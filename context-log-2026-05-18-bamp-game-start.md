@@ -454,3 +454,11 @@ NEXT:
 - FreightTruckT1: 0 SH_Vehicle renderers at slot [0] (back is HDRP/Lit); cab is at body slot [1]. Without the multi-slot fix, sync silently broadcast white and the ghost showed a random local colour. (rule)
 - Diagnostic `DumpFullCarColor` now iterates `sharedMaterials[]` (tagged `[i.j]`) and dumps Texture references too — kept in code for future investigations. (rule)
 - CONFIRMED 2026-05-19: Freightliner cab now matches host↔client in-game. Traffic colour sync complete for all observed truck variants. (rule)
+
+2026-05-19 — Backlog cycle: items #1, #2, #5 deployed.
+- #1 (name persistence): MPConfig.SetRuntime writes the chosen PlayerId back to BepInEx config (auto-saved on assign). MPMenuUI.Awake reads MPConfig.PlayerId into _name so the F8 panel pre-fills with the last-used name. (rule)
+- #2 (char-gen default name): New MPCanvasUI.TickIntroNamePrefill watches for Intro.IntroCharacterCustomizer, scans its TMP_InputField children, logs each ([IntroName] tag), and pre-fills empty fields with MPConfig.PlayerId (splits on first space for first/last-name forms). Never clobbers typed text. Re-armed on game (re)load. (rule)
+- IntroCharacterCustomizer's namespace is `Intro` (use `using Intro;`). (rule)
+- #5 (taxi lockup): TaxiController.TaxiTravel uses fast-forward to advance the world clock through the trip; our world-clock pinner reverted every advance so the ride hung. Fix: Patch_TaxiController_TaxiTravel.Prefix → TrafficSync.OnTaxiTravelStart sets LocalInTaxi=true; Patch_TaxiController_CompletedTaxiRide.Prefix → OnTaxiTravelEnd clears it. TickWorldClock skips suppression and slides its measurement window while LocalInTaxi, so the post-ride clock isn't re-detected as a skip. (rule)
+- TaxiController members confirmed via DLL string search: OnClickToUseTaxi, TaxiTravel, CompletedTaxiRide, isFastForwarding, HasFastForward, taxiTravelButton(Text). (rule)
+- NEXT in backlog: #7+#6 (interior/exterior split — host entering building kills traffic + client black-screens on building entry; likely same root cause), then #4 (vehicles avoid clients), then #3 (parked vehicle sync).

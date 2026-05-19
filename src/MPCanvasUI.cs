@@ -483,6 +483,20 @@ namespace BigAmbitionsMP
             double nowHours = d * 24.0 + h;
             float  realNow  = Time.unscaledTime;
 
+            // Backlog #5 — exempt taxi travel.  The game's TaxiTravel coroutine
+            // genuinely needs to fast-forward the clock to complete the ride;
+            // pinning the clock would lock the player in the cab.  While the
+            // local player is in a taxi we stop measuring rate and stay out of
+            // the way; the moment the ride ends we re-arm the detector at the
+            // post-ride clock (so the new time isn't seen as a skip retroactively).
+            if (TrafficSync.LocalInTaxi)
+            {
+                _wcWindowStartHours = nowHours;        // keep window glued to live time
+                _wcWindowStartReal  = realNow;
+                _wcRejecting        = false;
+                return;
+            }
+
             // Currently rejecting a skip — keep pinning the clock until it settles.
             if (_wcRejecting)
             {

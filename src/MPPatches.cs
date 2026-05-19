@@ -210,6 +210,56 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: TaxiController.TaxiTravel (backlog #5) ──────────────────────
+        // Fires when the player picks a destination from the taxi menu and the
+        // ride begins.  The game then sets isFastForwarding=true and advances
+        // the world clock through the trip — which our world-clock pinner
+        // normally reverts every frame, locking the player in the cab.
+        // We flip TrafficSync.LocalInTaxi=true so the pinner stands down for
+        // the duration of the ride.
+
+        [HarmonyPatch]
+        public static class Patch_TaxiController_TaxiTravel
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var t = VehicleManager.FindGameType("TaxiController");
+                return t?.GetMethod("TaxiTravel",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                    | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static);
+            }
+
+            static void Prefix()
+            {
+                try { TrafficSync.OnTaxiTravelStart(); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] TaxiTravel prefix: {ex.Message}"); }
+            }
+        }
+
+        // ── Patch: TaxiController.CompletedTaxiRide (backlog #5) ───────────────
+        // Fires when the ride finishes (player teleported to destination, fare
+        // deducted).  We flip LocalInTaxi=false so normal world-clock pinning
+        // resumes.  Defensive: also patch as Prefix so we capture the event
+        // even if the postfix gets skipped (e.g. exception inside the method).
+
+        [HarmonyPatch]
+        public static class Patch_TaxiController_CompletedRide
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var t = VehicleManager.FindGameType("TaxiController");
+                return t?.GetMethod("CompletedTaxiRide",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                    | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static);
+            }
+
+            static void Prefix()
+            {
+                try { TrafficSync.OnTaxiTravelEnd(); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] CompletedTaxiRide prefix: {ex.Message}"); }
+            }
+        }
+
         // ── Patch: GameManager.ClickSleep ─────────────────────────────────────
         // ClickSleep is the public handler for the in-game "sleep" button.
         // We allow the sleep to START (character enters bed) but suppress the

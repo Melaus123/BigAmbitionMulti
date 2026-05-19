@@ -892,6 +892,38 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Taxi travel fast-forward exemption (backlog #5) ───────────────────
+        // The game's taxi travel uses TaxiController.TaxiTravel which calls
+        // GameSpeedController.Set with isFastForwarding=true and advances the
+        // world clock by the trip duration.  Our world-clock pinner (MPCanvasUI.
+        // TickWorldClock) would normally revert each advance every frame —
+        // result: the taxi ride coroutine waits forever for time to move
+        // forward and the player is "locked up" in the cab.
+        //
+        // While LocalInTaxi is set the world-clock pinner gets out of the way.
+        // Once the ride completes (`CompletedTaxiRide`) we reset the pinner's
+        // window to the new clock so it doesn't see the advance retroactively
+        // as a skip and roll it back.
+        public static bool LocalInTaxi { get; private set; }
+
+        public static void OnTaxiTravelStart()
+        {
+            if (LocalInTaxi) return;
+            LocalInTaxi = true;
+            Plugin.Logger.LogInfo("[Taxi] TaxiTravel start — world-clock suppression OFF until ride ends.");
+        }
+
+        public static void OnTaxiTravelEnd()
+        {
+            if (!LocalInTaxi) return;
+            LocalInTaxi = false;
+            Plugin.Logger.LogInfo("[Taxi] CompletedTaxiRide — world-clock suppression re-armed at post-ride time.");
+            // World-clock detector resets itself on the next TickWorldClock pass
+            // because `LocalInTaxi` was true the previous frame; the detector
+            // already short-circuits in that case.  No explicit reset needed —
+            // see MPCanvasUI.TickWorldClock.
+        }
+
         /// <summary>Resolves a clicked taxi GameObject to its Gley pool index.</summary>
         private static int ResolveTaxiIndex(GameObject go)
         {
