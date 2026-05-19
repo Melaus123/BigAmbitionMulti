@@ -1,0 +1,445 @@
+# Session Context Log
+
+## Connections & Credentials
+
+## File Paths
+- Game install: `C:\Program Files (x86)\Steam\steamapps\common\Big Ambitions\`
+- Plugin output: `BepInEx\plugins\BigAmbitionsMP.dll`
+- Interop DLLs: `BepInEx\interop\BigAmbitions.dll`
+- Source: `C:\code\BigAmbitionsMP\src\`
+- BepInEx log: `BepInEx\LogOutput.log`
+- Project file: `C:\code\BigAmbitionsMP\BigAmbitionsMP.csproj`
+
+## Schema & Data Structure
+- `SaveGameManager.SaveGameStruct` — nested type, NOT standalone `SaveGameStruct`; fields: `alias`, `name`, `characterId`, `saveGameType`, `lastPlayedDate`, `day`, `description`, `isTemporary`, `tags` (rule)
+- `SaveGamePathHelper` — class owning `CurrentVersionFolderPath()` (static, returns string) and `GetAllSaveGamesFromVersion(string path)` (static, returns List) (rule)
+- `SaveGameManager.Load(SaveGameStruct saveGame, bool loadScene)` — loads a save; `loadScene=true` triggers full scene transition (rule)
+- `SaveGameManager.New(GameVariables difficulty)` — creates new game state only, does NOT trigger scene load (rule)
+- `UI.Load.LoadScene.LoadGame(bool skipFadeOut)` — triggers game scene load; requires `using UI.Load;` (rule)
+- `UI.Load.LoadScene.LoadIntro(bool skipFadeOut)` — loads character creation scene; correct entry point for new game (rule)
+- `GameStatePatcher.EnqueueOnMainThread(Action)` — public dispatcher to Unity main thread (rule)
+- `GameStatePatcher.DrainQueue()` — must be called from a MonoBehaviour.Update that exists in ALL scenes, not just in-game (rule)
+- `Intro.IntroCharacterCustomizer.StartGame()` — called when player clicks Start in character creation; this is what finishes a new-game setup (rule)
+
+## Decisions Made
+- 2026-05-18: `DrainQueue()` moved to `MPCanvasUI.Update()` (DontDestroyOnLoad) instead of only in `GameManager.Update` — GameManager only exists in-game, not on main menu (rule)
+- 2026-05-18: "Start New Game" uses `LoadScene.LoadIntro(false)`, NOT `SaveGameManager.New() + LoadScene.LoadGame()` — calling `LoadGame()` without character data from the intro scene leaves loading screen stuck at 100% permanently (rule)
+- 2026-05-18: "Load Multiplayer Save" uses `SaveGamePathHelper.GetAllSaveGamesFromVersion(SaveGamePathHelper.CurrentVersionFolderPath())` → `SaveGameManager.Load(saves[0], true)` (rule)
+- 2026-05-18: MP panel auto-hides on state transition LobbyHost/LobbyClient → Hosting/Connected so it doesn't block clicks on intro scene "Start Game" button (rule)
+- 2026-05-18: Probe projects must be created OUTSIDE `C:\code\BigAmbitionsMP\` — subdirectory obj files pollute the main project build with duplicate assembly attributes (rule)
+
+## Constraints & Requirements
+- BepInEx 6.0.0-be.755 IL2CPP on Unity 2022.3.62 — aggressive method stripping (rule)
+- Canvas/uGUI (DontDestroyOnLoad MonoBehaviour) is the only reliable Update hook across all scenes (rule)
+- All game API calls must be dispatched to main thread via `GameStatePatcher.EnqueueOnMainThread` (rule)
+- `using UI.Load;` required for `LoadScene.*` calls (rule)
+- `SaveGameManager.New()` alone is NOT sufficient to start a game — character data must come from intro scene (rule)
+- MP panel has GraphicRaycaster; if visible it blocks clicks on underlying scene UI — must hide before game transitions (rule)
+
+- `Steamworks.SteamClient.Name` — static string property on `Steamworks.SteamClient` in `Facepunch.Steamworks.Win64.dll` (interop); returns local Steam persona name; requires `SteamClient.IsValid` to be true first (rule)
+- `PlayerId` is now auto-detected from `SteamClient.Name` on first run; falls back to `Player-XXXXXX` if Steam not ready; empty config value = auto-detect (rule)
+- `IsHost` in config file is noise — never read by `MPConfig.Init()`; role is determined by which UI button the user clicks (rule)
+
+## Open Questions / TODO
+- Verify "Start New Game" now fully works: intro → character creation → click Start → enters game
+- Test "Load Multiplayer Save" with an actual save file
+- After game loads: host should send WorldSnapshot to all connected clients
+- Post-game WorldSnapshot: need Harmony patch point for scene-load-complete event
+- Join Game flow not tested end-to-end with two players
+- Market sync: `GameStateReader.GetMarketEntriesJson()` needs `SaveGameManager.Current != null` (in-session only)
+- `SaveGamePathHelper.GetAllSaveGamesFromVersion` sort order (newest-first assumed, not verified) [?]
+- F8 panel re-show in-game: user needs to know they can press F8 to get MP panel back after auto-hide
+
+## Current Task State
+DONE:
+- Lobby system (host waits, clients connect, player list shown, lobby player names)
+- "Start New Game": broadcasts to clients → all go to `LoadScene.LoadIntro(false)` → character creation — confirmed working
+- "Load Multiplayer Save": broadcasts → all load most recent save via `SaveGameManager.Load(save, true)`
+- `DrainQueue()` runs from `MPCanvasUI.Update()` (works on main menu AND in-game)
+- MP panel auto-hides when game starts (LobbyHost → Hosting state transition)
+- `SaveGameManager.New(difficulty)` called before `LoadScene.LoadIntro(false)` — Start button now works
+- Two-instance testing setup: game copied to `C:\BigAmbitions2\`; second instance config set to `PlayerId=Player2`, `IsHost=false`, `HostIP=127.0.0.1`
+- PostBuildEvent deploys DLL to both `C:\Program Files (x86)\Steam\...\BepInEx\plugins\` and `C:\BigAmbitions2\BepInEx\plugins\`
+
+- `SaveGameManager.New(difficulty)` MUST be called BEFORE `LoadScene.LoadIntro(false)` — mirrors `MainMenuController.StartNewGame(GameVariables)`. Without it, `SaveGameManager.Current` is null, `IntroCharacterCustomizer.StartGame()` silently returns early after name validation passes, and the Start button appears to do nothing. (rule)
+- Harmony patches on `IntroCharacterCustomizer.StartGame()` did not fire even when method was (apparently) called — IL2CPP instance method patching may be unreliable for some scene-loaded MonoBehaviours; static method patches untested in this session. [?] (situational: BepInEx 6 IL2CPP)
+- Second game copy `C:\BigAmbitions2\` bypasses single-instance mutex — both instances can run simultaneously (rule)
+- Always keep PostBuildEvent deploying to both game dirs — single build updates both instances (rule)
+- `SteamAPI_RestartAppIfNecessary()` is called in native C++ and calls `ExitProcess()` if the exe was not launched through Steam — bypasses all Harmony patches and managed code entirely (rule)
+- Fix: launch second instance via `C:\BigAmbitions2\launch_client.bat` which sets `SteamAppId`, `SteamGameId`, `SteamOverlayGameId` = 1331550 before starting the exe — fools `SteamAPI_RestartAppIfNecessary` into returning false (rule)
+- Big Ambitions Steam AppID = 1331550 (rule)
+
+- `PlayerHelper.GetPosition()` → `Vector3`, `PlayerHelper.PlayerController` → `PlayerController` (static, `using Helpers;`) (rule)
+- `PlayerController.Character` → `ThirdPersonCharacter`; `.transform.eulerAngles.y` for yaw (rule)
+- `ThirdPersonCharacter.ForceToPosition(Vector3)` / `ForceToRotation(Quaternion)` — teleport methods for applying remote state (rule)
+- Remote player visualization: `GameObject.CreatePrimitive(PrimitiveType.Capsule)` + `TextMesh` label; requires `UnityEngine.TextRenderingModule.dll` reference (rule)
+- `AddComponent<TextMesh>()` fails at runtime — IL2CPP only AOT-compiles generic instantiations the game itself uses; `TextMesh` is never used by the game so that instantiation doesn't exist. Fix: `go.AddComponent(Il2CppType.Of<TextMesh>()).TryCast<TextMesh>()` (rule)
+- Always register the capsule in `_players` dict immediately after `CreatePrimitive`, before any further setup — if later setup throws, the next tick won't try to re-spawn and flood the log (rule)
+- `SaveGameManager.Current != null && PlayerHelper.PlayerController != null` — reliable in-game check (rule)
+- WorldSnapshot trigger: host schedules 4s delay after detecting in-game; fires `BroadcastWorldSnapshotToAll()` (rule)
+- Position sync at 10Hz via `TickPositionSync()` in `MPCanvasUI.Update()` — uses `DeliveryMethod.Unreliable` for low latency (rule)
+
+- Time sync architecture: TWO systems — (1) Time.timeScale monitor: either player pausing/changing speed broadcasts immediately via `GameTimeSync` msg; client sends to host who relays to all; prevents day-skip entirely. (2) 3s heartbeat: host broadcasts {day, hour, speed} every 3s; client applies speed exactly, corrects clock drift gradually (ignore <1 game-min, nudge over 3s if <30 game-min, hard snap if >30 game-min). (rule)
+- `TimeSync.PollLocal()` MUST be called BEFORE `DrainQueue()` each frame — prevents echoing back network-applied timeScale changes (rule)
+- `TimeSync.ApplyNetwork()` sets `_skipNextPoll=true` before writing `Time.timeScale` to prevent the monitor detecting its own write (rule)
+- `Time.unscaledDeltaTime` used for sync timers so paused game doesn't delay heartbeat (rule)
+- `GameTimeSyncPayload.Speed = -1` means speed not included; `>= 0` means apply it (rule)
+- GameInstance time fields: NOT YET KNOWN — runtime probe logs all day/hour/time/minute/clock/tick fields via C# reflection on first in-game use; check BepInEx log for "GameInstance time-related members" line (situational: until first test run with new build)
+- `GameStateReader.GetGameTime()` caches reflected `FieldInfo`/`PropertyInfo` on first call; falls back to (0,0) if probe finds nothing; non-zero result required for BroadcastGameTime to fire (rule)
+- Market sync: host broadcasts market snapshot every 60s via `TickMarketSync()` in MPCanvasUI.Update(); also fires 8s after game load (rule)
+- In-game player HUD: small overlay top-right corner, F9 toggle, shows local player (green) + remote players (white) from `RemotePlayerManager.GetRemotePlayerIds()`; auto-hides if not connected; built as child of `_canvasGO` (DontDestroyOnLoad) (rule)
+- `RemotePlayerManager.GetRemotePlayerIds()` — public static, returns `IReadOnlyList<string>` snapshot of tracked remote player IDs (rule)
+
+DONE (previous):
+- Lobby system, Start New Game, Load Multiplayer Save, DrainQueue, auto-hide on game start
+- Two-instance testing, dual deploy on build
+- Player position sync 10Hz, remote player capsule (blue) + TMP label, smooth lerp, billboard
+- WorldSnapshot on host game-load (4s delay)
+
+- `GameManager.ClickSleep()` — public void no-param, on GameManager class (confirmed via DLL string search). PRIMARY intercept point for player sleep. (rule)
+- `StartSleeping` / `CancelSleeping` — private void, on a class with `hasHairShampooing` / `Clapping` / `StartAudienceClapping` — NOT on GameManager; likely a character activity class (type name unknown, need runtime probe) (situational: until class name found)
+- `StartResting` / `CancelResting` — private void, on a class with `isRecruiting` / `allowResting` / `EnableResting` / `DisableResting` — a separate interactable or NPC class (situational: until class name found)
+- `isFastForwarding` — bool field on a class with `ascending` / `disableAging` — character or time manager (situational: until class name found)
+- `OnFastForwardToggle(bool)` — on a UI class with `fastForwardToggle` field (probably the game's time UI panel) (situational: until class name found)
+- `SkipTime(string)` — public static void, likely a debug console command class, NOT the gameplay sleep API (rule)
+- `TimeSync.SKIP_THRESHOLD = 8f` — timeScale above this treated as skip-time, not normal speed button (rule)
+- Consensus skip: `ClickSleep` Harmony patch intercepts player sleep, calls `TimeSync.BeginSkipSuppression()` + casts vote; `GameManager.Update` postfix calls `TimeSync.TickSuppression()` AFTER game's own Update to reliably override high timeScale each frame (rule)
+- `TimeSync.TickSuppression()` must be called in `GameManager.Update` Postfix (not MPCanvasUI.Update) so it runs AFTER the game's own Update and wins the timeScale race (rule)
+- `MPServer.HandleSkipVote()` is public so the ClickSleep Harmony patch can call it directly when running as host (rule)
+- Skip-end detection: falling edge on `PollSkipEdge()` while `IsInConsensusSkip` → host broadcasts `TimeSkipEnd{day, hour}` → all clients call `TimeSync.EndConsensusSkip()` which snaps game time and resets state (rule)
+
+- Pause consensus: `MPServer._pauseWants: Dictionary<string,bool>` — tracks ONLY explicit pausers. When player A pauses, only `_pauseWants[A] = true`. Force-paused players (B gets paused by A's pause) are NOT added and do NOT need to explicitly unpause. `AnyPlayerPaused = _pauseWants.Values.Any(v => v)`. (rule)
+- WRONG (removed 2026-05-18): `MarkAllWantPaused()` — was writing ALL connected players into `_pauseWants` when any one player paused. This caused the bug: player B (who never pressed pause) being required to explicitly "unpause" to release the lock, even though their UI showed them as unpaused. Removed entirely. (one-off)
+- `ProcessLocalSpeedChange` and `ProcessRemoteSpeedChange`: now write `_pauseWants[id] = (speed == 0f)` for the SPECIFIC player only, never touching other players' entries. (rule)
+- Clock-rate skip detection in MPCanvasUI: `TickClockRateMonitor()` (called each LateUpdate). Detects bench rest / school / any internal fast-forward that doesn't raise `Time.timeScale`. If `gameHoursPerRealSecond > CLOCK_SKIP_H_PER_S (0.20f)`, starts suppression + casts vote. Resets sentinel on backward clock or single-frame advance > 2h (snap guard). (rule)
+- `CLOCK_SKIP_H_PER_S = 0.20f` threshold may need tuning after testing. At 4× normal play typically ~0.07 h/s; bench rest ~0.5-2 h/s. (situational: until first test run with bench rest)
+- `MPClient.SkipReadyCount` / `MPClient.SkipTotalCount` — updated on each `TimeSkipStatus` broadcast; used by skip indicator overlay when running as client (rule)
+- Skip-time waiting indicator: `_skipIndicatorGO` / `_skipIndicatorTxt`; anchored bottom-center 80px above edge; warm-yellow text; auto-shown by `TickSkipIndicator()` when `TimeSync.IsSuppressingSkip`; counts from `MPServer.SkipVoterCount`/`TotalPlayerCount` (host) or `MPClient.SkipReadyCount`/`SkipTotalCount` (client) (rule)
+- `TickTimeScaleMonitor` host path now calls `MPServer.ProcessLocalSpeedChange(newScale)` instead of `BroadcastGameTime(speedOverride)` — routes through pause consensus (rule)
+- `BeginSkipSuppression()` must NOT set `_prevWasSkip = true` — TickSuppression clamps timeScale to 1f immediately, causing PollSkipEdge to fire a false falling edge next frame which instantly calls CancelSkip, killing suppression (rule)
+- False falling-edge guard in TickTimeScaleMonitor: if `IsSuppressingSkip` is true and a falling skip-edge is detected, ignore it — it's caused by our own suppression, not a genuine player cancel (rule)
+- `MPServer.ProcessLocalSpeedChange` must call `TimeSync.ApplyNetwork(0f)` directly (not via EnqueueOnMainThread) when re-suppressing — called from main thread (TickTimeScaleMonitor); enqueueing causes a 1-frame gap where game runs at full speed (rule)
+- Client pause consensus: `MPClient.LastServerSpeed` volatile float tracks last server-commanded speed; when client tries to unpause while `LastServerSpeed == 0f`, TickTimeScaleMonitor re-applies pause immediately and sends a "wants to run" vote — host broadcasts all-clear when all players ready (rule)
+- REAL root cause of pause stuck bug: `TickTimeScaleMonitor` was in `Update()` but `EnforcePauseConsensus` was in `LateUpdate()`. EventSystem (button clicks) fires between Update and LateUpdate. So: host presses play → EventSystem sets timeScale=1 → LateUpdate re-pauses (ApplyNetwork(0f) + _skipNextPoll=true) → next Update: PollLocal sees _skipNextPoll=true → clears, returns false → ProcessLocalSpeedChange NEVER called → host never removed from _pausedPlayers → permanently stuck. Fix: move TickTimeScaleMonitor to LateUpdate BEFORE EnforcePauseConsensus (same phase = correct state). (rule)
+- `_pausedPlayers` / `_skipVoters` not cleared on peer disconnect → disconnecting while paused permanently blocks everyone. Fix: `OnPeerDisconnected` now removes player from both sets, broadcasts unpause/skip-status update as needed (rule)
+- Fix: `MPCanvasUI.LateUpdate()` runs after EventSystem — `EnforcePauseConsensus()` and `EnforceSkipSuppression()` act in the same frame as the button click (rule)
+- Bug 3 additional root cause: game likely has internal fast-forward multiplier independent of `Time.timeScale`; clamping timeScale doesn't stop game-clock from advancing (rule)
+- Fix: `TimeSync.TickSuppression()` added layer 2 — reverts game clock to `_suppressDay`/`_suppressHour` (captured at suppression start) if >~3 game-minutes advance is detected each frame (rule)
+- `MPServer.AnyPlayerPaused => _pausedPlayers.Count > 0` used by LateUpdate's `EnforcePauseConsensus()` (rule)
+
+- `GameStateReader` GSC probe (2026-05-18): finds `GameSpeedController` via `AppDomain.CurrentDomain.GetAssemblies()` scan. Logs ALL fields/properties/methods on first call. Caches: `paused`(bool), `isFastForwarding`(bool), `playerGameSpeed`(float), `currentGameSpeed`(float), `GameSpeed`(static prop). Instance captured via Harmony postfix on TogglePause. (rule)
+- `GameStateReader.GetGSCDiagnostic()` — returns formatted string of all GSC state; "(GSC instance not yet cached — press pause in-game first)" until TogglePause fires. (rule)
+- `GameStateReader.GetGSCPaused()` — returns `GameSpeedController.paused` directly (true = local player chose to pause, not force-paused by network). (rule)
+- `GameStateReader.FindGSCMethod(string)` / `CacheGSCInstance(object)` — used by `Patch_GSC_TogglePause` in MPPatches; dynamic patch via TargetMethod() so no compile-time namespace needed. (rule)
+- `TickClockRateMonitor` now logs full GSC diagnostic when clock-rate skip detected — discovery record for identifying which game mechanisms trigger time skips (bench rest, school, etc.). Suppression kept as safety net. (rule)
+- Build 2026-05-18: 0 errors, 0 warnings. Deployed to both instances. (one-off)
+- GSC cache all-null root cause (2026-05-18): `EnsureGSCProbed` was calling `GetField()` but IL2CPP interop exposes ALL instance state as **properties**. `NativeFieldInfoPtr_*` entries in field list are native pointer slots, not readable values. Fix: switch to `GetProperty()` with case-sensitive names: `"Paused"` (capital P), `"isFastForwarding"`, `"playerGameSpeed"`, `"currentGameSpeed"`. (rule)
+- `GameStateReader.GetGSCIsFastForwarding()` — returns `GameSpeedController.isFastForwarding` property; authoritative "skip active" flag for bench rest, sleep, any fast-forward regardless of `Time.timeScale` value. (rule)
+- `GameInstance.Minute` — `P:Minute(Single)` property, fractional part 0-60; `Hour` is integer 0-23. `GetGameTime()` now adds `minute/60f` so sub-hour advances are visible to clock-rate monitor. (rule)
+- `Patch_GSC_Set` — Harmony dynamic patch on `GameSpeedController.Set(GameSpeed)`; caches GSC instance when Set fires (bench skip may never call TogglePause, so Set is needed to ensure instance is cached before TickFastForwardMonitor runs). (rule)
+- `TickFastForwardMonitor()` — new method in MPCanvasUI, called each LateUpdate (Step 3). Detects rising/falling edge on `isFastForwarding`. Rising: starts suppression + casts vote if not already in consensus skip. Falling: sends vote=false or broadcasts skip-end. (rule)
+- Build 2026-05-18 (session 2): 0 errors, 0 warnings. Deployed to both instances. Includes: TickFastForwardMonitor, Patch_GSC_Set, GSC property fix, Minute precision. (one-off)
+- Clock-rate monitor blind spot: `gameElapsed > 2.0f` branch silently discarded large single-frame clock jumps. Now logs them ("Large clock jump … snap or teleport-skip") so a teleport-style skip isn't invisible to the diagnostic. (rule)
+- Clock-rate detection already sees minute-granular changes — `GetGameTime()` returns `hour + minute/60f`; "h/s" is just the unit, not the resolution. Diagnostic log now also prints game-min/s for readability. (rule)
+- Consensus model decision: **Model A** (shortest skip wins — first player's skip to end snaps everyone to host's current time, others re-trigger to continue). Current `MPServer.HandleSkipVote`/`BroadcastSkipEnd` logic already implements Model A. (rule)
+- Skip-vote tracking is currently EDGE-based (vote yes on rising edge, vote no on falling edge) — fragile: a missed falling edge (e.g. closing bench GUI) leaves a player stuck as a permanent yes-voter. PLANNED post-test fix: convert to heartbeat (each client continuously reports current skip state, host derives consensus). (situational: pending bench-skip diagnostic test)
+- Build 2026-05-18 (session 2b): 0 errors. Deployed both instances. Diagnostic-only: large-jump logging + game-min/s units. (one-off)
+- TEST 2026-05-18: bench-skip diagnostic ran. Result: NONE of 4 detectors fired. (situational: this build)
+- GSC member dump confirmed: methods = Awake/Start/Init/SetPause(bool,bool)/TogglePause/DisableTimeControl(bool)/Set(GameSpeed)/Reset/SetPauseState(GameSpeed)/ChangeTimeScale(TimeSpeed,Single)/SetPauseOverlay(GameSpeed)/UpdateVisuals. Props: isFastForwarding(Boolean), Paused(Boolean), playerGameSpeed(GameSpeed), currentGameSpeed(GameSpeed), isTimeControlDisabled(Boolean). (rule)
+- Bench/bed time skip is NOT a GameSpeedController mechanism: `isFastForwarding` stayed False through entire test; `Set(GameSpeed)` was never called (no Patch_GSC_Set log). Skip likely advances GameInstance Day/Hour/Minute directly (TemporalBoost). (rule)
+- ROOT CAUSE clock-rate monitor never worked: `TickClockRateMonitor` updated `_clockRatePrev*` baseline EVERY frame BEFORE the `realElapsed < 0.05f` guard. At any framerate >20fps every frame is <0.05s, so it always returned at the guard and the rate/large-jump checks were unreachable dead code. (rule)
+- FIX: monitor now holds the baseline until `realElapsed >= CLOCK_SAMPLE_WINDOW (0.25s)`, returning WITHOUT updating baseline while the window is short — so frames accumulate against a fixed anchor. Baseline advances only when the window is wide enough to measure. (rule)
+- Build 2026-05-18 (session 2c): 0 errors. Deployed both instances. Fixed clock-rate monitor dead-code bug. (one-off)
+- Auto-pause startup hold IMPLEMENTED (Option A, fully automatic) 2026-05-18:
+  - New messages: `PlayerInGame=6` (client→host), `StartupRelease=7` (host→all); payloads `PlayerInGamePayload`, `StartupReleasePayload`.
+  - `TimeSync.BeginStartupHold/EndStartupHold/TickStartupHold` + `IsStartupHeld` — freezes timeScale at 0, re-clamped every LateUpdate.
+  - `MPServer._inGamePlayers` HashSet + `_startupReleased` one-shot bool (lock `_startupLock`). `MarkPlayerInGame` releases when `LobbyPlayers.All(in _inGamePlayers)`. `ForceReleaseStartupHold` = timeout safety net. Reset in Stop/StartNewGame/StartLoadGame. OnPeerDisconnected re-checks consensus.
+  - `MPCanvasUI`: hold begins in `TickGameLoadDetect` on scene load; LateUpdate Step 0 freezes + skips all monitors while held; `TickStartupTimeout` watchdog force-releases after 90s; skip indicator shows "Waiting for all players to load…".
+  - `MPClient`: `SendPlayerInGame`, `HandleStartupRelease`, releases hold on disconnect.
+- Build 2026-05-18 (session 2e): 0 errors. Deployed both instances. Auto-pause startup hold. (one-off)
+- TEST 3 (2026-05-18): auto-pause + bench `SetGameTime` fix both worked. Bench skip suppression PARTIAL — ~80 game-min skipped before suppression engaged (detection latency overshoot). (situational: this build)
+- Bench skip overshoot fix: clock-rate monitor now passes its PRE-detection window-start baseline as the suppression lock point (`BeginSkipSuppression(lockDay,lockHour)` overload) so the revert goes to before the skip, not to where the clock raced to. `CLOCK_SAMPLE_WINDOW` 0.25→0.15s for faster detection. (rule)
+- Startup pause: replaced small indicator with dedicated full-screen `_startupScreenGO` overlay naming the players still loading. New `StartupStatus=8` msg + `StartupStatusPayload{WaitingFor}`; host `BroadcastStartupStatus`/`GetStartupWaitingFor`; client `StartupWaitingFor`. (rule)
+- Point 3 (pending): MP new game currently loads Story Mode — want Custom mode (story quests would break sync). `GameStateReader.ProbeGameVariables()` added (logs GameVariables fields/props/defaults), called in `MPServer.StartNewGame`. Awaiting test log to identify the mode + difficulty members, then force Custom. Difficulty (easy/normal/hard) UI option also wanted. (situational: pending probe results)
+- Build 2026-05-18 (session 2f): 0 errors. Deployed Steam install only — C:\BigAmbitions2 copy failed (game still running, file locked). Needs redeploy after instance closed. (one-off)
+- 2026-05-18: session 2f DLL manually copied to C:\BigAmbitions2 after instance closed — both instances now current. (one-off)
+- Bench-rest method now a CURRENT diagnostic (user request). `GameStateReader.ProbeGameInstance()` logs GameInstance time/skip/boost method+property names (called on game load); `DumpGameInstanceTimeState()` logs live boost/temporal/skip/fast property values, added to the clock-rate detection log. Goal: find the actual skip method to patch for zero-overshoot. (rule)
+- GameVariables probe needs no special action from user — `ProbeGameVariables` reflects the type, runs on host "Start New Game"; SP not needed. (rule)
+- Build 2026-05-18 (session 2g): 0 errors. Deployed both instances. GameInstance time-skip discovery probe. (one-off)
+- TEST 4 (2026-05-18): overshoot fix works (Reverted now steady ~0.06-0.08h). Startup hold worked. Startup SCREEN never visible — BUG.
+- STARTUP SCREEN BUG root cause: auto-hide on game start did `_canvasGO.SetActive(false)` — deactivates the whole canvas; HUD + skip indicator + startup screen are all children of `_canvasGO`, so none can render in-game. FIX: auto-hide / F8 now toggle `_panelRT.gameObject` (the draggable panel) only, leaving `_canvasGO` active. (rule)
+- BENCH DEADLOCK root cause (from log): bench rest pauses via a smooth `Time.timeScale` tween 1→0 (0.11,0.03,0.01,0). `TickTimeScaleMonitor` broadcasts every step → propagates the freeze to ALL players → a 2nd player can't move to their own bench → skip consensus can never form. Same applies to ANY menu that pauses. (rule)
+- GameInstance probe: NO time/skip methods on GameInstance; `timeEnteredTemporalBoost` empty during bench skip. Bench skip writes Day/Hour/Minute directly; trigger method is on a separate resting/bench class, not GameInstance. (rule)
+- GameVariables: has `difficulty`(enum, default Normal) + `tutorialEnabled`(bool, default True) + many sandbox multipliers. NO explicit story/custom-mode field. Hypothesis: story mode ⇔ `tutorialEnabled=true`; custom = `tutorialEnabled=false`. [?] (situational: pending confirmation)
+- Added `GameStateReader.GetGSCTimeControlDisabled()` + `timeCtrlDisabled` in GSC diagnostic — `isTimeControlDisabled` is the candidate discriminator for "menu pause vs pause-button press" (needed for the deadlock fix). (rule)
+- Build 2026-05-18 (session 2h): 0 errors. Deployed both. Startup-screen panel-hide fix + isTimeControlDisabled diagnostic. (one-off)
+
+## TIME MODEL DECISION (2026-05-18) — wall-clock / no-skip model
+- DECIDED: multiplayer abandons elastic time. The world runs at permanent 1× real-time. No fast-forward, no time skips, no menu pauses. The ONLY pause is the deliberate pause button (shared/consensus). Energy need disabled (no sleep-skip). Tutorial disabled (story quests would desync). (rule)
+- Rationale: elastic time is inherently fragile in MP (two players = two timelines). One wall-clock timeline eliminates skip-consensus, suppression, the deadlock, and menu-desync entirely. (rule)
+- Dedicated-server idea explicitly DEFERRED to a later revision; offline-company simulation also deferred. (situational: revisit later)
+- IMPLEMENTED 2026-05-18 (session 3a):
+  - `TimeSync.ManualPaused` + `SetManualPause(bool)` — the only player pause.
+  - `MPCanvasUI.LateUpdate` rewritten: forces `Time.timeScale = (ManualPaused||IsStartupHeld) ? 0 : 1` every frame → menus/benches/beds can no longer pause the world. Also `Postfix_GameManagerUpdate` enforces the same (2nd point, after game Update).
+  - `TickWorldClock()` (MPCanvasUI) — windowed skip detector (`WC_SAMPLE_WINDOW 0.15s`, `WC_SKIP_H_PER_S 0.20`): on a skip, pins the clock to the pre-skip value until the skip mechanism settles → skips simply never work. `ResetWorldClock()` on game load.
+  - `Patch_GSC_TogglePause` repurposed: pause button → reads absolute `GetGSCPaused()` → `SetManualPause` + broadcast. Confirmed TogglePause does NOT fire for benches/menus, so it's a clean pause-only signal.
+  - New `ManualPause=9` message + `ManualPausePayload{Paused}`; `MPServer.BroadcastManualPause`/`HandleClientManualPause` (relays), `MPClient.SendManualPause`/`HandleManualPause`.
+  - `MPServer.MakeGameVariables()` — `tutorialEnabled=false`, `disableEnergy=true` (try/catch on the setters); used by all 4 New() call sites in MPServer+MPClient.
+  - `Prefix_ClickSleep` gutted to `return true` (no skip consensus).
+  - OLD skip-consensus + pause-consensus code (TickTimeScaleMonitor, EnforcePauseConsensus, EnforceSkipSuppression, TickFastForwardMonitor, TickClockRateMonitor, HandleSkipVote, BeginSkipSuppression, etc.) left as DEAD code (not called) — Stage 2 cleanup pending. (rule)
+- DEFERRED follow-up: difficulty picker (Easy/Normal/Hard) in host lobby UI — `MakeGameVariables` currently uses default difficulty (Normal). (situational: pending)
+- Build 2026-05-18 (session 3a): 0 errors, 0 warnings. Deployed both instances. (one-off)
+- TEST (2026-05-18): wall-clock time model CONFIRMED working — Custom-mode new game, menus don't pause, skips don't work, manual pause, startup screen all verified. Startup screen needs staggered player connect times to be visible (no minimum-duration added — reverted, by user request). (rule)
+- Build 2026-05-18 (session 3b): 0 errors. Deployed both. (reverted a brief min-duration experiment). (one-off)
+- REMAINING: difficulty picker (Easy/Normal/Hard) in host lobby UI; Stage-2 cleanup of dead skip/pause-consensus code. Deferred tracks: vehicle sync, dedicated server, offline-company simulation. (situational: next work)
+- GameVariables PROBE RESULT (2026-05-18): `Difficulty` enum = {Custom, Easy, Normal, Hard}. `difficulty` is a PURE LABEL — setting it changes NONE of the other 23 settings. No preset method on GameVariables. Vanilla Easy/Hard presets live in the game's new-game menu, which the MP flow bypasses → the mod owns GameVariables 100% and must define its own presets. (rule)
+- GameVariables = 23 settings + `difficulty`. Normal/default values: startingAge=18, disableAging=F, disableEnergy=F, disableHappiness=F, allCoursesUnlocked=F, startingMoney=4200, taxPercentage=10, daysPerYear=60, marketPriceMultiplier=1, employeeHourlySalaryMultiplier=1, bankInterestMultiplier=1, tutorialEnabled=T, bankInterestRate=-0.5, rivalsDifficultyMultiplier=1, disableVehicleDamage=F, disableVehicleFuel=F, allContactsUnlocked=F, baseCustomerPromotionMultiplier=0.5, wholesaleUrgentFeeMultiplier=0.2, importerUrgentFeeMultiplier=0.75, disableWholesaleAndImportLimits=F, allProductsAvailableFromImporters=F, exportMultiplier=0.65. (rule)
+- Per-player difficulty rule (user-decided): clients may override only PLAYER-level settings (startingAge/Money, disableAging/Energy/Happiness, allCourses/Contacts, vehicle damage/fuel); WORLD-level settings (tax, daysPerYear, all multipliers, rivals, fees, import/export) always match the host. (rule)
+- Decision: mod-defined difficulty presets (user-accepted, tune later). (rule)
+- IMPLEMENTED 2026-05-18 (session 3c) — settings networking + difficulty selector:
+  - `GameVariablesDto` (Protocol.cs) — plain serialisable mirror of all 24 GameVariables; defaults = vanilla Normal + MP overrides (TutorialEnabled=false, DisableEnergy=true). `StartGamePayload.Settings` carries it.
+  - `MPServer.Preset(string)` — Easy/Normal/Hard preset DTOs (tweaks startingMoney, taxPercentage, rivalsDifficultyMultiplier, employeeHourlySalaryMultiplier; rest baseline). `BuildGameVariables(dto)` converts DTO→GameVariables (difficulty enum set via reflection). `MakeGameVariables()` now = `BuildGameVariables(Preset("Normal"))`.
+  - `MPServer.StartNewGame(GameVariablesDto)` — networks host's settings; client `HandleStartGame(env,isNew)` applies the host's DTO.
+  - Host lobby pane: click-to-cycle Difficulty selector (`_rtLHDifficulty`/`_txtLHDifficulty`, `OnCycleDifficulty`); `OnStartNew` sends `Preset(_selectedDifficulty)`.
+  - REMAINING for element #1: full 23-toggle editor UI + "delegate difficulty" per-client overrides.
+- Build 2026-05-18 (session 3c): 0 errors, 0 warnings. Deployed both instances. (one-off)
+- IMPLEMENTED 2026-05-18 (session 3d) — settings editor UI (step 3):
+  - `_hostSettings` (live edited DTO); host lobby "⚙ Game Settings…" button opens a modal panel.
+  - `BuildSettingsPanel` — modal overlay, all 23 settings grouped WORLD/PLAYER. `SettingsBoolRow` (ON/OFF toggle), `SettingsNumRow` (◄ ► stepper). Editing any value → `MarkCustom()` (difficulty="Custom").
+  - `_settingsHits` list (RectTransform→Action) for click routing; `_settingsRefreshers` re-display values; cycling the difficulty preset reloads `_hostSettings` + refreshes the panel.
+  - `BuildSettingsPanel` wrapped in its own try/catch so a UI fault can't kill the whole canvas.
+  - REMAINING for element #1: step 4 — "delegate difficulty" + client-side per-player (player-level only) override picker.
+- Build 2026-05-18 (session 3d): 0 errors, 0 warnings. Deployed both instances. (one-off)
+- IMPLEMENTED 2026-05-18 (session 3e) — settings editor polish:
+  - Hover tooltips: `_settingsTips` (label rect→description); `TickSettingsPanel` shows a cursor-following `_tooltipGO` while hovering a setting name.
+  - Click-to-type: numeric values are now editable fields (`NumField`/`_numFields`); click a value → `BeginSettingsEdit`, type digits/./- , Enter or click-away → `CommitSettingsEdit` (parse, clamp, apply). ◄ ► steppers still work.
+  - Settings char input routed via `_editField`/`_editBuffer` in the Update inputString block (separate from the name/IP/port `_focus` system).
+- Build 2026-05-18 (session 3e): 0 errors, 0 warnings. Deployed both instances. (one-off)
+- IMPLEMENTED 2026-05-18 (session 3f) — tooltip-left-of-cursor fix + step 4 (delegate difficulty):
+  - Tooltip now placed LEFT of the cursor (cursor body extends down-right), right-side fallback.
+  - `MPServer.AllowPlayerDifficulty` + `SetAllowPlayerDifficulty` (re-broadcasts lobby); `LobbyUpdatePayload`/`StartGamePayload` carry the flag; `MergePlayerDifficulty(host,clientDiff)` = host WORLD fields + client preset PLAYER fields.
+  - `MPClient.AllowPlayerDifficulty`/`ChosenDifficulty`; `HandleStartGame` merges when delegated.
+  - Host lobby: "Per-player difficulty: ON/OFF" toggle. Client lobby: difficulty cycler (active only when host allowed it).
+  - NOTE: with current presets, per-player difficulty only varies StartingMoney (other preset diffs are world-level). Deepen later by tuning preset player-level values.
+- Build 2026-05-18 (session 3f): 0 errors, 0 warnings. Deployed both instances. Element #1 (difficulty) feature-complete pending test. (one-off)
+- REWORK 2026-05-18 (session 3g) — per-player difficulty → per-player STARTING CASH (user: difficulty abstraction was misleading; only starting money was per-player-relevant):
+  - `AllowPlayerDifficulty` → `EnforceStartingCash` everywhere (Protocol/MPServer/MPClient), boolean meaning flipped (true=host enforces, default true).
+  - `MergePlayerDifficulty` deleted; client `HandleStartGame` just overrides `StartingMoney` with `MPClient.ChosenStartingCash` when `!EnforceStartingCash`.
+  - Host lobby toggle relabelled "Starting cash: ENFORCED / per-player" (`OnToggleEnforceCash`).
+  - Client lobby: difficulty cycler replaced with a typed cash field (`MakeField`, `_focus==5`, `_clientCash`→`MPClient.ChosenStartingCash`); shows "(set by host)" when enforced.
+- Build 2026-05-18 (session 3g): 0 errors, 0 warnings. Deployed both instances. (one-off)
+
+## STAGE-2 CLEANUP (2026-05-19)
+- Deleted all dead skip-consensus + pause-consensus code: `TimeSkip*` messages/payloads (Protocol); MPClient skip handlers + `LastServerSpeed`/`Skip*Count`/`SendSkipVote`/`SendTimeSpeedChange`; MPServer `HandleSkipVote`/`HandleClient*`/`Broadcast Skip*`/`ProcessLocal/RemoteSpeedChange`/`_skipVoters`/`_pauseWants`/`AnyPlayerPaused`; MPCanvasUI dead monitors (`TickTimeScaleMonitor`,`EnforcePauseConsensus`,`EnforceSkipSuppression`,`TickFastForwardMonitor`,`TickClockRateMonitor`,`TickSkipIndicator`,`BuildSkipIndicator`); TimeSync `PollLocal`/skip-suppression cluster (`BeginSkipSuppression`,`TickSuppression`,etc.). `ApplyNetwork` simplified. (rule)
+- NEAR-MISS during cleanup: a bulk line-range delete of MPCanvasUI also removed 5 LIVE methods interleaved with the dead monitors (`IsInGame`,`TickGameLoadDetect`,`TickStartupTimeout`,`TickWorldSnapshot`,`TickPositionSync`) — reconstructed from conversation history; build green but these should be sanity-tested in-game. No git repo → no clean restore available. (rule)
+- Item 3 (dedicated server / offline-company sim) REMOVED from the roadmap per user. (rule)
+- NEXT FEATURE (user-requested): remote players rendered as real animated character models instead of capsule placeholders. Needs a discovery probe of the character hierarchy + Animator first. (situational: next work)
+- Build 2026-05-19 (session 3h, cleanup): 0 errors, 0 warnings. Deployed both instances. (one-off)
+- `UnityEngine.AnimationModule.dll` interop reference added to the csproj — required for `Animator`/`AnimatorControllerParameter` (like TextRenderingModule was for TextMesh). (rule)
+- `RemotePlayerManager.ProbeLocalCharacter()` — one-time discovery probe: logs the local character's GameObject hierarchy + components (depth 4), the Animator (controller/avatar/isHuman/parameters), and all SkinnedMeshRenderers. Called from `MPCanvasUI.TickPositionSync` (self-guards via `_characterProbed`). Data needed to build real animated remote-player models. (rule)
+- Build 2026-05-19 (session 3i): 0 errors, 0 warnings. Deployed both. Character discovery probe. (one-off)
+- CHARACTER PROBE RESULTS (2026-05-19): hierarchy = `Player`[PlayerController,ThirdPersonCharacter,NavMeshAgent,...] → `Model`[Animator,RigBuilder,BoneRenderer,StepTrigger,AnimationObjectSpawner,AnimationTriggerEvents,SkinnedMeshCombiner] → `Armature`(skeleton+IK rigs) + `Male`/`Female`(clothing-variant SkinnedMeshRenderers, AppearanceElementVariant). Animator: controller `CharacterAnimator`, avatar `ArmatureLODAvatar`, isHuman, 115 params. Locomotion params: `Forward`(Float), `Running`(Bool); also `AnimationSpeed`,`Sitting`,`Laying`,`Swimming`,`Dancing`,etc. (rule)
+- IMPLEMENTED 2026-05-19 (session 3j) — real animated remote-player models:
+  - `RemotePlayerManager.SpawnRemotePlayer` clones the local `Player/Model` GameObject under a root GO; `StripModelScripts` destroys RigBuilder/BoneRenderer/StepTrigger/AnimationObjectSpawner/AnimationTriggerEvents/SkinnedMeshCombiner (keeps Animator+meshes+skeleton). Capsule fallback if the clone fails.
+  - `RemotePlayerMover` drives the clone's Animator: `Forward`=smoothed movement speed, `Running`=speed>3.5. Tune thresholds after testing.
+  - Remote players currently look like a copy of the LOCAL player's appearance (cloned model). Per-player appearance sync is a future follow-up.
+- Build 2026-05-19 (session 3j): 0 errors, 0 warnings. Deployed both instances. (one-off)
+- TEST (2026-05-19): real animated player models confirmed working — bodies + walk/idle/run animations look good (minor anim deviation, deferred). NEXT: sync each remote player's actual appearance (currently they look like a clone of the local player).
+- `RemotePlayerManager.ProbeAppearance()` — discovery probe: logs the `AppearanceSetter` component's props/methods, per-gender per-category active-variant state, and `AppearanceElementVariant` members. Called from `TickPositionSync` (self-guards). Data needed to design per-player appearance sync. (rule)
+- Build 2026-05-19 (session 3k): 0 errors, 0 warnings. Deployed both instances. Appearance discovery probe. (one-off)
+- APPEARANCE PROBE RESULT: `AppearanceSetter`/`AppearanceElementVariant` have no usable interop wrapper (resolve as `Component`) — not needed. Appearance = gender (Male/Female GameObject active) + exactly ONE active child per category under the active gender; inactive gender leaves all children active (irrelevant). Universal Model prefab contains all variants → syncing the selection reproduces any look. Colours/body-shape NOT covered (future). (rule)
+- IMPLEMENTED 2026-05-19 (session 3l) — appearance variant sync:
+  - `PlayerAppearancePayload{PlayerId,Gender,Variants:Dict}` + `AppearanceSyncPayload{List}`; messages `PlayerAppearance=32` (client→host), `AppearanceSync=33` (host→all, full set).
+  - `RemotePlayerManager`: `ReadLocalAppearance` (gender + active variant per category), `SetAppearance` (store + apply if model spawned), `ApplyAppearance` (toggle gender + per-category SetActive), `GetAllAppearances`, `_appearances` registry. `SpawnRemotePlayer` applies stored appearance on spawn.
+  - `MPServer.HandleClientAppearance`/`RegisterHostAppearance`/`BroadcastAppearanceSync` (full-set broadcast — handles late join). `MPClient.SendAppearance`/`HandleAppearanceSync`.
+  - `MPCanvasUI.TrySendLocalAppearance` — reads + sends local appearance once in-game (retries until character ready); reset on game load.
+  - Verification logging: `[Appearance] Local appearance: <gender — Cat=Variant...>` and `[Appearance] Applied to '<player>': ...`.
+- Build 2026-05-19 (session 3l): 0 errors, 0 warnings. Deployed both instances. (one-off)
+- `RemotePlayerManager.ProbeColors()` — colour discovery probe: for each active body/clothing/hair renderer logs material name, shader, all Color-type shader properties + values, and whether a MaterialPropertyBlock is present. Called from `TickPositionSync`. Data needed to sync skin/hair/clothing colours. (rule)
+- Build 2026-05-19 (session 3m): 0 errors, 0 warnings. Deployed both instances. Colour discovery probe. (one-off)
+- COLOUR PROBE RESULT (2026-05-19): colours live in per-renderer instanced materials (no MaterialPropertyBlocks). Skin=`_MaskColorRed` on `SH_CharacterStandard`; hair/beard=`_BaseColor`; clothing=`_MaskColorRed/Green/Blue`+`_SpecularColor*` on `SH_CharacterClothes`/`SH_CharacterClothesArray`. (rule)
+- IMPLEMENTED 2026-05-19 (session 3n) — colour sync:
+  - `ColorEntry{Cat,Mat,Prop,R,G,B,A}` + `PlayerAppearancePayload.Colors:List<ColorEntry>` (Protocol).
+  - `RemotePlayerManager.CaptureColors` — generic: every Color-type shader property on every material of each active variant's SkinnedMeshRenderer; called from `ReadLocalAppearance`'s variant loop.
+  - `ApplyColors` — groups Colors by category, finds each active variant's SMR, uses `.materials` (forces per-renderer instanced copies so the local player isn't recoloured), `SetColor` each entry; called at end of `ApplyAppearance`.
+- Build 2026-05-19 (session 3n): 0 errors, 0 warnings. Deployed both instances. Colour sync. (one-off)
+- TEST (2026-05-19): colour sync confirmed working — remote players show actual skin/hair/clothing colours, local player unaffected. (rule)
+- `RemotePlayerManager.ProbeMorphs()` — discovery probe: logs non-zero blendshape weights on each active variant SMR + Armature bones with non-default localScale; summary line says whether morphs are in use. Called from `TickPositionSync` (self-guards). Decides whether body-shape/face-morph sync is needed before moving to vehicle sync. (situational: pending test result)
+- Build 2026-05-19 (session 3o): 0 errors, 0 warnings. Deployed both instances. Body-shape/morph discovery probe. (one-off)
+- MORPH PROBE RESULT (2026-05-19): body shape IS blendshape-driven, 0 scaled bones. Each body/clothing variant SMR has 3 blendshapes; `Fat`/`fat` is the weight slider (mirrored across Head/Torso/Legs/Feet); 2 other blendshapes per renderer (zero in test = untouched, likely muscle/thin). Hair has 2 (both zero). → sync must capture ALL blendshape weights by name. (rule)
+- IMPLEMENTED 2026-05-19 (session 3p) — body-morph sync:
+  - `BlendEntry{Cat,Shape,Weight}` + `PlayerAppearancePayload.Blends:List<BlendEntry>` (Protocol).
+  - `RemotePlayerManager.CaptureBlendShapes` — every blendshape weight (by name) on each active variant's SMR; called from `ReadLocalAppearance` loop.
+  - `ApplyBlendShapes` — groups by category, finds active variant SMR, `GetBlendShapeIndex(name)`→`SetBlendShapeWeight`; called at end of `ApplyAppearance`.
+- Build 2026-05-19 (session 3p): 0 errors, 0 warnings. Deployed both instances. Body-morph sync. (one-off)
+- ANIM DEVIATION root cause: `RemotePlayerMover` does NOT sync real animator state — it re-derives speed from remote position deltas (smoothed, lagged) and feeds Forward/Running. The lag/jitter IS the slight deviation. FIX = network the owner's REAL animator params instead of deriving. (rule)
+- `RemotePlayerManager.ProbeAnimatorLive()` — live probe: samples local Animator every frame, logs each param the first time it changes from baseline (`[AnimProbe]` tag). Floats/Bools/Ints sampled; triggers skipped (momentary). Reveals the minimal param set to network. Called from `TickPositionSync` (runs every frame). (rule)
+- Planned anim-sync design (lean, after probe): minimal param set only, rides existing 10Hz PlayerMove packet, floats quantized to 1 byte, bools packed + sent on-change only (~2-4 bytes/player/update). (situational: pending probe result)
+- Build 2026-05-19 (session 3q): 0 errors, 0 warnings. Deployed both instances. Live animator probe. (one-off)
+- ANIM PROBE RESULT (2026-05-19): light play caught only 5/115 params (Forward,BoredAnimation floats; Sitting,HoldingBox,OnScooter bools). Param types: ~9 Float, ~59 Bool/Int, 47 Trigger. Discovery-by-doing is unworkable (47 context-specific triggers never reachable on a fresh save) → switched to GENERIC full-animator mirror. (rule)
+- IMPLEMENTED 2026-05-19 (session 3r) — generic animator sync:
+  - DESIGN: network the animator's INPUT state, not enumerated animations. Param index = position in `Animator.parameters` (same controller asset everywhere → index is portable). Floats/ints sent in FULL each tick (self-healing over Unreliable); bools as list of true indices (receiver sets every bool explicitly = default-agnostic); triggers are momentary → caught by Harmony patch + sent RELIABLE.
+  - `PlayerPositionPayload` + `AnimF:Dict<int,float>`, `AnimI:Dict<int,int>`, `AnimB:List<int>`. New `PlayerAnimTrigger=34` msg + `AnimTriggerPayload{PlayerId,ParamIndex}`.
+  - `RemotePlayerMover` REWRITTEN: removed the derive-speed-from-position block (that lag WAS the deviation). Now `ApplyAnimState`/`FireTrigger` + param-index map; floats lerped (AnimFLerp=14) toward target, bools/ints set directly, triggers fire-and-forget.
+  - `RemotePlayerManager`: `GetLocalAnimator` (cached, builds trigger hash/name→index maps), `ReadLocalAnimState`, `ResolveTriggerIndex`, `SendLocalTrigger`, `ApplyTrigger`. `SpawnOrUpdate` now takes the payload. `_localAnim`+trigger maps reset in `RemoveAll`.
+  - `MPPatches`: `Postfix_Animator_SetTrigger_Name/_Hash` on `UnityEngine.Animator.SetTrigger(string)`/`(int)` — instance-checked against local animator; routes via `SendLocalTrigger`. Engine-method patch, wrapped in try/catch.
+  - `MPServer.HandleAnimTrigger`/`BroadcastAnimTrigger`, `MPClient.HandleAnimTrigger`/`SendAnimTrigger` — trigger relay (reliable). `MPCanvasUI.TickPositionSync` calls `ReadLocalAnimState`.
+- Build 2026-05-19 (session 3r): 0 errors, 0 warnings. Deployed both instances. Generic animator sync. (one-off)
+- TEST (2026-05-19): generic animator sync confirmed working — remote players animate correctly, deviation gone. (rule)
+- NEXT FEATURE: vehicle sync. Breaks into 4 sub-problems: (1) vehicle existence/spawn, (2) transform sync, (3) driver association (character attach/hide on enter/exit), (4) vehicle identity (model+colour). (rule)
+- `VehicleManager.cs` — new vehicle subsystem (starts as discovery probe, will grow into the sync). `ProbeVehicles()` called from `TickPositionSync`: (1) `ScanAssembliesForVehicleTypes` — lists every type with a vehicle-ish name; (2) `ProbePlayerMembers` — dumps PlayerController + ThirdPersonCharacter props/methods (reveals the vehicle reference + entry/exit API); (3) `ProbeParentChanges` — live, dumps the character's ancestor chain when its transform parent changes (catches the vehicle GO on enter/exit). (rule)
+- Build 2026-05-19 (session 3s): 0 errors, 0 warnings. Deployed both instances. Vehicle discovery probe. (one-off)
+- VEHICLE PROBE 1 RESULT (2026-05-19): Driver association — entering a vehicle REPARENTS the whole `Player` GO as a child of the vehicle GO AND sets `Player.activeSelf=false` (character hidden by deactivation); exiting reparents back to `GameManager`, reactivates. Vehicle GO name encodes model (e.g. `VordV150(Clone)`); components: `Rigidbody, CarFeatures, CarController, VehicleController, FuelModuleWrapper, WheelControllerManager, DamageHandler, VehicleDeformationController, ...`. Vehicle classes: `CarController`,`ScooterController`,`VehicleController`,`VehicleInstance`,`VehicleSpawnerController`,`Helpers.VehicleHelper`,`Vehicles.VehicleTypes.VehicleType/TypeName/TypeHelper`,`Data.VehicleColors.VehicleColor`,`Entities.VehicleSlot`. (rule)
+- Scooters: confirmed by user — ridden scooter is an ANIMATION (scooter prop part of model, driven by `OnScooter` anim bool) → already synced by the generic animator sync. CARS are real separate objects needing full sync. (rule)
+- VEHICLE PLAN: phase 1 done (discovery). Phase 2 = probe #2 (vehicle-system class APIs + spawn/identity). Phase 3 = transform sync + remote spawn + driver association. (rule)
+- `VehicleManager.ProbeVehicleSystem` (probe #2) — dumps DeclaredOnly members of VehicleHelper/VehicleSpawnerController/VehicleController/CarController/CarFeatures/VehicleInstance/VehicleTypeHelper/VehicleType/VehicleTypeName/VehicleSlot/VehicleColor; `ProbeDrivenVehicle` — live, dumps the driven vehicle's components + renderers/materials once. Assembly-scan keyword "car" removed (matched noise). (rule)
+- Build 2026-05-19 (session 3t): 0 errors, 0 warnings. Deployed both instances. Vehicle probe #2. (one-off)
+- VEHICLE PROBE 2 RESULT (2026-05-19): `Helpers.VehicleHelper` (static) is the toolkit — `IsInsideMotorVehicle()→bool`, `GetCurrentVehicle()→VehicleInstance`, `GetCurrentVehicleBase()→VehicleController`, `CreateAndSpawnVehicle(VehicleInstance,Vector3,Quaternion)→VehicleController`, `TeleportVehicle(VehicleController,Vector3,Quaternion)`, `RegisterPlayerVehicle`/`UnregisterPlayerVehicle(VehicleController)`, `LoadVehiclePrefabAsync(VehicleTypeName)`. `VehicleInstance` (global ns) = saved vehicle data: `id`,`vehicleTypeName(VehicleTypeName enum)`,`vehicleColorName(string)`,position/rotation,fuel,etc. `VehicleController` (global ns): `vehicleInstance`,`vehicleType`,`SetFreeze(bool)`,`EnterVehicle/ExitVehicle`. `CarFeatures.SetColor(VehicleColor)`. `VehicleTypeName` enum = 20 models (VordV150, MersaidiS500, Bima320, ElectricScooter, ...). (rule)
+- IMPLEMENTED 2026-05-19 (session 3u) — vehicle sync (Phase 3, "real game spawn" per user):
+  - `VehicleSync=35` msg + `VehicleSyncPayload{PlayerId,Driving,TypeName,ColorName,VehicleId,X,Y,Z,Qx..Qw}` (full quaternion — cars pitch/roll).
+  - `VehicleManager`: `ReadLocalVehicle` (detect via `IsInsideMotorVehicle`, identity from `GetCurrentVehicle`, transform from `GetCurrentVehicleBase`); `ApplyVehicleState`→`SpawnRemoteVehicle` (`new VehicleInstance()` + set id/type/colour → `CreateAndSpawnVehicle` → `UnregisterPlayerVehicle` to keep it out of our save + `SetFreeze(true)` + `Rigidbody.isKinematic=true`); `TickSmoothing` lerps ghost transform; `DespawnRemoteVehicle`/`DespawnAll`.
+  - `RemotePlayerManager.SetDriving` hides the remote walking model while driving; despawn hooked into `Remove`/`RemoveAll`.
+  - `MPServer`/`MPClient` Handle+Broadcast/Send VehicleSync (reliable relay); `MPCanvasUI.TickPositionSync` sends vehicle state + calls `TickSmoothing`. `VehicleManager.ProbeVehicles` call removed (discovery done; probe methods kept in file).
+  - KNOWN GAPS pending test: no visible driver IN the ghost car (remote walking model just hidden); `CreateAndSpawnVehicle` behaviour with a synthetic half-populated `VehicleInstance` unverified (may NPE on null cargo lists — logged).
+- Build 2026-05-19 (session 3u): 0 errors, 0 warnings. Deployed both instances. Vehicle sync. (one-off)
+- TEST (2026-05-19): vehicle sync worked. User feedback: (1) want parked cars to persist + be visible (not despawn on exit); (2) need ownership concept — only owner can use a car; (3) ghost showed a false "owned" ICON on non-owner's screen (likely the VehicleController.poi point-of-interest). Also: want AI/world traffic synced. User chose "everything incl. AI traffic". (rule)
+- IMPLEMENTED 2026-05-19 (session 3v) — Phase 4: owned-vehicle fleet registry:
+  - Model change: per-vehicle `VehicleSyncPayload` → fleet model. `VehicleEntry{VehicleId,TypeName,ColorName,Driving,X..Qw}` + `VehicleFleetPayload{OwnerId,List<VehicleEntry>}`. `VehicleSync=35` msg now carries the fleet.
+  - `ReadLocalFleet` enumerates `VehicleHelper.AllPlayerVehicles` (List<VehicleController>) → every owned vehicle (parked + driven, `Driving=vc.controlledByPlayer`); sent 10Hz. Fleet is the complete truth for that owner.
+  - `ApplyVehicleFleet`: ghosts keyed by VehicleId, PERSIST (no despawn on park); a vehicle absent from the owner's fleet = sold → `DespawnByVehicleId`. `DespawnAllOwnedBy` on owner disconnect.
+  - Ownership: ghost spawn now also disables `vc.poi.gameObject` (kills false owned-icon), sets `vc.enabled=false` + CarController disabled (non-interactable — nobody can enter another's car), and adds a world-space `CreateOwnerLabel` ("<owner>'s car", billboarded in TickSmoothing).
+  - Late-join handled implicitly: fleets re-broadcast 10Hz so a joiner gets everything within ~100ms.
+- Build 2026-05-19 (session 3v): 0 errors, 0 warnings. Deployed both instances. Phase 4 vehicle fleet registry. (one-off)
+- VEHICLE NEXT: Phase 5 = AI/world traffic sync (host-authoritative) — needs a discovery probe of the traffic system first. (situational: next work)
+- TEST Phase 4 (2026-05-19): parked-car persistence WORKS. BUT: ghost still shows false ownership icon for BOTH players; ghost car was ENTERABLE/drivable by the other player; ghost appears on map everywhere → game genuinely treats `CreateAndSpawnVehicle` output as an owned vehicle. `UnregisterPlayerVehicle` + `poi.SetActive(false)` insufficient. (rule)
+- ROOT CAUSE: `CreateAndSpawnVehicle` produces a real game-tracked vehicle; the `VehicleController`/`CarController` components ARE the ownership/IO/ticket/map behaviour. Must destroy them to demote the ghost to a pure prop. (rule)
+- IMPLEMENTED 2026-05-19 (session 3w) — ghost demotion: `SpawnRemoteVehicle` now, post-spawn, `UnregisterPlayerVehicle` + destroys `vc.poi.gameObject` + `StripVehicleComponents` destroys VehicleController/CarController/DamageHandler/VehicleDeformationController/WheelControllerManager/FuelModuleWrapper/SpeedLimiterModuleWrapper/FlipOverModuleWrapper/VariableCenterOfMass (visual comps incl. CarFeatures kept). Rigidbody kinematic. Diagnostic logs `AllPlayerVehicles` count before→after-spawn→after-strip + poi name. (rule)
+- Build 2026-05-19 (session 3w): 0 errors, 0 warnings. Deployed both instances. Vehicle ghost demotion. (one-off)
+- TEST (2026-05-19): ghost demotion WORKS PERFECTLY. Diagnostic `AllPlayerVehicles 0→1→0` confirms clean de-registration. Owner keeps ownership icon + map presence + entry on THEIR screen (real car untouched); non-owners see a stripped prop — no icon, not on their map, not enterable. Key lesson: DESTROYING the gameplay components works where merely disabling them did not. (rule)
+- Vehicle ownership model: a player buys cars normally in their own game (real owned vehicle, never touched by the mod). Their game broadcasts `VehicleFleetPayload{OwnerId=self}`; every OTHER machine spawns a stripped ghost tagged with that OwnerId. The owner's machine ignores its own broadcast (`OwnerId==MPConfig.PlayerId` skip) so it never ghosts its own car. Ownership = who broadcast the fleet; cars are never transferred between games. (rule)
+- `VehicleManager.ProbeTraffic()` (Phase 5 prep) — discovery probe: assembly scan for traffic-named types; scene scan 25s after level load — counts VehicleControllers (player-owned vs AI), counts CarController/AiCarHorn/AiCarMusic/Pedestrian, dumps a sample AI vehicle's hierarchy + AI-ish component APIs. Called from `TickPositionSync` (self-guards). (rule)
+- Build 2026-05-19 (session 3x): 0 errors, 0 warnings. Deployed both instances. AI traffic discovery probe. (one-off)
+- TRAFFIC PROBE 1 RESULT (2026-05-19): AI traffic = third-party asset **GleyTrafficSystem** (Gley Traffic System). Does NOT use VehicleController/CarController (0 found). AI cars have `AiCarHorn` (16 live) / `AiCarMusic` (12). KEY: `GleyTrafficSystem.TrafficComponentMultiplayer` exists — Gley's plugin has built-in multiplayer support. Classes: `TrafficManager`,`TrafficVehicles`,`TrafficComponent`,`TrafficComponentMultiplayer`,`TrafficDespawner`,`TrafficLights*`. Plan: leverage Gley's MP mode rather than build traffic sync from scratch. (rule)
+- `VehicleManager.ScanGleyApi()` (traffic probe #2) — dumps DeclaredOnly members of GleyTrafficSystem.TrafficManager/API/TrafficVehicles/TrafficComponent/TrafficComponentMultiplayer + AiCarHorn + TrafficDespawner; samples a live AI car (found via AiCarHorn) hierarchy. (rule)
+- Build 2026-05-19 (session 3y): 0 errors, 0 warnings. Deployed both instances. Traffic probe #2 (Gley API dump). (one-off)
+- TRAFFIC PROBE 2 RESULT (2026-05-19): `TrafficComponentMultiplayer` = Gley's MULTI-CAMERA (split-screen) support (`players` array), NOT network sync. `TrafficManager` (singleton `Instance`) = Burst/Jobs sim, all vehicle state in NativeArrays; key methods: `GetVehicleList()`, `AddVehicle(Vector3,VehicleTypes)`, `RemoveVehicle`, `ClearTraffic()`, `SetTrafficDensity(int)`, `SetPause(bool)`, `UpdateCamera(Transform[])`, `Initialize(Transform[],...)`. `TrafficVehicles` = pool (`allVehicles`,`idleVehicles`,`trafficHolder`), public `GetVehicleList()→List<VehicleComponent>`. `TrafficComponent` (singular `player` anchor) is what the game uses. Traffic cars: under `TrafficHolder`, each has `VehicleComponent`+`Rigidbody`+`CarFeatures`+`RandomVehicleColor`+`TaxiController`(taxis)+etc. Models overlap player VehicleTypeName (FreightTruckT1, HonzaMimic, MersaidiS500...) plus traffic-only (Taxi). (rule)
+- USER DECISION (2026-05-19): build FULL host-authoritative traffic sync. ("sync only nearby" rejected — would jar when players converge.) Phase 5a = host enumerate+broadcast traffic, clients disable local + render ghosts. Phase 5b = host simulates traffic citywide around all players (DensityManager anchor problem). (rule)
+- `VehicleManager.ScanGleyInternals()` (traffic probe #3) — dumps VehicleComponent/VehiclePool/VehicleTypes/DensityManager/VehiclePositioningSystem/WaypointManager/DrivingAI member APIs — the design data for Phase 5a. (rule)
+- Build 2026-05-19 (session 3z): 0 errors, 0 warnings. Deployed both instances. Traffic probe #3 (Gley internals). (one-off)
+- TRAFFIC PROBE 3 RESULT (2026-05-19): `VehicleComponent` (per traffic car) — `transform`, `GetVehicleType()→VehicleTypes{Car,Truck}`, `GetIndex()`, `GetCurrentSpeed()`, `GetVelocity()`, `ActivateVehicle`/`DeactivateVehicle`. `VehiclePool.trafficCars(Il2CppReferenceArray)` = traffic-car prefab array. `DensityManager.UpdateCameraPositions(Transform[])` + `AddVehicleAtPosition(Vector3,VehicleTypes)` — the Phase-5b citywide-anchor hooks. `VehicleTypes` enum = just Car,Truck (model identity = GameObject name, e.g. FreightTruckT1(Clone)N). (rule)
+- GleyTrafficSystem types live in `ExternalPlugins.dll` (interop) — added that reference to the csproj; the Gley API is directly callable in code (no reflection needed). (rule)
+- IMPLEMENTED 2026-05-19 (session 4a) — Phase 5a foundation: `TrafficSync.cs`. `Tick()` (role-based, 25s after level load): host `HostEnumerate()` logs `TrafficManager.Instance.trafficVehicles.GetVehicleList()` (count + sample cars); client `DisableLocalTraffic()` = `SetTrafficDensity(0)`+`ClearTraffic()`. `Reset()` on game load. Wired into `MPCanvasUI` (TickPositionSync + game-load reset). Broadcast + ghost layer is next. (rule)
+- Build 2026-05-19 (session 4a): 0 errors, 0 warnings. Deployed both instances. Traffic sync foundation. (one-off)
+- TEST 4a (2026-05-19): CORRECTION — earlier claim "BigAmbitions2 has no traffic" was WRONG (overreach from a single one-shot scan that happened to read 0). User confirms BOTH instances always have traffic. The 4a test actually showed: client `DisableLocalTraffic` WORKS (client traffic vanished as intended); the host one-shot enumeration logged 0 due to bad timing, not absent traffic. Either instance can host. (rule)
+- `HostEnumerate` hardened: uses `FindObjectsOfType<VehicleComponent>` (robust). `Tick` host enumeration made PERIODIC (every 5s via unscaled timer) instead of one-shot — one-shot snapshots are unreliable. (rule)
+- Build 2026-05-19 (session 4b): 0 errors, 0 warnings. Deployed both instances. Periodic host enumeration. (one-off)
+- TEST 4b (2026-05-19): host enumeration WORKS — `FindObjectsOfType<VehicleComponent>` gives 24 active traffic cars with stable `index` (=`(Clone)NN` suffix), model name (GameObject name: VordTiaraVic/DeliveryTruck/VordPony/VordV150/UMCNunavut...), VehicleTypes Car/Truck, live position+speed. BUT: client one-shot `SetTrafficDensity(0)`+`ClearTraffic()` did NOT stick — Gley's density manager respawned traffic; client still showed its own traffic. (rule)
+- `SuppressLocalTraffic` (client) — runs every frame after 20s: `SetTrafficDensity(0)` + `SetPause(true)` every frame (pinned), `ClearTraffic()` every 2s, logs car count at each clear. (rule)
+- Build 2026-05-19 (session 4c): 0 errors, 0 warnings. Deployed both instances. Continuous client traffic suppression. (one-off)
+- TEST 4c (2026-05-19): client traffic suppression CONFIRMED (`0 car(s) present at clear`). Host enumeration confirmed (~24 cars). Foundation complete. (rule)
+- IMPLEMENTED 2026-05-19 (session 4d) — Phase 5a traffic broadcast + ghosts:
+  - `TrafficSnapshot=36` msg + `TrafficCarDto{Index,Model,X..Qw}` + `TrafficSnapshotPayload{Cars}`.
+  - Host: `TrafficSync.BuildSnapshot` (FindObjectsOfType<VehicleComponent>, model = GameObject name minus `(Clone)NN`), broadcast every 0.2s (~5Hz) reliable.
+  - Client: `ApplySnapshot` — ghosts keyed by Gley pool Index; spawn via `VehicleManager.SpawnVisualGhost` (reused player-ghost spawn: CreateAndSpawnVehicle→demote to prop); despawn cars absent from snapshot; `TickGhosts` lerps.
+  - `VehicleManager.SpawnVisualGhost(typeName,pos,rot)` — extracted reusable visual-ghost spawn (Enum.TryParse VehicleTypeName, fallback VordV150 for non-player models e.g. Taxi).
+  - `TrafficSync.DespawnAllGhosts` hooked into `RemotePlayerManager.RemoveAll`.
+- Build 2026-05-19 (session 4d): 0 errors, 0 warnings. Deployed both instances. Traffic broadcast + client ghosts. (one-off)
+- TEST 4d (2026-05-19): traffic broadcast WORKS — client sees host's traffic when players near each other. Issues: (1) client ~0.3s behind + jitter (latency/rate/lerp — partly inherent); (2) traffic doesn't follow client when host leaves area (Phase 5b — Gley spawns only near host); (4) car colours don't match (RandomVehicleColor per-instance); (5) taxis missing — replaced by VordV150 fallback (Taxi not a player VehicleTypeName). (rule)
+- IMPLEMENTED 2026-05-19 (session 4e) — traffic ghosts from Gley's own prefab pool (fixes #5 taxis + lighter spawn): `TrafficSync.BuildPrefabMap` reads `TrafficComponent.Instance.vehiclePool.trafficCars` → model→prefab map (handles GameObject[] or Component[] element type defensively); `SpawnTrafficGhost` = `Instantiate(prefab)` + strip Gley/AI/audio/LOD components (`_killTrafficComponents`) + kinematic Rigidbody. Replaces the CreateAndSpawnVehicle path for traffic. Correct models incl. Taxi; much lighter than CreateAndSpawnVehicle. (rule)
+- Build 2026-05-19 (session 4e): 0 errors, 0 warnings. Deployed both instances. Traffic ghosts from Gley prefab pool. (one-off)
+- TRAFFIC TODO: #2 spawn-following (Phase 5b, host citywide traffic via DensityManager anchors); #4 colour sync; #1 latency tuning. (situational: next traffic work)
+- TAXI DESIGN (2026-05-19): taxi = a clickable point that opens a fast-travel menu (pay fee → teleport local player); it does NOT drive you. Movement (host-dictated, ghost-lerped) and interaction (local, per-player, like a bench) ARE separable → host-synced taxi CAN stay functional. Fix = on taxi ghosts keep `TaxiController` + click hook, strip only AI/physics. Caveat: client hailing → host taxi keeps moving → ghost moves during menu (mitigate: freeze ghost while its menu open). (rule)
+- `VehicleManager.ProbeTaxi()` — dumps `TaxiController` API + a live taxi's component hierarchy (to learn TaxiController's deps + the clickable hook). Called from `TickPositionSync`, 25s gate, self-guards. (rule)
+- Build 2026-05-19 (session 4f): 0 errors, 0 warnings. Deployed both instances. Taxi discovery probe. (one-off)
+- BUG: `ProbeTaxi` call was placed AFTER the `!MPServer.IsRunning && !MPClient.IsConnected` gate in TickPositionSync → never ran in a single-instance test. Moved it up into the probe cluster (before the gate). (rule)
+- Build 2026-05-19 (session 4g): 0 errors, 0 warnings. Deployed both instances. ProbeTaxi call moved before the connection gate. (one-off)
+- TAXI PROBE RESULT (2026-05-19): `TaxiController` is tiny — methods `OnClickToUseTaxi()` (public, click entry → menu), `RequestVehicleStop()` (private, stops taxi), props `_vehicleComponent(VehicleComponent)`, `_lastDriveAction(SpecialDriveActionTypes)`. So a functional taxi ghost = keep `TaxiController` + `VehicleComponent` (the ref it holds) + colliders. (rule)
+- IMPLEMENTED 2026-05-19 (session 4h) — Build A: interactable taxi ghosts. `SpawnTrafficGhost` special-cases `model=="Taxi"`: keeps `TaxiController` (enabled) + `VehicleComponent` (disabled — ref valid for TaxiController, dead AI fires nothing); strips the rest. Non-taxi ghosts unchanged. (rule)
+- Build 2026-05-19 (session 4h): 0 errors, 0 warnings. Deployed both instances. Interactable taxi ghosts (Build A). (one-off)
+- TAXI NEXT (Build B): host-authoritative ref-counted stop — any player hailing a taxi → host stops its real taxi N → ghosts follow → resume when all hailers release. (situational)
+- REGRESSION (2026-05-19): build 4e (Gley-prefab ghost spawn) was never tested — it broke client traffic display (`BuildPrefabMap` silently produced an empty map → `SpawnTrafficGhost` returned null → no ghosts). Fix 4i: `BuildPrefabMap` now logs every failure path + the `trafficCars` element type; `SpawnTrafficGhost` falls back to `VehicleManager.SpawnVisualGhost` (CreateAndSpawnVehicle path, the 4d-working one) when the Gley prefab is unavailable — so traffic always shows. (rule)
+- Build 2026-05-19 (session 4i): 0 errors, 0 warnings. Deployed both instances. Traffic-ghost fallback + BuildPrefabMap diagnostics. (one-off)
+- DIAGNOSIS (2026-05-19): `VehiclePool.trafficCars` is `Il2CppReferenceArray<GleyTrafficSystem.CarType>` — a Gley wrapper class, not GameObject/Component. So the prefab lives INSIDE CarType. Fix 4j: `ExtractPrefab(CarType)` reflects CarType's properties for a GameObject-valued member (prefers names containing prefab/vehicle/car); logs CarType members once. (rule)
+- Build 2026-05-19 (session 4j): 0 errors, 0 warnings. Deployed both instances. CarType prefab extraction by reflection. (one-off)
+- TEST 4j (2026-05-19): taxi ghosts spawn as real taxis; clicking → player walks to taxi → teleport works. Remaining: (A) host taxi doesn't STOP when client hails (host unaware → ghost keeps moving, hard to reach) = Build B; (B) far from host, client's own local traffic spawns/clears in a war = teleporting/phasing cars. (rule)
+- FIX 4k (issue B): client traffic suppression changed from density-0+pause+periodic-ClearTraffic (lost the race in newly-entered grid areas) to disabling the `TrafficManager` component outright (`tm.enabled=false`) + one ClearTraffic — no sim, no spawner, anywhere. Caveat: traffic lights may freeze on the client (cosmetic; client has no local traffic anyway). (rule)
+- Build 2026-05-19 (session 4k): 0 errors, 0 warnings. Deployed both instances. Client traffic killed via TrafficManager disable. (one-off)
+- TEST 4k (2026-05-19): both fixes confirmed (taxis work, far-from-host teleporting gone). User wants traffic lights synced to host; chose "all 4 remaining items in one go".
+- IMPLEMENTED 2026-05-19 (session 4l) — 3 of 4 + 2 probes:
+  - TAXI STOP (Build B): `TaxiHail=37` msg + `TaxiHailPayload`. Harmony dynamic patch `Patch_TaxiController_OnClick` (postfix on `TaxiController.OnClickToUseTaxi`) → `TrafficSync.OnLocalTaxiHailed` → client sends `SendTaxiHail(index)` to host (host's own click already stops via SP flow). `MPServer.HandleTaxiHail` → `TrafficSync.HostStopTaxi(index)` finds the real traffic taxi by `VehicleComponent.GetIndex()`, reflection-invokes private `TaxiController.RequestVehicleStop()`. `ResolveTaxiIndex` = ghost reverse-lookup (client) / VehicleComponent index (host).
+  - CITYWIDE (Phase 5b): `TrafficSync.UpdateTrafficAnchors` (host, every frame) feeds all player transforms (host + remote-player ghosts via `RemotePlayerManager.GetRemotePlayerTransforms`) to `TrafficManager.densityManager.UpdateCameraPositions(Il2CppReferenceArray<Transform>)`.
+  - LATENCY: traffic broadcast 0.2s→0.1s (10Hz); GhostLerp 12→14.
+  - PROBES: `VehicleManager.ProbeTrafficExtras` dumps GleyTrafficSystem intersection/light classes + RandomVehicleColor/VehicleColor (for lights sync + colour sync next build).
+- Build 2026-05-19 (session 4l): 0 errors, 0 warnings. Deployed both instances. Taxi stop + citywide + latency + lights/colour probe. (one-off)
+- TEST 4l: taxi stop failed (`RequestVehicleStop method not found` — `FindComponentByName` returns base `Component`, so `GetType()` gave `Component` not `TaxiController`); citywide failed silently (`UpdateCameraPositions` is the wrong anchor lever). Latency better. (rule)
+- USER DIRECTIVE (2026-05-19, firm): vehicles incl. taxis must NOT desync — taxi stop stays HOST-AUTHORITATIVE as agreed. Do NOT change an approach the user specified without explicit permission. A mid-implementation pivot to a local-freeze (desync) was reverted. (rule)
+- FIX 4m: taxi stop reflection — `TaxiController` IS referenceable (global ns, `BigAmbitions.dll`). `HostStopTaxi` now `tcComp.TryCast<TaxiController>()` then `typeof(TaxiController).GetMethod("RequestVehicleStop", NonPublic|Instance).Invoke(taxi,null)`. Citywide: `UpdateTrafficAnchors` now calls `TrafficManager.UpdateCamera` AND `densityManager.UpdateCameraPositions` with all player anchors + one-time diagnostic. (rule)
+- Build 2026-05-19 (session 4m): 0 errors, 0 warnings. Deployed both instances. Host-authoritative taxi stop (fixed) + citywide retry. (one-off)
+- TEST 4m: taxi stop WORKS (host-authoritative, synced). Citywide `UpdateCamera` WORKS — traffic follows the client — but SPARSE (denser near host). Taxi doesn't auto-resume (stuck). (rule)
+- FIX 4n: (1) taxi resume — `HostStopTaxi` now schedules `_taxiResumeAt[index]=now+18s`; `TickTaxiResumes` (host, each frame) invokes the game's resume closure `TaxiController._OnClickToUseTaxi_b__8_0()` when due. `FindTaxiByIndex` shared helper. (2) sparseness — `UpdateTrafficAnchors` now also calls `densityManager.UpdateMaxCars(24 * playerCount)` so the traffic budget scales with player count. (rule)
+- Build 2026-05-19 (session 4n): 0 errors, 0 warnings. Deployed both instances. Taxi auto-resume + player-scaled traffic density. (one-off)
+- TEST 4n: density fix CONFIRMED (far-from-host traffic good now). Taxi resume WRONG — `_OnClickToUseTaxi_b__8_0` is the MENU-open callback, not resume; invoking it popped the host's taxi menu. (rule)
+- FIX 4o: `HostResumeTaxi` now restores the drive action directly — reflection-reads TaxiController's `_vehicleComponent` + `_lastDriveAction` (saved by RequestVehicleStop), calls `VehicleComponent.SetCurrentAction(lastDriveAction)`. The direct inverse of the stop, no menu. (rule)
+- Build 2026-05-19 (session 4o): 0 errors, 0 warnings. Deployed both instances. Taxi resume via drive-action restore. (one-off)
+- TEST 4o: taxi resume failed — `VehicleComponent.SetCurrentAction` only updates the component's local copy; Gley's Burst job reads drive state from `TrafficManager`'s NativeArrays, not the component. (rule)
+- FIX 4p: `HostResumeTaxi` now reflection-invokes private `TrafficManager.UpdateDrivingState(int index, SpecialDriveActionTypes, float)` with the taxi's saved `_lastDriveAction` + `_lastActionValue` — writes the job-level state, same layer RequestVehicleStop operates at. If this also fails, fallback = `TrafficManager.RemoveVehicle(index)` (despawn the stuck taxi). (rule)
+- Build 2026-05-19 (session 4p): 0 errors, 0 warnings. Deployed both instances. Taxi resume via TrafficManager.UpdateDrivingState. (one-off)
+- TEST 4p: taxi resume CONFIRMED working. User added a 3rd item: client traffic shows vehicles "very quickly moved across the screen" (jarring slides). (rule)
+- IMPLEMENTED 2026-05-19 (session 4q):
+  - JARRING FIX: pool-index reuse caused ghosts to slide to a reused slot's far car. `ApplySnapshot` now tracks `TrafficGhost.Model` — respawns on model mismatch; snaps the transform (no slide) on a position jump > `SnapDistance` (18u).
+  - TRAFFIC LIGHTS: `TrafficLights=38` msg + `LightStateDto{Index,Road,Yellow}` + `TrafficLightsPayload`. Host `BuildLightSnapshot` reads `IntersectionManager.allIntersections` → each `TrafficLightsIntersection.currentRoad`/`yellowLight`, broadcasts every 0.5s. Client `ApplyTrafficLights` → `ChangeAllRoadsExceptSelectd(road,Red)` + `ChangeCurrentRoadColors(road,Yellow|Green)` + `ApplyColorChanges()`.
+  - COLOUR PROBE: `VehicleManager.ProbeCarColor` dumps a traffic car's renderers/materials — Color shader props with shared-material AND MaterialPropertyBlock values — to locate where the body colour lives.
+- Build 2026-05-19 (session 4q): 0 errors, 0 warnings. Deployed both instances. Jarring fix + traffic-light sync + colour probe. (one-off)
+- TEST 4q: jarring GONE, lights SYNC. But colour probe never fired — `FindGameType("VehicleComponent")` returns null (it's `GleyTrafficSystem.VehicleComponent`, namespaced; FindGameType needs the full name). Fix 4r: VehicleManager `using GleyTrafficSystem` + `Il2CppType.Of<VehicleComponent>()` directly. (rule)
+- Build 2026-05-19 (session 4r): 0 errors, 0 warnings. Deployed both instances. ProbeCarColor namespace fix. (one-off)
+- COLOUR PROBE RESULT (2026-05-19): traffic car body renderer (`<Model>_Body`) uses shader `Shader Graphs/SH_Vehicle` with TWO custom Color props named `Color_<guid>` (non-`_`-prefixed) = the car's tint + fresnel. MaterialPropertyBlocks are EMPTY → colour is on instanced materials. (DeliveryTruck/Taxi etc. = fixed-livery shared materials — harmless to sync.)
+- IMPLEMENTED 2026-05-19 (session 4s) — traffic colour sync: `TrafficCarDto` += R1/G1/B1/R2/G2/B2. Host `GetVehicleBodyColors` reads the 2 non-`_` Color props off the SH_Vehicle body material (cached per index+model in `_carColorCache`); client `ApplyVehicleBodyColors` writes them onto the ghost's instanced SH_Vehicle material on spawn. (rule)
+- Build 2026-05-19 (session 4s): 0 errors, 0 warnings. Deployed both instances. Traffic car colour sync. (one-off)
+- TEST 4s: colour sync did NOT match — the colour probe had sampled a DeliveryTruck (fixed-livery, shared material, empty MPB) — a misleading sample. Regular cars likely store colour in the `CarFeatures` MaterialPropertyBlock. (rule)
+- FIX 4t: `ProbeCarColor` reworked — skips fixed-livery models (Truck/Taxi/Ambulance/Police/Delivery/Freight), samples up to 3 ordinary cars, dumps only the SH_Vehicle body renderers (shared + MPB values). Re-probe to find where a regular car's colour actually lives. (rule)
+- Build 2026-05-19 (session 4t): 0 errors, 0 warnings. Deployed both instances. ProbeCarColor — sample regular cars. (one-off)
+- COLOUR PROBE 2 RESULT (2026-05-19): regular cars (VordTiaraVic, UMCNunavut) — the per-car body colour is in the renderer's **MaterialPropertyBlock** (two cars, same shared `M_TaxiCivVersion` material, DIFFERENT mpb values). The active colour has alpha≈1; the inactive fallback alpha 0. Fixed-livery vehicles keep colour on the shared material. (rule)
+- FIX 4u: `GetVehicleBodyColors` reads from `renderer.GetPropertyBlock` (MPB), picks MPB-vs-shared by alpha≥0.5. `ApplyVehicleBodyColors` writes via `GetPropertyBlock`→`SetColor`→`SetPropertyBlock` (was writing the instanced material — which the shader ignores in favour of the MPB). (rule)
+- Build 2026-05-19 (session 4u): 0 errors, 0 warnings. Deployed both instances. Traffic colour sync via MaterialPropertyBlock. (one-off)
+- TEST 4u: colours STILL don't match; jarring movement seen once or twice (mostly fixed, not fully). (rule)
+- FIX 4v: `GetVehicleBodyColors` was reusing a STATIC MaterialPropertyBlock → block-less renderers leave stale values → wrong colour cached permanently. Now uses a fresh MPB per read. Added `[TrafficColor]` diagnostics: host logs first 8 cars' read colours, client logs first 8 ghosts' applied colours + renderer count. SnapDistance 18→12 (catch nearer index-reuse slides). (rule)
+- Build 2026-05-19 (session 4v): 0 errors, 0 warnings. Deployed both instances. Colour: fresh MPB + diagnostics; tighter snap. (one-off)
+- COLOUR DIAGNOSIS (2026-05-19): `[TrafficColor]` logs proved host-read == client-applied EXACTLY (pipeline perfect). BUT multiple cars read identical `0.737/0.482` = the PRE-COLOUR DEFAULT. Root cause: `RandomVehicleColor` colours a car a moment AFTER spawn; the host reads+caches on first sight → caches the default permanently. (rule)
+- FIX 4w: (1) host caches a car's colour only once `RandomVehicleColor._initialized` is true (`IsCarColorReady`; fixed-livery vehicles = no RVC = ready immediately). (2) `TrafficGhost` stores last-applied C1/C2; `ApplySnapshot` re-applies colour to an existing ghost when it changes — so a late-corrected colour reaches a ghost that spawned early. (rule)
+- Build 2026-05-19 (session 4w): 0 errors, 0 warnings. Deployed both instances. Colour: wait for RandomVehicleColor._initialized + re-apply on change. (one-off)
+- TEST 4w: colours STILL don't match after the timing fix. (rule)
+- DIAGNOSTIC 4x: added `DumpFullCarColor` — host dumps real car[N]'s full SH_Vehicle body-colour state (every Color prop, shared + MPB), client dumps ghost[N]'s; first 4 indices each, tagged `[ColorDump] HOST/CLIENT idx=N`. Diffing host vs client for the same idx pinpoints the exact differing property. No behaviour change this build. (rule)
+- Build 2026-05-19 (session 4x): 0 errors, 0 warnings. Deployed both instances. Colour dump-and-compare diagnostic. (one-off)
+- COLOUR DUMP RESULT 4x (2026-05-19): host car[N] and client ghost[N] dumps are BYTE-IDENTICAL → sync is perfect. BUT VordV150 and VordPony BOTH have `Color_3d0f`/`Color_f78f` MPB = `0.737/0.482` (identical) — so those 2 props are a CONSTANT, NOT the per-car paint colour. The real paint colour is a property the dump missed (only dumped Color-type; tint is likely a Vector or Float shader prop). (rule)
+- DIAGNOSTIC 4y: `DumpFullCarColor` widened — dumps EVERY shader property (Color/Vector/Float, shared + MPB) of the body renderer (skips wheels). Diffing VordV150 vs VordPony reveals which property is the actual paint colour. (rule)
+- Build 2026-05-19 (session 4y): 0 errors, 0 warnings. Deployed both instances. Colour diagnostic — all property types. (one-off)
+- COLOUR ROOT CAUSE FOUND (2026-05-19): 4y dump — ghost idx=16 `Color_3d0f` MPB = (0.773,0.639,0.149) real gold → `Color_3d0f`/`Color_f78f` ARE the right props (earlier 0.737/0.482 = pre-colour default). KEY: host log had ZERO `[ColorDump HOST]` lines → host never cached ANY colour → broadcast white for every car → client re-apply-on-change compares vs white default → `white==white` → never applied → ghosts kept their own RandomVehicleColor random colours. Cause: `IsCarColorReady` keyed on `RandomVehicleColor._initialized` which is ALWAYS false. (rule)
+- FIX 4z: removed `IsCarColorReady`/`_initialized` gate; replaced with a time delay — host caches a car's colour 2.5s after first seeing it (`_carFirstSeen`, `ColorReadDelay`), enough for RandomVehicleColor to finish. Client re-apply-on-change then propagates the real colour once it arrives. (rule)
+- Build 2026-05-19 (session 4z): 0 errors, 0 warnings. Deployed both instances. Colour: time-delayed read (replaces broken _initialized gate). (one-off)
+- COLOUR REAL ROOT CAUSE (2026-05-19): diffed two ColorDumps of the SAME index 14 — `Color_3d0f` MPB = (0.235,0,0) red one moment, (0.424,0.424,0.424) grey another (`_Dirtiness`/`_BlinkerOffset` also differ → genuinely two different cars). Gley REUSES pool indices: a car despawns, a different car (often SAME model) spawns at the same index. `_carColorCache` keyed by index+model never invalidated on same-model reuse → host broadcast the FIRST car's colour forever for that slot. The 2 colour props were always correct; the cache was stale. (Earlier "0.737/0.482 pre-colour default" theory was wrong — that was the static-MPB-reuse bug, fixed in 4v. The `_initialized` gate and 2.5s delay were fixes for a non-problem.) (rule)
+- FIX 5a: removed `_carColorCache` + `_carFirstSeen` + delay entirely. `GetVehicleBodyColors(index,go)` now reads the colour LIVE every snapshot (caches only the body Renderer ref per index — pooled GO, stays valid). No cache = no staleness. Client re-apply-on-change propagates recycled colours. (rule)
+- Build 2026-05-19 (session 5a): 0 errors, 0 warnings. Deployed both instances. Colour: live per-snapshot read (no cache). (one-off)
+- TEST 5a: traffic colours match — except a box truck's CAB (separately-coloured from the cargo box). Cause: one body colour read + applied to ALL SH_Vehicle renderers; box-trucks have 2 distinct-coloured renderers. (rule)
+- FIX 5b: per-renderer colour sync. `TrafficCarDto.Colors` = `List<float>` (6 per SH_Vehicle renderer group). Host `ReadBodyColors` reads each SH_Vehicle renderer (collapses to 1 group if uniform — regular cars). Client `ApplyVehicleBodyColors` applies group i → renderer i (same prefab → matching order), or the single group to all. `_carRenderers` caches the per-index renderer list. (rule)
+- Build 2026-05-19 (session 5b): 0 errors, 0 warnings. Deployed both instances. Per-renderer traffic colour sync. (one-off)
+- TEST 2 (2026-05-18, fixed monitor): clock-rate monitor FIRED — bench skip = `58.4 game-min/s` (~1 game-hr/real-sec), a FAST RAMP not a teleport. `timeScale=0.000` throughout — bench skip is a pure internal-clock advance, GSC `isFastForwarding` stays False. (rule)
+- ROOT CAUSE suppression never worked: `SetGameTime` passed the fractional float `hourOfDay` into `GameInstance.Hour` which is an **Int32** property → "Single cannot be converted to Int32" thrown every frame → clock-revert was a no-op (logged "Reverted X h" growing 0.06→0.73+ because nothing was actually put back). (rule)
+- FIX: `SetGameTime` now splits fractional hour into `int hourInt` + `float minute` and writes Hour(Int32) and Minute(Single) to their correctly-typed properties separately. Probe now logs Day/Hour/Minute `.CanWrite`. (rule)
+- Build 2026-05-18 (session 2d): 0 errors. Deployed both instances. Fixed SetGameTime Int32/Single type mismatch. (one-off)
+
+DONE (this session):
+- Game time sync framework: protocol, server broadcast, client receive/apply, reflection probe
+- Toggleable in-game player HUD (F9): top-right overlay, local=green, remote=white
+- Periodic market sync every 60s (host)
+- Consensus time-skip: ClickSleep intercepted, suppression via GameManager.Update postfix, vote/start/end protocol, snap-sync on end
+- Pause consensus: any player pausing pauses everyone; only the pauser needs to explicitly unpause
+- Skip-time waiting indicator: bottom-center overlay, auto-shown while waiting for consensus, "X / Y players ready"
+- Pause bug fix: removed `MarkAllWantPaused` — only the pausing player is tracked, force-paused players are not required to unpause
+- GSC probe + Harmony TogglePause capture + diagnostic logging in clock-rate monitor
+
+NEXT:
+- **Bug 1 test (client unpauses while host still paused)**: both players pause → client unpauses → game should stay paused because host is still in `_pausedPlayers`. If bug persists, check whether `GSC.Paused` monitor in `TickTimeScaleMonitor` fires correctly for client when force-paused.
+- **Bug 2 test (bench skip)**: one player opens bench GUI → clicks "skip time ahead" → check BOTH logs for `[Patch] GSC.Set fired with isFastForwarding=true` AND `[UI] isFastForwarding: false→true`. If not seen, `isFastForwarding` may not flip on bench skip → investigate `TemporalBoost` / `timeEnteredTemporalBoost` on GameInstance.
+- After bench skip: check if time suppression holds (clock doesn't advance for non-consenting player)
+- After Bug 2 confirmed: discover other time-skip triggers (school, other "wait" activities)
+- Verify GSC instance is cached via `Patch_GSC_Set` BEFORE TogglePause fires (check log order)
