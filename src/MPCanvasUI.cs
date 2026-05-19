@@ -433,6 +433,13 @@ namespace BigAmbitionsMP
 
             try
             {
+                // Backlog #5 — during a taxi ride the game intentionally bumps
+                // Time.timeScale to ~8× to fast-forward through the trip.  If
+                // we keep pinning timeScale to 1× the ride takes minutes of
+                // real time; the user perceives it as a lock-up.  Step out of
+                // the way entirely while LocalInTaxi is set.
+                if (TrafficSync.LocalInTaxi) return;
+
                 // The mod owns Time.timeScale.  The world runs at 1× real-time
                 // always; it stops ONLY for a deliberate manual pause or the
                 // startup load hold.  Forcing it here (after the EventSystem and

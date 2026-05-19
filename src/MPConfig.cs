@@ -56,11 +56,17 @@ namespace BigAmbitionsMP
             if (hostIp != null)
                 HostIP = hostIp;
 
-            // Persist the name across sessions (#1).
+            // Persist the name across sessions (#1).  Explicit ConfigFile.Save()
+            // because BepInEx 6 BE doesn't always flush the auto-save before a
+            // hard process exit (e.g. user clicks the window X).
             try
             {
                 if (_playerIdEntry != null && !string.IsNullOrWhiteSpace(playerId))
-                    _playerIdEntry.Value = playerId;     // BepInEx auto-saves on assign
+                {
+                    _playerIdEntry.Value = playerId;
+                    _playerIdEntry.ConfigFile?.Save();
+                    Plugin.Logger.LogInfo($"[Config] Persisted PlayerId='{playerId}' to disk.");
+                }
             }
             catch (Exception ex)
             {

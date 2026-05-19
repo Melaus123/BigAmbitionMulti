@@ -98,6 +98,11 @@ namespace BigAmbitionsMP
             _truckDumpHost.Clear();
             _truckDumpClient.Clear();
             _ghosts.Clear();          // ghost GameObjects die with the old scene
+
+            // Ghost anchor (#7) — clear last-outside memory so a new game/save
+            // doesn't keep spawning traffic at the previous session's location.
+            _hasOutsidePos = false;
+            if (_ghostAnchorGO != null) _ghostAnchorGO.transform.position = Vector3.zero;
         }
 
         /// <summary>Role-based step — called each frame in-game.</summary>
@@ -819,6 +824,27 @@ namespace BigAmbitionsMP
         /// </summary>
         private static bool _anchorDiagLogged;
 
+        // #7 — when host enters a building we need to KEEP an exterior anchor
+        // so Gley keeps spawning traffic.  Removing the host's anchor only
+        // works if a client is outside; in solo / both-inside cases, anchors
+        // hit zero and traffic stops.  Persistent fix: a "ghost anchor" pinned
+        // at the host's LAST outside position.  As long as the host has been
+        // outside once this session, the traffic system continues to simulate
+        // around that position while they're indoors.
+        private static GameObject? _ghostAnchorGO;
+        private static Vector3 _lastOutsidePos;
+        private static bool _hasOutsidePos;
+
+        private static Transform GetOrCreateGhostAnchor()
+        {
+            if (_ghostAnchorGO == null)
+            {
+                _ghostAnchorGO = new GameObject("BAMP_TrafficGhostAnchor");
+                UnityEngine.Object.DontDestroyOnLoad(_ghostAnchorGO);
+            }
+            return _ghostAnchorGO.transform;
+        }
+
         private static void UpdateTrafficAnchors()
         {
             try
@@ -829,11 +855,26 @@ namespace BigAmbitionsMP
 
                 var anchors = new List<Transform>();
                 var hostChar = PlayerHelper.PlayerController?.Character;
-                // #7 — drop the host's anchor while they're inside a building.
-                // Otherwise Gley spawns traffic where the host is (interior →
-                // no roads) and the outside world goes empty.  Clients (still
-                // outside) continue providing valid exterior anchors.
-                if (hostChar != null && !LocalInBuilding) anchors.Add(hostChar.transform);
+                if (hostChar != null)
+                {
+                    if (!LocalInBuilding)
+                    {
+                        // Outside — use the live transform AND remember it so
+                        // we can pin the ghost anchor here if we go inside.
+                        anchors.Add(hostChar.transform);
+                        _lastOutsidePos = hostChar.transform.position;
+                        _hasOutsidePos  = true;
+                    }
+                    else if (_hasOutsidePos)
+                    {
+                        // Inside — use the persistent ghost anchor parked at
+                        // the last outside position, so traffic keeps simulating
+                        // exactly where we left off.
+                        var ga = GetOrCreateGhostAnchor();
+                        ga.position = _lastOutsidePos;
+                        anchors.Add(ga);
+                    }
+                }
                 foreach (var t in RemotePlayerManager.GetRemotePlayerTransforms())
                     if (t != null) anchors.Add(t);
                 if (anchors.Count == 0) return;
