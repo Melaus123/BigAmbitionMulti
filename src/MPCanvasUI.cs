@@ -2,8 +2,10 @@ using System;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
+using Il2CppInterop.Runtime;
 using Il2CppInterop.Runtime.Injection;
 using Helpers;
+using Intro;
 
 namespace BigAmbitionsMP
 {
@@ -233,6 +235,7 @@ namespace BigAmbitionsMP
             TickPositionSync();
             TickTimeSync();
             TickMarketSync();
+            TickIntroNamePrefill();
 
             // Auto-hide when the game starts so our canvas doesn't block the intro
             // scene's "Start Game" button or any in-game UI.
@@ -554,6 +557,7 @@ namespace BigAmbitionsMP
                 ResetWorldClock();
                 TrafficSync.Reset();
                 _localAppearanceSent = false;
+                _introNameFilled = false;       // re-arm intro-name prefill on next char-gen
 
                 // Startup pause hold — freeze the game the moment our scene loads
                 // and report in-game.  Stays frozen until ALL players have loaded,
@@ -629,6 +633,66 @@ namespace BigAmbitionsMP
             _worldSnapshotTimer = 0f;
             MPServer.BroadcastWorldSnapshotToAll();
             Plugin.Logger.LogInfo("[UI] WorldSnapshot broadcast fired.");
+        }
+
+        // ── Intro-scene name pre-fill (#2) ───────────────────────────────────
+        // One-shot: when an IntroCharacterCustomizer appears (host or client just
+        // entered char-gen), pre-fill the first TMP_InputField with MPConfig.PlayerId
+        // so the user doesn't have to retype the same name they put in the F8 panel.
+        // Re-armed by Reset() (called on game load).
+        private bool _introNameFilled;
+
+        private void TickIntroNamePrefill()
+        {
+            if (_introNameFilled) return;
+            try
+            {
+                var found = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<IntroCharacterCustomizer>());
+                if (found == null || found.Length == 0) return;
+                var customizer = found[0].TryCast<IntroCharacterCustomizer>();
+                if (customizer == null) return;
+
+                var fields = customizer.GetComponentsInChildren(Il2CppType.Of<TMP_InputField>(), true);
+                if (fields == null || fields.Length == 0) return;
+
+                Plugin.Logger.LogInfo(
+                    $"[IntroName] IntroCharacterCustomizer detected — {fields.Length} TMP_InputField(s):");
+                for (int i = 0; i < fields.Length; i++)
+                {
+                    var f = fields[i].TryCast<TMP_InputField>();
+                    if (f == null) continue;
+                    Plugin.Logger.LogInfo($"[IntroName]   [{i}] '{f.gameObject.name}' text='{f.text}'");
+                }
+
+                var preferred = MPConfig.PlayerId;
+                if (string.IsNullOrWhiteSpace(preferred)) { _introNameFilled = true; return; }
+
+                // Split on first space for first/last-name dual-field forms.
+                string first = preferred, last = "";
+                int sp = preferred.IndexOf(' ');
+                if (sp > 0) { first = preferred.Substring(0, sp); last = preferred.Substring(sp + 1); }
+
+                int filled = 0;
+                for (int i = 0; i < fields.Length && filled < 2; i++)
+                {
+                    var f = fields[i].TryCast<TMP_InputField>();
+                    if (f == null) continue;
+                    // Only fill if the field is currently empty / placeholder — never clobber typed text.
+                    var cur = f.text;
+                    if (!string.IsNullOrWhiteSpace(cur)) continue;
+                    string fill = filled == 0 ? first : last;
+                    if (string.IsNullOrEmpty(fill)) { filled++; continue; }
+                    f.text = fill;
+                    Plugin.Logger.LogInfo($"[IntroName] pre-filled field[{i}] '{f.gameObject.name}' ← '{fill}'");
+                    filled++;
+                }
+                _introNameFilled = true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[IntroName] {ex.Message}");
+                _introNameFilled = true;        // don't spam — try once, give up on error
+            }
         }
 
         private void TickPositionSync()

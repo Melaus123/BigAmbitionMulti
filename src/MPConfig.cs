@@ -46,13 +46,26 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>Called by the UI when the user clicks Host or Join.</summary>
+        /// <summary>Called by the UI when the user clicks Host or Join.
+        /// Persists the player name to the BepInEx config so subsequent launches
+        /// pre-fill the F8 panel with the last-used name.</summary>
         public static void SetRuntime(string playerId, string? hostIp, int port)
         {
             PlayerId = playerId;
             Port     = port;
             if (hostIp != null)
                 HostIP = hostIp;
+
+            // Persist the name across sessions (#1).
+            try
+            {
+                if (_playerIdEntry != null && !string.IsNullOrWhiteSpace(playerId))
+                    _playerIdEntry.Value = playerId;     // BepInEx auto-saves on assign
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[Config] Could not persist PlayerId: {ex.Message}");
+            }
         }
 
         // ── Name resolution ───────────────────────────────────────────────────

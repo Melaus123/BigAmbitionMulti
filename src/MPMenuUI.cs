@@ -17,11 +17,23 @@ namespace BigAmbitionsMP
 
         // ── Model ─────────────────────────────────────────────────────────────
         private bool   _visible  = true;
-        private string _name     = "Player1";
+        // _name is initialised in Awake() from the persisted MPConfig.PlayerId
+        // so the user doesn't have to retype their name every launch (#1).
+        private string _name     = "";
         private string _port     = "7777";
         private string _ip       = "127.0.0.1";
         private string _status   = "";
         private bool   _statusErr;
+
+        private void Awake()
+        {
+            // Persisted name (Steam-detected or last-used) — only fall back to
+            // "Player1" if MPConfig hasn't resolved a name yet.
+            _name = !string.IsNullOrWhiteSpace(MPConfig.PlayerId)
+                ? MPConfig.PlayerId : "Player1";
+            _port = MPConfig.Port.ToString();
+            _ip   = MPConfig.HostIP;
+        }
 
         // ── Window / drag ─────────────────────────────────────────────────────
         private Rect    _win     = new Rect(20, 20, 340, 348);
