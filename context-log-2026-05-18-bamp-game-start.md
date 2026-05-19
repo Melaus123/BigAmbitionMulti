@@ -27,6 +27,7 @@
 - 2026-05-18: "Load Multiplayer Save" uses `SaveGamePathHelper.GetAllSaveGamesFromVersion(SaveGamePathHelper.CurrentVersionFolderPath())` → `SaveGameManager.Load(saves[0], true)` (rule)
 - 2026-05-18: MP panel auto-hides on state transition LobbyHost/LobbyClient → Hosting/Connected so it doesn't block clicks on intro scene "Start Game" button (rule)
 - 2026-05-18: Probe projects must be created OUTSIDE `C:\code\BigAmbitionsMP\` — subdirectory obj files pollute the main project build with duplicate assembly attributes (rule)
+- 2026-05-19: Project backed up to GitHub — private repo https://github.com/Melaus123/BigAmbitionMulti (remote `origin`, branch `main`). `.gitignore` excludes `bin/`, `obj/` (rule)
 
 ## Constraints & Requirements
 - BepInEx 6.0.0-be.755 IL2CPP on Unity 2022.3.62 — aggressive method stripping (rule)
@@ -443,3 +444,13 @@ NEXT:
 - After bench skip: check if time suppression holds (clock doesn't advance for non-consenting player)
 - After Bug 2 confirmed: discover other time-skip triggers (school, other "wait" activities)
 - Verify GSC instance is cached via `Patch_GSC_Set` BEFORE TogglePause fires (check log order)
+
+2026-05-19 — Box-truck cab colour FIX (Step 1 diagnostic → Step 1b multi-mat → Step 3 fix):
+- ROOT CAUSE: a single `Renderer.sharedMaterial` only returns sub-mesh slot 0. The Freightliner's body MeshRenderer has 3 slots: [0] `M_Freightliner Truck_Back` (HDRP/Lit, trailer), [1] `M_Freightliner Truck_Cabin` (SH_Vehicle, the recoloured cab), [2] `M_GlassTransCars` (HDRP/Lit, windows). Our color sync only looked at slot [0] and so never saw or wrote the cab material → ghost cab got whatever colour the client's local `RandomVehicleColor` happened to roll. Confirmed: HOST cab MPB = RGBA(0.376, 0.376, 0.376) gray, CLIENT cab MPB = RGBA(0.059, 0.133, 0.282) dark blue. (rule)
+- `Renderer.sharedMaterials` (plural, IL2CPP `Il2CppReferenceArray<Material>`) returns all sub-mesh slots — use this, not `sharedMaterial`, whenever a single renderer can host multiple meshes/materials (trucks, multi-paint vehicles). (rule)
+- `MaterialPropertyBlock` is per-Renderer, NOT per-material-slot. Setting `Color_3d0f...` via MPB on a renderer affects every material slot whose shader has that property. So we only need ONE SH_Vehicle material on a renderer to discover property names, and ONE MPB write per renderer to apply the colour to every SH_Vehicle slot. (rule)
+- FIX: `FindShVehicleMaterial(Renderer)` scans `sharedMaterials[]` for the first SH_Vehicle slot; `GetCarRenderers`, `ReadRendererColors`, `ApplyVehicleBodyColors` now all use it instead of `sharedMaterial`. (rule)
+- DeliveryTruck (UPS): 1 SH_Vehicle renderer in slot [0] (`M_UPSTruckBody`), 131 total renderers because the prefab embeds a full driver character (hair/beard/face/clothes). Driver renderers have `(Instance)` material suffix on host but not on client ghost — character visuals diverge, but invisible at normal play distance. (rule)
+- FreightTruckT1: 0 SH_Vehicle renderers at slot [0] (back is HDRP/Lit); cab is at body slot [1]. Without the multi-slot fix, sync silently broadcast white and the ghost showed a random local colour. (rule)
+- Diagnostic `DumpFullCarColor` now iterates `sharedMaterials[]` (tagged `[i.j]`) and dumps Texture references too — kept in code for future investigations. (rule)
+- CONFIRMED 2026-05-19: Freightliner cab now matches host↔client in-game. Traffic colour sync complete for all observed truck variants. (rule)

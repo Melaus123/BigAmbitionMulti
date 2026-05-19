@@ -48,8 +48,22 @@ namespace BigAmbitionsMP
         private static int _colorDiagHost;
         private static int _colorDiagClient;
         // Indices whose full colour state has been dumped (host / client).
+        // Separate caps for trucks vs regular cars so we're guaranteed to see
+        // truck data even if non-trucks fill the first 4 slots.
         private static readonly HashSet<int> _colorDumpHost   = new();
         private static readonly HashSet<int> _colorDumpClient = new();
+        private static readonly HashSet<int> _truckDumpHost   = new();
+        private static readonly HashSet<int> _truckDumpClient = new();
+
+        /// <summary>Heuristic: does this prefab name look like a delivery/box truck?</summary>
+        private static bool LooksLikeTruck(string model)
+        {
+            if (string.IsNullOrEmpty(model)) return false;
+            string m = model.ToLowerInvariant();
+            return m.Contains("truck") || m.Contains("box")
+                || m.Contains("delivery") || m.Contains("van")
+                || m.Contains("lorry") || m.Contains("cargo");
+        }
 
         private static float _hostBroadcastTimer;
         private static float _lightBroadcastTimer;
@@ -81,6 +95,8 @@ namespace BigAmbitionsMP
             _colorDiagClient = 0;
             _colorDumpHost.Clear();
             _colorDumpClient.Clear();
+            _truckDumpHost.Clear();
+            _truckDumpClient.Clear();
             _ghosts.Clear();          // ghost GameObjects die with the old scene
         }
 
@@ -159,8 +175,11 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogInfo(
                             $"[TrafficColor] host car[{index}] '{model}' {colors.Count / 6} group(s)");
                     }
-                    if (_colorDumpHost.Count < 4 && _colorDumpHost.Add(index))
-                        DumpFullCarColor(go, index, "HOST");
+                    bool truckH = LooksLikeTruck(model);
+                    bool dumpH  = truckH
+                        ? (_truckDumpHost.Count < 4 && _truckDumpHost.Add(index))
+                        : (_colorDumpHost.Count < 2 && _colorDumpHost.Add(index));
+                    if (dumpH) DumpFullCarColor(go, index, "HOST", model);
 
                     snap.Cars.Add(new TrafficCarDto
                     {
@@ -180,56 +199,115 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>
-        /// Diagnostic — logs the complete SH_Vehicle body-colour state of a car:
-        /// every Color shader property, shared-material value AND property-block
-        /// value.  Run on the host (real car) and client (ghost) for the same
-        /// index; diffing the two reveals exactly what differs.
+        /// Diagnostic — logs the complete colour/material state of a car.
+        /// For every non-wheel renderer dumps EACH material in `sharedMaterials`
+        /// (sub-meshes — a single MeshRenderer often has multiple slots, e.g. a
+        /// truck cab + box on the same mesh) with shader, name, all Color/
+        /// Vector/Float/Texture properties (shared + MPB).  Run on the host
+        /// (real car) and client (ghost) for the same index; diffing the two
+        /// pinpoints exactly what differs.
         /// </summary>
-        private static void DumpFullCarColor(GameObject car, int index, string side)
+        private static void DumpFullCarColor(GameObject car, int index, string side, string model)
         {
             try
             {
+                var rootT = car.transform;
                 var mpb = new MaterialPropertyBlock();
                 var rends = car.GetComponentsInChildren(Il2CppType.Of<Renderer>(), true);
+                int dumped = 0;
+                Plugin.Logger.LogInfo(
+                    $"[ColorDump] === {side} idx={index} model='{model}' renderers={rends.Length} ===");
+
                 for (int i = 0; i < rends.Length; i++)
                 {
                     var r = rends[i].TryCast<Renderer>();
                     if (r == null) continue;
-                    var mat = r.sharedMaterial;
-                    if (mat == null || mat.shader == null) continue;
-                    if (!mat.shader.name.Contains("SH_Vehicle")) continue;
-                    if (r.gameObject.name.Contains("Wheel")) continue;   // want the body
+                    if (r.gameObject.name.Contains("Wheel")) continue;   // noise
+
+                    string path = BuildHierarchyPath(r.transform, rootT);
+                    string rType = r.GetIl2CppType().Name;
+
+                    // sharedMaterials = all sub-mesh slots (cab vs box can be
+                    // separate slots on the same MeshRenderer).
+                    var mats = r.sharedMaterials;
+                    int matCount = mats != null ? mats.Length : 0;
+
+                    if (matCount == 0)
+                    {
+                        Plugin.Logger.LogInfo(
+                            $"[ColorDump] {side} idx={index} [{dumped}] '{path}' ({rType}) NO_MAT");
+                        dumped++;
+                        continue;
+                    }
 
                     r.GetPropertyBlock(mpb);
-                    var sh = mat.shader;
-                    int n = sh.GetPropertyCount();
-                    Plugin.Logger.LogInfo(
-                        $"[ColorDump] {side} idx={index} '{r.gameObject.name}' mat='{mat.name}' — {n} props:");
-                    for (int p = 0; p < n; p++)
+
+                    for (int m = 0; m < matCount; m++)
                     {
-                        string pn = sh.GetPropertyName(p);
-                        string val;
-                        switch (sh.GetPropertyType(p))
+                        var mat = mats[m];
+                        if (mat == null || mat.shader == null)
                         {
-                            case UnityEngine.Rendering.ShaderPropertyType.Color:
-                                val = $"COL s={mat.GetColor(pn)} m={mpb.GetColor(pn)}"; break;
-                            case UnityEngine.Rendering.ShaderPropertyType.Vector:
-                                val = $"VEC s={mat.GetVector(pn)} m={mpb.GetVector(pn)}"; break;
-                            case UnityEngine.Rendering.ShaderPropertyType.Float:
-                            case UnityEngine.Rendering.ShaderPropertyType.Range:
-                                val = $"FLT s={mat.GetFloat(pn):0.###} m={mpb.GetFloat(pn):0.###}"; break;
-                            default:
-                                continue;   // skip Texture / Int
+                            Plugin.Logger.LogInfo(
+                                $"[ColorDump] {side} idx={index} [{dumped}.{m}] '{path}' ({rType}) NULL_MAT");
+                            continue;
                         }
-                        Plugin.Logger.LogInfo($"[ColorDump] {side} idx={index}     {pn} : {val}");
+
+                        var sh = mat.shader;
+                        int n = sh.GetPropertyCount();
+                        Plugin.Logger.LogInfo(
+                            $"[ColorDump] {side} idx={index} [{dumped}.{m}] '{path}' ({rType}) shader='{sh.name}' mat='{mat.name}' props={n}");
+
+                        for (int p = 0; p < n; p++)
+                        {
+                            string pn = sh.GetPropertyName(p);
+                            string val;
+                            switch (sh.GetPropertyType(p))
+                            {
+                                case UnityEngine.Rendering.ShaderPropertyType.Color:
+                                    val = $"COL s={mat.GetColor(pn)} m={mpb.GetColor(pn)}"; break;
+                                case UnityEngine.Rendering.ShaderPropertyType.Vector:
+                                    val = $"VEC s={mat.GetVector(pn)} m={mpb.GetVector(pn)}"; break;
+                                case UnityEngine.Rendering.ShaderPropertyType.Float:
+                                case UnityEngine.Rendering.ShaderPropertyType.Range:
+                                    val = $"FLT s={mat.GetFloat(pn):0.###} m={mpb.GetFloat(pn):0.###}"; break;
+                                case UnityEngine.Rendering.ShaderPropertyType.Texture:
+                                {
+                                    var st = mat.GetTexture(pn);
+                                    var mt = mpb.GetTexture(pn);
+                                    val = $"TEX s='{(st != null ? st.name : "<null>")}'(id={(st != null ? st.GetInstanceID() : 0)}) m='{(mt != null ? mt.name : "<null>")}'(id={(mt != null ? mt.GetInstanceID() : 0)})";
+                                    break;
+                                }
+                                default:
+                                    continue;   // skip Int / others
+                            }
+                            Plugin.Logger.LogInfo($"[ColorDump] {side} idx={index} [{dumped}.{m}]   {pn} : {val}");
+                        }
                     }
-                    return;   // one body renderer is representative
+                    dumped++;
                 }
+                Plugin.Logger.LogInfo(
+                    $"[ColorDump] === {side} idx={index} end ({dumped} non-wheel renderers) ===");
             }
             catch (Exception ex)
             {
                 Plugin.Logger.LogWarning($"[ColorDump] {side} idx={index}: {ex.Message}");
             }
+        }
+
+        /// <summary>"Body/Cab/RoofMesh" — hierarchy path relative to the car root.</summary>
+        private static string BuildHierarchyPath(Transform t, Transform root)
+        {
+            if (t == null) return "<null>";
+            if (t == root) return t.name;
+            var sb = new System.Text.StringBuilder(t.name);
+            var cur = t.parent;
+            while (cur != null && cur != root)
+            {
+                sb.Insert(0, "/");
+                sb.Insert(0, cur.name);
+                cur = cur.parent;
+            }
+            return sb.ToString();
         }
 
         /// <summary>"VordTiaraVic(Clone)22" → "VordTiaraVic".</summary>
@@ -243,11 +321,39 @@ namespace BigAmbitionsMP
         //
         // The car body uses shader "SH_Vehicle" with two custom (non-`_`-prefixed)
         // Color properties — the tint + fresnel from the car's VehicleColor.
-        // Host: vehicle index → cached SH_Vehicle body renderers (the GameObject is
-        // pooled, so the references stay valid even when a slot's car is recycled).
+        // CRITICAL: a single Renderer can carry multiple materials via sub-meshes
+        // (Renderer.sharedMaterials).  The Freightliner truck's body renderer has
+        // 3 slots: [0] M_Freightliner Truck_Back (HDRP/Lit, the trailer),
+        // [1] M_Freightliner Truck_Cabin (SH_Vehicle, the recolored cab),
+        // [2] M_GlassTransCars (HDRP/Lit, windows).  Reading only sharedMaterial
+        // (= slot 0) misses the cab entirely.  Scan ALL slots to find SH_Vehicle.
+        //
+        // MaterialPropertyBlock is per-RENDERER (not per-slot), so all SH_Vehicle
+        // materials on the same renderer share a single MPB colour.  We only
+        // need to find ONE SH_Vehicle material on each renderer to discover the
+        // shader's property names; the MPB write then affects every SH_Vehicle
+        // slot on that renderer.
+        //
+        // Host: vehicle index → cached body renderers (pooled GameObjects keep
+        // their refs valid even when Gley recycles the slot to a different car).
         private static readonly Dictionary<int, List<Renderer>> _carRenderers = new();
 
-        /// <summary>All SH_Vehicle renderers of a car, in hierarchy order, cached per index.</summary>
+        /// <summary>First SH_Vehicle material in any sharedMaterials slot, or null.</summary>
+        private static Material? FindShVehicleMaterial(Renderer r)
+        {
+            if (r == null) return null;
+            var mats = r.sharedMaterials;
+            if (mats == null) return null;
+            for (int i = 0; i < mats.Length; i++)
+            {
+                var m = mats[i];
+                if (m != null && m.shader != null && m.shader.name.Contains("SH_Vehicle"))
+                    return m;
+            }
+            return null;
+        }
+
+        /// <summary>All renderers with at least one SH_Vehicle material slot, cached per index.</summary>
         private static List<Renderer> GetCarRenderers(int index, GameObject car)
         {
             if (_carRenderers.TryGetValue(index, out var cached) &&
@@ -262,8 +368,7 @@ namespace BigAmbitionsMP
                 {
                     var r = rends[i].TryCast<Renderer>();
                     if (r == null) continue;
-                    var mat = r.sharedMaterial;
-                    if (mat != null && mat.shader != null && mat.shader.name.Contains("SH_Vehicle"))
+                    if (FindShVehicleMaterial(r) != null)       // any sub-mesh slot
                         list.Add(r);
                 }
             }
@@ -272,10 +377,10 @@ namespace BigAmbitionsMP
             return list;
         }
 
-        /// <summary>Reads one renderer's two SH_Vehicle tint colours from its MPB.</summary>
+        /// <summary>Reads a renderer's two SH_Vehicle tint colours from its MPB.</summary>
         private static (Color, Color) ReadRendererColors(Renderer r)
         {
-            var mat = r.sharedMaterial;
+            var mat = FindShVehicleMaterial(r);                 // any slot, not just [0]
             if (mat == null || mat.shader == null) return (Color.white, Color.white);
             var mpb = new MaterialPropertyBlock();
             r.GetPropertyBlock(mpb);
@@ -354,9 +459,8 @@ namespace BigAmbitionsMP
                 {
                     var r = rends[i].TryCast<Renderer>();
                     if (r == null) continue;
-                    var mat = r.sharedMaterial;
+                    var mat = FindShVehicleMaterial(r);             // scan ALL slots, not just [0]
                     if (mat == null || mat.shader == null) continue;
-                    if (!mat.shader.name.Contains("SH_Vehicle")) continue;
 
                     int gi = groups == 1 ? 0 : Mathf.Min(ri, groups - 1);
                     int b  = gi * 6;
@@ -508,9 +612,14 @@ namespace BigAmbitionsMP
                     }
 
                     // Diagnostic — full colour dump of the first few coloured ghosts.
-                    if (g.Go != null && g.LastColors != null
-                        && _colorDumpClient.Count < 4 && _colorDumpClient.Add(car.Index))
-                        DumpFullCarColor(g.Go, car.Index, "CLIENT");
+                    if (g.Go != null && g.LastColors != null)
+                    {
+                        bool truckC = LooksLikeTruck(car.Model);
+                        bool dumpC  = truckC
+                            ? (_truckDumpClient.Count < 4 && _truckDumpClient.Add(car.Index))
+                            : (_colorDumpClient.Count < 2 && _colorDumpClient.Add(car.Index));
+                        if (dumpC) DumpFullCarColor(g.Go, car.Index, "CLIENT", car.Model);
+                    }
                 }
 
                 // Despawn ghosts whose host car is no longer in the snapshot.
