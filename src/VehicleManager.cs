@@ -119,6 +119,38 @@ namespace BigAmbitionsMP
             return null;
         }
 
+        /// <summary>Every method with the given simple name across all loaded
+        /// assemblies.  Used by Harmony patches whose declaring type isn't known
+        /// at compile time AND which may exist on multiple types (base +
+        /// derived).  Logs each match so we can see what's being patched.</summary>
+        public static IEnumerable<System.Reflection.MethodBase> FindAllMethodsByName(string methodName)
+        {
+            var bf = System.Reflection.BindingFlags.Public
+                   | System.Reflection.BindingFlags.NonPublic
+                   | System.Reflection.BindingFlags.Instance
+                   | System.Reflection.BindingFlags.Static
+                   | System.Reflection.BindingFlags.DeclaredOnly;   // skip inherited
+            int hits = 0;
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type[] types;
+                try { types = asm.GetTypes(); } catch { continue; }
+                foreach (var t in types)
+                {
+                    System.Reflection.MethodInfo? m = null;
+                    try { m = t.GetMethod(methodName, bf); } catch { }
+                    if (m != null)
+                    {
+                        hits++;
+                        Plugin.Logger.LogInfo($"[FindMethod] '{methodName}' → {t.FullName}");
+                        yield return m;
+                    }
+                }
+            }
+            if (hits == 0)
+                Plugin.Logger.LogWarning($"[FindMethod] '{methodName}' not found in any loaded assembly.");
+        }
+
         // ── 5. Driven-vehicle dump — model + colour identity ──────────────────
         //
         // While the player is driving, dumps the vehicle GameObject's renderers

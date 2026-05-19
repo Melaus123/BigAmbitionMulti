@@ -829,7 +829,11 @@ namespace BigAmbitionsMP
 
                 var anchors = new List<Transform>();
                 var hostChar = PlayerHelper.PlayerController?.Character;
-                if (hostChar != null) anchors.Add(hostChar.transform);
+                // #7 — drop the host's anchor while they're inside a building.
+                // Otherwise Gley spawns traffic where the host is (interior →
+                // no roads) and the outside world goes empty.  Clients (still
+                // outside) continue providing valid exterior anchors.
+                if (hostChar != null && !LocalInBuilding) anchors.Add(hostChar.transform);
                 foreach (var t in RemotePlayerManager.GetRemotePlayerTransforms())
                     if (t != null) anchors.Add(t);
                 if (anchors.Count == 0) return;
@@ -922,6 +926,37 @@ namespace BigAmbitionsMP
             // because `LocalInTaxi` was true the previous frame; the detector
             // already short-circuits in that case.  No explicit reset needed —
             // see MPCanvasUI.TickWorldClock.
+        }
+
+        // ── Building entry / exit (backlog #6 + #7) ───────────────────────────
+        // When the local player enters a building, Big Ambitions teleports them
+        // to an interior position (often far from the outside world).  For the
+        // host this means our traffic anchors include a "host" point inside the
+        // building — Gley then spawns traffic in the interior, which has no
+        // roads, so the outside world (where the client is) goes empty (#7).
+        //
+        // For the client, entering a building has been observed to freeze on a
+        // black screen (#6).  Root cause TBD — Harmony patches added below give
+        // us [Building] entry/exit logs so we can diagnose where the flow
+        // stalls.
+        public static bool LocalInBuilding { get; private set; }
+
+        public static void OnEnteredBuilding(string? where = null)
+        {
+            if (LocalInBuilding) return;
+            LocalInBuilding = true;
+            Plugin.Logger.LogInfo($"[Building] EnteredBuilding{(where != null ? " (" + where + ")" : "")} — local player inside.");
+            // Re-arm anchor diag so we re-log the active set after the host
+            // moves between exterior / interior.
+            _anchorDiagLogged = false;
+        }
+
+        public static void OnExitFromBuilding(string? where = null)
+        {
+            if (!LocalInBuilding) return;
+            LocalInBuilding = false;
+            Plugin.Logger.LogInfo($"[Building] ExitFromBuilding{(where != null ? " (" + where + ")" : "")} — local player outside.");
+            _anchorDiagLogged = false;
         }
 
         /// <summary>Resolves a clicked taxi GameObject to its Gley pool index.</summary>

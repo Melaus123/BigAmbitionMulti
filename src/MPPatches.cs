@@ -260,6 +260,85 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patches: building entry / exit (backlog #6 + #7) ───────────────────
+        // Diagnostic logs + flip TrafficSync.LocalInBuilding so the traffic
+        // anchor logic can drop the host's anchor while they're inside (#7).
+        //
+        // Method names confirmed present in BigAmbitions.dll:
+        //   EnterBuildingCoroutine, EnteredBuilding, ExitFromBuilding,
+        //   ExitFromBuildingCoroutine.
+        // These exist on multiple controller types (CityBuildingController,
+        // CasinoBuildingController, etc.) so we patch ALL methods with each
+        // name across all assemblies via FindAllMethodsByName.
+
+        [HarmonyPatch]
+        public static class Patch_EnterBuildingCoroutine
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("EnterBuildingCoroutine");
+
+            static void Prefix(object __instance)
+            {
+                try
+                {
+                    var t = __instance?.GetType().Name ?? "<static>";
+                    Plugin.Logger.LogInfo($"[Building] EnterBuildingCoroutine START on {t}");
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_EnteredBuilding
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("EnteredBuilding");
+
+            static void Postfix(object __instance)
+            {
+                try
+                {
+                    var t = __instance?.GetType().Name ?? "<static>";
+                    TrafficSync.OnEnteredBuilding(t);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] EnteredBuilding postfix: {ex.Message}"); }
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_ExitFromBuilding
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("ExitFromBuilding");
+
+            static void Prefix(object __instance)
+            {
+                try
+                {
+                    var t = __instance?.GetType().Name ?? "<static>";
+                    TrafficSync.OnExitFromBuilding(t);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] ExitFromBuilding prefix: {ex.Message}"); }
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_ExitFromBuildingCoroutine
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("ExitFromBuildingCoroutine");
+
+            static void Prefix(object __instance)
+            {
+                try
+                {
+                    var t = __instance?.GetType().Name ?? "<static>";
+                    Plugin.Logger.LogInfo($"[Building] ExitFromBuildingCoroutine START on {t}");
+                }
+                catch { }
+            }
+        }
+
         // ── Patch: GameManager.ClickSleep ─────────────────────────────────────
         // ClickSleep is the public handler for the in-game "sleep" button.
         // We allow the sleep to START (character enters bed) but suppress the

@@ -997,6 +997,40 @@ namespace BigAmbitionsMP
             var root = new GameObject($"BAMP_Player_{playerId}");
             _players[playerId] = root;          // register early — re-spawn guard
 
+            // #4 — make remote players visible to AI traffic so cars stop for
+            // them just like they do for the host's local player.  Gley
+            // raycasts against `playerLayer`; if a remote player is on the same
+            // layer as the local character (with a real collider on it), every
+            // existing "stop for player" rule applies for free.  We give the
+            // root a sized CapsuleCollider plus a kinematic Rigidbody so the
+            // remote isn't pushed around by physics but still blocks/triggers
+            // detection like a body.
+            try
+            {
+                int playerLayer = 0;
+                var localChar = PlayerHelper.PlayerController?.Character?.gameObject;
+                if (localChar != null) playerLayer = localChar.layer;
+                root.layer = playerLayer;
+
+                var col = root.AddComponent<CapsuleCollider>();
+                col.height   = 1.8f;
+                col.radius   = 0.4f;
+                col.center   = new Vector3(0f, 0.9f, 0f);
+                col.isTrigger = false;
+
+                var rb = root.AddComponent<Rigidbody>();
+                rb.isKinematic = true;
+                rb.useGravity  = false;
+                rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
+
+                Plugin.Logger.LogInfo(
+                    $"[RemotePlayer] '{playerId}' collider on layer {playerLayer} ({LayerMask.LayerToName(playerLayer)}).");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[RemotePlayer] Collider setup failed for '{playerId}': {ex.Message}");
+            }
+
             // Clone the local player's character model so remote players get a real
             // animated body.  Falls back to a capsule if the clone fails.
             GameObject? model = null;
