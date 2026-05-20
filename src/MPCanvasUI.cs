@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using TMPro;
 using Il2CppInterop.Runtime;
@@ -250,6 +251,7 @@ namespace BigAmbitionsMP
             TickTimeSync();
             TickMarketSync();
             TickIntroNamePrefill();
+            TickBuildingClientDiag();   // CLAUDE-DIAGNOSTIC for backlog #6
 
             // Auto-hide when the game starts so our canvas doesn't block the intro
             // scene's "Start Game" button or any in-game UI.
@@ -729,6 +731,133 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning($"[IntroName] {ex.Message}");
                 _introNameFilled = true;        // don't spam — try once, give up on error
             }
+        }
+
+        // CLAUDE-DIAGNOSTIC — backlog #6 client-building-entry black-screen.
+        // Symptom (per user 2026-05-19): screen goes black, but the F8 Canvas
+        // (ScreenSpaceOverlay) stays visible/draggable and the mouse moves.
+        // Main thread is alive — rendering is what's broken.  Most likely
+        // causes: (a) HDRP main camera disabled or moved to a place with
+        // nothing to render, (b) a Volume swap left the scene in pitch black,
+        // (c) interior sub-scene didn't load for the client.
+        //
+        // This diagnostic dumps camera + scene + volume state on a 2s
+        // heartbeat, AND on demand when you press F10.  Designed so you can
+        // walk into a building, see the screen go black, hit F10, and get
+        // the exact broken-state snapshot in the log.
+        private float _bcdNext;
+        private bool _bcdF10Down;
+
+        private void TickBuildingClientDiag()
+        {
+            if (!MPClient.IsConnected) return;
+            if (!IsInGame()) return;
+
+            try
+            {
+                // F10 — on-demand dump.  Edge-triggered (logs once per press).
+                bool f10 = Input.GetKey(KeyCode.F10);
+                if (f10 && !_bcdF10Down) DumpBuildingDiag("F10");
+                _bcdF10Down = f10;
+
+                // 2s heartbeat
+                if (Time.unscaledTime >= _bcdNext)
+                {
+                    _bcdNext = Time.unscaledTime + 2f;
+                    DumpBuildingDiag("HB");
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[BClientDiag] {ex.Message}");
+            }
+        }
+
+        private static void DumpBuildingDiag(string tag)
+        {
+            try
+            {
+                // Camera.main (game's primary camera)
+                var main = Camera.main;
+                string mainDesc = main == null
+                    ? "<null>"
+                    : $"'{main.gameObject.name}' enabled={main.enabled} active={main.gameObject.activeInHierarchy} " +
+                      $"pos={main.transform.position} fwd={main.transform.forward} " +
+                      $"clear={main.clearFlags} cull=0x{main.cullingMask:X}";
+                Plugin.Logger.LogInfo($"[BClientDiag/{tag}] Camera.main {mainDesc}");
+
+                // Every Camera in the scene
+                var cams = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<Camera>());
+                Plugin.Logger.LogInfo($"[BClientDiag/{tag}] total cameras={cams?.Length ?? 0}");
+                if (cams != null)
+                {
+                    for (int i = 0; i < cams.Length && i < 12; i++)
+                    {
+                        var c = cams[i].TryCast<Camera>();
+                        if (c == null) continue;
+                        Plugin.Logger.LogInfo(
+                            $"[BClientDiag/{tag}]   cam[{i}] '{c.gameObject.name}' enabled={c.enabled} active={c.gameObject.activeInHierarchy} depth={c.depth} pos={c.transform.position}");
+                    }
+                }
+
+                // Active scenes
+                int sc = SceneManager.sceneCount;
+                Plugin.Logger.LogInfo($"[BClientDiag/{tag}] scenes loaded={sc}");
+                for (int i = 0; i < sc; i++)
+                {
+                    var s = SceneManager.GetSceneAt(i);
+                    Plugin.Logger.LogInfo($"[BClientDiag/{tag}]   scene[{i}] '{s.name}' loaded={s.isLoaded} root={s.rootCount}");
+                }
+
+                // HDRP Volume components — count + enabled state.  We don't
+                // reference HDRP's Volume type directly to avoid an additional
+                // assembly reference; look up by name.
+                int volumeCount = 0, volumeEnabled = 0;
+                try
+                {
+                    var volT = FindAnyType("UnityEngine.Rendering.Volume")
+                            ?? FindAnyType("Volume");
+                    if (volT != null)
+                    {
+                        var vols = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(volT));
+                        if (vols != null)
+                        {
+                            volumeCount = vols.Length;
+                            for (int i = 0; i < vols.Length; i++)
+                            {
+                                var bh = vols[i].TryCast<MonoBehaviour>();
+                                if (bh != null && bh.enabled) volumeEnabled++;
+                            }
+                        }
+                    }
+                }
+                catch { }
+                Plugin.Logger.LogInfo($"[BClientDiag/{tag}] HDRP volumes total={volumeCount} enabled={volumeEnabled}");
+
+                // Local player position
+                try
+                {
+                    var ch = PlayerHelper.PlayerController?.Character;
+                    Plugin.Logger.LogInfo($"[BClientDiag/{tag}] localPlayer pos={(ch != null ? ch.transform.position.ToString() : "<null>")}");
+                }
+                catch { }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[BClientDiag/{tag}] dump error: {ex.Message}");
+            }
+        }
+
+        private static Type? FindAnyType(string nameOrFullName)
+        {
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type[] types;
+                try { types = asm.GetTypes(); } catch { continue; }
+                foreach (var t in types)
+                    if (t.FullName == nameOrFullName || t.Name == nameOrFullName) return t;
+            }
+            return null;
         }
 
         private void TickPositionSync()
