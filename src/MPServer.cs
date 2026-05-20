@@ -724,14 +724,11 @@ namespace BigAmbitionsMP
         /// Sends a full WorldSnapshot to every connected client.
         /// Called ~4 seconds after the host detects the game scene has loaded.
         /// </summary>
-        // CLAUDE-DIAGNOSTIC — host-side gate.  WorldSnapshot is sent ~4s after
-        // host enters game; the client can't press F4 in time to gate the apply,
-        // so MarkBuildingUnavailable runs before any kill-switch is active.
-        // DEFAULTED TO FALSE FOR THIS DIAGNOSTIC TEST — host will not broadcast
-        // any WorldSnapshot.  If this fixes the client building-exit bug, the
-        // WorldSnapshot apply path was the cause and we permanently fix it.
-        // Revert to true once test concludes (it carries the rent sync data).
-        public static bool BroadcastWorldSnapshotEnabled { get; set; } = false;
+        // Toggle for host's WorldSnapshot broadcast.  Gating was added during
+        // the backlog #6 entry-bug investigation; default restored to true so
+        // rent sync continues to work in normal play.  Can be flipped at
+        // runtime for ad-hoc diagnostic experiments.
+        public static bool BroadcastWorldSnapshotEnabled { get; set; } = true;
 
         public static void BroadcastWorldSnapshotToAll()
         {
