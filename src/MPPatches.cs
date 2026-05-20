@@ -626,9 +626,16 @@ namespace BigAmbitionsMP
         {
             static bool Prefix(bool __0)
             {
-                if (MPServer.IsRunning && __0)
+                // CLAUDE-DIAGNOSTIC — first-domino test: symmetrize on host AND
+                // client.  Observed sequence on host:
+                //   SetWorkingState → SetPause(true) [BLOCKED] → DelayedEnterBuildingActions
+                // On client SetPause(true) wasn't blocked and DelayedEnterBuildingActions
+                // never fired.  Testing the hypothesis that SetPause(true) side effects
+                // are what prevents the entry chain from progressing.
+                if ((MPServer.IsRunning || MPClient.IsConnected) && __0)
                 {
-                    Plugin.Logger.LogInfo("[TMBlock] SetPause(true) — SKIPPED (host MP active).");
+                    string side = MPServer.IsRunning ? "host" : "client";
+                    Plugin.Logger.LogInfo($"[TMBlock] SetPause(true) — SKIPPED ({side} MP active).");
                     return false;
                 }
                 return true;
