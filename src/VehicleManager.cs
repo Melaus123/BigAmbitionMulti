@@ -753,10 +753,16 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Applies a remote player's full vehicle fleet (main thread).</summary>
+        // CLAUDE-DIAGNOSTIC — kill-switch gate for owned-vehicle fleet sync.
+        // When false, ApplyVehicleFleet returns early (no ghost vehicles
+        // spawned for the host's owned cars).  Used by F4 master kill switch.
+        public static bool ClientApplyFleetEnabled { get; set; } = true;
+
         public static void ApplyVehicleFleet(VehicleFleetPayload p)
         {
             if (p == null || string.IsNullOrEmpty(p.OwnerId)) return;
             if (SaveGameManager.Current == null) return;
+            if (!ClientApplyFleetEnabled) return;     // CLAUDE-DIAGNOSTIC F4 gate
             try
             {
                 var seen = new HashSet<string>();

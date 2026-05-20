@@ -1149,22 +1149,25 @@ namespace BigAmbitionsMP
             if (_killSwitchActive)
             {
                 // Disable each subsystem's apply path.
-                ParkedVehicleSync.ClientApplyEnabled = false;
-                TrafficSync.ClientGhostApplyEnabled  = false;
-                RemotePlayerManager.ClientSpawnEnabled = false;
+                ParkedVehicleSync.ClientApplyEnabled    = false;
+                TrafficSync.ClientGhostApplyEnabled     = false;
+                RemotePlayerManager.ClientSpawnEnabled  = false;
+                VehicleManager.ClientApplyFleetEnabled  = false;     // owned-vehicle fleet ghosts
 
                 // Destroy / release existing artifacts so the world matches
                 // "client never received any sync".
                 ParkedVehicleSync.ReleaseAllGhosts();
                 TrafficSync.DespawnAllGhosts();
                 RemotePlayerManager.DestroyAllRemotePlayers();
-                Plugin.Logger.LogWarning("[ClientFix] KILL SWITCH ON — ALL client sync disabled, existing artifacts destroyed.");
+                VehicleManager.DespawnAll();         // host's owned-vehicle ghosts
+                Plugin.Logger.LogWarning("[ClientFix] KILL SWITCH ON — ALL client sync disabled (parked/traffic/remote-player/fleet), existing artifacts destroyed.");
             }
             else
             {
-                ParkedVehicleSync.ClientApplyEnabled = true;
-                TrafficSync.ClientGhostApplyEnabled  = true;
-                RemotePlayerManager.ClientSpawnEnabled = true;
+                ParkedVehicleSync.ClientApplyEnabled    = true;
+                TrafficSync.ClientGhostApplyEnabled     = true;
+                RemotePlayerManager.ClientSpawnEnabled  = true;
+                VehicleManager.ClientApplyFleetEnabled  = true;
                 Plugin.Logger.LogWarning("[ClientFix] KILL SWITCH OFF — all client sync re-enabled; artifacts will rehydrate on next snapshots.");
             }
         }
