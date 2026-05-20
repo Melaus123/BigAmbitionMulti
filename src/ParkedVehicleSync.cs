@@ -9,65 +9,79 @@ using Il2CppInterop.Runtime;
 namespace BigAmbitionsMP
 {
     /// <summary>
-    /// Backlog #3 — parked-vehicle sync (street parking + parking lots).
+    /// Backlog #3 — parked-vehicle sync.
     ///
-    /// Architecture (per ProbeParkedVehicles dump 2026-05-19):
-    /// - 558 ParkingLaneGenerator MonoBehaviour instances spread across the
-    ///   city, each generates vehicles into its own spots via RNG.
-    /// - Vehicles come from a shared static pool: Helpers.ParkingSimulator,
-    ///   keyed by vehicle name (string).  Methods RequestParkedVehicle and
-    ///   ReleaseParkedVehicle are the ONLY entry/exit points — Harmony
-    ///   Postfixes on those capture every spawn/release without per-lane
-    ///   subscription gymnastics.
-    /// - Lane positions are deterministic from world geometry; which CAR
-    ///   ends up in which spot is per-session random, which is why host and
-    ///   client previously didn't match.
+    /// Capture path: Harmony Postfix on Helpers.ParkingSimulator.RequestParkedVehicle
+    /// / Prefix on ReleaseParkedVehicle add/remove the GameObject in
+    /// `_hostTracked` keyed by GameObject.GetInstanceID().
     ///
-    /// Sync model (host-authoritative, like TrafficSync):
-    /// - HOST: Harmony Postfix on RequestParkedVehicle adds the spawned
-    ///   GameObject to `_hostTracked`; Prefix on ReleaseParkedVehicle removes
-    ///   it.  Every ~3 seconds the host re-reads live transform + colours
-    ///   from every tracked GameObject, builds a ParkedSnapshotPayload, and
-    ///   broadcasts it (reliable-ordered).
-    /// - CLIENT: receives the snapshot, spawns one ghost per Key by calling
-    ///   ParkingSimulator.RequestParkedVehicle(model) itself (using the
-    ///   client's own pool), positions/rotates/colors it.  Ghosts not in a
-    ///   later snapshot are released back to the client's pool.
-    /// - CLIENT: ParkingLaneGenerator.GenerateParkedVehicles is Prefix-skipped
-    ///   while MPClient.IsConnected so the client's own lanes don't generate
-    ///   competing cars.
+    /// Broadcast policy (efficient):
+    ///   - DIFF (Cars=adds, RemovedKeys=removes, IsFullSnapshot=false):
+    ///     broadcast at most every 1s, ONLY if `_pendingAdds` or
+    ///     `_pendingRemoves` is non-empty.  Steady-state when nothing changes
+    ///     → no broadcast at all.
+    ///   - FULL (IsFullSnapshot=true): broadcast every 30s for resync and to
+    ///     cover any client that joined mid-session.  ~7KB/30s = ~230 B/s avg.
+    ///
+    /// Client state is split:
+    ///   - `_clientKnown`: full metadata of every car the host has told us
+    ///     about.  ~2k entries × ~80 bytes ≈ 160 KB.  Cheap.
+    ///   - `_clientGhosts`: only the ghost GameObjects currently instantiated,
+    ///     bounded by spatial culling (~30–50 at any moment).
+    /// A 0.5s culling pass spawns ghosts that came within view-radius and
+    /// releases ghosts that left (with a hysteresis buffer to avoid flicker).
     /// </summary>
     public static class ParkedVehicleSync
     {
-        // ── Host-side capture ────────────────────────────────────────────────
-        // Keyed by GameObject.GetInstanceID() (stable for that GO's lifetime).
+        // ── Tuning ───────────────────────────────────────────────────────────
+        private const float DiffInterval         = 1f;       // host: max 1 diff per second
+        private const float FullSnapshotInterval = 30f;      // host: full resync cadence
+        private const float CullInterval         = 0.5f;     // client: cull pass cadence
+
+        private const float ViewRadius = 300f;
+        private const float CullRadius = 360f;  // hysteresis — drop only when farther
+        private static readonly float ViewRadiusSq = ViewRadius * ViewRadius;
+        private static readonly float CullRadiusSq = CullRadius * CullRadius;
+
+        // ── Host capture ─────────────────────────────────────────────────────
         private static readonly Dictionary<long, GameObject> _hostTracked = new();
-        private static float _hostBroadcastTimer;
-        private const float BroadcastInterval = 3f;
+        // Pending diff queues — populated by HostOnRequest/HostOnRelease and
+        // drained when we broadcast a diff.  Adds vs removes are mutually
+        // exclusive on flush.
+        private static readonly HashSet<long> _pendingAdds    = new();
+        private static readonly HashSet<long> _pendingRemoves = new();
+        private static float _diffTimer;
+        private static float _fullTimer;
+        private static float _diagTimer;
 
-        // ── Client-side ghosts ───────────────────────────────────────────────
-        // Keyed by the HOST's instance id (transmitted in the DTO).
+        // ── Client state ─────────────────────────────────────────────────────
+        // ALL metadata the host has told us about (regardless of distance).
+        private static readonly Dictionary<long, ParkedVehicleDto> _clientKnown = new();
+        // Only instantiated ghosts (subset, bounded by ViewRadius).
         private static readonly Dictionary<long, GameObject> _clientGhosts = new();
-        private static float _lastDiagTime;
+        private static float _cullTimer;
 
-        // Reflection-cached pool entry points (resolved lazily).
+        // Reflection-cached pool entry points.
         private static MethodInfo? _miRequest;
         private static MethodInfo? _miRelease;
 
         public static void Reset()
         {
             _hostTracked.Clear();
-            _hostBroadcastTimer = 0f;
+            _pendingAdds.Clear();
+            _pendingRemoves.Clear();
+            _diffTimer = 0f;
+            _fullTimer = 0f;
+            _diagTimer = 0f;
+            _cullTimer = 0f;
 
-            // Release any client ghosts cleanly back to the pool before
-            // dropping references; a fresh game / scene change has its own
-            // pool that we shouldn't pollute.
+            // Release any leftover client ghosts cleanly back to the pool.
             foreach (var g in _clientGhosts.Values)
             {
                 if (g != null) { try { CallPoolRelease(g); } catch { } }
             }
             _clientGhosts.Clear();
-            _lastDiagTime = 0f;
+            _clientKnown.Clear();
         }
 
         // Per-frame entry point — called from MPCanvasUI.TickPositionSync.
@@ -76,37 +90,127 @@ namespace BigAmbitionsMP
             try
             {
                 if (SaveGameManager.Current == null) return;
-                if (Time.timeSinceLevelLoad < 5f) return;       // let lanes settle
+                if (Time.timeSinceLevelLoad < 5f) return;
 
                 if (MPServer.IsRunning)
                 {
-                    _hostBroadcastTimer -= Time.unscaledDeltaTime;
-                    if (_hostBroadcastTimer <= 0f)
-                    {
-                        _hostBroadcastTimer = BroadcastInterval;
-                        MPServer.BroadcastParkedSnapshot(BuildSnapshot());
-                    }
-
-                    // 30s heartbeat — verifies capture is alive during play.
-                    if (Time.unscaledTime - _lastDiagTime > 30f)
-                    {
-                        _lastDiagTime = Time.unscaledTime;
-                        Plugin.Logger.LogInfo($"[ParkedSync] HOST tracking {_hostTracked.Count} parked vehicle(s).");
-                    }
+                    TickHost();
                 }
                 else if (MPClient.IsConnected)
                 {
-                    if (Time.unscaledTime - _lastDiagTime > 30f)
-                    {
-                        _lastDiagTime = Time.unscaledTime;
-                        Plugin.Logger.LogInfo($"[ParkedSync] CLIENT showing {_clientGhosts.Count} ghost(s).");
-                    }
+                    TickClient();
                 }
             }
             catch (Exception ex)
             {
                 Plugin.Logger.LogWarning($"[ParkedSync] Tick: {ex.Message}");
             }
+        }
+
+        // ── HOST broadcast scheduling ────────────────────────────────────────
+
+        private static void TickHost()
+        {
+            float dt = Time.unscaledDeltaTime;
+            _diffTimer += dt;
+            _fullTimer += dt;
+            _diagTimer += dt;
+
+            // Diff first: most frequent, smallest, only when something happened.
+            if (_diffTimer >= DiffInterval &&
+                (_pendingAdds.Count > 0 || _pendingRemoves.Count > 0))
+            {
+                _diffTimer = 0f;
+                MPServer.BroadcastParkedSnapshot(BuildDiffSnapshot());
+            }
+
+            // Periodic full snapshot for resync (handles new joiners + drift).
+            if (_fullTimer >= FullSnapshotInterval)
+            {
+                _fullTimer = 0f;
+                MPServer.BroadcastParkedSnapshot(BuildFullSnapshot());
+            }
+
+            // 30s heartbeat — diagnostics only.
+            if (_diagTimer >= 30f)
+            {
+                _diagTimer = 0f;
+                Plugin.Logger.LogInfo(
+                    $"[ParkedSync] HOST tracking {_hostTracked.Count} car(s); pending adds={_pendingAdds.Count} removes={_pendingRemoves.Count}.");
+            }
+        }
+
+        private static ParkedSnapshotPayload BuildDiffSnapshot()
+        {
+            var snap = new ParkedSnapshotPayload { IsFullSnapshot = false };
+            try
+            {
+                // Adds carry full per-car data so the client can spawn/place
+                // them when they come into view.
+                foreach (var key in _pendingAdds)
+                {
+                    if (!_hostTracked.TryGetValue(key, out var go) || go == null) continue;
+                    if (!go.activeInHierarchy) continue;
+                    var dto = MakeDto(key, go);
+                    if (dto != null) snap.Cars.Add(dto);
+                }
+                _pendingAdds.Clear();
+
+                // Removes are just keys — the client looks them up locally.
+                foreach (var key in _pendingRemoves) snap.RemovedKeys.Add(key);
+                _pendingRemoves.Clear();
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[ParkedSync] BuildDiffSnapshot: {ex.Message}");
+            }
+            return snap;
+        }
+
+        private static ParkedSnapshotPayload BuildFullSnapshot()
+        {
+            var snap = new ParkedSnapshotPayload { IsFullSnapshot = true };
+            try
+            {
+                var dead = new List<long>();
+                foreach (var kv in _hostTracked)
+                {
+                    if (kv.Value == null) { dead.Add(kv.Key); continue; }
+                    if (!kv.Value.activeInHierarchy) continue;
+                    var dto = MakeDto(kv.Key, kv.Value);
+                    if (dto != null) snap.Cars.Add(dto);
+                }
+                foreach (var k in dead) _hostTracked.Remove(k);
+
+                // A full snapshot supersedes any pending diff — flush them.
+                _pendingAdds.Clear();
+                _pendingRemoves.Clear();
+                _diffTimer = 0f;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[ParkedSync] BuildFullSnapshot: {ex.Message}");
+            }
+            return snap;
+        }
+
+        private static ParkedVehicleDto? MakeDto(long key, GameObject go)
+        {
+            try
+            {
+                var t = go.transform;
+                var pos = t.position;
+                var rot = t.rotation;
+                return new ParkedVehicleDto
+                {
+                    Key   = key,
+                    Model = StripCloneSuffix(go.name),
+                    X = pos.x, Y = pos.y, Z = pos.z,
+                    Qx = rot.x, Qy = rot.y, Qz = rot.z, Qw = rot.w,
+                    Colors = ReadBodyColors(go),
+                };
+            }
+            catch { return null; }
         }
 
         // ── HOST capture callbacks (invoked by Harmony patches) ──────────────
@@ -116,7 +220,10 @@ namespace BigAmbitionsMP
             try
             {
                 if (go == null) return;
-                _hostTracked[go.GetInstanceID()] = go;
+                long key = go.GetInstanceID();
+                _hostTracked[key] = go;
+                _pendingAdds.Add(key);
+                _pendingRemoves.Remove(key);    // request after release in same window
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[ParkedSync] HostOnRequest: {ex.Message}"); }
         }
@@ -126,82 +233,137 @@ namespace BigAmbitionsMP
             try
             {
                 if (go == null) return;
-                _hostTracked.Remove(go.GetInstanceID());
+                long key = go.GetInstanceID();
+                _hostTracked.Remove(key);
+                _pendingAdds.Remove(key);       // release after request in same window
+                _pendingRemoves.Add(key);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[ParkedSync] HostOnRelease: {ex.Message}"); }
         }
 
-        // ── HOST snapshot builder ────────────────────────────────────────────
+        // ── CLIENT processing ────────────────────────────────────────────────
 
-        private static ParkedSnapshotPayload BuildSnapshot()
+        private static void TickClient()
         {
-            var snap = new ParkedSnapshotPayload();
-            try
-            {
-                var dead = new List<long>();
-                foreach (var kv in _hostTracked)
-                {
-                    var go = kv.Value;
-                    if (go == null)              { dead.Add(kv.Key); continue; }
-                    if (!go.activeInHierarchy)   continue;     // pooled-out, skip
-                    var t = go.transform;
-                    var pos = t.position;
-                    var rot = t.rotation;
-                    snap.Cars.Add(new ParkedVehicleDto
-                    {
-                        Key   = kv.Key,
-                        Model = StripCloneSuffix(go.name),
-                        X = pos.x, Y = pos.y, Z = pos.z,
-                        Qx = rot.x, Qy = rot.y, Qz = rot.z, Qw = rot.w,
-                        Colors = ReadBodyColors(go),
-                    });
-                }
-                foreach (var k in dead) _hostTracked.Remove(k);
-            }
-            catch (Exception ex)
-            {
-                Plugin.Logger.LogWarning($"[ParkedSync] BuildSnapshot: {ex.Message}");
-            }
-            return snap;
-        }
+            _cullTimer += Time.unscaledDeltaTime;
+            _diagTimer += Time.unscaledDeltaTime;
 
-        // ── CLIENT apply ─────────────────────────────────────────────────────
+            if (_cullTimer >= CullInterval)
+            {
+                _cullTimer = 0f;
+                CullingPass();
+            }
+
+            if (_diagTimer >= 30f)
+            {
+                _diagTimer = 0f;
+                Plugin.Logger.LogInfo(
+                    $"[ParkedSync] CLIENT known={_clientKnown.Count} active ghosts={_clientGhosts.Count}.");
+            }
+        }
 
         public static void ApplySnapshot(ParkedSnapshotPayload payload)
         {
             try
             {
-                if (payload?.Cars == null) return;
+                if (payload == null) return;
 
-                var seen = new HashSet<long>(payload.Cars.Count);
-                foreach (var car in payload.Cars)
+                if (payload.IsFullSnapshot)
                 {
-                    seen.Add(car.Key);
-                    if (!_clientGhosts.TryGetValue(car.Key, out var ghost) || ghost == null)
+                    // Reset known set; despawn any ghost not in the new set.
+                    _clientKnown.Clear();
+                    foreach (var dto in payload.Cars)
                     {
-                        ghost = SpawnGhost(car.Model);
-                        if (ghost == null) continue;
-                        _clientGhosts[car.Key] = ghost;
+                        if (dto == null) continue;
+                        _clientKnown[dto.Key] = dto;
                     }
-                    var t = ghost.transform;
-                    t.position = new Vector3(car.X, car.Y, car.Z);
-                    t.rotation = new Quaternion(car.Qx, car.Qy, car.Qz, car.Qw);
-                    if (car.Colors != null && car.Colors.Count >= 6)
-                        ApplyBodyColors(ghost, car.Colors);
+                    // Drop ghosts whose key is no longer known.
+                    var stale = _clientGhosts.Where(kv => !_clientKnown.ContainsKey(kv.Key))
+                                              .Select(kv => kv.Key).ToList();
+                    foreach (var k in stale)
+                    {
+                        if (_clientGhosts[k] != null) CallPoolRelease(_clientGhosts[k]);
+                        _clientGhosts.Remove(k);
+                    }
+                }
+                else
+                {
+                    // Diff: add/update Cars, remove RemovedKeys.
+                    if (payload.Cars != null)
+                        foreach (var dto in payload.Cars)
+                            if (dto != null) _clientKnown[dto.Key] = dto;
+
+                    if (payload.RemovedKeys != null)
+                    {
+                        foreach (var key in payload.RemovedKeys)
+                        {
+                            _clientKnown.Remove(key);
+                            if (_clientGhosts.TryGetValue(key, out var g) && g != null)
+                                CallPoolRelease(g);
+                            _clientGhosts.Remove(key);
+                        }
+                    }
                 }
 
-                // Despawn ghosts the host's snapshot no longer contains.
-                var stale = _clientGhosts.Where(kv => !seen.Contains(kv.Key))
-                                          .Select(kv => kv.Key).ToList();
-                foreach (var k in stale)
-                {
-                    if (_clientGhosts[k] != null) CallPoolRelease(_clientGhosts[k]);
-                    _clientGhosts.Remove(k);
-                }
+                // Re-run culling immediately so newly-added in-range cars
+                // appear without waiting up to 0.5s for the next pass.
+                CullingPass();
             }
             catch (Exception ex)
             {
                 Plugin.Logger.LogError($"[ParkedSync] ApplySnapshot: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+
+        private static void CullingPass()
+        {
+            try
+            {
+                var localChar = PlayerHelper.PlayerController?.Character;
+                if (localChar == null) return;
+                var p = localChar.transform.position;
+
+                // Iterate _clientKnown — for each, decide whether it should be
+                // an active ghost based on distance to local player.
+                var toSpawn = new List<ParkedVehicleDto>();
+                foreach (var kv in _clientKnown)
+                {
+                    var dto = kv.Value;
+                    float dx = dto.X - p.x, dy = dto.Y - p.y, dz = dto.Z - p.z;
+                    float sq = dx * dx + dy * dy + dz * dz;
+                    bool isGhost = _clientGhosts.ContainsKey(kv.Key);
+
+                    if (!isGhost && sq <= ViewRadiusSq)
+                    {
+                        // Came into view — spawn (collect now, instantiate after iteration
+                        // to avoid mutating _clientGhosts mid-iteration of _clientKnown).
+                        toSpawn.Add(dto);
+                    }
+                    else if (isGhost && sq > CullRadiusSq)
+                    {
+                        // Went out of range (with hysteresis) — release.
+                        var g = _clientGhosts[kv.Key];
+                        if (g != null) CallPoolRelease(g);
+                        _clientGhosts.Remove(kv.Key);
+                    }
+                }
+
+                foreach (var dto in toSpawn)
+                {
+                    if (_clientGhosts.ContainsKey(dto.Key)) continue;
+                    var go = SpawnGhost(dto.Model);
+                    if (go == null) continue;
+                    var t = go.transform;
+                    t.position = new Vector3(dto.X, dto.Y, dto.Z);
+                    t.rotation = new Quaternion(dto.Qx, dto.Qy, dto.Qz, dto.Qw);
+                    if (dto.Colors != null && dto.Colors.Count >= 6)
+                        ApplyBodyColors(go, dto.Colors);
+                    _clientGhosts[dto.Key] = go;
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[ParkedSync] CullingPass: {ex.Message}");
             }
         }
 
@@ -218,8 +380,7 @@ namespace BigAmbitionsMP
                         BindingFlags.Public | BindingFlags.Static);
                 }
                 if (_miRequest == null) return null;
-                var go = _miRequest.Invoke(null, new object[] { model }) as GameObject;
-                return go;
+                return _miRequest.Invoke(null, new object[] { model }) as GameObject;
             }
             catch (Exception ex)
             {
@@ -246,11 +407,7 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── SH_Vehicle color reader/applier ──────────────────────────────────
-        // Same shader as traffic cars; duplicate of TrafficSync's logic but
-        // independent to avoid coupling.  Two non-`_`-prefixed Color shader
-        // properties (tint + fresnel), per renderer; MaterialPropertyBlock
-        // is per-renderer.
+        // ── SH_Vehicle colour reader/applier ─────────────────────────────────
 
         private static List<float> ReadBodyColors(GameObject car)
         {

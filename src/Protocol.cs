@@ -348,12 +348,17 @@ namespace BigAmbitionsMP
         public List<float> Colors { get; set; } = new();
     }
 
-    /// <summary>Host → All: the full parked-vehicle snapshot.  A Key absent
-    /// from a later snapshot means the host released that car — clients
-    /// despawn matching ghosts.</summary>
+    /// <summary>Host → All: parked-vehicle state.  Either a DIFF (default —
+    /// IsFullSnapshot=false; `Cars` is adds, `RemovedKeys` is removes) or a
+    /// FULL snapshot (IsFullSnapshot=true; `Cars` is the complete authoritative
+    /// set, `RemovedKeys` is ignored).  Diffs are broadcast at most every 1s
+    /// only when something changed; a full snapshot is broadcast every 30s
+    /// for resync + new-joiner coverage.</summary>
     public class ParkedSnapshotPayload
     {
         public List<ParkedVehicleDto> Cars { get; set; } = new();
+        public List<long> RemovedKeys { get; set; } = new();
+        public bool IsFullSnapshot { get; set; } = false;
     }
 
     /// <summary>Client → Host: a player hailed a traffic taxi; the host stops it.</summary>
