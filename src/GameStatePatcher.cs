@@ -45,19 +45,23 @@ namespace BigAmbitionsMP
 
         public static void ApplyWorldSnapshot(WorldSnapshotPayload snap)
         {
+            if (!ClientApplyOwnership && !ClientApplyMarket) return;   // CLAUDE-DIAGNOSTIC F4 gate
             RunOnMainThread(() =>
             {
                 Plugin.Logger.LogInfo("[Patcher] Applying world snapshot...");
 
                 // Mark any buildings owned by other players as unavailable locally
-                foreach (var kv in snap.BuildingOwners)
+                if (ClientApplyOwnership)
                 {
-                    if (kv.Value != "" && kv.Value != MPConfig.PlayerId)
-                        MarkBuildingUnavailable(kv.Key);
+                    foreach (var kv in snap.BuildingOwners)
+                    {
+                        if (kv.Value != "" && kv.Value != MPConfig.PlayerId)
+                            MarkBuildingUnavailable(kv.Key);
+                    }
                 }
 
                 // Apply market entries
-                if (!string.IsNullOrEmpty(snap.MarketEntriesJson))
+                if (ClientApplyMarket && !string.IsNullOrEmpty(snap.MarketEntriesJson))
                     ApplyMarketSnapshot(snap.MarketEntriesJson);
 
                 Plugin.Logger.LogInfo("[Patcher] World snapshot applied.");

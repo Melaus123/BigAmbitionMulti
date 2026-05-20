@@ -321,9 +321,16 @@ namespace BigAmbitionsMP
             else
             {
                 // Late join — game already in progress, send world snapshot immediately
-                var snapshot = BuildWorldSnapshot();
-                Send(peer, MessageEnvelope.Create(MessageType.Welcome, "host", snapshot));
-                Plugin.Logger.LogInfo($"[Server] Late join by '{hello.PlayerId}', sent world snapshot.");
+                if (!BroadcastWorldSnapshotEnabled)
+                {
+                    Plugin.Logger.LogWarning($"[Server] Late join by '{hello.PlayerId}' — WorldSnapshot SKIPPED (kill-switch active).");
+                }
+                else
+                {
+                    var snapshot = BuildWorldSnapshot();
+                    Send(peer, MessageEnvelope.Create(MessageType.Welcome, "host", snapshot));
+                    Plugin.Logger.LogInfo($"[Server] Late join by '{hello.PlayerId}', sent world snapshot.");
+                }
             }
         }
 
@@ -717,9 +724,23 @@ namespace BigAmbitionsMP
         /// Sends a full WorldSnapshot to every connected client.
         /// Called ~4 seconds after the host detects the game scene has loaded.
         /// </summary>
+        // CLAUDE-DIAGNOSTIC — host-side gate.  WorldSnapshot is sent ~4s after
+        // host enters game; the client can't press F4 in time to gate the apply,
+        // so MarkBuildingUnavailable runs before any kill-switch is active.
+        // DEFAULTED TO FALSE FOR THIS DIAGNOSTIC TEST — host will not broadcast
+        // any WorldSnapshot.  If this fixes the client building-exit bug, the
+        // WorldSnapshot apply path was the cause and we permanently fix it.
+        // Revert to true once test concludes (it carries the rent sync data).
+        public static bool BroadcastWorldSnapshotEnabled { get; set; } = false;
+
         public static void BroadcastWorldSnapshotToAll()
         {
             if (!_running) return;
+            if (!BroadcastWorldSnapshotEnabled)
+            {
+                Plugin.Logger.LogWarning("[Server] WorldSnapshot broadcast SKIPPED (host kill-switch active).");
+                return;
+            }
             var snapshot = BuildWorldSnapshot();
             Broadcast(MessageEnvelope.Create(MessageType.Welcome, "host", snapshot));
             Plugin.Logger.LogInfo("[Server] WorldSnapshot broadcast to all clients.");
