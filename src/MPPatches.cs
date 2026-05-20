@@ -349,6 +349,69 @@ namespace BigAmbitionsMP
             }
         }
 
+        // CLAUDE-DIAGNOSTIC — backlog #6 client building-entry investigation.
+        // The host's entry signal is BuildingManager.DelayedEnterBuildingActions,
+        // but observed-values 2026-05-19 showed ZERO [Building] events on the
+        // CLIENT side during a session where the client tried to enter a
+        // building and saw the black screen.  The client's entry must go
+        // through a DIFFERENT code path.  Widen the net with logging-only
+        // Prefixes on every plausible candidate — whichever ones fire on the
+        // client identify the real signal.
+
+        [HarmonyPatch]
+        public static class Patch_EnterBuildingCoroutine_C6
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("EnterBuildingCoroutine");
+            static void Prefix(object __instance)
+            { try { Plugin.Logger.LogInfo($"[BClientDiag/PATCH] EnterBuildingCoroutine on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_EnteredBuilding_C6
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("EnteredBuilding");
+            static void Prefix(object __instance)
+            { try { Plugin.Logger.LogInfo($"[BClientDiag/PATCH] EnteredBuilding on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_CmdEnterBuilding_C6
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("Command_EnterBuilding");
+            static void Prefix(object __instance)
+            { try { Plugin.Logger.LogInfo($"[BClientDiag/PATCH] Command_EnterBuilding on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_CanEnterBuilding_C6
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("CanEnterBuilding");
+            static void Postfix(object __instance, bool __result)
+            { try { Plugin.Logger.LogInfo($"[BClientDiag/PATCH] CanEnterBuilding on {__instance?.GetType().Name ?? "<static>"} → {__result}"); } catch { } }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_EnterParkingCoroutine_C6
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("EnterParkingCoroutine");
+            static void Prefix(object __instance)
+            { try { Plugin.Logger.LogInfo($"[BClientDiag/PATCH] EnterParkingCoroutine on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_EnterParkingFloorFromBuildingCoroutine_C6
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("EnterParkingFloorFromBuildingCoroutine");
+            static void Prefix(object __instance)
+            { try { Plugin.Logger.LogInfo($"[BClientDiag/PATCH] EnterParkingFloorFromBuildingCoroutine on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
+        }
+
         // ── Backlog #7 traffic-kill blockers ─────────────────────────────────
         // Gley's TrafficManager exposes ClearTraffic / ClearTrafficOnArea /
         // SetPause.  On building entry the game calls SetPause(true) +

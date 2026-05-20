@@ -747,6 +747,7 @@ namespace BigAmbitionsMP
         // the exact broken-state snapshot in the log.
         private float _bcdNext;
         private bool _bcdF10Down;
+        private bool _bcdF7Down;
 
         private void TickBuildingClientDiag()
         {
@@ -755,12 +756,19 @@ namespace BigAmbitionsMP
 
             try
             {
-                // F10 — on-demand dump.  Edge-triggered (logs once per press).
+                // F7  — "I'm about to enter the building NOW" marker.
+                // F10 — "the screen is black NOW" marker.
+                // (F9 is already the HUD toggle.)  Both edge-triggered;
+                // together they give a definitive before/after pair the
+                // heartbeats can't supply.
+                bool f7  = Input.GetKey(KeyCode.F7);
                 bool f10 = Input.GetKey(KeyCode.F10);
-                if (f10 && !_bcdF10Down) DumpBuildingDiag("F10");
+                if (f7  && !_bcdF7Down)  DumpBuildingDiag("MARK_BEFORE");
+                if (f10 && !_bcdF10Down) DumpBuildingDiag("MARK_BLACK");
+                _bcdF7Down  = f7;
                 _bcdF10Down = f10;
 
-                // 2s heartbeat
+                // 2s heartbeat — sanity check only; do NOT compare HB vs marker.
                 if (Time.unscaledTime >= _bcdNext)
                 {
                     _bcdNext = Time.unscaledTime + 2f;
