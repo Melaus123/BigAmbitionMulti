@@ -999,8 +999,32 @@ namespace BigAmbitionsMP
             return nameOK || typeOK;
         }
 
+        // CLAUDE-DIAGNOSTIC — special-case watch: the BlackOverlay canvas's
+        // .enabled state.  We do this separately because the canvas isn't
+        // discoverable at game-load time (it lives in the UI scene loaded
+        // later); the suppress-tick caches it via FindObjectsOfType.  Here
+        // we sample the cached reference each tick to detect when the game
+        // (vs our suppressor) flips it.
+        private static bool? _bspLastBoEnabled;
+        private static void BspCheckBlackOverlay()
+        {
+            try
+            {
+                var c = _blackOverlayCanvas;
+                if (c == null) return;
+                bool now = c.enabled;
+                if (!_bspLastBoEnabled.HasValue || _bspLastBoEnabled.Value != now)
+                {
+                    Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] CHANGE BlackOverlay.enabled: {_bspLastBoEnabled?.ToString() ?? "<init>"} → {now}");
+                    _bspLastBoEnabled = now;
+                }
+            }
+            catch { }
+        }
+
         private static void BspCheckChanges()
         {
+            BspCheckBlackOverlay();
             for (int i = 0; i < _bspWatches.Count; i++)
             {
                 var (label, field, instance) = _bspWatches[i];
@@ -1092,11 +1116,34 @@ namespace BigAmbitionsMP
         // game's own state machine isn't disturbed.
         private static Canvas? _blackOverlayCanvas;
         private static float _blackOverlayFindTimer;
+        // CLAUDE-DIAGNOSTIC — A/B toggle for backlog #6 first-domino test.
+        // Default ON (current behaviour).  F12 toggles live; when OFF the
+        // suppressor stands down and we'll see the game's natural behaviour
+        // around the BlackOverlay canvas.
+        private static bool _bsoEnabled = true;
+        private bool _bsoF12Down;
 
         private void TickSuppressBlackOverlay()
         {
             if (!MPClient.IsConnected) return;
             if (!IsInGame()) return;
+
+            // F12 toggle — flip the suppression flag, and if turning OFF,
+            // immediately re-enable the canvas in case we'd disabled it.
+            bool f12 = Input.GetKey(KeyCode.F12);
+            if (f12 && !_bsoF12Down)
+            {
+                _bsoEnabled = !_bsoEnabled;
+                Plugin.Logger.LogInfo($"[ClientFix] BlackOverlay suppression toggled → {_bsoEnabled}");
+                if (!_bsoEnabled && _blackOverlayCanvas != null)
+                {
+                    try { _blackOverlayCanvas.enabled = true; } catch { }
+                    Plugin.Logger.LogInfo("[ClientFix] BlackOverlay re-enabled (toggled off).");
+                }
+            }
+            _bsoF12Down = f12;
+
+            if (!_bsoEnabled) return;     // suppression off — stand down
 
             // If we've lost the cached reference (Unity destroyed the canvas
             // on scene change, etc.), rescan periodically.

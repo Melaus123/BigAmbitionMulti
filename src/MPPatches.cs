@@ -394,6 +394,58 @@ namespace BigAmbitionsMP
             { try { Plugin.Logger.LogInfo($"[ExitDiag/PATCH] ExitFloor on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
         }
 
+        // CLAUDE-DIAGNOSTIC — method-call tracer for the building entry path.
+        // Patches every public method declared on BuildingManager with a
+        // logging Prefix.  Run on both sides simultaneously and compare —
+        // the first method that appears in HOST's log but not CLIENT's is
+        // the next step after wherever the client coroutine bails (= one
+        // hop from the first domino).
+        //
+        // Why class-wide on BuildingManager: we don't know exactly which
+        // method the entry coroutine calls into next, and the coroutine's
+        // own MoveNext is compiler-generated.  Patching every method gives
+        // a complete call trace without us having to guess.
+        [HarmonyPatch]
+        public static class Patch_BuildingManager_AllMethods_Diag
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var t = VehicleManager.FindGameType("BuildingManager");
+                if (t == null) yield break;
+                var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                       | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static
+                       | System.Reflection.BindingFlags.DeclaredOnly;
+                foreach (var m in t.GetMethods(bf))
+                {
+                    if (m.IsAbstract) continue;
+                    if (m.ContainsGenericParameters) continue;
+                    // Skip hot-path Unity messages and trivial accessors —
+                    // they'd flood the log without helping us identify the
+                    // entry sequence.
+                    string n = m.Name;
+                    if (n == "Update" || n == "FixedUpdate" || n == "LateUpdate"
+                     || n == "OnGUI"  || n == "OnEnable"   || n == "OnDisable"
+                     || n == "Awake"  || n == "Start"      || n == "OnDestroy"
+                     || n.StartsWith("get_") || n.StartsWith("set_"))
+                        continue;
+                    // IL2CPP wrapped types expose lots of base.Object methods —
+                    // skip the obvious ones.
+                    if (n == "ToString" || n == "GetHashCode" || n == "Equals" || n == "Finalize")
+                        continue;
+                    yield return m;
+                }
+            }
+            static void Prefix(System.Reflection.MethodBase __originalMethod, object __instance)
+            {
+                try
+                {
+                    Plugin.Logger.LogInfo(
+                        $"[BMTrace/PATCH] BuildingManager.{__originalMethod?.Name} (static={__originalMethod?.IsStatic})");
+                }
+                catch { }
+            }
+        }
+
         // ── Backlog #7 traffic-kill blockers ─────────────────────────────────
         // Gley's TrafficManager exposes ClearTraffic / ClearTrafficOnArea /
         // SetPause.  On building entry the game calls SetPause(true) +
