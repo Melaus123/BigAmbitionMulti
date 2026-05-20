@@ -1,6 +1,8 @@
+using System;
 using HarmonyLib;
 using Buildings;
 using Helpers;
+using GleyTrafficSystem;
 
 namespace BigAmbitionsMP
 {
@@ -345,8 +347,83 @@ namespace BigAmbitionsMP
         {
             static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
                 => VehicleManager.FindAllMethodsByName("DelayedEnterBuildingActions");
+
+            // OBSERVED 2026-05-19: this is the actual entry signal the user hits
+            // — EnterBuildingCoroutine never fires for the on-foot entry path.
+            // Flip LocalInBuilding here so anchor logic + the traffic-kill
+            // blockers below take effect.
             static void Prefix(object __instance)
-            { try { Plugin.Logger.LogInfo($"[Building] DelayedEnterBuildingActions on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
+            {
+                try
+                {
+                    Plugin.Logger.LogInfo($"[Building] DelayedEnterBuildingActions on {__instance?.GetType().Name ?? "<static>"}");
+                    TrafficSync.OnEnteredBuilding("DelayedEnterBuildingActions");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] DelayedEnterBuilding prefix: {ex.Message}"); }
+            }
+        }
+
+        // ── Backlog #7 traffic-kill blockers ─────────────────────────────────
+        //
+        // OBSERVED: the world scene + TrafficManager singleton survive building
+        // entry intact (scene name unchanged, TrafficManager.Instance NON-NULL
+        // throughout).  Yet traffic visually disappears immediately on entry.
+        // Gley exposes ClearTraffic, ClearTrafficOnArea, and SetPause — any of
+        // these called on entry would explain the observation.  We patch all
+        // three: log every call (so we know which one fires) and SKIP THE METHOD
+        // (Prefix returns false) while LocalInBuilding=true.  In single-player
+        // this would be wrong — but in MP the host's interior visit shouldn't
+        // wipe traffic the client is watching.
+        //
+        // Diagnostic-tagged so the cleanup pass picks them up if we ever
+        // confirm none are the culprit.
+
+        [HarmonyPatch(typeof(TrafficManager), nameof(TrafficManager.ClearTraffic))]
+        public static class Patch_TM_ClearTraffic
+        {
+            // CLAUDE-DIAGNOSTIC
+            static bool Prefix()
+            {
+                if (TrafficSync.LocalInBuilding)
+                {
+                    Plugin.Logger.LogInfo("[TMBlock] ClearTraffic() called while LocalInBuilding=true — SKIPPED.");
+                    return false;
+                }
+                Plugin.Logger.LogInfo("[TMBlock] ClearTraffic() called (outside building — allowed).");
+                return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(TrafficManager), nameof(TrafficManager.ClearTrafficOnArea))]
+        public static class Patch_TM_ClearTrafficOnArea
+        {
+            // CLAUDE-DIAGNOSTIC
+            static bool Prefix(UnityEngine.Vector3 __0, float __1)
+            {
+                if (TrafficSync.LocalInBuilding)
+                {
+                    Plugin.Logger.LogInfo($"[TMBlock] ClearTrafficOnArea(pos={__0}, r={__1}) — SKIPPED (inside building).");
+                    return false;
+                }
+                Plugin.Logger.LogInfo($"[TMBlock] ClearTrafficOnArea(pos={__0}, r={__1}) — allowed.");
+                return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(TrafficManager), nameof(TrafficManager.SetPause))]
+        public static class Patch_TM_SetPause
+        {
+            // CLAUDE-DIAGNOSTIC
+            static bool Prefix(bool __0)
+            {
+                if (TrafficSync.LocalInBuilding && __0)
+                {
+                    Plugin.Logger.LogInfo($"[TMBlock] SetPause(true) — SKIPPED (inside building).");
+                    return false;
+                }
+                Plugin.Logger.LogInfo($"[TMBlock] SetPause({__0}) — allowed.");
+                return true;
+            }
         }
 
         [HarmonyPatch]
