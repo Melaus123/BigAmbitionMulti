@@ -744,6 +744,7 @@ namespace BigAmbitionsMP
             VehicleManager.ProbeTaxi();
             VehicleManager.ProbeTrafficExtras();
             VehicleManager.ProbeCarColor();
+            VehicleManager.ProbeParkedVehicles();    // backlog #3 discovery
 
             // Send our character appearance once the character is ready.
             TrySendLocalAppearance();
