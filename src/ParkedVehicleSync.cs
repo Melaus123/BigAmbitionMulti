@@ -11,74 +11,96 @@ namespace BigAmbitionsMP
     /// <summary>
     /// Backlog #3 — parked-vehicle sync (street parking + parking lots).
     ///
-    /// Architecture (per the ProbeParkedVehicles dump 2026-05-19):
-    /// - 558 distinct ParkingLaneGenerator MonoBehaviour instances spread
-    ///   across the city, each runs its own RNG-driven GenerateParkedVehicles.
-    /// - Vehicles are rented from a shared static pool: Helpers.ParkingSimulator.
-    ///   .RequestParkedVehicle(string name) / .ReleaseParkedVehicle(GameObject).
-    /// - Regeneration is time-driven: ParkingSimulator.RunHourly + .RunDaily,
-    ///   with a UnityEvent ParkingLaneRegeneration that fires on each cycle.
-    /// - Each lane exposes Action`1 onGenerateVehicle / onReleaseVehicle hooks
-    ///   per spawn/release — clean integration points without Harmony patches
-    ///   into the generation code itself.
+    /// Architecture (per ProbeParkedVehicles dump 2026-05-19):
+    /// - 558 ParkingLaneGenerator MonoBehaviour instances spread across the
+    ///   city, each generates vehicles into its own spots via RNG.
+    /// - Vehicles come from a shared static pool: Helpers.ParkingSimulator,
+    ///   keyed by vehicle name (string).  Methods RequestParkedVehicle and
+    ///   ReleaseParkedVehicle are the ONLY entry/exit points — Harmony
+    ///   Postfixes on those capture every spawn/release without per-lane
+    ///   subscription gymnastics.
+    /// - Lane positions are deterministic from world geometry; which CAR
+    ///   ends up in which spot is per-session random, which is why host and
+    ///   client previously didn't match.
     ///
-    /// Phase 3a (this iteration): HOST-SIDE CAPTURE ONLY, no network yet.
-    /// Subscribe every lane's onGenerate/onRelease events; maintain an
-    /// in-memory map of currently-parked vehicles {GO instance id → dto-shape}.
-    /// Log periodic counts so we can verify capture works before shipping
-    /// anything across the wire in Phase 3b.
+    /// Sync model (host-authoritative, like TrafficSync):
+    /// - HOST: Harmony Postfix on RequestParkedVehicle adds the spawned
+    ///   GameObject to `_hostTracked`; Prefix on ReleaseParkedVehicle removes
+    ///   it.  Every ~3 seconds the host re-reads live transform + colours
+    ///   from every tracked GameObject, builds a ParkedSnapshotPayload, and
+    ///   broadcasts it (reliable-ordered).
+    /// - CLIENT: receives the snapshot, spawns one ghost per Key by calling
+    ///   ParkingSimulator.RequestParkedVehicle(model) itself (using the
+    ///   client's own pool), positions/rotates/colors it.  Ghosts not in a
+    ///   later snapshot are released back to the client's pool.
+    /// - CLIENT: ParkingLaneGenerator.GenerateParkedVehicles is Prefix-skipped
+    ///   while MPClient.IsConnected so the client's own lanes don't generate
+    ///   competing cars.
     /// </summary>
     public static class ParkedVehicleSync
     {
-        // Currently-tracked parked vehicles on the host.  Keyed by the
-        // GameObject's instance id (stable for the GameObject's lifetime).
-        public class ParkedEntry
-        {
-            public int       InstanceId;
-            public string    Model = "";
-            public Vector3   Pos;
-            public Quaternion Rot;
-            // Colors filled lazily on first capture; SH_Vehicle has the same
-            // two non-`_`-prefixed Color props as traffic cars.
-            public List<float>? Colors;
-        }
+        // ── Host-side capture ────────────────────────────────────────────────
+        // Keyed by GameObject.GetInstanceID() (stable for that GO's lifetime).
+        private static readonly Dictionary<long, GameObject> _hostTracked = new();
+        private static float _hostBroadcastTimer;
+        private const float BroadcastInterval = 3f;
 
-        private static readonly Dictionary<int, ParkedEntry> _entries = new();
+        // ── Client-side ghosts ───────────────────────────────────────────────
+        // Keyed by the HOST's instance id (transmitted in the DTO).
+        private static readonly Dictionary<long, GameObject> _clientGhosts = new();
+        private static float _lastDiagTime;
 
-        private static bool _wired;
-        private static int  _wiredLaneCount;
-        private static float _lastLogTime;
-
-        public static int Count => _entries.Count;
-        public static IReadOnlyDictionary<int, ParkedEntry> Entries => _entries;
+        // Reflection-cached pool entry points (resolved lazily).
+        private static MethodInfo? _miRequest;
+        private static MethodInfo? _miRelease;
 
         public static void Reset()
         {
-            _wired = false;
-            _wiredLaneCount = 0;
-            _lastLogTime = 0f;
-            _entries.Clear();
+            _hostTracked.Clear();
+            _hostBroadcastTimer = 0f;
+
+            // Release any client ghosts cleanly back to the pool before
+            // dropping references; a fresh game / scene change has its own
+            // pool that we shouldn't pollute.
+            foreach (var g in _clientGhosts.Values)
+            {
+                if (g != null) { try { CallPoolRelease(g); } catch { } }
+            }
+            _clientGhosts.Clear();
+            _lastDiagTime = 0f;
         }
 
-        /// <summary>One-shot per-game wire-up + periodic diagnostic log.
-        /// Called from MPCanvasUI.TickPositionSync on the host only.</summary>
+        // Per-frame entry point — called from MPCanvasUI.TickPositionSync.
         public static void Tick()
         {
             try
             {
-                if (!MPServer.IsRunning) return;
                 if (SaveGameManager.Current == null) return;
-                if (Time.timeSinceLevelLoad < 5f) return;       // let lanes init
+                if (Time.timeSinceLevelLoad < 5f) return;       // let lanes settle
 
-                if (!_wired) WireAllLanes();
-
-                // Periodic count log so we can watch the capture working over
-                // an hourly regen cycle without flooding the log.
-                if (Time.unscaledTime - _lastLogTime > 30f)
+                if (MPServer.IsRunning)
                 {
-                    _lastLogTime = Time.unscaledTime;
-                    Plugin.Logger.LogInfo(
-                        $"[ParkedSync] tracked vehicles={_entries.Count} (lanes wired={_wiredLaneCount})");
+                    _hostBroadcastTimer -= Time.unscaledDeltaTime;
+                    if (_hostBroadcastTimer <= 0f)
+                    {
+                        _hostBroadcastTimer = BroadcastInterval;
+                        MPServer.BroadcastParkedSnapshot(BuildSnapshot());
+                    }
+
+                    // 30s heartbeat — verifies capture is alive during play.
+                    if (Time.unscaledTime - _lastDiagTime > 30f)
+                    {
+                        _lastDiagTime = Time.unscaledTime;
+                        Plugin.Logger.LogInfo($"[ParkedSync] HOST tracking {_hostTracked.Count} parked vehicle(s).");
+                    }
+                }
+                else if (MPClient.IsConnected)
+                {
+                    if (Time.unscaledTime - _lastDiagTime > 30f)
+                    {
+                        _lastDiagTime = Time.unscaledTime;
+                        Plugin.Logger.LogInfo($"[ParkedSync] CLIENT showing {_clientGhosts.Count} ghost(s).");
+                    }
                 }
             }
             catch (Exception ex)
@@ -87,122 +109,257 @@ namespace BigAmbitionsMP
             }
         }
 
-        private static void WireAllLanes()
-        {
-            try
-            {
-                var laneT = FindType("ParkingLaneGenerator");
-                if (laneT == null)
-                {
-                    Plugin.Logger.LogWarning("[ParkedSync] ParkingLaneGenerator type not found — will retry.");
-                    return;
-                }
+        // ── HOST capture callbacks (invoked by Harmony patches) ──────────────
 
-                var il2 = Il2CppType.From(laneT);
-                var lanes = UnityEngine.Object.FindObjectsOfType(il2);
-                if (lanes == null || lanes.Length == 0)
-                {
-                    Plugin.Logger.LogInfo("[ParkedSync] no ParkingLaneGenerator instances yet — will retry.");
-                    return;
-                }
-
-                int subbed = 0;
-                var bf = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
-                var genProp  = laneT.GetProperty("onGenerateVehicle", bf);
-                var relProp  = laneT.GetProperty("onReleaseVehicle",  bf);
-                if (genProp == null || relProp == null)
-                {
-                    Plugin.Logger.LogWarning(
-                        $"[ParkedSync] missing onGenerate/onRelease properties on lane (gen={genProp != null} rel={relProp != null}).");
-                    return;
-                }
-
-                // The Action<T> is exposed as a property — we ADD to it.  Reading
-                // returns the current delegate (may be null); we Combine with our
-                // handler and write back.
-                var actT = genProp.PropertyType;     // Action<GameObject> (or similar)
-                var mi = typeof(ParkedVehicleSync).GetMethod(nameof(OnLaneGenerated),
-                            BindingFlags.NonPublic | BindingFlags.Static)!;
-                var mi2 = typeof(ParkedVehicleSync).GetMethod(nameof(OnLaneReleased),
-                            BindingFlags.NonPublic | BindingFlags.Static)!;
-
-                foreach (var obj in lanes)
-                {
-                    try
-                    {
-                        // genProp / relProp are Action<GameObject> properties.  We
-                        // build a delegate of the matching type pointing at our
-                        // static handler.
-                        var genDel = Delegate.CreateDelegate(genProp.PropertyType, mi);
-                        var existingGen = genProp.GetValue(obj);
-                        var combinedGen = Delegate.Combine((Delegate?)existingGen, genDel);
-                        genProp.SetValue(obj, combinedGen);
-
-                        var relDel = Delegate.CreateDelegate(relProp.PropertyType, mi2);
-                        var existingRel = relProp.GetValue(obj);
-                        var combinedRel = Delegate.Combine((Delegate?)existingRel, relDel);
-                        relProp.SetValue(obj, combinedRel);
-
-                        subbed++;
-                    }
-                    catch (Exception ex)
-                    {
-                        if (subbed < 3)     // log first few failures
-                            Plugin.Logger.LogWarning($"[ParkedSync] subscribe lane failed: {ex.Message}");
-                    }
-                }
-
-                _wiredLaneCount = subbed;
-                _wired = subbed > 0;
-                Plugin.Logger.LogInfo(
-                    $"[ParkedSync] subscribed onGenerate/onRelease on {subbed}/{lanes.Length} lanes.");
-                // NOTE: ParkingSimulator.ParkingLaneRegeneration UnityEvent
-                // subscription deferred — IL2CPP's UnityAction ctor takes
-                // IntPtr, needs a different bridging shim.  Not required for
-                // Phase 3a because the per-lane Action delegates already fire
-                // per individual spawn/release.
-            }
-            catch (Exception ex)
-            {
-                Plugin.Logger.LogError($"[ParkedSync] WireAllLanes: {ex.Message}");
-            }
-        }
-
-        private static void OnLaneGenerated(GameObject go)
+        public static void HostOnRequest(GameObject go, string model)
         {
             try
             {
                 if (go == null) return;
-                int id = go.GetInstanceID();
-                var t  = go.transform;
-                var entry = new ParkedEntry
-                {
-                    InstanceId = id,
-                    Model      = StripCloneSuffix(go.name),
-                    Pos        = t.position,
-                    Rot        = t.rotation,
-                };
-                _entries[id] = entry;
+                _hostTracked[go.GetInstanceID()] = go;
             }
-            catch (Exception ex)
-            {
-                Plugin.Logger.LogWarning($"[ParkedSync] OnLaneGenerated: {ex.Message}");
-            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[ParkedSync] HostOnRequest: {ex.Message}"); }
         }
 
-        private static void OnLaneReleased(GameObject go)
+        public static void HostOnRelease(GameObject go)
         {
             try
             {
                 if (go == null) return;
-                int id = go.GetInstanceID();
-                _entries.Remove(id);
+                _hostTracked.Remove(go.GetInstanceID());
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[ParkedSync] HostOnRelease: {ex.Message}"); }
+        }
+
+        // ── HOST snapshot builder ────────────────────────────────────────────
+
+        private static ParkedSnapshotPayload BuildSnapshot()
+        {
+            var snap = new ParkedSnapshotPayload();
+            try
+            {
+                var dead = new List<long>();
+                foreach (var kv in _hostTracked)
+                {
+                    var go = kv.Value;
+                    if (go == null)              { dead.Add(kv.Key); continue; }
+                    if (!go.activeInHierarchy)   continue;     // pooled-out, skip
+                    var t = go.transform;
+                    var pos = t.position;
+                    var rot = t.rotation;
+                    snap.Cars.Add(new ParkedVehicleDto
+                    {
+                        Key   = kv.Key,
+                        Model = StripCloneSuffix(go.name),
+                        X = pos.x, Y = pos.y, Z = pos.z,
+                        Qx = rot.x, Qy = rot.y, Qz = rot.z, Qw = rot.w,
+                        Colors = ReadBodyColors(go),
+                    });
+                }
+                foreach (var k in dead) _hostTracked.Remove(k);
             }
             catch (Exception ex)
             {
-                Plugin.Logger.LogWarning($"[ParkedSync] OnLaneReleased: {ex.Message}");
+                Plugin.Logger.LogWarning($"[ParkedSync] BuildSnapshot: {ex.Message}");
+            }
+            return snap;
+        }
+
+        // ── CLIENT apply ─────────────────────────────────────────────────────
+
+        public static void ApplySnapshot(ParkedSnapshotPayload payload)
+        {
+            try
+            {
+                if (payload?.Cars == null) return;
+
+                var seen = new HashSet<long>(payload.Cars.Count);
+                foreach (var car in payload.Cars)
+                {
+                    seen.Add(car.Key);
+                    if (!_clientGhosts.TryGetValue(car.Key, out var ghost) || ghost == null)
+                    {
+                        ghost = SpawnGhost(car.Model);
+                        if (ghost == null) continue;
+                        _clientGhosts[car.Key] = ghost;
+                    }
+                    var t = ghost.transform;
+                    t.position = new Vector3(car.X, car.Y, car.Z);
+                    t.rotation = new Quaternion(car.Qx, car.Qy, car.Qz, car.Qw);
+                    if (car.Colors != null && car.Colors.Count >= 6)
+                        ApplyBodyColors(ghost, car.Colors);
+                }
+
+                // Despawn ghosts the host's snapshot no longer contains.
+                var stale = _clientGhosts.Where(kv => !seen.Contains(kv.Key))
+                                          .Select(kv => kv.Key).ToList();
+                foreach (var k in stale)
+                {
+                    if (_clientGhosts[k] != null) CallPoolRelease(_clientGhosts[k]);
+                    _clientGhosts.Remove(k);
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError($"[ParkedSync] ApplySnapshot: {ex.Message}\n{ex.StackTrace}");
             }
         }
+
+        // ── Pool access via reflection on Helpers.ParkingSimulator ───────────
+
+        private static GameObject? SpawnGhost(string model)
+        {
+            try
+            {
+                if (_miRequest == null)
+                {
+                    var simT = FindType("Helpers.ParkingSimulator");
+                    _miRequest = simT?.GetMethod("RequestParkedVehicle",
+                        BindingFlags.Public | BindingFlags.Static);
+                }
+                if (_miRequest == null) return null;
+                var go = _miRequest.Invoke(null, new object[] { model }) as GameObject;
+                return go;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[ParkedSync] SpawnGhost '{model}': {ex.Message}");
+                return null;
+            }
+        }
+
+        private static void CallPoolRelease(GameObject go)
+        {
+            try
+            {
+                if (_miRelease == null)
+                {
+                    var simT = FindType("Helpers.ParkingSimulator");
+                    _miRelease = simT?.GetMethod("ReleaseParkedVehicle",
+                        BindingFlags.Public | BindingFlags.Static);
+                }
+                _miRelease?.Invoke(null, new object[] { go });
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[ParkedSync] CallPoolRelease: {ex.Message}");
+            }
+        }
+
+        // ── SH_Vehicle color reader/applier ──────────────────────────────────
+        // Same shader as traffic cars; duplicate of TrafficSync's logic but
+        // independent to avoid coupling.  Two non-`_`-prefixed Color shader
+        // properties (tint + fresnel), per renderer; MaterialPropertyBlock
+        // is per-renderer.
+
+        private static List<float> ReadBodyColors(GameObject car)
+        {
+            var groups = new List<(Color, Color)>();
+            try
+            {
+                var rends = car.GetComponentsInChildren(Il2CppType.Of<Renderer>(), true);
+                for (int i = 0; i < rends.Length; i++)
+                {
+                    var r = rends[i].TryCast<Renderer>();
+                    if (r == null) continue;
+                    var mat = FindShVehicleMaterial(r);
+                    if (mat == null) continue;
+                    groups.Add(ReadRendererColors(r, mat));
+                }
+            }
+            catch { }
+            if (groups.Count == 0) groups.Add((Color.white, Color.white));
+
+            bool uniform = true;
+            for (int i = 1; i < groups.Count && uniform; i++)
+                if (groups[i] != groups[0]) uniform = false;
+
+            var flat = new List<float>();
+            int count = uniform ? 1 : groups.Count;
+            for (int i = 0; i < count; i++)
+            {
+                var (a, b) = groups[i];
+                flat.Add(a.r); flat.Add(a.g); flat.Add(a.b);
+                flat.Add(b.r); flat.Add(b.g); flat.Add(b.b);
+            }
+            return flat;
+        }
+
+        private static (Color, Color) ReadRendererColors(Renderer r, Material mat)
+        {
+            var mpb = new MaterialPropertyBlock();
+            r.GetPropertyBlock(mpb);
+            Color c1 = Color.white, c2 = Color.white;
+            int found = 0, n = mat.shader.GetPropertyCount();
+            for (int p = 0; p < n && found < 2; p++)
+            {
+                if (mat.shader.GetPropertyType(p) != UnityEngine.Rendering.ShaderPropertyType.Color) continue;
+                string pn = mat.shader.GetPropertyName(p);
+                if (pn.StartsWith("_")) continue;
+                var mpbCol = mpb.GetColor(pn);
+                var col = mpbCol.a >= 0.5f ? mpbCol : mat.GetColor(pn);
+                if (found == 0) c1 = col; else c2 = col;
+                found++;
+            }
+            return (c1, c2);
+        }
+
+        private static Material? FindShVehicleMaterial(Renderer r)
+        {
+            var mats = r.sharedMaterials;
+            if (mats == null) return null;
+            for (int i = 0; i < mats.Length; i++)
+            {
+                var m = mats[i];
+                if (m != null && m.shader != null && m.shader.name.Contains("SH_Vehicle"))
+                    return m;
+            }
+            return null;
+        }
+
+        private static void ApplyBodyColors(GameObject ghost, List<float> colors)
+        {
+            try
+            {
+                int groups = colors.Count / 6;
+                if (groups < 1) return;
+
+                var rends = ghost.GetComponentsInChildren(Il2CppType.Of<Renderer>(), true);
+                int ri = 0;
+                for (int i = 0; i < rends.Length; i++)
+                {
+                    var r = rends[i].TryCast<Renderer>();
+                    if (r == null) continue;
+                    var mat = FindShVehicleMaterial(r);
+                    if (mat == null) continue;
+
+                    int gi = groups == 1 ? 0 : Mathf.Min(ri, groups - 1);
+                    int b  = gi * 6;
+                    var c1 = new Color(colors[b],     colors[b + 1], colors[b + 2]);
+                    var c2 = new Color(colors[b + 3], colors[b + 4], colors[b + 5]);
+
+                    var mpb = new MaterialPropertyBlock();
+                    r.GetPropertyBlock(mpb);
+                    int idx = 0, n = mat.shader.GetPropertyCount();
+                    for (int p = 0; p < n && idx < 2; p++)
+                    {
+                        if (mat.shader.GetPropertyType(p) != UnityEngine.Rendering.ShaderPropertyType.Color) continue;
+                        string pn = mat.shader.GetPropertyName(p);
+                        if (pn.StartsWith("_")) continue;
+                        mpb.SetColor(pn, idx == 0 ? c1 : c2);
+                        idx++;
+                    }
+                    r.SetPropertyBlock(mpb);
+                    ri++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[ParkedSync] ApplyBodyColors: {ex.Message}");
+            }
+        }
+
+        // ── Utility ──────────────────────────────────────────────────────────
 
         private static Type? FindType(string nameOrFullName)
         {

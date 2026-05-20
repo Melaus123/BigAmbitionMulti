@@ -415,5 +415,64 @@ namespace BigAmbitionsMP
             return true;
         }
 
+        // ── Backlog #3 — parked-vehicle sync ──────────────────────────────────
+        // Helpers.ParkingSimulator is the static pool for all world parked
+        // vehicles.  RequestParkedVehicle / ReleaseParkedVehicle are the only
+        // entry/exit points and they're static — Postfixes here capture every
+        // spawn/release across the entire game.  On the host these feed
+        // ParkedVehicleSync's tracked set; the client's own client-driven
+        // ghost Requests/Releases are filtered out by the MPServer.IsRunning
+        // check.
+
+        [HarmonyPatch(typeof(Helpers.ParkingSimulator), nameof(Helpers.ParkingSimulator.RequestParkedVehicle))]
+        public static class Patch_ParkingSim_Request
+        {
+            static void Postfix(string __0, UnityEngine.GameObject __result)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning) return;
+                    if (__result == null) return;
+                    ParkedVehicleSync.HostOnRequest(__result, __0);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] RequestParkedVehicle postfix: {ex.Message}"); }
+            }
+        }
+
+        [HarmonyPatch(typeof(Helpers.ParkingSimulator), nameof(Helpers.ParkingSimulator.ReleaseParkedVehicle))]
+        public static class Patch_ParkingSim_Release
+        {
+            static void Prefix(UnityEngine.GameObject __0)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning) return;
+                    if (__0 == null) return;
+                    ParkedVehicleSync.HostOnRelease(__0);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] ReleaseParkedVehicle prefix: {ex.Message}"); }
+            }
+        }
+
+        // Client suppresses its own ParkingLaneGenerator.GenerateParkedVehicles
+        // so the local RNG can't create cars that conflict with host snapshots.
+        // The host snapshot is the only source of parked cars while connected.
+        [HarmonyPatch]
+        public static class Patch_GenerateParkedVehicles
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var t = VehicleManager.FindGameType("ParkingLaneGenerator");
+                return t?.GetMethod("GenerateParkedVehicles",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            }
+
+            static bool Prefix()
+            {
+                if (MPClient.IsConnected) return false;        // client = ghosts-only mode
+                return true;
+            }
+        }
+
     }
 }

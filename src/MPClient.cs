@@ -164,6 +164,10 @@ namespace BigAmbitionsMP
                     HandleTrafficLights(env);
                     break;
 
+                case MessageType.ParkedSnapshot:
+                    HandleParkedSnapshot(env);
+                    break;
+
                 case MessageType.PlayerLeft:
                     HandlePlayerLeft(env);
                     break;
@@ -353,6 +357,13 @@ namespace BigAmbitionsMP
             var payload = env.GetPayload<TrafficLightsPayload>();
             if (payload == null) return;
             GameStatePatcher.EnqueueOnMainThread(() => TrafficSync.ApplyTrafficLights(payload));
+        }
+
+        private static void HandleParkedSnapshot(MessageEnvelope env)
+        {
+            var payload = env.GetPayload<ParkedSnapshotPayload>();
+            if (payload == null) return;
+            GameStatePatcher.EnqueueOnMainThread(() => ParkedVehicleSync.ApplySnapshot(payload));
         }
 
         private static void HandlePlayerLeft(MessageEnvelope env)

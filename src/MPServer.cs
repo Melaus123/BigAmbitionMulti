@@ -661,6 +661,13 @@ namespace BigAmbitionsMP
             Broadcast(MessageEnvelope.Create(MessageType.TrafficLights, "host", payload));
         }
 
+        /// <summary>Broadcasts the host's parked-vehicle snapshot to all clients.</summary>
+        public static void BroadcastParkedSnapshot(ParkedSnapshotPayload payload)
+        {
+            if (!_running) return;
+            Broadcast(MessageEnvelope.Create(MessageType.ParkedSnapshot, "host", payload));
+        }
+
         // ── Broadcast helpers ─────────────────────────────────────────────────
 
         public static void BroadcastRentConfirmToClients(string addressKey, float dailyRent, float lastDeposit)

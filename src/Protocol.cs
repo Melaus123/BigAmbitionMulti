@@ -41,6 +41,7 @@ namespace BigAmbitionsMP
         TrafficSnapshot = 36,  // Host → All: full AI-traffic snapshot
         TaxiHail        = 37,  // Client → Host: "I'm hailing traffic taxi N — stop it"
         TrafficLights   = 38,  // Host → All: traffic-light intersection states
+        ParkedSnapshot  = 39,  // Host → All: world parked-vehicle snapshot (lots + street parking)
 
         // Player appearance
         PlayerAppearance = 32, // Client → Host: this player's character appearance
@@ -325,6 +326,34 @@ namespace BigAmbitionsMP
     public class TrafficSnapshotPayload
     {
         public List<TrafficCarDto> Cars { get; set; } = new();
+    }
+
+    /// <summary>One parked vehicle in a host parked-vehicle snapshot.
+    /// Same shape as TrafficCarDto but the identity Key is the host's
+    /// `GameObject.GetInstanceID()` instead of a Gley pool index, since
+    /// parked cars come from a static pool keyed by model name.</summary>
+    public class ParkedVehicleDto
+    {
+        /// <summary>Stable host-side identity (GameObject.GetInstanceID).</summary>
+        public long   Key   { get; set; }
+        public string Model { get; set; } = "";
+        public float  X { get; set; }
+        public float  Y { get; set; }
+        public float  Z { get; set; }
+        public float  Qx { get; set; }
+        public float  Qy { get; set; }
+        public float  Qz { get; set; }
+        public float  Qw { get; set; }
+        /// <summary>Body colours — same per-renderer encoding as TrafficCarDto.</summary>
+        public List<float> Colors { get; set; } = new();
+    }
+
+    /// <summary>Host → All: the full parked-vehicle snapshot.  A Key absent
+    /// from a later snapshot means the host released that car — clients
+    /// despawn matching ghosts.</summary>
+    public class ParkedSnapshotPayload
+    {
+        public List<ParkedVehicleDto> Cars { get; set; } = new();
     }
 
     /// <summary>Client → Host: a player hailed a traffic taxi; the host stops it.</summary>
