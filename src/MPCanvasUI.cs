@@ -252,6 +252,7 @@ namespace BigAmbitionsMP
             TickIntroNamePrefill();
             TickSuppressBlackOverlay(); // backlog #6 fix
             TickExitTriggerDiag();      // CLAUDE-DIAGNOSTIC — exit-trigger investigation
+            TickBuildingStateProbe();   // CLAUDE-DIAGNOSTIC — state-delta probe
 
             // Auto-hide when the game starts so our canvas doesn't block the intro
             // scene's "Start Game" button or any in-game UI.
@@ -831,6 +832,203 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogWarning($"[ExitDiag/F10] {ex.Message}");
             }
+        }
+
+        // CLAUDE-DIAGNOSTIC — building-state-delta probe.
+        //
+        // Goal: identify what state fields the GAME sets when a player enters
+        // or exits a building, so we can determine which (a) need to be faked
+        // on the client to make exit triggers fire, and (b) are safe to fake
+        // (no double-firing side effects).
+        //
+        // Runs on BOTH host and client.  Each tick (0.5s) inspects a curated
+        // list of likely state fields on BuildingManager + PlayerController.
+        // Only logs when a field CHANGES — silent otherwise — so the log
+        // shows a clean sequence of state transitions as the player moves in
+        // and out of buildings.
+        //
+        // F10 also force-dumps the current snapshot, useful for capturing
+        // state at a known moment (e.g., "right after the exit trigger should
+        // have fired").
+        private static bool _bspInit;
+        private static bool _bspF10Down;
+        private static float _bspNextCheck;
+        private static readonly System.Collections.Generic.List<(string label, System.Reflection.FieldInfo field, object? instance)> _bspWatches = new();
+        private static readonly System.Collections.Generic.Dictionary<string, string> _bspLastSeen = new();
+        private static string SideTag => MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
+
+        private void TickBuildingStateProbe()
+        {
+            if (!IsInGame()) return;
+            if (Time.timeSinceLevelLoad < 5f) return;
+
+            try
+            {
+                if (!_bspInit) BspInit();
+
+                if (Time.unscaledTime >= _bspNextCheck)
+                {
+                    _bspNextCheck = Time.unscaledTime + 0.5f;
+                    BspCheckChanges();
+                }
+
+                // Note: F10 is also used by TickExitTriggerDiag — both dumps
+                // fire on the same press, which is what we want.
+                bool f10 = Input.GetKey(KeyCode.F10);
+                if (f10 && !_bspF10Down) BspDumpAll();
+                _bspF10Down = f10;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BSProbe] {ex.Message}"); }
+        }
+
+        private static void BspInit()
+        {
+            _bspInit = true;
+            Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] === Building state probe init ===");
+
+            var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                   | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static;
+
+            // BuildingManager — singleton candidate.
+            var bmType = BspFindType("BuildingManager");
+            object? bmInstance = null;
+            if (bmType != null)
+            {
+                Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] BuildingManager type: {bmType.FullName}");
+                try
+                {
+                    var instProp = bmType.GetProperty("Instance", bf);
+                    if (instProp != null) bmInstance = instProp.GetValue(null);
+                }
+                catch { }
+                if (bmInstance == null)
+                {
+                    try { var f = bmType.GetField("instance", bf); if (f != null) bmInstance = f.GetValue(null); } catch { }
+                }
+                Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] BuildingManager instance: {(bmInstance != null ? "found" : "NULL")}");
+                BspRegisterWatchesFor(bmType, bmInstance, "BM", bf);
+            }
+            else
+            {
+                Plugin.Logger.LogWarning($"[BSProbe/{SideTag}] BuildingManager type not found.");
+            }
+
+            // PlayerController — accessed via PlayerHelper.
+            try
+            {
+                var pc = PlayerHelper.PlayerController;
+                if (pc != null)
+                {
+                    var pcType = pc.GetType();
+                    Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] PlayerController type: {pcType.FullName}");
+                    BspRegisterWatchesFor(pcType, pc, "PC", bf);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BSProbe/{SideTag}] PC init: {ex.Message}"); }
+
+            // ThirdPersonCharacter — also has its own state.
+            try
+            {
+                var pc = PlayerHelper.PlayerController;
+                var character = pc?.Character;
+                if (character != null)
+                {
+                    var tpcType = character.GetType();
+                    Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] Character type: {tpcType.FullName}");
+                    BspRegisterWatchesFor(tpcType, character, "TPC", bf);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BSProbe/{SideTag}] TPC init: {ex.Message}"); }
+
+            Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] Watching {_bspWatches.Count} fields total.");
+            BspCheckChanges();   // emit initial values as "CHANGE <init> → ..."
+        }
+
+        private static void BspRegisterWatchesFor(Type t, object? inst, string prefix, System.Reflection.BindingFlags bf)
+        {
+            try
+            {
+                foreach (var f in t.GetFields(bf))
+                {
+                    string fname = f.Name;
+                    string tn = f.FieldType.Name;
+                    // Heuristic — fields likely to change on building entry/exit.
+                    bool nameInteresting = fname.IndexOf("current",  StringComparison.OrdinalIgnoreCase) >= 0
+                                        || fname.IndexOf("inside",   StringComparison.OrdinalIgnoreCase) >= 0
+                                        || fname.IndexOf("isIn",     StringComparison.OrdinalIgnoreCase) >= 0
+                                        || fname.IndexOf("active",   StringComparison.OrdinalIgnoreCase) >= 0;
+                    bool typeInteresting = tn.Contains("Building") || tn.Contains("Floor") || tn.Contains("Room")
+                                        || tn.Contains("Interior")  || tn.Contains("Interact");
+                    if (!nameInteresting && !typeInteresting) continue;
+
+                    if (!f.IsStatic && inst == null) continue;
+                    _bspWatches.Add(($"{prefix}.{fname}", f, f.IsStatic ? null : inst));
+                    Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   watch {prefix}.{fname} ({tn}) static={f.IsStatic}");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BSProbe/{SideTag}] register({prefix}): {ex.Message}"); }
+        }
+
+        private static void BspCheckChanges()
+        {
+            for (int i = 0; i < _bspWatches.Count; i++)
+            {
+                var (label, field, instance) = _bspWatches[i];
+                try
+                {
+                    var v = field.GetValue(instance);
+                    string vs = BspFormatValue(v);
+                    if (!_bspLastSeen.TryGetValue(label, out var last) || last != vs)
+                    {
+                        Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] CHANGE {label}: {last ?? "<init>"} → {vs}");
+                        _bspLastSeen[label] = vs;
+                    }
+                }
+                catch { /* getter may throw if instance is dead — skip */ }
+            }
+        }
+
+        private static void BspDumpAll()
+        {
+            Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] === F10 snapshot ({_bspWatches.Count} watches) ===");
+            for (int i = 0; i < _bspWatches.Count; i++)
+            {
+                var (label, field, instance) = _bspWatches[i];
+                try
+                {
+                    var v = field.GetValue(instance);
+                    Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   {label} = {BspFormatValue(v)}");
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   {label} = <err: {ex.Message}>");
+                }
+            }
+        }
+
+        private static string BspFormatValue(object? v)
+        {
+            if (v == null) return "<null>";
+            // UnityEngine.Object overloads ==null; check via ReferenceEquals path
+            try
+            {
+                string s = v.ToString() ?? "<null-string>";
+                if (s.Length > 100) s = s.Substring(0, 100) + "…";
+                return s;
+            }
+            catch { return "<tostring-failed>"; }
+        }
+
+        private static Type? BspFindType(string nameOrFullName)
+        {
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type[] types;
+                try { types = asm.GetTypes(); } catch { continue; }
+                foreach (var t in types)
+                    if (t.FullName == nameOrFullName || t.Name == nameOrFullName) return t;
+            }
+            return null;
         }
 
         // ── Backlog #6 fix: keep 'BlackOverlay' canvas suppressed on client ──
