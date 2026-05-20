@@ -293,6 +293,54 @@ namespace BigAmbitionsMP
             }
         }
 
+        // CLAUDE-DIAGNOSTIC — DOTween DelayedCall probe.
+        // Given DelayedEnterBuildingActions' stack trace shows IL2CPP→managed
+        // with no managed caller frame, DOTween's DOVirtual.DelayedCall is the
+        // top suspect.  Patch every method named "DelayedCall" across all
+        // assemblies (FindAllMethodsByName) with a Postfix that logs call +
+        // a short stack trace.  Whichever caller scheduled DelayedEnterBuildingActions
+        // shows up just above.
+        [HarmonyPatch]
+        public static class Patch_DelayedCall_Diag
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("DelayedCall");
+
+            static void Postfix(System.Reflection.MethodBase __originalMethod)
+            {
+                try
+                {
+                    string side = MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
+                    Plugin.Logger.LogInfo(
+                        $"[InvokeProbe/{side}] {__originalMethod?.DeclaringType?.FullName}.{__originalMethod?.Name} fired");
+                    var lines = Environment.StackTrace.Split('\n');
+                    for (int i = 0; i < lines.Length && i < 10; i++)
+                        Plugin.Logger.LogInfo($"[InvokeProbe/{side}/Stack] {lines[i].Trim()}");
+                }
+                catch { }
+            }
+        }
+
+        // CLAUDE-DIAGNOSTIC — GameObject.SendMessage probe.
+        // SendMessage is the other native-dispatched method-by-name mechanism.
+        // Only logs calls whose target method name suggests building/delay
+        // semantics, to keep the log clean.
+        [HarmonyPatch(typeof(UnityEngine.GameObject), nameof(UnityEngine.GameObject.SendMessage), new[] { typeof(string) })]
+        public static class Patch_GO_SendMessage_Diag
+        {
+            static void Postfix(UnityEngine.GameObject __instance, string __0)
+            {
+                try
+                {
+                    if (__instance == null || __0 == null) return;
+                    if (!__0.Contains("Delayed") && !__0.Contains("Enter") && !__0.Contains("Building")) return;
+                    string side = MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
+                    Plugin.Logger.LogInfo($"[InvokeProbe/{side}] GameObject('{__instance.name}').SendMessage('{__0}')");
+                }
+                catch { }
+            }
+        }
+
         // CLAUDE-DIAGNOSTIC — StartCoroutine probe filtered to BuildingManager.
         // Since the Invoke probe came back empty, the most likely remaining
         // schedule mechanism is a coroutine.  Captures every coroutine started
