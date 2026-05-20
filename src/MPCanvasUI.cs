@@ -854,6 +854,7 @@ namespace BigAmbitionsMP
         private static bool _bspF10Down;
         private static float _bspNextCheck;
         private static readonly System.Collections.Generic.List<(string label, System.Reflection.FieldInfo field, object? instance)> _bspWatches = new();
+        private static readonly System.Collections.Generic.List<(string label, System.Reflection.PropertyInfo prop, object? instance)> _bspPropWatches = new();
         private static readonly System.Collections.Generic.Dictionary<string, string> _bspLastSeen = new();
         private static string SideTag => MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
 
@@ -951,22 +952,51 @@ namespace BigAmbitionsMP
                 foreach (var f in t.GetFields(bf))
                 {
                     string fname = f.Name;
+                    // Skip IL2CPP wrapper internals — they're pointer values
+                    // that never change at runtime.  Real state lives in
+                    // managed PROPERTIES, handled below.
+                    if (fname.StartsWith("NativeFieldInfoPtr_") || fname.StartsWith("NativeMethodInfoPtr_")) continue;
                     string tn = f.FieldType.Name;
-                    // Heuristic — fields likely to change on building entry/exit.
-                    bool nameInteresting = fname.IndexOf("current",  StringComparison.OrdinalIgnoreCase) >= 0
-                                        || fname.IndexOf("inside",   StringComparison.OrdinalIgnoreCase) >= 0
-                                        || fname.IndexOf("isIn",     StringComparison.OrdinalIgnoreCase) >= 0
-                                        || fname.IndexOf("active",   StringComparison.OrdinalIgnoreCase) >= 0;
-                    bool typeInteresting = tn.Contains("Building") || tn.Contains("Floor") || tn.Contains("Room")
-                                        || tn.Contains("Interior")  || tn.Contains("Interact");
-                    if (!nameInteresting && !typeInteresting) continue;
+                    if (!BspIsInteresting(fname, tn)) continue;
 
                     if (!f.IsStatic && inst == null) continue;
                     _bspWatches.Add(($"{prefix}.{fname}", f, f.IsStatic ? null : inst));
-                    Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   watch {prefix}.{fname} ({tn}) static={f.IsStatic}");
+                    Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   watch field {prefix}.{fname} ({tn}) static={f.IsStatic}");
+                }
+
+                // Properties — what IL2CPP wrappers actually expose for state.
+                // These are the real getters that read native fields.
+                foreach (var p in t.GetProperties(bf))
+                {
+                    if (!p.CanRead) continue;
+                    var getter = p.GetGetMethod(true);
+                    if (getter == null) continue;
+                    if (getter.GetParameters().Length > 0) continue;   // indexer — skip
+                    string pname = p.Name;
+                    string tn = p.PropertyType.Name;
+                    if (!BspIsInteresting(pname, tn)) continue;
+
+                    bool isStatic = getter.IsStatic;
+                    if (!isStatic && inst == null) continue;
+                    object? target = isStatic ? null : inst;
+
+                    _bspPropWatches.Add(($"{prefix}.{pname}", p, target));
+                    Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   watch prop  {prefix}.{pname} ({tn}) static={isStatic}");
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BSProbe/{SideTag}] register({prefix}): {ex.Message}"); }
+        }
+
+        private static bool BspIsInteresting(string memberName, string typeName)
+        {
+            bool nameOK = memberName.IndexOf("current",  StringComparison.OrdinalIgnoreCase) >= 0
+                       || memberName.IndexOf("inside",   StringComparison.OrdinalIgnoreCase) >= 0
+                       || memberName.IndexOf("isIn",     StringComparison.OrdinalIgnoreCase) >= 0
+                       || memberName.IndexOf("entered",  StringComparison.OrdinalIgnoreCase) >= 0
+                       || memberName.IndexOf("interior", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool typeOK = typeName.Contains("Building") || typeName.Contains("Floor") || typeName.Contains("Room")
+                       || typeName.Contains("Interior") || typeName.Contains("Tenant") || typeName.Contains("Entity");
+            return nameOK || typeOK;
         }
 
         private static void BspCheckChanges()
@@ -986,23 +1016,38 @@ namespace BigAmbitionsMP
                 }
                 catch { /* getter may throw if instance is dead — skip */ }
             }
+            for (int i = 0; i < _bspPropWatches.Count; i++)
+            {
+                var (label, prop, instance) = _bspPropWatches[i];
+                try
+                {
+                    var v = prop.GetValue(instance);
+                    string vs = BspFormatValue(v);
+                    if (!_bspLastSeen.TryGetValue(label, out var last) || last != vs)
+                    {
+                        Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] CHANGE {label}: {last ?? "<init>"} → {vs}");
+                        _bspLastSeen[label] = vs;
+                    }
+                }
+                catch { }
+            }
         }
 
         private static void BspDumpAll()
         {
-            Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] === F10 snapshot ({_bspWatches.Count} watches) ===");
+            int n = _bspWatches.Count + _bspPropWatches.Count;
+            Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] === F10 snapshot ({n} watches) ===");
             for (int i = 0; i < _bspWatches.Count; i++)
             {
                 var (label, field, instance) = _bspWatches[i];
-                try
-                {
-                    var v = field.GetValue(instance);
-                    Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   {label} = {BspFormatValue(v)}");
-                }
-                catch (Exception ex)
-                {
-                    Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   {label} = <err: {ex.Message}>");
-                }
+                try { Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   {label} = {BspFormatValue(field.GetValue(instance))}"); }
+                catch (Exception ex) { Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   {label} = <err: {ex.Message}>"); }
+            }
+            for (int i = 0; i < _bspPropWatches.Count; i++)
+            {
+                var (label, prop, instance) = _bspPropWatches[i];
+                try { Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   {label} = {BspFormatValue(prop.GetValue(instance))}"); }
+                catch (Exception ex) { Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   {label} = <err: {ex.Message}>"); }
             }
         }
 
