@@ -1109,6 +1109,8 @@ namespace BigAmbitionsMP
         private bool _trafF11Down;
         private bool _parkF6Down;
         private bool _parkApplyF5Down;
+        private bool _killSwitchF4Down;
+        private static bool _killSwitchActive;       // true = ALL client sync disabled
 
         private void TickToggleClientSuppressions()
         {
@@ -1127,8 +1129,44 @@ namespace BigAmbitionsMP
                 bool f5 = Input.GetKey(KeyCode.F5);
                 if (f5 && !_parkApplyF5Down) ParkedVehicleSync.ToggleClientApply();
                 _parkApplyF5Down = f5;
+
+                // CLAUDE-DIAGNOSTIC — F4 MASTER kill switch.  Disables ALL client-side
+                // world-modifying sync at once (parked ghosts, traffic ghosts,
+                // remote-player spawns) and destroys/releases existing artifacts.
+                // If exit works with F4 active, SOMETHING in client sync is the
+                // cause; we then re-enable subsystems individually via F5/F6/F11
+                // to narrow down.
+                bool f4 = Input.GetKey(KeyCode.F4);
+                if (f4 && !_killSwitchF4Down) ToggleKillSwitch();
+                _killSwitchF4Down = f4;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[ClientFix] toggle tick: {ex.Message}"); }
+        }
+
+        private static void ToggleKillSwitch()
+        {
+            _killSwitchActive = !_killSwitchActive;
+            if (_killSwitchActive)
+            {
+                // Disable each subsystem's apply path.
+                ParkedVehicleSync.ClientApplyEnabled = false;
+                TrafficSync.ClientGhostApplyEnabled  = false;
+                RemotePlayerManager.ClientSpawnEnabled = false;
+
+                // Destroy / release existing artifacts so the world matches
+                // "client never received any sync".
+                ParkedVehicleSync.ReleaseAllGhosts();
+                TrafficSync.DespawnAllGhosts();
+                RemotePlayerManager.DestroyAllRemotePlayers();
+                Plugin.Logger.LogWarning("[ClientFix] KILL SWITCH ON — ALL client sync disabled, existing artifacts destroyed.");
+            }
+            else
+            {
+                ParkedVehicleSync.ClientApplyEnabled = true;
+                TrafficSync.ClientGhostApplyEnabled  = true;
+                RemotePlayerManager.ClientSpawnEnabled = true;
+                Plugin.Logger.LogWarning("[ClientFix] KILL SWITCH OFF — all client sync re-enabled; artifacts will rehydrate on next snapshots.");
+            }
         }
 
         // ── Backlog #6 fix: keep 'BlackOverlay' canvas suppressed on client ──

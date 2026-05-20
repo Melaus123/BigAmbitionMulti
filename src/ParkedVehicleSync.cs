@@ -89,24 +89,23 @@ namespace BigAmbitionsMP
         public static void ToggleClientApply()
         {
             ClientApplyEnabled = !ClientApplyEnabled;
-            if (!ClientApplyEnabled)
+            if (!ClientApplyEnabled) ReleaseAllGhosts();
+            else Plugin.Logger.LogInfo("[ClientFix] Client parked-vehicle sync ENABLED — will rehydrate on next full host snapshot.");
+        }
+
+        public static void ReleaseAllGhosts()
+        {
+            int releasedCount = 0;
+            foreach (var g in _clientGhosts.Values)
             {
-                int releasedCount = 0;
-                foreach (var g in _clientGhosts.Values)
+                if (g != null)
                 {
-                    if (g != null)
-                    {
-                        try { CallPoolRelease(g); releasedCount++; } catch { }
-                    }
+                    try { CallPoolRelease(g); releasedCount++; } catch { }
                 }
-                _clientGhosts.Clear();
-                _clientKnown.Clear();
-                Plugin.Logger.LogInfo($"[ClientFix] Client parked-vehicle sync DISABLED — released {releasedCount} ghost(s) back to pool, cleared known set.");
             }
-            else
-            {
-                Plugin.Logger.LogInfo("[ClientFix] Client parked-vehicle sync ENABLED — will rehydrate on next full host snapshot.");
-            }
+            _clientGhosts.Clear();
+            _clientKnown.Clear();
+            Plugin.Logger.LogInfo($"[ClientFix] Client parked-vehicle sync — released {releasedCount} ghost(s) back to pool, cleared known set.");
         }
 
         public static void Reset()

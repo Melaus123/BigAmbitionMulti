@@ -159,9 +159,23 @@ namespace BigAmbitionsMP
         /// Moves an existing remote-player capsule, or spawns one on first call.
         /// No-ops when not in-game.
         /// </summary>
+        // CLAUDE-DIAGNOSTIC — master kill-switch flag.  When false, SpawnOrUpdate
+        // skips spawn AND skips position updates (so existing destroyed players
+        // don't get re-spawned).  Used by the F4 master toggle.
+        public static bool ClientSpawnEnabled { get; set; } = true;
+
+        public static void DestroyAllRemotePlayers()
+        {
+            foreach (var kv in _players)
+                if (kv.Value != null) UnityEngine.Object.Destroy(kv.Value);
+            _players.Clear();
+            Plugin.Logger.LogInfo("[RemotePlayer] Destroyed all remote players (kill-switch).");
+        }
+
         public static void SpawnOrUpdate(PlayerPositionPayload p)
         {
             if (SaveGameManager.Current == null) return;
+            if (!ClientSpawnEnabled) return;          // CLAUDE-DIAGNOSTIC kill-switch
 
             if (!_players.TryGetValue(p.PlayerId, out var go) || go == null)
                 go = SpawnRemotePlayer(p.PlayerId);

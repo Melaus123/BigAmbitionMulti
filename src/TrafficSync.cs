@@ -565,10 +565,16 @@ namespace BigAmbitionsMP
         // ── Client: apply the snapshot as ghost cars ──────────────────────────
 
         /// <summary>Applies a host traffic snapshot — spawns/moves/despawns ghosts.</summary>
+        // CLAUDE-DIAGNOSTIC — master kill-switch flag for client traffic ghosts.
+        // ApplySnapshot returns early when false.  Used by the F4 master toggle
+        // to find which client-side sync subsystem breaks the building-entry chain.
+        public static bool ClientGhostApplyEnabled { get; set; } = true;
+
         public static void ApplySnapshot(TrafficSnapshotPayload snap)
         {
             if (snap == null) return;
             if (SaveGameManager.Current == null) return;
+            if (!ClientGhostApplyEnabled) return;     // CLAUDE-DIAGNOSTIC kill-switch
             try
             {
                 var seen = new HashSet<int>();
