@@ -1,3 +1,5 @@
+using System;
+using System.Linq;
 using BepInEx;
 using BepInEx.Unity.IL2CPP;
 using BepInEx.Logging;
@@ -32,9 +34,20 @@ namespace BigAmbitionsMP
             // Attach the UI component — it creates its own Canvas in Awake()
             AddComponent<MPCanvasUI>();
 
-            // Apply Harmony patches (RentBuilding intercept, GameManager.Update drain)
+            // Apply Harmony patches.  Wrap in try/catch so a single broken
+            // patch (e.g. TargetMethod returning null) doesn't abort PatchAll
+            // and silently drop ALL other patches — which would leave the
+            // plugin in a half-loaded state that's hard to diagnose.
             _harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
-            _harmony.PatchAll();
+            try
+            {
+                _harmony.PatchAll();
+                Logger.LogInfo($"[Plugin] PatchAll completed: {_harmony.GetPatchedMethods().Count()} method(s) patched.");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"[Plugin] PatchAll FAILED — some Harmony patches were not applied: {ex}");
+            }
 
             Logger.LogInfo("BigAmbitionsMP loaded. Canvas UI active — press F8 to toggle.");
         }

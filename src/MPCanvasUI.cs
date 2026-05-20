@@ -57,6 +57,8 @@ namespace BigAmbitionsMP
 
         // ── model ─────────────────────────────────────────────────────────────
         private bool   _visible = true;
+        // #1 — initialised from MPConfig in Awake() so the F8 panel pre-fills
+        // with the previously-used (or Steam-detected) name, not "Player1".
         private string _name    = "Player1";
         private string _port    = "7777";
         private string _ip      = "127.0.0.1";
@@ -205,7 +207,19 @@ namespace BigAmbitionsMP
 
         // ─────────────────────────────────────────────────────────────────────
 
-        private void Awake() => DontDestroyOnLoad(gameObject);
+        private void Awake()
+        {
+            DontDestroyOnLoad(gameObject);
+            // #1 — pre-fill the F8 panel from persisted MPConfig (saved last
+            // time the user clicked Host/Join).  Awake runs after Plugin.Load
+            // → MPConfig.Init, so PlayerId is already resolved here.
+            if (!string.IsNullOrWhiteSpace(MPConfig.PlayerId))
+                _name = MPConfig.PlayerId;
+            _port = MPConfig.Port.ToString();
+            _ip   = MPConfig.HostIP;
+            Plugin.Logger.LogInfo(
+                $"[UI] F8 panel pre-fill: name='{_name}' port={_port} ip={_ip}");
+        }
 
         // ── Update ────────────────────────────────────────────────────────────
 

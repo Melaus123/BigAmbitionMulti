@@ -210,24 +210,25 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── Patch: TaxiController.TaxiTravel (backlog #5) ──────────────────────
+        // ── Patch: *.TaxiTravel (backlog #5) ──────────────────────────────────
         // Fires when the player picks a destination from the taxi menu and the
         // ride begins.  The game then sets isFastForwarding=true and advances
         // the world clock through the trip — which our world-clock pinner
         // normally reverts every frame, locking the player in the cab.
-        // We flip TrafficSync.LocalInTaxi=true so the pinner stands down for
-        // the duration of the ride.
+        //
+        // IMPORTANT: previous version used TargetMethod() returning null when
+        // TaxiTravel wasn't on TaxiController — Harmony treats null as an
+        // error and aborts PatchAll, which then silently drops EVERY other
+        // patch in the assembly (including building entry/exit).  Use
+        // TargetMethods (plural) with FindAllMethodsByName so a missing
+        // method just produces an empty enumerable and the rest of PatchAll
+        // continues unaffected.
 
         [HarmonyPatch]
-        public static class Patch_TaxiController_TaxiTravel
+        public static class Patch_TaxiTravel
         {
-            static System.Reflection.MethodBase? TargetMethod()
-            {
-                var t = VehicleManager.FindGameType("TaxiController");
-                return t?.GetMethod("TaxiTravel",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
-                    | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static);
-            }
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("TaxiTravel");
 
             static void Prefix()
             {
@@ -236,22 +237,16 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── Patch: TaxiController.CompletedTaxiRide (backlog #5) ───────────────
+        // ── Patch: *.CompletedTaxiRide (backlog #5) ────────────────────────────
         // Fires when the ride finishes (player teleported to destination, fare
-        // deducted).  We flip LocalInTaxi=false so normal world-clock pinning
-        // resumes.  Defensive: also patch as Prefix so we capture the event
-        // even if the postfix gets skipped (e.g. exception inside the method).
+        // deducted).  Same TargetMethods-by-name trick to survive a missing
+        // declaring type.
 
         [HarmonyPatch]
-        public static class Patch_TaxiController_CompletedRide
+        public static class Patch_CompletedTaxiRide
         {
-            static System.Reflection.MethodBase? TargetMethod()
-            {
-                var t = VehicleManager.FindGameType("TaxiController");
-                return t?.GetMethod("CompletedTaxiRide",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
-                    | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static);
-            }
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("CompletedTaxiRide");
 
             static void Prefix()
             {
