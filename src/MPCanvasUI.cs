@@ -591,6 +591,7 @@ namespace BigAmbitionsMP
                 // Fresh world-clock skip detector + appearance state for this session.
                 ResetWorldClock();
                 TrafficSync.Reset();
+                ParkedVehicleSync.Reset();
                 _localAppearanceSent = false;
                 _introNameFilled = false;       // re-arm intro-name prefill on next char-gen
 
@@ -744,7 +745,8 @@ namespace BigAmbitionsMP
             VehicleManager.ProbeTaxi();
             VehicleManager.ProbeTrafficExtras();
             VehicleManager.ProbeCarColor();
-            VehicleManager.ProbeParkedVehicles();    // backlog #3 discovery
+            VehicleManager.ProbeParkedVehicles();    // backlog #3 discovery (round 2 — kept for re-runs)
+            ParkedVehicleSync.Tick();                // backlog #3 phase 3a — host capture
 
             // Send our character appearance once the character is ready.
             TrySendLocalAppearance();
