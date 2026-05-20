@@ -252,6 +252,7 @@ namespace BigAmbitionsMP
             TickMarketSync();
             TickIntroNamePrefill();
             TickBuildingClientDiag();   // CLAUDE-DIAGNOSTIC for backlog #6
+            TickSuppressBlackOverlay(); // backlog #6 fix
 
             // Auto-hide when the game starts so our canvas doesn't block the intro
             // scene's "Start Game" button or any in-game UI.
@@ -596,6 +597,8 @@ namespace BigAmbitionsMP
                 ParkedVehicleSync.Reset();
                 _localAppearanceSent = false;
                 _introNameFilled = false;       // re-arm intro-name prefill on next char-gen
+                _blackOverlayCanvas = null;     // re-scan on fresh game load (#6)
+                _blackOverlayFindTimer = 0f;
 
                 // Startup pause hold — freeze the game the moment our scene loads
                 // and report in-game.  Stays frozen until ALL players have loaded,
@@ -915,6 +918,72 @@ namespace BigAmbitionsMP
             catch (Exception ex)
             {
                 Plugin.Logger.LogWarning($"[BClientDiag/{tag}] dump error: {ex.Message}");
+            }
+        }
+
+        // ── Backlog #6 fix: keep 'BlackOverlay' canvas suppressed on client ──
+        //
+        // OBSERVED 2026-05-20 MARK_BEFORE vs MARK_BLACK diff: a Canvas named
+        // 'BlackOverlay' (mode=ScreenSpaceOverlay, sort=3) is enabled only in
+        // the broken state.  In SP and on host the game disables it after the
+        // building-entry transition completes; on the client the disable step
+        // never runs, leaving an opaque black overlay covering the world.
+        // BAMP_Canvas (sort=999) is above it, which is why the F8 panel stays
+        // visible.
+        //
+        // Fix: cache the canvas on first sighting, then disable it whenever
+        // it's enabled.  Cheap (~one assignment per frame in the worst case);
+        // disabling the Canvas component preserves the GameObject so the
+        // game's own state machine isn't disturbed.
+        private static Canvas? _blackOverlayCanvas;
+        private static float _blackOverlayFindTimer;
+
+        private void TickSuppressBlackOverlay()
+        {
+            if (!MPClient.IsConnected) return;
+            if (!IsInGame()) return;
+
+            // If we've lost the cached reference (Unity destroyed the canvas
+            // on scene change, etc.), rescan periodically.
+            if (_blackOverlayCanvas == null)
+            {
+                _blackOverlayFindTimer -= Time.unscaledDeltaTime;
+                if (_blackOverlayFindTimer > 0f) return;
+                _blackOverlayFindTimer = 2f;
+
+                try
+                {
+                    var canvases = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<Canvas>());
+                    if (canvases == null) return;
+                    for (int i = 0; i < canvases.Length; i++)
+                    {
+                        var c = canvases[i].TryCast<Canvas>();
+                        if (c == null) continue;
+                        if (c.gameObject.name == "BlackOverlay")
+                        {
+                            _blackOverlayCanvas = c;
+                            Plugin.Logger.LogInfo("[ClientFix] Found BlackOverlay canvas; will keep disabled on client.");
+                            break;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogWarning($"[ClientFix] BlackOverlay search: {ex.Message}");
+                }
+                return;
+            }
+
+            // Cached — re-disable if the game turned it back on.
+            try
+            {
+                if (_blackOverlayCanvas != null && _blackOverlayCanvas.enabled)
+                    _blackOverlayCanvas.enabled = false;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[ClientFix] BlackOverlay suppress: {ex.Message}");
+                _blackOverlayCanvas = null;  // rescan next pass
             }
         }
 
