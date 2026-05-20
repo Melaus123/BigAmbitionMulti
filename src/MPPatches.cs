@@ -598,9 +598,13 @@ namespace BigAmbitionsMP
         {
             static bool Prefix()
             {
-                if (MPServer.IsRunning)
+                // CLAUDE-DIAGNOSTIC — symmetrize on host AND client.  Path X test:
+                // if blocking on client also lets DelayedEnterBuildingActions fire,
+                // ClearTraffic was the gate; if not, this was a dead end.
+                if (MPServer.IsRunning || MPClient.IsConnected)
                 {
-                    Plugin.Logger.LogInfo("[TMBlock] ClearTraffic() — SKIPPED (host MP active).");
+                    string side = MPServer.IsRunning ? "host" : "client";
+                    Plugin.Logger.LogInfo($"[TMBlock] ClearTraffic() — SKIPPED ({side} MP active).");
                     return false;
                 }
                 return true;
@@ -612,9 +616,11 @@ namespace BigAmbitionsMP
         {
             static bool Prefix(UnityEngine.Vector3 __0, float __1)
             {
-                if (MPServer.IsRunning)
+                // CLAUDE-DIAGNOSTIC — same Path X symmetrize.
+                if (MPServer.IsRunning || MPClient.IsConnected)
                 {
-                    Plugin.Logger.LogInfo($"[TMBlock] ClearTrafficOnArea(pos={__0}, r={__1}) — SKIPPED (host MP active).");
+                    string side = MPServer.IsRunning ? "host" : "client";
+                    Plugin.Logger.LogInfo($"[TMBlock] ClearTrafficOnArea(pos={__0}, r={__1}) — SKIPPED ({side} MP active).");
                     return false;
                 }
                 return true;
