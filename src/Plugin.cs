@@ -34,20 +34,36 @@ namespace BigAmbitionsMP
             // Attach the UI component — it creates its own Canvas in Awake()
             AddComponent<MPCanvasUI>();
 
-            // Apply Harmony patches.  Wrap in try/catch so a single broken
-            // patch (e.g. TargetMethod returning null) doesn't abort PatchAll
-            // and silently drop ALL other patches — which would leave the
-            // plugin in a half-loaded state that's hard to diagnose.
+            // Apply Harmony patches per-class so a single bad class can't take
+            // down the rest.  PatchAll() iterates internally and ABORTS on the
+            // first throw (e.g. a TargetMethods returning empty → "Undefined
+            // target method") — wrapping PatchAll in try/catch only catches
+            // the outer throw, it does NOT cause the remaining classes to be
+            // patched.  Iterating ourselves and try/catching each class gives
+            // real isolation.
             _harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
-            try
+            int okClasses = 0, failClasses = 0, totalPatched = 0;
+            foreach (var t in typeof(Plugin).Assembly.GetTypes())
             {
-                _harmony.PatchAll();
-                Logger.LogInfo($"[Plugin] PatchAll completed: {_harmony.GetPatchedMethods().Count()} method(s) patched.");
+                if (!t.GetCustomAttributes(typeof(HarmonyPatch), true).Any()) continue;
+                try
+                {
+                    var before = _harmony.GetPatchedMethods().Count();
+                    _harmony.CreateClassProcessor(t).Patch();
+                    var added = _harmony.GetPatchedMethods().Count() - before;
+                    okClasses++;
+                    totalPatched += added;
+                    // CLAUDE-DIAGNOSTIC — per-class patch count, so a future
+                    // regression in a single class is loud, not silent.
+                    Logger.LogInfo($"[Plugin] Patched {t.Name}: {added} method(s)");
+                }
+                catch (Exception ex)
+                {
+                    failClasses++;
+                    Logger.LogError($"[Plugin] Patch class {t.Name} FAILED: {ex.GetType().Name}: {ex.Message}");
+                }
             }
-            catch (Exception ex)
-            {
-                Logger.LogError($"[Plugin] PatchAll FAILED — some Harmony patches were not applied: {ex}");
-            }
+            Logger.LogInfo($"[Plugin] Patch summary: {okClasses} class(es) OK, {failClasses} failed, {totalPatched} method(s) patched total.");
 
             Logger.LogInfo("BigAmbitionsMP loaded. Canvas UI active — press F8 to toggle.");
         }

@@ -235,23 +235,16 @@ namespace BigAmbitionsMP
                 try { TrafficSync.OnTaxiTravelStart(); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] TaxiTravel prefix: {ex.Message}"); }
             }
-        }
 
-        // ── Patch: *.CompletedTaxiRide (backlog #5) ────────────────────────────
-        // Fires when the ride finishes (player teleported to destination, fare
-        // deducted).  Same TargetMethods-by-name trick to survive a missing
-        // declaring type.
-
-        [HarmonyPatch]
-        public static class Patch_CompletedTaxiRide
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("CompletedTaxiRide");
-
-            static void Prefix()
+            // OBSERVED 2026-05-19: TaxiTravel lives on UI.InGameUI.BuildingResume
+            // and there is no separate CompletedTaxiRide method anywhere in the
+            // loaded assemblies (log: "[FindMethod] 'CompletedTaxiRide' not
+            // found").  TaxiTravel is the ride coroutine itself — postfix fires
+            // when the ride completes, which is our "ride ended" event.
+            static void Postfix()
             {
                 try { TrafficSync.OnTaxiTravelEnd(); }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] CompletedTaxiRide prefix: {ex.Message}"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] TaxiTravel postfix: {ex.Message}"); }
             }
         }
 
