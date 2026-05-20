@@ -375,222 +375,160 @@ namespace BigAmbitionsMP
             if (Time.timeSinceLevelLoad < 25f) return;     // wait for world to settle
             _parkedProbed = true;
 
-            Plugin.Logger.LogInfo("[Parked] === ProbeParkedVehicles START ===");
+            Plugin.Logger.LogInfo("[Parked] === ProbeParkedVehicles START (round 2) ===");
             try
             {
-                // Step 1 — find every type that declares the storage field, the
-                // request method, or generate method.  In IL2CPP wrappers a
-                // single conceptual class often appears under multiple type
-                // names (the wrapped + its accessors); we want them all so we
-                // can decide which is the "manager" to talk to.
-                var bf = BindingFlags.Public | BindingFlags.NonPublic
-                       | BindingFlags.Instance | BindingFlags.Static
-                       | BindingFlags.DeclaredOnly;
+                // Round-1 observed: each parking strip is its own MonoBehaviour
+                // (ParkingLaneGenerator); Helpers.ParkingSimulator is a static
+                // pool of parked-vehicle GameObjects.  Round 2 dumps the actual
+                // members of those types and samples live instances.
+                var bfAll = BindingFlags.Public | BindingFlags.NonPublic
+                          | BindingFlags.Instance | BindingFlags.Static;   // no DeclaredOnly
 
-                System.Type? storageOwner = null;
-                FieldInfo?   storageField = null;
-                int hits = 0;
+                // Find ParkingLaneGenerator type by full name in any assembly.
+                System.Type? laneT = null;
+                System.Type? simT  = null;
                 foreach (var asm in System.AppDomain.CurrentDomain.GetAssemblies())
                 {
                     System.Type[] types;
                     try { types = asm.GetTypes(); } catch { continue; }
                     foreach (var t in types)
                     {
-                        FieldInfo? f = null;
-                        try { f = t.GetField("_parkedVehiclesStorage", bf); } catch { }
-                        if (f != null)
-                        {
-                            hits++;
-                            Plugin.Logger.LogInfo(
-                                $"[Parked]  field _parkedVehiclesStorage on {t.FullName} (static={f.IsStatic}, type={f.FieldType.FullName})");
-                            if (storageOwner == null) { storageOwner = t; storageField = f; }
-                        }
+                        if (t.Name == "ParkingLaneGenerator" && laneT == null) laneT = t;
+                        if (t.FullName == "Helpers.ParkingSimulator" && simT == null) simT = t;
                     }
                 }
-                Plugin.Logger.LogInfo($"[Parked]  total _parkedVehiclesStorage declarations: {hits}");
+                if (laneT == null) { Plugin.Logger.LogWarning("[Parked] ParkingLaneGenerator type not found."); return; }
+                if (simT  == null) Plugin.Logger.LogWarning("[Parked] Helpers.ParkingSimulator type not found.");
 
-                // Step 2 — list every method named in the symbol dump, with
-                // their declaring type, parameter signature, and return type.
-                foreach (var name in new[] {
-                    "GenerateParkedVehicles", "GenerateParkingVehiclesPool",
-                    "RequestParkedVehicle",   "ReleaseParkedVehicle",
-                    "CleanupParkedVehicles",  "DeferDestroyBlockingParkedVehicles",
-                    "GetVehiclesInParkingSpots", "InitNonBusinessParkingLane",
-                })
+                Plugin.Logger.LogInfo($"[Parked] ParkingLaneGenerator → {laneT.FullName}");
+                if (simT != null) Plugin.Logger.LogInfo($"[Parked] ParkingSimulator    → {simT.FullName}");
+
+                // ── A. Full member dump of ParkingLaneGenerator ──────────────
+                Plugin.Logger.LogInfo("[Parked] === ParkingLaneGenerator members ===");
+                DumpAllFields(laneT, bfAll, "[Parked]   field  ");
+                DumpAllProps (laneT, bfAll, "[Parked]   prop   ");
+
+                // ── B. Full member dump of Helpers.ParkingSimulator ──────────
+                if (simT != null)
                 {
-                    int methodHits = 0;
-                    foreach (var asm in System.AppDomain.CurrentDomain.GetAssemblies())
-                    {
-                        System.Type[] types;
-                        try { types = asm.GetTypes(); } catch { continue; }
-                        foreach (var t in types)
-                        {
-                            MethodInfo? m = null;
-                            try { m = t.GetMethod(name, bf); } catch { }
-                            if (m == null) continue;
-                            methodHits++;
-                            var ps = string.Join(",", m.GetParameters().Select(p => p.ParameterType.Name));
-                            Plugin.Logger.LogInfo(
-                                $"[Parked]  method {name} → {t.FullName}.{name}({ps}) : {m.ReturnType.Name} (static={m.IsStatic})");
-                        }
-                    }
-                    if (methodHits == 0)
-                        Plugin.Logger.LogInfo($"[Parked]  method {name} — not found");
+                    Plugin.Logger.LogInfo("[Parked] === ParkingSimulator members ===");
+                    DumpAllFields(simT, bfAll, "[Parked]   field  ");
+                    DumpAllProps (simT, bfAll, "[Parked]   prop   ");
                 }
 
-                if (storageOwner == null || storageField == null)
-                {
-                    Plugin.Logger.LogWarning("[Parked] No _parkedVehiclesStorage field found; cannot sample storage.");
-                    return;
-                }
-
-                // Step 3 — log the owner type's fields + properties + methods
-                // so we know how the manager exposes its state.
-                Plugin.Logger.LogInfo($"[Parked] === owner type members: {storageOwner.FullName} ===");
+                // ── C. Find live ParkingLaneGenerator instances + sample ─────
+                Plugin.Logger.LogInfo("[Parked] === live ParkingLaneGenerator instances ===");
+                Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<UnityEngine.Object>? lanes = null;
                 try
                 {
-                    var fnames = storageOwner.GetFields(bf)
-                        .Take(40).Select(f => $"{f.Name}({f.FieldType.Name})").ToArray();
-                    Plugin.Logger.LogInfo($"[Parked]   fields:  {string.Join(" | ", fnames)}");
-
-                    var pnames = storageOwner.GetProperties(bf)
-                        .Take(40).Select(p => $"{p.Name}({p.PropertyType.Name})").ToArray();
-                    Plugin.Logger.LogInfo($"[Parked]   props:   {string.Join(" | ", pnames)}");
+                    var il2 = Il2CppType.From(laneT);
+                    lanes = UnityEngine.Object.FindObjectsOfType(il2);
                 }
                 catch (System.Exception ex)
                 {
-                    Plugin.Logger.LogWarning($"[Parked]   member-dump failed: {ex.Message}");
+                    Plugin.Logger.LogWarning($"[Parked] FindObjectsOfType(ParkingLaneGenerator) failed: {ex.Message}");
+                }
+                int laneCount = lanes != null ? lanes.Length : 0;
+                Plugin.Logger.LogInfo($"[Parked]   live ParkingLaneGenerator count: {laneCount}");
+
+                // Sample first lane: dump every reflected field value.
+                if (lanes != null && lanes.Length > 0)
+                {
+                    var lane0 = lanes[0];
+                    Plugin.Logger.LogInfo($"[Parked]   --- sample lane[0] ({lane0?.GetType().Name}) ---");
+                    DumpInstanceFields(lane0, laneT, bfAll, "[Parked]   lane0  ");
                 }
 
-                // Step 4 — resolve the owner instance (if non-static).  Singletons
-                // typically expose a static `Instance` / `instance` property or
-                // field; failing that, FindObjectsOfType.
-                object? instance = null;
-                if (storageField.IsStatic)
+                // ── D. Static state of ParkingSimulator (the pool) ───────────
+                if (simT != null)
                 {
-                    instance = null;   // static — no instance required
-                    Plugin.Logger.LogInfo("[Parked]   storage field is static — reading directly.");
-                }
-                else
-                {
-                    // Try Instance/instance accessors first
-                    try
+                    Plugin.Logger.LogInfo("[Parked] === ParkingSimulator static state ===");
+                    foreach (var f in simT.GetFields(bfAll).Where(f => f.IsStatic).Take(20))
                     {
-                        var instProp = storageOwner.GetProperty("Instance",
-                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                        if (instProp != null) instance = instProp.GetValue(null);
-                    }
-                    catch { }
-                    if (instance == null)
-                    {
-                        try
-                        {
-                            var instField = storageOwner.GetField("instance",
-                                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                            if (instField != null) instance = instField.GetValue(null);
-                        }
-                        catch { }
-                    }
-                    if (instance == null)
-                    {
-                        try
-                        {
-                            var il2t = Il2CppType.From(storageOwner);
-                            var objs = UnityEngine.Object.FindObjectsOfType(il2t);
-                            if (objs != null && objs.Length > 0)
-                            {
-                                instance = objs[0];
-                                Plugin.Logger.LogInfo($"[Parked]   resolved instance via FindObjectsOfType ({objs.Length} match(es)).");
-                            }
-                        }
-                        catch (System.Exception ex)
-                        {
-                            Plugin.Logger.LogWarning($"[Parked]   FindObjectsOfType fallback failed: {ex.Message}");
-                        }
-                    }
-                    if (instance == null)
-                    {
-                        Plugin.Logger.LogWarning("[Parked]   could not resolve owner instance — aborting sample step.");
-                        return;
+                        object? v = null;
+                        try { v = f.GetValue(null); } catch { }
+                        Plugin.Logger.LogInfo($"[Parked]   simStatic  {f.Name}({f.FieldType.Name}) = {DescribeValue(v)}");
                     }
                 }
 
-                // Step 5 — get the storage value, inspect type + count + sample.
-                object? storage = null;
-                try { storage = storageField.GetValue(instance); }
-                catch (System.Exception ex)
+                // ── E. List every method (sig + static) on both types ───────
+                Plugin.Logger.LogInfo("[Parked] === ParkingLaneGenerator methods ===");
+                foreach (var m in laneT.GetMethods(bfAll).Where(m => m.DeclaringType == laneT).Take(40))
                 {
-                    Plugin.Logger.LogWarning($"[Parked]   reading storage value failed: {ex.Message}");
-                    return;
+                    var ps = string.Join(",", m.GetParameters().Select(p => p.ParameterType.Name));
+                    Plugin.Logger.LogInfo($"[Parked]   lm   {m.Name}({ps}) : {m.ReturnType.Name} (static={m.IsStatic})");
                 }
-                if (storage == null)
+                if (simT != null)
                 {
-                    Plugin.Logger.LogInfo("[Parked]   storage value is NULL right now (may not yet be initialised).");
-                    return;
-                }
-                var storageT = storage.GetType();
-                Plugin.Logger.LogInfo($"[Parked]   storage runtime type: {storageT.FullName}");
-
-                // Try a few enumeration paths (Length / Count / Count() / foreach).
-                int count = -1;
-                try { var pLen = storageT.GetProperty("Length"); if (pLen != null) count = (int)pLen.GetValue(storage); }
-                catch { }
-                if (count < 0)
-                {
-                    try { var pCnt = storageT.GetProperty("Count"); if (pCnt != null) count = (int)pCnt.GetValue(storage); }
-                    catch { }
-                }
-                Plugin.Logger.LogInfo($"[Parked]   storage count (Length/Count): {count}");
-
-                // Sample up to 3 entries via reflection.
-                int sampled = 0;
-                try
-                {
-                    if (storage is System.Collections.IEnumerable en)
+                    Plugin.Logger.LogInfo("[Parked] === ParkingSimulator methods ===");
+                    foreach (var m in simT.GetMethods(bfAll).Where(m => m.DeclaringType == simT).Take(40))
                     {
-                        foreach (var item in en)
-                        {
-                            if (item == null) { sampled++; if (sampled >= 3) break; continue; }
-                            var iT = item.GetType();
-                            var fields = iT.GetFields(bf).Take(20).ToArray();
-                            var fdump = string.Join(", ", fields.Select(f => {
-                                object? v = null;
-                                try { v = f.GetValue(item); } catch { }
-                                return $"{f.Name}={v}";
-                            }));
-                            Plugin.Logger.LogInfo($"[Parked]   sample[{sampled}] type={iT.Name} {fdump}");
-                            sampled++;
-                            if (sampled >= 3) break;
-                        }
-                    }
-                    else
-                    {
-                        Plugin.Logger.LogInfo("[Parked]   storage is not IEnumerable — can't sample generically.");
+                        var ps = string.Join(",", m.GetParameters().Select(p => p.ParameterType.Name));
+                        Plugin.Logger.LogInfo($"[Parked]   sm   {m.Name}({ps}) : {m.ReturnType.Name} (static={m.IsStatic})");
                     }
                 }
-                catch (System.Exception ex)
-                {
-                    Plugin.Logger.LogWarning($"[Parked]   sampling failed: {ex.Message}");
-                }
-
-                // Step 6 — look for the count property the symbols hint at.
-                try
-                {
-                    var nProp = storageOwner.GetProperty("numberOfParkedVehicles",
-                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
-                    if (nProp != null)
-                    {
-                        var v = nProp.GetValue(nProp.GetGetMethod()!.IsStatic ? null : instance);
-                        Plugin.Logger.LogInfo($"[Parked]   numberOfParkedVehicles property = {v}");
-                    }
-                }
-                catch { }
             }
             catch (System.Exception ex)
             {
                 Plugin.Logger.LogError($"[Parked] probe error: {ex.Message}\n{ex.StackTrace}");
             }
             Plugin.Logger.LogInfo("[Parked] === ProbeParkedVehicles END ===");
+        }
+
+        // ── helpers — only used by ProbeParkedVehicles ───────────────────────
+        private static void DumpAllFields(System.Type t, BindingFlags bf, string prefix)
+        {
+            try
+            {
+                foreach (var f in t.GetFields(bf).Where(f => f.DeclaringType == t).Take(60))
+                    Plugin.Logger.LogInfo($"{prefix}{f.Name}({f.FieldType.Name}) static={f.IsStatic}");
+            }
+            catch (System.Exception ex)
+            { Plugin.Logger.LogWarning($"{prefix}<dump failed: {ex.Message}>"); }
+        }
+        private static void DumpAllProps(System.Type t, BindingFlags bf, string prefix)
+        {
+            try
+            {
+                foreach (var p in t.GetProperties(bf).Where(p => p.DeclaringType == t).Take(60))
+                {
+                    bool isStatic = (p.GetGetMethod(true)?.IsStatic ?? false) || (p.GetSetMethod(true)?.IsStatic ?? false);
+                    Plugin.Logger.LogInfo($"{prefix}{p.Name}({p.PropertyType.Name}) static={isStatic}");
+                }
+            }
+            catch (System.Exception ex)
+            { Plugin.Logger.LogWarning($"{prefix}<dump failed: {ex.Message}>"); }
+        }
+        private static void DumpInstanceFields(object? inst, System.Type t, BindingFlags bf, string prefix)
+        {
+            if (inst == null) { Plugin.Logger.LogWarning($"{prefix}<null instance>"); return; }
+            try
+            {
+                foreach (var f in t.GetFields(bf).Where(f => !f.IsStatic && f.DeclaringType == t).Take(40))
+                {
+                    object? v = null;
+                    try { v = f.GetValue(inst); } catch (System.Exception ex) { v = $"<err: {ex.Message}>"; }
+                    Plugin.Logger.LogInfo($"{prefix}{f.Name} = {DescribeValue(v)}");
+                }
+            }
+            catch (System.Exception ex)
+            { Plugin.Logger.LogWarning($"{prefix}<dump failed: {ex.Message}>"); }
+        }
+        private static string DescribeValue(object? v)
+        {
+            if (v == null) return "<null>";
+            try
+            {
+                var t = v.GetType();
+                // Collection?  Show count.
+                var pLen = t.GetProperty("Length"); if (pLen != null) return $"<{t.Name} len={pLen.GetValue(v)}>";
+                var pCnt = t.GetProperty("Count");  if (pCnt != null) return $"<{t.Name} count={pCnt.GetValue(v)}>";
+                string s = v.ToString() ?? "<null-string>";
+                if (s.Length > 80) s = s.Substring(0, 80) + "…";
+                return $"{s} <{t.Name}>";
+            }
+            catch (System.Exception ex) { return $"<describe-err: {ex.Message}>"; }
         }
 
         private static bool _trafficExtrasProbed;
