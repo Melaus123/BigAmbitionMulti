@@ -27,6 +27,14 @@ namespace BigAmbitionsMP
 
         private static void RunOnMainThread(Action action) => _mainThreadQueue.Enqueue(action);
 
+        // CLAUDE-DIAGNOSTIC — kill-switch flags for the entry-bug investigation.
+        // Each apply path gates on its respective flag; F4 master toggle in
+        // MPCanvasUI flips them all at once so we can test which state-mutating
+        // sync (if any) is preventing the client's building-entry chain.
+        public static bool ClientApplyOwnership { get; set; } = true;
+        public static bool ClientApplyTime      { get; set; } = true;
+        public static bool ClientApplyMarket    { get; set; } = true;
+
         /// <summary>
         /// Public entry point so MPServer and MPClient can dispatch game-start actions
         /// from their background network threads onto the Unity main thread.
@@ -58,6 +66,7 @@ namespace BigAmbitionsMP
 
         public static void ApplyBuildingOwnership(BuildingOwnershipPayload payload)
         {
+            if (!ClientApplyOwnership) return;   // CLAUDE-DIAGNOSTIC F4 gate
             RunOnMainThread(() =>
             {
                 if (payload.OwnerPlayerId == MPConfig.PlayerId)
@@ -75,6 +84,7 @@ namespace BigAmbitionsMP
 
         public static void ApplyBuildingVacated(string addressKey)
         {
+            if (!ClientApplyOwnership) return;   // CLAUDE-DIAGNOSTIC F4 gate
             RunOnMainThread(() =>
             {
                 MarkBuildingAvailable(addressKey);
@@ -84,6 +94,7 @@ namespace BigAmbitionsMP
 
         public static void ApplyGameTime(GameTimeSyncPayload payload)
         {
+            if (!ClientApplyTime) return;        // CLAUDE-DIAGNOSTIC F4 gate
             RunOnMainThread(() =>
             {
                 try
@@ -121,6 +132,7 @@ namespace BigAmbitionsMP
 
         public static void ApplyMarketSnapshot(string marketJson)
         {
+            if (!ClientApplyMarket) return;      // CLAUDE-DIAGNOSTIC F4 gate
             RunOnMainThread(() =>
             {
                 try

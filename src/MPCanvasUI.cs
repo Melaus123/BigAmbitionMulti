@@ -1148,19 +1148,22 @@ namespace BigAmbitionsMP
             _killSwitchActive = !_killSwitchActive;
             if (_killSwitchActive)
             {
-                // Disable each subsystem's apply path.
+                // World-modifying syncs (ghosts/visuals).
                 ParkedVehicleSync.ClientApplyEnabled    = false;
                 TrafficSync.ClientGhostApplyEnabled     = false;
                 RemotePlayerManager.ClientSpawnEnabled  = false;
-                VehicleManager.ClientApplyFleetEnabled  = false;     // owned-vehicle fleet ghosts
+                VehicleManager.ClientApplyFleetEnabled  = false;
+                // State-modifying syncs (game data on the local game instance).
+                GameStatePatcher.ClientApplyOwnership   = false;     // rent / building ownership
+                GameStatePatcher.ClientApplyTime        = false;     // clock + DayNightCycle
+                GameStatePatcher.ClientApplyMarket      = false;     // market prices
 
-                // Destroy / release existing artifacts so the world matches
-                // "client never received any sync".
+                // Destroy / release existing world artifacts.
                 ParkedVehicleSync.ReleaseAllGhosts();
                 TrafficSync.DespawnAllGhosts();
                 RemotePlayerManager.DestroyAllRemotePlayers();
-                VehicleManager.DespawnAll();         // host's owned-vehicle ghosts
-                Plugin.Logger.LogWarning("[ClientFix] KILL SWITCH ON — ALL client sync disabled (parked/traffic/remote-player/fleet), existing artifacts destroyed.");
+                VehicleManager.DespawnAll();
+                Plugin.Logger.LogWarning("[ClientFix] KILL SWITCH ON — ALL client sync disabled (parked/traffic/remote-player/fleet/ownership/time/market), existing artifacts destroyed.");
             }
             else
             {
@@ -1168,6 +1171,9 @@ namespace BigAmbitionsMP
                 TrafficSync.ClientGhostApplyEnabled     = true;
                 RemotePlayerManager.ClientSpawnEnabled  = true;
                 VehicleManager.ClientApplyFleetEnabled  = true;
+                GameStatePatcher.ClientApplyOwnership   = true;
+                GameStatePatcher.ClientApplyTime        = true;
+                GameStatePatcher.ClientApplyMarket      = true;
                 Plugin.Logger.LogWarning("[ClientFix] KILL SWITCH OFF — all client sync re-enabled; artifacts will rehydrate on next snapshots.");
             }
         }
