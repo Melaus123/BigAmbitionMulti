@@ -378,18 +378,26 @@ namespace BigAmbitionsMP
         // Diagnostic-tagged so the cleanup pass picks them up if we ever
         // confirm none are the culprit.
 
+        // OBSERVED 2026-05-19 host log lines 39540-39543:
+        //   [TMBlock] SetPause(True) — allowed.
+        //   [TMBlock] ClearTraffic() called (outside building — allowed).
+        //   [Building] DelayedEnterBuildingActions on BuildingManager
+        //   [Building] EnteredBuilding ...
+        // The pause+clear calls land BEFORE the entry signal fires, so the
+        // LocalInBuilding gate can never catch them.  Block them whenever the
+        // host is multiplayer-active instead — in MP we want traffic
+        // persistent for clients regardless of why the game tries to clear it.
+
         [HarmonyPatch(typeof(TrafficManager), nameof(TrafficManager.ClearTraffic))]
         public static class Patch_TM_ClearTraffic
         {
-            // CLAUDE-DIAGNOSTIC
             static bool Prefix()
             {
-                if (TrafficSync.LocalInBuilding)
+                if (MPServer.IsRunning)
                 {
-                    Plugin.Logger.LogInfo("[TMBlock] ClearTraffic() called while LocalInBuilding=true — SKIPPED.");
+                    Plugin.Logger.LogInfo("[TMBlock] ClearTraffic() — SKIPPED (host MP active).");
                     return false;
                 }
-                Plugin.Logger.LogInfo("[TMBlock] ClearTraffic() called (outside building — allowed).");
                 return true;
             }
         }
@@ -397,15 +405,13 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(TrafficManager), nameof(TrafficManager.ClearTrafficOnArea))]
         public static class Patch_TM_ClearTrafficOnArea
         {
-            // CLAUDE-DIAGNOSTIC
             static bool Prefix(UnityEngine.Vector3 __0, float __1)
             {
-                if (TrafficSync.LocalInBuilding)
+                if (MPServer.IsRunning)
                 {
-                    Plugin.Logger.LogInfo($"[TMBlock] ClearTrafficOnArea(pos={__0}, r={__1}) — SKIPPED (inside building).");
+                    Plugin.Logger.LogInfo($"[TMBlock] ClearTrafficOnArea(pos={__0}, r={__1}) — SKIPPED (host MP active).");
                     return false;
                 }
-                Plugin.Logger.LogInfo($"[TMBlock] ClearTrafficOnArea(pos={__0}, r={__1}) — allowed.");
                 return true;
             }
         }
@@ -413,15 +419,13 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(TrafficManager), nameof(TrafficManager.SetPause))]
         public static class Patch_TM_SetPause
         {
-            // CLAUDE-DIAGNOSTIC
             static bool Prefix(bool __0)
             {
-                if (TrafficSync.LocalInBuilding && __0)
+                if (MPServer.IsRunning && __0)
                 {
-                    Plugin.Logger.LogInfo($"[TMBlock] SetPause(true) — SKIPPED (inside building).");
+                    Plugin.Logger.LogInfo("[TMBlock] SetPause(true) — SKIPPED (host MP active).");
                     return false;
                 }
-                Plugin.Logger.LogInfo($"[TMBlock] SetPause({__0}) — allowed.");
                 return true;
             }
         }
