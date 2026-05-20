@@ -251,6 +251,7 @@ namespace BigAmbitionsMP
             TickMarketSync();
             TickIntroNamePrefill();
             TickSuppressBlackOverlay(); // backlog #6 fix
+            TickExitTriggerDiag();      // CLAUDE-DIAGNOSTIC — exit-trigger investigation
 
             // Auto-hide when the game starts so our canvas doesn't block the intro
             // scene's "Start Game" button or any in-game UI.
@@ -731,6 +732,64 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogWarning($"[IntroName] {ex.Message}");
                 _introNameFilled = true;        // don't spam — try once, give up on error
+            }
+        }
+
+        // CLAUDE-DIAGNOSTIC — exit-trigger investigation.  Symptom: client
+        // walks into the in-building exit trigger area and nothing happens
+        // (host can exit from the same trigger).  F10 dumps player position,
+        // camera position, and every trigger Collider within 5m so we can
+        // identify what should be firing.
+        private bool _exitF10Down;
+
+        private void TickExitTriggerDiag()
+        {
+            if (!MPClient.IsConnected) return;
+            if (!IsInGame()) return;
+            try
+            {
+                bool f10 = Input.GetKey(KeyCode.F10);
+                if (f10 && !_exitF10Down) DumpExitTriggerDiag();
+                _exitF10Down = f10;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[ExitDiag] {ex.Message}"); }
+        }
+
+        private static void DumpExitTriggerDiag()
+        {
+            try
+            {
+                var ch = PlayerHelper.PlayerController?.Character;
+                var p = ch != null ? ch.transform.position : Vector3.zero;
+                var cam = Camera.main;
+                Plugin.Logger.LogInfo(
+                    $"[ExitDiag/F10] player pos={p} cam pos={(cam != null ? cam.transform.position.ToString() : "<null>")} cam fwd={(cam != null ? cam.transform.forward.ToString() : "<null>")}");
+
+                // Every trigger collider within 5m of player.  Iterate all
+                // colliders in the scene (slow but one-shot on F10 — fine).
+                var cols = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<Collider>());
+                int total = cols?.Length ?? 0;
+                int nearby = 0;
+                if (cols != null)
+                {
+                    for (int i = 0; i < cols.Length; i++)
+                    {
+                        var c = cols[i].TryCast<Collider>();
+                        if (c == null || !c.isTrigger || !c.enabled) continue;
+                        if (!c.gameObject.activeInHierarchy) continue;
+                        float sq = (c.transform.position - p).sqrMagnitude;
+                        if (sq > 25f) continue;          // 5m radius
+                        Plugin.Logger.LogInfo(
+                            $"[ExitDiag/F10]   trigger '{c.gameObject.name}' (parent='{(c.transform.parent != null ? c.transform.parent.name : "<root>")}') pos={c.transform.position} d={Mathf.Sqrt(sq):0.##}m");
+                        nearby++;
+                        if (nearby >= 15) break;
+                    }
+                }
+                Plugin.Logger.LogInfo($"[ExitDiag/F10] total colliders in scene={total}; nearby triggers logged={nearby}");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[ExitDiag/F10] {ex.Message}");
             }
         }
 

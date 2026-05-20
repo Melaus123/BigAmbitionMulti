@@ -329,6 +329,11 @@ namespace BigAmbitionsMP
                 try
                 {
                     var t = __instance?.GetType().Name ?? "<static>";
+                    // CLAUDE-DIAGNOSTIC — log unconditionally so we can see if
+                    // this fires on the client, whose LocalInBuilding flag
+                    // never flipped true and so OnExitFromBuilding's own log
+                    // would no-op.
+                    Plugin.Logger.LogInfo($"[ExitDiag/PATCH] ExitFromBuilding on {t}");
                     TrafficSync.OnExitFromBuilding(t);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] ExitFromBuilding prefix: {ex.Message}"); }
@@ -345,8 +350,48 @@ namespace BigAmbitionsMP
             // patch missed an exit path.
             static void Prefix(object __instance)
             {
-                try { TrafficSync.OnExitFromBuilding(__instance?.GetType().Name); } catch { }
+                try
+                {
+                    // CLAUDE-DIAGNOSTIC — log unconditionally (see Patch_ExitFromBuilding above).
+                    Plugin.Logger.LogInfo($"[ExitDiag/PATCH] ExitFromBuildingCoroutine on {__instance?.GetType().Name ?? "<static>"}");
+                    TrafficSync.OnExitFromBuilding(__instance?.GetType().Name);
+                }
+                catch { }
             }
+        }
+
+        // CLAUDE-DIAGNOSTIC — exit-trigger investigation (mirror of #6 entry probe).
+        // Symptom: client walks into building exit trigger; nothing fires.
+        // Host: ExitFromBuildingCoroutine fires fine.  Wider net of likely
+        // entry points — whichever fires on the client identifies the real
+        // exit signal, or none fires which means the trigger collider itself
+        // isn't responding to the client's player.
+
+        [HarmonyPatch]
+        public static class Patch_OnExitBuilding_Diag
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("OnExitBuilding");
+            static void Prefix(object __instance)
+            { try { Plugin.Logger.LogInfo($"[ExitDiag/PATCH] OnExitBuilding on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_GetExitPosition_Diag
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("GetExitPosition");
+            static void Postfix(object __instance, object __result)
+            { try { Plugin.Logger.LogInfo($"[ExitDiag/PATCH] GetExitPosition on {__instance?.GetType().Name ?? "<static>"} → {__result}"); } catch { } }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_ExitFloor_Diag
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("ExitFloor");
+            static void Prefix(object __instance)
+            { try { Plugin.Logger.LogInfo($"[ExitDiag/PATCH] ExitFloor on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
         }
 
         // ── Backlog #7 traffic-kill blockers ─────────────────────────────────
