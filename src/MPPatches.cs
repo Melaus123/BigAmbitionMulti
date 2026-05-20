@@ -457,15 +457,19 @@ namespace BigAmbitionsMP
         // Client suppresses its own ParkingLaneGenerator.GenerateParkedVehicles
         // so the local RNG can't create cars that conflict with host snapshots.
         // The host snapshot is the only source of parked cars while connected.
+        //
+        // OBSERVED 2026-05-19: the previous TargetMethod() using FindGameType
+        // returned null and aborted the patch class (1 of "2 failed" in the
+        // patch summary).  Result: client kept generating its own cars on top
+        // of host ghosts → 2 cars per spot, visible overlap.  Switch to the
+        // TargetMethods + FindAllMethodsByName pattern (same as building
+        // patches) — survives a name/namespace mismatch by yielding nothing
+        // rather than throwing, and catches every overload across assemblies.
         [HarmonyPatch]
         public static class Patch_GenerateParkedVehicles
         {
-            static System.Reflection.MethodBase? TargetMethod()
-            {
-                var t = VehicleManager.FindGameType("ParkingLaneGenerator");
-                return t?.GetMethod("GenerateParkedVehicles",
-                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            }
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("GenerateParkedVehicles");
 
             static bool Prefix()
             {
