@@ -765,6 +765,46 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo(
                     $"[ExitDiag/F10] player pos={p} cam pos={(cam != null ? cam.transform.position.ToString() : "<null>")} cam fwd={(cam != null ? cam.transform.forward.ToString() : "<null>")}");
 
+                // CLAUDE-DIAGNOSTIC — client player component/layer probe.
+                // Trigger fires require a Rigidbody (or CharacterController)
+                // on at least one of the overlapping colliders.  If the client
+                // character is missing those, OnTriggerEnter on ExitZone never
+                // runs.  Also check the layer — a layer-matrix exclusion would
+                // produce the same symptom.
+                try
+                {
+                    if (ch != null)
+                    {
+                        var go = ch.gameObject;
+                        Plugin.Logger.LogInfo(
+                            $"[ExitDiag/F10] player GO '{go.name}' layer={go.layer} ({LayerMask.LayerToName(go.layer)}) active={go.activeInHierarchy}");
+
+                        var par = go.transform.parent;
+                        if (par != null)
+                            Plugin.Logger.LogInfo(
+                                $"[ExitDiag/F10] player parent '{par.gameObject.name}' layer={par.gameObject.layer} ({LayerMask.LayerToName(par.gameObject.layer)})");
+
+                        // Walk down: components on player GO and direct children.
+                        var comps = go.GetComponents(Il2CppType.Of<Component>());
+                        Plugin.Logger.LogInfo($"[ExitDiag/F10] player components on '{go.name}' ({comps?.Length ?? 0}):");
+                        if (comps != null)
+                            for (int i = 0; i < comps.Length && i < 30; i++)
+                            {
+                                var c = comps[i];
+                                if (c == null) continue;
+                                Plugin.Logger.LogInfo($"[ExitDiag/F10]   comp {c.GetIl2CppType().Name}");
+                            }
+
+                        // Specifically check Rigidbody / CharacterController / Collider
+                        var rb = go.GetComponentInChildren(Il2CppType.Of<Rigidbody>());
+                        var cc = go.GetComponentInChildren(Il2CppType.Of<CharacterController>());
+                        var col = go.GetComponentInChildren(Il2CppType.Of<Collider>());
+                        Plugin.Logger.LogInfo(
+                            $"[ExitDiag/F10] player hierarchy has: Rigidbody={(rb != null ? "YES (" + rb.GetIl2CppType().Name + ")" : "no")} CharacterController={(cc != null ? "YES" : "no")} Collider={(col != null ? "YES (" + col.GetIl2CppType().Name + ")" : "no")}");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[ExitDiag/F10] player-component dump: {ex.Message}"); }
+
                 // Every trigger collider within 5m of player.  Iterate all
                 // colliders in the scene (slow but one-shot on F10 — fine).
                 var cols = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<Collider>());
