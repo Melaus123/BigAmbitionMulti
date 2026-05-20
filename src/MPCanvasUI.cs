@@ -841,11 +841,87 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[BClientDiag/{tag}] localPlayer pos={(ch != null ? ch.transform.position.ToString() : "<null>")}");
                 }
                 catch { }
+
+                // Skybox + ambient (covers the skybox-unbound hypothesis)
+                try
+                {
+                    var sky = RenderSettings.skybox;
+                    Plugin.Logger.LogInfo(
+                        $"[BClientDiag/{tag}] skybox={(sky != null ? sky.name : "<null>")} ambient={RenderSettings.ambientLight}");
+                }
+                catch { }
+
+                // Active Canvases — anything with a high sortingOrder is a
+                // candidate for a screen-cover overlay.
+                try
+                {
+                    var canvases = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<Canvas>());
+                    int cn = canvases?.Length ?? 0;
+                    Plugin.Logger.LogInfo($"[BClientDiag/{tag}] canvases total={cn}");
+                    if (canvases != null)
+                    {
+                        for (int i = 0; i < canvases.Length; i++)
+                        {
+                            var c = canvases[i].TryCast<Canvas>();
+                            if (c == null) continue;
+                            if (!c.gameObject.activeInHierarchy) continue;
+                            Plugin.Logger.LogInfo(
+                                $"[BClientDiag/{tag}]   canvas '{BuildPath(c.transform)}' mode={c.renderMode} sort={c.sortingOrder} enabled={c.enabled}");
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[BClientDiag/{tag}] canvas-dump: {ex.Message}"); }
+
+                // Suspicious overlay names — load/fade/black/cover/etc.  Looks
+                // at every active Image in the scene; logs those whose name
+                // matches the pattern.  This is the prime suspect for the
+                // black-screen symptom.
+                try
+                {
+                    var imgs = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<UnityEngine.UI.Image>());
+                    int matched = 0;
+                    if (imgs != null)
+                    {
+                        for (int i = 0; i < imgs.Length; i++)
+                        {
+                            var img = imgs[i].TryCast<UnityEngine.UI.Image>();
+                            if (img == null) continue;
+                            if (!img.gameObject.activeInHierarchy) continue;
+                            string n = img.gameObject.name.ToLowerInvariant();
+                            if (n.Contains("load") || n.Contains("fade") || n.Contains("black") ||
+                                n.Contains("cover") || n.Contains("transition") || n.Contains("intro") ||
+                                n.Contains("splash") || n.Contains("blackout") || n.Contains("dark"))
+                            {
+                                Plugin.Logger.LogInfo(
+                                    $"[BClientDiag/{tag}]   suspect '{BuildPath(img.transform)}' color={img.color} a={img.color.a:0.##}");
+                                matched++;
+                                if (matched >= 10) break;
+                            }
+                        }
+                    }
+                    if (matched == 0)
+                        Plugin.Logger.LogInfo($"[BClientDiag/{tag}] no suspect-named overlays found (imgs={imgs?.Length ?? 0}).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[BClientDiag/{tag}] image-dump: {ex.Message}"); }
             }
             catch (Exception ex)
             {
                 Plugin.Logger.LogWarning($"[BClientDiag/{tag}] dump error: {ex.Message}");
             }
+        }
+
+        private static string BuildPath(Transform t)
+        {
+            if (t == null) return "<null>";
+            var sb = new System.Text.StringBuilder(t.name);
+            var cur = t.parent;
+            while (cur != null)
+            {
+                sb.Insert(0, "/");
+                sb.Insert(0, cur.name);
+                cur = cur.parent;
+            }
+            return sb.ToString();
         }
 
         private static Type? FindAnyType(string nameOrFullName)
