@@ -280,9 +280,38 @@ namespace BigAmbitionsMP
                 try
                 {
                     Plugin.Logger.LogInfo($"[Building] DelayedEnterBuildingActions on {__instance?.GetType().Name ?? "<static>"}");
+                    // CLAUDE-DIAGNOSTIC — capture the call stack so we can see
+                    // who calls DelayedEnterBuildingActions on the host.  Without
+                    // this we don't know the call site (Invoke probe came back
+                    // empty, so it isn't UnityEngine.MonoBehaviour.Invoke).
+                    string st = Environment.StackTrace;
+                    foreach (var line in st.Split('\n'))
+                        Plugin.Logger.LogInfo($"[Building/Stack] {line.Trim()}");
                     TrafficSync.OnEnteredBuilding("DelayedEnterBuildingActions");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] DelayedEnterBuilding prefix: {ex.Message}"); }
+            }
+        }
+
+        // CLAUDE-DIAGNOSTIC — StartCoroutine probe filtered to BuildingManager.
+        // Since the Invoke probe came back empty, the most likely remaining
+        // schedule mechanism is a coroutine.  Captures every coroutine started
+        // by a BuildingManager so we can see what (if anything) it kicks off
+        // that would eventually call DelayedEnterBuildingActions.
+        [HarmonyPatch(typeof(UnityEngine.MonoBehaviour), nameof(UnityEngine.MonoBehaviour.StartCoroutine), new[] { typeof(System.Collections.IEnumerator) })]
+        public static class Patch_MB_StartCoroutine_Diag
+        {
+            static void Postfix(UnityEngine.MonoBehaviour __instance, System.Collections.IEnumerator __0)
+            {
+                try
+                {
+                    if (__instance == null || __0 == null) return;
+                    var t = __instance.GetIl2CppType();
+                    if (t == null || t.Name != "BuildingManager") return;
+                    string side = MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
+                    Plugin.Logger.LogInfo($"[InvokeProbe/{side}] BuildingManager.StartCoroutine({__0.GetType().Name})");
+                }
+                catch { }
             }
         }
 
