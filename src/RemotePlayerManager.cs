@@ -1001,34 +1001,50 @@ namespace BigAmbitionsMP
             // them just like they do for the host's local player.  Gley
             // raycasts against `playerLayer`; if a remote player is on the same
             // layer as the local character (with a real collider on it), every
-            // existing "stop for player" rule applies for free.  We give the
-            // root a sized CapsuleCollider plus a kinematic Rigidbody so the
-            // remote isn't pushed around by physics but still blocks/triggers
-            // detection like a body.
-            try
+            // existing "stop for player" rule applies for free.
+            //
+            // CRITICAL: only do this on the HOST.  Traffic only runs on the
+            // host, so only the host needs to detect remote players as
+            // obstacles.  Doing this on the CLIENT puts an extra collider on
+            // the Player layer, which (per backlog observation 2026-05-20)
+            // breaks the client's building-entry chain — its physics query
+            // for "the player at this entrance" returns more than expected
+            // and the entry coroutine bails on the player-identification
+            // check, never invoking DelayedEnterBuildingActions.
+            //
+            // On the client, the remote player is visual-only: position +
+            // animations, no physics presence.
+            if (MPServer.IsRunning)
             {
-                int playerLayer = 0;
-                var localChar = PlayerHelper.PlayerController?.Character?.gameObject;
-                if (localChar != null) playerLayer = localChar.layer;
-                root.layer = playerLayer;
+                try
+                {
+                    int playerLayer = 0;
+                    var localChar = PlayerHelper.PlayerController?.Character?.gameObject;
+                    if (localChar != null) playerLayer = localChar.layer;
+                    root.layer = playerLayer;
 
-                var col = root.AddComponent<CapsuleCollider>();
-                col.height   = 1.8f;
-                col.radius   = 0.4f;
-                col.center   = new Vector3(0f, 0.9f, 0f);
-                col.isTrigger = false;
+                    var col = root.AddComponent<CapsuleCollider>();
+                    col.height   = 1.8f;
+                    col.radius   = 0.4f;
+                    col.center   = new Vector3(0f, 0.9f, 0f);
+                    col.isTrigger = false;
 
-                var rb = root.AddComponent<Rigidbody>();
-                rb.isKinematic = true;
-                rb.useGravity  = false;
-                rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
+                    var rb = root.AddComponent<Rigidbody>();
+                    rb.isKinematic = true;
+                    rb.useGravity  = false;
+                    rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
 
-                Plugin.Logger.LogInfo(
-                    $"[RemotePlayer] '{playerId}' collider on layer {playerLayer} ({LayerMask.LayerToName(playerLayer)}).");
+                    Plugin.Logger.LogInfo(
+                        $"[RemotePlayer] '{playerId}' collider on layer {playerLayer} ({LayerMask.LayerToName(playerLayer)}) [host].");
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogWarning($"[RemotePlayer] Collider setup failed for '{playerId}': {ex.Message}");
+                }
             }
-            catch (Exception ex)
+            else
             {
-                Plugin.Logger.LogWarning($"[RemotePlayer] Collider setup failed for '{playerId}': {ex.Message}");
+                Plugin.Logger.LogInfo($"[RemotePlayer] '{playerId}' visual-only (no collider) — client side.");
             }
 
             // Clone the local player's character model so remote players get a real
