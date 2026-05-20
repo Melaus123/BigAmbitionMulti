@@ -327,6 +327,90 @@ namespace BigAmbitionsMP
             }
         }
 
+        // CLAUDE-DIAGNOSTIC — backlog #7.  The Prefix on EnterBuildingCoroutine
+        // doesn't fire even though Patch summary says the patch applied.  Widen
+        // the net: try every plausible "enter a building" entry point.  Whichever
+        // one fires first identifies the real entry path the user is taking.
+        [HarmonyPatch]
+        public static class Patch_CmdEnterBuilding
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("Command_EnterBuilding");
+            static void Prefix(object __instance)
+            { try { Plugin.Logger.LogInfo($"[Building] Command_EnterBuilding on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_DelayedEnterBuilding
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("DelayedEnterBuildingActions");
+            static void Prefix(object __instance)
+            { try { Plugin.Logger.LogInfo($"[Building] DelayedEnterBuildingActions on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_EnterBuildingWithVehicle
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("EnterBuildingWithVehicle");
+            static void Prefix(object __instance)
+            {
+                try
+                {
+                    Plugin.Logger.LogInfo($"[Building] EnterBuildingWithVehicle on {__instance?.GetType().Name ?? "<static>"}");
+                    TrafficSync.OnEnteredBuilding("EnterBuildingWithVehicle");
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_EnterParking
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("EnterParking");
+            static void Prefix(object __instance)
+            {
+                try
+                {
+                    Plugin.Logger.LogInfo($"[Building] EnterParking on {__instance?.GetType().Name ?? "<static>"}");
+                    TrafficSync.OnEnteredBuilding("EnterParking");
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_EnterParkingCoroutine
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("EnterParkingCoroutine");
+            static void Prefix(object __instance)
+            { try { Plugin.Logger.LogInfo($"[Building] EnterParkingCoroutine on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
+        }
+
+        // Also widen the existing EnterBuildingCoroutine patch to also flip the
+        // flag (currently only logs).  If THIS one was the right one all along
+        // but the prefix doesn't visibly fire due to an inlining quirk, having
+        // OnEnteredBuilding here too at least flips the state where it would
+        // otherwise stay false.
+        [HarmonyPatch]
+        public static class Patch_EnterBuildingCoroutine_Flag
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("EnterBuildingCoroutine");
+            static void Postfix(object __instance)
+            {
+                try
+                {
+                    Plugin.Logger.LogInfo($"[Building] EnterBuildingCoroutine POSTFIX on {__instance?.GetType().Name ?? "<static>"}");
+                    TrafficSync.OnEnteredBuilding(__instance?.GetType().Name);
+                }
+                catch { }
+            }
+        }
+
         // ── Patch: GameManager.ClickSleep ─────────────────────────────────────
         // ClickSleep is the public handler for the in-game "sleep" button.
         // We allow the sleep to START (character enters bed) but suppress the
