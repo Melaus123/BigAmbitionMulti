@@ -261,37 +261,60 @@ namespace BigAmbitionsMP
         // CasinoBuildingController, etc.) so we patch ALL methods with each
         // name across all assemblies via FindAllMethodsByName.
 
+        // Building entry / exit — flips TrafficSync.LocalInBuilding so anchor
+        // logic and other in-building behaviour can hook off it.  The actual
+        // method that fires on foot entry is BuildingManager.DelayedEnterBuildingActions
+        // (confirmed by observation 2026-05-19 — EnterBuildingCoroutine is
+        // patched but never fires for this path).  EnterBuildingWithVehicle /
+        // EnterParking are defensive secondary handlers for the vehicle and
+        // parking-entry paths.
+
         [HarmonyPatch]
-        public static class Patch_EnterBuildingCoroutine
+        public static class Patch_DelayedEnterBuilding
         {
             static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("EnterBuildingCoroutine");
+                => VehicleManager.FindAllMethodsByName("DelayedEnterBuildingActions");
 
             static void Prefix(object __instance)
             {
                 try
                 {
-                    var t = __instance?.GetType().Name ?? "<static>";
-                    Plugin.Logger.LogInfo($"[Building] EnterBuildingCoroutine START on {t}");
+                    Plugin.Logger.LogInfo($"[Building] DelayedEnterBuildingActions on {__instance?.GetType().Name ?? "<static>"}");
+                    TrafficSync.OnEnteredBuilding("DelayedEnterBuildingActions");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] DelayedEnterBuilding prefix: {ex.Message}"); }
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_EnterBuildingWithVehicle
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+                => VehicleManager.FindAllMethodsByName("EnterBuildingWithVehicle");
+            static void Prefix(object __instance)
+            {
+                try
+                {
+                    Plugin.Logger.LogInfo($"[Building] EnterBuildingWithVehicle on {__instance?.GetType().Name ?? "<static>"}");
+                    TrafficSync.OnEnteredBuilding("EnterBuildingWithVehicle");
                 }
                 catch { }
             }
         }
 
         [HarmonyPatch]
-        public static class Patch_EnteredBuilding
+        public static class Patch_EnterParking
         {
             static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("EnteredBuilding");
-
-            static void Postfix(object __instance)
+                => VehicleManager.FindAllMethodsByName("EnterParking");
+            static void Prefix(object __instance)
             {
                 try
                 {
-                    var t = __instance?.GetType().Name ?? "<static>";
-                    TrafficSync.OnEnteredBuilding(t);
+                    Plugin.Logger.LogInfo($"[Building] EnterParking on {__instance?.GetType().Name ?? "<static>"}");
+                    TrafficSync.OnEnteredBuilding("EnterParking");
                 }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] EnteredBuilding postfix: {ex.Message}"); }
+                catch { }
             }
         }
 
@@ -318,75 +341,22 @@ namespace BigAmbitionsMP
             static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
                 => VehicleManager.FindAllMethodsByName("ExitFromBuildingCoroutine");
 
+            // Defensive: also clear the flag here in case ExitFromBuilding's
+            // patch missed an exit path.
             static void Prefix(object __instance)
             {
-                try
-                {
-                    var t = __instance?.GetType().Name ?? "<static>";
-                    Plugin.Logger.LogInfo($"[Building] ExitFromBuildingCoroutine START on {t}");
-                }
-                catch { }
-            }
-        }
-
-        // CLAUDE-DIAGNOSTIC — backlog #7.  The Prefix on EnterBuildingCoroutine
-        // doesn't fire even though Patch summary says the patch applied.  Widen
-        // the net: try every plausible "enter a building" entry point.  Whichever
-        // one fires first identifies the real entry path the user is taking.
-        [HarmonyPatch]
-        public static class Patch_CmdEnterBuilding
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("Command_EnterBuilding");
-            static void Prefix(object __instance)
-            { try { Plugin.Logger.LogInfo($"[Building] Command_EnterBuilding on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
-        }
-
-        [HarmonyPatch]
-        public static class Patch_DelayedEnterBuilding
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("DelayedEnterBuildingActions");
-
-            // OBSERVED 2026-05-19: this is the actual entry signal the user hits
-            // — EnterBuildingCoroutine never fires for the on-foot entry path.
-            // Flip LocalInBuilding here so anchor logic + the traffic-kill
-            // blockers below take effect.
-            static void Prefix(object __instance)
-            {
-                try
-                {
-                    Plugin.Logger.LogInfo($"[Building] DelayedEnterBuildingActions on {__instance?.GetType().Name ?? "<static>"}");
-                    TrafficSync.OnEnteredBuilding("DelayedEnterBuildingActions");
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] DelayedEnterBuilding prefix: {ex.Message}"); }
+                try { TrafficSync.OnExitFromBuilding(__instance?.GetType().Name); } catch { }
             }
         }
 
         // ── Backlog #7 traffic-kill blockers ─────────────────────────────────
-        //
-        // OBSERVED: the world scene + TrafficManager singleton survive building
-        // entry intact (scene name unchanged, TrafficManager.Instance NON-NULL
-        // throughout).  Yet traffic visually disappears immediately on entry.
-        // Gley exposes ClearTraffic, ClearTrafficOnArea, and SetPause — any of
-        // these called on entry would explain the observation.  We patch all
-        // three: log every call (so we know which one fires) and SKIP THE METHOD
-        // (Prefix returns false) while LocalInBuilding=true.  In single-player
-        // this would be wrong — but in MP the host's interior visit shouldn't
-        // wipe traffic the client is watching.
-        //
-        // Diagnostic-tagged so the cleanup pass picks them up if we ever
-        // confirm none are the culprit.
-
-        // OBSERVED 2026-05-19 host log lines 39540-39543:
-        //   [TMBlock] SetPause(True) — allowed.
-        //   [TMBlock] ClearTraffic() called (outside building — allowed).
-        //   [Building] DelayedEnterBuildingActions on BuildingManager
-        //   [Building] EnteredBuilding ...
-        // The pause+clear calls land BEFORE the entry signal fires, so the
-        // LocalInBuilding gate can never catch them.  Block them whenever the
-        // host is multiplayer-active instead — in MP we want traffic
-        // persistent for clients regardless of why the game tries to clear it.
+        // Gley's TrafficManager exposes ClearTraffic / ClearTrafficOnArea /
+        // SetPause.  On building entry the game calls SetPause(true) +
+        // ClearTraffic, which wipes the world's cars for everyone — including
+        // remote clients still standing outside.  In MP we want traffic
+        // persistent across the host's interior visits, so we no-op these
+        // whenever the host is MP-active.  SetPause(false) (unpause) still
+        // passes through.
 
         [HarmonyPatch(typeof(TrafficManager), nameof(TrafficManager.ClearTraffic))]
         public static class Patch_TM_ClearTraffic
@@ -427,68 +397,6 @@ namespace BigAmbitionsMP
                     return false;
                 }
                 return true;
-            }
-        }
-
-        [HarmonyPatch]
-        public static class Patch_EnterBuildingWithVehicle
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("EnterBuildingWithVehicle");
-            static void Prefix(object __instance)
-            {
-                try
-                {
-                    Plugin.Logger.LogInfo($"[Building] EnterBuildingWithVehicle on {__instance?.GetType().Name ?? "<static>"}");
-                    TrafficSync.OnEnteredBuilding("EnterBuildingWithVehicle");
-                }
-                catch { }
-            }
-        }
-
-        [HarmonyPatch]
-        public static class Patch_EnterParking
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("EnterParking");
-            static void Prefix(object __instance)
-            {
-                try
-                {
-                    Plugin.Logger.LogInfo($"[Building] EnterParking on {__instance?.GetType().Name ?? "<static>"}");
-                    TrafficSync.OnEnteredBuilding("EnterParking");
-                }
-                catch { }
-            }
-        }
-
-        [HarmonyPatch]
-        public static class Patch_EnterParkingCoroutine
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("EnterParkingCoroutine");
-            static void Prefix(object __instance)
-            { try { Plugin.Logger.LogInfo($"[Building] EnterParkingCoroutine on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
-        }
-
-        // Also widen the existing EnterBuildingCoroutine patch to also flip the
-        // flag (currently only logs).  If THIS one was the right one all along
-        // but the prefix doesn't visibly fire due to an inlining quirk, having
-        // OnEnteredBuilding here too at least flips the state where it would
-        // otherwise stay false.
-        [HarmonyPatch]
-        public static class Patch_EnterBuildingCoroutine_Flag
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("EnterBuildingCoroutine");
-            static void Postfix(object __instance)
-            {
-                try
-                {
-                    Plugin.Logger.LogInfo($"[Building] EnterBuildingCoroutine POSTFIX on {__instance?.GetType().Name ?? "<static>"}");
-                    TrafficSync.OnEnteredBuilding(__instance?.GetType().Name);
-                }
-                catch { }
             }
         }
 

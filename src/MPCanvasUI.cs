@@ -1,13 +1,11 @@
 using System;
 using UnityEngine;
-using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using TMPro;
 using Il2CppInterop.Runtime;
 using Il2CppInterop.Runtime.Injection;
 using Helpers;
 using Intro;
-using GleyTrafficSystem;
 
 namespace BigAmbitionsMP
 {
@@ -252,7 +250,6 @@ namespace BigAmbitionsMP
             TickTimeSync();
             TickMarketSync();
             TickIntroNamePrefill();
-            TickBuildingDiag();    // CLAUDE-DIAGNOSTIC for backlog #7
 
             // Auto-hide when the game starts so our canvas doesn't block the intro
             // scene's "Start Game" button or any in-game UI.
@@ -730,55 +727,6 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogWarning($"[IntroName] {ex.Message}");
                 _introNameFilled = true;        // don't spam — try once, give up on error
-            }
-        }
-
-        // CLAUDE-DIAGNOSTIC — backlog #7 building-entry investigation.
-        // Three signals to identify what actually happens on building entry:
-        //   (a) active scene-name change (if a new scene loads)
-        //   (b) TrafficManager.Instance null transition (if the singleton dies)
-        //   (c) Throttled tick of current Y position so we can correlate with
-        //       in-game events (interiors are often at very different Y values).
-        private string _diagPrevScene = "";
-        private bool _diagPrevTmNull = true;
-        private float _diagNextHeartbeat;
-
-        private void TickBuildingDiag()
-        {
-            try
-            {
-                // (a) Active scene name watcher
-                var scene = SceneManager.GetActiveScene();
-                string cur = scene.name ?? "";
-                if (cur != _diagPrevScene)
-                {
-                    Plugin.Logger.LogInfo(
-                        $"[BuildingDiag] Active scene CHANGED: '{_diagPrevScene}' → '{cur}' (root count={scene.rootCount})");
-                    _diagPrevScene = cur;
-                }
-
-                // (b) TrafficManager singleton state
-                bool tmNull = (TrafficManager.Instance == null);
-                if (tmNull != _diagPrevTmNull)
-                {
-                    Plugin.Logger.LogInfo(
-                        $"[BuildingDiag] TrafficManager.Instance now {(tmNull ? "NULL" : "NON-NULL")}.");
-                    _diagPrevTmNull = tmNull;
-                }
-
-                // (c) 2s heartbeat: scene, TM state, player Y, anchor mode
-                if (Time.unscaledTime >= _diagNextHeartbeat)
-                {
-                    _diagNextHeartbeat = Time.unscaledTime + 2f;
-                    float y = 0f;
-                    try { y = PlayerHelper.PlayerController?.Character?.transform.position.y ?? 0f; } catch { }
-                    Plugin.Logger.LogInfo(
-                        $"[BuildingDiag] heartbeat scene='{cur}' tm={(tmNull ? "null" : "ok")} y={y:F1} inBuilding={TrafficSync.LocalInBuilding} inTaxi={TrafficSync.LocalInTaxi}");
-                }
-            }
-            catch (Exception ex)
-            {
-                Plugin.Logger.LogWarning($"[BuildingDiag] {ex.Message}");
             }
         }
 

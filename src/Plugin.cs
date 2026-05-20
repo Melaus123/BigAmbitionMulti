@@ -53,8 +53,8 @@ namespace BigAmbitionsMP
                     var added = _harmony.GetPatchedMethods().Count() - before;
                     okClasses++;
                     totalPatched += added;
-                    // CLAUDE-DIAGNOSTIC — per-class patch count, so a future
-                    // regression in a single class is loud, not silent.
+                    // Per-class patch count — keeps a single broken patch
+                    // class visible at startup instead of silently dropped.
                     Logger.LogInfo($"[Plugin] Patched {t.Name}: {added} method(s)");
                 }
                 catch (Exception ex)
