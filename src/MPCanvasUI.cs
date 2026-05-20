@@ -1108,6 +1108,7 @@ namespace BigAmbitionsMP
         // upstream cause.
         private bool _trafF11Down;
         private bool _parkF6Down;
+        private bool _parkApplyF5Down;
 
         private void TickToggleClientSuppressions()
         {
@@ -1122,6 +1123,10 @@ namespace BigAmbitionsMP
                 bool f6 = Input.GetKey(KeyCode.F6);
                 if (f6 && !_parkF6Down) ParkedVehicleSync.ToggleSpawnSuppression();
                 _parkF6Down = f6;
+
+                bool f5 = Input.GetKey(KeyCode.F5);
+                if (f5 && !_parkApplyF5Down) ParkedVehicleSync.ToggleClientApply();
+                _parkApplyF5Down = f5;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[ClientFix] toggle tick: {ex.Message}"); }
         }

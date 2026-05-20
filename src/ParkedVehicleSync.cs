@@ -77,6 +77,38 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[ClientFix] Parked-vehicle spawn suppression → {SpawnSuppressionEnabled}");
         }
 
+        // CLAUDE-DIAGNOSTIC — F5 toggle: disable the ENTIRE client-side
+        // parked-vehicle sync.  When false, ApplySnapshot is a no-op AND
+        // CullingPass is a no-op; toggling off ALSO releases all existing
+        // ghosts back to the pool.  Lets us test whether the act of
+        // renting from ParkingSimulator's pool (or having ghost vehicles
+        // in the world) is what breaks the client's building-entry chain
+        // after the host joins.
+        public static bool ClientApplyEnabled { get; set; } = true;
+
+        public static void ToggleClientApply()
+        {
+            ClientApplyEnabled = !ClientApplyEnabled;
+            if (!ClientApplyEnabled)
+            {
+                int releasedCount = 0;
+                foreach (var g in _clientGhosts.Values)
+                {
+                    if (g != null)
+                    {
+                        try { CallPoolRelease(g); releasedCount++; } catch { }
+                    }
+                }
+                _clientGhosts.Clear();
+                _clientKnown.Clear();
+                Plugin.Logger.LogInfo($"[ClientFix] Client parked-vehicle sync DISABLED — released {releasedCount} ghost(s) back to pool, cleared known set.");
+            }
+            else
+            {
+                Plugin.Logger.LogInfo("[ClientFix] Client parked-vehicle sync ENABLED — will rehydrate on next full host snapshot.");
+            }
+        }
+
         public static void Reset()
         {
             _hostTracked.Clear();
@@ -279,6 +311,7 @@ namespace BigAmbitionsMP
             try
             {
                 if (payload == null) return;
+                if (!ClientApplyEnabled) return;     // CLAUDE-DIAGNOSTIC F5 gate
 
                 if (payload.IsFullSnapshot)
                 {
@@ -329,6 +362,7 @@ namespace BigAmbitionsMP
 
         private static void CullingPass()
         {
+            if (!ClientApplyEnabled) return;     // CLAUDE-DIAGNOSTIC F5 gate
             try
             {
                 var localChar = PlayerHelper.PlayerController?.Character;
