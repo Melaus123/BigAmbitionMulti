@@ -65,6 +65,18 @@ namespace BigAmbitionsMP
         private static MethodInfo? _miRequest;
         private static MethodInfo? _miRelease;
 
+        // CLAUDE-DIAGNOSTIC — F6 toggle for the entry-bug investigation.
+        // Default ON.  Flipping OFF lets the client's ParkingLaneGenerator
+        // run as normal — used to test whether parked-vehicle suppression
+        // is the upstream cause of DelayedEnterBuildingActions not firing.
+        public static bool SpawnSuppressionEnabled { get; set; } = true;
+
+        public static void ToggleSpawnSuppression()
+        {
+            SpawnSuppressionEnabled = !SpawnSuppressionEnabled;
+            Plugin.Logger.LogInfo($"[ClientFix] Parked-vehicle spawn suppression → {SpawnSuppressionEnabled}");
+        }
+
         public static void Reset()
         {
             _hostTracked.Clear();

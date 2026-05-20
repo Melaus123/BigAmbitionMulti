@@ -253,6 +253,7 @@ namespace BigAmbitionsMP
             TickSuppressBlackOverlay(); // backlog #6 fix
             TickExitTriggerDiag();      // CLAUDE-DIAGNOSTIC — exit-trigger investigation
             TickBuildingStateProbe();   // CLAUDE-DIAGNOSTIC — state-delta probe
+            TickToggleClientSuppressions();  // CLAUDE-DIAGNOSTIC — F11/F6 toggles
 
             // Auto-hide when the game starts so our canvas doesn't block the intro
             // scene's "Start Game" button or any in-game UI.
@@ -1098,6 +1099,31 @@ namespace BigAmbitionsMP
                     if (t.FullName == nameOrFullName || t.Name == nameOrFullName) return t;
             }
             return null;
+        }
+
+        // CLAUDE-DIAGNOSTIC — F11/F6 toggles for the other two client
+        // suppressions (TrafficManager + ParkedVehicle spawn).  Per user's
+        // first-domino theory, if turning one of these OFF lets
+        // DelayedEnterBuildingActions fire on the client, we've found the
+        // upstream cause.
+        private bool _trafF11Down;
+        private bool _parkF6Down;
+
+        private void TickToggleClientSuppressions()
+        {
+            if (!MPClient.IsConnected) return;
+            if (!IsInGame()) return;
+            try
+            {
+                bool f11 = Input.GetKey(KeyCode.F11);
+                if (f11 && !_trafF11Down) TrafficSync.ToggleClientTrafficSuppression();
+                _trafF11Down = f11;
+
+                bool f6 = Input.GetKey(KeyCode.F6);
+                if (f6 && !_parkF6Down) ParkedVehicleSync.ToggleSpawnSuppression();
+                _parkF6Down = f6;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[ClientFix] toggle tick: {ex.Message}"); }
         }
 
         // ── Backlog #6 fix: keep 'BlackOverlay' canvas suppressed on client ──

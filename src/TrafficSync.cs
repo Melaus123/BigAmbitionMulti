@@ -1133,6 +1133,9 @@ namespace BigAmbitionsMP
         /// </summary>
         private static void SuppressLocalTraffic()
         {
+            // CLAUDE-DIAGNOSTIC — toggle flag for backlog #6 first-domino test.
+            if (!ClientTrafficSuppressionEnabled) return;
+
             var tm = TrafficManager.Instance;
             if (tm == null) return;
             if (!tm.enabled) return;                 // already killed
@@ -1144,6 +1147,29 @@ namespace BigAmbitionsMP
                 _clientTrafficKilled = true;
                 Plugin.Logger.LogInfo("[TrafficSync] Local traffic killed (TrafficManager disabled + cleared).");
             }
+        }
+
+        // CLAUDE-DIAGNOSTIC — F11 toggle for the entry-bug investigation.
+        // Default ON.  Flipping OFF stops SuppressLocalTraffic from running
+        // and re-enables TrafficManager so we can test whether disabling it
+        // is what prevents BuildingManager.DelayedEnterBuildingActions from
+        // firing on the client.
+        public static bool ClientTrafficSuppressionEnabled { get; set; } = true;
+
+        public static void ToggleClientTrafficSuppression()
+        {
+            ClientTrafficSuppressionEnabled = !ClientTrafficSuppressionEnabled;
+            try
+            {
+                var tm = TrafficManager.Instance;
+                if (tm != null && !ClientTrafficSuppressionEnabled)
+                {
+                    tm.enabled = true;     // un-suppress immediately
+                }
+                Plugin.Logger.LogInfo(
+                    $"[ClientFix] Client traffic suppression → {ClientTrafficSuppressionEnabled} (TM.enabled={(tm != null ? tm.enabled.ToString() : "<null>")})");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[ClientFix] traffic toggle: {ex.Message}"); }
         }
     }
 }

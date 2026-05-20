@@ -394,6 +394,67 @@ namespace BigAmbitionsMP
             { try { Plugin.Logger.LogInfo($"[ExitDiag/PATCH] ExitFloor on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
         }
 
+        // CLAUDE-DIAGNOSTIC — Invoke / CancelInvoke probe for BuildingManager.
+        // DelayedEnterBuildingActions fires on host but never on client.  Patch
+        // MonoBehaviour.Invoke + CancelInvoke and filter to instances whose
+        // runtime type is BuildingManager.  Two possible conclusions:
+        //   (1) Host logs '[InvokeProbe/HOST] BuildingManager.Invoke("DelayedEnterBuildingActions", ...)'
+        //       and client logs the same → the schedule is made on both, then
+        //       something on the client cancels or never executes it.
+        //   (2) Host logs it and client doesn't → the schedule itself is
+        //       gated on something that's false on the client.
+
+        [HarmonyPatch(typeof(UnityEngine.MonoBehaviour), nameof(UnityEngine.MonoBehaviour.Invoke), new[] { typeof(string), typeof(float) })]
+        public static class Patch_MB_Invoke
+        {
+            static void Postfix(UnityEngine.MonoBehaviour __instance, string __0, float __1)
+            {
+                try
+                {
+                    if (__instance == null) return;
+                    var t = __instance.GetIl2CppType();
+                    if (t == null || t.Name != "BuildingManager") return;
+                    string side = MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
+                    Plugin.Logger.LogInfo($"[InvokeProbe/{side}] BuildingManager.Invoke('{__0}', {__1})");
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(UnityEngine.MonoBehaviour), nameof(UnityEngine.MonoBehaviour.CancelInvoke), new[] { typeof(string) })]
+        public static class Patch_MB_CancelInvokeNamed
+        {
+            static void Postfix(UnityEngine.MonoBehaviour __instance, string __0)
+            {
+                try
+                {
+                    if (__instance == null) return;
+                    var t = __instance.GetIl2CppType();
+                    if (t == null || t.Name != "BuildingManager") return;
+                    string side = MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
+                    Plugin.Logger.LogInfo($"[InvokeProbe/{side}] BuildingManager.CancelInvoke('{__0}')");
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(UnityEngine.MonoBehaviour), nameof(UnityEngine.MonoBehaviour.CancelInvoke), new Type[0])]
+        public static class Patch_MB_CancelInvokeAll
+        {
+            static void Postfix(UnityEngine.MonoBehaviour __instance)
+            {
+                try
+                {
+                    if (__instance == null) return;
+                    var t = __instance.GetIl2CppType();
+                    if (t == null || t.Name != "BuildingManager") return;
+                    string side = MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
+                    Plugin.Logger.LogInfo($"[InvokeProbe/{side}] BuildingManager.CancelInvoke(all)");
+                }
+                catch { }
+            }
+        }
+
         // CLAUDE-DIAGNOSTIC — method-call tracer for the building entry path.
         // Patches every public method declared on BuildingManager with a
         // logging Prefix.  Run on both sides simultaneously and compare —
@@ -570,7 +631,9 @@ namespace BigAmbitionsMP
 
             static bool Prefix()
             {
-                if (MPClient.IsConnected) return false;        // client = ghosts-only mode
+                // CLAUDE-DIAGNOSTIC — gated on ParkedVehicleSync.SpawnSuppressionEnabled
+                // so F6 can toggle the suppression at runtime for the entry-bug A/B test.
+                if (MPClient.IsConnected && ParkedVehicleSync.SpawnSuppressionEnabled) return false;
                 return true;
             }
         }
