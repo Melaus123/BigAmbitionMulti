@@ -1,6 +1,5 @@
 using System;
 using UnityEngine;
-using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using TMPro;
 using Il2CppInterop.Runtime;
@@ -251,7 +250,6 @@ namespace BigAmbitionsMP
             TickTimeSync();
             TickMarketSync();
             TickIntroNamePrefill();
-            TickBuildingClientDiag();   // CLAUDE-DIAGNOSTIC for backlog #6
             TickSuppressBlackOverlay(); // backlog #6 fix
 
             // Auto-hide when the game starts so our canvas doesn't block the intro
@@ -736,191 +734,6 @@ namespace BigAmbitionsMP
             }
         }
 
-        // CLAUDE-DIAGNOSTIC — backlog #6 client-building-entry black-screen.
-        // Symptom (per user 2026-05-19): screen goes black, but the F8 Canvas
-        // (ScreenSpaceOverlay) stays visible/draggable and the mouse moves.
-        // Main thread is alive — rendering is what's broken.  Most likely
-        // causes: (a) HDRP main camera disabled or moved to a place with
-        // nothing to render, (b) a Volume swap left the scene in pitch black,
-        // (c) interior sub-scene didn't load for the client.
-        //
-        // This diagnostic dumps camera + scene + volume state on a 2s
-        // heartbeat, AND on demand when you press F10.  Designed so you can
-        // walk into a building, see the screen go black, hit F10, and get
-        // the exact broken-state snapshot in the log.
-        private float _bcdNext;
-        private bool _bcdF10Down;
-        private bool _bcdF7Down;
-
-        private void TickBuildingClientDiag()
-        {
-            if (!MPClient.IsConnected) return;
-            if (!IsInGame()) return;
-
-            try
-            {
-                // F7  — "I'm about to enter the building NOW" marker.
-                // F10 — "the screen is black NOW" marker.
-                // (F9 is already the HUD toggle.)  Both edge-triggered;
-                // together they give a definitive before/after pair the
-                // heartbeats can't supply.
-                bool f7  = Input.GetKey(KeyCode.F7);
-                bool f10 = Input.GetKey(KeyCode.F10);
-                if (f7  && !_bcdF7Down)  DumpBuildingDiag("MARK_BEFORE");
-                if (f10 && !_bcdF10Down) DumpBuildingDiag("MARK_BLACK");
-                _bcdF7Down  = f7;
-                _bcdF10Down = f10;
-
-                // 2s heartbeat — sanity check only; do NOT compare HB vs marker.
-                if (Time.unscaledTime >= _bcdNext)
-                {
-                    _bcdNext = Time.unscaledTime + 2f;
-                    DumpBuildingDiag("HB");
-                }
-            }
-            catch (Exception ex)
-            {
-                Plugin.Logger.LogWarning($"[BClientDiag] {ex.Message}");
-            }
-        }
-
-        private static void DumpBuildingDiag(string tag)
-        {
-            try
-            {
-                // Camera.main (game's primary camera)
-                var main = Camera.main;
-                string mainDesc = main == null
-                    ? "<null>"
-                    : $"'{main.gameObject.name}' enabled={main.enabled} active={main.gameObject.activeInHierarchy} " +
-                      $"pos={main.transform.position} fwd={main.transform.forward} " +
-                      $"clear={main.clearFlags} cull=0x{main.cullingMask:X}";
-                Plugin.Logger.LogInfo($"[BClientDiag/{tag}] Camera.main {mainDesc}");
-
-                // Every Camera in the scene
-                var cams = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<Camera>());
-                Plugin.Logger.LogInfo($"[BClientDiag/{tag}] total cameras={cams?.Length ?? 0}");
-                if (cams != null)
-                {
-                    for (int i = 0; i < cams.Length && i < 12; i++)
-                    {
-                        var c = cams[i].TryCast<Camera>();
-                        if (c == null) continue;
-                        Plugin.Logger.LogInfo(
-                            $"[BClientDiag/{tag}]   cam[{i}] '{c.gameObject.name}' enabled={c.enabled} active={c.gameObject.activeInHierarchy} depth={c.depth} pos={c.transform.position}");
-                    }
-                }
-
-                // Active scenes
-                int sc = SceneManager.sceneCount;
-                Plugin.Logger.LogInfo($"[BClientDiag/{tag}] scenes loaded={sc}");
-                for (int i = 0; i < sc; i++)
-                {
-                    var s = SceneManager.GetSceneAt(i);
-                    Plugin.Logger.LogInfo($"[BClientDiag/{tag}]   scene[{i}] '{s.name}' loaded={s.isLoaded} root={s.rootCount}");
-                }
-
-                // HDRP Volume components — count + enabled state.  We don't
-                // reference HDRP's Volume type directly to avoid an additional
-                // assembly reference; look up by name.
-                int volumeCount = 0, volumeEnabled = 0;
-                try
-                {
-                    var volT = FindAnyType("UnityEngine.Rendering.Volume")
-                            ?? FindAnyType("Volume");
-                    if (volT != null)
-                    {
-                        var vols = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(volT));
-                        if (vols != null)
-                        {
-                            volumeCount = vols.Length;
-                            for (int i = 0; i < vols.Length; i++)
-                            {
-                                var bh = vols[i].TryCast<MonoBehaviour>();
-                                if (bh != null && bh.enabled) volumeEnabled++;
-                            }
-                        }
-                    }
-                }
-                catch { }
-                Plugin.Logger.LogInfo($"[BClientDiag/{tag}] HDRP volumes total={volumeCount} enabled={volumeEnabled}");
-
-                // Local player position
-                try
-                {
-                    var ch = PlayerHelper.PlayerController?.Character;
-                    Plugin.Logger.LogInfo($"[BClientDiag/{tag}] localPlayer pos={(ch != null ? ch.transform.position.ToString() : "<null>")}");
-                }
-                catch { }
-
-                // Skybox + ambient (covers the skybox-unbound hypothesis)
-                try
-                {
-                    var sky = RenderSettings.skybox;
-                    Plugin.Logger.LogInfo(
-                        $"[BClientDiag/{tag}] skybox={(sky != null ? sky.name : "<null>")} ambient={RenderSettings.ambientLight}");
-                }
-                catch { }
-
-                // Active Canvases — anything with a high sortingOrder is a
-                // candidate for a screen-cover overlay.
-                try
-                {
-                    var canvases = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<Canvas>());
-                    int cn = canvases?.Length ?? 0;
-                    Plugin.Logger.LogInfo($"[BClientDiag/{tag}] canvases total={cn}");
-                    if (canvases != null)
-                    {
-                        for (int i = 0; i < canvases.Length; i++)
-                        {
-                            var c = canvases[i].TryCast<Canvas>();
-                            if (c == null) continue;
-                            if (!c.gameObject.activeInHierarchy) continue;
-                            Plugin.Logger.LogInfo(
-                                $"[BClientDiag/{tag}]   canvas '{BuildPath(c.transform)}' mode={c.renderMode} sort={c.sortingOrder} enabled={c.enabled}");
-                        }
-                    }
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[BClientDiag/{tag}] canvas-dump: {ex.Message}"); }
-
-                // Suspicious overlay names — load/fade/black/cover/etc.  Looks
-                // at every active Image in the scene; logs those whose name
-                // matches the pattern.  This is the prime suspect for the
-                // black-screen symptom.
-                try
-                {
-                    var imgs = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<UnityEngine.UI.Image>());
-                    int matched = 0;
-                    if (imgs != null)
-                    {
-                        for (int i = 0; i < imgs.Length; i++)
-                        {
-                            var img = imgs[i].TryCast<UnityEngine.UI.Image>();
-                            if (img == null) continue;
-                            if (!img.gameObject.activeInHierarchy) continue;
-                            string n = img.gameObject.name.ToLowerInvariant();
-                            if (n.Contains("load") || n.Contains("fade") || n.Contains("black") ||
-                                n.Contains("cover") || n.Contains("transition") || n.Contains("intro") ||
-                                n.Contains("splash") || n.Contains("blackout") || n.Contains("dark"))
-                            {
-                                Plugin.Logger.LogInfo(
-                                    $"[BClientDiag/{tag}]   suspect '{BuildPath(img.transform)}' color={img.color} a={img.color.a:0.##}");
-                                matched++;
-                                if (matched >= 10) break;
-                            }
-                        }
-                    }
-                    if (matched == 0)
-                        Plugin.Logger.LogInfo($"[BClientDiag/{tag}] no suspect-named overlays found (imgs={imgs?.Length ?? 0}).");
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[BClientDiag/{tag}] image-dump: {ex.Message}"); }
-            }
-            catch (Exception ex)
-            {
-                Plugin.Logger.LogWarning($"[BClientDiag/{tag}] dump error: {ex.Message}");
-            }
-        }
-
         // ── Backlog #6 fix: keep 'BlackOverlay' canvas suppressed on client ──
         //
         // OBSERVED 2026-05-20 MARK_BEFORE vs MARK_BLACK diff: a Canvas named
@@ -985,32 +798,6 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning($"[ClientFix] BlackOverlay suppress: {ex.Message}");
                 _blackOverlayCanvas = null;  // rescan next pass
             }
-        }
-
-        private static string BuildPath(Transform t)
-        {
-            if (t == null) return "<null>";
-            var sb = new System.Text.StringBuilder(t.name);
-            var cur = t.parent;
-            while (cur != null)
-            {
-                sb.Insert(0, "/");
-                sb.Insert(0, cur.name);
-                cur = cur.parent;
-            }
-            return sb.ToString();
-        }
-
-        private static Type? FindAnyType(string nameOrFullName)
-        {
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                Type[] types;
-                try { types = asm.GetTypes(); } catch { continue; }
-                foreach (var t in types)
-                    if (t.FullName == nameOrFullName || t.Name == nameOrFullName) return t;
-            }
-            return null;
         }
 
         private void TickPositionSync()
