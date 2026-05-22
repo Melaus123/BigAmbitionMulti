@@ -63,6 +63,14 @@
       <HintPath>$(InteropDir)BigAmbitions.Items.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="BigAmbitions.InteriorDesigner">
+      <HintPath>$(InteropDir)BigAmbitions.InteriorDesigner.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="DayNightCycle">
+      <HintPath>$(InteropDir)DayNightCycle.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="BigAmbitions.Characters">
       <HintPath>$(InteropDir)BigAmbitions.Characters.dll</HintPath>
       <Private>false</Private>

@@ -1240,10 +1240,80 @@ BACKLOG — Business sync remaining phases
 - This invalidates the "data identical" reading of the diagnostics — our diagnostic captures aggregate counts (335 Residential empty on both sides), but the per-building IDENTITY of which 335 are empty differs.  Host has buildings A,B,C empty; client has B,C,D empty.  Counts equal, sets differ — and our snapshot apply doesn't always overwrite buildings the client has assigned differently than host.  [?] (situational: Phase 1b investigation)
 - User executive decision: switch architecture from "wipe then mirror" to "suppress generation, verify wipe, mirror."  (rule)
 
+2026-05-22 — Phase 1 + 1b pushed to GitHub.
+- Commit 97fee28 to origin/main (https://github.com/Melaus123/BigAmbitionMulti).  10 files, +2882/-675.  New files: src/BusinessSync.cs, src/MPAutopilot.cs.  Modified: GameStatePatcher, MPCanvasUI, MPClient, MPPatches, MPServer, Plugin, Protocol, context log.
+- Launcher .bat files (_launch_client_internal.bat, _launch_host_internal.bat, launch-mp-test.bat) left as untracked-local-only per user (contain absolute paths + Steam app IDs).  (situational: this repo)
+- Inline identity used for commit (`git -c user.email=... -c user.name=... commit`) — no persistent git config modification.  Prior commits use the same identity allscott <allscott20@gmail.com>.  (rule)
+
 2026-05-22 — ✅ Phase 1b COMPLETE.  Suppress-then-mirror architecture working.
 - For-rent test: client's map highlights now match host's exactly (no extras), confirmed by user.
 - For-sale test: client's map highlights match host's exactly after deploy of buildingsForSale sync + RealEstateHelper.RunDaily suppression + RefreshMapFilters hook, confirmed by user.
 - Architectural learnings captured below in REFERENCE; key takeaway is "suppress generation, mirror authoritative state, refresh UI explicitly."  (rule)
+
+2026-05-22 — ✅ Phase 2 COMPLETE (interior sync — designs, prices, dirt, items).
+- Confirmed working by user: client now sees host's items (shelves, products, furniture) inside buildings, including live updates within 2s of host modifications.
+- Architecture proven: subscription-based on entry, polling-based diff broadcast while inside, element-level/per-item refresh primitives on apply.  Same pattern usable for any future per-object sync work.
+
+2026-05-22 — Phase 2b deployed (items: shelves, products, furniture).
+- Per-item primitive identified: BuildingManager.InstantiateSingleInstance(ItemInstance, bool onlyVisual).  The items analog of InteriorElement.Deserialize.
+- Removal primitive: UnityEngine.Object.Destroy on ItemController.gameObject — filtered to ItemControllers whose ItemHelper.GetBuildingRegistration matches the active reg (don't wipe inventory items etc.).
+- Protocol: added ItemInstanceInfo + nested DTOs (CargoInstanceInfo, NestedCargoInstanceInfo, AttachableChildInfo, CustomColorInfo, PlayerItemPurchaserSettingsInfo, Vector3Info) to Protocol.cs.  Active fields only — 11 [Obsolete] ItemInstance fields skipped.  Enums → int, SerializableVector3/Quaternion → flat floats, SerializableColor → packed int (Phase 1 pattern).
+- Host: InteriorSync.SerializeItemInstance walks reg.itemInstances dict; InteriorSync.Tick's hash now includes per-item id+name+position (rounded to cm)+rotation (rounded)+state+alias+cargo so item adds/moves/removes/restocks trigger broadcasts.
+- Client: GameStatePatcher.DeserializeItemInstance rebuilds IL2CPP ItemInstance from DTO.  ApplyInteriorSnapshot clears reg.itemInstances dict and repopulates from payload.  TryRefreshActiveInteriorIfMatches now also calls RefreshItemsForActiveBuilding which (a) destroys existing ItemController GameObjects matching the active reg, (b) re-spawns via InstantiateSingleInstance(ii, onlyVisual:false) so items participate in employee/customer systems on client.
+- Compile gotchas: ItemController.ItemInstance is the property name (uppercase, via getter), not .itemInstance.  CustomColorChannel lives in BigAmbitions.Items namespace (transitively from BigAmbitions.Items.dll, already referenced).  (rule)
+- Build clean, deployed.  Test plan: walk client into host's coffee shop after host has placed shelves + products; verify items show on client.  Host adds/moves an item; verify the broadcast fires within 2s and client visual updates.
+
+2026-05-22 — ✅ Phase 2a interior refresh SOLVED via element-level Deserialize.
+- After multiple test cycles, found the canonical primitive: `InteriorElement.Deserialize(SerializedInteriorDesign)`.  Walks the scene's InteriorElement components, matches each by UUID to a SerializedInteriorDesign in reg.interiorDesigns, calls Deserialize on each.  Works repeatedly — every paint by host gets reflected on client.
+- DISPROVEN candidates (do NOT use for live re-paint):
+   * `BuildingManager.LoadBuilding(false)` — returns true but doesn't re-apply designs to existing InteriorElements.  Probably only sets up materials on first-time element initialization.
+   * `BuildingManager.ApplyInteriorDesign(building, elements)` — same.  Likely resolves the registration via building.GetRegistration() which returns a different instance than gi.BuildingRegistrations (probably BuildingHelper.AllBuildingRegistrationDictionary's static copy).  So even after our snapshot updates gi.BuildingRegistrations, ApplyInteriorDesign reads stale data.  (rule)
+- The hash diagnostic that proved this: client-side log showed three distinct full-list hashes across three host paint actions (0xFEDA2C09 → 0x14AEF081 → 0x7E1CB21D).  Data was reaching the client correctly.  Yet ApplyInteriorDesign/LoadBuilding didn't re-paint.  Element.Deserialize did.  (rule)
+- ARCHITECTURAL LESSON for future sync work: prefer the LOWEST-LEVEL primitive that operates directly on the scene GameObject (component-method), not the high-level "apply everything" methods.  High-level methods may resolve state from a different registration instance, skip when "already loaded," or only run on first-time setup.  Element-level methods bypass all that.  (rule)
+- For Phase 2b (items), the analogous primitive is the per-item spawn/update method — not LoadItems or InstantiateInstances (which look like the high-level "apply everything" variants).  We'll need to find what gets called when a player single-places an item.
+
+2026-05-22 — Phase 2a refresh v3: revert to LoadBuilding(false) with diagnostic + dirt-noise filter.
+- Earlier "LoadBuilding has internal caching" claim was unsupported speculation — inspection of BuildingManager fields finds no isLoaded/loadedBuilding cache.  Apparent first-works-rest-don't behavior more likely caused by (a) host's later changes not yet committed to reg.interiorDesigns at poll time, (b) polling firing on dirt-fluctuation noise so "subsequent broadcasts" carried identical design data.  (rule)
+- Reverted to LoadBuilding(false) as the canonical "reload everything from current reg.*" call.  This is the unified approach: works for designs, layout, items, future fields — the game's own one-stop entry-time loader.
+- Added diagnostic: log reg field counts BEFORE and AFTER LoadBuilding so we can confirm it's actually reading fresh data each call.  Returns bool (success); we log that too.
+- Tightened InteriorSync hash: round DirtSpot.Dirtiness to 1 decimal place before hashing so NPC-walking micro-fluctuations stop triggering broadcasts.  Real changes still detected.  (rule)
+- Build clean, deployed.  Goal: confirm whether LoadBuilding is the single universal refresh, or whether per-type refresh methods are truly necessary.
+
+2026-05-22 — Phase 2a refresh v2: switch from LoadBuilding to ApplyInteriorDesign.
+- Symptom from second test: AI buildings refreshed correctly, but the host-OWNED building (host bought + named 'test', 15 FourthAvenue, a CoffeeShop) only refreshed ONCE on initial entry.  Subsequent host changes were broadcast by the polling tick (3 diffs visible in host log) and applied to client's reg.* fields successfully (3 receipts in client log) but visual stayed at the first refreshed state.
+- Diagnosis: LoadBuilding(false) likely has internal "already loaded" caching — after the first call it short-circuits subsequent invocations, so further ApplyInteriorSnapshot calls update data but the visual stays frozen.  (rule)
+- Fix: switch to BuildingManager.ApplyInteriorDesign(Building, InteriorElement[]) — a focused static method that re-paints walls/floor/ceiling from the registration's current interiorDesigns.  No "already loaded" gate.  Doesn't re-instantiate items either (Phase 2b concern).
+- Building reference obtained via reg.BuildingCached (IL2CPP property).  InteriorElement[] gathered via FindObjectsOfType<InteriorElement> at refresh time.
+- Build clean, deployed.
+
+2026-05-22 — Phase 2a refresh: trigger LoadBuilding on snapshot apply for active interior.
+- Symptom from first test: client interior data IS applied (log shows "Interior applied: designs=290 dirt=225") but walls/floor stay default visually.  Writing to reg.interiorDesigns updates the data model but doesn't re-paint the meshes — same issue we had with Phase 1 signs.
+- Fix: after ApplyInteriorSnapshot writes fields, call BuildingManager.LoadBuilding(false) IFF the local player is currently inside that building (BuildingManager.buildingRegistration matches the address).  LoadBuilding re-runs the full layout/designs/items pipeline from the now-fresh data.  No-op when outside.
+- LoadBuilding(false) is heavy (re-instantiates items GameObjects), but Phase 2a's items aren't synced yet anyway so flicker is acceptable for now.  Phase 2b may need a lighter ApplyInteriorDesign-only call.
+- Layout='' observed for InteriorInstallationFirm businesses on host — that's apparently their actual state (these are showroom-style businesses with no fixed layout template).  Not a sync bug.  (situational: AI businesses with empty Layout — investigate further only if visible problems persist for retail/office buildings)
+- Build clean, deployed.
+
+2026-05-22 — Phase 1c hotfix: schedule sync added so client businesses aren't "always closed."
+- Symptom: client saw every business as closed and couldn't enter them — Phase 1b suppression skipped SetRivalBuildings etc. which had been populating default operating-hour schedules.  scheduleDays was empty on client after sync.
+- Added ScheduleDayInfo (Day, IsOpen, OpeningHourSlots) + OpeningHourSlotInfo (StartingHour, EndingHour) DTOs to Protocol.cs.  Added `SharedSchedule` (bool) + `Schedule` (List<ScheduleDayInfo>) to BusinessInfo.
+- BusinessSync.ReadInfo now walks reg.scheduleDays → DTOs; ApplyBusinessInfoLocal clears reg.scheduleDays and rebuilds from payload.  EqualInfo + ScheduleEqual added for change detection.
+- Skipped reg.scheduleDays[i].workShifts (employee assignments) for now — separate concern; sync them later.  (situational: Phase 1c minimal)
+- csproj: added DayNightCycle reference (DayOfWeekOrdered enum lives there).
+- Build clean, deployed.
+
+2026-05-22 — Phase 2a (interior sync plumbing + simple fields) deployed.
+- New file src/InteriorSync.cs (host-side per-building subscriber set + diff-poll Tick).
+- Protocol: MessageType.InteriorRequest (60), InteriorSnapshot (61), PlayerExitedBuilding (62).  Payload types InteriorRequestPayload, InteriorSnapshotPayload, PlayerExitedBuildingPayload + helper DTOs InteriorDesignInfo, InteriorMaterialInfo, RetailPriceInfo, DirtSpotInfo.
+- Subscription model: client sends InteriorRequest on entering building X, host adds peer to X's subscriber set and sends initial snapshot.  While subscribed, every Tick (2s) host hashes the building's interior state and broadcasts to subscribers if changed.  Client sends PlayerExitedBuilding on exit; host removes peer.  HandlePeerDisconnected cleans up on drop.
+- Entry hook: extended Patch_DelayedEnterBuilding Prefix — reads BuildingManager.__instance.buildingRegistration to get the address, sends InteriorRequest.  Existing TrafficSync.OnEnteredBuilding call kept intact.
+- Exit hook: new Patch_ExitFromBuilding_InteriorSync Prefix on BuildingManager.ExitFromBuilding — reads buildingRegistration BEFORE the method runs, sends PlayerExitedBuilding.
+- Client apply (GameStatePatcher.ApplyInteriorSnapshot): overwrites reg.Layout, reg.interiorDesigns, reg.retailPrices, reg.dirtSpots from the payload.  ItemInstances explicitly deferred to Phase 2b.
+- Server: SendInteriorSnapshotTo(peer, snap) for initial reply; BroadcastInteriorSnapshotTo(peerIds, snap) for diff push to a building's subscribers.
+- Tick: InteriorSync.Tick() added to the existing MPCanvasUI tick chain, just after BusinessSync.Tick().
+- csproj: added BigAmbitions.InteriorDesigner reference (SerializedInteriorDesign lives there).
+- Compile gotcha: IL2CPP-Interop ItemName enum lives in BigAmbitions.Items namespace (not Enums.ItemName); cast `(BigAmbitions.Items.ItemName)rp.ItemName`.  (rule)
+- Compile gotcha: Harmony Prefix with `BuildingManager __instance` works directly (typed); use `object` only when the type isn't known at compile time, and then .TryCast<T>().  (rule)
+- Build clean, deployed to both BepInEx plugins dirs.
 
 ═══════════════════════════════════════════════════════════════════
 REFERENCE — Phase 1b key learnings (for future sync work)

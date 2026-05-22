@@ -53,6 +53,11 @@ namespace BigAmbitionsMP
         // Businesses (exterior business sync — Phase 1)
         BusinessSnapshot = 50, // Host → All: full table of business state (sent on connect).
         BusinessChange   = 51, // Host → All: single building business state changed.
+
+        // Interiors (Phase 2: building interior sync on entry + while inside)
+        InteriorRequest      = 60, // Client → Host: "I entered building X, subscribe me + send snapshot."
+        InteriorSnapshot     = 61, // Host → Client: full interior state of one building.
+        PlayerExitedBuilding = 62, // Client → Host: "I exited building X, unsubscribe me."
     }
 
     // ── Envelope ───────────────────────────────────────────────────────────────
@@ -506,6 +511,29 @@ namespace BigAmbitionsMP
         /// the full set.  Empty list for AI businesses (no on-disk files).
         /// </summary>
         public List<LogoFile> LogoFiles { get; set; } = new();
+
+        // ── Operating hours (Phase 1c) ────────────────────────────────────────
+        // Without these the client sees every business as "closed" because
+        // CityGenerator suppression also skips default schedule population.
+        // We mirror host's schedule verbatim.
+        public bool SharedSchedule { get; set; }
+        public List<ScheduleDayInfo> Schedule { get; set; } = new();
+    }
+
+    /// <summary>One day of the week's opening schedule for one building.</summary>
+    public class ScheduleDayInfo
+    {
+        /// <summary>DayOfWeekOrdered enum value (Monday=1..Sunday=7).</summary>
+        public int Day    { get; set; }
+        public bool IsOpen { get; set; }
+        public List<OpeningHourSlotInfo> OpeningHourSlots { get; set; } = new();
+    }
+
+    /// <summary>One contiguous open-hours window within a day (e.g. 09:00-17:00).</summary>
+    public class OpeningHourSlotInfo
+    {
+        public int StartingHour { get; set; }
+        public int EndingHour   { get; set; }
     }
 
     /// <summary>A single file from the player-business logo directory.</summary>
@@ -547,5 +575,152 @@ namespace BigAmbitionsMP
     public class BusinessChangePayload
     {
         public BusinessInfo Info { get; set; } = new();
+    }
+
+    // ── Interior sync (Phase 2: building interior state) ─────────────────────
+
+    /// <summary>
+    /// Client → Host on building entry.  Host adds the sender to the building's
+    /// subscriber set and replies with an InteriorSnapshot.  While subscribed,
+    /// the client receives further InteriorSnapshots whenever host's polling
+    /// detects state changes.
+    /// </summary>
+    public class InteriorRequestPayload
+    {
+        public string PlayerId   { get; set; } = "";
+        public string AddressKey { get; set; } = "";
+    }
+
+    /// <summary>Client → Host on building exit.  Removes the client from that building's subscriber set.</summary>
+    public class PlayerExitedBuildingPayload
+    {
+        public string PlayerId   { get; set; } = "";
+        public string AddressKey { get; set; } = "";
+    }
+
+    /// <summary>
+    /// One interior-design entry (one wall/floor/ceiling).  UUID identifies the
+    /// surface in the building's design slot; materials carry the material+color
+    /// for each surface.
+    /// </summary>
+    public class InteriorDesignInfo
+    {
+        public string UUID { get; set; } = "";
+        public List<InteriorMaterialInfo> Materials { get; set; } = new();
+    }
+
+    public class InteriorMaterialInfo
+    {
+        public string MaterialID    { get; set; } = "";
+        public int    MaterialIndex { get; set; }
+        public int    ColorIndex    { get; set; }
+    }
+
+    /// <summary>A single retail-shelf price tag.</summary>
+    public class RetailPriceInfo
+    {
+        /// <summary>ItemName enum value (as int for cross-version safety).</summary>
+        public int   ItemName { get; set; }
+        public float Price    { get; set; }
+    }
+
+    /// <summary>A single dirt spot on the floor.</summary>
+    public class DirtSpotInfo
+    {
+        public int   X         { get; set; }
+        public int   Z         { get; set; }
+        public float Dirtiness { get; set; }
+    }
+
+    /// <summary>
+    /// Host → Client: full interior state for one building.  Phase 2a carries
+    /// Layout/designs/prices/dirt.  Phase 2b adds ItemInstances (shelves,
+    /// products, furniture).
+    /// </summary>
+    public class InteriorSnapshotPayload
+    {
+        public string                     AddressKey      { get; set; } = "";
+        public string                     Layout          { get; set; } = "";
+        public List<InteriorDesignInfo>   InteriorDesigns { get; set; } = new();
+        public List<RetailPriceInfo>      RetailPrices    { get; set; } = new();
+        public List<DirtSpotInfo>         DirtSpots       { get; set; } = new();
+        public List<ItemInstanceInfo>     ItemInstances   { get; set; } = new();
+    }
+
+    // ── Item instance DTOs (Phase 2b) ────────────────────────────────────────
+    // Mirror of BigAmbitions.Items.ItemInstance and its nested types.  Active
+    // fields only; the 11 [Obsolete] fields on ItemInstance are skipped.
+    // Enums are transmitted as int; SerializableVector3/Quaternion are inlined
+    // as flat floats; SerializableColor uses the packed-int pattern from Phase 1.
+
+    public class ItemInstanceInfo
+    {
+        public string Id                { get; set; } = "";
+        public int    ItemName          { get; set; }   // BigAmbitions.Items.ItemName enum
+        public float  Px { get; set; }  public float Py { get; set; }  public float Pz { get; set; }
+        public float  Qx { get; set; }  public float Qy { get; set; }  public float Qz { get; set; }  public float Qw { get; set; }
+        public float  YRotation         { get; set; }
+        public string ParentId          { get; set; } = "";
+        public int    StreetName        { get; set; }
+        public int    StreetNumber      { get; set; }
+        public int    LinkedItemName    { get; set; }
+        public bool   IsSecured         { get; set; }
+        public string WorldSpaceTextValue { get; set; } = "";
+        public int    StateIndex        { get; set; }
+        public string Alias             { get; set; } = "";
+        public string CustomValue       { get; set; } = "";
+        public float  PriceOnPurchase   { get; set; }
+        public List<AttachableChildInfo>      StackedItems    { get; set; } = new();
+        public List<CargoInstanceInfo>        CargoInstances  { get; set; } = new();
+        public List<int>                      DirtSpotsThatAffects { get; set; } = new();
+        public List<Vector3Info>              CustomPositions { get; set; } = new();
+        public List<CustomColorInfo>          CustomColors    { get; set; } = new();
+        public PlayerItemPurchaserSettingsInfo? PurchaserSettings { get; set; }
+    }
+
+    public class AttachableChildInfo
+    {
+        public string ChildId          { get; set; } = "";
+        public int    ChildItemName    { get; set; }
+        public int    AttachmentIndex  { get; set; }
+    }
+
+    public class CargoInstanceInfo
+    {
+        public int    ItemName     { get; set; }
+        public int    Amount       { get; set; }
+        public float  PricePerUnit { get; set; }
+        public bool   Paid         { get; set; }
+        public List<CustomColorInfo>          CustomColors         { get; set; } = new();
+        public List<NestedCargoInstanceInfo>  NestedCargoInstances { get; set; } = new();
+    }
+
+    public class NestedCargoInstanceInfo
+    {
+        public int    ItemName     { get; set; }
+        public int    Amount       { get; set; }
+        public float  PricePerUnit { get; set; }
+        public List<CustomColorInfo> CustomColors { get; set; } = new();
+    }
+
+    public class CustomColorInfo
+    {
+        public int Channel       { get; set; }   // CustomColorChannel enum
+        public int ColorPacked   { get; set; }   // SerializableColor.color
+    }
+
+    public class PlayerItemPurchaserSettingsInfo
+    {
+        public string Name         { get; set; } = "";
+        public bool   Enabled      { get; set; }
+        public int    ItemName     { get; set; }
+        public int    ItemQuantity { get; set; }
+    }
+
+    public class Vector3Info
+    {
+        public float X { get; set; }
+        public float Y { get; set; }
+        public float Z { get; set; }
     }
 }

@@ -135,6 +135,391 @@ namespace BigAmbitionsMP
             });
         }
 
+        // ── Interior sync (Phase 2a: simple fields only — items deferred to 2b) ──
+
+        /// <summary>
+        /// Apply a host's interior snapshot to the local BuildingRegistration.
+        /// Phase 2a writes Layout / interiorDesigns / retailPrices / dirtSpots.
+        /// ItemInstances are NOT yet synced (Phase 2b).
+        /// </summary>
+        public static void ApplyInteriorSnapshot(InteriorSnapshotPayload payload)
+        {
+            if (!ClientApplyOwnership) return;
+            if (payload == null || string.IsNullOrEmpty(payload.AddressKey)) return;
+            RunOnMainThread(() =>
+            {
+                try
+                {
+                    var reg = FindRegistration(payload.AddressKey);
+                    if (reg == null)
+                    {
+                        Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorSnapshot: no reg for '{payload.AddressKey}'");
+                        return;
+                    }
+
+                    // Layout (string; controls which BusinessLayoutSet is used)
+                    if (!string.IsNullOrEmpty(payload.Layout))
+                        reg.Layout = payload.Layout;
+
+                    // Interior designs (wall/floor/ceiling material+color)
+                    try
+                    {
+                        if (reg.interiorDesigns != null)
+                        {
+                            reg.interiorDesigns.Clear();
+                            foreach (var d in payload.InteriorDesigns)
+                            {
+                                var sd = new SerializedInteriorDesign { UUID = d.UUID };
+                                if (d.Materials != null && d.Materials.Count > 0)
+                                {
+                                    var arr = new SerializedInteriorDesign.SerializableInteriorMaterial[d.Materials.Count];
+                                    for (int i = 0; i < d.Materials.Count; i++)
+                                    {
+                                        var m = d.Materials[i];
+                                        arr[i] = new SerializedInteriorDesign.SerializableInteriorMaterial
+                                        {
+                                            MaterialID    = m.MaterialID,
+                                            MaterialIndex = m.MaterialIndex,
+                                            ColorIndex    = m.ColorIndex,
+                                        };
+                                    }
+                                    sd.materials = arr;
+                                }
+                                reg.interiorDesigns.Add(sd);
+                            }
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] interiorDesigns apply: {ex.Message}"); }
+
+                    // Retail prices
+                    try
+                    {
+                        if (reg.retailPrices != null)
+                        {
+                            reg.retailPrices.Clear();
+                            foreach (var rp in payload.RetailPrices)
+                                reg.retailPrices.Add(new RetailPrice { itemName = (BigAmbitions.Items.ItemName)rp.ItemName, price = rp.Price });
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] retailPrices apply: {ex.Message}"); }
+
+                    // Dirt spots
+                    try
+                    {
+                        if (reg.dirtSpots != null)
+                        {
+                            reg.dirtSpots.Clear();
+                            foreach (var ds in payload.DirtSpots)
+                                reg.dirtSpots.Add(new DirtSpot { x = ds.X, z = ds.Z, dirtiness = ds.Dirtiness });
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] dirtSpots apply: {ex.Message}"); }
+
+                    // ItemInstances (Phase 2b).  Wipe-and-rebuild: clear the
+                    // dict, repopulate from payload.  Visual GameObjects will
+                    // be destroyed and re-spawned in TryRefreshActiveInteriorIfMatches.
+                    try
+                    {
+                        if (reg.itemInstances != null)
+                        {
+                            reg.itemInstances.Clear();
+                            foreach (var i in payload.ItemInstances)
+                            {
+                                var ii = DeserializeItemInstance(i);
+                                if (ii != null) reg.itemInstances[i.Id] = ii;
+                            }
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] itemInstances apply: {ex.Message}"); }
+
+                    Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' designs={payload.InteriorDesigns.Count} prices={payload.RetailPrices.Count} dirt={payload.DirtSpots.Count} items={payload.ItemInstances.Count}.");
+
+                    // Trigger a visual refresh of the interior IF the local
+                    // player is currently inside THIS building.  Writing to
+                    // reg.* only updates the data model; the walls/floor/items
+                    // GameObjects were already instantiated from stale data
+                    // when LoadBuilding ran on entry.  Calling LoadBuilding
+                    // again re-runs the full pipeline (layout, designs, items)
+                    // against the now-fresh fields.
+                    TryRefreshActiveInteriorIfMatches(payload.AddressKey);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorSnapshot: {ex.Message}"); }
+            });
+        }
+
+        /// <summary>
+        /// If the local player is inside the building whose interior we just
+        /// applied, re-paint the wall/floor/ceiling visuals to match the new
+        /// reg.interiorDesigns data.  No-op if not in that building.
+        ///
+        /// Implementation: element-level.  For each InteriorElement GameObject
+        /// in the scene, look up its UUID in our fresh reg.interiorDesigns dict
+        /// and call element.Deserialize(design) directly.  This is the primitive
+        /// the game uses internally and re-applies materials on every call.
+        ///
+        /// Two higher-level alternatives we tried and disproved:
+        ///   - BuildingManager.LoadBuilding(false): returns true but doesn't
+        ///     re-paint existing InteriorElements on subsequent calls.
+        ///   - BuildingManager.ApplyInteriorDesign(building, elements): same —
+        ///     likely resolves the registration via building.GetRegistration()
+        ///     which returns a different instance than our gi.BuildingRegistrations
+        ///     write target, so it reads stale designs.
+        /// element.Deserialize works because it operates directly on the scene
+        /// element using the design object we pass in.
+        /// </summary>
+        private static void TryRefreshActiveInteriorIfMatches(string addressKey)
+        {
+            try
+            {
+                var bms = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<BuildingManager>());
+                if (bms == null || bms.Length == 0) return;
+                BuildingManager? matched = null;
+                for (int i = 0; i < bms.Length; i++)
+                {
+                    var bm = bms[i].TryCast<BuildingManager>();
+                    if (bm == null) continue;
+                    var activeReg = bm.buildingRegistration;
+                    if (activeReg == null) continue;
+                    if (GameStateReader.AddressKey(activeReg) != addressKey) continue;
+                    matched = bm;
+                    break;
+                }
+                if (matched == null) return;
+                var reg = matched.buildingRegistration;
+                if (reg == null || reg.interiorDesigns == null) return;
+
+                // UUID → SerializedInteriorDesign dict from the fresh data we just wrote.
+                var dict = new System.Collections.Generic.Dictionary<string, SerializedInteriorDesign>();
+                for (int i = 0; i < reg.interiorDesigns.Count; i++)
+                {
+                    var d = reg.interiorDesigns[i];
+                    if (d == null) continue;
+                    string u = d.UUID?.ToString() ?? "";
+                    if (!string.IsNullOrEmpty(u)) dict[u] = d;
+                }
+
+                int deserialized = 0;
+                int matchedUuids = 0;
+                var elementsObj = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<InteriorElement>());
+                if (elementsObj != null)
+                {
+                    for (int i = 0; i < elementsObj.Length; i++)
+                    {
+                        var el = elementsObj[i].TryCast<InteriorElement>();
+                        if (el == null) continue;
+                        string uuid = el.UUID?.ToString() ?? "";
+                        if (string.IsNullOrEmpty(uuid)) continue;
+                        if (!dict.TryGetValue(uuid, out var design)) continue;
+                        matchedUuids++;
+                        try { el.Deserialize(design); deserialized++; }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] InteriorElement.Deserialize for UUID '{uuid}': {ex.Message}"); }
+                    }
+                }
+                Plugin.Logger.LogInfo($"[Patcher] Interior refresh for '{addressKey}': deserialized {deserialized}/{matchedUuids} elements (of {dict.Count} designs).");
+
+                // ── Item refresh (Phase 2b) ─────────────────────────────────
+                // Wipe existing ItemController GameObjects and re-spawn from
+                // the freshly-applied reg.itemInstances dict.  Uses the
+                // per-item primitive InstantiateSingleInstance(ii, onlyVisual)
+                // — the items analog of InteriorElement.Deserialize.  We pass
+                // onlyVisual=false initially so items participate in normal
+                // gameplay (employee stations, customer attractors).  If that
+                // proves disruptive, we can flip to onlyVisual=true later.
+                RefreshItemsForActiveBuilding(matched, reg);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] TryRefreshActiveInteriorIfMatches: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// Wipes existing ItemController GameObjects in the active building
+        /// and re-spawns from reg.itemInstances using BuildingManager's
+        /// InstantiateSingleInstance.  This is the per-item analog of the
+        /// InteriorElement.Deserialize trick for designs.
+        /// </summary>
+        private static void RefreshItemsForActiveBuilding(BuildingManager bm, BuildingRegistration reg)
+        {
+            try
+            {
+                // Find and destroy existing item GameObjects.  ItemController
+                // is the scene-side component for each spawned ItemInstance.
+                int destroyed = 0;
+                try
+                {
+                    var existing = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<ItemController>());
+                    if (existing != null)
+                    {
+                        for (int i = 0; i < existing.Length; i++)
+                        {
+                            var ic = existing[i].TryCast<ItemController>();
+                            if (ic == null) continue;
+                            // Be conservative: only destroy ItemControllers whose registration
+                            // matches the current building (avoid wiping inventory items etc.).
+                            try
+                            {
+                                var icReg = ItemHelper.GetBuildingRegistration(ic.ItemInstance);
+                                if (icReg != reg) continue;
+                            }
+                            catch { /* if lookup fails, skip rather than destroy */ continue; }
+                            UnityEngine.Object.Destroy(ic.gameObject);
+                            destroyed++;
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] item destroy pass: {ex.Message}"); }
+
+                // Re-spawn from the updated dict.  Build a List<ItemInstance>
+                // first (InstantiateInstances takes IEnumerable, but per-item
+                // InstantiateSingleInstance lets us catch failures one at a time).
+                int spawned = 0;
+                int failed = 0;
+                try
+                {
+                    if (reg.itemInstances != null)
+                    {
+                        foreach (var kv in reg.itemInstances)
+                        {
+                            var ii = kv.Value;
+                            if (ii == null) continue;
+                            try { bm.InstantiateSingleInstance(ii, false); spawned++; }
+                            catch (Exception ex) { failed++; if (failed <= 3) Plugin.Logger.LogWarning($"[Patcher] InstantiateSingleInstance id={ii.id}: {ex.Message}"); }
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] item spawn pass: {ex.Message}"); }
+
+                Plugin.Logger.LogInfo($"[Patcher] Items refresh: destroyed={destroyed} spawned={spawned} failed={failed} (dict size {(reg.itemInstances?.Count ?? -1)}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] RefreshItemsForActiveBuilding: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// Constructs a new IL2CPP ItemInstance from a network-side DTO and
+        /// populates all the fields we serialize.  Cargo + stacked + colors +
+        /// purchaser-settings are rebuilt as fresh IL2CPP objects.
+        /// </summary>
+        private static BigAmbitions.Items.ItemInstance? DeserializeItemInstance(ItemInstanceInfo i)
+        {
+            try
+            {
+                var ii = new BigAmbitions.Items.ItemInstance((BigAmbitions.Items.ItemName)i.ItemName)
+                {
+                    id                  = i.Id,
+                    itemName            = (BigAmbitions.Items.ItemName)i.ItemName,
+                    position            = new SerializableVector3 { x = i.Px, y = i.Py, z = i.Pz },
+                    rotation            = new SerializableQuaternion { x = i.Qx, y = i.Qy, z = i.Qz, w = i.Qw },
+                    yRotation           = i.YRotation,
+                    parentId            = i.ParentId,
+                    streetName          = (StreetName)i.StreetName,
+                    streetNumber        = i.StreetNumber,
+                    linkedItemName      = (BigAmbitions.Items.ItemName)i.LinkedItemName,
+                    isSecured           = i.IsSecured,
+                    worldSpaceTextValue = i.WorldSpaceTextValue,
+                    stateIndex          = i.StateIndex,
+                    alias               = i.Alias,
+                    customValue         = i.CustomValue,
+                    priceOnPurchase     = i.PriceOnPurchase,
+                };
+
+                // Stacked items
+                if (ii.stackedItems != null && i.StackedItems != null)
+                {
+                    ii.stackedItems.Clear();
+                    foreach (var s in i.StackedItems)
+                    {
+                        ii.stackedItems.Add(new AttachableChild
+                        {
+                            childId         = s.ChildId,
+                            childItemName   = (BigAmbitions.Items.ItemName)s.ChildItemName,
+                            attachmentIndex = s.AttachmentIndex,
+                        });
+                    }
+                }
+
+                // Cargo
+                if (ii.cargoInstances != null && i.CargoInstances != null)
+                {
+                    ii.cargoInstances.Clear();
+                    foreach (var c in i.CargoInstances)
+                    {
+                        var ci = new BigAmbitions.Items.CargoInstance(
+                            (BigAmbitions.Items.ItemName)c.ItemName,
+                            c.Amount,
+                            c.PricePerUnit,
+                            c.Paid);
+                        if (ci.customColors != null && c.CustomColors != null)
+                        {
+                            ci.customColors.Clear();
+                            foreach (var cc in c.CustomColors)
+                                ci.customColors.Add(new BigAmbitions.Items.CustomColor { channel = (BigAmbitions.Items.CustomColorChannel)cc.Channel, color = new SerializableColor(cc.ColorPacked) });
+                        }
+                        if (ci.nestedCargoInstances != null && c.NestedCargoInstances != null)
+                        {
+                            ci.nestedCargoInstances.Clear();
+                            foreach (var n in c.NestedCargoInstances)
+                            {
+                                var nci = new BigAmbitions.Items.NestedCargoInstance
+                                {
+                                    itemName     = (BigAmbitions.Items.ItemName)n.ItemName,
+                                    amount       = n.Amount,
+                                    pricePerUnit = n.PricePerUnit,
+                                };
+                                if (nci.customColors != null && n.CustomColors != null)
+                                {
+                                    nci.customColors.Clear();
+                                    foreach (var cc in n.CustomColors)
+                                        nci.customColors.Add(new BigAmbitions.Items.CustomColor { channel = (BigAmbitions.Items.CustomColorChannel)cc.Channel, color = new SerializableColor(cc.ColorPacked) });
+                                }
+                                ci.nestedCargoInstances.Add(nci);
+                            }
+                        }
+                        ii.cargoInstances.Add(ci);
+                    }
+                }
+
+                // Dirt spots
+                if (ii.dirtSpotsThatAffects != null && i.DirtSpotsThatAffects != null)
+                {
+                    ii.dirtSpotsThatAffects.Clear();
+                    foreach (var d in i.DirtSpotsThatAffects) ii.dirtSpotsThatAffects.Add(d);
+                }
+
+                // Custom positions
+                if (ii.customPositions != null && i.CustomPositions != null)
+                {
+                    ii.customPositions.Clear();
+                    foreach (var p in i.CustomPositions)
+                        ii.customPositions.Add(new SerializableVector3 { x = p.X, y = p.Y, z = p.Z });
+                }
+
+                // Top-level custom colors
+                if (ii.customColors != null && i.CustomColors != null)
+                {
+                    ii.customColors.Clear();
+                    foreach (var cc in i.CustomColors)
+                        ii.customColors.Add(new BigAmbitions.Items.CustomColor { channel = (BigAmbitions.Items.CustomColorChannel)cc.Channel, color = new SerializableColor(cc.ColorPacked) });
+                }
+
+                // Purchaser settings
+                if (i.PurchaserSettings != null)
+                {
+                    ii.playerItemPurchaserSettings = new BigAmbitions.Items.PlayerItemPurchaserSettings
+                    {
+                        name         = i.PurchaserSettings.Name,
+                        enabled      = i.PurchaserSettings.Enabled,
+                        itemName     = (BigAmbitions.Items.ItemName)i.PurchaserSettings.ItemName,
+                        itemQuantity = i.PurchaserSettings.ItemQuantity,
+                    };
+                }
+
+                return ii;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[Patcher] DeserializeItemInstance id={i.Id}: {ex.Message}");
+                return null;
+            }
+        }
+
         // ── Business sync (Phase 1) ───────────────────────────────────────────
 
         public static void ApplyBusinessSnapshot(BusinessSnapshotPayload payload)
@@ -425,6 +810,33 @@ namespace BigAmbitionsMP
                     reg.logoSettings.fontColor       = new SerializableColor(info.FontColorPacked);
                     reg.logoSettings.backgroundColor = new SerializableColor(info.BackgroundColorPacked);
                 }
+
+                // Operating hours (Phase 1c) — without these, suppression on
+                // client leaves scheduleDays empty and every business looks
+                // closed.  Replace verbatim from host.
+                try
+                {
+                    reg.sharedSchedule = info.SharedSchedule;
+                    if (reg.scheduleDays != null)
+                    {
+                        reg.scheduleDays.Clear();
+                        foreach (var d in info.Schedule)
+                        {
+                            var sd = new ScheduleDay
+                            {
+                                day    = (BigAmbitions.DayNightCycle.DayOfWeekOrdered)d.Day,
+                                isOpen = d.IsOpen,
+                            };
+                            if (sd.openingHourSlots != null && d.OpeningHourSlots != null)
+                            {
+                                foreach (var slot in d.OpeningHourSlots)
+                                    sd.openingHourSlots.Add(new OpeningHourSlot(slot.StartingHour, slot.EndingHour));
+                            }
+                            reg.scheduleDays.Add(sd);
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] schedule apply for {info.AddressKey}: {ex.Message}"); }
 
                 // Writes above only update the DATA model.  The visible sign /
                 // logo / map marker are GameObjects that were initialised from

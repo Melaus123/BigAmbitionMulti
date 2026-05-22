@@ -188,6 +188,10 @@ namespace BigAmbitionsMP
                     HandleBusinessChange(env);
                     break;
 
+                case MessageType.InteriorSnapshot:
+                    HandleInteriorSnapshot(env);
+                    break;
+
                 default:
                     Plugin.Logger.LogWarning($"[Client] Unknown message type: {env.Type}");
                     break;
@@ -435,7 +439,33 @@ namespace BigAmbitionsMP
             GameStatePatcher.ApplyBusinessChange(payload.Info);
         }
 
+        private static void HandleInteriorSnapshot(MessageEnvelope env)
+        {
+            var payload = env.GetPayload<InteriorSnapshotPayload>();
+            if (payload == null) return;
+            Plugin.Logger.LogInfo($"[Client] Received interior snapshot for '{payload.AddressKey}': designs={payload.InteriorDesigns.Count} prices={payload.RetailPrices.Count} dirt={payload.DirtSpots.Count}.");
+            GameStatePatcher.ApplyInteriorSnapshot(payload);
+        }
+
         // ── Outbound ──────────────────────────────────────────────────────────
+
+        /// <summary>Notify the host we just entered building X — host will subscribe us and reply with InteriorSnapshot.</summary>
+        public static void SendInteriorRequest(string addressKey)
+        {
+            if (!IsConnected || string.IsNullOrEmpty(addressKey)) return;
+            var p = new InteriorRequestPayload { PlayerId = MPConfig.PlayerId, AddressKey = addressKey };
+            Send(MessageEnvelope.Create(MessageType.InteriorRequest, MPConfig.PlayerId, p));
+            Plugin.Logger.LogInfo($"[Client] Sent InteriorRequest for '{addressKey}'.");
+        }
+
+        /// <summary>Notify the host we left building X — host will unsubscribe us.</summary>
+        public static void SendPlayerExitedBuilding(string addressKey)
+        {
+            if (!IsConnected || string.IsNullOrEmpty(addressKey)) return;
+            var p = new PlayerExitedBuildingPayload { PlayerId = MPConfig.PlayerId, AddressKey = addressKey };
+            Send(MessageEnvelope.Create(MessageType.PlayerExitedBuilding, MPConfig.PlayerId, p));
+            Plugin.Logger.LogInfo($"[Client] Sent PlayerExitedBuilding for '{addressKey}'.");
+        }
 
         /// <summary>
         /// Tells the host this player's game scene has finished loading.

@@ -930,6 +930,7 @@ namespace BigAmbitionsMP
             VehicleManager.ProbeParkedVehicles();    // backlog #3 discovery (round 2 — kept for re-runs)
             ParkedVehicleSync.Tick();                // backlog #3 phase 3a — host capture
             BusinessSync.Tick();                     // business-sync phase 1 — host change detection
+            InteriorSync.Tick();                     // interior sync phase 2 — diff-push to subscribed clients
             GameStatePatcher.DrainPendingLogoRefreshes();  // client-side deferred sign refresh after logo PNG generation
 
             // Send our character appearance once the character is ready.

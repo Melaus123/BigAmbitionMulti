@@ -326,10 +326,51 @@ namespace BigAmbitionsMP
             static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
                 => VehicleManager.FindAllMethodsByName("DelayedEnterBuildingActions");
 
-            static void Prefix()
+            static void Prefix(BuildingManager __instance)
             {
                 try { TrafficSync.OnEnteredBuilding("DelayedEnterBuildingActions"); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] DelayedEnterBuilding prefix: {ex.Message}"); }
+
+                // Interior sync (Phase 2): tell the host we've entered so we
+                // can subscribe to its authoritative interior state.  Host-side
+                // path is symmetric: the host enters its own buildings without
+                // sending anything (it IS the source of truth).
+                try
+                {
+                    if (!MPClient.IsConnected) return;
+                    if (__instance == null) return;
+                    var reg = __instance.buildingRegistration;
+                    if (reg == null) return;
+                    var addr = GameStateReader.AddressKey(reg);
+                    if (string.IsNullOrEmpty(addr)) return;
+                    MPClient.SendInteriorRequest(addr);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] DelayedEnterBuilding interior-req: {ex.Message}"); }
+            }
+        }
+
+        // ── Patch: BuildingManager.ExitFromBuilding (Phase 2 unsubscribe) ─────
+        // Fires when the player leaves a building (either on foot via the exit
+        // zone or via "exit to street").  We capture the registration BEFORE
+        // the method runs so the address is still valid, then send
+        // PlayerExitedBuilding to the host so it drops us from the building's
+        // subscriber set.
+        [HarmonyPatch(typeof(BuildingManager), nameof(BuildingManager.ExitFromBuilding))]
+        public static class Patch_ExitFromBuilding_InteriorSync
+        {
+            static void Prefix(BuildingManager __instance)
+            {
+                try
+                {
+                    if (!MPClient.IsConnected) return;
+                    if (__instance == null) return;
+                    var reg = __instance.buildingRegistration;
+                    if (reg == null) return;
+                    var addr = GameStateReader.AddressKey(reg);
+                    if (string.IsNullOrEmpty(addr)) return;
+                    MPClient.SendPlayerExitedBuilding(addr);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] ExitFromBuilding_InteriorSync prefix: {ex.Message}"); }
             }
         }
         // ── Backlog #7 traffic-kill blockers ─────────────────────────────────

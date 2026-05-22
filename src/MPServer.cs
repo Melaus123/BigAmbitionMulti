@@ -194,6 +194,10 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Server] Peer disconnected: {peer.Id} — {info.Reason}");
             _clients.Remove(peer);
 
+            // Clear any interior subscription the peer held so we stop polling
+            // a building no client is in anymore.
+            InteriorSync.HandlePeerDisconnected(peer.Id);
+
             string? leftPlayer = null;
 
             // Remove from lobby player list
@@ -292,6 +296,20 @@ namespace BigAmbitionsMP
                 case MessageType.PlayerAppearance:
                     HandleClientAppearance(env);
                     break;
+
+                case MessageType.InteriorRequest:
+                {
+                    var p = env.GetPayload<InteriorRequestPayload>();
+                    if (p != null) InteriorSync.HandleRequest(peer, p.PlayerId, p.AddressKey);
+                    break;
+                }
+
+                case MessageType.PlayerExitedBuilding:
+                {
+                    var p = env.GetPayload<PlayerExitedBuildingPayload>();
+                    if (p != null) InteriorSync.HandleExit(peer, p.PlayerId, p.AddressKey);
+                    break;
+                }
 
                 default:
                     Plugin.Logger.LogWarning($"[Server] Unexpected message type {env.Type} from peer {peer.Id}");
@@ -706,6 +724,42 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Server] Sent business snapshot to '{peer.Id}': {snap.Businesses.Count} buildings, {snap.BuildingsForSale.Count} for-sale.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendBusinessSnapshotTo: {ex.Message}"); }
+        }
+
+        // ── Interior sync (Phase 2) ──────────────────────────────────────────
+
+        /// <summary>Send a single building's interior snapshot to one peer (initial response to InteriorRequest).</summary>
+        public static void SendInteriorSnapshotTo(LiteNetLib.NetPeer peer, InteriorSnapshotPayload snap)
+        {
+            if (!_running || peer == null || snap == null) return;
+            try
+            {
+                Send(peer, MessageEnvelope.Create(MessageType.InteriorSnapshot, "host", snap));
+                Plugin.Logger.LogInfo($"[Server] Sent interior snapshot to peer={peer.Id} addr='{snap.AddressKey}': designs={snap.InteriorDesigns.Count} prices={snap.RetailPrices.Count} dirt={snap.DirtSpots.Count}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendInteriorSnapshotTo: {ex.Message}"); }
+        }
+
+        /// <summary>Broadcast an interior snapshot to a specific set of peer ids (the building's subscribers).</summary>
+        public static void BroadcastInteriorSnapshotTo(System.Collections.Generic.HashSet<int> peerIds, InteriorSnapshotPayload snap)
+        {
+            if (!_running || peerIds == null || peerIds.Count == 0 || snap == null) return;
+            try
+            {
+                var env = MessageEnvelope.Create(MessageType.InteriorSnapshot, "host", snap);
+                byte[] data = env.Serialize();
+                int sent = 0;
+                foreach (var peer in _server.ConnectedPeerList)
+                {
+                    if (peer == null) continue;
+                    if (!peerIds.Contains(peer.Id)) continue;
+                    peer.Send(data, LiteNetLib.DeliveryMethod.ReliableOrdered);
+                    sent++;
+                }
+                if (sent > 0)
+                    Plugin.Logger.LogInfo($"[Server] Interior diff broadcast to {sent} subscriber(s) for '{snap.AddressKey}'.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BroadcastInteriorSnapshotTo: {ex.Message}"); }
         }
 
         /// <summary>Broadcast the full business table to all peers (on for-sale list change).</summary>
