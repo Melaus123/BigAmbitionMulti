@@ -17,6 +17,57 @@ namespace BigAmbitionsMP
         /// </summary>
         public static bool SuppressNextRentRequest = false;
 
+        // Re-entrancy depth counter for the despawner OnTriggerEnter
+        // bandaid.  Incremented on Prefix, decremented on Postfix.  Used by
+        // Patch_ExitFromBuilding to determine "did the game's natural code
+        // already kick the exit while we were inside the despawner trigger?"
+        // — if so, the bandaid Postfix won't double-kick.
+        internal static int _despawnerDepth = 0;
+
+        // ════════════════════════════════════════════════════════════════════
+        // BANDAID REGISTRY (post-2026-05-21 cleanup)
+        // ════════════════════════════════════════════════════════════════════
+        // After 21 rounds of investigation the bandaid has shrunk to two
+        // small pieces:
+        //
+        //   1) ExitFromBuilding kick — in Patch_ExitZoneDespawner_OnTriggerEnter_Diag.Postfix.
+        //      When MPClient.IsConnected and the despawner silently short-
+        //      circuited (a different upstream bug that lives in cpp2il's
+        //      CallsUnknownMethods, which we never decompiled), we call
+        //      BuildingManager.ExitFromBuilding(exitToZoneId, true) ourselves.
+        //      Gated on ExitBandaidKickEnabled (below).
+        //
+        //   2) AiCarMusic suppression — Patch_AiCarMusic_StartB_NoOpOnClient.
+        //      The lambda <Start>b__1_* dereferences something null on the
+        //      client and crashes the exit coroutine mid-execution.  Prefix
+        //      returns false on client, host runs unchanged.  This is the
+        //      surgical root-cause fix.  See "REFERENCE — Key discoveries"
+        //      in the context log for details.
+        //
+        // To disable: set ExitBandaidKickEnabled=false (returns original
+        // can't-exit bug) and/or remove the AiCarMusic patch class (returns
+        // the NRE).  Search marker:  CLAUDE-DIAGNOSTIC[BANDAID]
+        // ════════════════════════════════════════════════════════════════════
+        public static bool ExitBandaidKickEnabled = true;
+
+        // CLAUDE-DIAGNOSTIC — bandaid fix tracking.  Set to true in
+        // Patch_ExitFromBuilding Prefix when _despawnerDepth > 0.  If after
+        // the despawner Postfix this is still false on the client, the
+        // despawner silently short-circuited and the Postfix kicks the exit
+        // manually.  Diagnostic logs from rounds 1-6 narrowed the bug to a
+        // check we can't intercept via Harmony — the bandaid bypasses it.
+        internal static bool _exitFromBuildingSeenDuringDespawn = false;
+        // Snapshot of the active despawner instance for the Postfix's manual
+        // ExitFromBuilding call (it needs exitToZoneId).
+        internal static object? _currentDespawnerInstance = null;
+        // De-double the bandaid.  Despawner trigger fires twice in rapid
+        // succession (once per Player collider, once per PlayerTriggerCollider)
+        // — two parallel ExitFromBuildingCoroutine state machines will trip
+        // over each other and the visual teleport never completes.  Track the
+        // realtime of the last successful bandaid kick and reject duplicates
+        // within a 3s cooldown.
+        internal static float _lastBandaidKickTime = -100f;
+
         // ── Diagnostic: Application.Quit ─────────────────────────────────────
         // Static method — reliably patchable on IL2CPP.
         // Logs a stack trace so we can see what triggers the second instance
@@ -275,315 +326,12 @@ namespace BigAmbitionsMP
             static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
                 => VehicleManager.FindAllMethodsByName("DelayedEnterBuildingActions");
 
-            static void Prefix(object __instance)
+            static void Prefix()
             {
-                try
-                {
-                    Plugin.Logger.LogInfo($"[Building] DelayedEnterBuildingActions on {__instance?.GetType().Name ?? "<static>"}");
-                    // CLAUDE-DIAGNOSTIC — capture the call stack so we can see
-                    // who calls DelayedEnterBuildingActions on the host.  Without
-                    // this we don't know the call site (Invoke probe came back
-                    // empty, so it isn't UnityEngine.MonoBehaviour.Invoke).
-                    string st = Environment.StackTrace;
-                    foreach (var line in st.Split('\n'))
-                        Plugin.Logger.LogInfo($"[Building/Stack] {line.Trim()}");
-                    TrafficSync.OnEnteredBuilding("DelayedEnterBuildingActions");
-                }
+                try { TrafficSync.OnEnteredBuilding("DelayedEnterBuildingActions"); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] DelayedEnterBuilding prefix: {ex.Message}"); }
             }
         }
-
-        // CLAUDE-DIAGNOSTIC — DOTween DelayedCall probe.
-        // Given DelayedEnterBuildingActions' stack trace shows IL2CPP→managed
-        // with no managed caller frame, DOTween's DOVirtual.DelayedCall is the
-        // top suspect.  Patch every method named "DelayedCall" across all
-        // assemblies (FindAllMethodsByName) with a Postfix that logs call +
-        // a short stack trace.  Whichever caller scheduled DelayedEnterBuildingActions
-        // shows up just above.
-        [HarmonyPatch]
-        public static class Patch_DelayedCall_Diag
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("DelayedCall");
-
-            static void Postfix(System.Reflection.MethodBase __originalMethod)
-            {
-                try
-                {
-                    string side = MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
-                    Plugin.Logger.LogInfo(
-                        $"[InvokeProbe/{side}] {__originalMethod?.DeclaringType?.FullName}.{__originalMethod?.Name} fired");
-                    var lines = Environment.StackTrace.Split('\n');
-                    for (int i = 0; i < lines.Length && i < 10; i++)
-                        Plugin.Logger.LogInfo($"[InvokeProbe/{side}/Stack] {lines[i].Trim()}");
-                }
-                catch { }
-            }
-        }
-
-        // CLAUDE-DIAGNOSTIC — GameObject.SendMessage probe.
-        // SendMessage is the other native-dispatched method-by-name mechanism.
-        // Only logs calls whose target method name suggests building/delay
-        // semantics, to keep the log clean.
-        [HarmonyPatch(typeof(UnityEngine.GameObject), nameof(UnityEngine.GameObject.SendMessage), new[] { typeof(string) })]
-        public static class Patch_GO_SendMessage_Diag
-        {
-            static void Postfix(UnityEngine.GameObject __instance, string __0)
-            {
-                try
-                {
-                    if (__instance == null || __0 == null) return;
-                    if (!__0.Contains("Delayed") && !__0.Contains("Enter") && !__0.Contains("Building")) return;
-                    string side = MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
-                    Plugin.Logger.LogInfo($"[InvokeProbe/{side}] GameObject('{__instance.name}').SendMessage('{__0}')");
-                }
-                catch { }
-            }
-        }
-
-        // CLAUDE-DIAGNOSTIC — StartCoroutine probe filtered to BuildingManager.
-        // Since the Invoke probe came back empty, the most likely remaining
-        // schedule mechanism is a coroutine.  Captures every coroutine started
-        // by a BuildingManager so we can see what (if anything) it kicks off
-        // that would eventually call DelayedEnterBuildingActions.
-        [HarmonyPatch(typeof(UnityEngine.MonoBehaviour), nameof(UnityEngine.MonoBehaviour.StartCoroutine), new[] { typeof(System.Collections.IEnumerator) })]
-        public static class Patch_MB_StartCoroutine_Diag
-        {
-            static void Postfix(UnityEngine.MonoBehaviour __instance, System.Collections.IEnumerator __0)
-            {
-                try
-                {
-                    if (__instance == null || __0 == null) return;
-                    var t = __instance.GetIl2CppType();
-                    if (t == null || t.Name != "BuildingManager") return;
-                    string side = MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
-                    Plugin.Logger.LogInfo($"[InvokeProbe/{side}] BuildingManager.StartCoroutine({__0.GetType().Name})");
-                }
-                catch { }
-            }
-        }
-
-        [HarmonyPatch]
-        public static class Patch_EnterBuildingWithVehicle
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("EnterBuildingWithVehicle");
-            static void Prefix(object __instance)
-            {
-                try
-                {
-                    Plugin.Logger.LogInfo($"[Building] EnterBuildingWithVehicle on {__instance?.GetType().Name ?? "<static>"}");
-                    TrafficSync.OnEnteredBuilding("EnterBuildingWithVehicle");
-                }
-                catch { }
-            }
-        }
-
-        [HarmonyPatch]
-        public static class Patch_EnterParking
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("EnterParking");
-            static void Prefix(object __instance)
-            {
-                try
-                {
-                    Plugin.Logger.LogInfo($"[Building] EnterParking on {__instance?.GetType().Name ?? "<static>"}");
-                    TrafficSync.OnEnteredBuilding("EnterParking");
-                }
-                catch { }
-            }
-        }
-
-        [HarmonyPatch]
-        public static class Patch_ExitFromBuilding
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("ExitFromBuilding");
-
-            static void Prefix(object __instance)
-            {
-                try
-                {
-                    var t = __instance?.GetType().Name ?? "<static>";
-                    // CLAUDE-DIAGNOSTIC — log unconditionally so we can see if
-                    // this fires on the client, whose LocalInBuilding flag
-                    // never flipped true and so OnExitFromBuilding's own log
-                    // would no-op.
-                    Plugin.Logger.LogInfo($"[ExitDiag/PATCH] ExitFromBuilding on {t}");
-                    TrafficSync.OnExitFromBuilding(t);
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] ExitFromBuilding prefix: {ex.Message}"); }
-            }
-        }
-
-        [HarmonyPatch]
-        public static class Patch_ExitFromBuildingCoroutine
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("ExitFromBuildingCoroutine");
-
-            // Defensive: also clear the flag here in case ExitFromBuilding's
-            // patch missed an exit path.
-            static void Prefix(object __instance)
-            {
-                try
-                {
-                    // CLAUDE-DIAGNOSTIC — log unconditionally (see Patch_ExitFromBuilding above).
-                    Plugin.Logger.LogInfo($"[ExitDiag/PATCH] ExitFromBuildingCoroutine on {__instance?.GetType().Name ?? "<static>"}");
-                    TrafficSync.OnExitFromBuilding(__instance?.GetType().Name);
-                }
-                catch { }
-            }
-        }
-
-        // CLAUDE-DIAGNOSTIC — exit-trigger investigation (mirror of #6 entry probe).
-        // Symptom: client walks into building exit trigger; nothing fires.
-        // Host: ExitFromBuildingCoroutine fires fine.  Wider net of likely
-        // entry points — whichever fires on the client identifies the real
-        // exit signal, or none fires which means the trigger collider itself
-        // isn't responding to the client's player.
-
-        [HarmonyPatch]
-        public static class Patch_OnExitBuilding_Diag
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("OnExitBuilding");
-            static void Prefix(object __instance)
-            { try { Plugin.Logger.LogInfo($"[ExitDiag/PATCH] OnExitBuilding on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
-        }
-
-        [HarmonyPatch]
-        public static class Patch_GetExitPosition_Diag
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("GetExitPosition");
-            static void Postfix(object __instance, object __result)
-            { try { Plugin.Logger.LogInfo($"[ExitDiag/PATCH] GetExitPosition on {__instance?.GetType().Name ?? "<static>"} → {__result}"); } catch { } }
-        }
-
-        [HarmonyPatch]
-        public static class Patch_ExitFloor_Diag
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("ExitFloor");
-            static void Prefix(object __instance)
-            { try { Plugin.Logger.LogInfo($"[ExitDiag/PATCH] ExitFloor on {__instance?.GetType().Name ?? "<static>"}"); } catch { } }
-        }
-
-        // CLAUDE-DIAGNOSTIC — Invoke / CancelInvoke probe for BuildingManager.
-        // DelayedEnterBuildingActions fires on host but never on client.  Patch
-        // MonoBehaviour.Invoke + CancelInvoke and filter to instances whose
-        // runtime type is BuildingManager.  Two possible conclusions:
-        //   (1) Host logs '[InvokeProbe/HOST] BuildingManager.Invoke("DelayedEnterBuildingActions", ...)'
-        //       and client logs the same → the schedule is made on both, then
-        //       something on the client cancels or never executes it.
-        //   (2) Host logs it and client doesn't → the schedule itself is
-        //       gated on something that's false on the client.
-
-        [HarmonyPatch(typeof(UnityEngine.MonoBehaviour), nameof(UnityEngine.MonoBehaviour.Invoke), new[] { typeof(string), typeof(float) })]
-        public static class Patch_MB_Invoke
-        {
-            static void Postfix(UnityEngine.MonoBehaviour __instance, string __0, float __1)
-            {
-                try
-                {
-                    if (__instance == null) return;
-                    var t = __instance.GetIl2CppType();
-                    if (t == null || t.Name != "BuildingManager") return;
-                    string side = MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
-                    Plugin.Logger.LogInfo($"[InvokeProbe/{side}] BuildingManager.Invoke('{__0}', {__1})");
-                }
-                catch { }
-            }
-        }
-
-        [HarmonyPatch(typeof(UnityEngine.MonoBehaviour), nameof(UnityEngine.MonoBehaviour.CancelInvoke), new[] { typeof(string) })]
-        public static class Patch_MB_CancelInvokeNamed
-        {
-            static void Postfix(UnityEngine.MonoBehaviour __instance, string __0)
-            {
-                try
-                {
-                    if (__instance == null) return;
-                    var t = __instance.GetIl2CppType();
-                    if (t == null || t.Name != "BuildingManager") return;
-                    string side = MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
-                    Plugin.Logger.LogInfo($"[InvokeProbe/{side}] BuildingManager.CancelInvoke('{__0}')");
-                }
-                catch { }
-            }
-        }
-
-        [HarmonyPatch(typeof(UnityEngine.MonoBehaviour), nameof(UnityEngine.MonoBehaviour.CancelInvoke), new Type[0])]
-        public static class Patch_MB_CancelInvokeAll
-        {
-            static void Postfix(UnityEngine.MonoBehaviour __instance)
-            {
-                try
-                {
-                    if (__instance == null) return;
-                    var t = __instance.GetIl2CppType();
-                    if (t == null || t.Name != "BuildingManager") return;
-                    string side = MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
-                    Plugin.Logger.LogInfo($"[InvokeProbe/{side}] BuildingManager.CancelInvoke(all)");
-                }
-                catch { }
-            }
-        }
-
-        // CLAUDE-DIAGNOSTIC — method-call tracer for the building entry path.
-        // Patches every public method declared on BuildingManager with a
-        // logging Prefix.  Run on both sides simultaneously and compare —
-        // the first method that appears in HOST's log but not CLIENT's is
-        // the next step after wherever the client coroutine bails (= one
-        // hop from the first domino).
-        //
-        // Why class-wide on BuildingManager: we don't know exactly which
-        // method the entry coroutine calls into next, and the coroutine's
-        // own MoveNext is compiler-generated.  Patching every method gives
-        // a complete call trace without us having to guess.
-        [HarmonyPatch]
-        public static class Patch_BuildingManager_AllMethods_Diag
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-            {
-                var t = VehicleManager.FindGameType("BuildingManager");
-                if (t == null) yield break;
-                var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
-                       | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static
-                       | System.Reflection.BindingFlags.DeclaredOnly;
-                foreach (var m in t.GetMethods(bf))
-                {
-                    if (m.IsAbstract) continue;
-                    if (m.ContainsGenericParameters) continue;
-                    // Skip hot-path Unity messages and trivial accessors —
-                    // they'd flood the log without helping us identify the
-                    // entry sequence.
-                    string n = m.Name;
-                    if (n == "Update" || n == "FixedUpdate" || n == "LateUpdate"
-                     || n == "OnGUI"  || n == "OnEnable"   || n == "OnDisable"
-                     || n == "Awake"  || n == "Start"      || n == "OnDestroy"
-                     || n.StartsWith("get_") || n.StartsWith("set_"))
-                        continue;
-                    // IL2CPP wrapped types expose lots of base.Object methods —
-                    // skip the obvious ones.
-                    if (n == "ToString" || n == "GetHashCode" || n == "Equals" || n == "Finalize")
-                        continue;
-                    yield return m;
-                }
-            }
-            static void Prefix(System.Reflection.MethodBase __originalMethod, object __instance)
-            {
-                try
-                {
-                    Plugin.Logger.LogInfo(
-                        $"[BMTrace/PATCH] BuildingManager.{__originalMethod?.Name} (static={__originalMethod?.IsStatic})");
-                }
-                catch { }
-            }
-        }
-
         // ── Backlog #7 traffic-kill blockers ─────────────────────────────────
         // Gley's TrafficManager exposes ClearTraffic / ClearTrafficOnArea /
         // SetPause.  On building entry the game calls SetPause(true) +
@@ -725,6 +473,458 @@ namespace BigAmbitionsMP
                 // so F6 can toggle the suppression at runtime for the entry-bug A/B test.
                 if (MPClient.IsConnected && ParkedVehicleSync.SpawnSuppressionEnabled) return false;
                 return true;
+            }
+        }
+
+        // CLAUDE-DIAGNOSTIC — client-can't-exit-building investigation (2026-05-20).
+        // Cpp2IL decompile revealed:
+        //   * ExitZone.OnTriggerEnter only opens the door (animation) — NOT the
+        //     building-exit trigger.  Our earlier exit-trigger probe was watching
+        //     the wrong class.
+        //   * The REAL exit handler is ExitZoneDespawner.OnTriggerEnter, which
+        //     guards on CompareTag / NavigationDisabled / IsInsideMotorVehicle /
+        //     BuildingManager.IsInsideBuilding / IsInsideParking / HasPaidForAllItems
+        //     / CanLeaveHome before calling StartCoroutine(ExitFromBuildingCoroutine).
+        //
+        // These two prefixes let us tell whether (a) the client's player collider
+        // never enters the despawner trigger volume (collider/layer problem) or
+        // (b) it enters but a guard rejects (state-mismatch problem).
+        //
+        // Tag/layer fetch is wrapped in try/catch because IL2CPP wrappers can
+        // throw NullRef on transient destroyed objects.
+        [HarmonyPatch]
+        public static class Patch_ExitZoneDespawner_OnTriggerEnter_Diag
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var t = VehicleManager.FindGameType("ExitZoneDespawner");
+                if (t == null) yield break;
+                var bf = System.Reflection.BindingFlags.Instance
+                       | System.Reflection.BindingFlags.NonPublic
+                       | System.Reflection.BindingFlags.Public
+                       | System.Reflection.BindingFlags.DeclaredOnly;
+                var m = t.GetMethod("OnTriggerEnter", bf);
+                if (m != null) yield return m;
+            }
+
+            static void Prefix(object __instance, UnityEngine.Collider other)
+            {
+                try
+                {
+                    _despawnerDepth++;
+                    // Reset bandaid tracking for THIS trigger fire and snapshot
+                    // the instance so the Postfix can call ExitFromBuilding
+                    // with its exitToZoneId field.
+                    _exitFromBuildingSeenDuringDespawn = false;
+                    _currentDespawnerInstance = __instance;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] ExitDespawner OnTriggerEnter prefix: {ex.Message}"); }
+            }
+
+            static void Postfix()
+            {
+                try
+                {
+                    if (!ExitBandaidKickEnabled) return;
+                    if (!MPClient.IsConnected)   return;
+                    if (_exitFromBuildingSeenDuringDespawn) return;   // game already kicked it
+                    if (_currentDespawnerInstance == null)  return;
+
+                    var di = _currentDespawnerInstance;
+                    var dt = di.GetType();
+                    bool casino = ReadBool(dt, di, "isCasinoExit");
+                    bool parking = ReadBool(dt, di, "isParkingExit");
+                    int exitToZoneId = ReadInt(dt, di, "exitToZoneId");
+                    if (casino || parking) return;   // game's casino/parking paths still work fine
+
+                    // De-double: the despawner trigger fires twice in a row
+                    // (Player collider + PlayerTriggerCollider).  Two parallel
+                    // ExitFromBuildingCoroutine starts garble the visual teleport.
+                    float now = UnityEngine.Time.realtimeSinceStartup;
+                    if (now - _lastBandaidKickTime < 3f) return;
+                    _lastBandaidKickTime = now;
+
+                    string side = MPServer.IsRunning ? "HOST" : "CLIENT";
+                    Plugin.Logger.LogInfo($"[ExitBandaid/{side}] kicking ExitFromBuilding({exitToZoneId})");
+
+                    var bmType = VehicleManager.FindGameType("BuildingManager");
+                    if (bmType == null) return;
+                    var bmInst = GetBuildingManagerInstance(bmType);
+                    if (bmInst == null) { Plugin.Logger.LogWarning($"[ExitBandaid/{side}] BuildingManager singleton null."); return; }
+                    var exitMethod = bmType.GetMethod("ExitFromBuilding",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    if (exitMethod == null) { Plugin.Logger.LogWarning($"[ExitBandaid/{side}] ExitFromBuilding not found."); return; }
+                    exitMethod.Invoke(bmInst, new object[] { exitToZoneId, true });
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogWarning($"[ExitBandaid] Postfix: {ex.GetType().Name}: {ex.Message}");
+                }
+                finally
+                {
+                    _currentDespawnerInstance = null;
+                    _despawnerDepth--;
+                    if (_despawnerDepth < 0) _despawnerDepth = 0;
+                }
+            }
+
+            // Helpers — small reflection wrappers used by the bandaid Postfix.
+            private static bool ReadBool(Type t, object inst, string field)
+            {
+                try
+                {
+                    var f = t.GetField(field, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    return f != null && (bool)(f.GetValue(inst) ?? false);
+                }
+                catch { return false; }
+            }
+            private static int ReadInt(Type t, object inst, string field)
+            {
+                try
+                {
+                    var f = t.GetField(field, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    return f == null ? -1 : (int)(f.GetValue(inst) ?? -1);
+                }
+                catch { return -1; }
+            }
+            private static object? GetBuildingManagerInstance(Type bmType)
+            {
+                try
+                {
+                    // Walk BaseType chain to InstanceBehavior<BuildingManager>.GetInstance(bool).
+                    var bt = bmType.BaseType;
+                    while (bt != null)
+                    {
+                        var get = bt.GetMethod("GetInstance",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                        if (get != null)
+                        {
+                            try { return get.Invoke(null, new object[] { true }); }
+                            catch { try { return get.Invoke(null, new object[] { false }); } catch { return null; } }
+                        }
+                        bt = bt.BaseType;
+                    }
+                }
+                catch { }
+                return null;
+            }
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        // CLAUDE-DIAGNOSTIC[BANDAID] — Round 20: REAL ROOT-CAUSE FIX.
+        // ════════════════════════════════════════════════════════════════
+        // The IL2CPP NRE stack trace finally showed two frames:
+        //   at AiCarMusic.<Start>b__1_1 (Address _) [0x00000]
+        //   at BuildingManager+<ExitFromBuildingCoroutine>d__87.MoveNext ()
+        //
+        // AiCarMusic is the NPC-car-music subsystem.  In Start() it registers
+        // two lambdas (<Start>b__1_0 and <Start>b__1_1) on a building-Address
+        // event (per cpp2il's Delegate.Combine call).  The exit coroutine
+        // fires that event during shutdown of the building scene.  The
+        // _1_1 lambda calls DoPlay() (per its CalledBy attribute) — DoPlay
+        // dereferences something null on the client and throws.
+        //
+        // Patch_AiCarMusic_StartB_NoOpOnClient prefixes the lambda and
+        // skips it entirely when MPClient.IsConnected.  On the host the
+        // lambda runs normally so AI-car music keeps working.
+        //
+        // Effect on the bandaid:
+        //   - Coroutine no longer NREs → can reach its terminal state-reset.
+        //   - Bandaid's force-reset (set_enteringBuilding/exitingBuilding(false))
+        //     is hopefully no longer needed.  Test by toggling
+        //     `MPPatches.ExitBandaidStateResetEnabled = false`.
+        //   - The kick (manual ExitFromBuilding) is still needed because
+        //     the despawner's silent short-circuit is a separate bug we
+        //     haven't fixed.
+        // ════════════════════════════════════════════════════════════════
+        [HarmonyPatch]
+        public static class Patch_AiCarMusic_StartB_NoOpOnClient
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var t = VehicleManager.FindGameType("AiCarMusic");
+                if (t == null)
+                {
+                    Plugin.Logger.LogWarning("[Patch] AiCarMusic type not found.");
+                    yield break;
+                }
+                // Compiler-generated lambdas — diffable-cs shows them as
+                // `<Start>b__1_0` / `<Start>b__1_1`.  IL2CPP-Interop renames
+                // `<>` to `_` in identifier names (verified with d__87 earlier).
+                // Search broadly across all flag combinations and log every
+                // method we find so we can see what's actually exposed.
+                var allFlags = System.Reflection.BindingFlags.Instance
+                             | System.Reflection.BindingFlags.Static
+                             | System.Reflection.BindingFlags.Public
+                             | System.Reflection.BindingFlags.NonPublic
+                             | System.Reflection.BindingFlags.DeclaredOnly;
+                int hits = 0;
+                foreach (var m in t.GetMethods(allFlags))
+                {
+                    // Match by `b__1` substring — that's the only stable
+                    // marker of the compiler-generated lambda block 1.
+                    // Avoid matching anything else (DoPlay, Start, etc.).
+                    if (m.Name.Contains("b__1"))
+                    {
+                        Plugin.Logger.LogInfo($"[Patch] AiCarMusic candidate: '{m.Name}' params=[{string.Join(",", m.GetParameters().Select(p => p.ParameterType.Name))}]");
+                        hits++;
+                        yield return m;
+                    }
+                }
+                if (hits == 0)
+                {
+                    // Dump all methods to help diagnose.
+                    Plugin.Logger.LogWarning("[Patch] No AiCarMusic b__1 lambda found.  Methods on type:");
+                    foreach (var m in t.GetMethods(allFlags))
+                        Plugin.Logger.LogWarning($"[Patch]   {m.Name}({string.Join(",", m.GetParameters().Select(p => p.ParameterType.Name))})");
+                }
+            }
+            // Fires hundreds of times per session (every AI car triggers it).
+            // Log only the first suppression + every 500th to keep the log
+            // readable.  The first one proves the patch is live.
+            private static int _aiCarSuppressCount = 0;
+            static bool Prefix(System.Reflection.MethodBase __originalMethod)
+            {
+                if (!MPClient.IsConnected) return true;   // host: run as normal
+                _aiCarSuppressCount++;
+                if (_aiCarSuppressCount == 1 || _aiCarSuppressCount % 500 == 0)
+                {
+                    Plugin.Logger.LogInfo($"[AiCarMusic/CLIENT] {__originalMethod?.Name} suppressed (#{_aiCarSuppressCount}).");
+                }
+                return false;
+            }
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        // Business sync helper: force player-business logo lookup on client.
+        // ════════════════════════════════════════════════════════════════
+        // LogoHelper.GetBusinessLogoTexture(name, size, playerBusiness) takes
+        // a bool that decides which path it queries: false → Addressables
+        // (AI businesses), true → on-disk files (player businesses).
+        // UpdateSign passes that bool from reg.RentedByPlayer, but on the
+        // client reg.RentedByPlayer is FALSE even for host-owned businesses
+        // (RentedByPlayer means "the LOCAL player owns it" — host owns it
+        // from their perspective, not from the client's).  So client always
+        // queries Addressables, never finds host's customized JPGs, and
+        // shows the generic fallback.
+        //
+        // Fix: a Prefix on GetBusinessLogoTexture that, when MPClient is
+        // connected and a player-business directory exists for the requested
+        // name, flips the playerBusiness arg to true.  Sign now loads from
+        // the JPG files we synced to disk.
+        [HarmonyPatch]
+        public static class Patch_GetBusinessLogoTexture_ForceClient
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var t = VehicleManager.FindGameType("LogoHelper");
+                if (t == null) return null;
+                foreach (var m in t.GetMethods(
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                  | System.Reflection.BindingFlags.Static  | System.Reflection.BindingFlags.DeclaredOnly))
+                {
+                    if (m.Name != "GetBusinessLogoTexture") continue;
+                    var p = m.GetParameters();
+                    if (p.Length != 3) continue;
+                    return m;
+                }
+                return null;
+            }
+
+            private static int _flipCount;
+            static void Prefix(string __0, object __1, ref bool __2)
+            {
+                if (!MPClient.IsConnected) return;
+                if (__2) return;   // already true
+                if (string.IsNullOrEmpty(__0)) return;
+                try
+                {
+                    var dir = LogoHelper.GetPlayerBusinessLogoPath(__0);
+                    if (!string.IsNullOrEmpty(dir) && System.IO.Directory.Exists(dir))
+                    {
+                        __2 = true;
+                        _flipCount++;
+                        if (_flipCount <= 3 || _flipCount % 50 == 0)
+                            Plugin.Logger.LogInfo($"[GetLogoTex] forced playerBusiness=true for '{__0}' (#{_flipCount})");
+                    }
+                }
+                catch { }
+            }
+        }
+
+        // ── Suppression: CityGenerator AI/rival business assignment ───────────
+        // The client's CityGenerator.InitializeCity runs on game load and assigns
+        // AI rivals/businesses to residential, warehouse, retail, and office
+        // buildings — using the client's LOCAL random seed.  Even after our
+        // BusinessSnapshot writes the host's authoritative state on top, a few
+        // residential/warehouse assignments survive (confirmed by the user's
+        // screenshot: the "extras" on client match the pre-sync state exactly).
+        //
+        // Strategy: skip the business-assigning generators on client.  Keep
+        // PopulateBuildings (creates the registrations in gi.BuildingRegistrations)
+        // and EnsureTutorialBuildingsAreAvailable (just ensures specific addresses
+        // are unassigned) since those are needed for the registration skeleton.
+        //
+        // Each patch is gated on MPClient.IsConnected so single-player and host
+        // behavior is unchanged.
+
+        [HarmonyPatch]
+        public static class Patch_CityGenerator_SetupResidentialBuildings_SkipOnClient
+        {
+            static System.Reflection.MethodBase? TargetMethod() =>
+                VehicleManager.FindGameType("Helpers.CityGenerator")?.GetMethod("SetupResidentialBuildings",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                  | System.Reflection.BindingFlags.Static  | System.Reflection.BindingFlags.DeclaredOnly);
+
+            static bool Prefix()
+            {
+                if (!MPClient.IsConnected) return true;
+                Plugin.Logger.LogInfo("[Suppress] SetupResidentialBuildings skipped on client.");
+                return false;
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_CityGenerator_SetupWarehouseBuildings_SkipOnClient
+        {
+            static System.Reflection.MethodBase? TargetMethod() =>
+                VehicleManager.FindGameType("Helpers.CityGenerator")?.GetMethod("SetupWarehouseBuildings",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                  | System.Reflection.BindingFlags.Static  | System.Reflection.BindingFlags.DeclaredOnly);
+
+            static bool Prefix()
+            {
+                if (!MPClient.IsConnected) return true;
+                Plugin.Logger.LogInfo("[Suppress] SetupWarehouseBuildings skipped on client.");
+                return false;
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_CityGenerator_DistributeBuildingsToRivals_SkipOnClient
+        {
+            static System.Reflection.MethodBase? TargetMethod() =>
+                VehicleManager.FindGameType("Helpers.CityGenerator")?.GetMethod("DistributeBuildingsToRivals",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                  | System.Reflection.BindingFlags.Static  | System.Reflection.BindingFlags.DeclaredOnly);
+
+            static bool Prefix()
+            {
+                if (!MPClient.IsConnected) return true;
+                Plugin.Logger.LogInfo("[Suppress] DistributeBuildingsToRivals skipped on client.");
+                return false;
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_CityGenerator_SetupRivalFactories_SkipOnClient
+        {
+            static System.Reflection.MethodBase? TargetMethod() =>
+                VehicleManager.FindGameType("Helpers.CityGenerator")?.GetMethod("SetupRivalFactories",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                  | System.Reflection.BindingFlags.Static  | System.Reflection.BindingFlags.DeclaredOnly);
+
+            static bool Prefix()
+            {
+                if (!MPClient.IsConnected) return true;
+                Plugin.Logger.LogInfo("[Suppress] SetupRivalFactories skipped on client.");
+                return false;
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_CityGenerator_SetRivalBuildings_SkipOnClient
+        {
+            static System.Reflection.MethodBase? TargetMethod() =>
+                VehicleManager.FindGameType("Helpers.CityGenerator")?.GetMethod("SetRivalBuildings",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                  | System.Reflection.BindingFlags.Static  | System.Reflection.BindingFlags.DeclaredOnly);
+
+            static bool Prefix()
+            {
+                if (!MPClient.IsConnected) return true;
+                Plugin.Logger.LogInfo("[Suppress] SetRivalBuildings skipped on client.");
+                return false;
+            }
+        }
+
+        // ── Suppression: RealEstateHelper.RunDaily (buy marketplace) ──────────
+        // RealEstateHelper.RunDaily is the orchestrator for the daily real-estate
+        // tick: UpdateBuildingsForSale (picks ~3 new buildings per neighborhood
+        // for the buy marketplace), UpdatePlayerRealEstate, and the two
+        // SimulateCompetitorBuying* methods.  All four make RNG-based choices —
+        // running them on the client diverges from host's choices.
+        //
+        // Suppressing the whole RunDaily on client means: client never mutates
+        // gi.buildingsForSale or gi.realEstate locally; host's snapshot is the
+        // sole authority.  BusinessSync.CheckBuildingsForSaleChange polls the
+        // host's list each Tick and re-broadcasts on change.
+        [HarmonyPatch]
+        public static class Patch_RealEstateHelper_RunDaily_SkipOnClient
+        {
+            static System.Reflection.MethodBase? TargetMethod() =>
+                VehicleManager.FindGameType("Helpers.RealEstateHelper")?.GetMethod("RunDaily",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                  | System.Reflection.BindingFlags.Static  | System.Reflection.BindingFlags.DeclaredOnly);
+
+            static bool Prefix()
+            {
+                if (!MPClient.IsConnected) return true;
+                Plugin.Logger.LogInfo("[Suppress] RealEstateHelper.RunDaily skipped on client.");
+                return false;
+            }
+        }
+
+        // ── Diagnostic: CityMapFilters.ApplyFilters ───────────────────────────
+        // The map's "for rent" highlight discrepancy investigation.  Our snapshot
+        // apply runs once at sync time and our diagnostic shows host/client state
+        // identical at that moment.  But the user reports a visual difference
+        // when they later open the map.  This patch fires our diagnostic at the
+        // EXACT moment the filter computes highlights — so we capture the state
+        // the filter algorithm actually sees, eliminating any timing ambiguity.
+        [HarmonyPatch]
+        public static class Patch_CityMapFilters_ApplyFilters_Diag
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var t = VehicleManager.FindGameType("CityMapFilters");
+                if (t == null) return null;
+                return t.GetMethod("ApplyFilters",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                  | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly);
+            }
+
+            // Throttle: ApplyFilters fires once per toggle click, but the user
+            // may toggle several quickly.  Cap to one dump per 2s so we don't
+            // spam the log.
+            private static float _lastDumpAt = -100f;
+            static void Prefix()
+            {
+                try
+                {
+                    float now = UnityEngine.Time.realtimeSinceStartup;
+                    if (now - _lastDumpAt < 2f) return;
+                    _lastDumpAt = now;
+
+                    string role = MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
+                    Plugin.Logger.LogInfo($"[Patch_ApplyFilters] === ApplyFilters about to run on {role} ===");
+
+                    var gi = SaveGameManager.Current;
+                    if (gi == null) return;
+
+                    var stats = new BusinessSync.TypeStats();
+                    int total = 0;
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null) continue;
+                        total++;
+                        stats.AccumulateFromReg(reg);
+                    }
+                    stats.Log($"ApplyFilters.{role}", total);
+                    BusinessSync.LogForSaleAndRealEstate($"ApplyFilters.{role}", gi);
+                    BusinessSync.LogSceneCBCCounts($"ApplyFilters.{role}");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_ApplyFilters] {ex.Message}"); }
             }
         }
 

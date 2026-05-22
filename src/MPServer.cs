@@ -330,6 +330,8 @@ namespace BigAmbitionsMP
                     var snapshot = BuildWorldSnapshot();
                     Send(peer, MessageEnvelope.Create(MessageType.Welcome, "host", snapshot));
                     Plugin.Logger.LogInfo($"[Server] Late join by '{hello.PlayerId}', sent world snapshot.");
+                    // Also send the business table — sent once, then deltas as they change.
+                    SendBusinessSnapshotTo(peer);
                 }
             }
         }
@@ -408,6 +410,20 @@ namespace BigAmbitionsMP
             Broadcast(MessageEnvelope.Create(
                 MessageType.StartupRelease, "host", new StartupReleasePayload()));
             GameStatePatcher.EnqueueOnMainThread(() => TimeSync.EndStartupHold());
+
+            // Business sync — Phase 1: once all clients are in-game, send the
+            // full exterior business table to everyone.  Event-driven deltas
+            // (BusinessChange) follow from BusinessSync.Tick after this.
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                try
+                {
+                    var snap = BusinessSync.BuildFullSnapshot();
+                    Broadcast(MessageEnvelope.Create(MessageType.BusinessSnapshot, "host", snap));
+                    Plugin.Logger.LogInfo($"[Server] Broadcast business snapshot: {snap.Businesses.Count} buildings.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Initial BusinessSnapshot broadcast: {ex.Message}"); }
+            });
         }
 
         // ── Manual pause ──────────────────────────────────────────────────────
@@ -669,6 +685,42 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Broadcasts the host's parked-vehicle snapshot to all clients.</summary>
+        // ── Business sync (Phase 1: exterior business state) ─────────────────
+
+        /// <summary>Broadcast a single business-changed delta to all clients.</summary>
+        public static void BroadcastBusinessChange(BusinessInfo info)
+        {
+            if (!_running) return;
+            var payload = new BusinessChangePayload { Info = info };
+            Broadcast(MessageEnvelope.Create(MessageType.BusinessChange, "host", payload));
+        }
+
+        /// <summary>Send the full business table to a single peer (on connect).</summary>
+        public static void SendBusinessSnapshotTo(LiteNetLib.NetPeer peer)
+        {
+            if (peer == null) return;
+            try
+            {
+                var snap = BusinessSync.BuildFullSnapshot();
+                Send(peer, MessageEnvelope.Create(MessageType.BusinessSnapshot, "host", snap));
+                Plugin.Logger.LogInfo($"[Server] Sent business snapshot to '{peer.Id}': {snap.Businesses.Count} buildings, {snap.BuildingsForSale.Count} for-sale.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendBusinessSnapshotTo: {ex.Message}"); }
+        }
+
+        /// <summary>Broadcast the full business table to all peers (on for-sale list change).</summary>
+        public static void BroadcastBusinessSnapshot()
+        {
+            if (!_running) return;
+            try
+            {
+                var snap = BusinessSync.BuildFullSnapshot();
+                Broadcast(MessageEnvelope.Create(MessageType.BusinessSnapshot, "host", snap));
+                Plugin.Logger.LogInfo($"[Server] Broadcast business snapshot: {snap.Businesses.Count} buildings, {snap.BuildingsForSale.Count} for-sale.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BroadcastBusinessSnapshot: {ex.Message}"); }
+        }
+
         public static void BroadcastParkedSnapshot(ParkedSnapshotPayload payload)
         {
             if (!_running) return;

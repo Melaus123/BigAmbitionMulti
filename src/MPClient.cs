@@ -180,6 +180,14 @@ namespace BigAmbitionsMP
                     HandleGameTimeSync(env);
                     break;
 
+                case MessageType.BusinessSnapshot:
+                    HandleBusinessSnapshot(env);
+                    break;
+
+                case MessageType.BusinessChange:
+                    HandleBusinessChange(env);
+                    break;
+
                 default:
                     Plugin.Logger.LogWarning($"[Client] Unknown message type: {env.Type}");
                     break;
@@ -410,6 +418,21 @@ namespace BigAmbitionsMP
 
             Plugin.Logger.LogInfo("[Client] Received market snapshot.");
             GameStatePatcher.ApplyMarketSnapshot(payload.MarketEntriesJson);
+        }
+
+        private static void HandleBusinessSnapshot(MessageEnvelope env)
+        {
+            var payload = env.GetPayload<BusinessSnapshotPayload>();
+            if (payload == null) return;
+            Plugin.Logger.LogInfo($"[Client] Received business snapshot: {payload.Businesses.Count} buildings.");
+            GameStatePatcher.ApplyBusinessSnapshot(payload);
+        }
+
+        private static void HandleBusinessChange(MessageEnvelope env)
+        {
+            var payload = env.GetPayload<BusinessChangePayload>();
+            if (payload?.Info == null) return;
+            GameStatePatcher.ApplyBusinessChange(payload.Info);
         }
 
         // ── Outbound ──────────────────────────────────────────────────────────

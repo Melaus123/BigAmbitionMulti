@@ -251,9 +251,8 @@ namespace BigAmbitionsMP
             TickMarketSync();
             TickIntroNamePrefill();
             TickSuppressBlackOverlay(); // backlog #6 fix
-            TickExitTriggerDiag();      // CLAUDE-DIAGNOSTIC — exit-trigger investigation
-            TickBuildingStateProbe();   // CLAUDE-DIAGNOSTIC — state-delta probe
-            TickToggleClientSuppressions();  // CLAUDE-DIAGNOSTIC — F11/F6 toggles
+            TickToggleClientSuppressions();  // F3-F12 runtime toggles
+            MPAutopilot.Tick();              // testing aid — drives new-game flow when BAMP_AUTOROLE is set
 
             // Auto-hide when the game starts so our canvas doesn't block the intro
             // scene's "Start Game" button or any in-game UI.
@@ -737,370 +736,6 @@ namespace BigAmbitionsMP
             }
         }
 
-        // CLAUDE-DIAGNOSTIC — exit-trigger investigation.  Symptom: client
-        // walks into the in-building exit trigger area and nothing happens
-        // (host can exit from the same trigger).  F10 dumps player position,
-        // camera position, and every trigger Collider within 5m so we can
-        // identify what should be firing.
-        private bool _exitF10Down;
-
-        private void TickExitTriggerDiag()
-        {
-            if (!MPClient.IsConnected) return;
-            if (!IsInGame()) return;
-            try
-            {
-                bool f10 = Input.GetKey(KeyCode.F10);
-                if (f10 && !_exitF10Down) DumpExitTriggerDiag();
-                _exitF10Down = f10;
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[ExitDiag] {ex.Message}"); }
-        }
-
-        private static void DumpExitTriggerDiag()
-        {
-            try
-            {
-                var ch = PlayerHelper.PlayerController?.Character;
-                var p = ch != null ? ch.transform.position : Vector3.zero;
-                var cam = Camera.main;
-                Plugin.Logger.LogInfo(
-                    $"[ExitDiag/F10] player pos={p} cam pos={(cam != null ? cam.transform.position.ToString() : "<null>")} cam fwd={(cam != null ? cam.transform.forward.ToString() : "<null>")}");
-
-                // CLAUDE-DIAGNOSTIC — client player component/layer probe.
-                // Trigger fires require a Rigidbody (or CharacterController)
-                // on at least one of the overlapping colliders.  If the client
-                // character is missing those, OnTriggerEnter on ExitZone never
-                // runs.  Also check the layer — a layer-matrix exclusion would
-                // produce the same symptom.
-                try
-                {
-                    if (ch != null)
-                    {
-                        var go = ch.gameObject;
-                        Plugin.Logger.LogInfo(
-                            $"[ExitDiag/F10] player GO '{go.name}' layer={go.layer} ({LayerMask.LayerToName(go.layer)}) active={go.activeInHierarchy}");
-
-                        var par = go.transform.parent;
-                        if (par != null)
-                            Plugin.Logger.LogInfo(
-                                $"[ExitDiag/F10] player parent '{par.gameObject.name}' layer={par.gameObject.layer} ({LayerMask.LayerToName(par.gameObject.layer)})");
-
-                        // Walk down: components on player GO and direct children.
-                        var comps = go.GetComponents(Il2CppType.Of<Component>());
-                        Plugin.Logger.LogInfo($"[ExitDiag/F10] player components on '{go.name}' ({comps?.Length ?? 0}):");
-                        if (comps != null)
-                            for (int i = 0; i < comps.Length && i < 30; i++)
-                            {
-                                var c = comps[i];
-                                if (c == null) continue;
-                                Plugin.Logger.LogInfo($"[ExitDiag/F10]   comp {c.GetIl2CppType().Name}");
-                            }
-
-                        // Specifically check Rigidbody / CharacterController / Collider
-                        var rb = go.GetComponentInChildren(Il2CppType.Of<Rigidbody>());
-                        var cc = go.GetComponentInChildren(Il2CppType.Of<CharacterController>());
-                        var col = go.GetComponentInChildren(Il2CppType.Of<Collider>());
-                        Plugin.Logger.LogInfo(
-                            $"[ExitDiag/F10] player hierarchy has: Rigidbody={(rb != null ? "YES (" + rb.GetIl2CppType().Name + ")" : "no")} CharacterController={(cc != null ? "YES" : "no")} Collider={(col != null ? "YES (" + col.GetIl2CppType().Name + ")" : "no")}");
-                    }
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[ExitDiag/F10] player-component dump: {ex.Message}"); }
-
-                // Every trigger collider within 5m of player.  Iterate all
-                // colliders in the scene (slow but one-shot on F10 — fine).
-                var cols = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<Collider>());
-                int total = cols?.Length ?? 0;
-                int nearby = 0;
-                if (cols != null)
-                {
-                    for (int i = 0; i < cols.Length; i++)
-                    {
-                        var c = cols[i].TryCast<Collider>();
-                        if (c == null || !c.isTrigger || !c.enabled) continue;
-                        if (!c.gameObject.activeInHierarchy) continue;
-                        float sq = (c.transform.position - p).sqrMagnitude;
-                        if (sq > 25f) continue;          // 5m radius
-                        Plugin.Logger.LogInfo(
-                            $"[ExitDiag/F10]   trigger '{c.gameObject.name}' (parent='{(c.transform.parent != null ? c.transform.parent.name : "<root>")}') pos={c.transform.position} d={Mathf.Sqrt(sq):0.##}m");
-                        nearby++;
-                        if (nearby >= 15) break;
-                    }
-                }
-                Plugin.Logger.LogInfo($"[ExitDiag/F10] total colliders in scene={total}; nearby triggers logged={nearby}");
-            }
-            catch (Exception ex)
-            {
-                Plugin.Logger.LogWarning($"[ExitDiag/F10] {ex.Message}");
-            }
-        }
-
-        // CLAUDE-DIAGNOSTIC — building-state-delta probe.
-        //
-        // Goal: identify what state fields the GAME sets when a player enters
-        // or exits a building, so we can determine which (a) need to be faked
-        // on the client to make exit triggers fire, and (b) are safe to fake
-        // (no double-firing side effects).
-        //
-        // Runs on BOTH host and client.  Each tick (0.5s) inspects a curated
-        // list of likely state fields on BuildingManager + PlayerController.
-        // Only logs when a field CHANGES — silent otherwise — so the log
-        // shows a clean sequence of state transitions as the player moves in
-        // and out of buildings.
-        //
-        // F10 also force-dumps the current snapshot, useful for capturing
-        // state at a known moment (e.g., "right after the exit trigger should
-        // have fired").
-        private static bool _bspInit;
-        private static bool _bspF10Down;
-        private static float _bspNextCheck;
-        private static readonly System.Collections.Generic.List<(string label, System.Reflection.FieldInfo field, object? instance)> _bspWatches = new();
-        private static readonly System.Collections.Generic.List<(string label, System.Reflection.PropertyInfo prop, object? instance)> _bspPropWatches = new();
-        private static readonly System.Collections.Generic.Dictionary<string, string> _bspLastSeen = new();
-        private static string SideTag => MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
-
-        private void TickBuildingStateProbe()
-        {
-            if (!IsInGame()) return;
-            if (Time.timeSinceLevelLoad < 5f) return;
-
-            try
-            {
-                if (!_bspInit) BspInit();
-
-                if (Time.unscaledTime >= _bspNextCheck)
-                {
-                    _bspNextCheck = Time.unscaledTime + 0.5f;
-                    BspCheckChanges();
-                }
-
-                // Note: F10 is also used by TickExitTriggerDiag — both dumps
-                // fire on the same press, which is what we want.
-                bool f10 = Input.GetKey(KeyCode.F10);
-                if (f10 && !_bspF10Down) BspDumpAll();
-                _bspF10Down = f10;
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[BSProbe] {ex.Message}"); }
-        }
-
-        private static void BspInit()
-        {
-            _bspInit = true;
-            Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] === Building state probe init ===");
-
-            var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
-                   | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static;
-
-            // BuildingManager — singleton candidate.
-            var bmType = BspFindType("BuildingManager");
-            object? bmInstance = null;
-            if (bmType != null)
-            {
-                Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] BuildingManager type: {bmType.FullName}");
-                try
-                {
-                    var instProp = bmType.GetProperty("Instance", bf);
-                    if (instProp != null) bmInstance = instProp.GetValue(null);
-                }
-                catch { }
-                if (bmInstance == null)
-                {
-                    try { var f = bmType.GetField("instance", bf); if (f != null) bmInstance = f.GetValue(null); } catch { }
-                }
-                Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] BuildingManager instance: {(bmInstance != null ? "found" : "NULL")}");
-                BspRegisterWatchesFor(bmType, bmInstance, "BM", bf);
-            }
-            else
-            {
-                Plugin.Logger.LogWarning($"[BSProbe/{SideTag}] BuildingManager type not found.");
-            }
-
-            // PlayerController — accessed via PlayerHelper.
-            try
-            {
-                var pc = PlayerHelper.PlayerController;
-                if (pc != null)
-                {
-                    var pcType = pc.GetType();
-                    Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] PlayerController type: {pcType.FullName}");
-                    BspRegisterWatchesFor(pcType, pc, "PC", bf);
-                }
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[BSProbe/{SideTag}] PC init: {ex.Message}"); }
-
-            // ThirdPersonCharacter — also has its own state.
-            try
-            {
-                var pc = PlayerHelper.PlayerController;
-                var character = pc?.Character;
-                if (character != null)
-                {
-                    var tpcType = character.GetType();
-                    Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] Character type: {tpcType.FullName}");
-                    BspRegisterWatchesFor(tpcType, character, "TPC", bf);
-                }
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[BSProbe/{SideTag}] TPC init: {ex.Message}"); }
-
-            Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] Watching {_bspWatches.Count} fields total.");
-            BspCheckChanges();   // emit initial values as "CHANGE <init> → ..."
-        }
-
-        private static void BspRegisterWatchesFor(Type t, object? inst, string prefix, System.Reflection.BindingFlags bf)
-        {
-            try
-            {
-                foreach (var f in t.GetFields(bf))
-                {
-                    string fname = f.Name;
-                    // Skip IL2CPP wrapper internals — they're pointer values
-                    // that never change at runtime.  Real state lives in
-                    // managed PROPERTIES, handled below.
-                    if (fname.StartsWith("NativeFieldInfoPtr_") || fname.StartsWith("NativeMethodInfoPtr_")) continue;
-                    string tn = f.FieldType.Name;
-                    if (!BspIsInteresting(fname, tn)) continue;
-
-                    if (!f.IsStatic && inst == null) continue;
-                    _bspWatches.Add(($"{prefix}.{fname}", f, f.IsStatic ? null : inst));
-                    Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   watch field {prefix}.{fname} ({tn}) static={f.IsStatic}");
-                }
-
-                // Properties — what IL2CPP wrappers actually expose for state.
-                // These are the real getters that read native fields.
-                foreach (var p in t.GetProperties(bf))
-                {
-                    if (!p.CanRead) continue;
-                    var getter = p.GetGetMethod(true);
-                    if (getter == null) continue;
-                    if (getter.GetParameters().Length > 0) continue;   // indexer — skip
-                    string pname = p.Name;
-                    string tn = p.PropertyType.Name;
-                    if (!BspIsInteresting(pname, tn)) continue;
-
-                    bool isStatic = getter.IsStatic;
-                    if (!isStatic && inst == null) continue;
-                    object? target = isStatic ? null : inst;
-
-                    _bspPropWatches.Add(($"{prefix}.{pname}", p, target));
-                    Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   watch prop  {prefix}.{pname} ({tn}) static={isStatic}");
-                }
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[BSProbe/{SideTag}] register({prefix}): {ex.Message}"); }
-        }
-
-        private static bool BspIsInteresting(string memberName, string typeName)
-        {
-            bool nameOK = memberName.IndexOf("current",  StringComparison.OrdinalIgnoreCase) >= 0
-                       || memberName.IndexOf("inside",   StringComparison.OrdinalIgnoreCase) >= 0
-                       || memberName.IndexOf("isIn",     StringComparison.OrdinalIgnoreCase) >= 0
-                       || memberName.IndexOf("entered",  StringComparison.OrdinalIgnoreCase) >= 0
-                       || memberName.IndexOf("interior", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool typeOK = typeName.Contains("Building") || typeName.Contains("Floor") || typeName.Contains("Room")
-                       || typeName.Contains("Interior") || typeName.Contains("Tenant") || typeName.Contains("Entity");
-            return nameOK || typeOK;
-        }
-
-        // CLAUDE-DIAGNOSTIC — special-case watch: the BlackOverlay canvas's
-        // .enabled state.  We do this separately because the canvas isn't
-        // discoverable at game-load time (it lives in the UI scene loaded
-        // later); the suppress-tick caches it via FindObjectsOfType.  Here
-        // we sample the cached reference each tick to detect when the game
-        // (vs our suppressor) flips it.
-        private static bool? _bspLastBoEnabled;
-        private static void BspCheckBlackOverlay()
-        {
-            try
-            {
-                var c = _blackOverlayCanvas;
-                if (c == null) return;
-                bool now = c.enabled;
-                if (!_bspLastBoEnabled.HasValue || _bspLastBoEnabled.Value != now)
-                {
-                    Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] CHANGE BlackOverlay.enabled: {_bspLastBoEnabled?.ToString() ?? "<init>"} → {now}");
-                    _bspLastBoEnabled = now;
-                }
-            }
-            catch { }
-        }
-
-        private static void BspCheckChanges()
-        {
-            BspCheckBlackOverlay();
-            for (int i = 0; i < _bspWatches.Count; i++)
-            {
-                var (label, field, instance) = _bspWatches[i];
-                try
-                {
-                    var v = field.GetValue(instance);
-                    string vs = BspFormatValue(v);
-                    if (!_bspLastSeen.TryGetValue(label, out var last) || last != vs)
-                    {
-                        Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] CHANGE {label}: {last ?? "<init>"} → {vs}");
-                        _bspLastSeen[label] = vs;
-                    }
-                }
-                catch { /* getter may throw if instance is dead — skip */ }
-            }
-            for (int i = 0; i < _bspPropWatches.Count; i++)
-            {
-                var (label, prop, instance) = _bspPropWatches[i];
-                try
-                {
-                    var v = prop.GetValue(instance);
-                    string vs = BspFormatValue(v);
-                    if (!_bspLastSeen.TryGetValue(label, out var last) || last != vs)
-                    {
-                        Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] CHANGE {label}: {last ?? "<init>"} → {vs}");
-                        _bspLastSeen[label] = vs;
-                    }
-                }
-                catch { }
-            }
-        }
-
-        private static void BspDumpAll()
-        {
-            int n = _bspWatches.Count + _bspPropWatches.Count;
-            Plugin.Logger.LogInfo($"[BSProbe/{SideTag}] === F10 snapshot ({n} watches) ===");
-            for (int i = 0; i < _bspWatches.Count; i++)
-            {
-                var (label, field, instance) = _bspWatches[i];
-                try { Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   {label} = {BspFormatValue(field.GetValue(instance))}"); }
-                catch (Exception ex) { Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   {label} = <err: {ex.Message}>"); }
-            }
-            for (int i = 0; i < _bspPropWatches.Count; i++)
-            {
-                var (label, prop, instance) = _bspPropWatches[i];
-                try { Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   {label} = {BspFormatValue(prop.GetValue(instance))}"); }
-                catch (Exception ex) { Plugin.Logger.LogInfo($"[BSProbe/{SideTag}]   {label} = <err: {ex.Message}>"); }
-            }
-        }
-
-        private static string BspFormatValue(object? v)
-        {
-            if (v == null) return "<null>";
-            // UnityEngine.Object overloads ==null; check via ReferenceEquals path
-            try
-            {
-                string s = v.ToString() ?? "<null-string>";
-                if (s.Length > 100) s = s.Substring(0, 100) + "…";
-                return s;
-            }
-            catch { return "<tostring-failed>"; }
-        }
-
-        private static Type? BspFindType(string nameOrFullName)
-        {
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                Type[] types;
-                try { types = asm.GetTypes(); } catch { continue; }
-                foreach (var t in types)
-                    if (t.FullName == nameOrFullName || t.Name == nameOrFullName) return t;
-            }
-            return null;
-        }
-
         // CLAUDE-DIAGNOSTIC — F11/F6 toggles for the other two client
         // suppressions (TrafficManager + ParkedVehicle spawn).  Per user's
         // first-domino theory, if turning one of these OFF lets
@@ -1110,6 +745,7 @@ namespace BigAmbitionsMP
         private bool _parkF6Down;
         private bool _parkApplyF5Down;
         private bool _killSwitchF4Down;
+        private bool _bandaidF3Down;
         private static bool _killSwitchActive;       // true = ALL client sync disabled
 
         private void TickToggleClientSuppressions()
@@ -1130,7 +766,17 @@ namespace BigAmbitionsMP
                 if (f5 && !_parkApplyF5Down) ParkedVehicleSync.ToggleClientApply();
                 _parkApplyF5Down = f5;
 
-                // CLAUDE-DIAGNOSTIC — F4 MASTER kill switch.  Disables ALL client-side
+                // F3 toggle for the exit-bandaid kick.  Press to flip
+                // MPPatches.ExitBandaidKickEnabled at runtime.
+                bool f3 = Input.GetKey(KeyCode.F3);
+                if (f3 && !_bandaidF3Down)
+                {
+                    MPPatches.ExitBandaidKickEnabled = !MPPatches.ExitBandaidKickEnabled;
+                    Plugin.Logger.LogInfo($"[ClientFix] ExitBandaidKick toggled → {MPPatches.ExitBandaidKickEnabled}");
+                }
+                _bandaidF3Down = f3;
+
+// CLAUDE-DIAGNOSTIC — F4 MASTER kill switch.  Disables ALL client-side
                 // world-modifying sync at once (parked ghosts, traffic ghosts,
                 // remote-player spawns) and destroys/releases existing artifacts.
                 // If exit works with F4 active, SOMETHING in client sync is the
@@ -1283,6 +929,8 @@ namespace BigAmbitionsMP
             VehicleManager.ProbeCarColor();
             VehicleManager.ProbeParkedVehicles();    // backlog #3 discovery (round 2 — kept for re-runs)
             ParkedVehicleSync.Tick();                // backlog #3 phase 3a — host capture
+            BusinessSync.Tick();                     // business-sync phase 1 — host change detection
+            GameStatePatcher.DrainPendingLogoRefreshes();  // client-side deferred sign refresh after logo PNG generation
 
             // Send our character appearance once the character is ready.
             TrySendLocalAppearance();
@@ -1648,7 +1296,7 @@ namespace BigAmbitionsMP
             SettingsNumRow (ct, ref y, "Starting age", "Your character's age when the game begins.",
                             () => _hostSettings.StartingAge, v => _hostSettings.StartingAge = (int)v, 1f, 16f, 80f, "0");
             SettingsNumRow (ct, ref y, "Starting money", "Cash your character starts the game with.",
-                            () => _hostSettings.StartingMoney, v => _hostSettings.StartingMoney = (int)v, 500f, 0f, 100000f, "0");
+                            () => _hostSettings.StartingMoney, v => _hostSettings.StartingMoney = (int)v, 500f, 0f, 1000000f, "0");
             SettingsBoolRow(ct, ref y, "Disable aging", "Your character never grows older.",
                             () => _hostSettings.DisableAging, v => _hostSettings.DisableAging = v);
             SettingsBoolRow(ct, ref y, "Disable energy need", "Removes the sleep/energy need. Required for multiplayer.",

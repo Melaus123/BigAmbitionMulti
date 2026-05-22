@@ -65,6 +65,10 @@ namespace BigAmbitionsMP
             }
             Logger.LogInfo($"[Plugin] Patch summary: {okClasses} class(es) OK, {failClasses} failed, {totalPatched} method(s) patched total.");
 
+            // Optional testing-aid: drive new-game setup automatically when
+            // BAMP_AUTOROLE env var is set.  No-op in normal play.
+            MPAutopilot.Init();
+
             Logger.LogInfo("BigAmbitionsMP loaded. Canvas UI active — press F8 to toggle.");
         }
 

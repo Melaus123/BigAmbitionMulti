@@ -505,3 +505,805 @@ NEXT:
 - Color machinery (SH_Vehicle two-Color-per-renderer reader/applier) duplicated in ParkedVehicleSync rather than refactoring out of TrafficSync — same logic, kept independent for simpler change. May factor later. (one-off)
 - IL2CPP gotcha: `new UnityAction(MethodGroup)` ctor wants IntPtr not method-group — would have needed a delegate-bridging shim to subscribe to ParkingSimulator.ParkingLaneRegeneration. Switched the entire capture path to static-method Postfixes which sidesteps the issue and is simpler / more robust. (rule)
 - NEXT: in-game test confirms snapshot arrives at client and ghosts appear at matching positions/models/colors. If client ghosts mismatch host visuals, the most likely culprit is the SpawnGhost path — client's `Helpers.ParkingSimulator.RequestParkedVehicle` may need its own pool init.
+
+2026-05-20 — Cpp2IL decompile breakthrough on client-can't-exit-building bug.
+- Cpp2IL pre-release `2022.1.0-pre-release.21` (downloaded to `/c/code/cpp2il/v2022.1/Cpp2IL.exe`) supports IL2CPP metadata v31.1, which 2022.0.7 stable does not. Use `--use-processor attributeanalyzer,attributeinjector,callanalyzer,nativemethoddetector` + `--output-as dll_il_recovery`; decompile resulting DLLs with `ilspycmd 9.1.0.7988` (newer versions need .NET 9). Method bodies are still `throw null` stubs, but `[CalledBy] / [Calls] / [CallerCount]` attributes give the static call graph — that's what's actionable. (rule)
+- ROOT CAUSE LEAD: `ExitZone.OnTriggerEnter` is NOT the building-exit trigger. It only adds the collider to a list and calls `UpdateDoorState` (door animation). The real exit handler is `ExitZoneDespawner.OnTriggerEnter` — its `[Calls]` set: `CompareTag`, `PlayerController.NavigationDisabled`, `VehicleHelper.IsInsideMotorVehicle`, `BuildingManager.IsInsideBuilding`, `UndergroundParkingManager.IsInsideParking`, `PlayerHelper.ItemInHands/HasPaidForAllItems/CanLeaveHome`, then `StartCoroutine(BuildingManager.ExitFromBuildingCoroutine)` or `KickOutPlayer` / `ExitParking`, with `Notifications.Show` for refusal paths. (rule)
+- Implication: the `// CLAUDE-DIAGNOSTIC` exit-trigger probe in MPCanvasUI was watching the wrong class. The bug is either (a) the client's player collider never enters the ExitZoneDespawner trigger volume, OR (b) it enters but one of the above guards rejects it. A Harmony Prefix on `ExitZoneDespawner.OnTriggerEnter` that logs `other.name`, `other.tag`, `other.gameObject.layer`, and snapshots `BuildingManager.IsInsideBuilding`, `PlayerController.NavigationDisabled`, `VehicleHelper.IsInsideMotorVehicle`, `PlayerHelper.HasPaidForAllItems`, `PlayerHelper.CanLeaveHome` will pinpoint which one. (situational: until exit-bug fix lands)
+- BuildingManager full decompile saved at `/c/code/cpp2il/BuildingManager-decompiled.cs` (2270 lines); ExitZone at `/c/code/cpp2il/ExitZone-decompiled.cs`; ExitZoneDespawner at `/c/code/cpp2il/ExitZoneDespawner-decompiled.cs`. Diffable C# tree (signature-only, no bodies — but a fast cross-class grep target) at `/c/code/cpp2il/output-2022.1/DiffableCs/`. (rule)
+
+2026-05-20 — Deploy checkpoint: ExitZoneDespawner + ExitFromBuilding diagnostic patches shipped.
+- Two new Harmony Prefix patches in MPPatches.cs marked `// CLAUDE-DIAGNOSTIC`: `Patch_ExitZoneDespawner_OnTriggerEnter_Diag` (uses FindGameType("ExitZoneDespawner") + GetMethod("OnTriggerEnter") since the type is in global namespace) and `Patch_ExitFromBuilding_Diag` (FindAllMethodsByName since multiple classes may host the name). Both log SIDE = HOST/CLIENT/SP plus collider tag/layer/GameObject name. (situational: until exit-bug fix lands)
+- A/B decision tree for the next test:
+   * Despawner prefix fires on host, prefix fires on client too → guard condition mismatch (next: snapshot IsInsideBuilding / NavigationDisabled / IsInsideMotorVehicle / HasPaidForAllItems / CanLeaveHome inside the prefix and compare)
+   * Despawner prefix fires on host but NEVER on client → collider/layer/physics problem (player collider or trigger volume on client side is malformed)
+   * ExitFromBuilding fires on host but not client (with despawner firing on both) → narrow to the specific guard between them
+
+2026-05-20 — Test 1 result: trigger DOES fire on client; guard rejection confirmed.
+- Host log: `[ExitDespawner/HOST] OnTriggerEnter ... by collider='Player' layer=6` and `collider='PlayerTriggerCollider' layer=11`, then `[Building] ExitFromBuilding` (from older Patch_ExitFromBuilding) and `[ExitDiag/PATCH] ExitFromBuildingCoroutine`. Full chain executes.
+- Client log: same two `[ExitDespawner/CLIENT] OnTriggerEnter` lines fire — both colliders, same tag='Player', same layers 6 and 11. But NO `[ExitFromBuilding]` and NO `[ExitFromBuildingCoroutine]` follow. The exit chain dies INSIDE ExitZoneDespawner.OnTriggerEnter on the client. (rule)
+- Therefore: it is NOT a collider/physics/layer/tag problem. It IS a guard-condition rejection inside the despawner. Categories: `IsInsideBuilding`/`IsInsideParking` (state-mismatch), `NavigationDisabled` (player-control state), `IsInsideMotorVehicle` (vehicle state), `HasPaidForAllItems`/`CanLeaveHome` (player-state). (rule)
+- Side note: my redundant `Patch_ExitFromBuilding_Diag` reported `0 method(s) patched` while the existing `Patch_ExitFromBuilding` reports `1 method(s)` — Harmony silently de-dupes a second prefix on the same MethodInfo OR our Plugin counter logic short-circuits the second class. Doesn't matter — removed the dup. (one-off)
+
+2026-05-20 — Deploy checkpoint: guard-value probes shipped.
+- Added `_despawnerDepth` counter + six guard probes (`IsInsideBuilding`, `IsInsideParking`, `NavigationDisabled`, `IsInsideMotorVehicle`, `HasPaidForAllItems`, `CanLeaveHome`) plus a `Notifications.Show` probe. Each logs only when `_despawnerDepth > 0`, so log noise stays minimal. All marked `// CLAUDE-DIAGNOSTIC`. (situational: until exit-bug fix lands)
+- Build clean (1 unrelated warning in TrafficSync.cs:252), deployed to both plugin paths.
+
+2026-05-20 — Test 2 result: client short-circuits earlier than NavigationDisabled.
+- Host trigger fire → 3 guards then exit chain: `NavigationDisabled=False → HasPaidForAllItems=True → CanLeaveHome=True → ExitFromBuildingCoroutine`. IsInsideMotorVehicle not called (not on this branch). (rule)
+- Client trigger fires 9+ times (player walks in/out) → ZERO of the four working guard probes ever fire. So the despawner's OnTriggerEnter returns BEFORE NavigationDisabled is reached. (rule)
+- IL2CPP gotcha: `Type.GetProperty(...).GetGetMethod(true)` returned null for `BuildingManager.IsInsideBuilding` and `UndergroundParkingManager.IsInsideParking` (Harmony then threw "Patching exception in method null"). The same calls work for `PlayerController.NavigationDisabled` and the rest. Fix: switch to `FindAllMethodsByName("get_IsInsideBuilding")` filtered by `DeclaringType.Name`. (rule)
+- Notifications.Show patch matched `UnityEngine.UI.Extensions.SimpleMenu<T>::Show` (open-generic) and failed. Fix: filter `DeclaringType.Name == "Notifications"` and skip ContainsGenericParameters types. (rule)
+
+2026-05-20 — Deploy checkpoint: fixed IsInsideBuilding/IsInsideParking probes + added CompareTag probe + Despawner field snapshot.
+- New: `Patch_ExitGuard_CompareTag` (filters by `_despawnerDepth > 0`, logs `gameObject.name`, the arg string, and the result).
+- New: `LogDespawnerFields(__instance)` called from despawner Prefix — logs `isCasinoExit`, `isParkingExit`, `exitToZoneId` from the trigger object. (situational: exit-bug)
+- Fixed: IsInsideBuilding / IsInsideParking probes now patch via `get_X` method name; Notifications.Show filtered to its own type only.
+- Expected outcome on next test:
+   * If CompareTag returns false on client → that's the short-circuit (the player object lost the "Player" tag or there's a tag-pool mismatch).
+   * If CompareTag returns true but IsInsideBuilding returns false on client → BuildingManager state mismatch (most likely cause).
+   * If isCasinoExit or isParkingExit are true on the client's despawner only → MP scene state inconsistency (unlikely but ruled out by inspection).
+
+2026-05-20 — Test 3 result: short-circuit is BEFORE NavigationDisabled and AFTER the Prefix.
+- Despawner fields IDENTICAL host vs client: `casino=False parking=False exitToZoneId=-1`. So it's not a parking/casino dispatch branch difference.
+- Host (after fix): `Prefix → DespawnerFields → NavigationDisabled → IsInsideBuilding=True → HasPaid=True → CanLeaveHome=True → Coroutine`. IsInsideBuilding now successfully patched via `FindAllMethodsByName("get_IsInsideBuilding")` (returns 1 method). (rule)
+- Client: `Prefix → DespawnerFields → (nothing)`. The despawner's OnTriggerEnter returns silently between the field reads and the first method call (NavigationDisabled). (rule)
+- The only checks left that would short-circuit in that gap, given casino/parking are both false, are flag checks: `enteringBuilding` / `exitingBuilding` on BuildingManager (private bool fields at 0x110/0x111 per cpp2il dump), or possibly a null-check on `building`. Hypothesis: `enteringBuilding` got stuck true on the client (entry coroutine never completed under MP timing). (rule)
+- CompareTag probe was removed — Harmony rejected the FindAllMethodsByName matches as `null` (likely open-generic or native-only Component override). Indirect inference: the Prefix logs tag='Player' and the method still short-circuits, so CompareTag passed. (one-off)
+
+2026-05-20 — Deploy checkpoint: BuildingManager singleton-state snapshot probe shipped.
+- `LogDespawnerFields` extended to also reach the BuildingManager singleton via `InstanceBehavior<BuildingManager>.GetInstance(false)` (walked via `BaseType` chain), then read `enteringBuilding`, `exitingBuilding`, and whether `building` is null via reflection. Logs `[ExitGuard/{side}] BM.entering=... exiting=... building==null:...`.
+- If next test shows `entering=True` on client but `False` on host → root cause confirmed: entry coroutine never finished. Fix candidates: force-clear `enteringBuilding` on a delay, force-complete the EnterBuildingCoroutine on the client, or find what's breaking the coroutine in the first place.
+- If `building==null:true` on client but `false` on host → IsInsideBuilding logic relies on that field; the singleton lost its building reference somehow.
+- If both look normal (entering=False, exiting=False, building!=null) on client — the short-circuit is from yet a different early-return, possibly involving an InstanceBehavior.GetInstance returning null for another singleton.
+
+2026-05-20 — Test 4 result: BM.entering/exiting flags IDENTICAL on host vs client.
+- Host: `BM.entering=False exiting=False building==null:?` → continues to NavigationDisabled, etc. → Coroutine.
+- Client: same values exactly → STOPS. (rule)
+- `building==null:?` on both means our reflection field-read for `building` threw silently (likely the type doesn't expose it via that name OR it's a property not a field). Minor — not the deciding factor since both sides match.
+- No exceptions, no errors, no other log activity between trigger and silence on client. The despawner's native body returns to control immediately after our Prefix.
+- Therefore the bug is even EARLIER than enteringBuilding/exitingBuilding flags. Only candidates left: (a) IL2CPP `CompareTag("Player")` returning false despite `.tag == "Player"` (tag-hash-cache miss), (b) a singleton-fetch via `InstanceBehavior<X>.GetInstance(false)` returning null on the client, (c) something we haven't even thought of yet.
+
+2026-05-20 — Deploy checkpoint: CompareTag direct-call + Postfix + ItemInHands/SetNewDestination/MouseController.Reset probes shipped.
+- Despawner Prefix now calls `other.CompareTag("Player")` directly in managed code and logs the bool — if this returns False on client despite `.tag == "Player"`, we have the smoking gun (IL2CPP tag-hash cache desync).
+- Postfix now logs `Postfix — original returned`: if Prefix fires but Postfix doesn't on client, the original method threw an exception silently.
+- Three new probes (ItemInHands, SetNewDestination, MouseController.Reset) cover the remaining [Calls] entries in the despawner's call graph that we hadn't yet probed.
+
+2026-05-20 — Test 5 result: CompareTag passes, Postfix fires, no other probes fire — bug is on a NULL-CHECK we can't intercept.
+- Host: full chain logs as expected and exits via coroutine.
+- Client: `Prefix → direct CompareTag('Player')=True → DespawnerFields=False/False/-1 → BM.entering=False exiting=False → Postfix — original returned`. The body runs to completion, returns cleanly, but never calls ANY of the [Calls] in its graph (NavigationDisabled, IsInsideBuilding, IsInsideParking, ItemInHands, HasPaidForAllItems, CanLeaveHome, IsInsideMotorVehicle, SetNewDestination, MouseController.Reset — none of them fire). (rule)
+- Conclusion: between CompareTag (returns true) and the first guard property access there is an EARLY RETURN we can't see via Harmony — most plausibly a `if (Instance == null) return;` on one of the singletons (PlayerController, BuildingManager, UndergroundParkingManager, MouseController). Generic `InstanceBehavior<T>.GetInstance` cannot be patched cleanly because it's open-generic. (rule)
+
+2026-05-20 — Deploy checkpoint: singleton-Instance probe shipped.
+- New helper `LogSingletonState()` invoked from despawner Prefix logs `Instance=null` vs `Instance=NOT-null` for PlayerController, BuildingManager, UndergroundParkingManager, MouseController via `InstanceBehavior<T>.GetInstance(false)` walked through BaseType chain.
+- IL2CPP gotcha hit and fixed: `UnityEngine.Object.FindObjectsOfType(System.Type)` doesn't accept managed `System.Type` — needs `Il2CppSystem.Type` via `Il2CppType.From(Type)`. Dropped scene-count for now to keep build clean; can re-add via Il2CppType.From if needed. (rule)
+- Expected outcome: one of the singletons should report `Instance=null` on client and `NOT-null` on host. That singleton is the root cause — we'd then find what makes it null on client (likely a destroy event our patches need to suppress or a registration step our patches are missing).
+
+2026-05-20 — Test 6 result + tooling limitations: no further diagnostic angles via Harmony.
+- Singleton inventory matched on host vs client (probe was partly broken: PlayerController/MouseController showed `no GetInstance() found` then `Instance=null` on BOTH sides — they don't inherit from InstanceBehavior). UndergroundParkingManager type not found in any loaded assembly. BuildingManager NOT-null on both. No distinguishing signal. (rule)
+- Cpp2IL.Plugin.ControlFlowGraph (downloaded into Plugins/Plugins/ subdir to match plugin loader's path expectation) added a `cfg` output format but crashed mid-dump with `MissingFieldException` (plugin's own bug, line 229 of ControlFlowGraphOutputFormat.cs). No usable CFG output. (rule)
+- `CallsUnknownMethods(Count = 39)` on the despawner's OnTriggerEnter means Cpp2IL itself couldn't statically resolve 39 calls. One of them is the early-return condition. Can't reach further without a different tool (ghidra, ida, runtime native-debug).
+
+2026-05-20 — Deploy checkpoint: bandaid fix for client-can't-exit-building shipped.
+- New flag `_exitFromBuildingSeenDuringDespawn` set true in Patch_ExitFromBuilding Prefix when `_despawnerDepth > 0`. New `_currentDespawnerInstance` snapshot.
+- ExitZoneDespawner Postfix: on CLIENT only, when the flag is still false AND the despawner is regular (`isCasinoExit=False, isParkingExit=False`), reflect into `BuildingManager.Instance.ExitFromBuilding(exitToZoneId, true)` and call it manually.
+- Bandaid is scoped: host path untouched, casino/parking paths untouched, scenes the despawner didn't actually fire on are untouched.
+- All bandaid code marked `// CLAUDE-DIAGNOSTIC` — clean it up to plain comments once user confirms it works in-game.
+- Test plan: client walks into the building exit zone after host has loaded. Expected log: `[ExitBandaid/CLIENT] despawner silently rejected exit — kicking ExitFromBuilding(-1) manually` then `[ExitBandaid/CLIENT] ExitFromBuilding(-1) invoked.` and the client should actually exit the building. Side effects (item-clearing, payment notification, mouse reset) won't run — acceptable given how cleanly client state matched host's pre-exit state.
+
+2026-05-20 — Test 7 result: bandaid actually worked (visual exit + correct teleport), but re-entry is now broken.
+- User confirmed: client exit succeeded, landed near host at the outdoor spawn point. Bandaid is end-to-end functional in the right conditions. (rule)
+- Re-entry attempt to the same building failed on the client. New bug: same class as the exit — entry-side flow short-circuits silently somewhere. (rule)
+- Re-interpretation of earlier "bandaid didn't work" results: likely the double-trigger (Player + PlayerTriggerCollider colliders) made two parallel ExitFromBuildingCoroutine state machines that garbled each other. This time only one likely fired. (rule)
+
+2026-05-20 — Deploy checkpoint: bandaid de-double + entry-side probes shipped.
+- `_lastBandaidKickTime` 3s cooldown: second despawner trigger within 3s of a successful kick is logged + skipped. Earlier `return;` inside Postfix would have skipped the depth-decrement at the bottom — restructured to if/else-if so the decrement still runs. (rule)
+- New `_interactDepth` counter and 4 entry probes:
+   * `Patch_EntryProbe_CBCInteract` — Prefix logs entry, Postfix logs return value. Increments/decrements _interactDepth.
+   * `Patch_EntryProbe_CanEnterBuilding` — Postfix logs result during interact window. This is the most likely culprit per call graph.
+   * `Patch_EntryProbe_IsBuildingBlocked` — Postfix logs result during interact window.
+   * `Patch_EntryProbe_EnterBuilding` — Prefix logs when fired (terminal success signal).
+- `Patch_Notifications_Show_Diag` extended to also fire during the interact window — any refusal-message text gets captured.
+- Expected decision tree:
+   * CBC.Interact() doesn't fire on click → user-input layer broken (very unlikely)
+   * Interact fires but returns False without other probes → CanEnterBuilding or another early check rejected
+   * CanEnterBuilding=False on client, True on host → ROOT CAUSE: scoped to whatever state CanEnterBuilding reads (probably BuildingRegistration.AvailableForRent or a "open" flag)
+   * IsBuildingBlocked=True on client, False on host → some service-state mismatch
+   * Notifications.Show fires with a specific message → game's own refusal reason
+   * All probes pass but EnterBuilding still doesn't fire → another logic gap we'd need to investigate
+
+2026-05-20 — Test 8 result: bandaid de-double works, re-entry bug is same-class as exit bug.
+- Bandaid de-double confirmed working: log shows `[ExitBandaid/CLIENT] duplicate trigger within 0.00s — skipping.` for the second collider. (rule)
+- Exit succeeded again (user landed at outdoor spawn near host). (rule)
+- Re-entry attempts: `CBC.Interact` → `CanEnterBuilding=True` → `IsBuildingBlocked=False` → `BM.EnterBuilding called` → `Interact() returned True`. All probes pass. But `BuildingManager.LoadBuilding` (which fires inside EnterBuildingCoroutine on the working 1st entry) NEVER fires on subsequent attempts. (rule)
+- Direct comparison of 1st (worked) vs 2nd (failed) entry chain: identical up through CBC.Interact returning True. After that, 1st has 20+ BMTrace lines (LoadBuilding, ToggleLayout, ApplyInteriorDesign, FillBuildingDirtSpotObjects, ...). 2nd has nothing — just GameTimeSync ticks. (rule)
+- Therefore EnterBuilding ran but never started its coroutine. Same silent short-circuit pattern as the despawner's OnTriggerEnter — early return on a check we can't intercept. (rule)
+- Top hypothesis: `BuildingManager.exitingBuilding` stuck True on client because the bandaid-kicked ExitFromBuildingCoroutine ran the visible steps but its terminal cleanup ("exitingBuilding = false") never executed cleanly. EnterBuilding's body likely starts with `if (this.exitingBuilding || this.enteringBuilding) return false;`. (rule)
+
+2026-05-20 — Deploy checkpoint: BM-state probe + EnterBuilding Postfix shipped.
+- `LogBuildingManagerStateOnly()` helper reads BM singleton's enteringBuilding, exitingBuilding, building (and resolves building.gameObject.name for clarity).
+- Called from `Patch_EntryProbe_CBCInteract` Prefix — logs once per click.
+- `Patch_EntryProbe_EnterBuilding` now has Postfix logging the return value (and Prefix logs the building name argument).
+- Expected next-test outcome:
+   * `BM.exiting=True` on client during re-entry attempt → hypothesis confirmed; fix candidate is to force-clear the flag once the exit chain's observable cleanup steps have completed.
+   * `BM.exiting=False` but EnterBuilding returns False → another guard we'll need to dig into.
+   * `BM.exiting=False` and EnterBuilding returns True but no LoadBuilding → coroutine factory ran but state machine didn't progress (much harder to fix).
+
+2026-05-20 — Test 9 result: re-entry coroutine hangs after phase-1 (player walk) completes; phase-2 (teleport in) never fires.
+- Entry data layer 100% clean on every click: `BM.entering=False exiting=False` (no stuck flags), `CanEnterBuilding=True`, `IsBuildingBlocked=False`, `BM.EnterBuilding(building='Building') returned True` (coroutine scheduled successfully). (rule)
+- The "stuck exitingBuilding flag" hypothesis is now BUSTED — both flags read False on both working 1st entry and failing 2nd+ entries. (rule)
+- Critical timing comparison between 1st (worked) and 2nd (failed) entry:
+   * 1st: EnterBuilding returns True → `BMTrace: LoadBuilding` fires immediately on the next log line. No player walking. (User was already at the entry spot when they clicked.)
+   * 2nd: EnterBuilding returns True → player velocity ticks `0 → 6 → 0` (player walks to entry spot and stops). NO LoadBuilding follows. (rule)
+- Therefore the entry coroutine has at least two phases: (1) walk-to-destination (player movement via SetNewDestination + yield until arrived), (2) screen-fade + scene-load + teleport-in. The hang is between phase 1 and phase 2 on subsequent entries. (rule)
+- EnterBuildingCoroutine state machine class `<EnterBuildingCoroutine>d__55` MoveNext body is marked `[ContainsInvalidInstructions]` by cpp2il — body is NOT decompilable. Same applies to ExitFromBuildingCoroutine's d__87 MoveNext. We can patch them as black boxes but cannot read their conditions. (rule)
+
+2026-05-20 — Significant discoveries not previously logged in detail.
+- Manual `BuildingManager.ExitFromBuilding(targetExitId, true)` is the API that triggers the entire exit chain reliably. Once invoked on the client, the full sequence runs: ResetIndoors → SerializeInteriorDesign → HideDirtInCurrentBuilding → DisableAllSizesAndLayouts → OnExitBuilding events fan out to LoudSpeakersManager / PurchaseUI / CityMapHider (50+ times) / GameManager / IndoorCustomerSpawner / TimeOfDayController / PedestrianSpawner / CashRegisterController / Employee → `BM.IsInsideBuilding True→False` → CityManager.PositionPlayerInScene fires (via OnScenesLoaded) → TryToTeleportPlayerToLastPosition OR TeleportPlayerToSavePoint actually moves the player. (rule)
+- The despawner's OnTriggerEnter (ExitZoneDespawner) is the NORMAL game entry point for exit, but it short-circuits silently on the client on a check we can't see (CallsUnknownMethods=39 in cpp2il static analysis). Our bandaid bypasses that by calling ExitFromBuilding directly. (rule)
+- Exit visual transition is gated on `CityManager.OnScenesLoaded`. On client this fires correctly when the data exit runs — proving the scene-load callback wiring isn't broken on the client. (rule)
+- The double-trigger fire (`Player` collider then `PlayerTriggerCollider` ~ms later) inside the same despawner can start TWO parallel exit coroutines on the client, which garble the visual teleport. 3s cooldown on the bandaid invocation fixes this. (rule)
+- Successful exit on the client leaves the player visually outside at the correct outdoor position (BSProbe-confirmed) but leaves SOMETHING in a state that prevents the entry coroutine's phase 2 from completing on the next entry attempt. The exact state-mismatch is currently unknown — none of `entering`, `exiting`, or `building` flags differ between successful 1st entry and failing 2nd entry. (rule)
+- Cpp2IL.Plugin.ControlFlowGraph crash is REPRODUCIBLE — multiple runs yielded `MissingFieldException` on dozens of methods including the ones we care about, and zero output files. Plugin is incompatible with the game's metadata. No "real" decompiled bodies available without heavier tooling (ghidra/ida). (rule)
+- IL2CPP reflection gotcha: BuildingManager.building field is in cpp2il dump as `public Building building` at offset 0x110, but reflection's `GetField("building", Public|NonPublic|Instance)` returns null. Backing field has been renamed by the IL2CPP-managed bridge. Has not been critical so far — IsInsideBuilding state via BSProbe gives us equivalent info. (rule)
+- Top current hypothesis for the re-entry hang: our BlackOverlay-canvas suppression (the fix shipped for backlog #6 "client freezes black screen on entry") interferes with the entry coroutine's fade-to-black yield specifically when the player walks to the destination (phase-1 with movement). When the player is already at the destination (no walk), the timing happens to work; when there's a walk, the coroutine and our suppressor are out of phase and the fade-complete check never returns true. Untested yet — F12 toggle test pending. (situational: until F12 test result)
+
+2026-05-20 — Test 10 (F12 BlackOverlay toggle) result: hypothesis BUSTED.
+- User toggled F12 multiple times. Clicks DID register through the visible BlackOverlay canvas (5+ `CBC.Interact()` fired with suppression OFF). So the overlay doesn't block raycasts/clicks. (rule)
+- Entry chain still fired identically (CanEnterBuilding=True, EnterBuilding returned True). Still no LoadBuilding. (rule)
+- Therefore BlackOverlay suppression is NOT the cause of the re-entry hang. Hypothesis eliminated. (rule)
+
+2026-05-20 — Deploy checkpoint: EnterBuildingCoroutine state machine MoveNext probe shipped.
+- `Patch_EBC_MoveNext_Diag` walks `BuildingManager.GetNestedTypes()` looking for the `<EnterBuildingCoroutine>d__55` class, then patches its MoveNext directly.
+- Prefix + Postfix both read the `<>1__state` field (the IEnumerator state machine's current state) and log it on entry/exit.
+- A monotonic counter `_ebcMoveNextCallCount` increments each call so we see ALL invocations across all entry attempts.
+- This is the deepest we can probe without external native tooling — d__55.MoveNext body itself is undecompilable, but we'll see HOW MANY state transitions the coroutine makes before hanging.
+- Expected outcome:
+   * 1st (working) entry: probably 4-8 MoveNext calls progressing through distinct state values (0 → 1 → 2 → -1 etc.).
+   * 2nd (failing) entry: stuck at one state value, OR MoveNext fires once and never again, OR MoveNext fires repeatedly with the same state indicating an infinite spin.
+   * The state value where MoveNext stops moving forward = the yield point that's broken.
+
+2026-05-20 — Test 11 (EBC MoveNext probe) result: ROOT CAUSE narrowed dramatically.
+- Patch_EBC_MoveNext_Diag bound successfully to `BuildingManager+_EnterBuildingCoroutine_d__55` (note IL2CPP-Interop renamed the class — angle brackets became underscores). (rule)
+- 1st (working) entry: MoveNext fires 3+ times (call #1 fires synchronously inside EnterBuilding's StartCoroutine, then #2 / #3 on subsequent frames). state-on-entry/exit always shows -999 → our reflection lookup of `<>1__state` field failed (renamed by IL2CPP-Interop). (rule)
+- 2nd+ (failing) entries: MoveNext NEVER fires once across 5 separate user clicks, even though EnterBuilding returns True every time. So the coroutine state machine isn't even getting its first synchronous pump. (rule)
+- Therefore: either (a) EnterBuilding's body has a code path that returns true WITHOUT calling StartCoroutine on subsequent calls, OR (b) StartCoroutine is called but the MonoBehaviour hosting the coroutine is disabled (Unity silently refuses to pump MoveNext on a disabled MB). (rule)
+- Top hypothesis: BuildingManager's MonoBehaviour or its GameObject is in a disabled state after the first exit, which is why StartCoroutine no-ops silently on subsequent entries. (rule)
+- BlackOverlay suppression hypothesis (round 10) ruled out: even with F12 toggling overlay back to enabled, MoveNext still never fires on the second entry. Confirms suppression isn't the cause. (rule)
+
+2026-05-20 — Deploy checkpoint: MB-host state probe + field-name discovery shipped.
+- `LogBuildingManagerStateOnly()` now also logs `BM.MonoBehaviour enabled=X activeInHierarchy=Y` so we can directly test the disabled-MB hypothesis.
+- Same helper enumerates BM instance fields with FieldType containing "Building" OR Name containing "building" to finally identify the renamed `building` backing field (cpp2il sees it as `public Building building`, reflection couldn't find it). Logs each one's resolved value.
+- Decision tree for next test:
+   * `enabled=False` or `activeInHierarchy=False` on failing attempt → root cause confirmed; fix is to force-enable BM before the entry chain (or skip the disable that exit caused).
+   * Both flags true on failing attempt but BM.field.building != null → "already inside" guard in EnterBuilding; fix is to manually clear that field after exit.
+   * Both flags true and building==null but MoveNext still doesn't fire → some flag we haven't yet probed gates the StartCoroutine call.
+
+2026-05-20 — Test 12 (MB-host probe) result: disabled-MonoBehaviour hypothesis BUSTED.
+- `BM.MonoBehaviour enabled=True activeInHierarchy=True` on BOTH the working 1st entry AND the failing 2nd+ entries. The MB hosting the coroutine is fully alive on both paths. (rule)
+- Field-enumeration filter (`name.Contains("building")` or type-name `Building`) logged NOTHING — IL2CPP-Interop isn't surfacing the `building` backing field under any name containing "building". Either the backing field is renamed past recognition (e.g., a generic-mangled name) or `Type.GetFields()` doesn't return it for this IL2CPP wrapper. (rule)
+- Combined-state snapshot for failing entries: `entering=False`, `exiting=False`, `IsInsideBuilding=False` (so `building==null` per its definition), `enabled=True`, `activeInHierarchy=True`, `EnterBuilding returns True`, `MoveNext never fires`. All readable state looks pristine; the differing state must be something we can't read via current reflection. (rule)
+- Next probe will dump ALL fields unfiltered to find what we're missing.
+
+2026-05-20 — Deploy checkpoint: full BM-field-dump probe shipped.
+- `LogBuildingManagerStateOnly` now enumerates EVERY instance field via `GetFields(Public|NonPublic|Instance)`, logs the count, and logs each field's name + type + value (with safe stringification — UnityObject.name for MonoBehaviours, truncated ToString for everything else).
+- Expected outcome: a comparison snapshot of every reflectable BM field at the "before 1st entry" timestamp vs "before 2nd entry" timestamp. Whichever field's value differs is a candidate for the silent guard.
+- If `GetFields` returns 0 (entire field table inaccessible via reflection), we'll need a different approach — perhaps GetMembers or going through IL2CPP-Interop's typed accessors directly.
+
+2026-05-20 — Test 13 (full BM field dump) result: REFLECTION GAP DISCOVERED.
+- `Type.GetFields(Public|NonPublic|Instance)` on `BuildingManager` returns only 2 fields: `isWrapped` (Boolean) and `pooledPtr` (IntPtr). Both are IL2CPP-Interop's own bookkeeping. (rule)
+- Game's native fields (`building`, `enteringBuilding`, `exitingBuilding`, `currentBuildingVersion`, `currentLayout`, `exitZones`, etc. per cpp2il dump) are NOT exposed via standard reflection on the IL2CPP wrapper. (rule)
+- pooledPtr identical across the two snapshots — same native instance, so it's not an instance-identity bug. (rule)
+- Implication: the game's state must be read through the wrapper's get_* METHODS, not as fields. Earlier rounds confirmed this works (e.g., `get_IsInsideBuilding` was patchable as a method). (rule)
+
+2026-05-20 — Deploy checkpoint: getter-method enumeration shipped.
+- `LogBuildingManagerStateOnly` now enumerates all instance methods on BuildingManager whose name starts with `get_`, takes 0 params, and returns non-void. For each, invokes and logs the result with safe stringification.
+- Should reveal every readable property value (IsInsideBuilding, CanBuildOnCurrentBuilding, IsPlayerOwnedBusiness, and likely many more — including the elusive `building` reference if there's a `get_building` exposed).
+- Decision tree for next test:
+   * The dump on failing entry shows a `get_*` value that differs from the working 1st entry → that's the silent gating state we've been hunting.
+   * All getters return identical values on both attempts → state difference lives outside BuildingManager (in CityManager, BuildingHelper, a static class, or the building's CityBuildingController).
+
+2026-05-21 — ROOT CAUSE FOUND for client re-entry hang (test 14).
+- Getter enumeration of BuildingManager exposed all native game state. Diff between working 1st entry and failing 2nd entry:
+   * `get_enteringBuilding`: False → **True** (stuck after exit)
+   * `get_exitingBuilding`:  False → **True** (stuck after exit)
+   * `get_isOpen`:           False → **True**
+   * `get_currentBuildingVersion`: null → **BuildingStructureC1**
+   * `get_interiorBounds`:   (0,0,0) → **(950.13, 0, 0) extents (7.13, 0, 7)**
+   * `get_allItemControllers`: List → **null**
+- THE SILENT GUARD: EnterBuilding's body checks something like `if (this.enteringBuilding || this.exitingBuilding) return true;` — returns true (claims success) without calling StartCoroutine. That's why MoveNext never fires on the failing attempt. (rule)
+- Why the bandaid exit leaves state stuck: ExitFromBuildingCoroutine runs its visible cleanup methods (ResetIndoors, DisableAllSizesAndLayouts, OnExitBuilding events) but hangs/garbage-collects before reaching the terminal state-reset step that would clear these flags. (rule)
+- HUGE GOTCHA discovered: ALL prior `LogBuildingManagerStateOnly` probes that read `enteringBuilding`/`exitingBuilding`/`building` via `Type.GetField()` were LYING. They returned False/null because they were reading IL2CPP-Interop's bookkeeping fields (the wrapper has only `isWrapped` and `pooledPtr` as actual managed fields). The game's native state must be read via `get_*` METHODS on the wrapper. Six rounds of probes (incl. the "BM.entering=False exiting=False" conclusions) were misleading. The getter-method enumeration in this round finally exposed ground truth. (rule)
+
+2026-05-21 — Deploy checkpoint: re-entry fix shipped.
+- New `ForceResetBMStateIfStuck(bmType, bmInst, side)` helper. Reads `get_enteringBuilding` and `get_exitingBuilding` via SafeBoolGet (proper getter-method invocation, NOT GetField). If either is True after the bandaid exit, calls `set_enteringBuilding(false)` / `set_exitingBuilding(false)` via SafeBoolSet. Also force-nulls `set_building(null)`. Logs before/after values.
+- Invoked from the bandaid path: right after `ExitFromBuilding(exitToZoneId, true)` returns, the reset is enqueued onto GameStatePatcher's main-thread queue so it runs a frame later — giving the coroutine an opportunity to do its own cleanup first. If the coroutine completed cleanly, the reset is a no-op ("post-exit state clean — no reset needed"). If it stuck, we force-clear.
+- Expected outcome: client can exit AND re-enter buildings in the same session. The re-entry's coroutine should finally pump MoveNext properly because the silent guards are no longer set.
+
+2026-05-21 — ✅ FIX CONFIRMED: client can enter and exit buildings repeatedly in MP.
+- User tested multiple enter/exit cycles with the round-13 force-state-reset in place. All cycles succeeded. This is the first known working client enter/exit loop in Big Ambitions MP (no community mod has attempted this — verified by web search earlier in session). (rule)
+- User decision: KEEP the bandaid for now while continuing to investigate the fundamental cause. (rule)
+
+═══════════════════════════════════════════════════════════════════
+BANDAID REGISTRY — client-can't-exit-or-reenter workaround
+═══════════════════════════════════════════════════════════════════
+- Gate flag: `MPPatches.ExitEntryBandaidEnabled` (default TRUE)
+- Runtime toggle: F3 in-game on client. Logs `[ClientFix] ExitEntryBandaid toggled → True/False`.
+- Code search marker: grep for `CLAUDE-DIAGNOSTIC[BANDAID]` to find ALL related code points.
+
+What the bandaid does (two pieces, both gated):
+  1) `Patch_ExitZoneDespawner_OnTriggerEnter_Diag.Postfix` — on client, if the despawner short-circuited and isCasinoExit/isParkingExit are both false, manually invokes `BuildingManager.ExitFromBuilding(exitToZoneId, true)` via reflection. 3-second cooldown de-doubles the duplicate-collider trigger.
+  2) `ForceResetBMStateIfStuck` (called via main-thread queue after #1) — reads `get_enteringBuilding` / `get_exitingBuilding` via reflection on the BM IL2CPP wrapper. If either is stuck True (the exit coroutine didn't reach its terminal state-reset), force-clears via `set_enteringBuilding(false)` / `set_exitingBuilding(false)` and nulls `set_building(null)`. Without this, EnterBuilding silently early-returns true on subsequent re-entries.
+
+To remove the bandaid (for testing a proper fix or before release):
+  - Set `ExitEntryBandaidEnabled = false` (or press F3 in-game).
+  - When OFF: client can't exit (original bug returns). That's expected and useful for A/B verification of any proposed fundamental fix.
+═══════════════════════════════════════════════════════════════════
+
+2026-05-21 — Plan: continue investigating fundamental cause.
+- The bandaid masks two symptoms but doesn't fix the underlying coroutine-doesn't-complete pattern that affects both ExitFromBuildingCoroutine (visible cleanup runs, terminal reset doesn't) and the original ExitZoneDespawner.OnTriggerEnter short-circuit.
+- Diagnostic options remaining without external tools:
+  a) Patch d__87 MoveNext (ExitFromBuildingCoroutine state machine) — same approach as we used for d__55 (EnterBuildingCoroutine). Count MoveNext calls + log <>1__state field on each invocation. Would tell us at WHICH state the exit coroutine bails out without reaching the terminal reset.
+  b) Look for what's DIFFERENT about client coroutines: do any of OUR Harmony patches (esp. on MonoBehaviour methods) interfere with coroutine completion? Kill switch + bandaid combined test would isolate this.
+  c) Static state diff: enumerate static fields on BuildingManager (and CityManager, BuildingHelper) at "before first entry" vs "after first exit". Find what changes and might be the upstream cause of the short-circuit.
+- Heavier escalation if (a)-(c) don't pan out: Ghidra to read the actual native code of ExitZoneDespawner.OnTriggerEnter (find the "first domino" guard), BuildingManager.EnterBuilding (confirm the enteringBuilding/exitingBuilding guard), and the two coroutine MoveNexts.
+- Next step proposed: patch d__87 (exit coroutine state machine) MoveNext to see how many states it pumps through on client vs host, and identify the hang point.
+
+2026-05-21 — Deploy checkpoint: bandaid gating + F3 toggle shipped.
+- `MPPatches.ExitEntryBandaidEnabled` static bool, default true. Gates the two bandaid code paths in `Patch_ExitZoneDespawner_OnTriggerEnter_Diag.Postfix`.
+- F3 toggle added in MPCanvasUI.TickToggleClientSuppressions (alongside the other F-key toggles). Edge-triggered, logs the new state.
+- All bandaid code points tagged with `// CLAUDE-DIAGNOSTIC[BANDAID]` for easy grep.
+- Built clean (3 unrelated nullable warnings), deployed to both plugin paths.
+
+2026-05-21 — Deploy checkpoint: Patch_EXC_MoveNext_Diag (ExitFromBuildingCoroutine state machine probe) shipped.
+- Patches `BuildingManager+<ExitFromBuildingCoroutine>d__87.MoveNext` directly via nested-type lookup (same approach as d__55).
+- `_excMoveNextCallCount` monotonic counter increments each invocation. Prefix + Postfix log it with state-on-entry/exit values.
+- One-shot field-name discovery: on call #1, dumps EVERY field on the state machine's wrapper with name, type, value. This identifies the actual state field name on the IL2CPP-Interop wrapper (`<>1__state` returned -999 for d__55; expect similar here). The dump happens once across the whole session.
+- `ReadStateMachineState(obj)` helper tries 5 likely state-field names (`<>1__state`, `_1__state`, `__1__state`, `_state`, `state`), then falls back to "first int field" — covers IL2CPP-Interop renamings.
+- Goal: compare HOST exit chain (works naturally) vs CLIENT exit chain (with bandaid ON). Diff in MoveNext counts + state transitions points at the broken yield where the client's coroutine bails out before reaching the terminal state-reset.
+
+2026-05-21 — Test 14 (Patch_EXC_MoveNext_Diag) result: FUNDAMENTAL BUG IDENTIFIED.
+- HOST: 5 MoveNext calls on d__87 (ExitFromBuildingCoroutine), final one returns False (coroutine completes cleanly). Two of the 5 are from a second coroutine instance started by the duplicate Player+PlayerTriggerCollider trigger (host doesn't have our de-double cooldown). (rule)
+- CLIENT: 3 MoveNext calls. Call #3 throws `Il2CppException: System.NullReferenceException` inside `BuildingManager+<ExitFromBuildingCoroutine>d__87.MoveNext()`. Coroutine dies before completing. (rule)
+- Surprising finding: in THIS test run, NO BM cleanup methods (ResetIndoors, SerializeInteriorDesign, etc.) fired on the client between MoveNext #1 and the NRE — unlike in earlier rounds where they did fire. Difference: previous rounds may have hit different coroutine state-machine timing. (rule)
+- HYPOTHESIS for why coroutine NREs: between MoveNext #1 and #2, our state-reset's `set_building(null)` runs (force-clearing the building reference). By MoveNext #3, the coroutine tries to access `this.<>4__this.building.SomeProperty` or similar → NRE. So our state-reset may be CAUSING the NRE, not just masking the symptom. (rule)
+- If hypothesis is correct: the actual fundamental bug is just the despawner first-domino short-circuit. With ExitFromBuilding kicked, the coroutine would complete naturally on its own — no force-reset needed.
+- IL2CPP-Interop renames `<>1__state` field beyond our 5 candidate names — `ReadStateMachineState` returns -999. The d__87 wrapper has only `isWrapped` + `pooledPtr` (same as BM wrapper). Field-table is entirely behind IL2CPP-Interop's interop; native fields are exposed only via wrapper methods. (rule)
+
+2026-05-21 — Deploy checkpoint: bandaid split into two independently togglable pieces.
+- `MPPatches.ExitBandaidKickEnabled` — gates the manual ExitFromBuilding call. Default TRUE. Without this, original "client can't exit" returns.
+- `MPPatches.ExitBandaidStateResetEnabled` — gates the `ForceResetBMStateIfStuck` call (force-clears enteringBuilding / exitingBuilding / nulls building). Default TRUE.
+- `MPPatches.ExitEntryBandaidEnabled` (legacy) is now a wrapper that gets/sets both at once (used by F3 toggle).
+- F3 still toggles BOTH together for quick on/off. For round-14 hypothesis testing, the user can edit MPPatches at startup to set `ExitBandaidStateResetEnabled = false` keeping `ExitBandaidKickEnabled = true` — that tests whether the coroutine completes naturally without our interference.
+
+2026-05-21 — Deploy checkpoint: state-reset default flipped to FALSE for round-15 hypothesis test.
+- `MPPatches.ExitBandaidStateResetEnabled = false` (was true). Kick remains true.
+- This tests whether the coroutine NRE was self-inflicted by our `set_building(null)` call, OR an independent bug in the game's coroutine.
+- If re-entry works without state-reset → state-reset was always unnecessary; remove it permanently and the bandaid stays half-sized.
+- If re-entry fails without state-reset → coroutine genuinely doesn't reset flags on client; we need state-reset, but should make it less destructive (don't null `building`, only clear bools).
+
+2026-05-21 — Test 15 result: state-reset is NOT what causes the NRE.
+- With `ExitBandaidStateResetEnabled = false`, MoveNext #3 on client STILL throws `Il2CppException: NullReferenceException` inside d__87.MoveNext. (rule)
+- Flags `entering=True exiting=True` on re-entry attempt — coroutine never cleared them naturally (it died at the NRE before reaching the terminal step). (rule)
+- Re-entry fails just as before. Bandaid is genuinely necessary; state-reset isn't responsible for the NRE; the NRE is a real game-side bug in the client coroutine. (rule)
+- Restored `ExitBandaidStateResetEnabled = true` default. Bandaid is back to fully working.
+- Open question: what IS null inside d__87.MoveNext that throws? Cpp2IL static [Calls] list points at: BuildingHelper.CanEnterBuilding(Address), Building.get_Address (would NRE if `<>4__this.building` is null even WITHOUT our intervention), CityManager.SetTrafficSpawnDistanceTarget(Transform), CameraHelper.GetCurrentCamera, Enumerable.FirstOrDefault on ExitZones (could return null if no match), various GarageDoor/VehicleController stuff, UiFader.Fade/UnFade returning IEnumerator. Many candidates.
+
+2026-05-21 — Deploy checkpoint: d__87 captured-locals dump probe shipped.
+- `DumpStateMachineLocals(smInstance, type, side, callNo)` enumerates every parameterless `get_*` method on the d__87 wrapper and invokes each. Logs `[EXC/{side}] d__87.{getter} (call #N) = {value}` for every call.
+- Filters out: get_Current (pollutes), get_Pointer/get_ObjectClass/get_WasCollected (IL2CPP plumbing).
+- Goal: get a snapshot of every accessible state-machine field at MoveNext #1, #2, AND #3 on client. The diff between #3 and host's equivalent will show what's about to be dereferenced.
+- Same probe pattern as `LogBuildingManagerStateOnly`'s getter enumeration — that successfully exposed the stuck flags last round. Should work for nested state-machine types too.
+- Will be verbose (many getters * multiple calls). One run is enough.
+
+2026-05-21 — Test 16 (d__87 getter dump) result: state machine internals readable.
+- IL2CPP-Interop renames `<>` to `__` in nested-class getter names. So `<>1__state` becomes `get___1__state` (three underscores between the `__1` and `__state`), `<>4__this` becomes `get___4__this`, etc. Once we know this, the entire state-machine internals are readable via reflection. (rule)
+- State progression on client: state 0 → 1 → 2 → NRE during state 2's body. `__4__this` (BuildingManager reference) stays valid on all 3 calls — NOT what's null. `__8__1` (captured-locals display class) is null on call #1 (not allocated yet), populated on calls #2 and #3 — also looks valid. (rule)
+- The NRE is therefore on something inside the display class OR a new local computed during state 2 execution, OR a field accessed via `__4__this.<something>`. (rule)
+- Force-reset DID run between MoveNext #1 and #2 (set_enteringBuilding(false), set_exitingBuilding(false), implied set_building(null) from IsInsideBuilding flipping right after). Coroutine survives state 0 and 1 transitions just fine, NREs in state 2.
+
+2026-05-21 — Deploy checkpoint: round 17 — recurse into `__8__1` display class.
+- `DumpDisplayClass(dc, side, callNo)` enumerates parameterless getters on the d__87 captured-locals object and logs each value.
+- Auto-invoked from `DumpStateMachineLocals` when `get___8__1` returns non-null.
+- Expected: state 2 captures locals like the looked-up `ExitZone`, references to `PlayerController`, audio sources, possibly a Camera or fade overlay. Any of these reading null on the client = the NRE source.
+
+2026-05-21 — Test 17 (display class recursion) result: DisplayClass87_0 only captures 2 things — `targetExitId` (-1) and `__4__this` (BM backreference). Both are valid. (rule)
+- Critical observation: ZERO BM cleanup methods fire on the client during this exit attempt. No ResetIndoors, no SerializeInteriorDesign, no OnExitBuilding events on any object. The coroutine NREs SO EARLY that none of its visible work happens. (rule)
+- The visual exit observed by the user (player lands at outdoor spawn) is NOT from the coroutine running cleanly — it's a side effect of our state-reset's `set_building(null)` which causes IsInsideBuilding → False and possibly triggers CityManager.OnScenesLoaded downstream. (rule)
+- State 2's first executable instruction is what NREs. Since the display class doesn't capture much, the null reference must be a field accessed via `this.__4__this.<bmField>`. Top suspects: building, cityBuildingController, buildingRegistration, currentLayout. (rule)
+
+2026-05-21 — Deploy checkpoint: round 18 — targeted BM-state probe at MoveNext call time.
+- `DumpTargetedBMGetters(bmInst, side, callNo)` invokes a curated list of getters on the BM instance passed via `__4__this` from the state machine: building, buildingRegistration, cityBuildingController, indoorVolume, parkingVolume, casinoVolume, currentLayout, currentBuildingVersion, businessType, exitZones, allItemControllers, isOpen, enteringBuilding, exitingBuilding, IsInsideBuilding, IsPlayerOwnedBusiness.
+- Logs each on every MoveNext call. We'll see the BM state evolve across state 0 → 1 → 2 → NRE. The field that's non-null at call #1 (which works) but null at call #3 (when state 2 NREs) is the most likely culprit.
+- If our state-reset's `set_building(null)` is what's making `building` null between calls #1 and #2, we'll see it directly in the log.
+
+2026-05-21 — Test 18 (targeted BM-getter snapshot at MoveNext call time): NRE SOURCE IDENTIFIED.
+- At MoveNext #1: `bm.get_building = Buildings.Building` (non-null), `enteringBuilding=True`, all other BM fields populated. Coroutine state 0 just ran.
+- State-reset block fires BETWEEN MoveNext #1 and #2: `set_enteringBuilding(False)` + `set_exitingBuilding(False)` + implicit `set_building(null)`.
+- At MoveNext #2: `bm.get_building = null` (we just nulled it), `enteringBuilding=False`, `exitingBuilding=False`. State 1 runs without accessing building — returns True.
+- At MoveNext #3: `bm.get_building = null` still. State 2 tries to access `this.__4__this.building.SomeField` → NRE.
+- THE NRE IS CAUSED BY OUR `set_building(null)` CALL IN THE STATE-RESET. (rule, pending round-19 verification)
+- All other BM fields stay populated throughout (buildingRegistration, cityBuildingController, indoorVolume, exitZones, allItemControllers, isOpen, etc.) — only `building` flips. (rule)
+- Apparent conflict with round 15 result (state-reset OFF entirely, NRE still happened) — needs verification. Possibilities: (a) round 15's test wasn't run with the new build deployed, (b) something else also nulls building in state 1 of the coroutine, (c) the round 15 NRE was on a different field that's null on client only.
+
+2026-05-21 — Deploy checkpoint: round 19 — remove `set_building(null)` from state-reset.
+- Bool clears (enteringBuilding=false, exitingBuilding=false) retained — they're what unsticks re-entry.
+- `set_building(null)` REMOVED — to test whether removing this prevents the NRE in MoveNext #3.
+- Expected outcomes:
+   * NRE goes away AND re-entry works → ROOT CAUSE: our own state-reset was causing the NRE all along. The natural coroutine should now complete (or at least not crash); the bool-clears are the safety net.
+   * NRE still happens → confirms the coroutine itself has a bug independent of our `building`-nulling. Then we look for what state 1's code does to `building` (probably ResetIndoors or similar method nulls it).
+
+═══════════════════════════════════════════════════════════════════
+TESTING AID: BAMP_AUTOROLE launcher + autopilot (added 2026-05-21)
+═══════════════════════════════════════════════════════════════════
+- Not part of the shipping mod — purely a developer convenience to skip
+  the manual click-through (host F8, connect F8, lobby start, character
+  editor confirm) on every bug-test iteration.
+- Disabled when env var `BAMP_AUTOROLE` is unset (default for normal play).
+- Files:
+   * `src/MPAutopilot.cs` — state machine driven from MPCanvasUI.LateUpdate.
+   * `launch-mp-test.bat` — double-click this to start both instances.
+   * `_launch_host_internal.bat` — sets BAMP_AUTOROLE=host, runs Steam exe.
+   * `_launch_client_internal.bat` — sets BAMP_AUTOROLE=client, runs C:\BigAmbitions2\launch_client.bat.
+- Hook points:
+   * Plugin.Load → `MPAutopilot.Init()`
+   * MPCanvasUI.LateUpdate → `MPAutopilot.Tick()`
+- States: WaitMenu → HostStart / ClientConnecting → HostWaitClient (host)
+  → HostStartingGame (host) → WaitCustomizer → ConfirmingCustomizer → Done.
+- In-game runtime control: F2 aborts the autopilot mid-sequence.
+- Customizer confirm method: `IntroCharacterCustomizer.StartGame()` invoked
+  via reflection.  Assumes that method exists on the IL2CPP wrapper.  If
+  the name differs at runtime, log warns and the autopilot stops at the
+  customizer state — manual click required as fallback.
+═══════════════════════════════════════════════════════════════════
+
+2026-05-21 — Autopilot bugfix: host env var swallowed by Steam relaunch.
+- First test: client autopilot fired and tried connecting 30× (60s timeout), but host's BepInEx log showed `[Autopilot] BAMP_AUTOROLE not set — manual mode.` Host instance never even saw the env var.
+- Root cause: Steam install at `C:\Program Files (x86)\Steam\steamapps\common\Big Ambitions\` triggers SteamAPI_RestartAppIfNecessary() which relaunches the exe through Steam, dropping our custom env vars in the relaunch.
+- Fix: `_launch_host_internal.bat` now also sets `SteamAppId=1331550 / SteamGameId=1331550 / SteamOverlayGameId=1331550` — same workaround `launch_client.bat` uses for the second install. With these set, SteamAPI sees "already a Steam launch" and skips the relaunch, preserving our BAMP_AUTOROLE.
+- No mod-side code change. The autopilot was correct; only the env-var pipeline broke.
+
+2026-05-21 — Autopilot fixes (3 issues): customizer hang, cmd-window litter, unnecessary pauses.
+- **Customizer hang**: previous run invoked `IntroCharacterCustomizer.StartGame()` ~0.9s after the customizer GameObject appeared — too fast.  Customizer's UI was still initializing (Start()/coroutines hadn't finished).  Pulling StartGame() out from under it left the customizer in a half-loaded state with no UI rendered at all.  Fixed: WaitCustomizer state now uses two-phase logic — first detects the customizer existence, records timestamp, then waits `CustomizerSettleSeconds = 5f` before invoking StartGame.  Gives the UI time to fully render.
+- **CMD window litter**: was using `start "TITLE" "file.bat"` which spawns a new console that doesn't auto-close after the bat finishes.  Changed to `start "" cmd /c "file.bat"` — the `cmd /c` exits when the command completes, taking its window with it.  Top-level launcher also exits immediately (no trailing pause).
+- **Unnecessary 5s delay**: removed the `timeout /t 5 /nobreak` between host and client launches.  The client's autopilot already retries every 2s for 60s — it doesn't need a head-start.  Host autopilot waits 5s in WaitMenu before calling Start anyway, so client has time even with simultaneous launch.
+
+2026-05-21 — Autopilot speed tuning.
+- All hardcoded delays extracted to named constants in MPAutopilot.cs:
+   * `InitialMenuWaitSeconds = 1f` (was 5f) — wait after plugin load before firing host/connect.
+   * `ClientRetryIntervalSeconds = 0.5f` (was 2f) — client connect-retry cadence.
+   * `CustomizerSettleSeconds = 2f` (was 5f) — minimum time confirmed reliable.
+   * `DoneSettleSeconds = 1f` (was 3f) — wait after StartGame() before marking Done.
+- Net savings ~9-10 seconds per cycle (from ~23s end-to-end to ~13s).
+- If customizer UI fails to render on slower machines, raise `CustomizerSettleSeconds` first.
+
+2026-05-21 — Test 19 result + ROOT-CAUSE OF NRE FINALLY IDENTIFIED.
+- With `set_building(null)` removed, `building` stays valid through all 3 MoveNext calls. (rule)
+- The full visible exit chain runs: ResetIndoors → SerializeInteriorDesign → HideDirtInCurrentBuilding → DisableAllSizesAndLayouts → OnExitBuilding events on all listeners (CityMapHider many times, GameManager, LoudSpeakersManager, PurchaseUI, IndoorCustomerSpawner, TimeOfDayController, PedestrianSpawner, etc.). (rule)
+- Re-entry SUCCEEDED on this test cycle (`CHANGE BM.IsInsideBuilding: False → True` after the re-entry click). (rule)
+- IL2CPP exception finally has TWO frames in its stack trace:
+   ```
+   at AiCarMusic.<Start>b__1_1 (Address _) [0x00000]
+   at BuildingManager+<ExitFromBuildingCoroutine>d__87.MoveNext ()
+   ```
+- ROOT CAUSE OF NRE: AiCarMusic.<Start>b__1_1(Address) — a compiler-generated lambda registered in AiCarMusic.Start() as a callback for some building-Address event (likely OnExitBuilding).  Per cpp2il [Calls], the lambda calls DoPlay(), which calls GlobalEvents.RegisterOnGameLoadedCallback + 2 unknown methods.  Something dereferenced inside there is null on the client (probably musicPlayer AudioSource or a singleton). (rule)
+- AiCarMusic is the NPC-car-music subsystem.  Plays driving music for AI cars (not the player).  On the client, this subsystem isn't fully initialised (likely because we suppress AI traffic on the client) — its callback dereferences a null reference when fired during the building-exit event. (rule)
+
+2026-05-21 — Deploy checkpoint: Patch_AiCarMusic_StartB_NoOpOnClient shipped — real root-cause fix.
+- Patches `AiCarMusic.<Start>b__1_0` AND `<Start>b__1_1` with a Prefix that returns false (skip original) when `MPClient.IsConnected`.  On host they run unchanged.
+- Effect: the exit coroutine should no longer NRE on the client.  It should reach its terminal state-reset step naturally.
+- If natural completion works, the bandaid's force-reset (set_enteringBuilding(false)/set_exitingBuilding(false)) becomes redundant.  Test by `MPPatches.ExitBandaidStateResetEnabled = false`.
+- The kick bandaid (manual ExitFromBuilding call) is still required — the despawner's silent short-circuit remains an unsolved upstream bug, but it's a separate problem with its own fix.
+
+2026-05-21 — Round 20 result: AiCarMusic patch installed and works.
+- Original lookup with `m.Name.Contains("Start") && m.Name.Contains("b__1_")` failed because IL2CPP-Interop renames `<Start>` to `_Start_`.  Broadened filter to just `b__1` substring + parameter signature [Address].  Now matches both `_Start_b__1_0` and `_Start_b__1_1`. (rule)
+- Both lambdas successfully suppressed on client: `[Plugin] Patched Patch_AiCarMusic_StartB_NoOpOnClient: 2 method(s)`. (rule)
+- The b__1_0 lambda fires HUNDREDS OF TIMES during normal play (every AI car triggers it) — not just on exit.  So we were silently eating these NREs across the whole session, not just during exit.  Suppressing it likely improves general client stability beyond just the exit fix. (rule)
+- Re-entry succeeded; ZERO Il2CppInterop NREs in the log after the patch was applied. (rule)
+- Log throttled: prefix now logs only the 1st and every 500th invocation, since hundreds of "suppressed" lines per session is noise.
+
+2026-05-21 — Deploy checkpoint: Round 21 test — state-reset disabled, expecting natural coroutine completion.
+- `ExitBandaidStateResetEnabled = false` (default flipped, was true after round-15 found NRE survived without it).
+- Now that the underlying NRE is patched (AiCarMusic suppressed), the exit coroutine should reach its terminal state-reset on its own.
+- If exit + re-entry both still work with state-reset OFF → state-reset retires permanently.  Bandaid becomes just the kick (ExitFromBuilding call) + AiCarMusic suppression.
+- If anything breaks → re-enable state-reset.
+
+2026-05-21 — ROUND 21 RESULT: STATE-RESET BANDAID NO LONGER NEEDED. ✅
+- With `ExitBandaidStateResetEnabled = false` AND AiCarMusic patch active, exit coroutine runs to COMPLETION on the client:
+   * d__87 MoveNext: 6 calls (was 3 when NRE killed it early).
+   * Final call returned False = terminal state.
+   * No Il2CppInterop NRE anywhere in the log.
+- `BSProbe CHANGE BM.IsInsideBuilding: True → False` fires from the GAME's own code (line 40110), not from our force-reset. (rule)
+- Re-entry succeeded naturally: `BSProbe CHANGE BM.IsInsideBuilding: False → True` (line 40227). (rule)
+- The bandaid has SHRUNK from ~80 lines to just two essential pieces:
+   1. **Kick** (manual ExitFromBuilding) — still needed because the despawner's OnTriggerEnter silently short-circuits on the client (a different, unsolved upstream bug — but cheap and stable to bandaid).
+   2. **AiCarMusic suppression** — REAL surgical fix for the actual bug.  Prefixes `_Start_b__1_0` and `_Start_b__1_1` to return false on client.  Prevents a NullReferenceException in the audio-callback lambda that fires from many places (every AI car).  Also fixes other silent NREs we hadn't noticed.
+- State-reset code still in the file but DEAD (the flag gates it).  Can be cleaned up in a future pass.  Keeping it for now in case we discover an edge case that needs it back.
+
+═══════════════════════════════════════════════════════════════════
+REFERENCE — Key discoveries from the building enter/exit investigation
+═══════════════════════════════════════════════════════════════════
+(Recorded 2026-05-21 after 21+ test rounds. Applies to all future work
+on this game and to BepInEx-IL2CPP mods for Unity 2022+ metadata v31.)
+
+## IL2CPP-Interop reflection gotchas
+
+- **`Type.GetFields()` returns ONLY the wrapper bookkeeping fields**
+  (`isWrapped`, `pooledPtr`) — not the game native fields. Game state must
+  be read through `get_*` METHODS, not fields. Standard reflection is
+  misleading: `GetField("building")` returns null on `BuildingManager`
+  even though the field exists at offset 0x110 per cpp2il.
+
+- **Property reflection is broken too.** `GetProperty(name).GetGetMethod(true)`
+  returns null for IL2CPP-Interop wrapped types. Use
+  `GetMethod("get_X", BindingFlags.Instance | Public | NonPublic)`
+  directly. True for `BuildingManager.IsInsideBuilding`,
+  `UndergroundParkingManager.IsInsideParking`, and all auto-generated
+  property getters. Harmony patches via `MethodType.Property` will fail
+  similarly; patch the `get_X` method by name instead.
+
+- **Compiler-generated identifier renaming.** cpp2il dumps show C# names
+  like `<Start>b__1_1` or `<EnterBuildingCoroutine>d__55`. At runtime
+  through IL2CPP-Interop, `<>` becomes `_`:
+    * `<Start>b__1_1` → `_Start_b__1_1`
+    * `<EnterBuildingCoroutine>d__55` → `_EnterBuildingCoroutine_d__55`
+    * `<>1__state` → `_1__state`, `<>2__current` → `_2__current`
+    * `<>4__this` → `_4__this`, `<>8__1` → `_8__1`
+  When patching these, search by substring (`b__1_`, `d__55`) — do not
+  attempt exact-name matching, since the underscore conversion is not
+  consistent across the leading `<>` (sometimes one, sometimes two).
+
+- **Native fields hidden but accessible via getters.** To dump state of
+  an IL2CPP-wrapped class, enumerate `GetMethods` filtered to `get_*`
+  with zero parameters and non-void return — invoke each. This is the
+  only reliable way to see what is actually in there. Pattern proven
+  in round 18 (`DumpTargetedBMGetters`).
+
+## Big Ambitions building enter/exit architecture
+
+- **Entry flow** has two phases:
+   1. CBC.Interact() click handler → BM.EnterBuilding() returns true →
+      StartCoroutine(EnterBuildingCoroutine d__55).
+   2. Player walks to entry spot; coroutine yields until arrival, then
+      fires LoadBuilding → ToggleLayout → ApplyInteriorDesign → ... →
+      flips IsInsideBuilding True.
+
+- **Exit flow** is despawner-triggered:
+   1. Player walks into ExitZoneDespawner trigger volume.
+   2. Despawner OnTriggerEnter checks tag + many guards (CanLeaveHome,
+      HasPaidForAllItems, NavigationDisabled, IsInsideMotorVehicle, etc.).
+   3. If all pass: StartCoroutine(ExitFromBuildingCoroutine d__87).
+   4. d__87 fires ResetIndoors → SerializeInteriorDesign →
+      HideDirtInCurrentBuilding → DisableAllSizesAndLayouts →
+      OnExitBuilding events fan out to: LoudSpeakersManager, PurchaseUI,
+      CityMapHider (many), GameManager, IndoorCustomerSpawner,
+      TimeOfDayController, PedestrianSpawner, CashRegisterController,
+      Employee, and **AiCarMusic** (this last one was the NRE source).
+   5. CityManager.PositionPlayerInScene (via OnScenesLoaded callback)
+      teleports player to the outdoor spawn point.
+   6. IsInsideBuilding flips False.
+
+- **Coroutine state-machine field shape (d__55 / d__87)**:
+   * `_1__state` (int) — current state, 0/1/2/.../-1.
+   * `_2__current` (object) — yield instruction returned.
+   * `_4__this` — back-reference to BuildingManager.
+   * `_8__1` (DisplayClass) — captured locals that span yields. Smaller
+     than expected: d__87 DisplayClass87_0 only captures `targetExitId`
+     and `__4__this`. Most coroutine locals are fresh stack vars during
+     each MoveNext execution.
+
+- **Two callers of d__87 typically**: despawner trigger fires twice in
+  quick succession (once each for Player and PlayerTriggerCollider).
+  On host, the second invocation early-returns via an idempotency check
+  inside the coroutine (returns False on first MoveNext). Our bandaid
+  needs a 3s cooldown to avoid double-kicking.
+
+## The bug we found
+
+- **`AiCarMusic.<Start>b__1_*`** — compiler-generated lambdas registered
+  in `AiCarMusic.Start()` via `Delegate.Combine`. Subscribe to the game
+  address-event system; fire on enter/exit. Each lambda calls `DoPlay()`
+  which dereferences something null on the client (likely `musicPlayer`
+  AudioSource or a GlobalEvents singleton not initialised on client).
+
+- **Fix**: Harmony Prefix on both lambdas that returns false when
+  `MPClient.IsConnected`. Six-line patch
+  (`Patch_AiCarMusic_StartB_NoOpOnClient`) fully eliminates the NRE.
+  Side effect: client may miss AI-car driving music — imperceptible
+  since most AI traffic is already suppressed on the client.
+
+- **The NRE fires HUNDREDS of times per session in normal play.** Not
+  just on exit. Every AI car triggers it. We were silently eating these
+  before this investigation — likely contributing to subtle client
+  instabilities we had not isolated.
+
+═══════════════════════════════════════════════════════════════════
+UNRESOLVED — Minor issues parked for future revisit
+═══════════════════════════════════════════════════════════════════
+(2026-05-21 — these do not block shipping. Workarounds-with-bandaids
+that could in theory be cleanly fixed if we invest more time.)
+
+1. **ExitZoneDespawner.OnTriggerEnter silent short-circuit on client.**
+   The original "first domino" we never figured out. After host loads,
+   despawner OnTriggerEnter fires on client (Prefix runs) but the body
+   short-circuits before reaching ANY of its `[Calls]` (no
+   NavigationDisabled, no IsInsideBuilding, no notifications, nothing).
+   The rejecting check lives in `CallsUnknownMethods(Count = 39)` —
+   cpp2il could not statically resolve them.
+   Workaround: kick bandaid (`Patch_ExitZoneDespawner_OnTriggerEnter_Diag`
+   Postfix calls ExitFromBuilding manually). Stable and cheap.
+   Real fix would require reading native code with Ghidra (tooling set
+   up but not executed). Cpp2IL.Plugin.ControlFlowGraph crashes on this
+   game so the easier route is blocked.
+
+2. **CityManager.OnScenesLoaded** — identified as the mechanism that
+   triggers visual exit (teleport player out + camera transition) but
+   never instrumented deeply. Fires naturally on client. Worth deeper
+   understanding when we work on parking-exit or casino-exit paths.
+
+3. **BlackOverlay canvas suppression** still active in MPCanvasUI
+   TickSuppressBlackOverlay. F12 toggles it off at runtime. Shipped for
+   backlog #6 (client freezes black screen on entry). Ruled out as a
+   cause of the building-exit hang (round 10), but still active for #6.
+   Do not remove without re-testing #6.
+
+4. **`set_building` writeback via reflection** — we proved we can write
+   to it (round 13 nulled it) but proved nulling it is destructive
+   (causes NREs in state 2+ of d__87). If we ever need to write to it
+   defensively, syntax works but side effects need careful handling.
+
+5. **`Patch_MB_StartCoroutine_Diag` failed** with HarmonyException.
+   Tried to patch `UnityEngine.MonoBehaviour.StartCoroutine(IEnumerator)`
+   but Harmony could not find method on IL2CPP-wrapped MonoBehaviour.
+   If we ever need to instrument StartCoroutine, the IL2CPP-Interop
+   parameter type is probably `Il2CppSystem.Collections.IEnumerator`
+   not `System.Collections.IEnumerator`. Worth a try.
+
+6. **`Cpp2IL.Plugin.ControlFlowGraph`** — produces real decompiled
+   bodies when it works, but crashes deterministically on this game
+   metadata with `MissingFieldException` at line 229 of
+   ControlFlowGraphOutputFormat.cs. Tried multiple times. A newer
+   plugin version would give us readable bodies for all the
+   `[ContainsInvalidInstructions]` methods we currently can not see.
+
+7. **Autopilot `IntroCharacterCustomizer.StartGame()` invocation** via
+   reflection works but we never validated what happens if the
+   character editor has unexpected input. Currently accepts whatever
+   defaults are in fields plus the pre-filled name.
+
+8. **No load-game launcher** — only "new game" is automated. If a test
+   ever needs to load a specific save, `MPServer.StartLoadGame()`
+   exists and would need wiring into the autopilot.
+
+9. **AiCarMusic suppression side-effect not measured.** The lambda real
+   purpose is "play music when an AI car enters/leaves the player
+   audible range." By suppressing it on client, the client may have
+   slightly different ambient audio than host. Unlikely noticeable,
+   but if anyone reports missing AI traffic sound on the client, this
+   is the cause.
+
+2026-05-21 — Major cleanup pass after investigation closed.
+- MPPatches.cs: 2292 → 699 lines (1593 deletions, ~70% reduction).
+- MPCanvasUI.cs: 2307 → 1937 lines (370 deletions, ~16% reduction).
+- Removed 30 dead diagnostic patch classes (ExitGuard_*, EntryProbe_*,
+  EBC/EXC MoveNext probes, BMTrace, DelayedCall/SendMessage/Invoke probes,
+  Notifications_Show_Diag, ExitDiag_*).
+- Removed dead helpers: ForceResetBMStateIfStuck, SafeBoolGet, SafeBoolSet,
+  LogBuildingManagerStateOnly, LogSingletonState, LogOneSingleton,
+  LogDespawnerFields, DumpStateMachineLocals, DumpDisplayClass,
+  DumpTargetedBMGetters, ReadStateMachineState.
+- Removed dead state fields: _interactDepth, _ebcMoveNextCallCount,
+  _excMoveNextCallCount, _excFirstCallFieldsLogged,
+  ExitBandaidStateResetEnabled, ExitEntryBandaidEnabled.
+- Removed dead UI ticks: TickExitTriggerDiag, TickBuildingStateProbe,
+  and their helpers (BspCheckBlackOverlay, BspInit, etc.).
+- Simplified the bandaid Postfix to ~30 lines of clean reflection
+  (was ~150 lines with diagnostic logging interspersed).
+- 13 active Harmony patches remain, all functional:
+  GSC_TogglePause, GSC_Set, TaxiController_OnClick, TaxiTravel,
+  DelayedEnterBuilding (calls TrafficSync.OnEnteredBuilding),
+  TM_ClearTraffic / ClearTrafficOnArea / SetPause (backlog #7),
+  ParkingSim_Request / Release, GenerateParkedVehicles (backlog #3),
+  ExitZoneDespawner_OnTriggerEnter_Diag (the kick bandaid),
+  AiCarMusic_StartB_NoOpOnClient (the surgical root-cause fix).
+- F3 toggle in MPCanvasUI now flips only `ExitBandaidKickEnabled`.
+- Build clean (1 unrelated nullable warning in TrafficSync.cs:252).
+
+2026-05-21 — Business sync Phase 1 shipped (exterior business state).
+- New files: src/BusinessSync.cs (host-side change detector).
+- Protocol additions: MessageType.BusinessSnapshot (50), MessageType.BusinessChange (51); DTOs BusinessInfo and BusinessSnapshotPayload/BusinessChangePayload.
+- Tier A fields (always sync'd to all): BusinessName, businessTypeName, temporarilyClosed.
+- Tier B fields (close-up detail; Phase 1 sends to all on connect, no distance culling yet): BusinessDescription, signAppearanceSettings (SignType + signLight + lamp), logoSettings (logoShape + font + logoColor + fontColor + backgroundColor).
+- SerializableColor handled by passing the packed int unchanged — host writes the int into reg.signAppearanceSettings.signLight, client reads it identically. No bit-layout knowledge needed.
+- Change detection: BusinessSync.Tick() polls every 2s on host, diffs each BuildingRegistration against last-broadcast snapshot, broadcasts BusinessChange for any building whose fields changed.
+- Connect bootstrap: full BusinessSnapshot sent (a) on late-join Welcome and (b) once all players are in-game after a fresh start (via ReleaseStartupHold).
+- Client side: ApplyBusinessSnapshot / ApplyBusinessChange in GameStatePatcher, gated under existing ClientApplyOwnership flag for kill-switch compatibility.
+- Build clean, deployed to both plugin paths.
+
+2026-05-21 — Business sync Phase 1 v2: visual refresh added.
+- Test 1 finding: data sync was working (BusinessTypeName + temporarilyClosed propagated on client) but the visible sign + business name + logo did NOT refresh.  Cause: writes to BuildingRegistration update the DATA model, but the building exterior sign / logo / map POI are GameObjects initialised on first load from the registration — they do not auto-rebind to data changes.
+- Identified refresh path via cpp2il: `BuildingLogoSignController.UpdateSign(reg)` is called by `CityBuildingController.UpdateSign()`.  Also `CityBuildingController.UpdatePoi(null)` refreshes the map POI marker.
+- Added FindCBC(addressKey) helper in GameStatePatcher — scans FindObjectsOfType<CityBuildingController> once and caches per-address.  GameStatePatcher.ResetCBCCache() should be called on game load (TODO: wire into game-loaded callback).
+- After each ApplyBusinessInfoLocal write, calls `cbc.UpdateSign()` and `cbc.UpdatePoi(null)` to repaint the visuals.
+- Stale AI businesses: BusinessSync already iterates ALL building registrations (including those with BusinessTypeName.Empty), so the client receives "Empty" for buildings without businesses on host.  With UpdateSign now firing, signs/logos for those should clear.  If they don't clear visually, may need additional refresh for AI-business spawner state.
+
+2026-05-21 — Business sync Phase 1 v3: deeper refresh + diagnostic logging.
+- Test 2 finding: cbc.UpdateSign() + cbc.UpdatePoi(null) alone did not fix the visible sign / business name / map name.  Stale-AI-business issue (test 4) is fixed.
+- Hypothesis: cbc.UpdateSign() defers to LOD-state-based logic (BuildingSignController and BuildingLogoSignController both implement ICullable with OnLod0/1/2 paths).  When the building is at LOD2 or culled, the update may be a no-op.  Direct ConfigureSign / UpdateSign on the child controllers should force a refresh regardless.
+- v3 walks cbc.GetComponentsInChildren<BuildingSignController> and <BuildingLogoSignController>, calls ConfigureSign(reg) / UpdateSign(reg) directly on each.  Logs the refresh count per address.
+- Also logs "[Patcher] Refresh <addr>: name='X' type=Y sign+logo refreshed=N" so we can verify the call site is firing.
+- If sign still doesn't show after v3: the issue is deeper (e.g. an asynchronous texture load that requires server-only state, or a separate text-mesh component we haven't found).
+
+2026-05-21 — Business sync Phase 1 v4: logo PNG regeneration on client.
+- Test 3 finding: host and client diagnostic logs match field-for-field (name, type, signType, logo colors all wire-identical).  Wire is clean.  Issue is purely visual: the host's player-customized sign logo is stored as a PNG file on disk (at LogoHelper.GetPlayerBusinessLogoPath(businessName)) — generated by the BizMan UI when the player customizes the logo.  The client has no such PNG on disk → BuildingLogoSignController.UpdateSign loads a default/generic instead.
+- Fix: after applying business info on client, if logoShape and BusinessName are non-empty, call `BusinessLogoGenerator.Create(name, settings, savePath, isPlayerBusiness:true, null)` to regenerate the PNG locally from the synced LogoSettings (host and client have identical settings, so output is identical).
+- Generation is asynchronous (coroutine internal to the game).  We queue a deferred sign refresh ~3s out via `_pendingLogoRefreshes` list, drained per-frame from `MPCanvasUI.LateUpdate`.  Once the PNG is on disk, the deferred refresh re-invokes the sign controllers to load it.
+- Side effect: BusinessLogoGenerator.Create writes a PNG to the client's local save folder.  Harmless but worth noting if save-folder hygiene matters later.
+
+2026-05-21 — ✅ Business sync Phase 1 COMPLETE.
+- All exterior business state synced host → clients: name, type, description, sign type/colors, logo (shape/font/colors), open-closed flag, and the actual rendered sign textures (Billboard/SquareSign/WideSign JPGs).
+- Lessons learned along the way (all in the new REFERENCE section):
+   * IL2CPP-Interop hides game native fields from Type.GetField — use direct compile-time access (`LogoHelper.BusinessLogoTextures.Clear()`) instead of reflection.
+   * NEVER Destroy() textures that may still be referenced by other GameObjects — caused cross-business sign contamination.
+   * NEVER iterate Il2CppSystem.Dictionary in foreach when the key is a ValueTuple — crashed the client.
+   * GetPlayerBusinessLogoPath returns a directory, not a file — contains multiple per-size JPGs.
+   * GetBusinessLogoTexture takes a `playerBusiness` bool; needs to be true on client for host's businesses (we patched it).
+- Final architecture (~250 lines code, polling-based, full table on connect, deltas on change):
+   * src/BusinessSync.cs (host change detector + JPG read)
+   * src/GameStatePatcher.cs ApplyBusinessSnapshot/ApplyBusinessChange + ApplyBusinessInfoLocal (writes fields + JPG files + invalidates cache + queues deferred sign-refresh)
+   * src/MPPatches.cs Patch_GetBusinessLogoTexture_ForceClient (forces player-business lookup path when files exist on disk)
+   * Protocol: BusinessInfo / BusinessSnapshotPayload / BusinessChangePayload, MessageType BusinessSnapshot (50) + BusinessChange (51)
+
+═══════════════════════════════════════════════════════════════════
+BACKLOG — Business sync remaining phases
+═══════════════════════════════════════════════════════════════════
+- **Phase 1b: Rental marketplace sync** — building rental state (AvailableForRent, RentPerDay, lastDeposit, BuildingForSale flag, and ownership-driven "for sale" listings by other players).  Currently we only mark BUYABLE-BY-OTHERS buildings as unavailable; we don't actively sync the AVAILABLE state, prices, deposits, or owned-but-listed-for-sale buildings.  Result: buildings the host can rent may not show as rentable on client (or show with different prices).
+- **Phase 2: Interior layout sync on entry** — building interior items (Layout string, itemInstances, interiorDesigns, retailPrices, dirtSpots).  Only sync when a player enters a building; host snapshots and ships InteriorSnapshot.  See REFERENCE for shape details.
+- **Phase 3: Shopper sync when 2+ inside** — first player in is authoritative for customer positions, queue state, item-in-hand.  Second player on entry: subscribe to shopper broadcasts.  When everyone leaves, sync stops.
+- **Phase 4: Save persistence (Option A: host owns everything)** — single .bamp.sav JSON file containing world state + per-player snapshots.  Host saves on demand + auto-save + on player disconnect.  Client never saves.  MP saves NOT loadable in single-player (different file format, different folder) — prevents the "earn $$$ in SP then bring to MP" cheat path.
+
+2026-05-21 — Business sync Phase 1b shipped: rental marketplace state.
+- Added 3 fields to BusinessInfo: AvailableForRent, RentPerDay, LastDeposit.
+- Host's ReadInfo populates them from reg.  Client's ApplyBusinessInfoLocal writes them back.  EqualInfo includes them in the diff so changes are detected and broadcast.
+- Expected effect: buildings the host considers vacant+rentable should now show as for-rent on client too — overriding the client's local AI-economy assignments that diverge from host's world state.
+- Polling continues to catch ALL changes regardless of cause (player action, AI economy churn, scheduled events) — the polling design is event-source agnostic, which means we don't need to subscribe to specific event types to catch state mutations.
+- Note: existing MarkBuildingUnavailable code (sets AvailableForRent=false for buildings owned by other players in BuildingOwners) is now structurally redundant with Phase 1b but harmless — left in place to avoid disturbing tested behavior; can be removed in a future cleanup pass.
+
+2026-05-21 — Phase 1b residential/warehouse anomaly observed.
+- User test: open map, toggle "for rent" filter across categories.  Retail/Office match host↔client.  Residential and Warehouse: CLIENT shows MORE for-rent entries than host.
+- User hypothesis (likely correct): client's local AI economy generates additional for-rent residential/warehouse buildings on top of what host directs.  Either (a) those buildings aren't in host's BuildingRegistrations list at all (so they never get into the snapshot), (b) the client's AI keeps flipping them back to for-rent after we apply, or (c) the map filter for residential/warehouse reads from a different list (e.g. BuildingHelper.AllBuildingRegistrationDictionary, BuildingHelper.allBuildings) that bypasses gi.BuildingRegistrations entirely.  (situational: Phase 1b investigation)
+- gi.BuildingRegistrations is a save-list — may not include every building in the city.  BuildingHelper has static dictionaries (AllBuildingRegistrationDictionary, AllBuildingDictionary) populated from "BuildingsDefinitions" AddressableLabel that DO cover the whole city.  If the map filter consults the static dict, we need to iterate that instead of (or in addition to) gi.BuildingRegistrations. [?] (situational: Phase 1b investigation)
+- Diagnostic plan: count per-BuildingType (Residential/Retail/Office/Warehouse/...) (a) regs in gi.BuildingRegistrations on host and AvailableForRent count, (b) same on client BEFORE applying snapshot, (c) same on client AFTER applying.  If host count <<< client count for residential/warehouse, the buildings aren't in gi.BuildingRegistrations at all → iterate AllBuildingRegistrationDictionary.  If host count == client-after but client UI still shows more, the map reads from a different source.  (rule)
+- BuildingType enum: Residential=0, Retail=1, Office=2, Warehouse=3, Special=4, Cinema=5, Theater=6 (Buildings.BuildingType in BigAmbitions.dll).  Accessible via reg.BuildingCached.BuildingType (lazy-loaded via BuildingHelper). (rule)
+
+2026-05-21 — Phase 1b diagnostic build deployed.
+- BusinessSync.BuildFullSnapshot now counts per-BuildingType (totalRegs / forRent) and logs the breakdown.
+- BusinessSync.TryGetBuildingTypeIndex(reg) + LogTypeBreakdown(label, …) made public for client-side reuse.
+- GameStatePatcher.ApplyBusinessSnapshot logs THREE breakdowns: BEFORE applying (client's pre-sync state), PAYLOAD (what host sent, broken down by client-side BuildingType lookup of each address), and AFTER applying.
+- Expected diagnostic outputs after a test:
+   * Host log: "BuildFullSnapshot: totalRegs=N | Residential=A/BforRent Retail=…"
+   * Client log: same three lines for BEFORE/PAYLOAD/AFTER.
+- If host's Residential/Warehouse counts are << what's visible on host's map filter, gi.BuildingRegistrations is missing those buildings → must iterate BuildingHelper.AllBuildingRegistrationDictionary instead.
+- If PAYLOAD's Residential/Warehouse counts match host's BuildFullSnapshot but client's BEFORE has more, sync is fine but client AI is regenerating them after — need to purge between snapshot apply and map refresh.
+- Build clean, deployed to BepInEx plugins dirs.
+
+2026-05-21 — Phase 1b diagnostic result #1: AvailableForRent is NOT the for-rent flag.
+- Test result: host BuildFullSnapshot and client BEFORE/PAYLOAD/AFTER all show IDENTICAL counts.  825 buildings on both sides (Residential=335 Retail=284 Office=86 Warehouse=74 Special=38 Cinema=4 Theater=4), and `AvailableForRent=true` for ZERO buildings on both sides.
+- Conclusion: gi.BuildingRegistrations is exhaustive (all 825 city buildings present), and our sync of AvailableForRent is wire-clean.  But the map's "for rent" filter reads SOMETHING ELSE — `AvailableForRent` is always false in this game version.  (rule)
+- Candidate signals on BuildingRegistration that distinguish rentable vs occupied: BusinessTypeName==Empty(0), RentedByPlayer, buildingOwnerRivalId, businessOwnerRivalId.  For Residential buildings there's no BusinessTypeName concept (they aren't businesses), so the differentiator there is buildingOwnerRivalId/RentedByPlayer.  For Warehouse, same.  (rule)
+- Per the decompile, BuildingRegistration.GetPOIIcon (the on-map dot) is determined by BusinessTypeName + BuildingType (no AvailableForRent involvement).  The map's CityMapFilters.ApplyFilters then shows POIs by category.  (rule)
+- buildingOwnerRivalId and businessOwnerRivalId are NOT currently in BusinessInfo payload.  If those drive the for-rent state and they're not in sync, that's the cause.  (situational: Phase 1b investigation)
+
+2026-05-21 — Phase 1b diagnostic v2 deployed.
+- Extended BusinessSync.TypeStats class: per BuildingType records total + 5 candidate signals (AvailForRent, EmptyBizType, PlayerRented, RivalOwns, RivalBiz).
+- Host logs "BuildFullSnapshot: …" with the full breakdown.  Client logs BEFORE and AFTER (PAYLOAD removed — only the reg-level signals matter, and the payload doesn't carry the rival ids yet).
+- Next test will show which signal differs between host and client for Residential/Warehouse — that's the one we need to add to BusinessInfo.
+- Build clean, deployed.
+
+2026-05-21 — Phase 1b diagnostic v2 result: BuildingRegistration fields IDENTICAL on both sides.
+- Both host and client report 825 buildings, identical totals per type, identical (avail=0 empty=N playerR=0 rivalOwn=0 rivalBiz=0) on EVERY type.  AvailableForRent and rival-ownership fields are all zero on both sides at this point in the game.
+- The map UI nonetheless shows "a few additional" for-rent buildings on client vs host.  Data is identical → the discrepancy must come from a source we haven't checked.  (situational: Phase 1b investigation)
+- Decompile of CityMapFilters.ApplyFilters: calls IsBuildingForSale(CityBuildingController) which (per the compiler-generated lambda) iterates BuildingForSale list AND RealEstate list.  A building present in EITHER list is "for sale" → hidden from the for-rent filter.  (rule)
+- gi.buildingsForSale is RNG-populated from a subset of city buildings (the buy marketplace).  Different RNG seed → different sets.  If host has building X in buildingsForSale, host hides it from for-rent.  If client doesn't have X in its buildingsForSale, client shows X as for-rent → CLIENT EXTRAS.  This matches the user's observation exactly.  [?] (situational: Phase 1b investigation — hypothesis pending diagnostic confirmation)
+- gi.realEstate is the player's owned-property list.  Empty on both sides for our test (player hasn't bought anything).
+
+2026-05-21 — Phase 1b diagnostic v3 deployed.
+- Added BusinessSync.LogForSaleAndRealEstate(label, gi) — logs gi.buildingsForSale.Count + gi.realEstate.Count plus a per-BuildingType breakdown of each list.
+- Host's BuildFullSnapshot and client's BEFORE/AFTER all log this new breakdown alongside the TypeStats.
+- Next test should show host has N entries in buildingsForSale while client has M (or zero), confirming the hypothesis.  Then the fix is to add a "ForSale" list to the protocol and sync it as part of the snapshot.
+- Build clean, deployed.
+
+2026-05-22 — Phase 1b v3 result: buildingsForSale and realEstate ALSO identical (both empty).
+- Host BuildFullSnapshot: forSale=0 realEstate=0 (all per-type breakdown zero).
+- Client BEFORE / AFTER: forSale=0 realEstate=0 (matching).
+- Hypothesis falsified: this isn't the source of the discrepancy either.  At early game state, both lists are empty (the marketplace presumably populates on a day-tick event we haven't yet observed).
+- Remaining places the for-rent map filter could differ between host and client when gi.BuildingRegistrations + buildingsForSale + realEstate are all identical: (a) CityBuildingController GameObjects in the scene (the filter iterates CBCs, not registrations directly), (b) some per-CBC cache (highlights, hidden state) that wasn't refreshed by our snapshot apply, (c) BuildingRegistration sub-objects we haven't dumped (e.g., scheduleDays, RealEstate.BuildingRegistration link).  (situational: Phase 1b investigation)
+
+2026-05-22 — Phase 1b diagnostic v4 deployed.
+- Added BusinessSync.LogSceneCBCCounts(label) — calls FindObjectsOfType<CityBuildingController> and prints per-BuildingType count + count of CBCs whose reg.BusinessTypeName is Empty (the "for-rent eligible" set).
+- If the scene CBC count differs from gi.BuildingRegistrations count, the map UI is operating on a different set of objects than what our sync touches.  Likely candidates for divergence: CBCs that aren't backed by a BuildingRegistration at all, or duplicate CBCs spawned during world-streaming.
+- Build clean, deployed.
+
+2026-05-22 — Phase 1b v4 result: scene CBC populations also IDENTICAL.
+- Host BuildFullSnapshot sceneCBCs: total=825 noReg=0 (R335/335empty Re284/274empty O86/85empty W74/74empty S38/0empty C4/4empty T4/4empty).  Client BEFORE+AFTER match host EXACTLY.  Every layer of state we can measure is identical between host and client at snapshot apply time.  (rule)
+- The user's "few additional" buildings highlighted in for-rent on client are real but not visible in any data field we measure at snapshot apply time.  Possible causes: (a) state drift between snapshot apply and when user opens map — AI economy or scheduled tick mutates something asymmetrically, (b) CityMapFilters caches `_searchableBuildings` at Start() and never refreshes — so post-load CBCs aren't in its set, (c) some PointOfInterest/CityBuildingController UI cache that ApplyFilters reads instead of the registration data.
+- Strategy: capture state AT THE MOMENT the filter actually runs.  Harmony-patch CityMapFilters.ApplyFilters Prefix and dump TypeStats + sceneCBC counts there.  Eliminates timing ambiguity.
+
+2026-05-22 — Phase 1b diagnostic v5 deployed.
+- Added Patch_CityMapFilters_ApplyFilters_Diag (Harmony Prefix on CityMapFilters.ApplyFilters, throttled to 2s).
+- Fires every time the user toggles a filter on the map.  Logs role (HOST/CLIENT), TypeStats, forSale/realEstate counts, and sceneCBC counts at the EXACT moment ApplyFilters runs.
+- If host and client diagnostic at filter time STILL match, the filter is using an input we haven't found.  If they differ, the divergence happens between snapshot apply and filter use — pointing at AI economy or some other tick.
+- Build clean, deployed.
+
+2026-05-22 — KEY INSIGHT from user screenshot: extras are pre-sync survivors, not new additions.
+- User took a screenshot of client's "for rent" highlights BEFORE our snapshot applied.  After snapshot, the "extras" beyond host's set EXACTLY match the pre-sync state — i.e., our wipe is not 100% effective.  A handful of residential/warehouse buildings retain their pre-sync state through our apply.  (rule)
+- This invalidates the "data identical" reading of the diagnostics — our diagnostic captures aggregate counts (335 Residential empty on both sides), but the per-building IDENTITY of which 335 are empty differs.  Host has buildings A,B,C empty; client has B,C,D empty.  Counts equal, sets differ — and our snapshot apply doesn't always overwrite buildings the client has assigned differently than host.  [?] (situational: Phase 1b investigation)
+- User executive decision: switch architecture from "wipe then mirror" to "suppress generation, verify wipe, mirror."  (rule)
+
+2026-05-22 — ✅ Phase 1b COMPLETE.  Suppress-then-mirror architecture working.
+- For-rent test: client's map highlights now match host's exactly (no extras), confirmed by user.
+- For-sale test: client's map highlights match host's exactly after deploy of buildingsForSale sync + RealEstateHelper.RunDaily suppression + RefreshMapFilters hook, confirmed by user.
+- Architectural learnings captured below in REFERENCE; key takeaway is "suppress generation, mirror authoritative state, refresh UI explicitly."  (rule)
+
+═══════════════════════════════════════════════════════════════════
+REFERENCE — Phase 1b key learnings (for future sync work)
+═══════════════════════════════════════════════════════════════════
+
+1. **"Wipe-then-mirror" is fragile; "suppress-then-mirror" is robust.**
+   Letting the client run its own generator then overwriting fields one-by-one leaves residual state in fields you didn't sync.  Better: Harmony-patch the generator functions to no-op on client, so the client never makes independent assignments.  Then mirror the host's authoritative state on top.  The verification pass (count any reg in a non-default state before applying) lets you confirm the suppression is complete.
+
+2. **Game generator methods named for OUTPUT often do INPUT.**
+   `MarkBuildingsForRentAndGetAvailableOnes` doesn't decide what becomes for-rent — it just catalogs whatever was left UNASSIGNED by the preceding methods.  The assignment methods are `SetupResidentialBuildings`, `SetupWarehouseBuildings`, `DistributeBuildingsToRivals`, `SetupRivalFactories`, `SetRivalBuildings`.  When suppressing, target the assignment methods, not the cataloging method (which is the safe baseline).
+
+3. **`AvailableForRent` is not the for-rent flag.**
+   Despite the name, it's `false` for every building on both sides at fresh-game time.  The map's "for rent" highlight is computed from `BusinessTypeName == Empty` AND not-in-`buildingsForSale` AND not-in-`realEstate` AND no rival ownership.  Don't trust field names — verify with the decompile of the consumer (`CityMapFilters.ApplyFilters` in this case).
+
+4. **`gi.buildingsForSale` is RNG-populated per side; must be synced.**
+   `RealEstateHelper.UpdateBuildingsForSale` picks ~3 buildings per neighborhood daily.  Different RNG → different picks → different for-sale set.  Wipe-and-rebuild the entire list on each snapshot rather than diff-and-patch (it's small; the simplicity is worth it).  Hash-diff on host detects daily changes and rebroadcasts.
+
+5. **UI doesn't auto-refresh when data changes — call the game's own refresher.**
+   `CityMapFilters.ApplyFilters()` is the function the game itself calls after any state change that affects map highlights.  Call it ourselves after each snapshot apply.  Without this, data is correct but visuals stay frozen until the user toggles a filter manually.  Same pattern likely applies to other UI panels (BizMan, market insider).
+
+6. **Per-player state vs. world state.**
+   `gi.realEstate` is each player's OWN owned-property list, not a shared list.  Don't blanket-sync it host→client; clients should see host's owned buildings as "owned by someone else."  Currently we sidestep this by removing the building from `buildingsForSale` (so it can't be highlighted as for-sale).  Richer per-player ownership display is a Phase 4 concern.
+
+7. **Suppression must let the skeleton run.**
+   `CityGenerator.PopulateBuildings` (creates the 825 `BuildingRegistration` entries in `gi.BuildingRegistrations`) and `EnsureTutorialBuildingsAreAvailable` must NOT be suppressed — otherwise the snapshot has no registrations to write to.  Only suppress the "make a choice" methods.
+
+8. **Verification before AND after the apply is worth the code.**
+   `VerifyCleanBaseline` (before) confirms suppression took effect (`dirty=0`).  `VerifyMatchesPayload` (after) confirms the apply wrote every field successfully (`matched=N mismatchBiz=0`).  When something breaks later, those two logs immediately localize the issue.
+
+═══════════════════════════════════════════════════════════════════
+
+2026-05-22 — Map filter refresh hook added.
+- New helper GameStatePatcher.RefreshMapFilters() — calls FindObjectsOfType<CityMapFilters> and invokes ApplyFilters() on each instance.  No-op if no CityMapFilters in scene yet.
+- Invoked at the end of ApplyBusinessSnapshot, after VerifyMatchesPayload.  Mirrors what the game does natively after rent/sale/RealEstateHelper.RunDaily ticks — without it the client's map data is correct but colored highlights stay frozen until the user toggles a filter manually.  (rule)
+- Build clean, deployed.
+
+2026-05-22 — For-sale marketplace (gi.buildingsForSale) sync deployed.
+- New protocol type BuildingForSaleInfo (AddressKey, BuildingPrice, SquareMeters, AcceptOfferRate).  Added List<BuildingForSaleInfo> BuildingsForSale to BusinessSnapshotPayload.
+- Host: BusinessSync.ReadBuildingsForSale walks gi.buildingsForSale and packages every entry into the payload.  BuildFullSnapshot includes it.  BusinessSync.CheckBuildingsForSaleChange polls each Tick — hashes the list, if changed (e.g. after daily real-estate update) broadcasts a fresh full snapshot via MPServer.BroadcastBusinessSnapshot.
+- Client: GameStatePatcher.ApplyBuildingsForSale wipes gi.buildingsForSale and rebuilds from the payload (one BuildingForSale per entry, with reg.Address pulled from the local registration).  Wipe count + add count logged.
+- Suppression: Patch_RealEstateHelper_RunDaily_SkipOnClient — Harmony Prefix returns false on client, skipping the entire daily real-estate tick (UpdateBuildingsForSale, UpdatePlayerRealEstate, SimulateCompetitorBuyingAIBuildings, SimulateCompetitorBuyingPlayerBuildings).  Host's snapshot is the sole authority for marketplace state.
+- gi.realEstate (player-owned property) NOT yet synced — empty for both at fresh-game time, becomes relevant once any player buys a building.  Backlog.
+- Build clean, deployed.
+
+2026-05-22 — Phase 1b suppression + verification deployed.
+- New Harmony Prefix patches in MPPatches.cs (gated on MPClient.IsConnected, so host/SP unchanged):
+   * Patch_CityGenerator_SetupResidentialBuildings_SkipOnClient
+   * Patch_CityGenerator_SetupWarehouseBuildings_SkipOnClient
+   * Patch_CityGenerator_DistributeBuildingsToRivals_SkipOnClient
+   * Patch_CityGenerator_SetupRivalFactories_SkipOnClient
+   * Patch_CityGenerator_SetRivalBuildings_SkipOnClient
+   * Each Prefix returns false on client, allowing PopulateBuildings + EnsureTutorialBuildingsAreAvailable to still run (registration skeleton needs to exist for the snapshot to write to).
+- New verification passes in GameStatePatcher.ApplyBusinessSnapshot:
+   * VerifyCleanBaseline(payload) — runs BEFORE applying; counts regs with businessTypeName != Empty, buildingOwnerRivalId, businessOwnerRivalId, RentedByPlayer.  If non-zero, logs warning ("Baseline NOT clean — suppression may be incomplete").  Logs first 5 example addresses.
+   * VerifyMatchesPayload(payload) — runs AFTER applying; per address compares client's BusinessTypeName to what host sent.  Logs first 5 mismatches.  Expected: zero mismatches.
+- Expected diagnostic flow after test:
+   * "Suppress: SetupResidentialBuildings skipped on client" + 4 sibling lines logged once during city init on client.
+   * "Baseline check (BEFORE apply): total=825 dirty=0" — confirms suppression worked.
+   * "Baseline is 100% clean ✓"
+   * "Business snapshot applied: 825/825 buildings."
+   * "Match check (AFTER apply): matched=825 mismatchBiz=0 addrNotInPayload=0"
+   * "Client now mirrors host's snapshot 100% ✓"
+- Build clean, deployed.
