@@ -210,8 +210,10 @@ namespace BigAmbitionsMP
             _clients.Remove(peer);
 
             // Clear any interior subscription the peer held so we stop polling
-            // a building no client is in anymore.
-            InteriorSync.HandlePeerDisconnected(peer.Id);
+            // a building no client is in anymore.  Marshal — it mutates the same
+            // subscriber dictionaries InteriorSync.Tick touches on the main thread.
+            int gonePeerId = peer.Id;
+            GameStatePatcher.EnqueueOnMainThread(() => InteriorSync.HandlePeerDisconnected(gonePeerId));
 
             string? leftPlayer = null;
 
@@ -314,15 +316,30 @@ namespace BigAmbitionsMP
 
                 case MessageType.InteriorRequest:
                 {
+                    // HandleRequest builds the interior snapshot (reads IL2CPP:
+                    // reg.interiorDesigns/itemInstances/dirtSpots) AND mutates the
+                    // subscriber dictionaries that InteriorSync.Tick also touches on
+                    // the main thread — so run it ON the main thread (off-thread
+                    // IL2CPP read + concurrent-dictionary race otherwise).
                     var p = env.GetPayload<InteriorRequestPayload>();
-                    if (p != null) InteriorSync.HandleRequest(peer, p.PlayerId, p.AddressKey);
+                    if (p != null)
+                    {
+                        var pc = peer;
+                        GameStatePatcher.EnqueueOnMainThread(() => InteriorSync.HandleRequest(pc, p.PlayerId, p.AddressKey));
+                    }
                     break;
                 }
 
                 case MessageType.PlayerExitedBuilding:
                 {
+                    // Mutates the same subscriber dictionaries as Tick (main thread)
+                    // — marshal to avoid the concurrent-dictionary race.
                     var p = env.GetPayload<PlayerExitedBuildingPayload>();
-                    if (p != null) InteriorSync.HandleExit(peer, p.PlayerId, p.AddressKey);
+                    if (p != null)
+                    {
+                        var pc = peer;
+                        GameStatePatcher.EnqueueOnMainThread(() => InteriorSync.HandleExit(pc, p.PlayerId, p.AddressKey));
+                    }
                     break;
                 }
 
@@ -443,14 +460,28 @@ namespace BigAmbitionsMP
                 }
                 else
                 {
-                    var snapshot = BuildWorldSnapshot();
-                    Send(peer, MessageEnvelope.Create(MessageType.Welcome, "host", snapshot));
-                    Plugin.Logger.LogInfo($"[Server] Late join by '{hello.PlayerId}', sent world snapshot.");
-                    // Also send the rival roster — must arrive before BusinessSnapshot so the
-                    // building-owner ID strings have name entries to resolve to.
-                    SendRivalsSnapshotTo(peer);
-                    // Also send the business table — sent once, then deltas as they change.
-                    SendBusinessSnapshotTo(peer);
+                    // Late join: building these snapshots iterates IL2CPP objects
+                    // (gi.BuildingRegistrations, gi.rivalStates, GetRivalData …),
+                    // which is unsafe from this background poll thread — marshal
+                    // onto the main thread.  (Wave-13 class bug; only fires on a
+                    // mid-game join so it had gone unnoticed.)
+                    var joinPeer = peer;
+                    var joinName = hello.PlayerId;
+                    GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        try
+                        {
+                            var snapshot = BuildWorldSnapshot();
+                            Send(joinPeer, MessageEnvelope.Create(MessageType.Welcome, "host", snapshot));
+                            Plugin.Logger.LogInfo($"[Server] Late join by '{joinName}', sent world snapshot.");
+                            // Rival roster BEFORE BusinessSnapshot so building-owner
+                            // ID strings have name entries to resolve to.
+                            SendRivalsSnapshotTo(joinPeer);
+                            // Business table — sent once, then deltas as they change.
+                            SendBusinessSnapshotTo(joinPeer);
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Late-join snapshot: {ex.Message}"); }
+                    });
                 }
             }
         }
