@@ -135,6 +135,488 @@ namespace BigAmbitionsMP
             });
         }
 
+        // ── Rivals roster sync (Phase 1d Wave 2) ─────────────────────────────
+
+        /// <summary>
+        /// Plain-C# id→name dict managed by us.  IL2CPP-Interop wrappers don't
+        /// expose private fields like RivalsHelper.RivalDataCache, so we can't
+        /// populate the game's cache directly.  Instead, our Harmony patch on
+        /// RivalsHelper.GetRivalName consults THIS dict first and short-
+        /// circuits with the host's name — bypassing the game's cache lookup
+        /// entirely for known IDs.
+        /// </summary>
+        public static readonly System.Collections.Generic.Dictionary<string, string> ClientRivalNames = new();
+
+        /// <summary>
+        /// Ordered FIFO of rival IDs to be consumed by client's GenerateRivals.
+        /// Populated when host's RivalsSnapshot arrives.  Drained by the
+        /// Harmony Prefix on UuidHelper.GenerateBase64Uuid (which only fires
+        /// while RivalsGenerateRunning is true).
+        /// </summary>
+        public static readonly System.Collections.Generic.Queue<string> PendingRivalIdQueue = new();
+
+        /// <summary>Set to true by Patch_RivalsHelper_GenerateRivals around the original method's execution.</summary>
+        public static bool RivalsGenerateRunning = false;
+
+        /// <summary>True only while RivalLeaderboard.Load is executing (set by its
+        /// Prefix, cleared by its Postfix).  Gates the GetAllRivalData Postfix so
+        /// we append remote-player RivalData ONLY for the leaderboard build — not
+        /// for GetAllRivalData's other callers (CityMapFilters, GetPlayerRanking),
+        /// which must not see synthetic players.</summary>
+        public static bool RivalsLeaderboardLoadRunning = false;
+
+        /// <summary>Becomes true once the client has received host's RivalsSnapshot — used by autopilot to gate StartGame.</summary>
+        public static bool ClientRivalsReady = false;
+
+        /// <summary>
+        /// Set to true the first time our UUID-queue injection successfully
+        /// runs through the original GenerateRivals.  Subsequent GenerateRivals
+        /// calls are suppressed so the natural new-game flow can't wipe our
+        /// injected cache.
+        /// </summary>
+        public static bool ClientRivalsInjected = false;
+
+        /// <summary>
+        /// PlayerId → CharacterName for entries that are HUMAN PLAYERS (not AI
+        /// rivals).  Populated alongside ClientRivalNames when RivalsSnapshot
+        /// arrives.  Used by Patch_RivalLeaderboard_Load_AddPlayers to inject
+        /// additional rows into the rivals leaderboard for each non-local
+        /// player — same approach the game uses to add the local player row.
+        /// </summary>
+        public static readonly System.Collections.Generic.Dictionary<string, string> ClientPlayerRoster = new();
+
+        /// <summary>
+        /// id → RivalData reference, captured when the local game's
+        /// GetRivalLeaderboardData runs (Postfix).  Host uses this to access
+        /// rd.WeeklyIncome (the correct calc) when computing stats to send
+        /// clients — avoids the inaccurate RentPerDay*7 approximation.
+        /// Client uses this to access rivals' actual data for further sync.
+        /// </summary>
+        public static readonly System.Collections.Generic.Dictionary<string, BigAmbitions.Rivals.RivalData> AiRivalDataRefs = new();
+
+        /// <summary>
+        /// Per-rival stats cache (Phase 1d Wave 4).  Populated by
+        /// ApplyRivalsStatsSnapshot when host responds to a stats request.
+        /// Consulted by the RivalLeaderboard.GetRivalLeaderboardData Postfix
+        /// to override the locally-computed (and therefore stale) values.
+        /// </summary>
+        public static readonly System.Collections.Generic.Dictionary<string, RivalStatsInfo> ClientRivalStats = new();
+
+        /// <summary>
+        /// AddressKey → host-authoritative weekly income for a rival-owned
+        /// business.  Populated from RivalStatsInfo.Businesses in
+        /// ApplyRivalsStatsSnapshot.  Consulted by the RivalBusinessesCellView
+        /// .SetData patch to override the client's $0 per-business income (AI
+        /// business sales aren't simulated on the client).
+        /// </summary>
+        public static readonly System.Collections.Generic.Dictionary<string, float> ClientBusinessIncomeByAddress = new();
+
+        /// <summary>PlayerId → their actual portrait Sprite (decoded from the
+        /// relayed PNG).  Consulted by the RivalPortraitHelper patches so a
+        /// remote player's profile shows their real face.</summary>
+        public static readonly System.Collections.Generic.Dictionary<string, UnityEngine.Sprite> ClientPlayerPortraits = new();
+
+        /// <summary>PlayerId → their character age in years (from PlayerProfile),
+        /// so the rivals profile shows the real age, not a default.</summary>
+        public static readonly System.Collections.Generic.Dictionary<string, int> ClientPlayerAges = new();
+
+        /// <summary>True once we've sent our profile WITH a non-empty portrait —
+        /// whether on the initial game-entry send or a later re-send.  Ensures
+        /// the (large) portrait image is transmitted exactly once per session.
+        /// Reset when leaving the game.</summary>
+        public static bool LocalPortraitSent = false;
+
+        /// <summary>Local player's character age in years = ageInDays / daysPerYear.</summary>
+        public static int LocalAgeInYears()
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null || gi.charactersData == null || gi.charactersData.Count == 0) return 0;
+                var cd = gi.charactersData[0];
+                if (cd == null) return 0;
+                int dpy = 60;
+                try { if (gi.gameVariables != null && gi.gameVariables.daysPerYear > 0) dpy = gi.gameVariables.daysPerYear; } catch { }
+                return dpy > 0 ? cd.ageInDays / dpy : 0;
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>Read the LOCAL player's rendered portrait PNG as Base64 (for
+        /// relaying to other players).  Empty if not on disk yet.</summary>
+        public static string ReadLocalPortraitBase64()
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null) return "";
+                string path = Character.Customization.PortraitGenerator.GetCharacterPortraitPath(gi);
+                if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) return "";
+                var bytes = System.IO.File.ReadAllBytes(path);
+                if (bytes == null || bytes.Length == 0) return "";
+                return Convert.ToBase64String(bytes);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ReadLocalPortraitBase64: {ex.Message}"); return ""; }
+        }
+
+        /// <summary>Decode a relayed portrait PNG into a Sprite and cache it for
+        /// the given player.  MUST run on the main thread (creates a Texture2D).</summary>
+        public static void ApplyPlayerPortrait(string playerId, string base64)
+        {
+            if (string.IsNullOrEmpty(playerId) || string.IsNullOrEmpty(base64)) return;
+            try
+            {
+                var managed = Convert.FromBase64String(base64);
+                if (managed == null || managed.Length == 0) return;
+                var tex = new UnityEngine.Texture2D(2, 2);
+                bool loaded = UnityEngine.ImageConversion.LoadImage(tex, (Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<byte>)managed);
+                if (!loaded) { Plugin.Logger.LogWarning($"[Patcher] Portrait decode failed for '{playerId}'."); return; }
+                var sprite = UnityEngine.Sprite.Create(
+                    tex,
+                    new UnityEngine.Rect(0, 0, tex.width, tex.height),
+                    new UnityEngine.Vector2(0.5f, 0.5f));
+                ClientPlayerPortraits[playerId] = sprite;
+                Plugin.Logger.LogInfo($"[Patcher] Applied portrait for player '{playerId}' ({tex.width}x{tex.height}, {managed.Length}B).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyPlayerPortrait '{playerId}': {ex.Message}"); }
+        }
+
+        /// <summary>AddressKeys the host reports as a rival's businesses (the
+        /// exact membership the host's leaderboard/breakdown use).  Lets the
+        /// client reconcile its factory-inclusive owner-id matching down to the
+        /// host's set.  Keyed by rivalId → set of address keys.</summary>
+        public static readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.HashSet<string>> ClientRivalBusinessAddrs = new();
+
+        /// <summary>
+        /// Apply host's rival roster.  Wave 2 just maintains our own
+        /// id→name dict (consulted by the Patch_RivalsHelper_GetRivalName
+        /// patch) and adds matching RivalState entries to gi.rivalStates so
+        /// leaderboard/history queries don't NRE.
+        /// </summary>
+        public static void ApplyRivalsSnapshot(RivalsSnapshotPayload payload)
+        {
+            if (!ClientApplyOwnership) return;
+            if (payload == null) return;
+            RunOnMainThread(() =>
+            {
+                try
+                {
+                    ClientRivalNames.Clear();
+                    int added = 0;
+                    foreach (var r in payload.Rivals)
+                    {
+                        if (string.IsNullOrEmpty(r.Id)) continue;
+                        ClientRivalNames[r.Id] = r.Name ?? "";
+                        added++;
+                    }
+                    Plugin.Logger.LogInfo($"[Patcher] ClientRivalNames populated: {added} rival(s).");
+
+                    // Populate the UUID queue with AI rivals ONLY.  Player IDs are
+                    // segregated into ClientPlayerRoster; they get their own
+                    // leaderboard rows injected via Patch_RivalLeaderboard_Load_AddPlayers,
+                    // matching how the local player is rendered (separate from
+                    // RivalDataCache).  Putting player IDs in the queue would
+                    // misalign them with AI templates and produce wrong names.
+                    PendingRivalIdQueue.Clear();
+                    ClientPlayerRoster.Clear();
+                    foreach (var r in payload.Rivals)
+                    {
+                        if (string.IsNullOrEmpty(r.Id)) continue;
+                        if (r.IsPlayer)
+                            ClientPlayerRoster[r.Id] = r.Name ?? r.Id;
+                        else
+                            PendingRivalIdQueue.Enqueue(r.Id);
+                    }
+                    Plugin.Logger.LogInfo($"[Patcher] PendingRivalIdQueue seeded with {PendingRivalIdQueue.Count} AI id(s); ClientPlayerRoster has {ClientPlayerRoster.Count} player(s).");
+                    ClientRivalsReady = true;
+
+                    EnsureRivalCachesPopulated(payload);
+
+                    // Manually trigger GenerateRivals NOW — the natural startup
+                    // call was suppressed (queue not ready then), and the new-
+                    // game call from customizer.StartGame might not fire if the
+                    // user manually clicks before we're ready.  Our Prefix
+                    // checks ClientRivalsInjected to ensure this is the ONLY
+                    // successful run; subsequent calls (e.g. from the natural
+                    // new-game flow) are skipped to preserve our cache.
+                    if (!ClientRivalsInjected)
+                    {
+                        try
+                        {
+                            var gi = SaveGameManager.Current;
+                            if (gi != null)
+                            {
+                                Plugin.Logger.LogInfo("[Patcher] Manually triggering RivalsHelper.GenerateRivals to consume the queue.");
+                                BigAmbitions.Rivals.RivalsHelper.GenerateRivals(gi);
+                            }
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] Manual GenerateRivals: {ex.Message}"); }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyRivalsSnapshot: {ex.Message}"); }
+            });
+        }
+
+        /// <summary>
+        /// Populates gi.rivalStates + RivalsHelper.RivalDataCache on the
+        /// LOCAL machine from a rivals snapshot.  Tries Harmony's AccessTools
+        /// for the private cache field; falls back to RivalsHelper.FillData
+        /// if direct access fails.  Safe to call from either role (client
+        /// applying snapshot, or host applying its own roster).
+        /// </summary>
+        public static void EnsureRivalCachesPopulated(RivalsSnapshotPayload payload)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null) return;
+
+                // 1. gi.rivalStates — top up missing AI rival IDs only.
+                //    Player IDs are EXCLUDED here.  Why: the game's leaderboard
+                //    iterates gi.rivalStates and renders rows for every id.  If
+                //    we add player IDs but never get RivalData entries for them
+                //    in the private RivalDataCache, the game renders ghost rows
+                //    with raw template placeholders (e.g. "{numBusinesses}").
+                //    Player rows come exclusively from our Patch_Load_AddPlayers
+                //    Postfix; the game must never see player IDs in rivalStates.
+                if (gi.rivalStates != null)
+                {
+                    var existing = new System.Collections.Generic.HashSet<string>();
+                    for (int i = 0; i < gi.rivalStates.Count; i++)
+                    {
+                        var s = gi.rivalStates[i];
+                        if (s == null) continue;
+                        string sid = s.rivalId?.ToString() ?? "";
+                        if (!string.IsNullOrEmpty(sid)) existing.Add(sid);
+                    }
+                    int statesAdded = 0;
+                    foreach (var r in payload.Rivals)
+                    {
+                        if (string.IsNullOrEmpty(r.Id)) continue;
+                        if (r.IsPlayer) continue;          // ← key change
+                        if (existing.Contains(r.Id)) continue;
+                        gi.rivalStates.Add(new BigAmbitions.Rivals.RivalState { rivalId = r.Id });
+                        statesAdded++;
+                    }
+                    if (statesAdded > 0)
+                        Plugin.Logger.LogInfo($"[Patcher] gi.rivalStates topped up: +{statesAdded} AI entries ({gi.rivalStates.Count} total).");
+                }
+
+                // 2. RivalsHelper.RivalDataCache — try AccessTools first, then fall back to FillData.
+                int cacheAdded = 0;
+                try
+                {
+                    var fi = HarmonyLib.AccessTools.Field(typeof(BigAmbitions.Rivals.RivalsHelper), "RivalDataCache");
+                    if (fi != null)
+                    {
+                        var dictObj = fi.GetValue(null);
+                        if (dictObj is Il2CppSystem.Collections.Generic.Dictionary<string, BigAmbitions.Rivals.RivalData> dict)
+                        {
+                            foreach (var r in payload.Rivals)
+                            {
+                                if (string.IsNullOrEmpty(r.Id)) continue;
+                                if (dict.ContainsKey(r.Id)) continue;
+                                dict[r.Id] = new BigAmbitions.Rivals.RivalData
+                                {
+                                    id        = r.Id,
+                                    rivalName = string.IsNullOrEmpty(r.Name) ? r.Id : r.Name,
+                                };
+                                cacheAdded++;
+                            }
+                            Plugin.Logger.LogInfo($"[Patcher] RivalDataCache populated via AccessTools: +{cacheAdded} entries.");
+                        }
+                        else
+                        {
+                            Plugin.Logger.LogWarning($"[Patcher] AccessTools got field but value is {(dictObj == null ? "null" : dictObj.GetType().FullName)} — falling back to FillData.");
+                            cacheAdded = -1;
+                        }
+                    }
+                    else
+                    {
+                        Plugin.Logger.LogWarning("[Patcher] AccessTools.Field returned null for RivalDataCache — falling back to FillData.");
+                        cacheAdded = -1;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogWarning($"[Patcher] RivalDataCache AccessTools path: {ex.Message} — falling back to FillData.");
+                    cacheAdded = -1;
+                }
+
+                if (cacheAdded < 0)
+                {
+                    // FillData was a candidate fallback here, but calling it
+                    // at runtime triggers Addressables.LoadAssetsAsync which
+                    // hangs the client at 100% loading (FillData is only safe
+                    // during SaveGameManager.Load context).  Leaving the cache
+                    // alone — leaderboard will fall back to whatever rivals the
+                    // client's own GenerateRivals produced.  Building popups
+                    // still resolve via the GetRivalName Prefix override.
+                    Plugin.Logger.LogInfo("[Patcher] Skipping RivalDataCache populate; leaderboard will use client-local rivals (see context log 2026-05-22 Wave 5 rollback).");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] EnsureRivalCachesPopulated: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// Apply host's rivals stats snapshot.  Replaces ClientRivalStats dict.
+        /// The RivalLeaderboard.GetRivalLeaderboardData Postfix in MPPatches
+        /// reads from this dict to override the leaderboard rows with host's
+        /// authoritative values.
+        /// </summary>
+        public static void ApplyRivalsStatsSnapshot(RivalsStatsSnapshotPayload payload)
+        {
+            if (!ClientApplyOwnership) return;
+            if (payload == null) return;
+            RunOnMainThread(() =>
+            {
+                try
+                {
+                    ClientRivalStats.Clear();
+                    ClientBusinessIncomeByAddress.Clear();
+                    ClientRivalBusinessAddrs.Clear();
+                    int bizRows = 0;
+                    foreach (var s in payload.Stats)
+                    {
+                        if (string.IsNullOrEmpty(s.Id)) continue;
+                        ClientRivalStats[s.Id] = s;
+                        if (s.Businesses != null && s.Businesses.Count > 0)
+                        {
+                            var addrs = new System.Collections.Generic.HashSet<string>();
+                            foreach (var b in s.Businesses)
+                            {
+                                if (string.IsNullOrEmpty(b.AddressKey)) continue;
+                                ClientBusinessIncomeByAddress[b.AddressKey] = b.WeeklyIncome;
+                                addrs.Add(b.AddressKey);
+                                bizRows++;
+                            }
+                            ClientRivalBusinessAddrs[s.Id] = addrs;
+                        }
+                    }
+                    Plugin.Logger.LogInfo($"[Patcher] ClientRivalStats populated: {payload.Stats.Count} entries, {bizRows} business income rows.");
+
+                    // If the leaderboard UI is currently visible (its
+                    // GameObject is active in the hierarchy), re-call its
+                    // Load() so the just-arrived stats are reflected.  We
+                    // CHECK activeInHierarchy explicitly — Load() on a
+                    // hidden/uninitialized RivalLeaderboard can dereference
+                    // null serialized fields and crash the process natively.
+                    try
+                    {
+                        var lbs = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<UI.Smartphone.Apps.Rivals.RivalLeaderboard>());
+                        if (lbs != null && lbs.Length > 0)
+                        {
+                            for (int i = 0; i < lbs.Length; i++)
+                            {
+                                var lb = lbs[i].TryCast<UI.Smartphone.Apps.Rivals.RivalLeaderboard>();
+                                if (lb == null) continue;
+                                bool active = false;
+                                try { active = lb.gameObject != null && lb.gameObject.activeInHierarchy; } catch { }
+                                if (!active)
+                                {
+                                    Plugin.Logger.LogInfo("[Patcher] Skipping Load() on inactive RivalLeaderboard.");
+                                    continue;
+                                }
+                                try { lb.Load(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] RivalLeaderboard.Load post-stats: {ex.Message}"); }
+                            }
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] post-stats Load re-call: {ex.Message}"); }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyRivalsStatsSnapshot: {ex.Message}"); }
+            });
+        }
+
+        /// <summary>
+        /// Build a synthetic RivalData for a REMOTE human player so the game's
+        /// own RivalLeaderboard.Load can include + rank them by income alongside
+        /// AI rivals.  Owned-business lists are populated from local registrations
+        /// (owner ids synced from host) so the count + estimated income resolve;
+        /// non-null lists are mandatory (downstream code iterates them natively).
+        /// Used by the GetAllRivalData Postfix (leaderboard) and the GetRivalData
+        /// fallback (detail view click).
+        /// </summary>
+        public static BigAmbitions.Rivals.RivalData? BuildSyntheticPlayerRivalData(string playerId)
+        {
+            if (string.IsNullOrEmpty(playerId)) return null;
+            string name = playerId;
+            try { if (ClientRivalNames.TryGetValue(playerId, out var n) && !string.IsNullOrWhiteSpace(n)) name = n; } catch { }
+            int age = 30;
+            try { if (ClientPlayerAges.TryGetValue(playerId, out var a) && a > 0) age = a; } catch { }
+            var rd = new BigAmbitions.Rivals.RivalData
+            {
+                id        = playerId,
+                rivalName = name,
+                startingAgeInYears = age,
+                ownedBuildings              = new Il2CppSystem.Collections.Generic.List<BuildingRegistration>(),
+                ownedBusinesses             = new Il2CppSystem.Collections.Generic.List<BuildingRegistration>(),
+                ownedRetailOfficeBusinesses = new Il2CppSystem.Collections.Generic.List<BuildingRegistration>(),
+            };
+            PopulateRivalOwnedFromSync(rd, playerId);
+            return rd;
+        }
+
+        /// <summary>
+        /// (Re)populate a rival/player RivalData's owned-* lists from local
+        /// registrations.  The leaderboard COUNT and the detail BREAKDOWN both use
+        /// ownedRetailOfficeBusinesses, which (confirmed via HostBizDiag) contains
+        /// Retail+Office+Cinema+Theater and excludes factories — so we mirror the
+        /// HOST'S EXACT membership by address (ClientRivalStats[id].Businesses,
+        /// built host-side from rd.ownedRetailOfficeBusinesses) rather than guess
+        /// by BuildingType (which dropped cinema/theater).  ownedBusinesses gets
+        /// the same set so the breakdown matches regardless of which list the game
+        /// reads.  Falls back to owner-id-match-minus-factory before stats arrive.
+        /// ownedBuildings = real estate (buildingOwnerRivalId), independent.
+        /// </summary>
+        public static void PopulateRivalOwnedFromSync(BigAmbitions.Rivals.RivalData rd, string id)
+        {
+            if (rd == null || string.IsNullOrEmpty(id)) return;
+            try
+            {
+                if (rd.ownedBuildings  != null) rd.ownedBuildings.Clear();
+                if (rd.ownedBusinesses != null) rd.ownedBusinesses.Clear();
+                if (rd.ownedRetailOfficeBusinesses != null) rd.ownedRetailOfficeBusinesses.Clear();
+
+                System.Collections.Generic.HashSet<string>? syncedAddrs = null;
+                if (ClientRivalStats.TryGetValue(id, out var stat) && stat.Businesses != null && stat.Businesses.Count > 0)
+                {
+                    syncedAddrs = new System.Collections.Generic.HashSet<string>();
+                    foreach (var b in stat.Businesses)
+                        if (!string.IsNullOrEmpty(b.AddressKey)) syncedAddrs.Add(b.AddressKey);
+                }
+
+                var gi = SaveGameManager.Current;
+                if (gi == null || gi.BuildingRegistrations == null) return;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null) continue;
+                    try
+                    {
+                        string bldg = reg.buildingOwnerRivalId?.ToString() ?? "";
+                        string biz  = reg.businessOwnerRivalId?.ToString() ?? "";
+                        if (bldg == id && rd.ownedBuildings != null) rd.ownedBuildings.Add(reg);
+
+                        bool isBiz;
+                        if (syncedAddrs != null)
+                            isBiz = syncedAddrs.Contains(GameStateReader.AddressKey(reg));   // host's exact set
+                        else
+                        {
+                            // Fallback before stats arrive: owner match minus factory.
+                            bool isFactory = false; try { isFactory = (int)reg.businessTypeName == 38; } catch { }
+                            isBiz = (biz == id) && !isFactory;
+                        }
+                        if (isBiz)
+                        {
+                            if (rd.ownedBusinesses             != null) rd.ownedBusinesses.Add(reg);
+                            if (rd.ownedRetailOfficeBusinesses != null) rd.ownedRetailOfficeBusinesses.Add(reg);
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
         // ── Interior sync (Phase 2a: simple fields only — items deferred to 2b) ──
 
         /// <summary>
@@ -288,6 +770,18 @@ namespace BigAmbitionsMP
                 var reg = matched.buildingRegistration;
                 if (reg == null || reg.interiorDesigns == null) return;
 
+                // For AI businesses (CoffeeShop, FastFoodRestaurant, etc.),
+                // the items come from the BusinessLayoutSet template named by
+                // reg.Layout — they're NOT in reg.itemInstances.  At first
+                // entry the client's LoadBuilding ran with reg.Layout still
+                // empty (Phase 1b suppression prevented CityGenerator from
+                // setting it), so nothing was template-spawned.  Now that our
+                // snapshot has set reg.Layout, re-call LoadBuilding so the
+                // template spawns its furniture/shelves.  Idempotent for
+                // already-loaded layouts.
+                try { matched.LoadBuilding(false); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] LoadBuilding re-trigger for layout '{reg.Layout}': {ex.Message}"); }
+
                 // UUID → SerializedInteriorDesign dict from the fresh data we just wrote.
                 var dict = new System.Collections.Generic.Dictionary<string, SerializedInteriorDesign>();
                 for (int i = 0; i < reg.interiorDesigns.Count; i++)
@@ -335,11 +829,28 @@ namespace BigAmbitionsMP
         /// and re-spawns from reg.itemInstances using BuildingManager's
         /// InstantiateSingleInstance.  This is the per-item analog of the
         /// InteriorElement.Deserialize trick for designs.
+        ///
+        /// IMPORTANT: skipped when reg.itemInstances is empty.  AI businesses
+        /// (CoffeeShop, FastFoodRestaurant, etc.) spawn their items from the
+        /// `BusinessLayoutSet` template at LoadBuilding time — those template-
+        /// spawned items are NOT in reg.itemInstances.  If we wipe them and
+        /// replace with an empty dict, the building visibly goes empty.  When
+        /// host's snapshot reports zero items we trust the layout-driven
+        /// spawn and don't touch the scene.
         /// </summary>
         private static void RefreshItemsForActiveBuilding(BuildingManager bm, BuildingRegistration reg)
         {
             try
             {
+                // Skip refresh entirely when host has no per-instance items —
+                // see XML doc above for why.
+                int dictCount = reg.itemInstances?.Count ?? 0;
+                if (dictCount == 0)
+                {
+                    Plugin.Logger.LogInfo($"[Patcher] Items refresh skipped (empty itemInstances; layout-spawned items left intact).");
+                    return;
+                }
+
                 // Find and destroy existing item GameObjects.  ItemController
                 // is the scene-side component for each spawned ItemInstance.
                 int destroyed = 0;
@@ -837,6 +1348,62 @@ namespace BigAmbitionsMP
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] schedule apply for {info.AddressKey}: {ex.Message}"); }
+
+                // ── Ownership (Phase 1d Wave 1) ─────────────────────────────
+                // Sync the rival-id strings verbatim — for AI-owned buildings
+                // this immediately fixes the "undefined" / wrong-rival display
+                // because the same AI rival IDs exist on both sides.  For
+                // PLAYER-owned buildings (host bought it), host's value here
+                // will likely be either empty or a player-id string; we log
+                // it so the test data tells us what to translate.
+                // RentedByPlayer is intentionally NOT applied on client — host
+                // having RentedByPlayer=true means HOST owns it, but writing
+                // true on client would make the CLIENT think they own it.
+                // Wave 2 will translate that into a synthetic rival.
+                string priorBuildingOwner = reg.buildingOwnerRivalId?.ToString() ?? "";
+                string priorBusinessOwner = reg.businessOwnerRivalId?.ToString() ?? "";
+                bool   priorRented        = reg.RentedByPlayer;
+                try
+                {
+                    // Default: mirror host's rival-id fields verbatim.
+                    string newBuildingOwner = info.BuildingOwnerRivalId ?? "";
+                    string newBusinessOwner = info.BusinessOwnerRivalId ?? "";
+                    bool   newRented        = false;   // host's true ≠ client's true (Wave 3 translation)
+
+                    // Wave 3 translation: if host marked the building as owned
+                    // by a HUMAN player (OwnerPlayerId set), translate per
+                    // receiver identity.
+                    if (!string.IsNullOrEmpty(info.OwnerPlayerId))
+                    {
+                        if (info.OwnerPlayerId == MPConfig.PlayerId)
+                            newRented = true;        // building is the receiving client's own
+                        else
+                            newBuildingOwner = info.OwnerPlayerId;  // owned by another player; treat as rival
+                    }
+                    if (!string.IsNullOrEmpty(info.BusinessOwnerPlayerId)
+                        && info.BusinessOwnerPlayerId != MPConfig.PlayerId)
+                    {
+                        newBusinessOwner = info.BusinessOwnerPlayerId;
+                    }
+
+                    reg.buildingOwnerRivalId = newBuildingOwner;
+                    reg.businessOwnerRivalId = newBusinessOwner;
+                    reg.RentedByPlayer       = newRented;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ownership apply for {info.AddressKey}: {ex.Message}"); }
+
+                // Diagnostic for Wave 2 planning: log when the host claims to
+                // own a building so we can see exactly how host's reg represents
+                // player-ownership.  Only logs interesting cases (host or AI
+                // changes), not every default-empty record.
+                if (info.RentedByPlayer || !string.IsNullOrEmpty(info.BuildingOwnerRivalId)
+                                       || !string.IsNullOrEmpty(info.BusinessOwnerRivalId)
+                                       || !string.IsNullOrEmpty(priorBuildingOwner)
+                                       || !string.IsNullOrEmpty(priorBusinessOwner)
+                                       || priorRented)
+                {
+                    Plugin.Logger.LogInfo($"[Patcher] Ownership for {info.AddressKey}: host[bldg='{info.BuildingOwnerRivalId}' biz='{info.BusinessOwnerRivalId}' rented={info.RentedByPlayer}] client-was[bldg='{priorBuildingOwner}' biz='{priorBusinessOwner}' rented={priorRented}].");
+                }
 
                 // Writes above only update the DATA model.  The visible sign /
                 // logo / map marker are GameObjects that were initialised from

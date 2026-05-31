@@ -379,6 +379,11 @@ namespace BigAmbitionsMP
         public static string AddressKey(BuildingRegistration reg)
             => $"{reg.StreetNumber} {reg.StreetName}";
 
+        /// <summary>Same key from an Address value (used to match the rival
+        /// business-breakdown cells, which carry an Address not a registration).</summary>
+        public static string AddressKey(Address address)
+            => $"{address.streetNumber} {address.streetName}";
+
         // ── GameVariables probe ───────────────────────────────────────────────
         // One-time discovery probe: logs the structure of GameVariables so we can
         // identify which member controls Story Mode vs Custom/Sandbox and the

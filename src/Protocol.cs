@@ -58,6 +58,18 @@ namespace BigAmbitionsMP
         InteriorRequest      = 60, // Client → Host: "I entered building X, subscribe me + send snapshot."
         InteriorSnapshot     = 61, // Host → Client: full interior state of one building.
         PlayerExitedBuilding = 62, // Client → Host: "I exited building X, unsubscribe me."
+
+        // Rivals (Phase 1d Wave 2: synthetic-rival sync so buildingOwnerRivalId
+        // lookups resolve to a real name instead of "undefined" on the client).
+        RivalsSnapshot       = 70, // Host → Client: full rival roster (id + name pairs).
+
+        // Rivals stats (Phase 1d Wave 4: on-demand refresh when client opens
+        // the rivals app on their phone).
+        RivalsStatsRequest   = 71, // Client → Host: "the user just opened the rivals window, send me fresh stats."
+        RivalsStatsSnapshot  = 72, // Host → Client: per-rival stat block (income, building counts).
+
+        // Player profile (Phase 1d Wave 5: character name as canonical display).
+        PlayerProfile        = 80, // Either direction: a player's in-character name (CharacterData.name).
     }
 
     // ── Envelope ───────────────────────────────────────────────────────────────
@@ -518,6 +530,23 @@ namespace BigAmbitionsMP
         // We mirror host's schedule verbatim.
         public bool SharedSchedule { get; set; }
         public List<ScheduleDayInfo> Schedule { get; set; } = new();
+
+        // ── Ownership (Phase 1d) ──────────────────────────────────────────────
+        // The two RivalId strings drive BuildingResume.rivalBuildingOwner /
+        // rivalBusinessOwner via RivalsHelper.GetRivalName.  RentedByPlayer is
+        // sent for completeness.  Phase 1d Wave 3 adds OwnerPlayerId fields:
+        // when a building/business is owned by a HUMAN player (local on the
+        // sender's machine), the player's PlayerId is included so receivers
+        // can translate it:
+        //   * if receiver IS that player → set reg.RentedByPlayer = true
+        //   * else → set reg.buildingOwnerRivalId = OwnerPlayerId (and we
+        //     ensure a rival entry exists for that player so the popup shows
+        //     the player's name).
+        public string BuildingOwnerRivalId { get; set; } = "";
+        public string BusinessOwnerRivalId { get; set; } = "";
+        public bool   RentedByPlayer       { get; set; }
+        public string OwnerPlayerId        { get; set; } = "";
+        public string BusinessOwnerPlayerId{ get; set; } = "";
     }
 
     /// <summary>One day of the week's opening schedule for one building.</summary>
@@ -722,5 +751,108 @@ namespace BigAmbitionsMP
         public float X { get; set; }
         public float Y { get; set; }
         public float Z { get; set; }
+    }
+
+    // ── Rivals roster sync (Phase 1d Wave 2) ─────────────────────────────────
+
+    /// <summary>One entry in the host's AI rival roster.</summary>
+    public class RivalInfo
+    {
+        /// <summary>The base64 GUID the host uses as buildingOwnerRivalId / businessOwnerRivalId.</summary>
+        public string Id   { get; set; } = "";
+        public string Name { get; set; } = "";
+        /// <summary>True if this entry represents a human player (not an AI rival).</summary>
+        public bool   IsPlayer { get; set; }
+    }
+
+    /// <summary>
+    /// Host → Client on connect.  Replaces client's local RivalDataCache so
+    /// id→name lookups resolve consistently across the session.  Client's
+    /// own RivalsHelper.GenerateRivals is suppressed via Harmony patch so the
+    /// host's roster is authoritative.
+    /// </summary>
+    public class RivalsSnapshotPayload
+    {
+        public List<RivalInfo> Rivals { get; set; } = new();
+    }
+
+    /// <summary>
+    /// Client → Host: triggers a fresh stats snapshot AND attaches the
+    /// client's own self-stats so host has data to populate the client's row
+    /// on host's own leaderboard.  Self-stats are computed locally from the
+    /// client's gi.realEstate / RentedByPlayer state.
+    /// </summary>
+    public class RivalsStatsRequestPayload
+    {
+        public string PlayerId { get; set; } = "";
+        public int    SelfOwnedBuildingsCount  { get; set; }
+        public int    SelfOwnedBusinessesCount { get; set; }
+        public float  SelfWeeklyIncome         { get; set; }
+    }
+
+    /// <summary>
+    /// Player profile update — carries a player's in-character name (the one
+    /// chosen in the character creator, stored in CharacterData.name).  Used
+    /// as the canonical display name for the player in rival lists, building
+    /// ownership popups, leaderboard, etc.  PlayerId is the internal/network
+    /// key (stable, from F8 menu / Steam); CharacterName is what humans see.
+    /// </summary>
+    public class PlayerProfilePayload
+    {
+        public string PlayerId      { get; set; } = "";
+        public string CharacterName { get; set; } = "";
+        /// <summary>Base64 of the player's rendered portrait image (from
+        /// PortraitGenerator.GetCharacterPortraitPath).  Relayed so other
+        /// players see this player's ACTUAL face in the rivals profile, rather
+        /// than a generated default.  May be empty if not yet on disk (it's
+        /// written lazily) — the profile is re-sent once it appears.</summary>
+        public string PortraitPngBase64 { get; set; } = "";
+        /// <summary>Player's character age in years (charactersData[0].ageInDays
+        /// / gameVariables.daysPerYear) so the rivals profile shows the real age
+        /// instead of a default.</summary>
+        public int AgeInYears { get; set; }
+    }
+
+    /// <summary>
+    /// One rival-owned business, for the per-business breakdown table shown in
+    /// the rival detail view (RivalBusinessesTable).  The client can't compute
+    /// per-business income for AI businesses (their sales aren't simulated
+    /// locally), so the host sends the authoritative figures keyed by AddressKey.
+    /// </summary>
+    public class RivalBusinessInfo
+    {
+        public string AddressKey   { get; set; } = "";   // "{streetNumber} {streetName}" — matches GameStateReader.AddressKey
+        public string BusinessName { get; set; } = "";
+        public int    BusinessType { get; set; }          // BusinessTypeName enum index
+        public float  WeeklyIncome { get; set; }
+    }
+
+    /// <summary>Per-rival stats for the leaderboard display.</summary>
+    public class RivalStatsInfo
+    {
+        public string Id                     { get; set; } = "";
+        public string Name                   { get; set; } = "";
+        public int    AgeInYears             { get; set; }
+        public float  WeeklyIncome           { get; set; }
+        public int    OwnedBuildingsCount    { get; set; }
+        public int    OwnedBusinessesCount   { get; set; }
+        public int    MostActiveNeighborhood { get; set; }   // enum index
+        public bool   IsDefeated             { get; set; }
+        /// <summary>Per-business breakdown (host-authoritative income per owned
+        /// business).  Drives both the detail-view breakdown income override and
+        /// the leaderboard business-count reconciliation on the client.</summary>
+        public List<RivalBusinessInfo> Businesses { get; set; } = new();
+    }
+
+    /// <summary>
+    /// Host → Client: stats for every rival in the host's view.  Sent in
+    /// response to a RivalsStatsRequest (or when host's own rivals window
+    /// rebuilds, which would be relevant once we hit multi-client).  Client
+    /// caches and uses these to override RivalLeaderboard.GetRivalLeaderboardData
+    /// return values.
+    /// </summary>
+    public class RivalsStatsSnapshotPayload
+    {
+        public List<RivalStatsInfo> Stats { get; set; } = new();
     }
 }

@@ -192,6 +192,18 @@ namespace BigAmbitionsMP
                     HandleInteriorSnapshot(env);
                     break;
 
+                case MessageType.RivalsSnapshot:
+                    HandleRivalsSnapshot(env);
+                    break;
+
+                case MessageType.RivalsStatsSnapshot:
+                    HandleRivalsStatsSnapshot(env);
+                    break;
+
+                case MessageType.PlayerProfile:
+                    HandlePlayerProfile(env);
+                    break;
+
                 default:
                     Plugin.Logger.LogWarning($"[Client] Unknown message type: {env.Type}");
                     break;
@@ -447,6 +459,87 @@ namespace BigAmbitionsMP
             GameStatePatcher.ApplyInteriorSnapshot(payload);
         }
 
+        private static void HandleRivalsSnapshot(MessageEnvelope env)
+        {
+            var payload = env.GetPayload<RivalsSnapshotPayload>();
+            if (payload == null) return;
+            Plugin.Logger.LogInfo($"[Client] Received rivals snapshot: {payload.Rivals.Count} rival(s).");
+            GameStatePatcher.ApplyRivalsSnapshot(payload);
+        }
+
+        private static void HandleRivalsStatsSnapshot(MessageEnvelope env)
+        {
+            var payload = env.GetPayload<RivalsStatsSnapshotPayload>();
+            if (payload == null) return;
+            Plugin.Logger.LogInfo($"[Client] Received rivals stats snapshot: {payload.Stats.Count} stat block(s).");
+            GameStatePatcher.ApplyRivalsStatsSnapshot(payload);
+        }
+
+        private static void HandlePlayerProfile(MessageEnvelope env)
+        {
+            var p = env.GetPayload<PlayerProfilePayload>();
+            if (p == null || string.IsNullOrEmpty(p.PlayerId)) return;
+            string name = string.IsNullOrWhiteSpace(p.CharacterName) ? p.PlayerId : p.CharacterName;
+            GameStatePatcher.ClientRivalNames[p.PlayerId] = name;
+            if (p.AgeInYears > 0) GameStatePatcher.ClientPlayerAges[p.PlayerId] = p.AgeInYears;
+            Plugin.Logger.LogInfo($"[Client] PlayerProfile: '{p.PlayerId}' → '{name}' age={p.AgeInYears} portrait={(string.IsNullOrEmpty(p.PortraitPngBase64) ? "none" : "yes")}.");
+            // Decode the relayed portrait on the main thread (Texture2D create).
+            string portraitB64 = p.PortraitPngBase64;
+            string pid = p.PlayerId;
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                RemotePlayerManager.UpdateLabel(pid);
+                if (!string.IsNullOrEmpty(portraitB64)) GameStatePatcher.ApplyPlayerPortrait(pid, portraitB64);
+            });
+        }
+
+        /// <summary>
+        /// Fire from the RivalLeaderboard.Load Prefix to fetch fresh stats from
+        /// host.  Also includes the client's OWN self-stats so host can render
+        /// this client's row on host's leaderboard.
+        /// </summary>
+        public static void SendRivalsStatsRequest()
+        {
+            if (!IsConnected) return;
+            int bldgCount = 0, bizCount = 0;
+            float weeklyIncome = 0f;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi != null && gi.BuildingRegistrations != null)
+                {
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null) continue;
+                        try
+                        {
+                            if (reg.BuildingOwnedByPlayer) bldgCount++;
+                            // Don't count residential rentals as businesses —
+                            // they're player HOMES, not revenue operations.
+                            bool isResidential = false;
+                            try { isResidential = reg.BuildingCached != null && reg.BuildingCached.BuildingType == Buildings.BuildingType.Residential; } catch { }
+                            if (reg.RentedByPlayer && !isResidential)
+                            {
+                                bizCount++;
+                                weeklyIncome += reg.RentPerDay * 7f;
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+            var p = new RivalsStatsRequestPayload
+            {
+                PlayerId = MPConfig.PlayerId,
+                SelfOwnedBuildingsCount  = bldgCount,
+                SelfOwnedBusinessesCount = bizCount,
+                SelfWeeklyIncome         = weeklyIncome,
+            };
+            Send(MessageEnvelope.Create(MessageType.RivalsStatsRequest, MPConfig.PlayerId, p));
+            Plugin.Logger.LogInfo($"[Client] Sent RivalsStatsRequest with self-stats: bldgs={bldgCount} biz={bizCount} income=${weeklyIncome:F0}.");
+        }
+
         // ── Outbound ──────────────────────────────────────────────────────────
 
         /// <summary>Notify the host we just entered building X — host will subscribe us and reply with InteriorSnapshot.</summary>
@@ -478,6 +571,41 @@ namespace BigAmbitionsMP
             var payload = new PlayerInGamePayload { PlayerId = MPConfig.PlayerId };
             Send(MessageEnvelope.Create(MessageType.PlayerInGame, MPConfig.PlayerId, payload));
             Plugin.Logger.LogInfo("[Client] Sent PlayerInGame to host.");
+
+            // Wave 5: send our in-character name so other players' UIs can
+            // display it as our identity.  Character name lives in
+            // gi.charactersData[0].name; falls back to PlayerId if not yet set.
+            SendPlayerProfile();
+        }
+
+        /// <summary>
+        /// Reads the local CharacterData.name and broadcasts it as the
+        /// canonical display name for this player.  Safe to call multiple
+        /// times — receivers just update their mapping.  If charactersData
+        /// isn't available yet, falls back to MPConfig.PlayerId so the
+        /// message still goes out with SOMETHING usable.
+        /// </summary>
+        public static void SendPlayerProfile()
+        {
+            if (!IsConnected) return;
+            string name = MPConfig.PlayerId;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi != null && gi.charactersData != null && gi.charactersData.Count > 0)
+                {
+                    var cd = gi.charactersData[0];
+                    var cn = cd?.name?.ToString();
+                    if (!string.IsNullOrWhiteSpace(cn)) name = cn;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Client] SendPlayerProfile read failed: {ex.Message}"); }
+            string portrait = ""; try { portrait = GameStatePatcher.ReadLocalPortraitBase64(); } catch { }
+            int age = 0; try { age = GameStatePatcher.LocalAgeInYears(); } catch { }
+            var p = new PlayerProfilePayload { PlayerId = MPConfig.PlayerId, CharacterName = name, PortraitPngBase64 = portrait, AgeInYears = age };
+            if (!string.IsNullOrEmpty(portrait)) GameStatePatcher.LocalPortraitSent = true;   // image goes over once
+            Send(MessageEnvelope.Create(MessageType.PlayerProfile, MPConfig.PlayerId, p));
+            Plugin.Logger.LogInfo($"[Client] Sent PlayerProfile: PlayerId='{MPConfig.PlayerId}' CharacterName='{name}' age={age} portrait={(string.IsNullOrEmpty(portrait) ? "none" : portrait.Length + "b64")}.");
         }
 
         /// <summary>Tells the host this player toggled the manual (pause-button) pause.</summary>

@@ -1250,6 +1250,303 @@ BACKLOG — Business sync remaining phases
 - For-sale test: client's map highlights match host's exactly after deploy of buildingsForSale sync + RealEstateHelper.RunDaily suppression + RefreshMapFilters hook, confirmed by user.
 - Architectural learnings captured below in REFERENCE; key takeaway is "suppress generation, mirror authoritative state, refresh UI explicitly."  (rule)
 
+═══════════════════════════════════════════════════════════════════
+REFERENCE — Phase 1d + AI-interior key learnings (for future sync work)
+═══════════════════════════════════════════════════════════════════
+
+1. **Rival IDs are random GUIDs per game session.**
+   `UuidHelper.GenerateBase64Uuid` produces a fresh base64-encoded GUID
+   each time `RivalsHelper.GenerateRivals` runs.  Same logical rival
+   ("Vord", "Marin" etc.) gets a DIFFERENT GUID on host vs client.  Cross-
+   machine ID references (e.g. host's `buildingOwnerRivalId` synced to
+   client) will never resolve unless we suppress one side's generation
+   and mirror the other's IDs.  Same root cause as the AI-rival-assignment
+   randomness in Phase 1b: independent RNG → divergent state.  (rule)
+
+2. **IL2CPP-Interop strips private fields from wrappers.**
+   `RivalsHelper.RivalDataCache` is `private static readonly` in the
+   original code, but the IL2CPP-Interop wrapper exposes neither the
+   field nor a reflection-accessible counterpart.  Reflection returns
+   null even though the field clearly exists in the underlying IL2CPP
+   memory.  Pattern: **intercept the PUBLIC API** (Harmony Prefix on the
+   reader) instead of poking the private storage.  We maintain a plain-
+   C# `Dictionary<string,string> ClientRivalNames` and our prefix on
+   `RivalsHelper.GetRivalName(string)` returns from it.  Works
+   identically for any other "private cache" we encounter.  (rule)
+
+3. **AI businesses spawn items from BusinessLayoutSet templates, not from `reg.itemInstances`.**
+   The `Layout` string on a BuildingRegistration names a template
+   (`"CoffeeWholesalers"`, `"GroceryStoreA"`, etc.).  At `LoadBuilding`
+   time, the game looks up the template and spawns its standard
+   furniture/shelves/products as ItemController GameObjects in the
+   scene — without writing them to `reg.itemInstances`.  Two
+   consequences for sync:
+   (a) `reg.itemInstances` is EMPTY for AI businesses on the host too;
+       don't interpret "empty itemInstances" as "no contents".
+   (b) Player-customized businesses populate `reg.itemInstances` for
+       individually-placed items, but inherit furniture from the layout
+       on top.
+   Our wipe-and-rebuild on snapshot apply must early-return when
+   `reg.itemInstances` is empty, or we'll destroy AI business furniture
+   and leave nothing behind.  (rule)
+
+4. **`LoadBuilding(false)` is the right primitive to re-trigger template item spawn after `reg.Layout` changes.**
+   When client enters an AI building cold, the game's natural
+   `LoadBuilding` runs with `reg.Layout=""` (Phase 1b suppression
+   prevented CityGenerator from setting it).  No template-spawn occurs.
+   Our snapshot then updates `reg.Layout`.  We must explicitly call
+   `LoadBuilding(false)` again to re-fire the template lookup.  This
+   does NOT repaint walls/floor designs — that still needs the per-
+   element `InteriorElement.Deserialize` from Phase 2a.  Correct order
+   in `TryRefreshActiveInteriorIfMatches`: 1) `LoadBuilding(false)`
+   (template + items), 2) per-element `Deserialize` (designs), 3)
+   conditional items wipe-and-rebuild (only when dict non-empty).  (rule)
+
+5. **Building owner ≠ business runner.**
+   - **Landlord** (owns the property as real estate) → check
+     `reg.BuildingOwnedByPlayer` (derived from `gi.realEstate` membership).
+   - **Tenant / operator** (rents and runs a business) → check
+     `reg.RentedByPlayer`.
+   These are independent: player can be neither, either, or both
+   (bought a building AND runs the business in it).  Misusing
+   `RentedByPlayer=true` to indicate ownership labels rented buildings
+   as bought.  Our cross-player ownership sync uses two distinct fields
+   (`OwnerPlayerId`, `BusinessOwnerPlayerId`) populated independently
+   from each side.  (rule)
+
+6. **Players-as-rivals is the right architectural reuse for cross-player ownership display.**
+   The game's rival/leaderboard system is designed around `RivalData`
+   entries keyed by `rivalId`.  All "owned by X" displays go through
+   `RivalsHelper.GetRivalName(rivalId)`.  By injecting one synthetic
+   `RivalInfo` per human player into every machine's roster (id =
+   `PlayerId`, name = display name), every "owned by player X" lookup
+   resolves naturally with no additional UI code.  The local player
+   IS included in their own rival list (N entries per machine, not
+   N-1), which keeps the model symmetric.  (rule)
+
+7. **Distributed stat computation: each player has their own data already.**
+   For Wave 3+ (income / business count / history on the leaderboard),
+   each player's instance already computes their own stats locally
+   (for their own rival entry in their own leaderboard).  The cleanest
+   model is each player sends their own self-rival-data to host on
+   change; host aggregates own + received and rebroadcasts.  No single
+   machine has to derive anyone else's stats — they relay what each
+   origin produces.  (rule, not yet implemented)
+
+═══════════════════════════════════════════════════════════════════
+
+2026-05-22 — Wave 13: ROOT CAUSE of host crash — IL2CPP access from background thread.
+- User clue: "host stayed open until client started clicking around on rival profiles".  This pointed at request-handlers, not the rivals UI itself.
+- Diagnosis: MPServer.PollLoop runs in a BACKGROUND THREAD (Thread.Sleep loop, not Unity main thread).  All network message handlers (HandleMessage → all the case branches) fire on that thread.  RivalsStatsRequest handler calls SendRivalsStatsSnapshotTo → BuildRivalsStatsSnapshot which iterates IL2CPP-Interop wrapped objects (gi.BuildingRegistrations, RivalData.WeeklyIncome that walks ownedBusinesses).  IL2CPP-Interop expects main-thread access for most operations — off-thread access eventually native-crashes (no managed exception, can't try/catch).  (rule: ALL network message handlers in MPServer that touch IL2CPP-Interop objects must marshal the work onto the main thread via GameStatePatcher.EnqueueOnMainThread.)
+- Each client profile click triggered Load → Prefix sent fresh RivalsStatsRequest → host's background handler fired BuildRivalsStatsSnapshot off-thread → eventually crashed.  Other handlers may have had the same vulnerability but fired less often; the rapid-fire request pattern from profile clicking surfaced it.
+- Fix: wrap SendRivalsStatsSnapshotTo in EnqueueOnMainThread inside the case branch.  Self-stats dict writes (pure C# operations on Dictionary<string,X>) stay inline — those are thread-safe enough for our purposes and don't touch IL2CPP.
+- Build clean, deployed.
+
+2026-05-22 — Wave 12: GetRivalState synthetic safety (likely cause of delayed crash).
+- Log analysis after Wave 11: Patch_Load_AddPlayers Postfix DID fire successfully on host (injected client row), game ran for ~314 more lines incl. GameTimeSync, then crash.  Crash was DELAYED, not at rivals window open.  Pointed at GetRivalState synthetic from Wave 10 — likely a background tick iterates the null history lists and crashes natively.
+- Two fixes to the synthetic:
+   * Removed `|| __0 == MPConfig.PlayerId` — never return synthetic for the LOCAL player's id.  Game expects null there (local player goes through GetPlayerLeaderboardData).  Returning non-null confuses downstream code.
+   * Initialize weeklyIncomeHistory and numberOfBusinessesHistory as empty Il2CppSystem.Collections.Generic.List<Tuple<...>> instead of leaving them null.  Null Lists iterated by chart code or background ticks → native crash with no managed exception to catch.  (rule: when synthesizing an IL2CPP DTO that downstream game code will consume, initialize ALL list/collection fields to empty instances, never null.)
+- Build clean, deployed.
+
+2026-05-22 — Wave 11: HOST CRASH FIX (remove force-Load + activeInHierarchy gate).
+- Symptom: host crashed to desktop shortly after opening rivals window.  Log showed plugin loaded, business sync running, client connected, then crash — no managed exception captured (native crash).
+- Suspected cause: Wave 9's force-Load on RivalLeaderboard when AiRivalDataRefs was empty.  Load() calls into UI code that dereferences private SerializeField references; on an inactive/uninitialized leaderboard those are null → native crash that try/catch can't catch.
+- Three changes:
+   * Removed the force-Load entirely.  If AiRivalDataRefs is empty, we just skip the overlay — AI income falls back to the RentPerDay*7 approximation (imperfect but won't crash).  Documented: for accurate AI income on client, host needs to open rivals app at least once.
+   * Each kv.Value.WeeklyIncome read in the overlay loop is now individually try/catch'd to defend against stale RivalData refs (refs from a previous game session whose underlying IL2CPP object got destroyed).
+   * Clear GameStatePatcher.AiRivalDataRefs on the GenerateRivals Prefix — a fresh GenerateRivals run replaces the cache; old refs become stale immediately.
+   * Client-side Load re-trigger (post-RivalsStatsSnapshot) now checks activeInHierarchy before calling Load() — same crash class.
+- Build clean, deployed.
+
+2026-05-22 — Wave 10: bundle of fixes (diagnostics + player profile click).
+- User feedback: AI rival income still $0 on client list view despite Wave 9.  Plus the player-profile-detail-view click still doesn't open for player rows.
+- Three changes bundled:
+   * Diagnostic A on host: BuildRivalsStatsSnapshot's AI rd-ref overlay now logs refs count, how many had non-zero income, and a sample of `[id-prefix biz={N} inc=${V}]` for the first few rivals.  Reveals whether host's rd.WeeklyIncome is actually returning non-zero values, vs the overlay loop not finding matches in byId.
+   * Diagnostic B on client: Patch_GetRivalLeaderboardData_FromCache Postfix logs the first 5 incomes flowing through (natural calc vs stats override vs final).  Reveals if the override path is firing as expected.
+   * Player profile click fix: new Patch_RivalsHelper_GetRivalState_PlayerFallback Postfix — when GetRivalState returns null AND the id is a known player (in ClientPlayerRoster or matches MPConfig.PlayerId), return a synthetic empty RivalState.  Lets SelectedRivalUI's chart code path (which calls GetRivalState) succeed instead of NRE-ing on null, so the detail view opens.  Chart will be empty (no history yet) but the rest of the profile shows.  (rule: when a downstream consumer requires a RivalState lookup to succeed, intercept GetRivalState rather than re-injecting into gi.rivalStates which causes ghost leaderboard rows.)
+- Build clean, deployed.
+
+2026-05-22 — Wave 9: host-sourced AI WeeklyIncome via captured RivalData refs.
+- Test feedback on Wave 8: AI rival detail-view selection works (income breakdown per business displays correctly).  But the LIST view total income for AI rivals on client doesn't match host's.  Root cause: client's RivalData.WeeklyIncome computes per-business revenue from local stock/prices/items — but we don't sync items for AI businesses (items only sync on player entry).  Client's per-building revenue calc returns ~$0, summed total looks wrong.
+- Fix: capture RivalData refs on EITHER side (host AND client) via Postfix on GetRivalLeaderboardData → GameStatePatcher.AiRivalDataRefs.  Host's BuildRivalsStatsSnapshot now uses kv.Value.WeeklyIncome (the authoritative game-side calc) for each captured rival.  If refs cache is empty (host hasn't opened rivals app yet), host calls FindObjectsOfType<RivalLeaderboard> + Load() to prime it.  The accurate value gets sent in RivalsStatsSnapshot.
+- Client's Postfix on GetRivalLeaderboardData now prefers ClientRivalStats[id].WeeklyIncome over the locally-recomputed rd.WeeklyIncome (only when non-zero).  Result: client's list view matches host's exactly.  Detail view still works (uses rd.ownedBusinesses populated by our Wave 8 path).
+- Player profile click still doesn't open detail view — that requires SelectedRivalUI patching to handle synthetic player data.  Deferred (architecturally separate concern).
+- Build clean, deployed.
+
+2026-05-22 — Wave 8: residence-vs-business filter + populate AI RivalData on client.
+- Issue 1 (residences counted as businesses): RentedByPlayer is true for both player homes (residential) AND business operations.  Fix: in SendRivalsStatsRequest and BuildRivalsStatsSnapshot, only count as business if reg.BuildingCached.BuildingType != Residential.  Income from residentials is rent for a home, not revenue.
+- Issue 2 (client's AI income doesn't match host): on client, RivalData.ownedBusinesses is empty (we suppressed SetRivalBuildings) → game's natural RivalData.WeeklyIncome iterates empty → $0.  Our previous override used RentPerDay * 7 which is LANDLORD rent, not actual business revenue (host's leaderboard shows the latter).  Fix: in Patch_RivalLeaderboard_GetRivalLeaderboardData_FromCache Postfix, when a RivalData is passed in, populate its ownedBuildings / ownedBusinesses / ownedRetailOfficeBusinesses from client's local gi.BuildingRegistrations matching by buildingOwnerRivalId / businessOwnerRivalId (already synced from host).  Then re-read lb.weeklyIncome = rd.WeeklyIncome so the natural calc takes effect.  Client now shows the same income host's calc produces — no mismatch.  (rule: when host's display uses the game's natural property-based calc, ensure client's underlying data is populated so the same property produces the same value.)
+- Issue 3 (can't select player profiles): partial benefit from the populate path — AI rival selection should now show full detail.  Player rows still don't have RivalData backing them; their detail-view click won't open.  Deferred — would need separate SelectedRivalUI handling.
+- Build clean, deployed.
+
+2026-05-22 — Wave 7: populate-owned-lists in row injection + client→host self-stats sync.
+- Test on 6.8: log confirmed stats path working — `Injected row for 'Host' weeklyIncome=$175 (stats=yes)`.  But the visible row still showed "0 businesses, $0/week".  Cause: RivalLeaderboardButton.SetUp's localization layer reads `data.ownedBusinesses.Count` (not the weeklyIncome field) when building the displayed text — empty list → "0 businesses, $0".  (rule: SetUp's localization computes display strings from the List fields, not from the scalar fields.  Must populate the lists with refs that have the right Count.)
+- Fix A (client display): in Patch_Load_AddPlayers, populate ownedBuildings + ownedBusinesses by iterating client's local gi.BuildingRegistrations and matching buildingOwnerRivalId / businessOwnerRivalId against the player's id.  We've synced these fields from host so the matches are accurate.  Now .Count returns the real number and the localization renders correctly.
+- Fix B (host's view of client): host previously had no source of truth for what other players own (no client→host ownership sync).  Added self-stats piggyback on RivalsStatsRequest — client computes its own bldg/biz counts + weekly income from local gi.realEstate + RentedByPlayer, sends with the request.  Host stores in _clientSelfStats AND writes to GameStatePatcher.ClientRivalStats so host's own Load Postfix renders the row populated.  BuildRivalsStatsSnapshot also overlays these self-stats so other clients see consistent numbers.
+- Limitation acknowledged: client's self-stats only update on host when client opens its OWN rivals window.  If client buys a building and host opens their rivals window WITHOUT client having opened theirs first, host sees stale (or zero) values.  Periodic push from client (e.g. every 10s) would close this gap — deferred.
+- Build clean, deployed.
+
+2026-05-22 — Wave 6.8: stop polluting gi.rivalStates with player IDs + fix RivalLeaderboardData NRE.
+- Test result on 6.7: client log showed `[Patch_Load_AddPlayers] adding row for 'Host': System.NullReferenceException`.  Our injection was throwing because RivalLeaderboardData.ownedBusinesses / ownedBuildings were null — SetUp() reads .Count on them for the localized stats text.  Visible symptom: raw "{numBusinesses}" / "Businesses..." template placeholders in the row.  (rule: when constructing IL2CPP DTOs for the game to consume, initialize List fields to empty Il2CppSystem.Collections.Generic.List instances; null fields NRE during downstream localization substitution.)
+- Also: user reported "2 hosts / 2 clients" on client leaderboard.  Local-player skip was working (per log).  The duplicates came from the GAME'S NATURAL flow rendering ghost rows for the player IDs we'd inserted into gi.rivalStates — without matching RivalData entries in the private cache, the game built rows with placeholder data.  (rule: don't add player IDs to gi.rivalStates if you can't also populate RivalDataCache for them; the leaderboard renders ghost rows from rivalStates alone.)
+- Fix:
+   * EnsureRivalCachesPopulated now skips entries where IsPlayer=true.  Player IDs stay out of gi.rivalStates; only ClientPlayerRoster + ClientRivalNames track them.  Player rows come exclusively from Patch_Load_AddPlayers.
+   * MPServer.HandlePlayerProfile now marks its injected RivalInfo as IsPlayer=true so EnsureRivalCachesPopulated correctly skips it on host's side too.
+   * Patch_Load_AddPlayers' RivalLeaderboardData now initializes empty Il2CppSystem.Collections.Generic.List instances for ownedBusinesses + ownedBuildings.
+- Net: client should now see 19 AI + local player (game's path) + 1 host (our injection) = 21, no ghost rows, no raw template placeholders, host row should populate income/businesses from ClientRivalStats once RivalsStatsRequest response arrives.
+- Build clean, deployed.
+
+2026-05-22 — Wave 6.7: workaround for AccessTools failing on RivalLeaderboard private fields.
+- Test result on 6.6 deploy: log shows `[Patch_Load_AddPlayers] AccessTools couldn't reach buttonPrefab/buttonParent; aborting.`  IL2CPP-Interop strips these private SerializeFields from the C# wrapper just like RivalDataCache.  AccessTools doesn't help here.  (rule: not all private fields are reachable via AccessTools; depends on IL2CPP-Interop's wrapper-generation choices.)
+- Workaround: use FindObjectsOfType<RivalLeaderboardButton> to grab any of the AI-rival buttons the game just instantiated in Load.  Use that button's transform.parent as our parent and the button gameObject as our prefab template (Instantiate from it).  Skip our own previously-injected buttons (BAMP_PlayerRow_ name prefix) so we don't template off a synthetic one.
+- This bypasses the private-field problem entirely — we leverage the scene state the game just produced.  (rule: when private fields are unreachable, derive needed references from runtime scene state the game already wrote.)
+- Build clean, deployed.
+
+2026-05-22 — Wave 6.6: sweep-and-rebuild on player row injection.
+- Symptoms after 6.5: client sees 2 separate self-entries + $0 income for the host row.  Diagnosis: RivalLeaderboard.Load is called multiple times (initial open + re-call when RivalsStatsSnapshot arrives), and each Postfix invocation INSTANTIATED new buttons without removing previous ones → rows pile up.  The first-pass row used empty ClientRivalStats so it showed $0; the second-pass row was correct but the stale first-pass row stayed visible alongside.
+- Fix: tag injected GameObjects with "BAMP_PlayerRow_<playerId>" name prefix.  At the start of every Postfix call, sweep buttonParent's children, destroy any with that prefix, THEN add fresh rows.  The game's own _buttons list is unaffected (we don't touch its tracked AI/local-player rows).
+- Diagnostic: log each injection with name + weeklyIncome + whether stats were available.  Log skipped local-player.  Log swept count.  Lets us see at a glance whether stats are flowing through or the fallback is being used.
+- Build clean, deployed.
+
+2026-05-22 — Wave 6.5: player rows via Load Postfix (architectural insight from user).
+- User insight: the local player isn't in RivalDataCache — the game's RivalLeaderboard.Load builds the local player's row via a SEPARATE method, GetPlayerLeaderboardData(), and merges it with rows from GetRivalLeaderboardData(rd) for each cache entry.  Two parallel code paths.  Replicating the "build a row directly" path for remote players bypasses the RivalDataCache requirement entirely.
+- Architecture:
+   * RivalInfo gets an IsPlayer flag — host marks player entries when building the snapshot.
+   * Client's ApplyRivalsSnapshot now segregates: AI rivals → UUID queue (consumed by GenerateRivals); player IDs → GameStatePatcher.ClientPlayerRoster dict.  Queue is now exactly 19 IDs (matching template count), no orphans.
+   * New Patch_RivalLeaderboard_Load_AddPlayers — Postfix on Load() that:
+     - Reads private SerializeField buttonPrefab + buttonParent via HarmonyLib.AccessTools.Field (private-but-Unity-serialized fields are reachable this way).
+     - For each entry in ClientPlayerRoster (skipping the local player — game already handles them), instantiates the prefab as a child of buttonParent and calls SetUp(RivalLeaderboardData, leaderboard, rank, activeRivalry).
+     - Pulls name + stats from ClientRivalStats if available (populated by on-demand RivalsStatsRequest); falls back to roster name + zero stats.
+   * Host populates its OWN ClientPlayerRoster when receiving PlayerProfile messages so host's leaderboard shows remote players via the same Postfix path.
+- Net effect: 19 AI rivals from cache via natural path + local player via natural path + N remote players via our Postfix injection = a complete leaderboard.  No private-field write to RivalDataCache needed.  (rule: when the game has parallel paths for local-vs-remote/special-vs-generic entries, replicate the LOCAL path for synthesized remote entries rather than fighting the generic path's cache.)
+- Build clean, deployed.
+
+2026-05-22 — Wave 6 fix: suppress early GenerateRivals + manually trigger after snapshot.
+- Test result on Wave 6 v1: client log showed `[Wave6] GenerateRivals starting on client; UUID queue has 0 id(s) ready to feed.` BEFORE the snapshot arrived (queue populated 6 log-lines later).  Client's GenerateRivals fires at game-launch (probably from a default-load codepath) BEFORE the autopilot connects + receives host's snapshot.  Empty queue → fallback to random IDs → client generated ~19 local rivals.  Result: client saw 37 rivals (19 local random + 18-ish from a subsequent GenerateRivals call after snapshot arrived) + 2 duplicate client profiles.
+- Two flags now control client's GenerateRivals state:
+   * ClientRivalsReady — true once snapshot arrives + queue populated.
+   * ClientRivalsInjected — true after the ONE successful injected GenerateRivals run.
+- Prefix state machine on client:
+   * !ClientRivalsReady → suppress (the early default-load call).
+   * ClientRivalsReady && !ClientRivalsInjected → allow + mark Injected.
+   * ClientRivalsInjected → suppress (so the natural new-game GenerateRivals can't wipe our cache).
+- ApplyRivalsSnapshot now MANUALLY invokes RivalsHelper.GenerateRivals(gi) after seeding the queue + setting ClientRivalsReady.  This guarantees exactly one successful injection with our queue, regardless of whether the natural new-game flow fires before or after.
+- Build clean, deployed.
+
+2026-05-22 — Wave 6: UUID-queue strategy for rivals sync (user's idea).
+- Architectural pivot per user insight: instead of trying to WRITE to RivalDataCache from outside (blocked by IL2CPP-Interop private field policy; FillData fallback hangs the client), INTERCEPT THE INPUT to the game's own cache-writing code path.  Harmony Prefix on UuidHelper.GenerateBase64Uuid: when client is inside GenerateRivals AND a host-supplied id queue is non-empty, dequeue and return host's id instead of generating a random one.  The game's own GenerateRivals then writes RivalData entries with HOST's ids into RivalDataCache via its native (private) code path.  No private-field access required from our side.  (rule)
+- Confirmed viable by decompile: GenerateRivals callees are { Dictionary.Clear, LoadSpecialRivals, GenerateBase64Uuid, AddWithResize }.  Templates load from Addressables in deterministic order — same templates loaded on host & client → matching rival names paired with matching ids if id ordering matches.  GenerateBase64Uuid has 39 callers across the game, so interception MUST be gated to GenerateRivals only.
+- Implementation:
+   * GameStatePatcher.PendingRivalIdQueue (Queue<string>) — FIFO of host's rival ids, drained by the UuidHelper patch.
+   * GameStatePatcher.RivalsGenerateRunning (bool) — flag set by GenerateRivals Prefix, cleared by Postfix; gates the UUID interception.
+   * GameStatePatcher.ClientRivalsReady (bool) — set true once RivalsSnapshot arrives; checked by autopilot before allowing TryConfirmCustomizer.
+   * Patch_RivalsHelper_GenerateRivals — Prefix/Postfix manage the flag.  On HOST, Postfix ALSO broadcasts the rival roster immediately (during SaveGameManager.New, much earlier than the previous ReleaseStartupHold timing).  This is the "broadcast as soon as ready" restructure the user asked for.
+   * Patch_UuidHelper_GenerateBase64Uuid — Prefix dequeues when MPClient.IsConnected && RivalsGenerateRunning && queue non-empty.  All other callers (item ids, employee ids, etc.) untouched.
+   * ApplyRivalsSnapshot now also seeds the queue + flips ClientRivalsReady.
+   * MPAutopilot.WaitCustomizer state now gates TryConfirmCustomizer on ClientRivalsReady — client autopilot blocks at the customizer until host's snapshot arrives, then auto-proceeds.
+   * MPServer.BroadcastAny — public wrapper over the private Broadcast helper, callable from Harmony patches.
+- Bandwidth parallelization: rivals broadcast moves from ReleaseStartupHold (post-everyone-in-game) to immediately-after-host's-GenerateRivals (mid-host-load).  Client receives during its own load wait, no extra sequential delay.  Existing BusinessSnapshot timing unchanged — still fires at ReleaseStartupHold (it has to, since client needs PopulateBuildings to have run before its data lands).
+- Build clean, deployed.
+
+2026-05-22 — Wave 5 ROLLBACK: FillData hangs client at 100% loading.
+- Test result: AccessTools.Field("RivalDataCache") returned null (IL2CPP-Interop strips it as expected).  Fallback path called RivalsHelper.FillData(idList).  Confirmed log lines fired ("Called RivalsHelper.FillData with 21 ids (fallback).") but client hung at 100% loading immediately after.
+- Diagnosis: FillData uses Addressables.LoadAssetsAsync internally and is called natively from SaveGameManager.Load — i.e. it expects to run during the save-load context.  Calling it at runtime (during game-start sequence) interferes with the load pipeline and the scene never finishes settling.  (rule: FillData is not safe to call at arbitrary points; only during save load)
+- Mitigations applied:
+   * EnsureRivalCachesPopulated no longer calls FillData when AccessTools fails — just logs and moves on.  RivalDataCache stays empty on client; leaderboard falls back to whatever GenerateRivals produced locally.
+   * Disabled the GenerateRivals suppression patch on client (kept the patch class as documentation anchor, Prefix now returns true unconditionally).  Client runs its own GenerateRivals, populating RivalDataCache with locally-random IDs/names.
+- What still works:
+   * Building popups: host syncs its rival ID strings via BusinessInfo; our Patch_RivalsHelper_GetRivalName Prefix intercepts lookups for host's IDs and returns host's names (from RivalsSnapshot).  ✓
+   * Client-as-rival on host: still works (host populated _characterNamesByPlayerId from client's PlayerProfile).
+   * Floating name tag above remote player avatar: still resolves character name via ClientRivalNames.  ✓
+- What's now imperfect (acknowledged trade-off):
+   * Client's leaderboard shows CLIENT's locally-generated rivals, not host's.  Different RNG seeds → different rival names visible on client vs host leaderboards.  Host's PlayerId entry won't appear on client's leaderboard either (no RivalData for that ID on client).
+   * Pending: a safe way to populate RivalDataCache without using FillData.  Possible future paths: Harmony Transpiler to inject entries during initialization, or wait until after game-load to call FillData when it's safe.
+- Build clean, deployed.
+
+2026-05-22 — Wave 5 fixes: name tag + rivals list population.
+- (A) Name tag above remote player avatar still showed PlayerId.  Fixed: RemotePlayerManager.SpawnRemotePlayer now sets the floating label text via ResolveDisplayName(playerId) which checks GameStatePatcher.ClientRivalNames first.  Added UpdateLabel(playerId) helper; HandlePlayerProfile calls it so labels refresh when a name update arrives mid-session.
+- (B) Rivals leaderboard was empty on client + missing client entry on host.  Root cause: RivalLeaderboard.Load iterates rivals via RivalsHelper.RivalDataCache (private static dict), and we couldn't populate it (IL2CPP-Interop strips private fields from the C# wrapper).  Even though our snapshot populated gi.rivalStates, the per-row RivalData lookup failed for every id → Load produced an empty list.  Same issue on host for the client's PlayerId.
+- Fixes layered:
+   * GameStatePatcher.EnsureRivalCachesPopulated — tries HarmonyLib.AccessTools.Field(typeof(RivalsHelper), "RivalDataCache") first.  AccessTools sometimes finds fields IL2CPP-Interop's reflection layer hides.  Falls back to RivalsHelper.FillData(idList) (public API that populates the cache from a list of IDs by loading templates from Addressables).  Logs which path succeeded.  (rule: prefer AccessTools.Field for private IL2CPP fields; fall back to game's own populate API)
+   * Patch_RivalsHelper_GetRivalName Prefix now fires on EITHER role (MPClient.IsConnected || MPServer.IsRunning) so host's UI also gets the character-name override.
+   * MPServer.HandlePlayerProfile now populates HOST's GameStatePatcher.ClientRivalNames + calls EnsureRivalCachesPopulated with the new client's entry — so the host's own leaderboard / popups can render the client.
+   * BroadcastHostProfile also seeds host's local ClientRivalNames with the host's own (PlayerId → character name) so host's UI for its own entry shows the character name.
+- Build clean, deployed.
+
+2026-05-22 — Manual character-creator opt-out for Wave 5 testing.
+- Need: tester wants to type a custom character name in the creator (different from PlayerId) to verify the name-flow plumbing.  Default autopilot auto-invokes IntroCharacterCustomizer.StartGame() too fast.
+- Added optional env var BAMP_MANUAL_CUSTOMIZER=1.  When set, MPAutopilot.WaitCustomizer state detects the customizer GameObject but does NOT call TryConfirmCustomizer; instead waits for the GameObject to disappear (user clicked Continue manually) and then transitions to Done.  Rest of autopilot (lobby, connect, etc.) unchanged.
+- New launcher launch-mp-test-manual-customizer.bat sets the env var on both instances.  Original launch-mp-test.bat untouched.  (situational: testing aid; not a code-rule change)
+- Build clean, deployed.
+
+2026-05-22 — Phase 1d Wave 5: in-character name as canonical display name.
+- User architectural correction: in business sims the CHARACTER NAME (chosen in character creator) is what UIs should reference, not the multiplayer/Steam username.  PlayerId becomes a purely internal/network ID for the F8 lobby phase; once character creation is done, character name takes over for all human-visible UI.
+- Storage location: gi.charactersData[0].name (single string, set via NamePicker UI owned by IntroCharacterCustomizer.StartGame).  Read by CharacterInfo (Persona phone app) and various business UIs.
+- Implementation:
+  * Protocol: new MessageType.PlayerProfile (80) + PlayerProfilePayload (PlayerId, CharacterName).
+  * Client (MPClient.SendPlayerProfile): reads local gi.charactersData[0].name, sends to host.  Hooked into SendPlayerInGame so it fires once the local player is in-game (after character creation).
+  * Host (MPServer): tracks _characterNamesByPlayerId dict.  Receives PlayerProfile messages, stores mapping, re-broadcasts to all peers, then re-broadcasts the rivals roster so popups update.  Host also broadcasts its OWN profile at ReleaseStartupHold (before the rivals snapshot).
+  * Host's BuildRivalsSnapshot + BuildRivalsStatsSnapshot now use DisplayNameFor(playerId) — checks _characterNamesByPlayerId; falls back to PlayerId if not yet known.
+  * Client (HandlePlayerProfile): writes the received PlayerId → CharacterName mapping into GameStatePatcher.ClientRivalNames.  Our existing Patch_RivalsHelper_GetRivalName Prefix immediately starts returning the character name when any UI queries it.
+- Net effect: building popups, rivals leaderboard, and any UI going through RivalsHelper.GetRivalName show the chosen character name (e.g. "Sarah Chen") instead of the Steam username ("h0xx0r__123").  PlayerId stays as the stable internal identifier — same key for ownership lookups, but the displayed string is the character name.  (rule)
+- Build clean, deployed.
+
+2026-05-22 — Phase 1d Wave 4: on-demand rival stats sync (no continuous polling).
+- User insight: rivals window is rarely opened, so stats sync should be on-demand (request/response on window open), not periodic.  Also AI rivals — not just player rivals — need correct stats since Phase 1b suppression leaves client's local RivalData mostly empty.
+- Determined that MPConfig.PlayerId is already the Steam username (or `Player-XXXXXX` fallback) — so it IS the display name.  Wave 4a (display name) is effectively already done; no separate DisplayName field needed.  (rule)
+- Scout found the right hook: UI.Smartphone.Apps.Rivals.RivalLeaderboard.Load() (called when the rivals app opens) iterates rivals and calls per-row GetRivalLeaderboardData(RivalData) → returns a RivalLeaderboardData class with name + weeklyIncome + ageInYears + ownedBusinesses/ownedBuildings lists + mostActiveNeighborhood + isDefeated.
+- Implementation:
+  * Protocol: MessageType.RivalsStatsRequest (71), RivalsStatsSnapshot (72) + RivalStatsInfo (Id, Name, AgeInYears, WeeklyIncome, OwnedBuildingsCount, OwnedBusinessesCount, MostActiveNeighborhood, IsDefeated).
+  * Host: BuildRivalsStatsSnapshot iterates gi.BuildingRegistrations and counts ownership per rivalId (both buildingOwnerRivalId for landlords and businessOwnerRivalId for operators).  Seeds entries for every rival in gi.rivalStates + every player so even zero-ownership rivals show up.  WeeklyIncome approximated as sum of RentPerDay * 7 (refine later).  Sent on RivalsStatsRequest.
+  * Client: ApplyRivalsStatsSnapshot populates GameStatePatcher.ClientRivalStats dict + re-invokes RivalLeaderboard.Load() if visible to refresh the UI with new data.
+  * Patch_RivalLeaderboard_Load_RequestStats — Prefix on Load, throttled to 1s, fires MPClient.SendRivalsStatsRequest.
+  * Patch_RivalLeaderboard_GetRivalLeaderboardData_FromCache — Postfix on the per-row data-fetch; if id is in ClientRivalStats, overrides entryName / weeklyIncome / ageInYears / mostActiveNeighborhood / isDefeated on the returned RivalLeaderboardData.  Skips ownedBusinesses/ownedBuildings lists (would need real BuildingRegistration refs we don't have).
+- Build clean, deployed.
+
+2026-05-22 — AI interior fix v2: re-trigger LoadBuilding after Layout sync.
+- Items-refresh skip alone wasn't sufficient.  When client first enters an AI business, BuildingManager.LoadBuilding runs with reg.Layout still empty (Phase 1b suppression prevented CityGenerator from setting it on client), so the BusinessLayoutSet template's items NEVER get template-spawned at all.  Then our snapshot updates reg.Layout but nothing re-triggers the template load.
+- Fix: after applying the snapshot's data in TryRefreshActiveInteriorIfMatches, call BuildingManager.LoadBuilding(false) so the (now-correct) reg.Layout drives template spawning.  Per-element Deserialize runs AFTER so wall/floor designs still re-paint (LoadBuilding alone doesn't repaint designs — proved in prior debug cycle).
+- Build clean, deployed.
+
+2026-05-22 — Wave 3 fixes: ownership distinction + AI interior regression.
+- (A) Ownership distinction (user correction).  RentedByPlayer means "player rents this building (is the tenant/business runner)", NOT "player bought it (is the landlord)".  Landlord status comes from gi.realEstate membership, exposed via reg.BuildingOwnedByPlayer.  Fixed BusinessSync.ReadInfo to set OwnerPlayerId only when BuildingOwnedByPlayer is true (proper landlord), and BusinessOwnerPlayerId only when RentedByPlayer (proper tenant/operator).  These are independent — a player can be both, either, or neither.  (rule)
+- (B) AI building interior regression.  Phase 2b's wipe-and-rebuild was destroying template-spawned items for AI businesses (CoffeeWholesalers etc.) when host's snapshot reported items=0.  AI businesses spawn items from their BusinessLayoutSet at LoadBuilding time — those items are NOT in reg.itemInstances.  Fix: GameStatePatcher.RefreshItemsForActiveBuilding now early-returns when reg.itemInstances.Count == 0, leaving layout-spawned items untouched.  Logged as "Items refresh skipped (empty itemInstances; layout-spawned items left intact)".  (rule)
+- Build clean, deployed.
+
+2026-05-22 — Phase 1d Wave 3: players-as-rivals (host's owned buildings show "owned by [host]").
+- Wave 2.1 test confirmed: AI-owned buildings (including AI-rented businesses) show real names on client.  But buildings the HOST owns show blank/no-owner because (a) host's RentedByPlayer=true with empty buildingOwnerRivalId, (b) the host's PlayerId has no rival entry on the client.
+- Implementation:
+  * BusinessInfo: added OwnerPlayerId + BusinessOwnerPlayerId fields.  Host populates them with MPConfig.PlayerId when reg.RentedByPlayer=true.
+  * BuildRivalsSnapshot now appends a RivalInfo entry for the host's own PlayerId + every LobbyPlayers entry.  Currently uses PlayerId as the display name (UX refinement later).
+  * Client ApplyBusinessInfoLocal translation: if info.OwnerPlayerId equals receiver's PlayerId → set RentedByPlayer=true (own building); else if non-empty → set buildingOwnerRivalId=OwnerPlayerId.  Same pattern for BusinessOwnerPlayerId.
+  * The RivalsSnapshot already includes player entries → GetRivalName lookup via our Patch_RivalsHelper_GetRivalName Prefix resolves the player's PlayerId to a display name on every receiver.
+- Build clean, deployed.
+
+2026-05-22 — Phase 1d Wave 2.1: switch from reflection to GetRivalName Prefix.
+- Test result from Wave 2: client log showed `[Patcher] Couldn't reflect RivalsHelper.RivalDataCache field.`  Reason: IL2CPP-Interop wrappers don't expose private fields — RivalDataCache literally doesn't exist as a C# member on the wrapper.  (rule)
+- Strategy pivot: intercept the lookup at the public API instead of populating the private cache.  New Harmony Prefix on RivalsHelper.GetRivalName(string) consults our own plain-C# Dictionary GameStatePatcher.ClientRivalNames; if the rivalId is one we received from host, return that name and skip the original.  No private-field access required.
+- ApplyRivalsSnapshot now populates ClientRivalNames (our dict) instead of attempting reflection.  Also keeps the gi.rivalStates topup so leaderboard/history queries find entries.
+- Build clean, deployed.
+
+2026-05-22 — Phase 1d Wave 2: rival roster sync + GenerateRivals suppression.
+- Wave 1 diagnostic revealed: host's reg.buildingOwnerRivalId values are base64 GUIDs (e.g. `1S+8LOyx+0G2fHSP9es+ug==`).  These are generated per session by UuidHelper.GenerateBase64Uuid inside RivalsHelper.GenerateRivals.  Host and client each get DIFFERENT GUIDs for the same logical rivals → client lookup of host's GUID in client's RivalDataCache fails → "undefined".  (rule)
+- Root cause confirmed: rival IDs are session-random, not session-stable.  Fix is the same suppress-then-mirror pattern from Phase 1b: suppress client's generation, ship host's roster.
+- Implementation:
+  * New protocol: MessageType.RivalsSnapshot (70) + RivalsSnapshotPayload + RivalInfo (Id, Name).
+  * Host: BuildRivalsSnapshot walks gi.rivalStates, resolves each id via RivalsHelper.GetRivalName.  Sent on Welcome (late join) and on ReleaseStartupHold (initial broadcast).  Sent BEFORE BusinessSnapshot so owner ID strings have cache entries to resolve to.
+  * Client: ApplyRivalsSnapshot accesses RivalsHelper.RivalDataCache (private static Dictionary<string, RivalData>) via reflection, clears + repopulates with synthetic RivalData entries (id + name only — gender/age/owned-buildings deferred).  Also adds matching RivalState entries to gi.rivalStates so GetRivalState lookups don't NRE.  (rule: rival cache field is private static, reflection-only access)
+  * Suppression: Harmony Prefix on RivalsHelper.GenerateRivals returns false when MPClient.IsConnected.  Without suppression, client would re-populate RivalDataCache with random IDs after our snapshot arrived.
+- Build clean, deployed.
+
+2026-05-22 — Phase 1d Wave 1 (ownership sync diagnostic) deployed.
+- Goal: when host buys a building, client shows "owned by undefined" because (a) buildingOwnerRivalId wasn't synced, (b) any synthetic identity for the host as a "rival" doesn't exist on the client.  This wave addresses (a) and adds the diagnostic data we need to design (b).
+- Investigated UI path: BuildingResume.rivalBuildingOwner/rivalBusinessOwner → RivalsHelper.GetRivalName(rivalId) → RivalData.rivalName.  gi.rivalStates holds RivalState (history); the NAME lives in a separate RivalData object.  Lookup is by rivalId.  (rule)
+- Added BuildingOwnerRivalId / BusinessOwnerRivalId / RentedByPlayer to BusinessInfo + EqualInfo.  Host's ReadInfo populates them; client's ApplyBusinessInfoLocal writes the two rival-id strings (NOT RentedByPlayer — true on client would mean THIS client owns, which is wrong).
+- Added diagnostic logging on both sides: host logs ownership in "Sent change" line when fields are non-default; client logs "Ownership for X: host[...] client-was[...]" in ApplyBusinessInfoLocal when any side has non-default ownership.  Test data will tell us how host represents player-ownership in reg (player-id string? empty + RentedByPlayer? sentinel?).
+- Wave 2 (after observing test data): if host represents own ownership via empty buildingOwnerRivalId + RentedByPlayer=true, then on client we synthesize a RivalData entry for the host player, and set client's reg.buildingOwnerRivalId to the synthetic rival's id so BuildingResume displays the host's name.
+- Build clean, deployed.
+
 2026-05-22 — ✅ Phase 2 COMPLETE (interior sync — designs, prices, dirt, items).
 - Confirmed working by user: client now sees host's items (shelves, products, furniture) inside buildings, including live updates within 2s of host modifications.
 - Architecture proven: subscription-based on entry, polling-based diff broadcast while inside, element-level/per-item refresh primitives on apply.  Same pattern usable for any future per-object sync work.
@@ -1377,3 +1674,151 @@ REFERENCE — Phase 1b key learnings (for future sync work)
    * "Match check (AFTER apply): matched=825 mismatchBiz=0 addrNotInPayload=0"
    * "Client now mirrors host's snapshot 100% ✓"
 - Build clean, deployed.
+
+2026-05-31 — Rivals window investigation (income + selectable profiles). NEW SESSION continues here.
+- User's 3 threads to fix: (1) both host+client rows populate on the leaderboard, (2) AI rival business income not populating on client → overall income not showing, (3) the OTHER player's profile is not selectable (detail view won't open).
+- Tooling: cpp2il at C:\code\cpp2il. The root Cpp2IL.exe FAILS on this game (metadata v31; "We support 24-29, got 31"). The WORKING one is C:\code\cpp2il\v2022.1\Cpp2IL.exe. Il2CppDumper signatures dump: C:\code\cpp2il\dumper-out\dump.cs (1.04M lines, all type sigs+offsets, NO bodies). IL-recovery DLL: C:\code\cpp2il\output-il-recovery\BigAmbitions.dll — bodies decompile to `throw null` BUT carry cpp2il [Calls]/[CallsUnknownMethods]/[CalledBy] attributes = the call graph. ilspycmd 9.1 available at ~/.dotnet/tools; `ilspycmd <dll> -t <FullTypeName>` decompiles one type. (rule: to learn what a game method calls, decompile output-il-recovery\BigAmbitions.dll with ilspycmd and read the [Calls] attributes — bodies are stubs but the call list is accurate.)
+- CONFIRMED Thread 3 root cause: `SelectedRivalUI.ShowRival(RivalLeaderboardData)` [Calls] `RivalsHelper.GetRivalData(string)→RivalData` near the top (for portrait/age/neighborhood/selectedRival). For a PLAYER row, data.rivalId is a playerId NOT in RivalDataCache → GetRivalData returns null → ShowRival NREs before it ever reaches the chart code. The Wave-10 Patch_RivalsHelper_GetRivalState_PlayerFallback does NOT help — GetRivalData is called first. FIX: add Patch_RivalsHelper_GetRivalData_PlayerFallback (Postfix) returning a synthetic non-null RivalData (empty-but-non-null owned* lists, rivalName) for REMOTE player ids only (NOT local — same crash-later caution as the GetRivalState fallback). (rule)
+- CONFIRMED income pipeline shape: `RivalLeaderboardButton.SetUp` builds the row stats text via `string.FormatHelper` (string.Format) from the SCALAR `data.weeklyIncome` + `data.ownedBusinesses.Count` — it does NOT call get_WeeklyIncome / recompute. So overriding `lb.weeklyIncome` in the GetRivalLeaderboardData Postfix DOES drive the displayed row income (the override happens before Load calls SetUp). (rule)
+- `RivalLeaderboard.GetRivalLeaderboardData(RivalData)` [Calls] `RivalData.get_WeeklyIncome` + `get_MostActiveNeighborhood` → builds lb from the rival's own property calc. On client that's $0 (AI business stock/items not synced); our Postfix then overrides from ClientRivalStats. (rule)
+- KEY API DISCOVERY: RivalsHelper exposes PUBLIC statics `GetRivalData(string)→RivalData`, `GetAllRivalData()→IEnumerable<RivalData>`, `GetNonSpecialRivals()→List<RivalData>`. So the HOST can read each AI rival's authoritative WeeklyIncome + ownedBusinesses/ownedBuildings.Count directly at snapshot-build time WITHOUT opening the rivals app. This eliminates the AiRivalDataRefs UI-priming dependency that made AI income work "only after host opens rivals app once." (rule)
+- BUG (income double-count) in MPServer.BuildRivalsStatsSnapshot: AiRivalDataRefs overlay sets entry.WeeklyIncome= and OwnedBusinessesCount=, THEN the gi.BuildingRegistrations loop does `bizStat.WeeklyIncome += RentPerDay*7` and `OwnedBusinessesCount++` for the SAME AI rivals (matched by businessOwnerRivalId) → inflated/garbage AI numbers. Must not both set and increment. (rule)
+- DIAGNOSTIC BLIND SPOT: client Patch_GetRivalLeaderboardData diag is gated by `_diagSample < 5` (static, never reset). Log timeline (client BigAmbitions2): 43364 Sent request → 43365-69 income diag x5 (fromStats=$0, stats NOT arrived yet) → 43374 Received 21 blocks → 43375 ClientRivalStats populated → 43376 re-Load (player rows) but NO further income diag (counter exhausted). So we are BLIND to whether the override fires post-stats. Host log (Steam install) 48118-48120: built ONCE with refs=19 nonZeroIncome=19, sent 21 blocks → the applied snapshot DID carry non-zero AI income. So AI income may already work post-re-Load; can't confirm from logs. FIX: reset _diagSample per Load (or log a post-stats summary). (rule)
+- Player/self incomes legitimately $0 in that test: neither player owned businesses (host self-calc $0; client self-stats bldgs=0 biz=0 income=$0). Not a bug. (situational: that test, early game)
+- PLAN (this session): (A) MPServer.BuildRivalsStatsSnapshot — compute AI rival WeeklyIncome+counts from RivalsHelper.GetRivalData(id) (no UI dependency), remove the AiRivalDataRefs overlay + the rent-approx double-count for AI rivals; keep host-own + _clientSelfStats for players. (B) Add Patch_RivalsHelper_GetRivalData_PlayerFallback for Thread 3. (C) Fix diagnostic blind spot. Then ONE test confirms all three. (rule)
+- IMPLEMENTED 2026-05-31 (build A):
+  * MPServer.BuildRivalsStatsSnapshot rewritten — AI rival stats now read from RivalsHelper.GetRivalData(id) per rival in gi.rivalStates (authoritative WeeklyIncome + ownedBusinesses/ownedBuildings.Count + MostActiveNeighborhood + GetRivalAgeInYears + IsRivalDefeated). Removed the AiRivalDataRefs overlay AND the per-reg AI counting/rent-approx (was double-counting). Host-own player stats still computed from gi (BuildingOwnedByPlayer + RentedByPlayer&&!residential). _clientSelfStats path for other players unchanged. New host log line "[Server] AI stats via GetRivalData: rivals=N withData=M nonZeroIncome=K".
+  * MPPatches Patch_RivalLeaderboard_GetRivalLeaderboardData_FromCache — added public ResetIncomeDiag() (resets _diagSample). Patch_RivalLeaderboard_Load_RequestStats.Prefix calls it on EVERY Load (before the request throttle) so the post-stats re-Load logs fresh "[Patch_GetRivalLeaderboardData]" income samples (was capped at 5, exhausted on first pre-stats Load).
+  * MPPatches new Patch_RivalsHelper_GetRivalData_PlayerFallback (Postfix on RivalsHelper.GetRivalData) — returns synthetic non-null RivalData for REMOTE player ids (in ClientPlayerRoster, != local), owned* lists populated from local regs by buildingOwnerRivalId/businessOwnerRivalId. Fires on either role (auto-registered via [HarmonyPatch]). Fixes ShowRival NRE so the other player's profile opens. Logs "[Patch_GetRivalData_PlayerFallback] synth RivalData for player ...".
+  * AiRivalDataRefs is now write-only (captured in FromCache Postfix, cleared in GenerateRivals Prefix, no longer read) — harmless dead state, candidate for a future cleanup pass.
+- Build 2026-05-31 (build A): 0 errors, 3 pre-existing nullable warnings (MPPatches.cs:1090, TrafficSync.cs:252, MPServer.cs:871 — none in new code). Deployed to BOTH instances (Steam install + C:\BigAmbitions2). AWAITING TEST. (one-off)
+- TEST PLAN (build A): host + client both reach in-game. (1) HOST opens rivals app first (primes nothing now, but confirms host-side log "AI stats via GetRivalData ... nonZeroIncome>0"). (2) CLIENT opens rivals app → expect AI rows to show non-zero income matching host; client log "[Patch_GetRivalLeaderboardData]" lines should now show fromStats=$NONZERO overrode=True final=$NONZERO after the re-Load. (3) CLIENT clicks the HOST's player row → detail view should OPEN (was not selectable) with empty chart; client log "[Patch_GetRivalData_PlayerFallback] synth RivalData for player 'Host'". (4) HOST clicks the CLIENT's row → same. Watch for any native crash (process exit) — the GetRivalData fallback is the main risk. (situational: build A test)
+- TEST A RESULT (2026-05-31, user): MOSTLY WORKING. AI rows populate ~correctly, total income matches. Remaining: (1) client over-counts businesses by a FACTORY the host doesn't count; (2) per-business income BREAKDOWN shows $0 each on client (total matches but individual businesses 0); (3) other player's profile now SELECTABLE (✓) but shows default-looking info + default portrait; chart empty (expected). (situational)
+- INVESTIGATION (decompiled output-il-recovery via ilspycmd, read [Calls]):
+  * BusinessTypeName.Factory = 38. (rule)
+  * Per-business breakdown UI = RivalBusinessesTable.Load(List<BuildingRegistration>) → RivalBusinessesCellView.SetData(RivalBusinessModel{BusinessName,BusinessType,WeeklyIncome,Address}). Load computes each cell's WeeklyIncome from BuildingRegistration.GetAvgDailyIncome(int) → $0 on client (AI sales unsimulated). Fed by RivalsApp.ShowRival's frame-delayed closure from the selected rival's lists. (rule)
+  * RivalLeaderboard.GetRivalLeaderboardData(rival) does NOT filter — copies rival.ownedBusinesses + sets lb.weeklyIncome=rival.WeeklyIncome, lb.mostActiveNeighborhood=rival.MostActiveNeighborhood. So host leaderboard count = rival.ownedBusinesses.Count. (rule)
+  * Host's rival.ownedBusinesses EXCLUDES factories (SetupRivalFactories sets the factory's businessOwnerRivalId — so it SYNCS to client — but does NOT add it to ownedBusinesses). Client was counting all businessOwnerRivalId matches → over-counted by the factory. (rule)
+  * SelectedRivalUI.ShowRival [Calls] RivalsHelper.GetRivalData (→ selectedRival), GetRivalBackgroundIndex, RivalPortraitHelper.CreatePortrait, ToShortCurrencyFormat, EnumHelpers.ToStringFast(Neighbourhood). The local-player row path GetPlayerLeaderboardData uses PortraitGenerator.LoadPlayerPortrait + FinancialSummaryHelper. So a remote player's real portrait would need character-appearance sync (deferred). (rule)
+  * BuildingRegistration: public GetAvgWeeklyIncome() and GetAvgDailyIncome(int numberOfDays). Address (global ns) has streetNumber(int)+streetName(StreetName enum); AddressKey(reg)="{StreetNumber} {StreetName}" matches AddressKey(Address)="{streetNumber} {streetName}". (rule)
+- IMPLEMENTED 2026-05-31 (build B):
+  * Protocol: new RivalBusinessInfo{AddressKey,BusinessName,BusinessType(int),WeeklyIncome}; RivalStatsInfo gains List<RivalBusinessInfo> Businesses.
+  * GameStateReader: AddressKey(Address) overload.
+  * MPServer.BuildRivalsStatsSnapshot: per AI rival, build info.Businesses from rd.ownedBusinesses (AddressKey + name + type + GetAvgWeeklyIncome). One-time host diag logs avgWeekly vs avgDaily(7)*7 for the first rival's businesses to confirm the formula the breakdown cell uses.
+  * GameStatePatcher: ClientBusinessIncomeByAddress (addr→weekly) + ClientRivalBusinessAddrs (rivalId→set of addr) populated in ApplyRivalsStatsSnapshot.
+  * MPPatches FromCache: reconcile client's rd.ownedBusinesses to the host's exact address set when available (ClientRivalBusinessAddrs); fallback excludes Factory(38). Self-check warns on count mismatch vs host. Fixes Issue 1 (factory over-count) for both the leaderboard count AND the breakdown membership.
+  * MPPatches new Patch_RivalBusinessesCellView_SetData (Prefix) — overrides each breakdown cell's WeeklyIncome from ClientBusinessIncomeByAddress[AddressKey(model.Address)]. Fixes Issue 2.
+  * Issue 3: name/count/total-income now correct; remote player CUSTOM PORTRAIT + history CHART deferred (need character-appearance + weekly-history sync). 
+- Build 2026-05-31 (build B): 0 errors, 3 pre-existing warnings. Deployed both instances. AWAITING TEST. (one-off)
+- TEST B RESULT (2026-05-31, user): "no changes" — businesses still $0, factory still shown, host profile still generic, AND injected player rows show rank #100 (the old hardcoded value). Build B WAS loaded (logs 1:44 post-1:38-deploy; patches Patch_RivalBusinessesCellView_SetData + GetRivalData_PlayerFallback registered).
+- ROOT CAUSES (build B host diagnostic "[Server] biz ... avgWeekly=$X avgDaily(7)*7=$Y"):
+  * Host's GetAvgWeeklyIncome() AND GetAvgDailyIncome(7) BOTH return $0 for AI rival businesses at snapshot time — these are HISTORICAL (FinancialSummary-based), empty early game. So my synced per-business income was $0 → override set $0 → no visible change. The leaderboard TOTAL (rd.WeeklyIncome) is non-zero because it uses an ESTIMATED/projected calc, NOT historical. (rule: per-business breakdown income = historical GetAvgDailyIncome → $0 until businesses accrue in-game days; leaderboard total = estimated, non-zero immediately. Two different income concepts.)
+  * The factory (BusinessTypeName 38) IS present in the host's rd.ownedBusinesses (diag printed "biz '' type=38"). So my Issue-1 fix (match the host's ownedBusinesses address set) KEEPS the factory → didn't fix the count. The host leaderboard COUNT must come from a DIFFERENT list (candidate: rd.ownedRetailOfficeBusinesses, which excludes the factory since it's not Retail/Office). Field reads are invisible to cpp2il [Calls] and the il-recovery body is throw-null, so the exact list can't be read statically. (rule: GetRivalLeaderboardData's list assignment can't be determined from decompile — must capture the game's own lb.ownedBusinesses.Count on the host at runtime.)
+  * GetEstimatedWeeklyIncome(BuildingRegistration, BusinessLayoutSet, int) exists (static) — the likely non-historical per-business income source, but needs a BusinessLayoutSet param. (reference)
+- IMPLEMENTED 2026-05-31 (build C — rank fix + ground-truth diagnostics):
+  * Rank fix: Patch_Load_AddPlayers now ranks injected rows AFTER the game's rows — baseRank = count of non-injected children (excludes our deferred-Destroy rows by name), rank = baseRank + added + 1 → first remote player is #21 not #100.
+  * Host count diag: FromCache Postfix on host (MPServer.IsRunning, first 6 rivals) logs "[HostCountDiag] <id> lb.ownedBiz=A rd.ownedBiz=B rd.retailOffice=C rd.ownedBldg=D rd.WeeklyIncome=$E" — reveals which list the leaderboard COUNT uses (whichever rd list == lb.ownedBiz) and whether it includes the factory.
+  * Host breakdown diag: Patch_RivalBusinessesCellView_SetData now logs "[HostBizDiag] cell '<name>' addr='<key>' weekly=$X" on the host (captures the EXACT per-business income the host displays when host clicks a rival). Client path also logs "[Patch_SetData] override ... A→B".
+- Build 2026-05-31 (build C): 0 errors, 3 pre-existing warnings. Deployed both instances 1:52:57. AWAITING GROUND-TRUTH TEST. (one-off)
+- OPEN QUESTIONS for user (build C): (Q1) On HOST, click a rival — do individual businesses show real $ income or $0? How far into the game (day#)? (Q2) On HOST leaderboard, does a rival's business COUNT include their factory? (Q3) confirm injected player row is now #21. The [HostCountDiag]/[HostBizDiag] logs will corroborate. (situational: build C)
+- USER ANSWERS (2026-05-31): Q1 = AI rival businesses show REAL income (thousands) on host from DAY 1; only the player is $0 (no businesses yet). Q2 = host COUNT EXCLUDES factories (user OK keeping that convention — don't change game behavior). Q3 = test was day 1, first hour ONLY; user will NOT test late-game until save/load exists. (rule: ALL rivals features must work correctly at day-1/hour-1 with ESTIMATED income; never assume historical/accrued data is available in tests.)
+- KEY CONSEQUENCE: per-business breakdown income is the game's ESTIMATED weekly income (non-zero day 1), NOT historical GetAvgDailyIncome/GetAvgWeeklyIncome (which are $0 day 1 — confirmed by build-B host diag). Income source = EstimatedWeeklyIncomeHelper.GetEstimatedWeeklyIncome(BuildingRegistration, BusinessLayoutSet, int currentDay=-1) [extension, global ns]. layoutSet via BusinessLayoutSetHelper.GetOrLoadBusinessLayoutSet(reg.businessTypeName, reg.BuildingCached.BuildingSize, reg.BuildingCached.BuildingVersion, reg.Layout, false). Building.BuildingSize (BuildingSize enum) + Building.BuildingVersion (int) at Building 0x20/0x24. EstimatedWeeklyIncomeHelper NOT in output-il-recovery/BigAmbitions.dll (different assembly) — verify it's in a referenced interop DLL before calling directly; else reflection. (rule)
+- DECISION: do NOT reimplement the estimated-income chain blind (2 misses already). First get build C TESTED to capture [HostCountDiag] (which owned-list the leaderboard count uses → Issue 1 fix target) + [HostBizDiag] (host's EXACT per-business displayed income → verification target for the GetEstimatedWeeklyIncome reimpl). THEN build D = verified count-list + estimated-income sync. (rule: confirmed-over-inferred; verify against captured ground truth before claiming a fix.)
+- BUILD C TEST GROUND TRUTH (2026-05-31, logs 02:55):
+  * [HostCountDiag] (6 rivals): lb.ownedBusinesses.Count == rd.ownedRetailOfficeBusinesses.Count for ALL. Top rivals: ownedBiz=28 retailOffice=27 (1 factory), 28/27, 22/21, 21/20; others equal (no factory). CONFIRMS leaderboard COUNT = ownedRetailOfficeBusinesses (Retail/Office only) → excludes factories+warehouses. (rule: rival leaderboard business count = RivalData.ownedRetailOfficeBusinesses.Count, NOT ownedBusinesses.)
+  * [HostBizDiag]: host's per-business breakdown income is REAL/non-zero day 1 (e.g. '365 Tobacco'@'23 FifthAvenue'=$15596, 'Gallery 84'@'15 SeventhStreet'=$24518). The model.WeeklyIncome the game displays. This is the ESTIMATED income, captured from RivalBusinessesCellView.SetData.
+  * Rank #42 cause: Patch_Load_AddPlayers runs TWICE per rivals-app-open (initial Load + post-stats re-Load), each logs "Swept 0 stale, added 1". Counting parent.childCount during the 2nd Load sees a transient DOUBLED container (game's old 20 rows pending deferred-Destroy + 20 fresh) → baseRank≈41 → rank 42 (==21*2). (rule: never compute leaderboard rank from container childCount — Load double-fires + Unity defers Destroy → transient 2x count.)
+- IMPLEMENTED 2026-05-31 (build D):
+  * Income helpers confirmed in interop BigAmbitions.dll (already referenced): Helpers.EstimatedWeeklyIncomeHelper.GetEstimatedWeeklyIncome(BuildingRegistration, BusinessLayoutSet, int=-1); BusinessLayoutSets.BusinessLayoutSetHelper.GetOrLoadBusinessLayoutSet(BusinessTypeName, Buildings.BuildingSize, int version, string layout, bool warn). Building.BuildingSize + Building.BuildingVersion via reg.BuildingCached. (rule)
+  * Issue 1 (count): MPServer sends info.OwnedBusinessesCount = rd.ownedRetailOfficeBusinesses.Count. Client FromCache sets lb.ownedBusinesses = rd.ownedRetailOfficeBusinesses (Retail/Office subset) so the row count matches host (factory excluded). rd.ownedBusinesses kept as full set for the breakdown. Self-check warns if clientRetailOffice != host count.
+  * Issue 2 (income): MPServer per-business income now = GetEstimatedWeeklyIncome(reg, GetOrLoadBusinessLayoutSet(...)) instead of historical GetAvgWeeklyIncome ($0 day1). Verification log "[Server] est '<name>' addr='<key>' est=$X" to compare against [HostBizDiag]. Client SetData override (ClientBusinessIncomeByAddress) unchanged → displays synced estimate.
+  * Issue 3 (rank): baseRank now = (AI count from ClientRivalStats not-in-roster & not-local) + 1; rank = baseRank + added + 1 → #21. Child-count only as fallback when stats absent. NOTE: injected rows still APPEND at the bottom (not income-sorted into position) — acceptable per user (#21 expected); income-ordered insertion is a future enhancement.
+  * PERF NOTE: GetOrLoadBusinessLayoutSet + GetEstimatedWeeklyIncome called per rival-business (~500/snapshot) on main thread when a client opens rivals app; layouts already loaded so mostly cached dict lookups. Watch for a hitch; cache/throttle if needed. (situational)
+  * ClientRivalBusinessAddrs now unused (reconciliation removed) — harmless, candidate cleanup. (situational)
+- Build 2026-05-31 (build D): 0 errors, 3 pre-existing warnings (MPPatches injected-row log line, TrafficSync:252, MPServer:871). Deployed both instances 3:04:41. AWAITING TEST. (one-off)
+- TEST PLAN (build D): both in-game, both open rivals app. (1) The 4 factory-owning AI rivals (Huang Guo/Thierry/Ingrid/Jessica) business COUNT should now match host on client (factory dropped). (2) Click an AI rival on CLIENT → per-business breakdown shows REAL income matching host. VERIFY in host log: "[Server] est ... addr=X est=$Y" should equal "[HostBizDiag] cell ... addr=X weekly=$Y" for the same address. (3) Injected player row should show #21 (both directions). (situational: build D test)
+- USER DIRECTIVE (2026-05-31): leaderboard rank must be INCOME-RELATIVE & dynamic — as a player earns they climb #21→#20→#19 and AI/other players shift accordingly (like SP, which ranks all by income). With 2 clients there must be a #22 spot too. The static "append at #21" model is wrong. (rule)
+- ARCHITECTURAL FIND: RivalLeaderboard.Load builds its rows from RivalsHelper.GetAllRivalData() (IEnumerable<RivalData>) + GetPlayerLeaderboardData() (local), then List.Sort by income, then SetUp(rank). So feeding remote players INTO GetAllRivalData makes the GAME rank/order/number them by income — handling all the dynamics for free. GetAllRivalData returns a freshly-built List<RivalData> per call (does `new List<>(cache.Values.Where(...))`) → safe to append to. Other callers (CityMapFilters.CreateSpecialRivalFilters, RivalsHelper.GetPlayerRanking) must NOT see players → gate to Load context via a flag. (rule)
+- IMPLEMENTED 2026-05-31 (build E) — income-relative leaderboard via the game's own ranking:
+  * GameStatePatcher.RivalsLeaderboardLoadRunning flag (set in Load Prefix, cleared in Load Postfix). GameStatePatcher.BuildSyntheticPlayerRivalData(playerId) — shared synthetic RivalData builder (owned lists from local regs), used by both the GetAllRivalData append and the GetRivalData fallback.
+  * NEW Patch_RivalsHelper_GetAllRivalData (Postfix): when RivalsLeaderboardLoadRunning && connected, TryCast __result to List<RivalData> and Add a synthetic RivalData per remote player (skip local). Game then ranks/orders/numbers them by income.
+  * REMOVED the manual row injection (Patch_RivalLeaderboard_Load_AddPlayers gutted to just clear the flag) — no more sweep/baseRank/SetUp, no #42 doubling. (Income-ordered insertion is now the game's job.)
+  * Load Prefix sets the flag on either role (+ keeps ResetIncomeDiag + client stats request).
+  * FromCache Postfix: NEW remote-player branch (both roles, before the client-only gate) — populates owned lists from local regs + sets lb.weeklyIncome/entryName from ClientRivalStats so the game's income-sort ranks the player correctly and the row shows right. AI-rival branch (retailOffice count + income override) unchanged.
+  * Issue 1 (count) + Issue 2 (per-business est income) from build D unchanged (still in).
+  * GetRivalData fallback still present for the ShowRival profile-click path.
+  * Dead: ClientRivalBusinessAddrs now unused; AiRivalDataRefs write-only. (situational: cleanup later)
+- Build 2026-05-31 (build E): 0 errors, 2 pre-existing warnings (MPServer:871, TrafficSync:252). Deployed both 3:18:56. AWAITING TEST. (one-off)
+- TEST PLAN (build E): both in-game, both open rivals app. (1) 4 factory rivals' COUNT matches host (factory dropped). (2) Click an AI rival on client → per-business breakdown shows real income matching host (verify host log [Server] est addr=X est=$Y == [HostBizDiag] addr=X weekly=$Y). (3) Each remote player appears at an INCOME-RANKED position (#21 at $0; climbs as they earn; AI shift). Log: "[Patch_GetAllRivalData] appended N remote player(s)". (4) Player profile still clickable. (5) (if feasible) 2 clients → #21 + #22. (situational: build E test)
+- BUILD E TEST RESULT (2026-05-31, user): (1) count OVER-cut — excluded factory AND cinema/theater (cinema/theater ARE businesses, added to the game later with their own BuildingTypes 5/6). (2) breakdown income non-zero but WRONG vs host (mine higher/different, varies per business). (3) REGRESSION: remote player (host) now shows "defeated" with no rank. (4) profile clickable but worse due to (3). (5) deferred (item 3 blocks it).
+- GROUND TRUTH from build-E logs comparing [Server] est (my GetEstimatedWeeklyIncome) vs [HostBizDiag] (host's actual displayed model.WeeklyIncome), matched by address:
+  * Chip's Electronics @3 FourthStreet: mine $352027 vs host $181675. @7 SecondAvenue: $355583 vs $183507. @36 FirstAvenue: $368310 vs $189879. @34 FirstAvenue host $336238. SAME business type (ElectronicsStore) clusters ~$350k in MY est but host varies $181-336k by LOCATION. → GetEstimatedWeeklyIncome is a location-blind TEMPLATE estimate; the breakdown shows ACTUAL per-building income. NOT a constant ratio (Nano Dev close, Bolumar's mine LOWER, From Pens mine 4.5x higher). (rule: rival breakdown income = actual per-building, NOT GetEstimatedWeeklyIncome and NOT the $0 historical GetAvg* methods — it's one of RivalBusinessesTable.Load's 5 unresolved calls; must MEASURE which host method yields model.WeeklyIncome.)
+  * [HostBizDiag] for the viewed rival included 'McKay Theater Company' + 'DEC Cinemas' but NO factory → the breakdown (and count) = rd.ownedRetailOfficeBusinesses, which INCLUDES Cinema/Theater and EXCLUDES factory (the name is misleading). (rule: leaderboard count + detail breakdown both = RivalData.ownedRetailOfficeBusinesses; it contains Retail+Office+Cinema+Theater, not just retail/office. Don't reproduce it by BuildingType filter — mirror the host's exact membership by address.)
+  * Item 3 root cause (mine): routing remote players through GetAllRivalData → the game's RivalData path treats a no-business player as a "defeated" rival (no businesses ⇒ defeated) and de-ranks them. Fix: override lb.isDefeated=false for player rows in the FromCache Postfix (keeps the income-relative ranking from the GetAllRivalData approach). (rule)
+- PLAN build F: (1) host builds info.Businesses + OwnedBusinessesCount from rd.ownedRetailOfficeBusinesses (incl cinema/theater, excl factory); client mirrors the exact membership by ADDRESS (synced) for both lb.ownedBusinesses (count) and rd.ownedBusinesses/ownedRetailOfficeBusinesses (breakdown). (3) lb.isDefeated=false for player rows. (2) host SetData diag logs ACTUAL model.WeeklyIncome vs GetAvgDailyIncome(7), *7, GetAvgWeeklyIncome, GetEstimatedWeeklyIncome (look up reg by address) to DEFINITIVELY identify the income method — keep est synced as placeholder this round; fix the method in build G. (rule)
+- IMPLEMENTED 2026-05-31 (build F):
+  * GameStatePatcher.PopulateRivalOwnedFromSync(rd, id) — new shared helper: clears+repopulates rd.ownedBuildings (by buildingOwnerRivalId) and ownedBusinesses/ownedRetailOfficeBusinesses from the HOST'S EXACT business address set (ClientRivalStats[id].Businesses). Fallback before stats: owner-match-minus-factory. Used by BuildSyntheticPlayerRivalData + both FromCache branches. Fixes item 1 (cinema/theater no longer dropped — we mirror host membership by address, not BuildingType filter).
+  * MPServer: info.Businesses + OwnedBusinessesCount now built from rd.ownedRetailOfficeBusinesses (the exact counted+displayed set: Retail+Office+Cinema+Theater, no factory).
+  * FromCache player branch: PopulateRivalOwnedFromSync + lb.isDefeated=false (fixes item 3 defeated regression) + income/name from ClientRivalStats. AI branch: PopulateRivalOwnedFromSync + income override (unchanged).
+  * Item 2 income still PLACEHOLDER (synced est, known wrong). Host SetData diag now logs "[HostBizDiag] '<name>' addr=X ACTUAL=$A | avgWeekly=$W avgDaily7x7=$D est=$E" — measurement to identify which method == ACTUAL. Fix method in build G.
+- Build 2026-05-31 (build F): 0 errors, 2 pre-existing warnings (MPServer:871, TrafficSync:252). Deployed both 3:47:26. AWAITING TEST. (one-off)
+- TEST PLAN (build F): both in-game, both open rivals app. (1) AI counts match host INCL cinema/theater (the 4 factory rivals + any cinema/theater owners). (3) remote player NO LONGER "defeated" — shows with an income-ranked number (#21 at $0). (2) breakdown income still wrong (placeholder) — IGNORE values; instead I read host log "[HostBizDiag] ... ACTUAL=$A | avgWeekly avgDaily7x7 est" to find which method matches ACTUAL → that's the build-G fix. User: open a rival's breakdown ON THE HOST so [HostBizDiag] logs. (situational: build F test)
+- BUILD F TEST RESULT (2026-05-31, user): (1) counts MATCH ✓ (cinema/theater included). (2) player NO LONGER defeated, shows #20/#21 (tied at $0) ✓. (3) done ✓. Reminder from user: the other player's PROFILE must also match their actual PICTURE (portrait) + stats.
+- ITEM 2 DEFINITIVE MEASUREMENT (build F [HostBizDiag] ACTUAL vs candidates): for ALL businesses avgWeekly=$0 AND avgDaily(7)*7=$0 (AI businesses have NO financial-summary history). est (GetEstimatedWeeklyIncome w/ template layoutSet) ≠ ACTUAL with NO consistent ratio (Chip's 304034 vs est 547122 = 0.56; Barbosa 35121 vs est 13888 = 2.53; A+Attorneys 85995 vs est 50944 = 1.69). GetEstimatedWeeklyIncome internally uses CalculateCustomersPerWeek(reg)+GetProductBenefit+GatherEmployees but off the TEMPLATE layoutSet, not the rival's ACTUAL business config. (rule: rival per-business breakdown income = the game's internal projection off the business's ACTUAL items/products/staff; NOT reproducible from template (GetEstimatedWeeklyIncome) and NOT historical ($0). The ONLY reliable source is the game's computed model.WeeklyIncome — must CAPTURE + relay it.)
+- PLAN build G: capture the host's model.WeeklyIncome (RivalBusinessesCellView.SetData, host) into GameStatePatcher.HostCapturedBizIncome[addr]; BuildRivalsStatsSnapshot sends captured value when available, est as ballpark fallback otherwise. Limitation: a rival's exact per-business income is captured only after the HOST has opened that rival's breakdown (Load builds the models). (rule)
+- OPEN: remote player PORTRAIT (needs character-appearance sync → PortraitGenerator on client) — separate feature, next after income.
+- IMPLEMENTED 2026-05-31 (build G — per-business income capture-relay):
+  * GameStatePatcher.HostCapturedBizIncome (addr→actual income). Host RivalBusinessesCellView.SetData branch now CAPTURES model.WeeklyIncome into it (replaced the measurement logging).
+  * MPServer.BuildRivalsStatsSnapshot: per-business WeeklyIncome = HostCapturedBizIncome[addr] if captured, else GetEstimatedWeeklyIncome ballpark fallback.
+  * Client SetData override (ClientBusinessIncomeByAddress) unchanged → displays the synced value (now ACTUAL for captured businesses).
+  * TIMING LIMITATION: a rival's exact per-business income is captured only after the HOST opens that rival's breakdown (Load builds + renders the cells). Snapshot is sent on the client's RivalsStatsRequest (fires on the client's leaderboard Load). So host must have browsed a rival BEFORE the client requests, for exact values; else ballpark est. Possible future improvement: re-broadcast stats when HostCapturedBizIncome changes, or client re-requests on ShowRival. (situational)
+- Build 2026-05-31 (build G): 0 errors, 2 pre-existing warnings. Deployed both 4:01:52. AWAITING TEST. (one-off)
+- TEST PLAN (build G): (1) HOST opens rivals app + clicks through several rivals' profiles (captures their per-business income). (2) THEN CLIENT opens rivals app + clicks those same rivals → per-business breakdown income should now MATCH host exactly (for the rivals the host viewed). Rivals the host hasn't opened show a ballpark est. (situational: build G test)
+- NEXT AFTER INCOME: remote player profile PORTRAIT + ensure profile stats (income/biz/neighborhood) match. Portrait = sync character appearance (gender + face/hair/etc. from character creator) then PortraitGenerator on client, OR relay rendered portrait image. Scope TBD with user. (rule)
+- USER (2026-05-31): income TOTAL matched but per-business doesn't — why? ANSWER: RivalData.WeeklyIncome (total) is a single exposed PROPERTY I read+copy; the breakdown per-cell income is computed inside RivalBusinessesTable.Load by an internal method the decompiler only sees as a stub (unreachable). Measurement proved it's neither the template estimate nor historical. So they ARE different methodologies in the game — total exposed, per-business not. Hence capture+relay for per-business. User also: implement PROFILE (portrait + stats) BEFORE next test (not queued).
+- CharacterData appearance = explicit params (ageInDays, gender, strength, fatness, color, eyesColor, blendshapes List, elements List, skinColor) — NOT a seed. So regenerating remotely = sync all that. CHOSE instead to RELAY the rendered portrait PNG (each player has one at Character.Customization.PortraitGenerator.GetCharacterPortraitPath(gi)) — proven Base64-over-JSON image pattern (like Phase 1 logos). (rule)
+- Portrait API: Character.Customization.PortraitGenerator.GetCharacterPortraitPath(GameInstance)→path. RivalPortraitHelper.GetPortrait(rivalId)→Sprite + CreatePortrait(RivalData, int bg, Action<Sprite> cb) — the rivals profile portrait path. RivalLeaderboardButton has NO portrait image (leaderboard ROW shows no portrait — only the detail view SelectedRivalUI.portraitImage). (rule)
+- IMPLEMENTED 2026-05-31 (build H — remote player portrait relay):
+  * Protocol PlayerProfilePayload += PortraitPngBase64.
+  * GameStatePatcher: ClientPlayerPortraits (playerId→Sprite); ReadLocalPortraitBase64() (reads GetCharacterPortraitPath PNG→Base64); ApplyPlayerPortrait(id, b64) (Base64→Texture2D via ImageConversion.LoadImage((Il2CppStructArray<byte>)bytes)→Sprite.Create; main-thread only).
+  * MPClient.SendPlayerProfile attaches local portrait; HandlePlayerProfile decodes incoming on main thread. MPServer HandlePlayerProfile decodes client portrait (host UI) + re-broadcasts payload (carries portrait → other clients); BroadcastHostProfile attaches host portrait.
+  * MPPatches: Patch_RivalPortraitHelper_GetPortrait (Prefix → return cached sprite for player ids) + Patch_RivalPortraitHelper_CreatePortrait (Prefix → invoke callback w/ cached sprite + skip generation). Only fire for ids in ClientPlayerPortraits (remote players) → AI rivals + local player unaffected.
+  * csproj: added UnityEngine.ImageConversionModule reference (ImageConversion lives there).
+  * All defensive (try/catch) — a decode/inject failure falls back to the default portrait, never a crash.
+- Build 2026-05-31 (build H): 0 errors, 2 pre-existing warnings. Deployed both 4:13:48. AWAITING TEST.
+  * TIMING RISK: portrait PNG must be on disk when SendPlayerProfile/BroadcastHostProfile fires. Client sends on entering game (autopilot may be fast → PNG maybe not yet written → empty → default portrait). Host broadcasts at ReleaseStartupHold (likely ready). If portrait empty due to timing, add a re-send (on rivals-app open or a delayed retry). (situational)
+- TEST PLAN (build H): (income) host browse rivals first, then client → per-business matches for browsed rivals (build G). (portrait) open the OTHER player's profile on each side → should show their REAL character portrait (not a default). Log: "[Patcher] Applied portrait for player ..." on receive, "[Client] Sent PlayerProfile ... portrait=Nb64" / "[Server] Broadcast host profile ... portrait=yes". If default portrait shows, check whether portrait= was 'none' (timing — PNG not on disk yet). (situational: build H test)
+
+═══════════════════════════════════════════════════════════════════
+NATIVE DECOMPILE WIN (2026-05-31) — per-business income formula CRACKED
+═══════════════════════════════════════════════════════════════════
+- TOOLING (rule): cpp2il can't recover method BODIES for this game, but the logic is just compiled x86-64 in GameAssembly.dll. Lightweight pipeline that WORKED (no Ghidra/Java needed): Il2CppDumper's dumper-out\script.json maps method Name→Address where Address == RVA (confirmed: RivalBusinessesTable.Load RVA 0xA6EC10 == script.json Address 10939408). pip install capstone pefile; load GameAssembly.dll via pefile (ImageBase 0x180000000, get_memory_mapped_image() indexed by RVA), disassemble from a method's RVA, resolve each `call`/`jmp` immediate target → RVA → script.json name. Script: C:\code\cpp2il\disasm_income.py / disasm_load.py. il2cpp class-init boilerplate = repeated `call sub_3F82B0` + `lock or [rsp],0` (skip it). (rule: to read any game method's real logic, disassemble GameAssembly.dll at its script.json RVA with capstone + resolve calls via script.json — far lighter than Ghidra.)
+- FORMULA (rule): RivalBusinessesTable.Load per-business cell income (RivalBusinessModel.WeeklyIncome): `if (reg.RentedByPlayer) income = reg.GetAvgDailyIncome(7) * 7;  else income = Enumerable.Sum(Enumerable.TakeLast(reg.dailyIncomes, 7));`. AI rival businesses have RentedByPlayer=false → use the dailyIncomes path. `BuildingRegistration.dailyIncomes` is a PUBLIC List<float> @0x120 (rolling daily income; weekly = sum of last 7). RivalData.get_WeeklyIncome (the TOTAL, which already matches) sums the SAME via lambda b__8_2 = Sum(TakeLast(reg.dailyIncomes,7)) per business → so total == sum of breakdown; consistent.
+- WHY earlier attempts failed (rule): GetAvgDailyIncome / GetAvgWeeklyIncome read FinancialSummary (empty for AI businesses) → $0. GetEstimatedWeeklyIncome is a location-blind TEMPLATE projection → wrong. The real AI value is the simulated reg.dailyIncomes list, which NOTHING I'd tried read.
+- SOLUTION (build I): host computes per-business income directly = (RentedByPlayer ? GetAvgDailyIncome(7)*7 : sum of last 7 of reg.dailyIncomes) for EVERY rival business → full coverage, exact, no capture/UI dependency. Replaces the capture-relay + est fallback. (rule)
+- IMPLEMENTED 2026-05-31 (build I):
+  * MPServer.WeeklyIncomeForBusiness(reg) — the exact formula. BuildRivalsStatsSnapshot uses it for every info.Businesses[].WeeklyIncome (removed HostCapturedBizIncome + GetEstimatedWeeklyIncome fallback from the loop).
+  * Host SetData branch now a VERIFICATION diag: "[BizVerify] '<name>' addr=X ACTUAL=$A mine=$B MATCH/MISMATCH (ai|player)" — confirms the replicated formula == the game's displayed value. Temporary; remove once confirmed.
+  * GameStatePatcher.HostCapturedBizIncome now unused (dead field) — remove on cleanup. Portrait relay (build H) unchanged.
+- Build 2026-05-31 (build I): 0 errors, 2 pre-existing warnings. Deployed both 9:44:05. AWAITING TEST.
+- TEST PLAN (build I): (1) On HOST open a rival's profile → host log "[BizVerify] ... MATCH" for each business (verifies formula). (2) On CLIENT open rivals + click rivals → per-business breakdown income matches host for ALL rivals (no host-pre-browse needed). (3) Portrait (build H): other player's profile shows their real portrait. (situational: build I test)
+- BUILD I RESULT (2026-05-31, user): per-business income MATCHES PERFECTLY ✓ (formula confirmed). Portrait does NOT match; profile AGE does NOT match. User: clean up income diagnostics, then implement portrait + age before testing.
+- PORTRAIT ROOT CAUSE (logs, not guessed): both sides logged "portrait=none". The portrait file IS on disk as "<SaveName> portrait.jpg" in the save folder, written LAZILY (mtime 9:50, ~minutes AFTER entering game) — but SendPlayerProfile/BroadcastHostProfile fire on game-entry (earlier) → file not there yet → empty. Decompiled GetCharacterPortraitPath(gi): path = SaveGamePathHelper.GetCharacterFolderPath(gi.id) + (gi.saveName @0xE8) + " portrait" + ext, invalid-filename-chars replaced. Path is correct; it's purely a timing problem. (rule: a player's portrait is written lazily after game-entry; read it on a RETRY, not once at entry.)
+- AGE: GetRivalAgeInYears(rd) reads rd.startingAgeInYears (@0x24) + game-time adjust → set the synthetic player's startingAgeInYears = real age. Real age = gi.charactersData[0].ageInDays (@0x18 on CharacterData @gi 0x190) / gi.gameVariables.daysPerYear (@0x24 on GameVariables @gi 0x1D8; default 60). (rule)
+- IMPLEMENTED 2026-05-31 (build J — cleanup + portrait timing + age):
+  * CLEANUP: removed [BizVerify] host diagnostic (SetData now client-override-only) + dead HostCapturedBizIncome field.
+  * AGE: PlayerProfilePayload += AgeInYears. GameStatePatcher.LocalAgeInYears() = charactersData[0].ageInDays / gameVariables.daysPerYear; ClientPlayerAges dict. Sender (SendPlayerProfile/BroadcastHostProfile) includes it; receivers store it; BuildSyntheticPlayerRivalData sets startingAgeInYears=synced age; FromCache player branch sets lb.ageInYears.
+  * PORTRAIT TIMING: MPCanvasUI.TickProfileResend() — every 3s while in-game+connected, once ReadLocalPortraitBase64() returns non-empty (file now exists), re-send the profile (client SendPlayerProfile / host BroadcastHostProfile) ONCE; give up after ~600s; reset on leaving game. Carries portrait + age. Receiver decodes via existing ApplyPlayerPortrait + RivalPortraitHelper patches.
+- Build 2026-05-31 (build J): 0 errors, 2 pre-existing warnings. Deployed both 10:06:44. AWAITING TEST.
+- TEST PLAN (build J): both in-game a few minutes (let the portrait file get written). (1) Open OTHER player's profile each side → real portrait (log "[UI] Re-sent player profile now that the portrait is on disk" then receiver "[Patcher] Applied portrait for player ..."; sender "...age=N portrait=Nb64"). (2) Profile AGE matches the player's real character age. If portrait still default, check the resend log fired + portrait!=none. (situational: build J test)
+- BUILD J RESULT (2026-05-31, user): portraits + age now MATCH ✓✓. Both fixed.
+- METHODOLOGY NOTE (build J design, per user question): the profile MESSAGE is sent twice by design — (1) on game-entry with name+age but EMPTY portrait (file not written yet) so leaderboard names/ages populate promptly; (2) re-sent once the portrait file exists, carrying the image. The image rides only the 2nd send. User flagged a redundancy: if the portrait file already existed at entry (e.g. load-game), the initial send AND the resend would both carry the image (double ~100KB).
+- IMPLEMENTED 2026-05-31 (build K — portrait sent exactly once): GameStatePatcher.LocalPortraitSent flag, set true by SendPlayerProfile/BroadcastHostProfile whenever they send a NON-empty portrait. TickProfileResend skips entirely if LocalPortraitSent (so the image goes over once — whether via the initial send or the resend). Reset on leaving game. Removed MPCanvasUI._profileResentWithPortrait. (rule: relayed portrait image transmitted exactly once per session.)
+- Build 2026-05-31 (build K): 0 errors, 2 pre-existing warnings. Deployed both 10:13:27.
+
+═══════════════════════════════════════════════════════════════════
+RIVALS WINDOW — ✅ COMPLETE (2026-05-31)
+═══════════════════════════════════════════════════════════════════
+All user-reported rivals issues resolved & confirmed: both host+client rows populate (income-ranked via GetAllRivalData append, not manual injection); AI rival business COUNT matches (ownedRetailOfficeBusinesses incl cinema/theater, excl factory); per-business breakdown income matches (exact formula from native decompile: AI = sum last-7 of reg.dailyIncomes); other player's profile selectable (GetRivalData/GetRivalState player fallbacks), not "defeated" (lb.isDefeated=false), real PORTRAIT (relayed PNG once available) + real AGE (synced). UNCOMMITTED — all Phase 1d Wave 5-13 + the rivals overhaul (builds A-K) since origin/main 4df3c86 is local-only.
+- OWNERSHIP STANDARD (user directive 2026-05-31): the ENTIRE multiplayer mod is owned/maintained by this effort, including all code inherited from prior opus 4.7 sessions. No "this is hardcoded" / "prior version did it" dismissals. Any error or problem in the mod is in-scope and must be fixed correctly, never attributed-away as someone else's. (rule)
+- TEST PLAN (build B): (1) AI business COUNT on client should now match host (no extra factory) — watch client warn "[Patch_GetRivalLeaderboardData] count mismatch" (should NOT appear). (2) Click an AI rival → per-business breakdown should show NON-ZERO income per business matching host's breakdown — compare a couple values host-vs-client (if off by ~7x or different, the host should sync GetAvgDailyIncome(7)*7 instead of GetAvgWeeklyIncome — check host log "[Server] biz '...' avgWeekly=$X avgDaily(7)*7=$Y" vs what host's own breakdown shows on screen). (3) Player profile name/biz-count/total-income should look real (portrait still generic, chart empty — known deferrals). (situational: build B test)

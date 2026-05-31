@@ -55,6 +55,16 @@ namespace BigAmbitionsMP
         private static int   _attempts;
         private static float _customizerFirstSeenAt = -1f;
 
+        /// <summary>
+        /// When BAMP_MANUAL_CUSTOMIZER=1 is set in the launcher env, the
+        /// autopilot does NOT auto-invoke IntroCharacterCustomizer.StartGame.
+        /// Instead it waits for the user to confirm the customizer manually
+        /// (detected by the customizer GameObject disappearing).  Lets a
+        /// tester pick a custom character name to verify the name flow
+        /// without losing the rest of the autopilot.
+        /// </summary>
+        private static bool _manualCustomizer = false;
+
         // Settle time after first detecting IntroCharacterCustomizer before
         // invoking StartGame() on it.  Invoking too early (when the customizer
         // GameObject exists but its UI hasn't finished Start()/coroutines)
@@ -99,7 +109,20 @@ namespace BigAmbitionsMP
             CurrentState    = State.WaitMenu;
             _stateEnteredAt = Time.realtimeSinceStartup;
             _attempts       = 0;
-            Plugin.Logger.LogInfo($"[Autopilot] BAMP_AUTOROLE='{r}' — role={CurrentRole} state={CurrentState}");
+
+            // Optional: BAMP_MANUAL_CUSTOMIZER=1 disables the auto-confirm of
+            // IntroCharacterCustomizer.StartGame so the tester can pick a
+            // custom character name.  Autopilot still drives everything else
+            // (lobby, connect, etc.); waits for the human to click Continue.
+            try
+            {
+                var m = Environment.GetEnvironmentVariable("BAMP_MANUAL_CUSTOMIZER");
+                _manualCustomizer = !string.IsNullOrWhiteSpace(m) && (m.Trim() == "1"
+                                  || m.Trim().Equals("true", StringComparison.OrdinalIgnoreCase));
+            }
+            catch { }
+
+            Plugin.Logger.LogInfo($"[Autopilot] BAMP_AUTOROLE='{r}' — role={CurrentRole} state={CurrentState} manualCustomizer={_manualCustomizer}");
         }
 
         private static void Transition(State next)
@@ -208,18 +231,48 @@ namespace BigAmbitionsMP
                         // CustomizerSettleSeconds for its UI to finish setting
                         // up, then invoke StartGame.  Invoking too early left
                         // the customizer with no UI rendered (observed once).
-                        if (FindCustomizer() != null)
+                        var customizer = FindCustomizer();
+                        if (customizer != null)
                         {
                             if (_customizerFirstSeenAt < 0f)
                             {
                                 _customizerFirstSeenAt = now;
-                                Plugin.Logger.LogInfo($"[Autopilot/{CurrentRole}] Customizer detected — settling for {CustomizerSettleSeconds:F0}s before StartGame()");
+                                if (_manualCustomizer)
+                                    Plugin.Logger.LogInfo($"[Autopilot/{CurrentRole}] Customizer detected — MANUAL mode, waiting for human to click Continue.");
+                                else
+                                    Plugin.Logger.LogInfo($"[Autopilot/{CurrentRole}] Customizer detected — settling for {CustomizerSettleSeconds:F0}s before StartGame()");
                             }
-                            else if (now - _customizerFirstSeenAt >= CustomizerSettleSeconds)
+                            else if (!_manualCustomizer && now - _customizerFirstSeenAt >= CustomizerSettleSeconds)
                             {
+                                // Wave 6 gate: don't auto-confirm until host's
+                                // RivalsSnapshot has arrived.  Once the
+                                // customizer's StartGame fires, SaveGameManager.New
+                                // → GenerateRivals runs immediately; we need
+                                // host's UUID queue populated by then.
+                                if (CurrentRole == Role.Client && !GameStatePatcher.ClientRivalsReady)
+                                {
+                                    if (_attempts != (int)inState)
+                                    {
+                                        _attempts = (int)inState;
+                                        Plugin.Logger.LogInfo($"[Autopilot/Client] customizer ready, but waiting for host RivalsSnapshot ({inState:F0}s)…");
+                                    }
+                                    return;
+                                }
                                 if (TryConfirmCustomizer())
                                     Transition(State.ConfirmingCustomizer);
                             }
+                            // In manual mode we sit here doing nothing until the
+                            // user finishes — they click Continue, the
+                            // IntroCharacterCustomizer GameObject destroys itself,
+                            // and the FindCustomizer()==null branch below fires.
+                        }
+                        else if (_customizerFirstSeenAt > 0f)
+                        {
+                            // Customizer disappeared after we'd seen it — user
+                            // confirmed manually (in _manualCustomizer mode) or
+                            // some other code closed it.  Move to Done.
+                            Plugin.Logger.LogInfo($"[Autopilot/{CurrentRole}] Customizer gone (manual confirm or external) — transitioning to Done.");
+                            Transition(State.Done);
                         }
                         // Heartbeat every 10s while we're still waiting for it to appear.
                         else if (inState > 10f && _attempts != (int)inState / 10)

@@ -84,6 +84,11 @@ namespace BigAmbitionsMP
         private float _timeSyncTimer = 3f;
         /// <summary>Counts down to next market broadcast (host, ~60 s).</summary>
         private float _marketSyncTimer = 60f;
+        // Portrait is written to disk lazily (after we first broadcast the
+        // profile), so the initial profile carries portrait=none.  Re-send the
+        // profile once the portrait file appears, until it goes out once.
+        private float _profileResendTimer = 5f;
+        private float _profileResendElapsed = 0f;
 
         // ── in-game player HUD (F9 toggle) ────────────────────────────────────
         private bool        _hudVisible;
@@ -249,6 +254,7 @@ namespace BigAmbitionsMP
             TickPositionSync();
             TickTimeSync();
             TickMarketSync();
+            TickProfileResend();
             TickIntroNamePrefill();
             TickSuppressBlackOverlay(); // backlog #6 fix
             TickToggleClientSuppressions();  // F3-F12 runtime toggles
@@ -1031,6 +1037,41 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogError($"[UI] TickMarketSync error: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// The character portrait PNG/JPG is written to disk lazily — AFTER the
+        /// initial profile broadcast — so that first send carries no portrait.
+        /// Once the file appears, re-send the profile (with portrait + age) so
+        /// remote players get the real face.  Sends once, then stops; gives up
+        /// after a couple of minutes.  Resets when leaving the game.
+        /// </summary>
+        private void TickProfileResend()
+        {
+            bool connected = MPClient.IsConnected || MPServer.IsRunning;
+            if (!IsInGame() || !connected) { GameStatePatcher.LocalPortraitSent = false; _profileResendElapsed = 0f; _profileResendTimer = 5f; return; }
+            // Already went out (either the initial game-entry send carried it, or
+            // a prior re-send did) — never send the image a second time.
+            if (GameStatePatcher.LocalPortraitSent) return;
+
+            _profileResendTimer -= Time.unscaledDeltaTime;
+            _profileResendElapsed += Time.unscaledDeltaTime;
+            if (_profileResendTimer > 0f) return;
+            _profileResendTimer = 3f;
+            if (_profileResendElapsed > 600f) { GameStatePatcher.LocalPortraitSent = true; return; }   // give up after ~10 min
+
+            try
+            {
+                // Only re-send once the portrait is actually readable (else wait,
+                // so we don't spam name/age every 3s).  The send sets
+                // LocalPortraitSent=true because the portrait is now non-empty.
+                string portrait = GameStatePatcher.ReadLocalPortraitBase64();
+                if (string.IsNullOrEmpty(portrait)) return;
+                if (MPClient.IsConnected) MPClient.SendPlayerProfile();
+                else if (MPServer.IsRunning) MPServer.BroadcastHostProfile();
+                Plugin.Logger.LogInfo("[UI] Re-sent player profile now that the portrait is on disk.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[UI] TickProfileResend: {ex.Message}"); }
         }
 
         // ── Player HUD ────────────────────────────────────────────────────────

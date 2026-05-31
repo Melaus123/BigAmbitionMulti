@@ -382,9 +382,12 @@ namespace BigAmbitionsMP
                     changes++;
                     // Log only non-trivial changes (something that has a name or
                     // isn't BusinessTypeName.Empty) so we don't spam at startup.
-                    if (!string.IsNullOrEmpty(info.BusinessName) || info.BusinessTypeName != 0)
+                    if (!string.IsNullOrEmpty(info.BusinessName) || info.BusinessTypeName != 0
+                        || !string.IsNullOrEmpty(info.BuildingOwnerRivalId)
+                        || !string.IsNullOrEmpty(info.BusinessOwnerRivalId)
+                        || info.RentedByPlayer)
                     {
-                        Plugin.Logger.LogInfo($"[BusinessSync] Sent change {info.AddressKey}: name='{info.BusinessName}' type={info.BusinessTypeName} desc='{info.BusinessDescription}' signType={info.SignType} sign=0x{info.SignLightPacked:X8}/0x{info.LampPacked:X8} logoShape='{info.LogoShape}' logoFont={info.LogoFont} logoColors=0x{info.LogoColorPacked:X8}/0x{info.FontColorPacked:X8}/0x{info.BackgroundColorPacked:X8}");
+                        Plugin.Logger.LogInfo($"[BusinessSync] Sent change {info.AddressKey}: name='{info.BusinessName}' type={info.BusinessTypeName} owners[bldg='{info.BuildingOwnerRivalId}' biz='{info.BusinessOwnerRivalId}' rented={info.RentedByPlayer}] sign=0x{info.SignLightPacked:X8}");
                     }
                 }
                 if (changes > 0)
@@ -425,6 +428,19 @@ namespace BigAmbitionsMP
                     RentPerDay         = reg.RentPerDay,
                     LastDeposit        = reg.lastDeposit,
                     BusinessDescription = SafeStr(reg.BusinessDescription),
+                    BuildingOwnerRivalId = SafeStr(reg.buildingOwnerRivalId),
+                    BusinessOwnerRivalId = SafeStr(reg.businessOwnerRivalId),
+                    RentedByPlayer       = reg.RentedByPlayer,
+                    // Two separate concepts:
+                    //   * Building owner (landlord) — host bought the property.
+                    //     reg.BuildingOwnedByPlayer is the canonical check;
+                    //     internally it looks up the registration in gi.realEstate.
+                    //   * Business runner (tenant) — host operates a business
+                    //     in the building.  reg.RentedByPlayer.
+                    // A player can be both at once (buy + run own business),
+                    // either, or neither.
+                    OwnerPlayerId         = SafeBuildingOwnedByPlayer(reg) ? MPConfig.PlayerId : "",
+                    BusinessOwnerPlayerId = reg.RentedByPlayer           ? MPConfig.PlayerId : "",
                 };
 
                 var sign = reg.signAppearanceSettings;
@@ -539,6 +555,18 @@ namespace BigAmbitionsMP
             catch { return ""; }
         }
 
+        /// <summary>
+        /// Wraps the BuildingOwnedByPlayer getter so an exception inside the
+        /// IL2CPP-Interop lookup doesn't kill snapshot building.  Defaults to
+        /// false on failure (safer to mis-attribute "not owned" than to
+        /// falsely claim ownership across the wire).
+        /// </summary>
+        private static bool SafeBuildingOwnedByPlayer(BuildingRegistration reg)
+        {
+            try { return reg.BuildingOwnedByPlayer; }
+            catch { return false; }
+        }
+
         private static bool EqualInfo(BusinessInfo a, BusinessInfo b)
         {
             return a.BusinessName             == b.BusinessName
@@ -558,7 +586,10 @@ namespace BigAmbitionsMP
                 && a.BackgroundColorPacked    == b.BackgroundColorPacked
                 && LogoFilesEqual(a.LogoFiles, b.LogoFiles)
                 && a.SharedSchedule           == b.SharedSchedule
-                && ScheduleEqual(a.Schedule, b.Schedule);
+                && ScheduleEqual(a.Schedule, b.Schedule)
+                && a.BuildingOwnerRivalId     == b.BuildingOwnerRivalId
+                && a.BusinessOwnerRivalId     == b.BusinessOwnerRivalId
+                && a.RentedByPlayer           == b.RentedByPlayer;
         }
 
         private static bool ScheduleEqual(System.Collections.Generic.List<ScheduleDayInfo> a, System.Collections.Generic.List<ScheduleDayInfo> b)

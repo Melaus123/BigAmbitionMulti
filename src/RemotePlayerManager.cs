@@ -204,6 +204,39 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Remove one remote player (they left the session).</summary>
+        /// <summary>
+        /// Looks up the in-character name for a remote PlayerId.  Falls back
+        /// to PlayerId if no profile has arrived yet for this player.
+        /// </summary>
+        public static string ResolveDisplayName(string playerId)
+        {
+            if (string.IsNullOrEmpty(playerId)) return "";
+            if (GameStatePatcher.ClientRivalNames.TryGetValue(playerId, out var n)
+                && !string.IsNullOrWhiteSpace(n)) return n;
+            return playerId;
+        }
+
+        /// <summary>
+        /// Called when a PlayerProfile message arrives — refreshes the
+        /// floating name tag above the matching remote-player avatar.
+        /// No-op if the player isn't currently spawned.
+        /// </summary>
+        public static void UpdateLabel(string playerId)
+        {
+            if (string.IsNullOrEmpty(playerId)) return;
+            if (!_players.TryGetValue(playerId, out var go) || go == null) return;
+            try
+            {
+                var t = go.transform.Find("BAMP_Label");
+                if (t == null) return;
+                var tmp = t.GetComponent<TextMeshProUGUI>();
+                if (tmp == null) return;
+                tmp.text = ResolveDisplayName(playerId);
+                Plugin.Logger.LogInfo($"[RemotePlayer] Label refreshed for '{playerId}' → '{tmp.text}'");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RemotePlayer] UpdateLabel '{playerId}': {ex.Message}"); }
+        }
+
         public static void Remove(string playerId)
         {
             if (_players.TryGetValue(playerId, out var go) && go != null)
@@ -1125,7 +1158,7 @@ namespace BigAmbitionsMP
                 rt.localScale = new Vector3(0.01f, 0.01f, 0.01f);
 
                 var tmp = labelGO.AddComponent<TextMeshProUGUI>();
-                tmp.text      = playerId;
+                tmp.text      = ResolveDisplayName(playerId);
                 tmp.fontSize  = 48f;
                 tmp.alignment = TextAlignmentOptions.Center;
                 tmp.color     = Color.white;

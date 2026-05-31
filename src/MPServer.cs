@@ -29,6 +29,21 @@ namespace BigAmbitionsMP
 
         private static readonly HashSet<NetPeer>        _clients   = new();
         private static readonly Dictionary<int, string> _peerNames = new(); // peer.Id → playerId
+
+        /// <summary>
+        /// PlayerId → CharacterName (Wave 5).  Populated by PlayerProfile
+        /// messages from each connected client + host's own profile.
+        /// Used as the display name in RivalsSnapshot / RivalsStatsSnapshot.
+        /// </summary>
+        public static readonly Dictionary<string, string> _characterNamesByPlayerId = new();
+
+        /// <summary>
+        /// PlayerId → most recent self-reported stats from that client (Wave 7).
+        /// Captured when client sends RivalsStatsRequest; used by host's
+        /// BuildRivalsStatsSnapshot to populate non-host player rows since
+        /// host has no source of truth for what other players own locally.
+        /// </summary>
+        private static readonly Dictionary<string, RivalsStatsRequestPayload> _clientSelfStats = new();
         private static Thread? _pollThread;
         private static volatile bool _running;
 
@@ -311,6 +326,89 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.RivalsStatsRequest:
+                {
+                    // CRITICAL: PollLoop runs on a BACKGROUND THREAD.  Building
+                    // the stats snapshot iterates IL2CPP-Interop objects
+                    // (gi.BuildingRegistrations, RivalData.WeeklyIncome,
+                    // ownedBusinesses lists) which is unsafe from non-main
+                    // threads — eventually native-crashes.  Marshal the work
+                    // onto Unity's main thread via EnqueueOnMainThread.
+                    // Self-stats capture (pure C# dict writes) is safe inline.
+                    var req = env.GetPayload<RivalsStatsRequestPayload>();
+                    if (req != null && !string.IsNullOrEmpty(req.PlayerId))
+                    {
+                        _clientSelfStats[req.PlayerId] = req;
+                        string nameForClient = _characterNamesByPlayerId.TryGetValue(req.PlayerId, out var nm) && !string.IsNullOrWhiteSpace(nm) ? nm : req.PlayerId;
+                        GameStatePatcher.ClientRivalStats[req.PlayerId] = new RivalStatsInfo
+                        {
+                            Id                   = req.PlayerId,
+                            Name                 = nameForClient,
+                            OwnedBuildingsCount  = req.SelfOwnedBuildingsCount,
+                            OwnedBusinessesCount = req.SelfOwnedBusinessesCount,
+                            WeeklyIncome         = req.SelfWeeklyIncome,
+                        };
+                        Plugin.Logger.LogInfo($"[Server] Stored self-stats from '{req.PlayerId}': bldgs={req.SelfOwnedBuildingsCount} biz={req.SelfOwnedBusinessesCount} income=${req.SelfWeeklyIncome:F0}.");
+                    }
+                    var peerCapture = peer;
+                    GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        try { SendRivalsStatsSnapshotTo(peerCapture); }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RivalsStatsRequest main-thread dispatch: {ex.Message}"); }
+                    });
+                    break;
+                }
+
+                case MessageType.PlayerProfile:
+                {
+                    var p = env.GetPayload<PlayerProfilePayload>();
+                    if (p != null && !string.IsNullOrEmpty(p.PlayerId))
+                    {
+                        _characterNamesByPlayerId[p.PlayerId] = p.CharacterName ?? "";
+                        if (p.AgeInYears > 0) GameStatePatcher.ClientPlayerAges[p.PlayerId] = p.AgeInYears;
+                        string resolvedName = string.IsNullOrWhiteSpace(p.CharacterName) ? p.PlayerId : p.CharacterName;
+                        // Populate HOST's local caches so host's own UI can
+                        // render this player as a rival.  Mirrors what the
+                        // client does on its side via EnsureRivalCachesPopulated.
+                        GameStatePatcher.ClientRivalNames[p.PlayerId] = resolvedName;
+                        // Add to player roster (drives Patch_Load_AddPlayers
+                        // injection of leaderboard rows for this player).
+                        if (p.PlayerId != MPConfig.PlayerId)
+                            GameStatePatcher.ClientPlayerRoster[p.PlayerId] = resolvedName;
+                        GameStatePatcher.EnqueueOnMainThread(() =>
+                        {
+                            try
+                            {
+                                // Mark IsPlayer=true so EnsureRivalCachesPopulated
+                                // skips adding this id to gi.rivalStates (which
+                                // would create a ghost leaderboard row).  Player
+                                // rows come solely from Patch_Load_AddPlayers.
+                                var injected = new RivalsSnapshotPayload();
+                                injected.Rivals.Add(new RivalInfo { Id = p.PlayerId, Name = resolvedName, IsPlayer = true });
+                                GameStatePatcher.EnsureRivalCachesPopulated(injected);
+                                // Decode this client's portrait so the HOST'S rivals
+                                // profile shows the client's real face.
+                                if (!string.IsNullOrEmpty(p.PortraitPngBase64))
+                                    GameStatePatcher.ApplyPlayerPortrait(p.PlayerId, p.PortraitPngBase64);
+                            }
+                            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Local rival cache add for client: {ex.Message}"); }
+                        });
+                        Plugin.Logger.LogInfo($"[Server] PlayerProfile from peer={peer.Id}: PlayerId='{p.PlayerId}' CharacterName='{p.CharacterName}'.  Re-broadcasting roster.");
+                        // Forward to all so every client (including the sender)
+                        // sees the updated mapping, and rebroadcast rivals roster
+                        // so the new name shows up immediately in popups.
+                        Broadcast(MessageEnvelope.Create(MessageType.PlayerProfile, "host", p));
+                        try
+                        {
+                            var snap = BuildRivalsSnapshot();
+                            Broadcast(MessageEnvelope.Create(MessageType.RivalsSnapshot, "host", snap));
+                            Plugin.Logger.LogInfo($"[Server] Re-broadcast rivals snapshot (profile update): {snap.Rivals.Count} rival(s).");
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Rivals re-broadcast on profile: {ex.Message}"); }
+                    }
+                    break;
+                }
+
                 default:
                     Plugin.Logger.LogWarning($"[Server] Unexpected message type {env.Type} from peer {peer.Id}");
                     break;
@@ -348,6 +446,9 @@ namespace BigAmbitionsMP
                     var snapshot = BuildWorldSnapshot();
                     Send(peer, MessageEnvelope.Create(MessageType.Welcome, "host", snapshot));
                     Plugin.Logger.LogInfo($"[Server] Late join by '{hello.PlayerId}', sent world snapshot.");
+                    // Also send the rival roster — must arrive before BusinessSnapshot so the
+                    // building-owner ID strings have name entries to resolve to.
+                    SendRivalsSnapshotTo(peer);
                     // Also send the business table — sent once, then deltas as they change.
                     SendBusinessSnapshotTo(peer);
                 }
@@ -428,6 +529,29 @@ namespace BigAmbitionsMP
             Broadcast(MessageEnvelope.Create(
                 MessageType.StartupRelease, "host", new StartupReleasePayload()));
             GameStatePatcher.EnqueueOnMainThread(() => TimeSync.EndStartupHold());
+
+            // Host profile (Wave 5) — broadcast the host's own character name
+            // BEFORE the rivals snapshot so it's available when receivers
+            // populate display names for player entries.
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                try { BroadcastHostProfile(); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Host profile broadcast: {ex.Message}"); }
+            });
+
+            // Rivals roster (Phase 1d Wave 2) — must broadcast BEFORE the
+            // business snapshot so client's RivalDataCache is populated when
+            // the building owner IDs arrive.
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                try
+                {
+                    var snap = BuildRivalsSnapshot();
+                    Broadcast(MessageEnvelope.Create(MessageType.RivalsSnapshot, "host", snap));
+                    Plugin.Logger.LogInfo($"[Server] Broadcast rivals snapshot: {snap.Rivals.Count} rival(s).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Initial RivalsSnapshot broadcast: {ex.Message}"); }
+            });
 
             // Business sync — Phase 1: once all clients are in-game, send the
             // full exterior business table to everyone.  Event-driven deltas
@@ -762,6 +886,315 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BroadcastInteriorSnapshotTo: {ex.Message}"); }
         }
 
+        // ── Player profile (Wave 5) ──────────────────────────────────────────
+
+        /// <summary>
+        /// Resolve a player's display name (in-character).  Falls back to the
+        /// PlayerId if the character name isn't known yet (e.g. before the
+        /// player has finished character creation or sent their profile).
+        /// </summary>
+        private static string DisplayNameFor(string playerId)
+        {
+            if (string.IsNullOrEmpty(playerId)) return "";
+            if (_characterNamesByPlayerId.TryGetValue(playerId, out var n) && !string.IsNullOrWhiteSpace(n))
+                return n;
+            return playerId;
+        }
+
+        /// <summary>
+        /// Host-side equivalent of MPClient.SendPlayerProfile.  Reads the
+        /// host's own CharacterData.name, writes it into our dict, and
+        /// broadcasts to all peers so their UIs use the in-character name.
+        /// Called from ReleaseStartupHold once everyone's in-game.
+        /// </summary>
+        public static void BroadcastHostProfile()
+        {
+            try
+            {
+                string name = MPConfig.PlayerId;
+                var gi = SaveGameManager.Current;
+                if (gi != null && gi.charactersData != null && gi.charactersData.Count > 0)
+                {
+                    var cd = gi.charactersData[0];
+                    var cn = cd?.name?.ToString();
+                    if (!string.IsNullOrWhiteSpace(cn)) name = cn;
+                }
+                _characterNamesByPlayerId[MPConfig.PlayerId] = name;
+                // Also seed the host's local UI lookup dict so when host's own
+                // UI calls GetRivalName(MPConfig.PlayerId), our Prefix returns
+                // the character name (used by leaderboard / popups on host).
+                GameStatePatcher.ClientRivalNames[MPConfig.PlayerId] = name;
+                string portrait = ""; try { portrait = GameStatePatcher.ReadLocalPortraitBase64(); } catch { }
+                int age = 0; try { age = GameStatePatcher.LocalAgeInYears(); } catch { }
+                var p = new PlayerProfilePayload { PlayerId = MPConfig.PlayerId, CharacterName = name, PortraitPngBase64 = portrait, AgeInYears = age };
+                if (!string.IsNullOrEmpty(portrait)) GameStatePatcher.LocalPortraitSent = true;   // image goes over once
+                Broadcast(MessageEnvelope.Create(MessageType.PlayerProfile, "host", p));
+                Plugin.Logger.LogInfo($"[Server] Broadcast host profile: PlayerId='{MPConfig.PlayerId}' CharacterName='{name}' age={age} portrait={(string.IsNullOrEmpty(portrait) ? "none" : "yes")}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BroadcastHostProfile: {ex.Message}"); }
+        }
+
+        // ── Rivals roster sync (Phase 1d Wave 2) ─────────────────────────────
+
+        /// <summary>
+        /// Build a snapshot of host's AI rival roster (id + name pairs) by
+        /// walking gi.rivalStates + resolving each id via GetRivalName.  Wave 3
+        /// also injects an entry for every human player in the session (their
+        /// PlayerId as both id and name for now — display name UX is later).
+        /// Receivers (clients) get matching name entries so building popups
+        /// can resolve "owned by [player]" without an "undefined" fallback.
+        /// </summary>
+        public static RivalsSnapshotPayload BuildRivalsSnapshot()
+        {
+            var snap = new RivalsSnapshotPayload();
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi != null && gi.rivalStates != null)
+                {
+                    foreach (var rs in gi.rivalStates)
+                    {
+                        if (rs == null) continue;
+                        string id = rs.rivalId?.ToString() ?? "";
+                        if (string.IsNullOrEmpty(id)) continue;
+                        string name = "";
+                        try { name = BigAmbitions.Rivals.RivalsHelper.GetRivalName(id) ?? ""; } catch { }
+                        snap.Rivals.Add(new RivalInfo { Id = id, Name = name });
+                    }
+                }
+
+                // Inject every human player as a "rival" entry so receivers
+                // can resolve "owned by [player X]" lookups.  Includes the host
+                // itself so the host's own PlayerId resolves on every client.
+                var seen = new System.Collections.Generic.HashSet<string>();
+                foreach (var r in snap.Rivals) if (!string.IsNullOrEmpty(r.Id)) seen.Add(r.Id);
+
+                // Host itself — marked IsPlayer so client renders via Postfix-injected
+                // button instead of consuming a slot in the UUID queue (which is sized
+                // to the AI-rival template count exactly).
+                if (!string.IsNullOrEmpty(MPConfig.PlayerId) && seen.Add(MPConfig.PlayerId))
+                    snap.Rivals.Add(new RivalInfo { Id = MPConfig.PlayerId, Name = DisplayNameFor(MPConfig.PlayerId), IsPlayer = true });
+                // All connected/known peers
+                foreach (var playerId in LobbyPlayers)
+                {
+                    if (string.IsNullOrEmpty(playerId)) continue;
+                    if (!seen.Add(playerId)) continue;
+                    snap.Rivals.Add(new RivalInfo { Id = playerId, Name = DisplayNameFor(playerId), IsPlayer = true });
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BuildRivalsSnapshot: {ex.Message}"); }
+            return snap;
+        }
+
+        public static void SendRivalsSnapshotTo(LiteNetLib.NetPeer peer)
+        {
+            if (peer == null) return;
+            try
+            {
+                var snap = BuildRivalsSnapshot();
+                Send(peer, MessageEnvelope.Create(MessageType.RivalsSnapshot, "host", snap));
+                Plugin.Logger.LogInfo($"[Server] Sent rivals snapshot to peer={peer.Id}: {snap.Rivals.Count} rival(s).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendRivalsSnapshotTo: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// The game's exact per-business weekly income, as shown in the rivals
+        /// detail breakdown (RivalBusinessesTable.Load, per native decompile):
+        ///   RentedByPlayer ? GetAvgDailyIncome(7) * 7
+        ///                  : sum of the last 7 entries of reg.dailyIncomes.
+        /// AI rival businesses (RentedByPlayer=false) use the simulated
+        /// dailyIncomes list (the same source RivalData.WeeklyIncome sums).
+        /// </summary>
+        public static float WeeklyIncomeForBusiness(BuildingRegistration reg)
+        {
+            if (reg == null) return 0f;
+            try
+            {
+                if (reg.RentedByPlayer)
+                {
+                    try { return reg.GetAvgDailyIncome(7) * 7f; } catch { return 0f; }
+                }
+                var di = reg.dailyIncomes;
+                if (di == null) return 0f;
+                int c = di.Count;
+                int start = c > 7 ? c - 7 : 0;
+                float s = 0f;
+                for (int i = start; i < c; i++) s += di[i];
+                return s;
+            }
+            catch { return 0f; }
+        }
+
+        /// <summary>
+        /// Build per-rival stats by iterating gi.BuildingRegistrations and
+        /// counting ownership matches per rivalId.  WeeklyIncome currently
+        /// approximated as sum of rent revenue from owned-as-landlord buildings;
+        /// a finer model (full business revenue) is a later refinement.
+        /// </summary>
+        public static RivalsStatsSnapshotPayload BuildRivalsStatsSnapshot()
+        {
+            var snap = new RivalsStatsSnapshotPayload();
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null) return snap;
+
+                // id → stats dict.  AI rivals come from gi.rivalStates; we read
+                // their AUTHORITATIVE income/counts straight from each rival's
+                // RivalData via the public RivalsHelper.GetRivalData API.  This
+                // does NOT depend on the rivals leaderboard UI having been
+                // opened — the old AiRivalDataRefs overlay only had data after
+                // the host opened the rivals app once, which is exactly the
+                // fragility that left AI income at $0 on the client.
+                var byId = new System.Collections.Generic.Dictionary<string, RivalStatsInfo>();
+                int aiWithData = 0, aiNonZero = 0;
+                if (gi.rivalStates != null)
+                {
+                    foreach (var rs in gi.rivalStates)
+                    {
+                        if (rs == null) continue;
+                        string id = rs.rivalId?.ToString() ?? "";
+                        if (string.IsNullOrEmpty(id)) continue;
+                        string name = "";
+                        try { name = BigAmbitions.Rivals.RivalsHelper.GetRivalName(id) ?? ""; } catch { }
+                        var info = new RivalStatsInfo { Id = id, Name = name };
+                        try
+                        {
+                            var rd = BigAmbitions.Rivals.RivalsHelper.GetRivalData(id);
+                            if (rd != null)
+                            {
+                                info.WeeklyIncome         = rd.WeeklyIncome;            // authoritative game calc
+                                // Leaderboard ROW counts the Retail/Office subset
+                                // (HostCountDiag: lb.ownedBusinesses.Count ==
+                                // rd.ownedRetailOfficeBusinesses.Count) — this is why
+                                // the host excludes factories from the count.  Send
+                                // THAT so the client's row matches.
+                                info.OwnedBusinessesCount = rd.ownedRetailOfficeBusinesses?.Count ?? 0;
+                                info.OwnedBuildingsCount  = rd.ownedBuildings?.Count  ?? 0;
+                                try { info.MostActiveNeighborhood = (int)rd.MostActiveNeighborhood; } catch { }
+                                try { info.AgeInYears = BigAmbitions.Rivals.RivalsHelper.GetRivalAgeInYears(rd); } catch { }
+                                try { info.IsDefeated = BigAmbitions.Rivals.RivalsHelper.IsRivalDefeated(id); } catch { }
+                                aiWithData++;
+                                if (info.WeeklyIncome != 0f) aiNonZero++;
+
+                                // Per-business breakdown (host-authoritative).  The
+                                // client can't compute AI business income locally
+                                // (no sales simulation), so we ship name/type/income
+                                // per business, keyed by AddressKey.  Iterate
+                                // ownedRetailOfficeBusinesses — that is the EXACT set
+                                // the leaderboard counts AND the detail breakdown
+                                // shows (Retail+Office+Cinema+Theater; factory/
+                                // warehouse excluded).  Confirmed via HostBizDiag
+                                // (which listed a Cinema + Theater but no factory).
+                                if (rd.ownedRetailOfficeBusinesses != null)
+                                {
+                                    foreach (var reg in rd.ownedRetailOfficeBusinesses)
+                                    {
+                                        if (reg == null) continue;
+                                        try
+                                        {
+                                            string addr = GameStateReader.AddressKey(reg);
+                                            // EXACT per-business income, replicating the game's
+                                            // RivalBusinessesTable.Load (from native decompile):
+                                            //   RentedByPlayer ? GetAvgDailyIncome(7)*7
+                                            //                  : Sum(last 7 of reg.dailyIncomes)
+                                            // AI rival businesses (RentedByPlayer=false) use the
+                                            // simulated dailyIncomes list — the same source the
+                                            // matching leaderboard total sums.  Fully computable
+                                            // here for every rival; no UI capture needed.
+                                            float wkInc = WeeklyIncomeForBusiness(reg);
+
+                                            info.Businesses.Add(new RivalBusinessInfo
+                                            {
+                                                AddressKey   = addr,
+                                                BusinessName = reg.BusinessName?.ToString() ?? "",
+                                                BusinessType = (int)reg.businessTypeName,
+                                                WeeklyIncome = wkInc,
+                                            });
+                                        }
+                                        catch { }
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] GetRivalData('{id}'): {ex.Message}"); }
+                        byId[id] = info;
+                    }
+                }
+                Plugin.Logger.LogInfo($"[Server] AI stats via GetRivalData: rivals={byId.Count} withData={aiWithData} nonZeroIncome={aiNonZero}.");
+
+                // Seed host + connected players so they appear with at least
+                // their identity even before they own anything.  Players are
+                // NOT in RivalDataCache, so GetRivalData skipped them above.
+                void SeedPlayer(string playerId)
+                {
+                    if (string.IsNullOrEmpty(playerId)) return;
+                    if (!byId.ContainsKey(playerId))
+                        byId[playerId] = new RivalStatsInfo { Id = playerId, Name = DisplayNameFor(playerId) };
+                }
+                SeedPlayer(MPConfig.PlayerId);
+                foreach (var p in LobbyPlayers) SeedPlayer(p);
+
+                // Other connected clients: use their self-reported stats — the
+                // host's gi doesn't know what other players own (no client→host
+                // ownership sync).  Pushed via RivalsStatsRequest when that
+                // client opens its own rivals app.
+                foreach (var kv in _clientSelfStats)
+                {
+                    if (string.IsNullOrEmpty(kv.Key)) continue;
+                    if (kv.Key == MPConfig.PlayerId) continue;   // host computes own below
+                    if (!byId.TryGetValue(kv.Key, out var entry)) continue;
+                    var req = kv.Value;
+                    entry.OwnedBuildingsCount  = req.SelfOwnedBuildingsCount;
+                    entry.OwnedBusinessesCount = req.SelfOwnedBusinessesCount;
+                    entry.WeeklyIncome         = req.SelfWeeklyIncome;
+                }
+
+                // Host's OWN player stats from gi.  AI rival counts now come
+                // from GetRivalData above, so this only handles the host
+                // player's owned buildings / operated businesses — no per-reg
+                // AI counting (which previously DOUBLE-COUNTED on top of the
+                // RivalData numbers and corrupted AI income).
+                if (byId.TryGetValue(MPConfig.PlayerId, out var hostStat) && gi.BuildingRegistrations != null)
+                {
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null) continue;
+                        try
+                        {
+                            if (reg.BuildingOwnedByPlayer) hostStat.OwnedBuildingsCount++;
+                            // Residential rentals are HOMES, not businesses.
+                            bool isResidential = false;
+                            try { isResidential = reg.BuildingCached != null && reg.BuildingCached.BuildingType == Buildings.BuildingType.Residential; } catch { }
+                            if (reg.RentedByPlayer && !isResidential)
+                            {
+                                hostStat.OwnedBusinessesCount++;
+                                try { hostStat.WeeklyIncome += reg.RentPerDay * 7f; } catch { }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+
+                snap.Stats.AddRange(byId.Values);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BuildRivalsStatsSnapshot: {ex.Message}"); }
+            return snap;
+        }
+
+        public static void SendRivalsStatsSnapshotTo(LiteNetLib.NetPeer peer)
+        {
+            if (peer == null) return;
+            try
+            {
+                var snap = BuildRivalsStatsSnapshot();
+                Send(peer, MessageEnvelope.Create(MessageType.RivalsStatsSnapshot, "host", snap));
+                Plugin.Logger.LogInfo($"[Server] Sent rivals stats snapshot to peer={peer.Id}: {snap.Stats.Count} stat block(s).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendRivalsStatsSnapshotTo: {ex.Message}"); }
+        }
+
         /// <summary>Broadcast the full business table to all peers (on for-sale list change).</summary>
         public static void BroadcastBusinessSnapshot()
         {
@@ -886,6 +1319,9 @@ namespace BigAmbitionsMP
             foreach (var peer in _clients)
                 peer.Send(writer, DeliveryMethod.ReliableOrdered);
         }
+
+        /// <summary>Public wrapper around Broadcast so external code (e.g. Harmony patches) can use it.</summary>
+        public static void BroadcastAny(MessageEnvelope env) => Broadcast(env);
 
         private static void Send(NetPeer peer, MessageEnvelope env)
         {
