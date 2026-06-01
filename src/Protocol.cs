@@ -20,6 +20,7 @@ namespace BigAmbitionsMP
         StartupStatus   = 8,   // Host → All: which players are still loading (waiting screen)
         ManualPause     = 9,   // Any → Host → All: the deliberate (pause-button) pause toggled
         LobbyPref       = 14,  // Client → Host: this player's lobby choices (currently: starting age).
+        WorldReady      = 15,  // Client → Host: "I've applied the world sync" — frozen-until-synced startup release gate.
 
         // Building ownership
         RentRequest     = 10,  // Client → Host: "I want to rent this building"

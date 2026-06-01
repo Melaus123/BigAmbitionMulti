@@ -38,10 +38,28 @@ namespace BigAmbitionsMP
         private const float FullSnapshotInterval = 30f;      // host: full resync cadence
         private const float CullInterval         = 0.5f;     // client: cull pass cadence
 
-        private const float ViewRadius = 300f;
-        private const float CullRadius = 360f;  // hysteresis — drop only when farther
+        // Client render radii.  A player only ever SEES the parked cars on the
+        // street around them (~20-40 at once), so a 300 m view spawned hundreds of
+        // pointless ghosts.  Tightened to roughly one block + margin.
+        private const float ViewRadius = 95f;
+        private const float CullRadius = 125f;  // hysteresis — drop only when farther
         private static readonly float ViewRadiusSq = ViewRadius * ViewRadius;
         private static readonly float CullRadiusSq = CullRadius * CullRadius;
+
+        // Host send radius.  The host tracks EVERY parked car the game spawns
+        // (thousands citywide); broadcasting them all is a huge, pointless burden.
+        // Only cars within this radius of SOME player (host or a connected client)
+        // can ever be rendered, so only those are sent.  A bit larger than the
+        // client view radius for movement margin between diffs.
+        private const float HostSendRadius = 160f;
+        private static readonly float HostSendRadiusSq = HostSendRadius * HostSendRadius;
+
+        // Unscaled "world settled" gate — replaces Time.timeSinceLevelLoad (which is
+        // SCALED and stalls under the startup-freeze timeScale=0, delaying parked
+        // broadcasts until after the unfreeze).  Counts real seconds since the scene
+        // loaded so the host streams parked cars DURING the frozen hold.
+        private static float _levelUnscaled;
+        private const float SettleSeconds = 2.5f;
 
         // ── Host capture ─────────────────────────────────────────────────────
         private static readonly Dictionary<long, GameObject> _hostTracked = new();
@@ -108,6 +126,13 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[ClientFix] Client parked-vehicle sync — released {releasedCount} ghost(s) back to pool, cleared known set.");
         }
 
+        /// <summary>Host-side count of currently-tracked parked cars — for the startup
+        /// "world is populated" gate (don't unpause onto empty streets).</summary>
+        public static int HostTrackedCount => _hostTracked.Count;
+
+        /// <summary>Client-side count of spawned parked ghosts — load diagnostics.</summary>
+        public static int ClientGhostCount => _clientGhosts.Count;
+
         public static void Reset()
         {
             _hostTracked.Clear();
@@ -117,6 +142,7 @@ namespace BigAmbitionsMP
             _fullTimer = 0f;
             _diagTimer = 0f;
             _cullTimer = 0f;
+            _levelUnscaled = 0f;
 
             // Release any leftover client ghosts cleanly back to the pool.
             foreach (var g in _clientGhosts.Values)
@@ -133,7 +159,11 @@ namespace BigAmbitionsMP
             try
             {
                 if (SaveGameManager.Current == null) return;
-                if (Time.timeSinceLevelLoad < 5f) return;
+                // Real-time settle gate (advances even while the world is frozen at
+                // timeScale=0) so the host begins streaming parked cars during the
+                // startup hold instead of only after the unfreeze.
+                _levelUnscaled += Time.unscaledDeltaTime;
+                if (_levelUnscaled < SettleSeconds) return;
 
                 if (MPServer.IsRunning)
                 {
@@ -188,12 +218,15 @@ namespace BigAmbitionsMP
             var snap = new ParkedSnapshotPayload { IsFullSnapshot = false };
             try
             {
+                var centers = GetPlayerCenters();
                 // Adds carry full per-car data so the client can spawn/place
-                // them when they come into view.
+                // them when they come into view.  Only send cars near a player —
+                // far cars can never be rendered and just waste bandwidth.
                 foreach (var key in _pendingAdds)
                 {
                     if (!_hostTracked.TryGetValue(key, out var go) || go == null) continue;
                     if (!go.activeInHierarchy) continue;
+                    if (!NearAnyPlayer(go.transform.position, centers)) continue;
                     var dto = MakeDto(key, go);
                     if (dto != null) snap.Cars.Add(dto);
                 }
@@ -215,11 +248,16 @@ namespace BigAmbitionsMP
             var snap = new ParkedSnapshotPayload { IsFullSnapshot = true };
             try
             {
+                var centers = GetPlayerCenters();
                 var dead = new List<long>();
                 foreach (var kv in _hostTracked)
                 {
                     if (kv.Value == null) { dead.Add(kv.Key); continue; }
                     if (!kv.Value.activeInHierarchy) continue;
+                    // Cull: only stream cars within reach of SOME player.  The host
+                    // tracks every car the game spawns citywide (thousands); a client
+                    // can only ever render the handful around itself.
+                    if (!NearAnyPlayer(kv.Value.transform.position, centers)) continue;
                     var dto = MakeDto(kv.Key, kv.Value);
                     if (dto != null) snap.Cars.Add(dto);
                 }
@@ -229,12 +267,56 @@ namespace BigAmbitionsMP
                 _pendingAdds.Clear();
                 _pendingRemoves.Clear();
                 _diffTimer = 0f;
+
+                Plugin.Logger.LogInfo(
+                    $"[ParkedSync] HOST full snapshot: sent {snap.Cars.Count}/{_hostTracked.Count} car(s) " +
+                    $"within {HostSendRadius}m of {centers.Count} player(s).");
             }
             catch (Exception ex)
             {
                 Plugin.Logger.LogWarning($"[ParkedSync] BuildFullSnapshot: {ex.Message}");
             }
             return snap;
+        }
+
+        // ── Host-side proximity cull ─────────────────────────────────────────
+        private static readonly List<Vector3> _centerScratch = new();
+
+        /// <summary>Positions to cull parked cars against: the host player plus every
+        /// connected client's avatar (the host renders remote players, so their
+        /// transforms give each client's world position).</summary>
+        private static List<Vector3> GetPlayerCenters()
+        {
+            _centerScratch.Clear();
+            try
+            {
+                var localChar = PlayerHelper.PlayerController?.Character;
+                if (localChar != null) _centerScratch.Add(localChar.transform.position);
+            }
+            catch { }
+            try
+            {
+                var remotes = RemotePlayerManager.GetRemotePlayerTransforms();
+                if (remotes != null)
+                    foreach (var t in remotes)
+                        if (t != null) _centerScratch.Add(t.position);
+            }
+            catch { }
+            return _centerScratch;
+        }
+
+        private static bool NearAnyPlayer(Vector3 pos, List<Vector3> centers)
+        {
+            // No known player position → don't cull (sending is safer than starving).
+            if (centers.Count == 0) return true;
+            for (int i = 0; i < centers.Count; i++)
+            {
+                float dx = pos.x - centers[i].x;
+                float dy = pos.y - centers[i].y;
+                float dz = pos.z - centers[i].z;
+                if (dx * dx + dy * dy + dz * dz <= HostSendRadiusSq) return true;
+            }
+            return false;
         }
 
         private static ParkedVehicleDto? MakeDto(long key, GameObject go)

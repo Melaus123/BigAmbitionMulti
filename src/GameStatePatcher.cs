@@ -1036,8 +1036,10 @@ namespace BigAmbitionsMP
         public static void ApplyBusinessSnapshot(BusinessSnapshotPayload payload)
         {
             if (!ClientApplyOwnership) return;   // gated under existing kill-switch flag
+            MPLoadProfiler.Mark($"CLIENT ApplyBusinessSnapshot QUEUED ({payload.Businesses.Count} buildings)");
             RunOnMainThread(() =>
             {
+                long _profT0 = MPLoadProfiler.NowMs;
                 // ── BEFORE-apply per-type count (Phase 1b investigation) ────
                 LogClientTypeBreakdown("ApplyBusinessSnapshot.BEFORE");
 
@@ -1075,6 +1077,18 @@ namespace BigAmbitionsMP
                 // colored map highlights stay frozen until the user toggles a
                 // filter manually.
                 RefreshMapFilters();
+                MPLoadProfiler.Span($"CLIENT ApplyBusinessSnapshot APPLIED ({applied}/{payload.Businesses.Count})", _profT0);
+
+                // Frozen-until-synced: the business table is the bulk of the world
+                // state.  Mark it applied so the overlay-freeze gate knows the world
+                // sync is done.  We only tell the host we're world-ready once we are
+                // BOTH synced (here) AND our loading overlay has cleared (= frozen).
+                // If we're already frozen, send now; otherwise the overlay gate sends
+                // it the moment our overlay clears (covers the apply-before-freeze
+                // ordering).
+                MPClient.WorldSyncApplied = true;
+                if (MPClient.IsConnected && TimeSync.IsStartupHeld)
+                    MPClient.SendWorldReady();
             });
         }
 
@@ -1284,6 +1298,25 @@ namespace BigAmbitionsMP
             });
         }
 
+        /// <summary>HOST: apply a business a CLIENT built/changed (in a building it owns)
+        /// to the host's own world, so the host sees it.  ApplyBusinessInfoLocal is
+        /// identity-relative, so OwnerPlayerId != host resolves to that player as the
+        /// building's owner (buildingOwnerRivalId).  The host's BusinessSync.Tick then
+        /// detects the changed reg and relays it to the other clients.  MAIN THREAD.</summary>
+        public static void ApplyClientBusinessChange(BusinessInfo info)
+        {
+            if (info == null) return;
+            RunOnMainThread(() =>
+            {
+                var reg = FindRegistration(info.AddressKey);
+                bool signObjNull = reg == null || reg.signAppearanceSettings == null;
+                if (ApplyBusinessInfoLocal(info))
+                    Plugin.Logger.LogInfo($"[Patcher/Host] Client business applied: {info.AddressKey} = '{info.BusinessName}' sign=type{info.SignType} (owner '{info.OwnerPlayerId}', signObjNull={signObjNull}).");
+                else
+                    Plugin.Logger.LogWarning($"[Patcher/Host] Client business NOT applied (no reg?): {info.AddressKey}");
+            });
+        }
+
         private static bool ApplyBusinessInfoLocal(BusinessInfo info)
         {
             try
@@ -1376,9 +1409,9 @@ namespace BigAmbitionsMP
                     if (!string.IsNullOrEmpty(info.OwnerPlayerId))
                     {
                         if (info.OwnerPlayerId == MPConfig.PlayerId)
-                            newRented = true;        // building is the receiving client's own
+                        { newRented = true; newBuildingOwner = ""; }  // it's OURS — clear any stray rival-owner
                         else
-                            newBuildingOwner = info.OwnerPlayerId;  // owned by another player; treat as rival
+                            newBuildingOwner = info.OwnerPlayerId;    // owned by another player; treat as rival
                     }
                     if (!string.IsNullOrEmpty(info.BusinessOwnerPlayerId)
                         && info.BusinessOwnerPlayerId != MPConfig.PlayerId)
@@ -1709,6 +1742,23 @@ namespace BigAmbitionsMP
             if (reg == null) return;
             reg.AvailableForRent = false;
             Plugin.Logger.LogInfo($"[Patcher] {addressKey} marked unavailable.");
+        }
+
+        /// <summary>HOST: reflect a client's rent in the host's OWN game so the host
+        /// sees the building leave the for-rent pool and show as that player's
+        /// business — mirroring how clients represent the host's player-owned
+        /// buildings (buildingOwnerRivalId = the player's id).  MAIN THREAD.</summary>
+        public static void HostReflectPlayerRent(string addressKey, string playerId)
+        {
+            try
+            {
+                var reg = FindRegistration(addressKey);
+                if (reg == null) { Plugin.Logger.LogWarning($"[Patcher/Host] rent reflect: no reg for '{addressKey}'."); return; }
+                reg.AvailableForRent = false;                       // out of the for-rent pool
+                try { reg.buildingOwnerRivalId = playerId; } catch { }   // owned by that player (as a rival)
+                Plugin.Logger.LogInfo($"[Patcher/Host] {addressKey} now owned by player '{playerId}' (removed from for-rent).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher/Host] HostReflectPlayerRent: {ex.Message}"); }
         }
 
         private static void MarkBuildingAvailable(string addressKey)

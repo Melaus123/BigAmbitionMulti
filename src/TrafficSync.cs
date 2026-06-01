@@ -147,6 +147,18 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>Host-side count of active driving vehicles in the world — for the
+        /// startup "world is populated" gate.</summary>
+        public static int HostTrafficCount()
+        {
+            try
+            {
+                var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<VehicleComponent>());
+                return arr == null ? 0 : arr.Length;
+            }
+            catch { return 0; }
+        }
+
         // ── Host: build the traffic snapshot ──────────────────────────────────
 
         private static TrafficSnapshotPayload BuildSnapshot()

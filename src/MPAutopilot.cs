@@ -159,9 +159,9 @@ namespace BigAmbitionsMP
                 switch (CurrentState)
                 {
                     case State.WaitMenu:
-                        // Brief wait so the main menu has time to settle.
-                        // Plugin loads ~3-5s after launch anyway, so this
-                        // delay starts AFTER initial bootstrap.
+                        // Brief settle only.  The UI theme is frontloaded independently
+                        // (MPCanvasUI.TickThemeCapture), so the autopilot no longer has to
+                        // wait for a menu injection — nothing breaks if we proceed fast.
                         if (inState < InitialMenuWaitSeconds) return;
                         if (CurrentRole == Role.Host)   Transition(State.HostStart);
                         else                            Transition(State.ClientConnecting);

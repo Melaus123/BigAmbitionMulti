@@ -58,6 +58,7 @@ namespace BigAmbitionsMP
             if (_startupHold) return;
             _startupHold = true;
             ApplyNetwork(0f);
+            MPLoadProfiler.Mark($"FREEZE begin — timeScale now {Time.timeScale}");
             Plugin.Logger.LogInfo("[TimeSync] Startup hold — game paused until all players have loaded.");
         }
 
@@ -67,6 +68,7 @@ namespace BigAmbitionsMP
             if (!_startupHold) return;
             _startupHold = false;
             ApplyNetwork(1f);
+            MPLoadProfiler.Mark("FREEZE end — game running");
             Plugin.Logger.LogInfo("[TimeSync] Startup hold released — game running.");
         }
 

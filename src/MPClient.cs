@@ -118,18 +118,22 @@ namespace BigAmbitionsMP
                     break;
 
                 case MessageType.StartGameNew:
+                    MPLoadProfiler.Mark("CLIENT recv StartGameNew");
                     HandleStartGame(env, isNew: true);
                     break;
 
                 case MessageType.StartGameLoad:
+                    MPLoadProfiler.Mark("CLIENT recv StartGameLoad");
                     HandleStartGame(env, isNew: false);
                     break;
 
                 case MessageType.Welcome:
+                    MPLoadProfiler.Mark("CLIENT recv Welcome (WorldSnapshot)");
                     HandleWelcome(env);
                     break;
 
                 case MessageType.StartupRelease:
+                    MPLoadProfiler.Mark("CLIENT recv StartupRelease (go-live)");
                     HandleStartupRelease();
                     break;
 
@@ -194,6 +198,7 @@ namespace BigAmbitionsMP
                     break;
 
                 case MessageType.BusinessSnapshot:
+                    MPLoadProfiler.Mark($"CLIENT recv BusinessSnapshot ({env.Data?.Length ?? 0} bytes json)");
                     HandleBusinessSnapshot(env);
                     break;
 
@@ -206,6 +211,7 @@ namespace BigAmbitionsMP
                     break;
 
                 case MessageType.RivalsSnapshot:
+                    MPLoadProfiler.Mark("CLIENT recv RivalsSnapshot");
                     HandleRivalsSnapshot(env);
                     break;
 
@@ -225,6 +231,7 @@ namespace BigAmbitionsMP
                 case MessageType.LoadData:
                     // Host shipped us our stored .hsg — write + load it (coordinator
                     // marshals the load onto the main thread).
+                    MPLoadProfiler.Mark($"CLIENT recv LoadData (own .hsg, {env.Data?.Length ?? 0} bytes json)");
                     MPSaveCoordinator.ClientHandleLoadData(env.GetPayload<LoadDataPayload>());
                     break;
 
@@ -603,6 +610,8 @@ namespace BigAmbitionsMP
         public static void SendPlayerInGame()
         {
             if (!IsConnected) return;
+            _worldReadySent = false;   // re-arm the world-ready ack for this load
+            WorldSyncApplied = false;  // re-arm: world sync not yet applied for this load
             var payload = new PlayerInGamePayload { PlayerId = MPConfig.PlayerId };
             Send(MessageEnvelope.Create(MessageType.PlayerInGame, MPConfig.PlayerId, payload));
             Plugin.Logger.LogInfo("[Client] Sent PlayerInGame to host.");
@@ -611,6 +620,25 @@ namespace BigAmbitionsMP
             // display it as our identity.  Character name lives in
             // gi.charactersData[0].name; falls back to PlayerId if not yet set.
             SendPlayerProfile();
+        }
+
+        private static bool _worldReadySent;
+
+        /// <summary>Set true once the client has APPLIED the bulk world sync (business
+        /// snapshot).  The overlay-freeze gate reads this to decide when to send
+        /// WorldReady — the client must be BOTH overlay-cleared (frozen) AND
+        /// world-synced before it counts as truly in the game.</summary>
+        public static bool WorldSyncApplied { get; set; }
+
+        /// <summary>Tell the host we've APPLIED the world sync, so it can release the
+        /// frozen-until-synced startup hold once everyone is ready.  One-shot per load.</summary>
+        public static void SendWorldReady()
+        {
+            if (!IsConnected || _worldReadySent) return;
+            _worldReadySent = true;
+            Send(MessageEnvelope.Create(MessageType.WorldReady, MPConfig.PlayerId,
+                new PlayerInGamePayload { PlayerId = MPConfig.PlayerId }));
+            Plugin.Logger.LogInfo("[Client] Sent WorldReady to host (world sync applied).");
         }
 
         /// <summary>
@@ -658,6 +686,16 @@ namespace BigAmbitionsMP
             };
             Send(MessageEnvelope.Create(MessageType.SaveData, MPConfig.PlayerId, p));
             Plugin.Logger.LogInfo($"[Client] Sent SaveData: session='{sessionName}' raw={rawLength}B day={slot?.Day}.");
+        }
+
+        /// <summary>Sends a business this player runs (in a building it owns) up to the
+        /// host so the host applies it + relays to the other players.  Change-driven
+        /// (BusinessSync.TickClient only calls this when the building's info changed).</summary>
+        public static void SendBusinessChange(BusinessInfo info)
+        {
+            if (!IsConnected || info == null) return;
+            Send(MessageEnvelope.Create(MessageType.BusinessChange, MPConfig.PlayerId,
+                new BusinessChangePayload { Info = info }));
         }
 
         /// <summary>Reports this client's self-chosen starting age to the host so it

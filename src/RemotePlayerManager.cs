@@ -177,6 +177,19 @@ namespace BigAmbitionsMP
             if (SaveGameManager.Current == null) return;
             if (!ClientSpawnEnabled) return;          // CLAUDE-DIAGNOSTIC kill-switch
 
+            // Don't spawn/update remote players until WE are actually standing in the
+            // game world.  SaveGameManager.Current goes non-null at SaveGameManager.New()
+            // — which runs BEFORE character creation — so the check above is true while
+            // we're still in the customizer with no PlayerController.  Spawning a physics
+            // capsule into the intro/char-creation scene (then tearing it down on the
+            // scene transition) is the suspected host crash when a client finishes
+            // customization long before we do.  Gate on the real in-world indicator.
+            if (PlayerHelper.PlayerController == null)
+            {
+                DiagEarlyRemoteData(p.PlayerId);
+                return;
+            }
+
             if (!_players.TryGetValue(p.PlayerId, out var go) || go == null)
                 go = SpawnRemotePlayer(p.PlayerId);
 
@@ -201,6 +214,28 @@ namespace BigAmbitionsMP
         {
             if (_players.TryGetValue(playerId, out var go) && go != null)
                 go.GetComponent<RemotePlayerMover>()?.FireTrigger(paramIndex);
+        }
+
+        // ── Crash diagnostic (2026-06-01) ────────────────────────────────────
+        // Fires when remote-player data arrives while OUR own world isn't loaded
+        // yet (PlayerController null but a save exists = we're in character
+        // creation).  This is the suspected host-CTD window when a client loads
+        // far ahead of us.  The spawn is now suppressed; this log confirms whether
+        // the path was actually being hit, so if the crash persists we know to look
+        // elsewhere.  Throttled + unscaled-time so it can't spam at 10 Hz.
+        private static float _earlyDataNextLog;
+        private static int   _earlyDataCount;
+
+        private static void DiagEarlyRemoteData(string playerId)
+        {
+            _earlyDataCount++;
+            float now = Time.unscaledTime;
+            if (now < _earlyDataNextLog) return;
+            _earlyDataNextLog = now + 2f;
+            Plugin.Logger.LogWarning(
+                $"[RemotePlayer] EARLY-DATA: remote-player data for '{playerId}' arrived while " +
+                $"local world not ready (PlayerController null, save loaded) — spawn suppressed. " +
+                $"count={_earlyDataCount}");
         }
 
         /// <summary>Remove one remote player (they left the session).</summary>

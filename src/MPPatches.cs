@@ -76,77 +76,73 @@ namespace BigAmbitionsMP
 
 
         // ── Patch: BuildingHelper.RentBuilding ────────────────────────────────
+        // NESTED [HarmonyPatch] class — REQUIRED.  Plugin.cs only applies patch
+        // classes that carry a CLASS-level [HarmonyPatch] (it skips method-level
+        // patches on the bare MPPatches class).  This was previously written as
+        // method-level patches on MPPatches → they were silently NEVER applied,
+        // so a client's rent was never sent to the host (the bug being fixed).
 
         [HarmonyPatch(typeof(BuildingHelper), nameof(BuildingHelper.RentBuilding))]
-        [HarmonyPrefix]
-        public static bool Prefix_RentBuilding(Building building, float dailyRent, float lastDeposit)
+        public static class Patch_RentBuilding
         {
-            // Not in multiplayer session — let it run normally
-            if (!MPServer.IsRunning && !MPClient.IsConnected)
-                return true;
-
-            // This is a server-confirmed execution dispatched by GameStatePatcher — allow it
-            if (SuppressNextRentRequest)
+            static bool Prefix(Building building, float dailyRent, float lastDeposit)
             {
-                SuppressNextRentRequest = false;
+                // Not in multiplayer session — let it run normally
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+
+                // Server-confirmed execution dispatched by GameStatePatcher — allow it.
+                if (SuppressNextRentRequest) { SuppressNextRentRequest = false; return true; }
+
+                // Client — rent LOCALLY (so the UI flows to the start-business /
+                // terminate-contract window and the client actually owns it), AND
+                // notify the host so it records ownership + tells the other players.
+                // (Optimistic: blocking the rent broke the in-game UI; on the common
+                // no-conflict path local + host agree.  Host broadcasts the confirm to
+                // OTHERS only, so we never double-rent ourselves.)
+                if (MPClient.IsConnected)
+                {
+                    var key = GameStateReader.AddressKey(building);
+                    MPClient.RequestRentBuilding(key, dailyRent, lastDeposit);
+                    Plugin.Logger.LogInfo($"[Patch] Client renting {key} locally + notifying host.");
+                    return true;
+                }
+
+                // Host — let it rent locally; the Postfix broadcasts the result.
                 return true;
             }
 
-            // We're a client — send request to host and block local execution
-            if (MPClient.IsConnected)
+            static void Postfix(Building building, float dailyRent, float lastDeposit)
             {
+                if (!MPServer.IsRunning) return;
+                if (SuppressNextRentRequest) return;   // already handled
+
                 var key = GameStateReader.AddressKey(building);
-                MPClient.RequestRentBuilding(key, dailyRent, lastDeposit);
-                Plugin.Logger.LogInfo($"[Patch] RentBuilding intercepted for client: {key}");
-                return false; // Skip original — wait for host confirmation
+                MPServer.BuildingOwners[key] = "host";
+                MPServer.BroadcastRentConfirmToClients(key, dailyRent, lastDeposit);
+                Plugin.Logger.LogInfo($"[Patch] Host rented {key}, broadcasted to clients.");
             }
-
-            // We're the host — let it run locally, then broadcast the result
-            // (the result broadcast happens in the Postfix)
-            return true;
-        }
-
-        [HarmonyPatch(typeof(BuildingHelper), nameof(BuildingHelper.RentBuilding))]
-        [HarmonyPostfix]
-        public static void Postfix_RentBuilding(Building building, float dailyRent, float lastDeposit)
-        {
-            // Only the host needs to broadcast after a local rent
-            if (!MPServer.IsRunning) return;
-            if (SuppressNextRentRequest) return; // already handled
-
-            var key = GameStateReader.AddressKey(building);
-            MPServer.BuildingOwners[key] = "host";
-
-            var payload = new BuildingOwnershipPayload
-            {
-                AddressKey    = key,
-                OwnerPlayerId = "host",
-                DailyRent     = dailyRent,
-                LastDeposit   = lastDeposit
-            };
-            // Broadcast to clients so they mark the building as taken
-            // (Re-using the existing broadcast path)
-            MPServer.BroadcastRentConfirmToClients(key, dailyRent, lastDeposit);
-            Plugin.Logger.LogInfo($"[Patch] Host rented {key}, broadcasted to clients.");
         }
 
         // ── Patch: GameManager.Update ─────────────────────────────────────────
         // Postfix runs AFTER the game's own Update, so TickSuppression overrides
         // any timeScale the game set during its frame — we reliably win the race.
-
+        // NESTED class — REQUIRED so Plugin.cs actually applies it (see the rent
+        // patch note above; method-level patches on bare MPPatches are skipped).
         [HarmonyPatch(typeof(GameManager), "Update")]
-        [HarmonyPostfix]
-        public static void Postfix_GameManagerUpdate()
+        public static class Patch_GameManager_Update
         {
-            GameStatePatcher.DrainQueue();
-
-            // Second timeScale enforcement point — runs after the game's own Update,
-            // so nothing the game does mid-frame can let the world pause or skip.
-            // (MPCanvasUI.LateUpdate is the primary point; this backs it up.)
-            if (MPServer.IsRunning || MPClient.IsConnected)
+            static void Postfix()
             {
-                bool frozen = TimeSync.ManualPaused || TimeSync.IsStartupHeld;
-                UnityEngine.Time.timeScale = frozen ? 0f : 1f;
+                GameStatePatcher.DrainQueue();
+
+                // Second timeScale enforcement point — runs after the game's own Update,
+                // so nothing the game does mid-frame can let the world pause or skip.
+                // (MPCanvasUI.LateUpdate is the primary point; this backs it up.)
+                if (MPServer.IsRunning || MPClient.IsConnected)
+                {
+                    bool frozen = TimeSync.ManualPaused || TimeSync.IsStartupHeld;
+                    UnityEngine.Time.timeScale = frozen ? 0f : 1f;
+                }
             }
         }
 
@@ -209,30 +205,37 @@ namespace BigAmbitionsMP
         // EVERY animator in the game (all NPCs) — the instance check against the
         // local player's animator keeps the body free for everything else.
 
+        // NESTED classes — REQUIRED so Plugin.cs applies them (method-level patches on
+        // bare MPPatches are skipped — see the rent patch note).  These were silently
+        // dead, so remote players' one-off action animations never synced.
         [HarmonyPatch(typeof(UnityEngine.Animator), nameof(UnityEngine.Animator.SetTrigger), typeof(string))]
-        [HarmonyPostfix]
-        public static void Postfix_Animator_SetTrigger_Name(UnityEngine.Animator __instance, string __0)
+        public static class Patch_Animator_SetTrigger_Name
         {
-            try
+            static void Postfix(UnityEngine.Animator __instance, string __0)
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                if (__instance != RemotePlayerManager.GetLocalAnimator()) return;
-                RemotePlayerManager.SendLocalTrigger(RemotePlayerManager.ResolveTriggerIndex(__0));
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    if (__instance != RemotePlayerManager.GetLocalAnimator()) return;
+                    RemotePlayerManager.SendLocalTrigger(RemotePlayerManager.ResolveTriggerIndex(__0));
+                }
+                catch { /* never let an animator trigger break the game */ }
             }
-            catch { /* never let an animator trigger break the game */ }
         }
 
         [HarmonyPatch(typeof(UnityEngine.Animator), nameof(UnityEngine.Animator.SetTrigger), typeof(int))]
-        [HarmonyPostfix]
-        public static void Postfix_Animator_SetTrigger_Hash(UnityEngine.Animator __instance, int __0)
+        public static class Patch_Animator_SetTrigger_Hash
         {
-            try
+            static void Postfix(UnityEngine.Animator __instance, int __0)
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                if (__instance != RemotePlayerManager.GetLocalAnimator()) return;
-                RemotePlayerManager.SendLocalTrigger(RemotePlayerManager.ResolveTriggerIndex(__0));
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    if (__instance != RemotePlayerManager.GetLocalAnimator()) return;
+                    RemotePlayerManager.SendLocalTrigger(RemotePlayerManager.ResolveTriggerIndex(__0));
+                }
+                catch { /* never let an animator trigger break the game */ }
             }
-            catch { /* never let an animator trigger break the game */ }
         }
 
         // ── Patch: TaxiController.OnClickToUseTaxi ────────────────────────────
@@ -742,17 +745,19 @@ namespace BigAmbitionsMP
         // LogoHelper.GetBusinessLogoTexture(name, size, playerBusiness) takes
         // a bool that decides which path it queries: false → Addressables
         // (AI businesses), true → on-disk files (player businesses).
-        // UpdateSign passes that bool from reg.RentedByPlayer, but on the
-        // client reg.RentedByPlayer is FALSE even for host-owned businesses
-        // (RentedByPlayer means "the LOCAL player owns it" — host owns it
-        // from their perspective, not from the client's).  So client always
-        // queries Addressables, never finds host's customized JPGs, and
-        // shows the generic fallback.
+        // UpdateSign passes that bool from reg.RentedByPlayer — which is only
+        // true when the LOCAL player owns the business.  For a business owned
+        // by the OTHER player it's FALSE on BOTH sides: the client sees a
+        // host-owned business as not-player, and the host sees a client-owned
+        // business the same way.  Either side then queries Addressables, never
+        // finds the synced JPGs, and renders the generic "?" sign.
         //
-        // Fix: a Prefix on GetBusinessLogoTexture that, when MPClient is
-        // connected and a player-business directory exists for the requested
-        // name, flips the playerBusiness arg to true.  Sign now loads from
-        // the JPG files we synced to disk.
+        // Fix: a Prefix on GetBusinessLogoTexture that — whenever we're in MP
+        // (host OR client) and a player-business logo directory exists for the
+        // requested name — flips the playerBusiness arg to true, so the sign
+        // loads from the JPG files we synced to disk.  AI businesses (no logo
+        // dir) are untouched; a local player business already passes true.
+        // (Class name says "ForceClient" for history; it now serves the host too.)
         [HarmonyPatch]
         public static class Patch_GetBusinessLogoTexture_ForceClient
         {
@@ -775,7 +780,7 @@ namespace BigAmbitionsMP
             private static int _flipCount;
             static void Prefix(string __0, object __1, ref bool __2)
             {
-                if (!MPClient.IsConnected) return;
+                if (!MPClient.IsConnected && !MPServer.IsRunning) return;   // MP only — host OR client
                 if (__2) return;   // already true
                 if (string.IsNullOrEmpty(__0)) return;
                 try

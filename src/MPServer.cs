@@ -161,6 +161,12 @@ namespace BigAmbitionsMP
         // The game stays frozen at timeScale 0 until every roster player is in
         // this set, then the host releases it for everyone.  One-shot per game.
         private static readonly HashSet<string> _inGamePlayers = new();
+        // Frozen-until-synced: a player is "world ready" once it has APPLIED the world
+        // sync (host = as soon as its own world is loaded; clients = after they ack
+        // WorldReady).  The startup hold releases only when ALL players are world-ready,
+        // so nobody gets control of an un-synced world.
+        private static readonly HashSet<string> _worldReadyPlayers = new();
+        private static bool _hostSnapshotsReady;   // host's own world loaded → can serve snapshots
         private static readonly object _startupLock = new();
         private static bool _startupReleased;
 
@@ -219,17 +225,18 @@ namespace BigAmbitionsMP
             LobbyPlayers.Clear();
             _peerNames.Clear();
             _clients.Clear();
-            lock (_startupLock) { _inGamePlayers.Clear(); _startupReleased = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _hostSnapshotsReady = false; _startupReleased = false; }
         }
 
         /// <summary>Host clicked "Start New Game" in the lobby.</summary>
         public static void StartNewGame(GameVariablesDto settings)
         {
             if (!_running) return;
+            MPLoadProfiler.Mark($"HOST StartNewGame ({settings.Difficulty}) — {_clients.Count} client(s)");
             IsInLobby = false;
 
             // Re-arm the startup pause hold for this new game.
-            lock (_startupLock) { _inGamePlayers.Clear(); _startupReleased = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _hostSnapshotsReady = false; _startupReleased = false; }
 
             // Per-player starting cash: each client gets the host-designated amount
             // (their override, else the difficulty base).  The host now designates
@@ -288,10 +295,11 @@ namespace BigAmbitionsMP
         public static void StartLoadGame()
         {
             if (!_running) return;
+            MPLoadProfiler.Mark($"HOST StartLoadGame (session='{ChosenLoadSession}') — {_clients.Count} client(s)");
             IsInLobby = false;
 
             // Re-arm the startup pause hold for this new game.
-            lock (_startupLock) { _inGamePlayers.Clear(); _startupReleased = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _hostSnapshotsReady = false; _startupReleased = false; }
 
             // Phase 4: if a multiplayer session exists, resume it — the host holds
             // every player's .hsg, so it ships each connected client its own and
@@ -387,7 +395,10 @@ namespace BigAmbitionsMP
                     {
                         wasHeld = true;
                         _inGamePlayers.Remove(leftPlayer);
-                        waiting = LobbyPlayers.Where(p => !_inGamePlayers.Contains(p)).ToList();
+                        _worldReadyPlayers.Remove(leftPlayer);
+                        // Release if the REMAINING players are all world-ready (the
+                        // leaver no longer gates the hold).
+                        waiting = LobbyPlayers.Where(p => !_worldReadyPlayers.Contains(p)).ToList();
                         if (LobbyPlayers.Count > 0 && waiting.Count == 0)
                         {
                             _startupReleased = true;
@@ -444,6 +455,10 @@ namespace BigAmbitionsMP
 
                 case MessageType.PlayerInGame:
                     HandleClientPlayerInGame(env);
+                    break;
+
+                case MessageType.WorldReady:
+                    HandleWorldReady(env);
                     break;
 
                 case MessageType.ManualPause:
@@ -552,36 +567,52 @@ namespace BigAmbitionsMP
                         // injection of leaderboard rows for this player).
                         if (p.PlayerId != MPConfig.PlayerId)
                             GameStatePatcher.ClientPlayerRoster[p.PlayerId] = resolvedName;
-                        GameStatePatcher.EnqueueOnMainThread(() =>
+                        Plugin.Logger.LogInfo($"[Server] PlayerProfile from peer={peer.Id}: PlayerId='{p.PlayerId}' CharacterName='{p.CharacterName}'.  Re-broadcasting roster.");
+                        // Forward to all so every client (including the sender) sees the
+                        // updated mapping.  Pure byte-forward — always safe.
+                        Broadcast(MessageEnvelope.Create(MessageType.PlayerProfile, "host", p));
+
+                        // Everything below — populating gi.rivalStates, decoding the
+                        // portrait into a Texture2D/Sprite, and BuildRivalsSnapshot —
+                        // touches IL2CPP game systems that DO NOT EXIST while the HOST is
+                        // still in character creation / the intro scene.  Running them
+                        // there NATIVE-CRASHES the host (uncatchable) when a client loads
+                        // far ahead of it.  The name/roster were already stored above
+                        // (pure C#), and the host re-broadcasts full rivals state on
+                        // go-live, so deferring this costs nothing but a transient
+                        // portrait.  Gate on the host being truly in the game world.
+                        if (!HostSnapshotsReady)
                         {
+                            Plugin.Logger.LogInfo($"[Server] PlayerProfile '{p.PlayerId}': host not in-world yet — deferred rivals/portrait/snapshot work (avoids intro-scene crash).");
+                        }
+                        else
+                        {
+                            GameStatePatcher.EnqueueOnMainThread(() =>
+                            {
+                                try
+                                {
+                                    // Mark IsPlayer=true so EnsureRivalCachesPopulated
+                                    // skips adding this id to gi.rivalStates (which
+                                    // would create a ghost leaderboard row).  Player
+                                    // rows come solely from Patch_Load_AddPlayers.
+                                    var injected = new RivalsSnapshotPayload();
+                                    injected.Rivals.Add(new RivalInfo { Id = p.PlayerId, Name = resolvedName, IsPlayer = true });
+                                    GameStatePatcher.EnsureRivalCachesPopulated(injected);
+                                    // Decode this client's portrait so the HOST'S rivals
+                                    // profile shows the client's real face.
+                                    if (!string.IsNullOrEmpty(p.PortraitPngBase64))
+                                        GameStatePatcher.ApplyPlayerPortrait(p.PlayerId, p.PortraitPngBase64);
+                                }
+                                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Local rival cache add for client: {ex.Message}"); }
+                            });
                             try
                             {
-                                // Mark IsPlayer=true so EnsureRivalCachesPopulated
-                                // skips adding this id to gi.rivalStates (which
-                                // would create a ghost leaderboard row).  Player
-                                // rows come solely from Patch_Load_AddPlayers.
-                                var injected = new RivalsSnapshotPayload();
-                                injected.Rivals.Add(new RivalInfo { Id = p.PlayerId, Name = resolvedName, IsPlayer = true });
-                                GameStatePatcher.EnsureRivalCachesPopulated(injected);
-                                // Decode this client's portrait so the HOST'S rivals
-                                // profile shows the client's real face.
-                                if (!string.IsNullOrEmpty(p.PortraitPngBase64))
-                                    GameStatePatcher.ApplyPlayerPortrait(p.PlayerId, p.PortraitPngBase64);
+                                var snap = BuildRivalsSnapshot();
+                                Broadcast(MessageEnvelope.Create(MessageType.RivalsSnapshot, "host", snap));
+                                Plugin.Logger.LogInfo($"[Server] Re-broadcast rivals snapshot (profile update): {snap.Rivals.Count} rival(s).");
                             }
-                            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Local rival cache add for client: {ex.Message}"); }
-                        });
-                        Plugin.Logger.LogInfo($"[Server] PlayerProfile from peer={peer.Id}: PlayerId='{p.PlayerId}' CharacterName='{p.CharacterName}'.  Re-broadcasting roster.");
-                        // Forward to all so every client (including the sender)
-                        // sees the updated mapping, and rebroadcast rivals roster
-                        // so the new name shows up immediately in popups.
-                        Broadcast(MessageEnvelope.Create(MessageType.PlayerProfile, "host", p));
-                        try
-                        {
-                            var snap = BuildRivalsSnapshot();
-                            Broadcast(MessageEnvelope.Create(MessageType.RivalsSnapshot, "host", snap));
-                            Plugin.Logger.LogInfo($"[Server] Re-broadcast rivals snapshot (profile update): {snap.Rivals.Count} rival(s).");
+                            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Rivals re-broadcast on profile: {ex.Message}"); }
                         }
-                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Rivals re-broadcast on profile: {ex.Message}"); }
                     }
                     break;
                 }
@@ -591,6 +622,16 @@ namespace BigAmbitionsMP
                     // — safe on the poll thread.
                     MPSaveCoordinator.HostHandleSaveData(env.GetPayload<SaveDataPayload>());
                     break;
+
+                case MessageType.BusinessChange:
+                {
+                    // A client built/changed a business in a building it owns.  Apply it
+                    // to the host's world so the host sees it; the host's BusinessSync.Tick
+                    // then relays it to the other clients.
+                    var bc = env.GetPayload<BusinessChangePayload>();
+                    if (bc?.Info != null) GameStatePatcher.ApplyClientBusinessChange(bc.Info);
+                    break;
+                }
 
                 case MessageType.LobbyPref:
                 {
@@ -713,41 +754,140 @@ namespace BigAmbitionsMP
             MarkPlayerInGame(payload?.PlayerId ?? env.SenderId);
         }
 
+        /// <summary>Send a peer the full world state (owners+market, host profile,
+        /// rivals, businesses) — on the main thread (IL2CPP).  Used for both late-join
+        /// and the frozen-until-synced startup hold (sent while the client is frozen on
+        /// the wait screen, so it applies before anyone gets control).</summary>
+        public static void SendWorldStateTo(NetPeer peer)
+        {
+            if (peer == null) return;
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                try
+                {
+                    var snapshot = BuildWorldSnapshot();
+                    Send(peer, MessageEnvelope.Create(MessageType.Welcome, "host", snapshot));
+                    BroadcastHostProfile();
+                    SendRivalsSnapshotTo(peer);
+                    SendBusinessSnapshotTo(peer);
+                    MPLoadProfiler.Mark($"HOST sent full world state to peer {peer.Id}");
+                    Plugin.Logger.LogInfo($"[Server] Sent full world state to peer {peer.Id}.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendWorldStateTo: {ex.Message}"); }
+            });
+        }
+
         /// <summary>
-        /// Called when a player (host or client) confirms their game scene has
-        /// finished loading.  Once every roster player is in-game, releases the
-        /// startup pause hold for everyone.  One-shot — ignored after release.
+        /// Called when a player (host or client) confirms their game SCENE has loaded.
+        /// Frozen-until-synced: we do NOT release here — instead we send that peer its
+        /// world snapshots (during the freeze).  The host's own scene-load also marks
+        /// the host world-ready (its world is the source) and flushes snapshots to any
+        /// clients already waiting.  Release happens later, in MarkWorldReady.
         /// </summary>
         public static void MarkPlayerInGame(string playerId)
         {
-            bool release = false;
-            List<string> waiting;
+            bool hostJustReady = false;
+            List<NetPeer> sendTo = new();
             lock (_startupLock)
             {
                 if (_startupReleased) return;
                 _inGamePlayers.Add(playerId);
-                int total = LobbyPlayers.Count;
-                Plugin.Logger.LogInfo(
-                    $"[Server] Player in-game: '{playerId}' ({_inGamePlayers.Count}/{total})");
+                Plugin.Logger.LogInfo($"[Server] Scene loaded: '{playerId}' ({_inGamePlayers.Count}/{LobbyPlayers.Count})");
+                MPLoadProfiler.Mark($"HOST scene-loaded '{playerId}' ({_inGamePlayers.Count}/{LobbyPlayers.Count})");
 
-                waiting = LobbyPlayers.Where(p => !_inGamePlayers.Contains(p)).ToList();
-                if (total > 0 && waiting.Count == 0)
+                bool isHost = playerId == MPConfig.PlayerId;
+                if (isHost && !_hostSnapshotsReady)
+                {
+                    // The host's own world loaded — it's the source of truth, so it can
+                    // serve snapshots now.  Flush to any clients already on the wait screen.
+                    _hostSnapshotsReady = true;
+                    hostJustReady = true;
+                    foreach (var p in _clients)
+                        if (_peerNames.TryGetValue(p.Id, out var nm) && _inGamePlayers.Contains(nm))
+                            sendTo.Add(p);
+                }
+                else if (!isHost && _hostSnapshotsReady)
+                {
+                    // A client's scene is ready and the host can serve — send its world now.
+                    foreach (var p in _clients)
+                        if (_peerNames.TryGetValue(p.Id, out var nm) && nm == playerId)
+                            sendTo.Add(p);
+                }
+            }
+
+            foreach (var p in sendTo) SendWorldStateTo(p);
+            // The host does NOT mark itself world-ready here.  Its game scene has
+            // loaded (PlayerController spawned) so it can SERVE snapshots, but the
+            // host's loading OVERLAY is usually still up and the world is still
+            // streaming in.  MPCanvasUI.TickOverlayFreezeGate marks the host
+            // world-ready only once that overlay has cleared — so the freeze holds
+            // until the host (typically the last to finish loading) has truly
+            // entered the game.
+            if (hostJustReady)
+                MPLoadProfiler.Mark("HOST world loaded — awaiting loading overlay before world-ready");
+            BroadcastStartupStatus(WorldWaitingList());
+        }
+
+        /// <summary>A player has APPLIED the world sync.  Once everyone is world-ready
+        /// the startup hold releases for all — so the game unfreezes onto a fully-synced
+        /// world.  hostSelf marks the host (whose world is authoritative).</summary>
+        public static void MarkWorldReady(string playerId, bool hostSelf = false)
+        {
+            bool release = false;
+            lock (_startupLock)
+            {
+                if (_startupReleased) return;
+                if (string.IsNullOrEmpty(playerId)) return;
+                if (hostSelf && !_hostSnapshotsReady) return;   // host world not loaded yet
+                _worldReadyPlayers.Add(playerId);
+                int total = LobbyPlayers.Count;
+                int ready = LobbyPlayers.Count(p => _worldReadyPlayers.Contains(p));
+                Plugin.Logger.LogInfo($"[Server] World-ready: '{playerId}' ({ready}/{total})");
+                MPLoadProfiler.Mark($"HOST world-ready '{playerId}' ({ready}/{total})");
+                if (total > 0 && ready >= total)
                 {
                     _startupReleased = true;
                     release = true;
                 }
             }
-            if (release) ReleaseStartupHold("all players loaded");
-            else         BroadcastStartupStatus(waiting);
+            if (release) ReleaseStartupHold("all players world-ready");
+            else         BroadcastStartupStatus(WorldWaitingList());
         }
 
-        /// <summary>Players who have not yet finished loading — for the host's own startup screen.</summary>
+        private static void HandleWorldReady(MessageEnvelope env)
+        {
+            var payload = env.GetPayload<PlayerInGamePayload>();
+            MarkWorldReady(payload?.PlayerId ?? env.SenderId);
+        }
+
+        /// <summary>True once the host's own game world has loaded (PlayerController
+        /// spawned) so it can serve snapshots — even if its overlay is still up.</summary>
+        public static bool HostSnapshotsReady
+        {
+            get { lock (_startupLock) return _hostSnapshotsReady; }
+        }
+
+        /// <summary>True once the host has been marked world-ready (its loading
+        /// overlay cleared).  Used by the overlay gate to avoid re-marking.</summary>
+        public static bool HostIsWorldReady
+        {
+            get { lock (_startupLock) return _worldReadyPlayers.Contains(MPConfig.PlayerId); }
+        }
+
+        /// <summary>Roster players who are NOT yet world-ready (for the wait screen).</summary>
+        private static List<string> WorldWaitingList()
+        {
+            lock (_startupLock)
+                return LobbyPlayers.Where(p => !_worldReadyPlayers.Contains(p)).ToList();
+        }
+
+        /// <summary>Players not yet world-ready — for the host's own startup screen.</summary>
         public static List<string> GetStartupWaitingFor()
         {
             lock (_startupLock)
             {
                 if (_startupReleased) return new List<string>();
-                return LobbyPlayers.Where(p => !_inGamePlayers.Contains(p)).ToList();
+                return LobbyPlayers.Where(p => !_worldReadyPlayers.Contains(p)).ToList();
             }
         }
 
@@ -775,47 +915,26 @@ namespace BigAmbitionsMP
 
         private static void ReleaseStartupHold(string reason)
         {
-            Plugin.Logger.LogInfo($"[Server] Releasing startup pause hold ({reason}).");
+            // Frozen-until-synced: the world snapshots (owners/market, host profile,
+            // rivals, businesses) were already sent to each peer DURING the hold (see
+            // SendWorldStateTo on scene-load).  By the time we get here everyone is
+            // world-ready, so release just unfreezes onto a fully-synced world.
+            Plugin.Logger.LogInfo($"[Server] Releasing startup pause hold ({reason}) — world already synced.");
+            MPLoadProfiler.Mark($"HOST ReleaseStartupHold ({reason}) — unfreeze (world pre-synced)");
             Broadcast(MessageEnvelope.Create(
                 MessageType.StartupRelease, "host", new StartupReleasePayload()));
             GameStatePatcher.EnqueueOnMainThread(() => TimeSync.EndStartupHold());
 
-            // Host profile (Wave 5) — broadcast the host's own character name
-            // BEFORE the rivals snapshot so it's available when receivers
-            // populate display names for player entries.
-            GameStatePatcher.EnqueueOnMainThread(() =>
+            // Safety net: if we got here via the timeout watchdog (a client never
+            // acked world-ready), make sure everyone still receives the world state.
+            if (reason == "startup timeout")
             {
-                try { BroadcastHostProfile(); }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Host profile broadcast: {ex.Message}"); }
-            });
-
-            // Rivals roster (Phase 1d Wave 2) — must broadcast BEFORE the
-            // business snapshot so client's RivalDataCache is populated when
-            // the building owner IDs arrive.
-            GameStatePatcher.EnqueueOnMainThread(() =>
-            {
-                try
+                GameStatePatcher.EnqueueOnMainThread(() =>
                 {
-                    var snap = BuildRivalsSnapshot();
-                    Broadcast(MessageEnvelope.Create(MessageType.RivalsSnapshot, "host", snap));
-                    Plugin.Logger.LogInfo($"[Server] Broadcast rivals snapshot: {snap.Rivals.Count} rival(s).");
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Initial RivalsSnapshot broadcast: {ex.Message}"); }
-            });
-
-            // Business sync — Phase 1: once all clients are in-game, send the
-            // full exterior business table to everyone.  Event-driven deltas
-            // (BusinessChange) follow from BusinessSync.Tick after this.
-            GameStatePatcher.EnqueueOnMainThread(() =>
-            {
-                try
-                {
-                    var snap = BusinessSync.BuildFullSnapshot();
-                    Broadcast(MessageEnvelope.Create(MessageType.BusinessSnapshot, "host", snap));
-                    Plugin.Logger.LogInfo($"[Server] Broadcast business snapshot: {snap.Businesses.Count} buildings.");
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Initial BusinessSnapshot broadcast: {ex.Message}"); }
-            });
+                    try { BroadcastHostProfile(); Broadcast(MessageEnvelope.Create(MessageType.RivalsSnapshot, "host", BuildRivalsSnapshot())); BroadcastBusinessSnapshot(); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Timeout-release world resend: {ex.Message}"); }
+                });
+            }
         }
 
         // ── Manual pause ──────────────────────────────────────────────────────
@@ -967,9 +1086,19 @@ namespace BigAmbitionsMP
             BuildingOwners[req.AddressKey] = env.SenderId;
             req.OwnerPlayerId = env.SenderId;
 
-            // Confirm to all clients (including the requester)
-            Broadcast(MessageEnvelope.Create(MessageType.RentConfirm, "host", req));
-            Plugin.Logger.LogInfo($"[Server] Rent confirmed: {req.AddressKey} → {env.SenderId}");
+            // Confirm to the OTHER clients (not the requester — it already rented
+            // locally, so re-applying would double-charge it).  They mark it taken.
+            var confirm = MessageEnvelope.Create(MessageType.RentConfirm, "host", req);
+            foreach (var p in _clients)
+                if (p != peer) Send(p, confirm);
+            Plugin.Logger.LogInfo($"[Server] Rent confirmed: {req.AddressKey} → {env.SenderId} (relayed to {_clients.Count - 1} other client(s)).");
+
+            // Reflect it in the HOST's own game (main thread — IL2CPP): take the
+            // building off the for-rent pool + mark it owned by that player, so the
+            // host sees it occupied as the client's business (was missing — the host
+            // only updated its dict, never its game state).
+            string addr = req.AddressKey, owner = env.SenderId;
+            GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostReflectPlayerRent(addr, owner));
             // (No event-driven save here: ownership is already tracked live on the
             //  host, and cash is live-streamed — so a crash right after a purchase
             //  loses neither.  Business internals ride the periodic autosave.)
@@ -1113,8 +1242,13 @@ namespace BigAmbitionsMP
             if (peer == null) return;
             try
             {
+                long t0 = MPLoadProfiler.NowMs;
                 var snap = BusinessSync.BuildFullSnapshot();
-                Send(peer, MessageEnvelope.Create(MessageType.BusinessSnapshot, "host", snap));
+                MPLoadProfiler.Span($"HOST BuildFullSnapshot ({snap.Businesses.Count} buildings, {snap.BuildingsForSale.Count} for-sale)", t0);
+                var env = MessageEnvelope.Create(MessageType.BusinessSnapshot, "host", snap);
+                int bytes = env.Serialize().Length;
+                Send(peer, env);
+                MPLoadProfiler.Mark($"HOST sent BusinessSnapshot to '{peer.Id}': {bytes} bytes ({snap.Businesses.Count} buildings)");
                 Plugin.Logger.LogInfo($"[Server] Sent business snapshot to '{peer.Id}': {snap.Businesses.Count} buildings, {snap.BuildingsForSale.Count} for-sale.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendBusinessSnapshotTo: {ex.Message}"); }
@@ -1465,14 +1599,30 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendRivalsStatsSnapshotTo: {ex.Message}"); }
         }
 
+        // Collapse bursts: at go-live the release path AND the first for-sale check
+        // both want to send a full table within a few hundred ms.  One is enough.
+        private static int _lastFullSnapshotTick = -100000;
+
         /// <summary>Broadcast the full business table to all peers (on for-sale list change).</summary>
         public static void BroadcastBusinessSnapshot()
         {
             if (!_running) return;
+            if (Environment.TickCount - _lastFullSnapshotTick < 3000)
+            {
+                Plugin.Logger.LogInfo("[Server] BusinessSnapshot broadcast skipped (duplicate within 3s).");
+                MPLoadProfiler.Mark("HOST BusinessSnapshot broadcast SKIPPED (dedupe <3s)");
+                return;
+            }
+            _lastFullSnapshotTick = Environment.TickCount;
             try
             {
+                long t0 = MPLoadProfiler.NowMs;
                 var snap = BusinessSync.BuildFullSnapshot();
-                Broadcast(MessageEnvelope.Create(MessageType.BusinessSnapshot, "host", snap));
+                MPLoadProfiler.Span($"HOST BuildFullSnapshot (broadcast; {snap.Businesses.Count} buildings)", t0);
+                var env = MessageEnvelope.Create(MessageType.BusinessSnapshot, "host", snap);
+                int bytes = env.Serialize().Length;
+                Broadcast(env);
+                MPLoadProfiler.Mark($"HOST broadcast BusinessSnapshot: {bytes} bytes ({snap.Businesses.Count} buildings)");
                 Plugin.Logger.LogInfo($"[Server] Broadcast business snapshot: {snap.Businesses.Count} buildings, {snap.BuildingsForSale.Count} for-sale.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BroadcastBusinessSnapshot: {ex.Message}"); }

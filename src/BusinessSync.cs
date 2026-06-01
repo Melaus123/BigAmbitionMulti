@@ -358,6 +358,12 @@ namespace BigAmbitionsMP
         public static void Tick()
         {
             if (!MPServer.IsRunning) return;
+            // During the startup hold the initial full table is delivered per-client by
+            // SendWorldStateTo (which also seeds _lastSent + the for-sale hash).  Running
+            // the change-detector / for-sale broadcast here too would send a SECOND full
+            // table to everyone (the duplicate seen in the load profile).  Skip until the
+            // world is live; steady-state deltas resume after release.
+            if (TimeSync.IsStartupHeld) return;
             float now = UnityEngine.Time.realtimeSinceStartup;
             if (now - _lastPollAt < PollIntervalSeconds) return;
             _lastPollAt = now;
@@ -402,10 +408,59 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] Tick: {ex.Message}"); }
         }
 
+        // ── Client → host: push THIS player's owned-business changes up ───────
+        private static readonly Dictionary<string, BusinessInfo> _lastSentClient = new();
+        private static float _lastClientPollAt;
+
+        /// <summary>CLIENT: change-driven sync of the businesses THIS player runs (rented
+        /// buildings) up to the host, so the host + other players see them.  Mirrors the
+        /// host detector: polls every PollIntervalSeconds, sends a building ONLY when its
+        /// info actually changed — no idle "nothing changed" traffic.  The host applies it
+        /// to its world and its own Tick relays it to the other clients.</summary>
+        public static void TickClient()
+        {
+            if (!MPClient.IsConnected) return;
+            float now = UnityEngine.Time.realtimeSinceStartup;
+            if (now - _lastClientPollAt < PollIntervalSeconds) return;
+            _lastClientPollAt = now;
+
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null) return;
+
+                int changes = 0;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null) continue;
+                    bool mine = false;
+                    try { mine = reg.RentedByPlayer; } catch { }
+                    if (!mine) continue;                       // only buildings this client runs a business in
+
+                    var info = ReadInfo(reg);
+                    if (info == null) continue;
+                    info.OwnerPlayerId         = MPConfig.PlayerId;   // it's ours — the host attributes it to us
+                    info.BusinessOwnerPlayerId = MPConfig.PlayerId;
+
+                    if (_lastSentClient.TryGetValue(info.AddressKey, out var prev) && EqualInfo(prev, info))
+                        continue;                              // unchanged — don't send
+
+                    _lastSentClient[info.AddressKey] = info;
+                    MPClient.SendBusinessChange(info);
+                    changes++;
+                    Plugin.Logger.LogInfo($"[BusinessSync/Client] → host {info.AddressKey}: name='{info.BusinessName}' type={info.BusinessTypeName} sign=type{info.SignType}/light0x{info.SignLightPacked:X8}/lamp0x{info.LampPacked:X8}");
+                }
+                if (changes > 0) Plugin.Logger.LogInfo($"[BusinessSync/Client] Pushed {changes} owned-business change(s) to host.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] TickClient: {ex.Message}"); }
+        }
+
         /// <summary>Reset state on host shutdown / new game start.</summary>
         public static void Reset()
         {
             _lastSent.Clear();
+            _lastSentClient.Clear();
+            _lastClientPollAt = 0f;
             _lastPollAt = 0f;
         }
 
@@ -439,7 +494,7 @@ namespace BigAmbitionsMP
                     //     in the building.  reg.RentedByPlayer.
                     // A player can be both at once (buy + run own business),
                     // either, or neither.
-                    OwnerPlayerId         = SafeBuildingOwnedByPlayer(reg) ? MPConfig.PlayerId : "",
+                    OwnerPlayerId         = ResolveOwnerPlayerId(addr, reg),
                     BusinessOwnerPlayerId = reg.RentedByPlayer           ? MPConfig.PlayerId : "",
                 };
 
@@ -565,6 +620,21 @@ namespace BigAmbitionsMP
         {
             try { return reg.BuildingOwnedByPlayer; }
             catch { return false; }
+        }
+
+        /// <summary>Who owns this building, as a network playerId, for the BusinessInfo
+        /// receivers translate: if a CLIENT rented it (tracked in BuildingOwners), send
+        /// that player's id so the renter sees RentedByPlayer=true and others see it as
+        /// that player's; otherwise fall back to the host's own bought-property check.</summary>
+        private static string ResolveOwnerPlayerId(string addr, BuildingRegistration reg)
+        {
+            try
+            {
+                if (MPServer.BuildingOwners.TryGetValue(addr, out var o) && !string.IsNullOrEmpty(o) && o != "host")
+                    return o;   // a client rented this building
+            }
+            catch { }
+            return SafeBuildingOwnedByPlayer(reg) ? MPConfig.PlayerId : "";
         }
 
         private static bool EqualInfo(BusinessInfo a, BusinessInfo b)
