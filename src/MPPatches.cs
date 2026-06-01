@@ -1607,5 +1607,190 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: SaveGamePathHelper.CurrentVersionFolderPath ────────────────
+        // Durable MP load: the game's SaveGameManager.Load locates a save by
+        // re-scanning CurrentVersionFolderPath() (the single-player version folder).
+        // MP saves live under _BAMP_MP, which that scan never sees.  While an MP load
+        // is in progress (MPSaveCoordinator.LoadRedirectFolder set, on the main thread,
+        // only around the Load call) we redirect this to the MP session folder so the
+        // game's own Load finds + loads our save natively — no staging, and MP saves
+        // never touch the single-player folder (anti-cheat for free).
+        [HarmonyPatch(typeof(SaveGamePathHelper), nameof(SaveGamePathHelper.CurrentVersionFolderPath))]
+        public static class Patch_CurrentVersionFolderPath_MpRedirect
+        {
+            static void Postfix(ref string __result)
+            {
+                var redirect = MPSaveCoordinator.LoadRedirectFolder;
+                if (!string.IsNullOrEmpty(redirect)) __result = redirect;
+            }
+        }
+
+        // ── In-game pause menu (UI.MiniMenu.MiniMenu) ─────────────────────────
+        // The Escape pause menu's "Save" and "Save and Exit to Desktop" buttons
+        // call SaveGameManager into the SINGLE-PLAYER folder.  In an MP session
+        // that would write a player's progress only to their solo save and lose
+        // it to the host-centralized session.  These prefixes reroute both
+        // buttons through the coordinated MP save when MP is active; in single
+        // player they are inert (Prefix returns true → the game runs unchanged).
+        //
+        // SaveGame()              → MP save, then close the menu (Toggle(false)),
+        //                           skip the SP save.
+        // SaveAndExitToDesktop()  → MP save, then QuitToDesktop() (the game's own
+        //                           NO-save exit path) so we exit cleanly WITHOUT
+        //                           writing a single-player save.
+
+        /// <summary>Resolves the game's MiniMenu type + caches its Toggle/Quit
+        /// methods.  Uses the full interop name first, then a simple-name scan as
+        /// a fallback in case the interop namespace differs from the dump.</summary>
+        internal static class MiniMenuUtil
+        {
+            private static Type? _type;
+            private static System.Reflection.MethodBase? _toggleBool;
+            private static System.Reflection.MethodBase? _quit;
+
+            internal static Type? Resolve()
+            {
+                if (_type != null) return _type;
+                _type = VehicleManager.FindGameType("UI.MiniMenu.MiniMenu");
+                if (_type == null)
+                {
+                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        Type[] types; try { types = asm.GetTypes(); } catch { continue; }
+                        foreach (var ty in types)
+                        {
+                            if (ty.Name != "MiniMenu") continue;
+                            if (ty.GetMethod("SaveAndExitToDesktop",
+                                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance) == null)
+                                continue;
+                            _type = ty; break;
+                        }
+                        if (_type != null) break;
+                    }
+                }
+                return _type;
+            }
+
+            internal static System.Reflection.MethodBase? Method(string name)
+                => Resolve()?.GetMethod(name,
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+
+            /// <summary>Close the pause menu — Toggle(bool show=false), the same
+            /// call the original SaveGame() makes after a successful save.</summary>
+            internal static void Close(object miniMenu)
+            {
+                try
+                {
+                    if (_toggleBool == null)
+                    {
+                        foreach (var m in (Resolve()?.GetMethods(
+                                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+                                 ?? Array.Empty<System.Reflection.MethodInfo>()))
+                            if (m.Name == "Toggle" && m.GetParameters().Length == 1) { _toggleBool = m; break; }
+                    }
+                    _toggleBool?.Invoke(miniMenu, new object[] { false });
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuSave] close menu: {ex.Message}"); }
+            }
+
+            /// <summary>Exit to desktop WITHOUT saving (the game's own no-save
+            /// quit), so an MP Save-and-Exit doesn't also leave an SP save.</summary>
+            internal static void QuitToDesktop(object miniMenu)
+            {
+                _quit ??= Method("QuitToDesktop");
+                _quit?.Invoke(miniMenu, null);
+            }
+
+            /// <summary>Reads the name the player typed in the pause-menu save box
+            /// (MiniMenu.saveGameName, a TMP_InputField) so the MP save can use it
+            /// as the session name.  Empty if unavailable.</summary>
+            internal static string GetSaveName(object miniMenu)
+            {
+                try
+                {
+                    var t = Resolve();
+                    if (t == null) return "";
+                    const System.Reflection.BindingFlags BF =
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                    // Il2CppInterop exposes Unity-serialized fields as PROPERTIES, so try
+                    // the property first; fall back to a real field just in case.
+                    object? input = t.GetProperty("saveGameName", BF)?.GetValue(miniMenu)
+                                 ?? t.GetField("saveGameName", BF)?.GetValue(miniMenu);
+                    if (input == null) { Plugin.Logger.LogWarning("[MenuSave] saveGameName not found on MiniMenu."); return ""; }
+                    var textProp = input.GetType().GetProperty("text",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    string name = (textProp?.GetValue(input) as string)?.Trim() ?? "";
+                    Plugin.Logger.LogInfo($"[MenuSave] save box name = '{name}'.");
+                    return name;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuSave] read save name: {ex.Message}"); return ""; }
+            }
+        }
+
+        // ── In-game MP window input suppression ───────────────────────────────
+        // While the F9 chat window is focused / hovered / being dragged, force the
+        // game's own "a text field is selected" gate true so typing + clicking the
+        // window doesn't drive the character (movement / camera / hotkeys / click-to-
+        // move).  Inert otherwise (MPChat.SuppressGameInput is false).
+        [HarmonyPatch(typeof(GameManager), "HasInputSelected")]
+        public static class Patch_GM_HasInputSelected
+        {
+            static void Postfix(ref bool __result) { if (MPChat.SuppressGameInput) __result = true; }
+        }
+
+        [HarmonyPatch(typeof(GameManager), "ShouldBlockKeyboardShortcuts")]
+        public static class Patch_GM_ShouldBlockKeyboardShortcuts
+        {
+            static void Postfix(ref bool __result) { if (MPChat.SuppressGameInput) __result = true; }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_MiniMenu_SaveGame
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+                => MiniMenuUtil.Method("SaveGame");
+
+            static bool Prefix(object __instance)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;   // SP → normal save
+                try
+                {
+                    string name = MiniMenuUtil.GetSaveName(__instance);
+                    Plugin.Logger.LogInfo($"[MenuSave] Save '{name}' → coordinated MP save (skipping SP save).");
+                    MPSaveCoordinator.MenuSave(exiting: false, saveName: name);
+                    MiniMenuUtil.Close(__instance);   // mirror the original's menu-close UX
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuSave] SaveGame: {ex.Message}"); }
+                return false;   // skip the single-player save
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_MiniMenu_SaveAndExitToDesktop
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+                => MiniMenuUtil.Method("SaveAndExitToDesktop");
+
+            static bool Prefix(object __instance)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;   // SP → normal
+                try
+                {
+                    string name = MiniMenuUtil.GetSaveName(__instance);
+                    Plugin.Logger.LogInfo($"[MenuSave] Save & Exit '{name}' → coordinated MP save, then quit (no SP save).");
+                    MPSaveCoordinator.MenuSave(exiting: true, saveName: name);
+                    MiniMenuUtil.QuitToDesktop(__instance);
+                }
+                catch (Exception ex)
+                {
+                    // If our path failed, don't strand the player at the menu —
+                    // fall back to the game's own save+exit.
+                    Plugin.Logger.LogWarning($"[MenuSave] SaveAndExit: {ex.Message} — falling back to game save+exit.");
+                    return true;
+                }
+                return false;   // we handled both save + exit
+            }
+        }
+
     }
 }

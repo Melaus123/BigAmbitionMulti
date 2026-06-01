@@ -19,6 +19,7 @@ namespace BigAmbitionsMP
         StartupRelease  = 7,   // Host → All: all players loaded — release the startup pause
         StartupStatus   = 8,   // Host → All: which players are still loading (waiting screen)
         ManualPause     = 9,   // Any → Host → All: the deliberate (pause-button) pause toggled
+        LobbyPref       = 14,  // Client → Host: this player's lobby choices (currently: starting age).
 
         // Building ownership
         RentRequest     = 10,  // Client → Host: "I want to rent this building"
@@ -70,6 +71,16 @@ namespace BigAmbitionsMP
 
         // Player profile (Phase 1d Wave 5: character name as canonical display).
         PlayerProfile        = 80, // Either direction: a player's in-character name (CharacterData.name).
+
+        // Save persistence (Phase 4: coordinated MP save — centralized on host).
+        SaveNow              = 90, // Host → All: "save your game into MP session N right now."
+        SaveData             = 91, // Client → Host: "here's my saved .hsg (gzipped) + slot" — host is the keeper.
+        RequestSave          = 92, // Client → Host: "the user hit Save in the pause menu — please run a coordinated save."
+        CashSync             = 93, // Client → Host: periodic current money, so the host always has a near-current cash figure to restore on reconnect (loss-minimization).
+        LoadData             = 94, // Host → Client: "here is YOUR stored .hsg (gzipped) for this session + the cash to restore" — load it.
+
+        // In-game chat (Phase 6: connected-players window + chat).
+        Chat                 = 100, // Any → Host → All: a chat line.  Clients send to host; host relays to everyone (incl. sender) so the log is consistent.
     }
 
     // ── Envelope ───────────────────────────────────────────────────────────────
@@ -120,6 +131,9 @@ namespace BigAmbitionsMP
     {
         public string PlayerId { get; set; } = "";
         public string Version  { get; set; } = "";
+        /// <summary>Immutable identity (SteamID64 / guid-…) — the key for save +
+        /// ownership persistence, distinct from the mutable PlayerId display name.</summary>
+        public string StableId { get; set; } = "";
     }
 
     /// <summary>
@@ -165,6 +179,24 @@ namespace BigAmbitionsMP
 
         /// <summary>True if the host enforces one starting cash for everyone (else each client sets their own).</summary>
         public bool EnforceStartingCash { get; set; } = true;
+
+        /// <summary>Per-player starting age (playerId → age), so every lobby shows each
+        /// player's self-chosen age.  Cash is host-dictated and not synced for display.</summary>
+        public Dictionary<string, int> Ages { get; set; } = new();
+
+        /// <summary>True if the host is RESUMING a saved game (not starting a new one).
+        /// Clients hide the new-game settings (age/cash) since they come from the save.</summary>
+        public bool   LoadMode        { get; set; }
+        /// <summary>Name of the save being resumed (for the client's "Resuming…" line).</summary>
+        public string LoadSessionName { get; set; } = "";
+    }
+
+    /// <summary>Client → Host: this player's lobby preferences.  Currently just the
+    /// self-chosen starting age (each player picks their own; cash stays host-set).</summary>
+    public class LobbyPrefPayload
+    {
+        public string PlayerId { get; set; } = "";
+        public int    Age      { get; set; }
     }
 
     /// <summary>Sent by host when starting the game (new or load).</summary>
@@ -811,6 +843,78 @@ namespace BigAmbitionsMP
         /// / gameVariables.daysPerYear) so the rivals profile shows the real age
         /// instead of a default.</summary>
         public int AgeInYears { get; set; }
+    }
+
+    /// <summary>Host → All: trigger a coordinated MP save.  Every player saves
+    /// their own .hsg into the named MP session folder, then reports back.</summary>
+    public class SaveNowPayload
+    {
+        public string SessionName { get; set; } = "";
+        /// <summary>Why the save fired — for logging only ("manual"/"autosave"/"disconnect").</summary>
+        public string Reason      { get; set; } = "";
+    }
+
+    /// <summary>One chat line.  Clients send it to the host; the host relays it to
+    /// every player (including the original sender) so each player's chat log is
+    /// identical and ordered by the host.</summary>
+    public class ChatPayload
+    {
+        /// <summary>Display name of the sender (PlayerId / character name).</summary>
+        public string PlayerId { get; set; } = "";
+        public string Text     { get; set; } = "";
+    }
+
+    /// <summary>Client → Host: the user pressed Save (or Save-and-Exit) in the
+    /// in-game pause menu.  The host responds by running a coordinated save
+    /// (HostSaveNow), which broadcasts SaveNow back so every player — including
+    /// the requester — saves and uploads.  This keeps the host's session name
+    /// canonical rather than letting a client guess it.</summary>
+    public class RequestSavePayload
+    {
+        /// <summary>For logging only ("client-menu"/"client-menu-exit").</summary>
+        public string Reason  { get; set; } = "";
+        /// <summary>True if the requester is about to quit (clean-leave); the host
+        /// logs it and the requester also best-effort ships its own save inline.</summary>
+        public bool   Exiting { get; set; }
+        /// <summary>Optional name the requester typed in the save box — the host
+        /// uses it as the session name so the save is identifiable + overwritable.</summary>
+        public string SaveName { get; set; } = "";
+    }
+
+    /// <summary>Client → Host: the client's full saved game, so the host holds
+    /// the canonical copy (centralized persistence).  The .hsg is gzipped then
+    /// Base64'd to ride inside the JSON envelope; a ~450 KB save compresses to a
+    /// fraction of that.  The host writes it into its own MP session folder and
+    /// folds the slot into the manifest.</summary>
+    public class SaveDataPayload
+    {
+        public string SessionName    { get; set; } = "";
+        public bool   Success        { get; set; }
+        public MpSlot Slot           { get; set; } = new();
+        public string HsgGzipBase64  { get; set; } = "";   // gzip(.hsg bytes) → base64
+        public int    RawLength       { get; set; }          // uncompressed length, for sanity check
+    }
+
+    /// <summary>Client → Host: this player's current money.  Sent periodically so
+    /// the host always has a near-current cash figure (cash is the one private
+    /// scalar worth losing the least).  On reconnect the host reapplies it over
+    /// the loaded save, so a crash costs at most a few seconds of earnings.</summary>
+    public class CashSyncPayload
+    {
+        public string PlayerId { get; set; } = "";
+        public float  Money    { get; set; }
+    }
+
+    /// <summary>Host → Client: the client's own stored .hsg for an MP session, so
+    /// it can load (or reconnect into) the session.  The .hsg lives on the host
+    /// (centralized persistence); this ships it back.  Money is the host's most
+    /// current known cash for this player, overlaid after the load completes.</summary>
+    public class LoadDataPayload
+    {
+        public string SessionName    { get; set; } = "";
+        public string HsgGzipBase64  { get; set; } = "";
+        public int    RawLength      { get; set; }
+        public float  Money          { get; set; }
     }
 
     /// <summary>

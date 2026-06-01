@@ -29,6 +29,18 @@ namespace BigAmbitionsMP
         /// <summary>This client's chosen starting cash (used only when EnforceStartingCash is false).</summary>
         public static int ChosenStartingCash = 4200;
 
+        /// <summary>This client's self-chosen starting age (lobby).  Reported to the
+        /// host (LobbyPref); the host bakes it into this client's start settings.</summary>
+        public static int ChosenStartingAge = 18;
+
+        /// <summary>Per-player starting ages from the host (LobbyUpdate), for lobby display.</summary>
+        public static readonly Dictionary<string, int> LobbyAges = new();
+
+        /// <summary>True if the host is resuming a saved game (from LobbyUpdate) — the
+        /// client hides the new-game settings (age) since they come from the save.</summary>
+        public static bool   HostLoadMode;
+        public static string HostLoadSession = "";
+
         public static bool IsConnected  => _server?.ConnectionState == ConnectionState.Connected;
         public static bool IsConnecting => _running && !IsConnected;
 
@@ -74,7 +86,8 @@ namespace BigAmbitionsMP
             var hello = new HelloPayload
             {
                 PlayerId = MPConfig.PlayerId,
-                Version  = MyPluginInfo.PLUGIN_VERSION
+                Version  = MyPluginInfo.PLUGIN_VERSION,
+                StableId = MPConfig.StableId
             };
             Send(MessageEnvelope.Create(MessageType.Hello, MPConfig.PlayerId, hello));
         }
@@ -204,6 +217,24 @@ namespace BigAmbitionsMP
                     HandlePlayerProfile(env);
                     break;
 
+                case MessageType.SaveNow:
+                    // Coordinator marshals the actual save onto the main thread.
+                    MPSaveCoordinator.ClientHandleSaveNow(env.GetPayload<SaveNowPayload>());
+                    break;
+
+                case MessageType.LoadData:
+                    // Host shipped us our stored .hsg — write + load it (coordinator
+                    // marshals the load onto the main thread).
+                    MPSaveCoordinator.ClientHandleLoadData(env.GetPayload<LoadDataPayload>());
+                    break;
+
+                case MessageType.Chat:
+                {
+                    var cp = env.GetPayload<ChatPayload>();
+                    if (cp != null) MPChat.AddLine(cp.PlayerId, cp.Text);   // pure C# — safe on poll thread
+                    break;
+                }
+
                 default:
                     Plugin.Logger.LogWarning($"[Client] Unknown message type: {env.Type}");
                     break;
@@ -219,6 +250,10 @@ namespace BigAmbitionsMP
             LobbyPlayers.Clear();
             LobbyPlayers.AddRange(payload.Players);
             EnforceStartingCash = payload.EnforceStartingCash;
+            LobbyAges.Clear();
+            if (payload.Ages != null) foreach (var kv in payload.Ages) LobbyAges[kv.Key] = kv.Value;
+            HostLoadMode    = payload.LoadMode;
+            HostLoadSession = payload.LoadSessionName ?? "";
             Plugin.Logger.LogInfo($"[Client] Lobby: {string.Join(", ", LobbyPlayers)} " +
                                   $"(starting cash {(EnforceStartingCash ? "enforced by host" : "per-player")})");
         }
@@ -606,6 +641,61 @@ namespace BigAmbitionsMP
             if (!string.IsNullOrEmpty(portrait)) GameStatePatcher.LocalPortraitSent = true;   // image goes over once
             Send(MessageEnvelope.Create(MessageType.PlayerProfile, MPConfig.PlayerId, p));
             Plugin.Logger.LogInfo($"[Client] Sent PlayerProfile: PlayerId='{MPConfig.PlayerId}' CharacterName='{name}' age={age} portrait={(string.IsNullOrEmpty(portrait) ? "none" : portrait.Length + "b64")}.");
+        }
+
+        /// <summary>Ships this player's saved .hsg (gzipped) up to the host so the
+        /// host holds the canonical copy (Phase 4 — centralized persistence).</summary>
+        public static void SendSaveData(string sessionName, MpSlot slot, string hsgGzipBase64, int rawLength)
+        {
+            if (!IsConnected) return;
+            var p = new SaveDataPayload
+            {
+                SessionName   = sessionName,
+                Success       = true,
+                Slot          = slot,
+                HsgGzipBase64 = hsgGzipBase64,
+                RawLength     = rawLength,
+            };
+            Send(MessageEnvelope.Create(MessageType.SaveData, MPConfig.PlayerId, p));
+            Plugin.Logger.LogInfo($"[Client] Sent SaveData: session='{sessionName}' raw={rawLength}B day={slot?.Day}.");
+        }
+
+        /// <summary>Reports this client's self-chosen starting age to the host so it
+        /// shows in everyone's lobby and is baked into this client's start settings.</summary>
+        public static void SendLobbyPref(int age)
+        {
+            if (!IsConnected) return;
+            Send(MessageEnvelope.Create(MessageType.LobbyPref, MPConfig.PlayerId,
+                new LobbyPrefPayload { PlayerId = MPConfig.PlayerId, Age = age }));
+        }
+
+        /// <summary>Sends a chat line to the host, which relays it to everyone
+        /// (including us) so the log stays consistent and host-ordered.</summary>
+        public static void SendChat(string text)
+        {
+            if (!IsConnected || string.IsNullOrWhiteSpace(text)) return;
+            Send(MessageEnvelope.Create(MessageType.Chat, MPConfig.PlayerId,
+                new ChatPayload { PlayerId = MPConfig.PlayerId, Text = text }));
+        }
+
+        /// <summary>Asks the host to run a coordinated MP save (the user hit Save /
+        /// Save-and-Exit in the pause menu).  The host's SaveNow broadcast comes
+        /// back to us, so our own save+upload happens through the normal path.</summary>
+        public static void SendRequestSave(string reason = "client-menu", bool exiting = false, string saveName = "")
+        {
+            if (!IsConnected) return;
+            Send(MessageEnvelope.Create(MessageType.RequestSave, MPConfig.PlayerId,
+                new RequestSavePayload { Reason = reason, Exiting = exiting, SaveName = saveName }));
+            Plugin.Logger.LogInfo($"[Client] Sent RequestSave (reason={reason}, exiting={exiting}, name='{saveName}').");
+        }
+
+        /// <summary>Reports this player's current money to the host (Phase 4
+        /// loss-minimization — host keeps a near-current cash figure).</summary>
+        public static void SendCashSync(float money)
+        {
+            if (!IsConnected) return;
+            Send(MessageEnvelope.Create(MessageType.CashSync, MPConfig.PlayerId,
+                new CashSyncPayload { PlayerId = MPConfig.PlayerId, Money = money }));
         }
 
         /// <summary>Tells the host this player toggled the manual (pause-button) pause.</summary>

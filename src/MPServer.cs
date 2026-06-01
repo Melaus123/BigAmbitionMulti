@@ -1,5 +1,6 @@
 using LiteNetLib;
 using LiteNetLib.Utils;
+using System.Collections.Concurrent;
 using System.Text.Json;
 using UI.Load;
 
@@ -14,8 +15,12 @@ namespace BigAmbitionsMP
         private static NetManager?   _server;
         private static EventBasedNetListener? _listener;
 
-        /// <summary>Address key → player ID who owns it. Empty = unowned.</summary>
-        public static readonly Dictionary<string, string> BuildingOwners = new();
+        /// <summary>Address key → player ID who owns it. Empty = unowned.
+        /// CONCURRENT: written on the network poll thread (rent/disconnect) and
+        /// read/iterated on the main thread (save manifest build, world snapshot).
+        /// A plain Dictionary here corrupts under that race → coreclr access
+        /// violation, so this must be a ConcurrentDictionary.</summary>
+        public static readonly ConcurrentDictionary<string, string> BuildingOwners = new();
 
         /// <summary>Ordered list of player IDs currently in the lobby (host is always index 0).</summary>
         public static readonly List<string> LobbyPlayers = new();
@@ -23,12 +28,116 @@ namespace BigAmbitionsMP
         /// <summary>True while waiting in the lobby; false once the game has been started.</summary>
         public static bool IsInLobby { get; private set; } = true;
 
+        /// <summary>The MP save session the host picked in the "Host Saved Game" list
+        /// (empty = load the newest).  Consumed by StartLoadGame.</summary>
+        public static string ChosenLoadSession = "";
+
         /// <summary>Host setting: when true, the host's starting cash applies to everyone;
         /// when false, each client sets their own starting cash.</summary>
         public static bool EnforceStartingCash = true;
 
+        /// <summary>Host lobby: per-player starting-cash overrides, keyed by playerId
+        /// (the host's own included).  Absent ⇒ the player gets the difficulty/base
+        /// StartingMoney.  Lets the host designate that specific players begin with
+        /// more (or less) than the base.  Edited on the main thread (lobby UI),
+        /// read on the main thread (StartNewGame) — no cross-thread access.</summary>
+        public static readonly Dictionary<string, int> StartingCashByPlayer = new();
+
+        /// <summary>Effective starting cash for a player: their override if set, else
+        /// the supplied base.</summary>
+        public static int StartingCashFor(string playerId, int baseCash)
+            => (!string.IsNullOrEmpty(playerId) && StartingCashByPlayer.TryGetValue(playerId, out var v)) ? v : baseCash;
+
+        /// <summary>Per-player self-chosen starting age (playerId → age, host included).
+        /// Unlike cash, each player picks their OWN; the host just aggregates them for
+        /// display + bakes each into that player's start settings.</summary>
+        public static readonly Dictionary<string, int> StartingAgeByPlayer = new();
+
+        public static int StartingAgeFor(string playerId, int baseAge)
+            => (!string.IsNullOrEmpty(playerId) && StartingAgeByPlayer.TryGetValue(playerId, out var v) && v > 0) ? v : baseAge;
+
+        /// <summary>Records a player's chosen starting age and re-broadcasts the lobby
+        /// so everyone sees it.  Called for the host's own age (from the lobby UI) and
+        /// for each client's reported age (LobbyPref).</summary>
+        public static void SetStartingAge(string playerId, int age)
+        {
+            if (string.IsNullOrEmpty(playerId)) return;
+            StartingAgeByPlayer[playerId] = age;
+            if (IsInLobby) BroadcastLobbyUpdate();
+        }
+
         private static readonly HashSet<NetPeer>        _clients   = new();
         private static readonly Dictionary<int, string> _peerNames = new(); // peer.Id → playerId
+        /// <summary>playerId → immutable StableId (for save/ownership persistence).
+        /// Includes the host's own.  Populated from each client's Hello.
+        /// CONCURRENT: written on the poll thread (Hello) + main thread (host
+        /// start), read on the main thread (save/load) — must be thread-safe.</summary>
+        public static readonly ConcurrentDictionary<string, string> StableIdByPlayer = new();
+
+        /// <summary>stableId → last-known money (live-streamed from each player +
+        /// the host's own).  The most-current cash figure to restore on reconnect,
+        /// so a crash costs at most a few seconds of earnings.
+        /// CONCURRENT: written on poll + main threads, read on the main thread.</summary>
+        public static readonly ConcurrentDictionary<string, float> CashByStableId = new();
+
+        /// <summary>Record a player's latest cash, keyed by their stable id.</summary>
+        public static void RecordCash(string playerId, float money)
+        {
+            if (string.IsNullOrEmpty(playerId)) return;
+            string stable = StableIdByPlayer.TryGetValue(playerId, out var s) && !string.IsNullOrEmpty(s) ? s : playerId;
+            CashByStableId[stable] = money;
+        }
+
+        /// <summary>Host: rebuild the live ownership map from a session manifest
+        /// (re-keying the stableId-keyed owners back to the live playerIds of
+        /// connected players; absent owners stay reserved under their stableId
+        /// until they reconnect) and seed last-known cash.  Phase 4 load.</summary>
+        public static void RestoreOwnershipFromManifest(MpManifest m)
+        {
+            try
+            {
+                var reverse = new Dictionary<string, string>();   // stableId → playerId
+                foreach (var kv in StableIdByPlayer) reverse[kv.Value] = kv.Key;
+
+                BuildingOwners.Clear();
+                foreach (var kv in m.BuildingOwners)
+                {
+                    string ownerStable = kv.Value;
+                    if (string.IsNullOrEmpty(ownerStable)) continue;
+                    if (ownerStable == MPConfig.StableId)             BuildingOwners[kv.Key] = "host";
+                    else if (reverse.TryGetValue(ownerStable, out var pid)) BuildingOwners[kv.Key] = pid;
+                    else                                              BuildingOwners[kv.Key] = ownerStable; // reserved (absent owner)
+                }
+                foreach (var slot in m.Slots)
+                    if (slot.Money != 0f) CashByStableId[slot.StableId] = slot.Money;
+
+                Plugin.Logger.LogInfo($"[Server] Restored {BuildingOwners.Count} owned building(s) from manifest.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RestoreOwnershipFromManifest: {ex.Message}"); }
+        }
+
+        /// <summary>Host: send each connected client its own stored .hsg for the
+        /// session so it can load in.  Phase 4 load.</summary>
+        public static void SendLoadDataToEachClient(string session, MpManifest m)
+        {
+            foreach (var peer in _clients)
+            {
+                if (!_peerNames.TryGetValue(peer.Id, out var pid)) continue;
+                if (!StableIdByPlayer.TryGetValue(pid, out var stable) || string.IsNullOrEmpty(stable)) continue;
+                var data = MPSaveCoordinator.ReadSaveBytesGzip(session, stable);
+                if (data == null) { Plugin.Logger.LogWarning($"[Server] No stored .hsg for '{pid}' (stable={stable})."); continue; }
+                float cash = MPSaveCoordinator.BestCashFor(m, stable);
+                var payload = new LoadDataPayload
+                {
+                    SessionName   = session,
+                    HsgGzipBase64 = data.Value.b64,
+                    RawLength     = data.Value.raw,
+                    Money         = cash,
+                };
+                Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", payload));
+                Plugin.Logger.LogInfo($"[Server] Sent LoadData to '{pid}' ({data.Value.raw}B, ${cash:F0}).");
+            }
+        }
 
         /// <summary>
         /// PlayerId → CharacterName (Wave 5).  Populated by PlayerProfile
@@ -65,7 +174,12 @@ namespace BigAmbitionsMP
             LobbyPlayers.Clear();
             LobbyPlayers.Add(MPConfig.PlayerId); // host is always the first player
             EnforceStartingCash = true;
+            StartingCashByPlayer.Clear();
+            StartingAgeByPlayer.Clear();
+            ChosenLoadSession = "";   // cleared each host session; set only when a save is picked
             _peerNames.Clear();
+            StableIdByPlayer.Clear();
+            StableIdByPlayer[MPConfig.PlayerId] = MPConfig.StableId; // host's own
             _listener = new EventBasedNetListener();
             _server   = new NetManager(_listener)
             {
@@ -117,15 +231,32 @@ namespace BigAmbitionsMP
             // Re-arm the startup pause hold for this new game.
             lock (_startupLock) { _inGamePlayers.Clear(); _startupReleased = false; }
 
-            // Tell all clients to start a new game, with the host's chosen settings.
-            var payload = new StartGamePayload
+            // Per-player starting cash: each client gets the host-designated amount
+            // (their override, else the difficulty base).  The host now designates
+            // everyone's cash, so EnforceStartingCash is always true here — the
+            // client uses the StartingMoney we bake into its own Settings copy.
+            int baseCash = settings.StartingMoney;
+            int baseAge  = settings.StartingAge;
+            foreach (var peer in _clients)
             {
-                SaveName = "",
-                Settings = settings,
-                EnforceStartingCash = EnforceStartingCash,
-            };
-            Broadcast(MessageEnvelope.Create(MessageType.StartGameNew, "host", payload));
-            Plugin.Logger.LogInfo($"[Server] StartNewGame ({settings.Difficulty}) sent to all clients.");
+                string pid  = _peerNames.TryGetValue(peer.Id, out var p) ? p : "";
+                int    cash = StartingCashFor(pid, baseCash);
+                int    age  = StartingAgeFor(pid, baseAge);
+                var perPayload = new StartGamePayload
+                {
+                    SaveName            = "",
+                    Settings            = CloneWithCash(settings, cash, age),
+                    EnforceStartingCash = true,
+                };
+                Send(peer, MessageEnvelope.Create(MessageType.StartGameNew, "host", perPayload));
+                Plugin.Logger.LogInfo($"[Server] StartNewGame → '{pid}' cash ${cash} age {age}.");
+            }
+            Plugin.Logger.LogInfo($"[Server] StartNewGame ({settings.Difficulty}) sent to {_clients.Count} client(s); base cash ${baseCash}.");
+
+            // Host's own starting cash + age (the host's overrides if set, else base).
+            int hostCash = StartingCashFor(MPConfig.PlayerId, baseCash);
+            int hostAge  = StartingAgeFor(MPConfig.PlayerId, baseAge);
+            var hostSettings = CloneWithCash(settings, hostCash, hostAge);
 
             // Route the host through the game's own intro/character-creation scene.
             // LoadGame() called without character data leaves the loading screen stuck;
@@ -142,7 +273,7 @@ namespace BigAmbitionsMP
                     // Discovery probe — logs GameVariables structure so we can
                     // later force multiplayer new games into Custom (non-story) mode.
                     GameStateReader.ProbeGameVariables();
-                    SaveGameManager.New(BuildGameVariables(settings));
+                    SaveGameManager.New(BuildGameVariables(hostSettings));
                     LoadScene.LoadIntro(false);
                     Plugin.Logger.LogInfo("[Server] New game init + intro scene loaded.");
                 }
@@ -162,10 +293,26 @@ namespace BigAmbitionsMP
             // Re-arm the startup pause hold for this new game.
             lock (_startupLock) { _inGamePlayers.Clear(); _startupReleased = false; }
 
-            // Tell all clients to load their most recent save
+            // Phase 4: if a multiplayer session exists, resume it — the host holds
+            // every player's .hsg, so it ships each connected client its own and
+            // loads its own, rather than everyone loading a single-player save.
+            var sessions = MPSaveManager.ListSessions();
+            if (sessions.Count > 0)
+            {
+                // Use the session the host picked in the save list; else newest.
+                string session = !string.IsNullOrEmpty(ChosenLoadSession)
+                                 && sessions.Exists(s => s.Name == ChosenLoadSession)
+                                 ? ChosenLoadSession : sessions[0].Name;
+                Plugin.Logger.LogInfo($"[Server] StartLoadGame → resuming MP session '{session}'.");
+                MPSaveCoordinator.HostLoadSession(session);
+                return;
+            }
+
+            // No MP session yet — fall back to the legacy "everyone loads their most
+            // recent single-player save" behaviour.
             var payload = new StartGamePayload { SaveName = "" };
             Broadcast(MessageEnvelope.Create(MessageType.StartGameLoad, "host", payload));
-            Plugin.Logger.LogInfo("[Server] StartLoadGame sent to all clients.");
+            Plugin.Logger.LogInfo("[Server] StartLoadGame (legacy SP path) sent to all clients.");
 
             // Host loads its most recent save on the main thread
             GameStatePatcher.EnqueueOnMainThread(() =>
@@ -222,10 +369,9 @@ namespace BigAmbitionsMP
             {
                 LobbyPlayers.Remove(leftPlayer);
                 _peerNames.Remove(peer.Id);
-                if (IsInLobby)
-                    BroadcastLobbyUpdate();
-                else
-                    BroadcastPlayerLeft(leftPlayer); // tell remaining clients to remove the capsule
+                BroadcastLobbyUpdate();   // keep everyone's roster (incl. the in-game F9 list) current
+                if (!IsInLobby)
+                    BroadcastPlayerLeft(leftPlayer); // also tell remaining clients to remove the capsule
             }
 
             // If a player disconnected during the startup hold, drop them from the
@@ -253,21 +399,35 @@ namespace BigAmbitionsMP
                 else if (wasHeld) BroadcastStartupStatus(waiting);
             }
 
-            // Free any buildings they owned
-            var freed = BuildingOwners
-                .Where(kv => kv.Value == (leftPlayer ?? peer.Id.ToString()))
-                .Select(kv => kv.Key)
-                .ToList();
-
-            foreach (var key in freed)
-            {
-                BuildingOwners[key] = "";
-                BroadcastVacate(key);
-            }
+            // HOLD ownership for reconnect (Phase 4): a dropped player keeps their
+            // buildings reserved to them so they reclaim everything on return,
+            // rather than losing it.  We do NOT free/vacate them.  (Remaining
+            // players see those buildings as owned, so they stay un-rentable.)
+            int held = BuildingOwners.Count(kv => kv.Value == (leftPlayer ?? peer.Id.ToString()));
+            if (held > 0)
+                Plugin.Logger.LogInfo($"[Server] Holding {held} building(s) for '{leftPlayer ?? peer.Id.ToString()}' until reconnect.");
 
             // Remove the player's capsule from the host's own game
             if (leftPlayer != null)
                 GameStatePatcher.EnqueueOnMainThread(() => RemotePlayerManager.Remove(leftPlayer));
+
+            // In-game drop → pause the session (so remaining players don't pull
+            // ahead while someone's gone) and run a coordinated save so the dropped
+            // player's last-known state is preserved on the host.  Lobby drops skip
+            // this (no game in progress).
+            if (leftPlayer != null && !IsInLobby)
+            {
+                try
+                {
+                    BroadcastManualPause(true);
+                    GameStatePatcher.EnqueueOnMainThread(() => TimeSync.SetManualPause(true));
+                    Plugin.Logger.LogInfo($"[Server] Paused session — '{leftPlayer}' disconnected.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Disconnect pause: {ex.Message}"); }
+
+                try { MPSaveCoordinator.HostSaveNow("disconnect"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Disconnect save: {ex.Message}"); }
+            }
         }
 
         private static void OnReceive(NetPeer peer, NetPacketReader reader, byte channel, DeliveryMethod delivery)
@@ -426,6 +586,58 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.SaveData:
+                    // Pure C# decompress + file write + manifest merge (no IL2CPP)
+                    // — safe on the poll thread.
+                    MPSaveCoordinator.HostHandleSaveData(env.GetPayload<SaveDataPayload>());
+                    break;
+
+                case MessageType.LobbyPref:
+                {
+                    var lp = env.GetPayload<LobbyPrefPayload>();
+                    if (lp != null && !string.IsNullOrEmpty(lp.PlayerId) && lp.Age > 0)
+                        SetStartingAge(lp.PlayerId, lp.Age);   // stores + re-broadcasts lobby
+                    break;
+                }
+
+                case MessageType.Chat:
+                {
+                    // A client chatted.  Append to the host's own log + relay to
+                    // every client (the sender included, so it sees its line in
+                    // host order).  Pure C# — safe on the poll thread.
+                    var cp = env.GetPayload<ChatPayload>();
+                    if (cp != null && !string.IsNullOrWhiteSpace(cp.Text))
+                    {
+                        MPChat.AddLine(cp.PlayerId, cp.Text);
+                        Broadcast(MessageEnvelope.Create(MessageType.Chat, "host", cp));
+                    }
+                    break;
+                }
+
+                case MessageType.RequestSave:
+                {
+                    // A client hit Save / Save-and-Exit in their pause menu.  Run a
+                    // coordinated save — HostSaveNow is thread-safe (it enqueues the
+                    // IL2CPP-touching part onto the main thread) so it's fine here on
+                    // the poll thread.
+                    var rq = env.GetPayload<RequestSavePayload>();
+                    string reason = string.IsNullOrEmpty(rq?.Reason) ? "client-request" : rq!.Reason;
+                    // Honor the requester's chosen save name as the session name.
+                    string sess = MPSaveCoordinator.SanitizeSession(rq?.SaveName ?? "");
+                    if (!string.IsNullOrEmpty(sess)) MPSaveCoordinator.ActiveSessionName = sess;
+                    Plugin.Logger.LogInfo($"[Server] RequestSave from peer {peer.Id} (reason={reason}, exiting={rq?.Exiting}, name='{rq?.SaveName}') — coordinated save.");
+                    MPSaveCoordinator.HostSaveNow(reason);
+                    break;
+                }
+
+                case MessageType.CashSync:
+                {
+                    var c = env.GetPayload<CashSyncPayload>();
+                    if (c != null && !string.IsNullOrEmpty(c.PlayerId))
+                        RecordCash(c.PlayerId, c.Money);   // pure C# dict write — safe here
+                    break;
+                }
+
                 default:
                     Plugin.Logger.LogWarning($"[Server] Unexpected message type {env.Type} from peer {peer.Id}");
                     break;
@@ -442,6 +654,8 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Server] Hello from '{hello.PlayerId}' (v{hello.Version})");
             _clients.Add(peer);
             _peerNames[peer.Id] = hello.PlayerId;
+            if (!string.IsNullOrEmpty(hello.StableId))
+                StableIdByPlayer[hello.PlayerId] = hello.StableId;
 
             if (IsInLobby)
             {
@@ -453,6 +667,11 @@ namespace BigAmbitionsMP
             }
             else
             {
+                // Late join — keep the roster current for everyone (the in-game F9
+                // window reads LobbyPlayers) by adding + re-broadcasting it.
+                if (!LobbyPlayers.Contains(hello.PlayerId)) LobbyPlayers.Add(hello.PlayerId);
+                BroadcastLobbyUpdate();
+
                 // Late join — game already in progress, send world snapshot immediately
                 if (!BroadcastWorldSnapshotEnabled)
                 {
@@ -657,6 +876,23 @@ namespace BigAmbitionsMP
             return dto;
         }
 
+        /// <summary>Deep-clones a settings DTO and overrides its starting cash + age,
+        /// so each player can be sent the same world settings with a per-player
+        /// starting balance + age without aliasing the shared lobby settings object.</summary>
+        private static GameVariablesDto CloneWithCash(GameVariablesDto src, int cash, int age)
+        {
+            GameVariablesDto copy;
+            try
+            {
+                var json = System.Text.Json.JsonSerializer.Serialize(src);
+                copy = System.Text.Json.JsonSerializer.Deserialize<GameVariablesDto>(json) ?? new GameVariablesDto();
+            }
+            catch { copy = new GameVariablesDto(); }
+            copy.StartingMoney = cash;
+            if (age > 0) copy.StartingAge = age;
+            return copy;
+        }
+
         /// <summary>Converts a settings DTO into the game's GameVariables struct.</summary>
         public static GameVariables BuildGameVariables(GameVariablesDto dto)
         {
@@ -734,6 +970,9 @@ namespace BigAmbitionsMP
             // Confirm to all clients (including the requester)
             Broadcast(MessageEnvelope.Create(MessageType.RentConfirm, "host", req));
             Plugin.Logger.LogInfo($"[Server] Rent confirmed: {req.AddressKey} → {env.SenderId}");
+            // (No event-driven save here: ownership is already tracked live on the
+            //  host, and cash is live-streamed — so a crash right after a purchase
+            //  loses neither.  Business internals ride the periodic autosave.)
         }
 
         // ── Message handlers (cont.) ──────────────────────────────────────────
@@ -1265,6 +1504,9 @@ namespace BigAmbitionsMP
             {
                 Players = new List<string>(LobbyPlayers),
                 EnforceStartingCash = EnforceStartingCash,
+                Ages = new Dictionary<string, int>(StartingAgeByPlayer),
+                LoadMode = !string.IsNullOrEmpty(ChosenLoadSession),   // resuming a save
+                LoadSessionName = ChosenLoadSession,
             };
             Broadcast(MessageEnvelope.Create(MessageType.LobbyUpdate, "host", payload));
         }
@@ -1353,6 +1595,14 @@ namespace BigAmbitionsMP
 
         /// <summary>Public wrapper around Broadcast so external code (e.g. Harmony patches) can use it.</summary>
         public static void BroadcastAny(MessageEnvelope env) => Broadcast(env);
+
+        /// <summary>Host: relay a chat line to every connected client.</summary>
+        public static void BroadcastChat(string playerId, string text)
+        {
+            if (!_running || string.IsNullOrWhiteSpace(text)) return;
+            Broadcast(MessageEnvelope.Create(MessageType.Chat, "host",
+                new ChatPayload { PlayerId = playerId, Text = text }));
+        }
 
         private static void Send(NetPeer peer, MessageEnvelope env)
         {
