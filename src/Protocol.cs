@@ -311,6 +311,11 @@ namespace BigAmbitionsMP
 
         /// <summary>Indices of bool animator params currently set true.</summary>
         public List<int> AnimB { get; set; } = new();
+        /// <summary>Animator layer weights by layer index.  Game scripts drive
+        /// these on the real character (upper-body hold layer while pushing a
+        /// cart etc.); the script-stripped clone needs them mirrored or a
+        /// state can be entered yet render at blend weight 0.</summary>
+        public List<float> LayerW { get; set; } = new();
     }
 
     /// <summary>One animator trigger fired by a player (one-off action animation).</summary>

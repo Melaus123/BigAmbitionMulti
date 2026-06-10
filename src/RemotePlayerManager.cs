@@ -84,7 +84,8 @@ namespace BigAmbitionsMP
         /// <summary>Stores the latest networked float/bool/int animator state.</summary>
         public void ApplyAnimState(Dictionary<int, float>? floats,
                                    List<int>? trueBools,
-                                   Dictionary<int, int>? ints)
+                                   Dictionary<int, int>? ints,
+                                   List<float>? layerWeights = null)
         {
             if (floats != null)
                 foreach (var kv in floats) _targetF[kv.Key] = kv.Value;
@@ -93,7 +94,14 @@ namespace BigAmbitionsMP
             _trueB.Clear();
             if (trueBools != null)
                 foreach (var b in trueBools) _trueB.Add(b);
+            _layerW = layerWeights;
         }
+
+        // Mirrored animator-layer weights.  The clone's game scripts are
+        // stripped, so nothing raises layer weights locally — a state can be
+        // ENTERED (transitions are parameter-driven) yet render at weight 0.
+        // That was the cart-pusher bug: push state active, blend invisible.
+        private List<float>? _layerW;
 
         /// <summary>Queues a one-off trigger to fire on the next frame.</summary>
         public void FireTrigger(int paramIndex)
@@ -109,6 +117,10 @@ namespace BigAmbitionsMP
         private int DiagL1()
         {
             try { return Anim!.GetCurrentAnimatorStateInfo(1).shortNameHash; } catch { return 0; }
+        }
+        private float DiagL1Weight()
+        {
+            try { return Anim!.GetLayerWeight(1); } catch { return -1f; }
         }
 
         private void EnsureParamMap()
@@ -142,7 +154,7 @@ namespace BigAmbitionsMP
                     {
                         _rideDiagAt = Time.unscaledTime + 3f;
                         string a = Anim == null ? "anim=NULL"
-                            : $"HoldingBox={DiagBool("HoldingBox")} UsingHands={DiagBool("UsingHands")} OnScooter={DiagBool("OnScooter")} L1=0x{DiagL1():X8} enabled={Anim.enabled}";
+                            : $"HoldingBox={DiagBool("HoldingBox")} UsingHands={DiagBool("UsingHands")} OnScooter={DiagBool("OnScooter")} L1=0x{DiagL1():X8} L1w={DiagL1Weight():F2} enabled={Anim.enabled}";
                         Plugin.Logger.LogInfo($"[RideDiag] '{name}' pinned to '{RideAttach.name}' at ({transform.position.x:F1},{transform.position.y:F1},{transform.position.z:F1}) | {a}");
                     }
                 }
@@ -193,6 +205,11 @@ namespace BigAmbitionsMP
                                 Anim.SetTrigger(_paramNames[t]);
                         _pendingTriggers.Clear();
                     }
+                    // Layer weights — mirrored from the sender (layer 0 is
+                    // always weight 1 in Unity; start at 1).
+                    if (_layerW != null)
+                        for (int l = 1; l < _layerW.Count && l < Anim.layerCount; l++)
+                            Anim.SetLayerWeight(l, _layerW[l]);
                 }
                 catch { /* parameter mismatch — ignore */ }
             }
@@ -274,7 +291,7 @@ namespace BigAmbitionsMP
             if (mover != null)
             {
                 mover.SetTarget(new Vector3(p.X, p.Y, p.Z), Quaternion.Euler(0f, p.RotY, 0f), p.T);
-                mover.ApplyAnimState(p.AnimF, p.AnimB, p.AnimI);
+                mover.ApplyAnimState(p.AnimF, p.AnimB, p.AnimI, p.LayerW);
             }
             else
             {
@@ -921,6 +938,12 @@ namespace BigAmbitionsMP
                             break;
                     }
                 }
+                // Layer weights — the game's scripts drive these (e.g. the
+                // upper-body hold layer fades in when pushing a cart); the
+                // clone has no scripts, so they must be mirrored explicitly.
+                int lc = anim.layerCount;
+                for (int l = 0; l < lc && l < 8; l++)
+                    p.LayerW.Add(anim.GetLayerWeight(l));
             }
             catch (Exception ex)
             {
