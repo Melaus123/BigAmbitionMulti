@@ -495,8 +495,8 @@ namespace BigAmbitionsMP
                 bool frozen = TimeSync.ManualPaused || TimeSync.IsStartupHeld;
                 Time.timeScale = frozen ? 0f : 1f;
 
-                // Reject any time skip (bench / bed / sleep fast-forward) so the
-                // world clock can only advance at real-time pace.
+                // World-clock guardian: taxi 1× clamp + unaccounted-acceleration
+                // net (known skips are suppressed at the TimeMachine patch).
                 if (!frozen)
                     TickWorldClock();
             }
@@ -506,13 +506,16 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── World clock — skip rejection ──────────────────────────────────────
+        // ── World clock — the MP time architecture (overhauled 2026-06-10) ────
         //
-        // With Time.timeScale forced to 1, the game clock advances at exactly 1×
-        // real-time on its own.  A skip/fast-forward (bench, bed, sleep) instead
-        // races the clock forward far faster than real time.  We measure the rate
-        // over a short window and, on a skip, pin the clock back to the pre-skip
-        // value until the skip mechanism gives up — so skips simply never work.
+        //   Layer 1 (primary): Patch_TimeMachine_Start_Consensus suppresses
+        //     EVERY native skip at the source; MPRestSync turns long ones into
+        //     consensus votes and the HOST executes sanctioned skips by writing
+        //     the clock directly (clients follow via the regular time sync).
+        //   Layer 2 (taxi): the ride keeps its visual fast-forward, but this
+        //     clamp holds GAME TIME to the measured 1× rate during it.
+        //   Layer 3 (anomaly net): the rate detector below — anything that
+        //     still races the clock is an unaccounted mechanism: pin + warn.
 
         private const float  WC_SAMPLE_WINDOW = 0.15f;  // s — rate measurement window
         private const double WC_SKIP_H_PER_S  = 0.20;   // game-h/real-s above this = a skip
@@ -522,6 +525,12 @@ namespace BigAmbitionsMP
         private static float  _wcWindowStartReal;
         private static bool   _wcRejecting;
         private static double _wcLockHours;
+        // Live 1× clock-rate estimate (game-hours per real-second; EMA over
+        // healthy windows) and the taxi-clamp anchor state.
+        private static double _wcNormalRate = 1.0 / 60.0;
+        private static bool   _wcInTaxiClamp;
+        private static double _wcTaxiAnchorHours;
+        private static float  _wcTaxiAnchorReal;
 
         /// <summary>Resets the world-clock skip detector — call on game (re)load.</summary>
         private static void ResetWorldClock()
@@ -543,14 +552,41 @@ namespace BigAmbitionsMP
             // local player is in a taxi we stop measuring rate and stay out of
             // the way; the moment the ride ends we re-arm the detector at the
             // post-ride clock (so the new time isn't seen as a skip retroactively).
-            if (TrafficSync.LocalInTaxi || MPRestSync.SkipActive)
+            // Consensus skip: the HOST deliberately races the clock and clients
+            // follow it — stand down entirely.
+            if (MPRestSync.SkipActive)
             {
-                // Taxi: the ride needs its local fast-forward (Backlog #5).
-                // Consensus skip: the HOST is deliberately racing the clock and
-                // clients follow it — the detector stands down in both cases.
                 _wcWindowStartHours = nowHours;        // keep window glued to live time
                 _wcWindowStartReal  = realNow;
                 _wcRejecting        = false;
+                _wcInTaxiClamp      = false;
+                return;
+            }
+
+            // Taxi: the ride keeps its local fast-forward (timescale exempt in
+            // LateUpdate — the trip completes in seconds) but GAME TIME flows
+            // at the measured normal rate, so the ride costs the same time it
+            // would for everyone else.  (Overhaul 2026-06-10: replaces the full
+            // exemption that let the rider's clock genuinely race ahead.)
+            if (TrafficSync.LocalInTaxi)
+            {
+                if (!_wcInTaxiClamp)
+                {
+                    _wcInTaxiClamp     = true;
+                    _wcTaxiAnchorHours = nowHours;
+                    _wcTaxiAnchorReal  = realNow;
+                    Plugin.Logger.LogInfo($"[Time] taxi clock clamp ON (1x = {_wcNormalRate * 3600.0:F1} game-min/real-min).");
+                }
+                double expected = _wcTaxiAnchorHours + (realNow - _wcTaxiAnchorReal) * _wcNormalRate;
+                if (nowHours > expected + WC_SETTLE_SLACK) WriteWorldClock(expected);
+                return;
+            }
+            if (_wcInTaxiClamp)
+            {
+                _wcInTaxiClamp      = false;
+                _wcWindowStartHours = -1;              // re-arm the window fresh
+                _wcRejecting        = false;
+                Plugin.Logger.LogInfo("[Time] taxi clock clamp OFF.");
                 return;
             }
 
@@ -581,17 +617,23 @@ namespace BigAmbitionsMP
             double rate = (nowHours - _wcWindowStartHours) / realElapsed;
             if (rate > WC_SKIP_H_PER_S)
             {
-                // Skip detected — lock at the pre-skip (window-start) value.
+                // ANOMALY: every known skip is suppressed at the TimeMachine
+                // choke point, so an acceleration reaching here is a mechanism
+                // we haven't accounted for — pin the clock and SHOUT.
                 _wcRejecting = true;
                 _wcLockHours = _wcWindowStartHours;
                 WriteWorldClock(_wcLockHours);
-                Plugin.Logger.LogInfo(
-                    $"[UI] Time skip rejected ({rate * 60:F0} game-min/s) — " +
-                    $"clock held at day {(int)(_wcLockHours / 24.0)} hour {_wcLockHours % 24.0:F2}.");
+                Plugin.Logger.LogWarning(
+                    $"[Time] UNACCOUNTED time acceleration ({rate * 60:F1} game-h/min) — " +
+                    $"clock pinned at day {(int)(_wcLockHours / 24.0)} hour {_wcLockHours % 24.0:F2}.  " +
+                    "Report this: a skip mechanism bypassed the TimeMachine patch.");
             }
             else
             {
-                // Normal real-time progression — slide the measurement window forward.
+                // Healthy 1× window — refine the live normal-rate estimate
+                // (powers the taxi clamp) and slide the window forward.
+                if (rate > 0)
+                    _wcNormalRate = _wcNormalRate * 0.9 + rate * 0.1;
                 _wcWindowStartHours = nowHours;
                 _wcWindowStartReal  = realNow;
             }
