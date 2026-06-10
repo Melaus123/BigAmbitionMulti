@@ -93,6 +93,29 @@ namespace BigAmbitionsMP
             _hostVotes.Clear(); _skipGoalMinutes = 0;
         }
 
+        // ── Taxi v2: INSTANT ARRIVAL (user-chosen, 2026-06-10) ───────────────
+        // The ride's completion handler (TaxiSystem.OnTimeMachineEnded) is what
+        // teleports the player — so: machine starts, we hide its misleading
+        // overlay (frozen clock, "Day 123") and stop it through its own off
+        // switch a beat later.  Ride completes instantly, clock never moves.
+        private static float _taxiPendingUntil;
+        private static float _taxiStopAt;
+
+        public static bool TaxiRidePending => Time.unscaledTime < _taxiPendingUntil;
+
+        public static void OnTaxiRideStarting()
+        {
+            _taxiPendingUntil = Time.unscaledTime + 8f;
+            Plugin.Logger.LogInfo("[Taxi] ride starting — instant-arrival mode armed.");
+        }
+
+        public static void OnTaxiMachineStarted()
+        {
+            SetMachineCanvasVisible(false);            // no frozen-clock overlay
+            _taxiStopAt = Time.unscaledTime + 0.3f;    // let the caller settle first
+            Plugin.Logger.LogInfo("[Taxi] ride machine started — stopping for instant arrival.");
+        }
+
         // ── Native skip engine → clean neutralization (MPPatches Postfix) ─────
         public static void OnNativeSkipButtonPressed()
         {
@@ -277,11 +300,25 @@ namespace BigAmbitionsMP
         // ── Per-frame tick (main thread, MP active + in game) ─────────────────
         public static void Tick()
         {
+            // Taxi instant arrival runs at FRAME cadence (the 0.3s beat matters):
+            // stop the ride's machine — its end handler teleports the player;
+            // the clock never moved.
+            if (_taxiStopAt > 0f && Time.unscaledTime >= _taxiStopAt)
+            {
+                _taxiStopAt = 0f;
+                _taxiPendingUntil = 0f;
+                StopLocalMachine();
+                SetMachineCanvasVisible(true);   // restore for future rest skips
+                Plugin.Logger.LogInfo("[Taxi] instant arrival — machine stopped, no time cost.");
+            }
+
             if (Time.unscaledTime < _nextPollAt) return;
             _nextPollAt = Time.unscaledTime + 0.5f;
 
             // Watchdog: nothing may freeze time outside our explicit systems.
-            if (!TimeSync.ManualPaused && !TimeSync.IsStartupHeld)
+            // (Not while a taxi ride is mid-handoff — the ride machine briefly
+            // owns the pause state.)
+            if (!TimeSync.ManualPaused && !TimeSync.IsStartupHeld && !TaxiRidePending)
                 GameStateReader.EnsureTimeNotLocked();
 
             // Seated state from the game's activity system.
@@ -581,6 +618,20 @@ namespace BigAmbitionsMP
                 if (m != null && mm != null) mm.Invoke(m, new object[] { 0f });
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] StopLocalMachine: {ex.Message}"); }
+        }
+
+        /// <summary>Hide/show the native skip overlay (taxi rides hide it: its
+        /// frozen clock and wrong day are misleading; restored after).</summary>
+        private static void SetMachineCanvasVisible(bool visible)
+        {
+            try
+            {
+                var m = GetMachine();
+                var p = _machineType?.GetProperty("canvas");
+                var canvas = p?.GetValue(m) as Canvas;
+                if (canvas != null) canvas.enabled = visible;
+            }
+            catch { }
         }
 
         public static string Fmt(double totalMinutes)

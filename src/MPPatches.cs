@@ -1615,9 +1615,16 @@ namespace BigAmbitionsMP
             static void Postfix()
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                if (TrafficSync.LocalInTaxi) return;          // native taxi flow
-                // v3: immediate clean shutdown through the engine's own off
-                // switch — the engine never stays alive in MP.
+                // Taxi ride machine → INSTANT ARRIVAL (overlay hidden, machine
+                // stopped a beat later — its end handler teleports the player,
+                // the clock never moves).
+                if (TrafficSync.LocalInTaxi || MPRestSync.TaxiRidePending)
+                {
+                    try { MPRestSync.OnTaxiMachineStarted(); } catch { }
+                    return;
+                }
+                // Rest-class skip press: immediate clean shutdown through the
+                // engine's own off switch — the engine never stays alive in MP.
                 try { MPRestSync.OnNativeSkipButtonPressed(); } catch { }
             }
         }
@@ -1867,8 +1874,29 @@ namespace BigAmbitionsMP
             static bool Prefix()
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
-                if (TrafficSync.LocalInTaxi) return true;     // taxi keeps native machine
+                // No taxi bypass: the ride machine is stopped instantly (taxi
+                // v2 = instant arrival), so it must never self-advance either.
                 return false;                                  // machine never self-advances in MP
+            }
+        }
+
+        // ── Patch: TaxiSystem.TravelTo — arms instant-arrival mode ────────────
+        [HarmonyPatch]
+        public static class Patch_TaxiSystem_TravelTo_Arm
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var t = VehicleManager.FindGameType("TaxiSystem");
+                var m = t?.GetMethod("TravelTo",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static);
+                Plugin.Logger.LogInfo($"[Taxi] TravelTo arm patch: {(m != null ? "patched" : "NOT FOUND")}");
+                return m;
+            }
+
+            static void Prefix()
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                try { MPRestSync.OnTaxiRideStarting(); } catch { }
             }
         }
 
