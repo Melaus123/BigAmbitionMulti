@@ -127,18 +127,37 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (CancelButtonIndex >= 0) { InvokeDockButton(CancelButtonIndex); return; }
-                var act = _curAct;
-                if (act == null) return;
-                var b = act as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase;
-                string? full = b?.TryCast<Il2CppSystem.Object>()?.GetIl2CppType()?.FullName;
-                var ct = full != null ? VehicleManager.FindGameType(full) : null;
-                if (ct != null && b != null)
+                if (CancelButtonIndex >= 0) InvokeDockButton(CancelButtonIndex);
+                else
                 {
-                    var target = Activator.CreateInstance(ct, b.Pointer);
-                    ct.GetMethod("Finish")?.Invoke(target, null);
-                    Plugin.Logger.LogInfo("[Rest] StandUp via Finish() fallback.");
+                    var act = _curAct;
+                    var b = act as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase;
+                    string? full = b?.TryCast<Il2CppSystem.Object>()?.GetIl2CppType()?.FullName;
+                    var ct = full != null ? VehicleManager.FindGameType(full) : null;
+                    if (ct != null && b != null)
+                    {
+                        var target = Activator.CreateInstance(ct, b.Pointer);
+                        ct.GetMethod("Finish")?.Invoke(target, null);
+                        Plugin.Logger.LogInfo("[Rest] StandUp via Finish() fallback.");
+                    }
                 }
+
+                // The activity-UI's close-out bookkeeping (clear current slot,
+                // re-enable navigation) normally runs when its panel closes —
+                // which we suppress.  Do it ourselves, or the game keeps the
+                // character "busy" and movement stays locked.
+                var (ui, uiType) = GetActivityUiCached();
+                if (ui != null && uiType != null)
+                {
+                    bool navBefore = false;
+                    try { navBefore = (bool)(uiType.GetMethod("HasNavigationDisabled", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.Invoke(null, null) ?? false); } catch { }
+                    try { uiType.GetProperty("GetCurrentActivity")?.SetValue(ui, null); } catch { }
+                    try { uiType.GetMethod("CancelActivityMovement")?.Invoke(ui, null); } catch { }
+                    bool navAfter = false;
+                    try { navAfter = (bool)(uiType.GetMethod("HasNavigationDisabled", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.Invoke(null, null) ?? false); } catch { }
+                    Plugin.Logger.LogInfo($"[Rest] StandUp close-out: navDisabled {navBefore} → {navAfter}.");
+                }
+                _curAct = null;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] StandUp: {ex.Message}"); }
         }

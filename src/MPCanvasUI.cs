@@ -784,7 +784,7 @@ namespace BigAmbitionsMP
                 if (_dockSkipLbl != null)
                     _dockSkipLbl.text = voting ? "Skip requested — click to cancel" : "Request time skip";
                 if (_skipToggleImg != null)
-                    _skipToggleImg.color = voting ? new Color(0.22f, 0.55f, 0.28f, 1f) : new Color(0.20f, 0.36f, 0.60f, 1f);
+                    _skipToggleImg.color = voting ? new Color(0.24f, 0.60f, 0.31f, 1f) : new Color(0.19f, 0.42f, 0.67f, 1f);
 
                 // Left column: compact who-voted checklist + match buttons.
                 if (_dockPlayers != null)
@@ -819,14 +819,28 @@ namespace BigAmbitionsMP
                     _dockPlayers.text = sb.ToString();
                 }
 
-                // Hover + clicks.
+                // Hover + drag + clicks.
                 var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
-                _restUiHover = RectHit(_dockRT, mp);
+                _restUiHover = RectHit(_dockRT, mp) || _dockDragging;
                 if (_restUiHover) MPChat.SuppressGameInput = true;
+
+                if (Input.GetMouseButtonUp(0)) _dockDragging = false;
+                if (_dockDragging && _dockRT != null)
+                {
+                    Vector2 d = mp - _dockDragLast;
+                    _dockDragLast = mp;
+                    _dockRT.anchoredPosition += d;
+                    _dockSavedPos = _dockRT.anchoredPosition;   // remembered for next open
+                    return;
+                }
+
                 if (!Input.GetMouseButtonDown(0) || !_restUiHover) return;
 
                 if (hasX && _dockXRT != null && RectHit(_dockXRT, mp))
                 { MPRestSync.InvokeDockButton(MPRestSync.CancelButtonIndex); return; }
+
+                if (RectHit(_dockHdrRT, mp))
+                { _dockDragging = true; _dockDragLast = mp; return; }
 
                 for (int i = 0; i < 3; i++)
                     if (_matchRT[i] != null && _matchRT[i]!.gameObject.activeSelf && _matchGoal[i] > 0 && RectHit(_matchRT[i], mp))
@@ -865,6 +879,11 @@ namespace BigAmbitionsMP
 
         private bool _dockBuildFailed;
         private Sprite? _dockSprite;
+        // Drag + position memory (per session: re-opens where you left it).
+        private RectTransform? _dockHdrRT;
+        private bool _dockDragging;
+        private Vector2 _dockDragLast;
+        private static Vector2? _dockSavedPos;
 
         private void BuildDock()
         {
@@ -883,16 +902,19 @@ namespace BigAmbitionsMP
                 bg.color = new Color(0.07f, 0.08f, 0.11f, 0.96f);
                 if (_dockSprite != null) { try { bg.sprite = _dockSprite; bg.type = Image.Type.Sliced; } catch { } }
 
-                // Header band - chat title-bar look; title + red X.
+                // Restore the last position the player dragged it to.
+                if (_dockSavedPos.HasValue) _dockRT.anchoredPosition = _dockSavedPos.Value;
+
+                // Header band - chat title-bar look; title + red X; DRAG HANDLE.
                 var hdr = MakeGO("Hdr", _dock.transform);
-                var hrt = hdr.GetComponent<RectTransform>();
-                Stretch(hrt, 0f, 0f, 0f, 28f, top: true);
+                _dockHdrRT = hdr.GetComponent<RectTransform>();
+                Stretch(_dockHdrRT, 0f, 0f, 0f, 28f, top: true);
                 var hImg = hdr.AddComponent<Image>();
-                hImg.color = new Color(0.15f, 0.18f, 0.27f, 1f);
+                hImg.color = new Color(0.18f, 0.23f, 0.36f, 1f);
                 if (_dockSprite != null) { try { hImg.sprite = _dockSprite; hImg.type = Image.Type.Sliced; } catch { } }
                 _dockTitle = MakeLabel(hdr.transform, "", 14, C_WHITE, 14f, 0f, 300f, 28f, TextAlignmentOptions.Left);
                 ApplyFont(_dockTitle);
-                var (xRT, xLbl) = MakeDockButton("X", default, 30f, new Color(0.45f, 0.22f, 0.19f, 1f), 20f);
+                var (xRT, xLbl) = MakeDockButton("X", default, 30f, new Color(0.56f, 0.27f, 0.20f, 1f), 20f);
                 xRT.SetParent(hdr.transform, false);
                 xRT.anchorMin = xRT.anchorMax = xRT.pivot = new Vector2(1f, 0.5f);
                 xRT.anchoredPosition = new Vector2(-7f, 0f);
@@ -939,19 +961,20 @@ namespace BigAmbitionsMP
                 float bw = 60f, gap = 8f;
                 float rowW = bw * 4 + gap * 3;
                 float x0 = CX + (CW - rowW) / 2f;
-                (_tgtM1h, _) = MakeDockButton("-1h",  new Vector2(x0,                 68f), bw, new Color(0.165f, 0.184f, 0.24f, 1f), 25f);
-                (_tgtM15, _) = MakeDockButton("-15m", new Vector2(x0 + (bw + gap),     68f), bw, new Color(0.165f, 0.184f, 0.24f, 1f), 25f);
-                (_tgtP15, _) = MakeDockButton("+15m", new Vector2(x0 + (bw + gap) * 2, 68f), bw, new Color(0.165f, 0.184f, 0.24f, 1f), 25f);
-                (_tgtP1h, _) = MakeDockButton("+1h",  new Vector2(x0 + (bw + gap) * 3, 68f), bw, new Color(0.165f, 0.184f, 0.24f, 1f), 25f);
+                var nudgeCol = new Color(0.24f, 0.27f, 0.37f, 1f);    // brighter than v8 — vibrancy per mockup
+                (_tgtM1h, _) = MakeDockButton("-1h",  new Vector2(x0,                 68f), bw, nudgeCol, 25f);
+                (_tgtM15, _) = MakeDockButton("-15m", new Vector2(x0 + (bw + gap),     68f), bw, nudgeCol, 25f);
+                (_tgtP15, _) = MakeDockButton("+15m", new Vector2(x0 + (bw + gap) * 2, 68f), bw, nudgeCol, 25f);
+                (_tgtP1h, _) = MakeDockButton("+1h",  new Vector2(x0 + (bw + gap) * 3, 68f), bw, nudgeCol, 25f);
                 for (int i = 0; i < PresetHours.Length; i++)
                 {
-                    var (prt, plbl) = MakeDockButton($"{PresetHours[i]:D2}:00", new Vector2(x0 + (bw + gap) * i, 38f), bw, new Color(0.133f, 0.188f, 0.29f, 1f), 25f);
-                    plbl.color = new Color(0.71f, 0.83f, 0.96f, 1f);
+                    var (prt, plbl) = MakeDockButton($"{PresetHours[i]:D2}:00", new Vector2(x0 + (bw + gap) * i, 38f), bw, new Color(0.17f, 0.30f, 0.49f, 1f), 25f);
+                    plbl.color = new Color(0.76f, 0.87f, 0.98f, 1f);
                     _presetRT[i] = prt;
                 }
 
                 // Toggle - wide, centered.
-                var (tgRT, tgLbl) = MakeDockButton("", new Vector2(CX + (CW - 340f) / 2f, 6f), 340f, new Color(0.157f, 0.32f, 0.49f, 1f), 27f);
+                var (tgRT, tgLbl) = MakeDockButton("", new Vector2(CX + (CW - 340f) / 2f, 6f), 340f, new Color(0.19f, 0.42f, 0.67f, 1f), 27f);
                 _skipToggleRT  = tgRT;
                 _dockSkipLbl   = tgLbl;
                 _skipToggleImg = tgRT.GetComponent<Image>();
