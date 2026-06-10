@@ -231,8 +231,8 @@ namespace BigAmbitionsMP
                 string nm;
                 try
                 {
-                    nm = (act as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase)
-                         ?.GetIl2CppType()?.Name?.Replace("Activity", "") ?? "Rest";
+                    var io = (act as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase)?.TryCast<Il2CppSystem.Object>();
+                    nm = io?.GetIl2CppType()?.Name?.Replace("Activity", "") ?? "Rest";
                 }
                 catch { nm = "Rest"; }
                 return (act, nm);
