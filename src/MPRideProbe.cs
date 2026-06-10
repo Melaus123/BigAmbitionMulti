@@ -1,6 +1,7 @@
 using System;
 using Il2CppInterop.Runtime;
 using Helpers;
+using Vehicles.VehicleTypes;
 using UnityEngine;
 
 namespace BigAmbitionsMP
@@ -25,10 +26,56 @@ namespace BigAmbitionsMP
         private static float   _nextLogAt;
         private static string  _lastAnimSig = "";
 
-        // (F7 spawn-test-row removed 2026-06-10 — capture complete: all three
-        //  open types measured offset (0,0,0) / yaw 0; pose = animator bools
-        //  HoldingBox/UsingHands/OnScooter, already mirrored.  The passive
-        //  Sample() capture below stays for any future vehicle types.)
+        // ── F3 test row: spawn every OPEN vehicle type next to the player ────
+        // (HandTruck / Flatbed / ElectricScooter) for cart-visual testing
+        // without owning them.  F3 again (or leaving the game) cleans up.
+        // Restored 2026-06-10 at user request for the hand-IK test rounds —
+        // REMOVE AGAIN before release.  Don't save while the row is out.
+        private static readonly System.Collections.Generic.List<GameObject> _testSpawns = new();
+        private static readonly string[] OpenTypes = { "HandTruck", "Flatbed", "ElectricScooter" };
+
+        public static void ToggleTestRow()
+        {
+            try
+            {
+                if (_testSpawns.Count > 0) { CleanupTestRow(); return; }
+                var ch = PlayerHelper.PlayerController?.Character?.transform;
+                if (ch == null) return;
+                for (int i = 0; i < OpenTypes.Length; i++)
+                {
+                    try
+                    {
+                        var inst = new VehicleInstance { id = "BAMP_ridetest_" + OpenTypes[i] };
+                        if (Enum.TryParse<VehicleTypeName>(OpenTypes[i], out var vtn))
+                            inst.vehicleTypeName = vtn;
+                        var pos = ch.position + ch.forward * 2.5f + ch.right * (i - 1) * 2.2f;
+                        var vc  = VehicleHelper.CreateAndSpawnVehicle(inst, pos, Quaternion.LookRotation(ch.forward));
+                        if (vc != null) _testSpawns.Add(vc.gameObject);
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[RideProbe] spawn {OpenTypes[i]}: {ex.Message}"); }
+                }
+                Plugin.Logger.LogInfo($"[RideProbe] TEST ROW spawned ({_testSpawns.Count}/3) — F3 again to clean up.  Do NOT save while these are out.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RideProbe] ToggleTestRow: {ex.Message}"); }
+        }
+
+        public static void CleanupTestRow()
+        {
+            foreach (var go in _testSpawns)
+            {
+                if (go == null) continue;
+                try
+                {
+                    var vcComp = go.GetComponent(Il2CppType.Of<VehicleController>());
+                    var vc = vcComp != null ? vcComp.TryCast<VehicleController>() : null;
+                    if (vc != null) { try { VehicleHelper.UnregisterPlayerVehicle(vc); } catch { } }
+                    UnityEngine.Object.Destroy(go);
+                }
+                catch { }
+            }
+            if (_testSpawns.Count > 0) Plugin.Logger.LogInfo("[RideProbe] test row cleaned up.");
+            _testSpawns.Clear();
+        }
 
         public static void Sample(string typeName, Transform vehicle)
         {

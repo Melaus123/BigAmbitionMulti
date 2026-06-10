@@ -96,7 +96,18 @@ namespace BigAmbitionsMP
             if (trueBools != null)
                 foreach (var b in trueBools) _trueB.Add(b);
             _layerW = layerWeights;
-            _ikT = (ikTargets != null && ikTargets.Count >= 8) ? ikTargets : null;
+            // Hand-IK anchors with a grace window: one missed packet must not
+            // release the hands (visible pop).  Cleared after 0.6s of silence.
+            if (ikTargets != null && ikTargets.Count >= 8)
+            {
+                _ikT = ikTargets;
+                _ikLastAt = Time.unscaledTime;
+            }
+            else if (_ikT != null && Time.unscaledTime - _ikLastAt > 0.6f)
+            {
+                _ikT = null;
+                _ikSmoothInit = false;
+            }
         }
 
         // Mirrored animator-layer weights.  The clone's game scripts are
@@ -109,8 +120,11 @@ namespace BigAmbitionsMP
         // sender; manual two-bone solve on the clone's arm bones AFTER the
         // animation pass (LateUpdate) so it overrides the frame's pose.
         private List<float>? _ikT;
+        private float _ikLastAt;
         private bool _ikHumanChecked;
         private bool _ikHuman;
+        private bool _ikSmoothInit;
+        private Vector3 _ikL, _ikR;   // smoothed vehicle-local hand anchors
 
         private void LateUpdate()
         {
@@ -119,12 +133,21 @@ namespace BigAmbitionsMP
             {
                 if (!_ikHumanChecked) { _ikHumanChecked = true; _ikHuman = Anim.isHuman; }
                 if (!_ikHuman) return;
-                var lT = RideAttach.TransformPoint(new Vector3(_ikT[0], _ikT[1], _ikT[2]));
-                var rT = RideAttach.TransformPoint(new Vector3(_ikT[3], _ikT[4], _ikT[5]));
-                // Elbows bend down-and-slightly-forward — natural for pushing.
-                Vector3 pole = (-transform.up + transform.forward * 0.25f).normalized;
-                MPHandIk.SolveArm(Anim, true,  lT, pole);
-                MPHandIk.SolveArm(Anim, false, rT, pole);
+
+                // Smooth the anchors — packets step at 10 Hz and raw application
+                // makes the hands pop between spots.
+                var lRaw = new Vector3(_ikT[0], _ikT[1], _ikT[2]);
+                var rRaw = new Vector3(_ikT[3], _ikT[4], _ikT[5]);
+                if (!_ikSmoothInit) { _ikSmoothInit = true; _ikL = lRaw; _ikR = rRaw; }
+                float k = Mathf.Min(Time.deltaTime * 10f, 1f);
+                _ikL = Vector3.Lerp(_ikL, lRaw, k);
+                _ikR = Vector3.Lerp(_ikR, rRaw, k);
+
+                // Pole = world down: elbow solution stays stable however the
+                // avatar/cart rotate (an avatar-relative pole flipped the
+                // elbows on turns — the "arms coming off" wobble).
+                MPHandIk.SolveArm(Anim, true,  RideAttach.TransformPoint(_ikL), Vector3.down);
+                MPHandIk.SolveArm(Anim, false, RideAttach.TransformPoint(_ikR), Vector3.down);
             }
             catch { }
         }
