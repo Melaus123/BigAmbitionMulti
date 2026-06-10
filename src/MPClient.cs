@@ -298,6 +298,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.RestSkipState:
+                {
+                    var rs = env.GetPayload<RestSkipStatePayload>();
+                    if (rs != null) GameStatePatcher.EnqueueOnMainThread(() => MPRestSync.ApplyState(rs));
+                    break;
+                }
+
                 default:
                     Plugin.Logger.LogWarning($"[Client] Unknown message type: {env.Type}");
                     break;
@@ -765,6 +772,13 @@ namespace BigAmbitionsMP
 
         /// <summary>Sends a chat line to the host, which relays it to everyone
         /// (including us) so the log stays consistent and host-ordered.</summary>
+        /// <summary>Sends this player's rest-vote (started/ended a rest activity).</summary>
+        public static void SendRestVote(RestVotePayload p)
+        {
+            if (!IsConnected || p == null) return;
+            Send(MessageEnvelope.Create(MessageType.RestVote, MPConfig.PlayerId, p));
+        }
+
         /// <summary>Sends this player's changed retail prices to the host (who
         /// applies + relays to the other clients).</summary>
         public static void SendRetailPrices(RetailPricesPayload p)

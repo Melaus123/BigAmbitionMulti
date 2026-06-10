@@ -543,8 +543,11 @@ namespace BigAmbitionsMP
             // local player is in a taxi we stop measuring rate and stay out of
             // the way; the moment the ride ends we re-arm the detector at the
             // post-ride clock (so the new time isn't seen as a skip retroactively).
-            if (TrafficSync.LocalInTaxi)
+            if (TrafficSync.LocalInTaxi || MPRestSync.SkipActive)
             {
+                // Taxi: the ride needs its local fast-forward (Backlog #5).
+                // Consensus skip: the HOST is deliberately racing the clock and
+                // clients follow it — the detector stands down in both cases.
                 _wcWindowStartHours = nowHours;        // keep window glued to live time
                 _wcWindowStartReal  = realNow;
                 _wcRejecting        = false;
@@ -592,6 +595,62 @@ namespace BigAmbitionsMP
                 _wcWindowStartHours = nowHours;
                 _wcWindowStartReal  = realNow;
             }
+        }
+
+        /// <summary>Consensus-skip executor entry (MPRestSync, host only):
+        /// advance the authoritative clock to the given total game-minutes.</summary>
+        public static void WriteWorldClockMinutes(double totalMinutes) => WriteWorldClock(totalMinutes / 60.0);
+
+        // ── Rest-vote banner — small top-center overlay, NON-interactive (no
+        // raycast target, no input capture: ignorable while playing). ─────────
+        private TextMeshProUGUI? _restBanner;
+        private string _restBannerSig = "\0";
+
+        private void TickRestBanner()
+        {
+            try
+            {
+                int n = MPRestSync.Votes.Count;
+                string sig = n == 0 ? "" : $"{n}|{MPRestSync.RequiredVotes}|{MPRestSync.SkipActive}|{string.Join(",", MPRestSync.Votes.ConvertAll(v => v.PlayerId + v.Activity + (int)v.GoalMinutes))}";
+                if (sig == _restBannerSig) return;
+                _restBannerSig = sig;
+
+                if (n == 0)
+                {
+                    if (_restBanner != null) _restBanner.gameObject.SetActive(false);
+                    return;
+                }
+                if (_restBanner == null)
+                {
+                    if (_canvasGO == null) return;
+                    var go = MakeGO("BAMP_RestBanner", _canvasGO.transform);
+                    var rt = go.GetComponent<RectTransform>();
+                    rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 1f); rt.pivot = new Vector2(0.5f, 1f);
+                    rt.anchoredPosition = new Vector2(0f, -64f); rt.sizeDelta = new Vector2(860f, 54f);
+                    _restBanner = go.AddComponent<TextMeshProUGUI>();
+                    _restBanner.fontSize = 17; _restBanner.alignment = TextAlignmentOptions.Top;
+                    _restBanner.raycastTarget = false;          // never blocks clicks
+                    _restBanner.enableWordWrapping = true;
+                    ApplyFont(_restBanner);
+                }
+                _restBanner.gameObject.SetActive(true);
+
+                var sb = new System.Text.StringBuilder();
+                if (MPRestSync.SkipActive)
+                    sb.Append("<color=#8CE08C><b>Resting…</b></color>  ");
+                else
+                    sb.Append($"<color=#FFD27A><b>Rest vote {n}/{MPRestSync.RequiredVotes}</b></color>  ");
+                for (int i = 0; i < MPRestSync.Votes.Count; i++)
+                {
+                    var v = MPRestSync.Votes[i];
+                    if (i > 0) sb.Append("   ");
+                    sb.Append($"<color=#CFE3FF>{v.PlayerId}</color>: {v.Activity.ToLowerInvariant()} until {MPRestSync.Fmt(v.GoalMinutes)}");
+                }
+                if (!MPRestSync.SkipActive)
+                    sb.Append("\n<color=#9AA3B2><i>use a bed / bench / similar to join — time skips when everyone rests</i></color>");
+                _restBanner.text = sb.ToString();
+            }
+            catch { }
         }
 
         private static void WriteWorldClock(double totalHours)
@@ -674,6 +733,7 @@ namespace BigAmbitionsMP
                 MPHandIk.Reset();                      // cached refs die with the scene
                 MPRideProbe.CleanupTestRow();          // never leave test spawns behind
                 MPPriceSync.Reset();                   // price hashes are per-session
+                MPRestSync.Reset();                    // votes/skip die with the session
                 // The session-over lock is for the in-game world only — back at
                 // the menu the player is free to host/join again.
                 MPClient.SessionEnded = false;
@@ -1119,6 +1179,8 @@ namespace BigAmbitionsMP
             _pt = MPPerf.Begin(); BusinessSync.Tick();         MPPerf.End("BizHost",  _pt);   // host change detection (time-boxed sweep)
             _pt = MPPerf.Begin(); BusinessSync.TickClient();   MPPerf.End("BizClient",_pt);   // client pushes own businesses up
             _pt = MPPerf.Begin(); MPPriceSync.Tick();          MPPerf.End("Price",    _pt);   // live retail prices of own businesses (both roles)
+            _pt = MPPerf.Begin(); MPRestSync.Tick();           MPPerf.End("Rest",     _pt);   // consensus time-skip votes + host clock executor
+            TickRestBanner();
             _pt = MPPerf.Begin(); InteriorSync.Tick();         MPPerf.End("Interior", _pt);   // diff-push to subscribed clients
             _pt = MPPerf.Begin(); GameStatePatcher.DrainPendingLogoRefreshes(); MPPerf.End("LogoRefresh", _pt);
 

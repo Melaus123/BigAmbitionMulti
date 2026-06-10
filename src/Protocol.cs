@@ -83,6 +83,8 @@ namespace BigAmbitionsMP
         // In-game chat (Phase 6: connected-players window + chat).
         Chat                 = 100, // Any → Host → All: a chat line.  Clients send to host; host relays to everyone (incl. sender) so the log is consistent.
         RetailPrices         = 101, // Any → Host → Others: live retail prices of a business the SENDER runs — keeps per-neighbourhood price competition fed with current numbers on every machine.
+        RestVote             = 102, // Client → Host: this player started/ended a rest-class activity (consensus time-skip voting).
+        RestSkipState        = 103, // Host → All: current votes + whether the consensus skip is running (banner + skip-detector stand-down).
     }
 
     // ── Envelope ───────────────────────────────────────────────────────────────
@@ -698,6 +700,32 @@ namespace BigAmbitionsMP
     }
 
     /// <summary>A single retail-shelf price tag.</summary>
+    /// <summary>One player's rest-vote (MessageType.RestVote).</summary>
+    public class RestVotePayload
+    {
+        public string PlayerId    { get; set; } = "";
+        public bool   Active      { get; set; }
+        /// <summary>Goal as total game-minutes (day*1440 + hour*60 + min).</summary>
+        public double GoalMinutes { get; set; }
+        /// <summary>What the player is doing ("Sleep", "Rest", "Workout"...).</summary>
+        public string Activity    { get; set; } = "";
+    }
+
+    public class RestVoteEntry
+    {
+        public string PlayerId    { get; set; } = "";
+        public double GoalMinutes { get; set; }
+        public string Activity    { get; set; } = "";
+    }
+
+    /// <summary>Host → all: consensus state (MessageType.RestSkipState).</summary>
+    public class RestSkipStatePayload
+    {
+        public List<RestVoteEntry> Votes { get; set; } = new();
+        public int  Required   { get; set; }
+        public bool SkipActive { get; set; }
+    }
+
     /// <summary>Live retail prices for one business (MessageType.RetailPrices).
     /// Sent by the machine that RUNS the business whenever its prices change;
     /// receivers write them into their local registration copy so the game's

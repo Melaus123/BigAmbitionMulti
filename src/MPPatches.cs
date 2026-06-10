@@ -1580,6 +1580,32 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: TimeMachine.StartTimeMachine — consensus time-skip ─────────
+        // EVERY native skip (sleep/bench/work/gym/shower/TV/swim/school) goes
+        // through here.  In MP the native skip is ALWAYS suppressed; MPRestSync
+        // decides what happens instead (vote / run at 1×).  NOTE: the prefix
+        // deliberately declares NO parameters — the goal arg is a game struct
+        // (Timestamp) and structs stay out of our reflection/marshaling per the
+        // 2026-06-10 crash rule; goals are derived from the activity instead.
+        [HarmonyPatch]
+        public static class Patch_TimeMachine_Start_Consensus
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var t = VehicleManager.FindGameType("TimeMachine");
+                if (t == null) yield break;
+                foreach (var m in t.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+                    if (m.Name == "StartTimeMachine") yield return m;
+            }
+
+            static bool Prefix()
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                try { MPRestSync.OnNativeSkipSuppressed(); } catch { }
+                return false;   // native skip never runs in MP
+            }
+        }
+
         // ── Patch: CollapsibleWindow.OnHover — phone only ─────────────────────
         // The phone's hover-peek slides toward the uncollapsed position; with
         // our taller phone (adjusted collapse slide) the peek travels far and

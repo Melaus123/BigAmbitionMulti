@@ -696,6 +696,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.RestVote:
+                {
+                    var rv = env.GetPayload<RestVotePayload>();
+                    if (rv != null) GameStatePatcher.EnqueueOnMainThread(() => MPRestSync.HostHandleVote(rv));
+                    break;
+                }
+
                 case MessageType.RetailPrices:
                 {
                     // A client's business changed its retail prices: apply to the
@@ -1921,6 +1928,13 @@ namespace BigAmbitionsMP
 
         /// <summary>Public wrapper around Broadcast so external code (e.g. Harmony patches) can use it.</summary>
         public static void BroadcastAny(MessageEnvelope env) => Broadcast(env);
+
+        /// <summary>Host: broadcast the consensus rest/skip state.</summary>
+        public static void BroadcastRestState(RestSkipStatePayload p)
+        {
+            if (!_running || p == null) return;
+            Broadcast(MessageEnvelope.Create(MessageType.RestSkipState, "host", p));
+        }
 
         /// <summary>Host: broadcast the host's own changed retail prices.</summary>
         public static void BroadcastRetailPrices(RetailPricesPayload p)
