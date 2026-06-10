@@ -709,41 +709,21 @@ namespace BigAmbitionsMP
             _ => string.IsNullOrEmpty(a) ? "resting" : a.ToLowerInvariant(),
         };
 
-        // ── Rest dock (v5) — destination-time design, chat-window styling.
-        // One concept: "rest until <time of day>".  No durations.  Shows a
-        // named checklist of who has / hasn't voted.  Native Start/Stop/
-        // Cancel passthrough buttons live in the header. ─────────────────────
+        // ── Rest dock (v7) — chat-program styling, centered "Rest until".
+        // Left: who-voted checklist (+match).  Center: day (amber when not
+        // today) over a large centered time, nudge row, preset row, toggle.
+        // Header: activity title + X (the native Stop/Cancel). ───────────────
         private GameObject? _dock;          private RectTransform? _dockRT;
         private TextMeshProUGUI? _dockTitle, _dockDay, _dockTime, _dockPlayers, _dockSkipLbl;
-        private RectTransform? _dockXRT;    // header X = the native Stop/Cancel
+        private RectTransform? _dockXRT;
         private RectTransform? _tgtM1h, _tgtM15, _tgtP15, _tgtP1h, _skipToggleRT;
         private readonly RectTransform?[] _presetRT = new RectTransform?[4];
         private static readonly int[] PresetHours = { 7, 12, 18, 22 };
-        // Per-player quick-match buttons, aligned with the checklist rows.
         private readonly RectTransform?[] _matchRT = new RectTransform?[3];
         private readonly double[] _matchGoal = new double[3];
         private Image? _skipToggleImg;
         private double _skipTarget;
         private bool _restUiHover;
-        // Native BizPhone art (alive in-game) — the dock wears the game's look.
-        private static Sprite? _dockBgSprite;     // 'darkgreybox@2x'
-        private static Sprite? _dockBtnSprite;    // 'button-ws-grey@2x'
-
-        private static void CapturePhoneArt()
-        {
-            if (_dockBgSprite != null && _dockBtnSprite != null) return;
-            try
-            {
-                var phone = GameObject.Find("Canvases/Smartphone/Container/Phone");
-                if (phone != null && _dockBgSprite == null)
-                    _dockBgSprite = phone.GetComponent<Image>()?.sprite;
-                var skip = GameObject.Find("Canvases/Smartphone/Container/Phone/Radio/Skip");
-                if (skip != null && _dockBtnSprite == null)
-                    _dockBtnSprite = skip.GetComponent<Image>()?.sprite;
-                Plugin.Logger.LogInfo($"[RestDock] phone art: bg={(_dockBgSprite != null ? "ok" : "miss")} btn={(_dockBtnSprite != null ? "ok" : "miss")}");
-            }
-            catch { }
-        }
 
         private void TickRestUI()
         {
@@ -764,18 +744,23 @@ namespace BigAmbitionsMP
                 if (_dockTitle != null)
                     _dockTitle.text = NiceActivity(MPRestSync.ActivityName);
 
-                // Header X = the native Stop/Cancel (Start is auto-pressed).
                 bool hasX = MPRestSync.CancelButtonIndex >= 0;
                 if (_dockXRT != null && _dockXRT.gameObject.activeSelf != hasX)
                     _dockXRT.gameObject.SetActive(hasX);
 
-                // Destination time — day and time clearly separated.
-                if (_skipTarget <= 0) _skipTarget = MPRestSync.NextOccurrence(7);
-                double minT = MPRestSync.NowMinutes() + 5;
-                if (_skipTarget < minT) _skipTarget = minT;
+                // Destination time: default is a SHORT wait (now + 1h) — the
+                // old next-morning default silently meant "until tomorrow".
+                double now = MPRestSync.NowMinutes();
+                if (_skipTarget <= 0) _skipTarget = Math.Ceiling((now + 60) / 15.0) * 15.0;
+                double minT = now + 5;
+                if (_skipTarget < minT) _skipTarget = Math.Ceiling(minT / 5.0) * 5.0;
                 double shown = voting ? MPRestSync.LocalGoal : _skipTarget;
                 var (dStr, tStr) = MPRestSync.FmtParts(shown);
-                if (_dockDay  != null) _dockDay.text  = dStr;
+                if (_dockDay != null)
+                {
+                    bool otherDay = (int)(shown / 1440.0) != (int)(now / 1440.0);
+                    _dockDay.text  = otherDay ? $"<color=#FFD27A><b>{dStr} (tomorrow+)</b></color>" : dStr;
+                }
                 if (_dockTime != null) _dockTime.text = tStr;
 
                 if (_dockSkipLbl != null)
@@ -783,12 +768,12 @@ namespace BigAmbitionsMP
                 if (_skipToggleImg != null)
                     _skipToggleImg.color = voting ? new Color(0.22f, 0.55f, 0.28f, 1f) : new Color(0.20f, 0.36f, 0.60f, 1f);
 
-                // Compact named checklist + per-player quick-match buttons.
+                // Left column: compact who-voted checklist + match buttons.
                 if (_dockPlayers != null)
                 {
                     var sb = new System.Text.StringBuilder();
                     if (MPRestSync.SkipActive) sb.Append("<color=#8CE08C><b>Skipping time…</b></color>\n");
-                    int row = 0, matchIdx = 0;
+                    int row = MPRestSync.SkipActive ? 1 : 0, matchIdx = 0;
                     for (int i = 0; i < 3; i++) { _matchGoal[i] = 0; _matchRT[i]?.gameObject.SetActive(false); }
                     foreach (var pl in MPRestSync.AllPlayers())
                     {
@@ -796,22 +781,22 @@ namespace BigAmbitionsMP
                         if (MPRestSync.HasVote(pl, out double g))
                         {
                             var (gd, gt) = MPRestSync.FmtParts(g);
-                            sb.Append($"<color=#8CE08C>{pl}{(me ? " (you)" : "")}</color> <color=#CFE3FF>{gd} {gt}</color>\n");
-                            // quick-match button on this row (other players only)
+                            sb.Append($"<color=#8CE08C>{pl}{(me ? " (you)" : "")}</color>\n<color=#CFE3FF>   {gd} {gt}</color>\n");
                             if (!me && matchIdx < 3 && _matchRT[matchIdx] != null)
                             {
                                 _matchGoal[matchIdx] = g;
                                 var mrt = _matchRT[matchIdx]!;
-                                mrt.anchoredPosition = new Vector2(-12f, -(40f + (row + (MPRestSync.SkipActive ? 1 : 0)) * 19f));
+                                mrt.anchoredPosition = new Vector2(160f, -36f - row * 17f);
                                 mrt.gameObject.SetActive(true);
                                 matchIdx++;
                             }
+                            row += 2;
                         }
                         else
                         {
                             sb.Append($"<color=#8A93A6>{pl}{(me ? " (you)" : "")} — not voted</color>\n");
+                            row++;
                         }
-                        row++;
                     }
                     _dockPlayers.text = sb.ToString();
                 }
@@ -822,7 +807,7 @@ namespace BigAmbitionsMP
                 if (_restUiHover) MPChat.SuppressGameInput = true;
                 if (!Input.GetMouseButtonDown(0) || !_restUiHover) return;
 
-                if (hasX && _dockXRT != null && _dockXRT.gameObject.activeSelf && RectHit(_dockXRT, mp))
+                if (hasX && _dockXRT != null && RectHit(_dockXRT, mp))
                 { MPRestSync.InvokeDockButton(MPRestSync.CancelButtonIndex); return; }
 
                 for (int i = 0; i < 3; i++)
@@ -865,70 +850,73 @@ namespace BigAmbitionsMP
             _dock = MakeGO("BAMP_RestDock", _canvasGO!.transform);
             _dockRT = _dock.GetComponent<RectTransform>();
             _dockRT.anchorMin = _dockRT.anchorMax = _dockRT.pivot = new Vector2(0.5f, 0f);
-            _dockRT.anchoredPosition = new Vector2(0f, 120f);          // up off the bottom edge
-            _dockRT.sizeDelta = new Vector2(720f, 168f);
-            CapturePhoneArt();   // wear the game's own BizPhone art when available
+            _dockRT.anchoredPosition = new Vector2(0f, 120f);
+            _dockRT.sizeDelta = new Vector2(720f, 212f);
             var bg = _dock.AddComponent<Image>();
-            if (_dockBgSprite != null)
-            {
-                bg.sprite = _dockBgSprite; bg.type = Image.Type.Sliced;
-                bg.color = Color.white;                                // sprite carries the look
-            }
-            else
-            {
-                bg.color = new Color(0.07f, 0.08f, 0.11f, 0.96f);
-                if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }
-            }
+            bg.color = new Color(0.07f, 0.08f, 0.11f, 0.96f);          // chat-window body
+            if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }
 
-            // Header: just the title + the X (the native Stop/Cancel).
-            _dockTitle = MakeLabel(_dock.transform, "", 15, C_WHITE, 16f, -8f, 280f, 22f, TextAlignmentOptions.Left);
+            // Header band — chat title-bar look.
+            var hdr = MakeGO("Hdr", _dock.transform);
+            var hrt = hdr.GetComponent<RectTransform>();
+            Stretch(hrt, 0f, 0f, 0f, 28f, top: true);
+            var hImg = hdr.AddComponent<Image>();
+            hImg.color = new Color(0.15f, 0.18f, 0.27f, 1f);
+            if (_panelSprite != null) { try { hImg.sprite = _panelSprite; hImg.type = Image.Type.Sliced; } catch { } }
+            _dockTitle = MakeLabel(hdr.transform, "", 14, C_WHITE, 12f, 0f, 280f, 28f, TextAlignmentOptions.Left);
             ApplyFont(_dockTitle);
-            var (xRT, xLbl) = MakeDockButton("X", default, 30f, new Color(0.45f, 0.22f, 0.22f, 1f), 24f);
-            xRT.anchorMin = xRT.anchorMax = xRT.pivot = new Vector2(1f, 1f);
-            xRT.anchoredPosition = new Vector2(-8f, -6f);
+            var (xRT, xLbl) = MakeDockButton("X", default, 28f, new Color(0.45f, 0.22f, 0.22f, 1f), 22f);
+            xRT.SetParent(hdr.transform, false);
+            xRT.anchorMin = xRT.anchorMax = xRT.pivot = new Vector2(1f, 0.5f);
+            xRT.anchoredPosition = new Vector2(-6f, 0f);
             xLbl.fontSize = 13;
             _dockXRT = xRT;
             xRT.gameObject.SetActive(false);
 
-            // Left column (x 16..395): destination time + controls.
-            var until = MakeLabel(_dock.transform, "Rest until", 12, C_LBLGREY, 16f, -38f, 100f, 18f, TextAlignmentOptions.Left);
+            // Left column: checklist + match buttons (anchored top-left).
+            _dockPlayers = MakeLabel(_dock.transform, "", 12, C_WHITE, 14f, -34f, 210f, 170f, TextAlignmentOptions.TopLeft);
+            ApplyFont(_dockPlayers);
+            for (int i = 0; i < 3; i++)
+            {
+                var (mrt, mlbl) = MakeDockButton("match", default, 50f, new Color(0.30f, 0.24f, 0.42f, 1f), 16f);
+                mrt.anchorMin = mrt.anchorMax = mrt.pivot = new Vector2(0f, 1f);
+                mrt.anchoredPosition = new Vector2(160f, -36f - i * 17f);
+                mlbl.fontSize = 10;
+                _matchRT[i] = mrt;
+                mrt.gameObject.SetActive(false);
+            }
+
+            // Center stack (region x 240..706, centered): the star of the dock.
+            const float CX = 240f, CW = 466f;
+            var until = MakeLabel(_dock.transform, "Rest until", 12, C_LBLGREY, CX, -34f, CW, 16f, TextAlignmentOptions.Center);
             ApplyFont(until);
-            _dockDay = MakeLabel(_dock.transform, "", 13, C_LBLGREY, 110f, -38f, 120f, 18f, TextAlignmentOptions.Left);
+            _dockDay = MakeLabel(_dock.transform, "", 14, C_LBLGREY, CX, -52f, CW, 20f, TextAlignmentOptions.Center);
             ApplyFont(_dockDay);
-            _dockTime = MakeLabel(_dock.transform, "", 30, C_WHITE, 16f, -58f, 130f, 36f, TextAlignmentOptions.Left);
+            _dockTime = MakeLabel(_dock.transform, "", 38, C_WHITE, CX, -72f, CW, 44f, TextAlignmentOptions.Center);
             ApplyFont(_dockTime);
 
-            // Nudges - beside the big time.
-            (_tgtM1h, _) = MakeDockButton("-1h",  new Vector2(150f, 78f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f));
-            (_tgtM15, _) = MakeDockButton("-15m", new Vector2(200f, 78f), 50f, new Color(0.18f, 0.20f, 0.27f, 1f));
-            (_tgtP15, _) = MakeDockButton("+15m", new Vector2(254f, 78f), 50f, new Color(0.18f, 0.20f, 0.27f, 1f));
-            (_tgtP1h, _) = MakeDockButton("+1h",  new Vector2(308f, 78f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f));
-            // Presets - quick times of day (next occurrence).
+            // Nudges — four distinct buttons, centered (gap 10).
+            float bw = 58f, gap = 10f;
+            float rowW = bw * 4 + gap * 3;
+            float x0 = CX + (CW - rowW) / 2f;
+            (_tgtM1h, _) = MakeDockButton("-1h",  new Vector2(x0,                 64f), bw, new Color(0.18f, 0.20f, 0.27f, 1f), 26f);
+            (_tgtM15, _) = MakeDockButton("-15m", new Vector2(x0 + (bw + gap),     64f), bw, new Color(0.18f, 0.20f, 0.27f, 1f), 26f);
+            (_tgtP15, _) = MakeDockButton("+15m", new Vector2(x0 + (bw + gap) * 2, 64f), bw, new Color(0.18f, 0.20f, 0.27f, 1f), 26f);
+            (_tgtP1h, _) = MakeDockButton("+1h",  new Vector2(x0 + (bw + gap) * 3, 64f), bw, new Color(0.18f, 0.20f, 0.27f, 1f), 26f);
+            // Presets — same geometry, one row below.
             for (int i = 0; i < PresetHours.Length; i++)
             {
-                var (rt, _) = MakeDockButton($"{PresetHours[i]:D2}:00", new Vector2(150f + i * 54f, 44f), 50f, new Color(0.18f, 0.20f, 0.27f, 1f));
+                var (rt, _) = MakeDockButton($"{PresetHours[i]:D2}:00", new Vector2(x0 + (bw + gap) * i, 34f), bw, new Color(0.16f, 0.24f, 0.38f, 1f), 26f);
                 _presetRT[i] = rt;
             }
 
-            // Toggle - big, unmistakable, full left-column width at the bottom.
-            var (tgRT, tgLbl) = MakeDockButton("", new Vector2(16f, 6f), 360f, new Color(0.20f, 0.36f, 0.60f, 1f), 32f);
+            // Toggle — wide, centered at the bottom.
+            var (tgRT, tgLbl) = MakeDockButton("", new Vector2(CX + (CW - 320f) / 2f, 4f), 320f, new Color(0.20f, 0.36f, 0.60f, 1f), 26f);
             _skipToggleRT  = tgRT;
             _dockSkipLbl   = tgLbl;
             _skipToggleImg = tgRT.GetComponent<Image>();
             _dockSkipLbl.fontSize = 13;
 
-            // Right column: the who-voted checklist (compact) + match buttons.
-            _dockPlayers = MakeLabel(_dock.transform, "", 12, C_WHITE, 410f, -38f, 250f, 124f, TextAlignmentOptions.TopLeft);
-            ApplyFont(_dockPlayers);
-            for (int i = 0; i < 3; i++)
-            {
-                var (mrt, mlbl) = MakeDockButton("match", default, 52f, new Color(0.30f, 0.24f, 0.42f, 1f), 17f);
-                mrt.anchorMin = mrt.anchorMax = mrt.pivot = new Vector2(1f, 1f);
-                mrt.anchoredPosition = new Vector2(-12f, -40f - i * 19f);
-                mlbl.fontSize = 10;
-                _matchRT[i] = mrt;
-                mrt.gameObject.SetActive(false);
-            }
             _dock.SetActive(false);
         }
 
@@ -939,22 +927,14 @@ namespace BigAmbitionsMP
             rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0f, 0f);
             rt.anchoredPosition = pos; rt.sizeDelta = new Vector2(w, h);
             var img = go.AddComponent<Image>();
-            if (_dockBtnSprite != null)
-            {
-                // The game's own button art; tint carries our accent color.
-                img.sprite = _dockBtnSprite; img.type = Image.Type.Sliced;
-                img.color = Color.Lerp(Color.white, bg, 0.45f);
-            }
-            else
-            {
-                img.color = bg;
-                if (_panelSprite != null) { try { img.sprite = _panelSprite; img.type = Image.Type.Sliced; } catch { } }
-            }
+            img.color = bg;
+            if (_panelSprite != null) { try { img.sprite = _panelSprite; img.type = Image.Type.Sliced; } catch { } }
             var lbl = MakeLabel(go.transform, label, 12, C_WHITE, 0f, 0f, w, h, TextAlignmentOptions.Center);
             ApplyFont(lbl);
             var lrt = lbl.rectTransform; lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one; lrt.offsetMin = Vector2.zero; lrt.offsetMax = Vector2.zero;
             return (rt, lbl);
         }
+
         private static void WriteWorldClock(double totalHours)
         {
             if (totalHours < 0) totalHours = 0;

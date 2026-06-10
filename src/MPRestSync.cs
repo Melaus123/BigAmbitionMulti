@@ -196,6 +196,15 @@ namespace BigAmbitionsMP
             // Seated state from the game's activity system.
             UpdateSeated();
 
+            // Sitting is INDEFINITE: the game's default duration (30 min) was
+            // auto-standing players while they pondered the dock ("the window
+            // auto-closed").  Top the activity up so only X / walking ends it.
+            if (Seated)
+            {
+                double need = _localVoteActive ? Math.Max(30, _localGoal - NowMinutes()) : 30;
+                if (RemainingActivityMinutes() < need) ChangeDuration(60f);
+            }
+
             // Vote lifecycle: standing up (or losing the activity) drops it.
             if (_localVoteActive)
             {
