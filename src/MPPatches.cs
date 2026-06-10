@@ -1644,6 +1644,9 @@ namespace BigAmbitionsMP
             static void Prefix(ref bool hide)
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                // Only OUR rest-class activities lose their panel — foreign
+                // activities (the taxi flow!) keep their native UI untouched.
+                if (!MPRestSync.IsCurrentActivityRestClass()) return;
                 hide = true;   // the native panel is replaced by our dock
             }
         }

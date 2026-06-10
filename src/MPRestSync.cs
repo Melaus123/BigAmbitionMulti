@@ -26,6 +26,31 @@ namespace BigAmbitionsMP
     {
         public const float SkipMinutesPerRealSecond = 25f;
 
+        // Activities OUR system manages.  Anything else (the TAXI is an
+        // activity too — auto-pressing its Start mid-destination-pick crashed
+        // the game) is invisible to us and stays fully native.
+        private static readonly string[] RestClassNames =
+            { "Rest", "Sleep", "Work", "Workout", "Hygiene", "Entertain", "Swimming", "Study" };
+
+        public static bool IsRestClassName(string name)
+        {
+            foreach (var r in RestClassNames)
+                if (string.Equals(name, r, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        /// <summary>Live check for the HidePanel patch: is the CURRENT activity
+        /// one of ours?  Uses the cached UI wrapper (no scene walk).</summary>
+        public static bool IsCurrentActivityRestClass()
+        {
+            try
+            {
+                var (act, nm) = GetCurrentActivity();
+                return act != null && IsRestClassName(nm);
+            }
+            catch { return false; }
+        }
+
         // ── Local state ───────────────────────────────────────────────────────
         public static bool   Seated       { get; private set; }
         public static string ActivityName { get; private set; } = "";
@@ -125,6 +150,7 @@ namespace BigAmbitionsMP
         /// The exit must never depend on a button existing.</summary>
         private static float _suppressAutoStartUntil;
         private static float _navHealNext;
+        private static string _lastForeignActivity = "";
 
         public static void StandUp()
         {
@@ -323,11 +349,17 @@ namespace BigAmbitionsMP
             try
             {
                 var (act, nm) = GetCurrentActivity();
-                bool seated = act != null;
+                // NON-rest activities (taxi!) are none of our business.
+                bool seated = act != null && IsRestClassName(nm);
+                if (act != null && !IsRestClassName(nm) && nm != _lastForeignActivity)
+                {
+                    _lastForeignActivity = nm;
+                    Plugin.Logger.LogInfo($"[Rest] foreign activity '{nm}' — fully native, ignored.");
+                }
                 if (seated != Seated)
                     Plugin.Logger.LogInfo($"[Rest] seated → {seated}{(seated ? $" ({nm})" : "")}");
                 Seated = seated;
-                _curAct = act;
+                _curAct = seated ? act : null;
                 ActivityName = seated ? nm : "";
                 ActivityState = -1;
                 DockButtons.Clear();
