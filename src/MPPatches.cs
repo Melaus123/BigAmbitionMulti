@@ -1659,6 +1659,13 @@ namespace BigAmbitionsMP
                     ("PermanentTaxiController",  "OnClickToUseTaxi"),
                     ("TaxiSystem",               "TravelTo"),
                     ("TaxiSystem",               "OnTimeMachineEnded"),
+                    // ApplyFilters' internal stages (the crash is INSIDE its body):
+                    ("CityMapFilters",           "HideAllOutlines"),
+                    ("CityMapFilters",           "ShowHiddenPermanentPois"),
+                    ("CityMapFilters",           "UpdateVisibleNeighborhoods"),
+                    ("CityMapFilters",           "UpdateVisibleBuildingTypes"),
+                    ("CityMapFilters",           "UpdateVisibleBusinesses"),
+                    ("CityMapFilters",           "PopulateSearchDropdown"),
                 };
                 int n = 0;
                 foreach (var (tn, mn) in targets)
@@ -1667,13 +1674,19 @@ namespace BigAmbitionsMP
                     var m = t?.GetMethod(mn, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static);
                     if (m != null) { n++; yield return m; }
                 }
-                Plugin.Logger.LogInfo($"[TaxiProbe] breadcrumb probes bound: {n}/9");
+                Plugin.Logger.LogInfo($"[TaxiProbe] breadcrumb probes bound: {n}/15");
             }
 
             static void Prefix(System.Reflection.MethodBase __originalMethod)
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                 Plugin.Logger.LogInfo($"[TaxiProbe] ENTER {__originalMethod.DeclaringType?.Name}.{__originalMethod.Name}");
+            }
+
+            static void Postfix(System.Reflection.MethodBase __originalMethod)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                Plugin.Logger.LogInfo($"[TaxiProbe] EXIT  {__originalMethod.DeclaringType?.Name}.{__originalMethod.Name}");
             }
 
             static void Finalizer(Exception? __exception, System.Reflection.MethodBase __originalMethod)
