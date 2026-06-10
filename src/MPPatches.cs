@@ -1610,7 +1610,9 @@ namespace BigAmbitionsMP
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                 if (TrafficSync.LocalInTaxi) return;          // native taxi flow
-                try { MPRestSync.OnMachineStarted(); } catch { }
+                // v3: immediate clean shutdown through the engine's own off
+                // switch — the engine never stays alive in MP.
+                try { MPRestSync.OnNativeSkipButtonPressed(); } catch { }
             }
         }
 

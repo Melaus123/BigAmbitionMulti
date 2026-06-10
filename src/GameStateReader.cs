@@ -283,6 +283,29 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[GSC] SetNativePause({paused}): {ex.Message}"); }
         }
 
+        /// <summary>Watchdog (rest-v3): nothing may freeze time in MP outside the
+        /// explicit pause/vote systems.  Clears BOTH freeze switches: the pause
+        /// flag AND the skip engine's "time control disabled" lock — the second
+        /// one is what kept hard-locking sessions (2026-06-10).</summary>
+        public static void EnsureTimeNotLocked()
+        {
+            try
+            {
+                if (GetGSCPaused()) SetNativePause(false);
+                if (GetGSCTimeControlDisabled())
+                {
+                    var m = _gscType?.GetMethod("DisableTimeControl",
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (m != null && _gscInstance != null)
+                    {
+                        m.Invoke(_gscInstance, new object[] { false });
+                        Plugin.Logger.LogWarning("[GSC] WATCHDOG: time-control lock cleared (nothing may freeze time outside the vote system).");
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[GSC] EnsureTimeNotLocked: {ex.Message}"); }
+        }
+
         /// <summary>
         /// Returns true if GameSpeedController.isFastForwarding is true — i.e. the game
         /// is currently in a time-skip state (bench skip, sleep, or any other fast-forward).

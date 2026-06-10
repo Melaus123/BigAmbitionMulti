@@ -6,41 +6,43 @@ using UnityEngine;
 namespace BigAmbitionsMP
 {
     /// <summary>
-    /// Consensus time-skip ("waiting mechanic", 2026-06-10).
+    /// Consensus time-skip v3 ("our wiring", user-designed 2026-06-10).
     ///
-    /// Vanilla skips run through TimeMachine.StartTimeMachine(goal,...) —
-    /// sleep, bench rest, work shifts, gym, shower, TV, swimming, school.
-    /// In MP the patch in MPPatches suppresses every native skip and instead:
-    ///   * duration &lt; 60 game-minutes → no vote; the activity just runs at
-    ///     normal (synced) time — showers etc. are seconds of real time.
-    ///   * otherwise → a REST VOTE: everyone sees a banner ("1/3 resting —
-    ///     Bob: sleeping until Day 2 07:30"); each player must engage a rest
-    ///     item themselves.  When ALL connected players have an active vote
-    ///     the HOST fast-forwards the authoritative clock (direct clock
-    ///     writes — clients follow via the regular time sync) until the
-    ///     EARLIEST goal is reached or any vote drops (activity finished or
-    ///     cancelled) — i.e. the first sleeper to wake stops the skip.
+    /// PRINCIPLE: the game's skip engine (TimeMachine) NEVER stays alive in
+    /// MP.  Sitting just sits — pure native behavior, normal time.  Waiting
+    /// is OUR system: while seated, a small "Wait until…" button (MPCanvasUI)
+    /// raises a vote with an absolute goal (minimum 1 hour ahead).  When ALL
+    /// players have an active vote the HOST races the authoritative clock to
+    /// the EARLIEST goal; standing up or cancelling drops your vote and stops
+    /// the skip.  No native overlay, no pause, no hidden mechanics.
     ///
-    /// No game structs are constructed or reflected (Timestamp stays
-    /// untouched — see the 2026-06-10 generic-struct crash rule): goals are
-    /// derived from IPlayerActivity.GetRemainingMinutesForTimeMachine().
+    /// The native skip button is neutralized, not fought: if pressed, the
+    /// engine starts and is immediately shut down through ITS OWN off switch
+    /// (complete, self-consistent teardown) and a notice points to our button.
+    /// A watchdog clears any leftover time-freeze every second — a hard-lock
+    /// is structurally impossible.
     /// </summary>
     public static class MPRestSync
     {
-        public const float MinVoteMinutes = 60f;     // shorter activities just run at 1×
-        public const float SkipMinutesPerRealSecond = 25f;
+        public const double MinVoteMinutes = 60;     // minimum wait length
+        public const float  SkipMinutesPerRealSecond = 25f;
 
-        // ── Local vote state ──────────────────────────────────────────────────
-        private static bool     _localVoteActive;
-        private static double   _localGoal;
-        private static float    _nextPollAt;
+        // ── Local state ───────────────────────────────────────────────────────
+        public static bool   Seated       { get; private set; }
+        public static string ActivityName { get; private set; } = "";
+        private static bool   _localVoteActive;
+        private static double _localGoal;
+        private static float  _nextPollAt;
 
-        // ── Shared state (host-broadcast; used for banner + detector stand-down) ──
+        public static bool LocalVoteActive => _localVoteActive;
+        public static double LocalGoal     => _localGoal;
+
+        // ── Shared state (host-broadcast; banner + detector stand-down) ──────
         public static readonly List<RestVoteEntry> Votes = new();
         public static int  RequiredVotes;
-        public static volatile bool SkipActive;      // detector stand-down everywhere
+        public static volatile bool SkipActive;
 
-        // Transient local-only banner line (e.g. "resting at normal speed").
+        // Transient local-only banner line.
         public static string LocalNotice = "";
         public static float  LocalNoticeUntil;
 
@@ -50,286 +52,113 @@ namespace BigAmbitionsMP
 
         public static void Reset()
         {
+            Seated = false; ActivityName = "";
             _localVoteActive = false; _localGoal = 0;
-            _localHold = false; _pendingEvalAt = 0f;
             _machine = null;
             Votes.Clear(); RequiredVotes = 0; SkipActive = false;
             _hostVotes.Clear(); _skipGoalMinutes = 0;
-            LocalNotice = "";
+            LocalNotice = ""; LocalNoticeUntil = 0f;
         }
 
-        // ── Machine-started hook (MPPatches Postfix) ──────────────────────────
-        // Classification is DEFERRED ~0.35s: the taxi also starts a TimeMachine
-        // and LocalInTaxi isn't reliably set yet at start time — stopping the
-        // taxi's machine mid-coroutine was the host crash.  By eval time the
-        // taxi identifies itself and we leave it fully native.
-        private static float _pendingEvalAt;
-
-        public static void OnMachineStarted() => _pendingEvalAt = Time.unscaledTime + 0.35f;
-
-        private static void EvaluateMachine()
+        // ── Native skip button → clean neutralization (MPPatches Postfix) ─────
+        public static void OnNativeSkipButtonPressed()
         {
-            try
-            {
-                if (TrafficSync.LocalInTaxi) { Plugin.Logger.LogInfo("[Rest] machine belongs to a TAXI ride — native."); return; }
-                if (!MachineRunning()) return;   // already gone (cancelled instantly)
-
-                // Authoritative remaining time from the machine itself —
-                // _goalTotalMinutes is set before our hook fires.  (The old
-                // source, PlayerActivityUI.GetCurrentActivity, is already null
-                // by machine-start time: that was the '' (0 min) bug.)
-                var (d, h) = GameStateReader.GetGameTime();
-                double now = d * 1440.0 + h * 60.0;
-                double goalTotal = ReadMachineGoalMinutes();
-                double remaining = goalTotal - now;
-                var (_, actName) = GetCurrentActivity();
-                if (string.IsNullOrEmpty(actName)) actName = "Rest";
-
-                if (goalTotal <= 0 || remaining <= 0)
-                {
-                    Plugin.Logger.LogWarning($"[Rest] machine running but goal unreadable (goal={goalTotal:F0}, now={now:F0}) — leaving it frozen; cancel via its button.");
-                    return;
-                }
-                if (remaining < MinVoteMinutes)
-                {
-                    // Stay seated, NO native overlay (user 2026-06-10): hold the
-                    // frozen machine with its canvas hidden; our banner notice
-                    // persists until the goal time arrives at 1×.
-                    _localHold = true;
-                    _localGoal = goalTotal;
-                    SetMachineCanvasVisible(false);
-                    // Starting the machine also PAUSED the game (its normal mode
-                    // pauses the sim and drives time itself) — that pause is the
-                    // translucent click-blocking overlay AND a frozen clock.
-                    GameStateReader.SetNativePause(false);
-                    LocalNotice      = $"Resting until {Fmt(goalTotal)} — under 1h, no group skip needed.";
-                    LocalNoticeUntil = float.MaxValue;   // cleared on release
-                    Plugin.Logger.LogInfo($"[Rest] '{actName}' ({remaining:F0} min) below vote threshold — held at 1x until {Fmt(goalTotal)}, overlay hidden.");
-                    return;
-                }
-                // Lock the goal as an ABSOLUTE target on a clean 5-min boundary.
-                double goal = Math.Ceiling(goalTotal / 5.0) * 5.0;
-                if (goal <= now + 1.0) goal = now + 5.0;
-                _localGoal       = goal;
-                _localVoteActive = true;
-                MakeOverlayBackgroundTransparent();   // see the world while waiting
-                GameStateReader.SetNativePause(false);   // kill the machine's pause/fade
-                SendVote(true, goal, actName);
-                Plugin.Logger.LogInfo($"[Rest] vote ON: '{actName}' {remaining:F0} min → goal {Fmt(goal)} (machine held).");
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] EvaluateMachine: {ex.Message}"); }
+            StopLocalMachine();   // the game's own complete teardown
+            LocalNotice      = "Time skip is group-based in multiplayer — use the \"Wait until…\" button while seated.";
+            LocalNoticeUntil = Time.unscaledTime + 7f;
+            Plugin.Logger.LogInfo("[Rest] native skip press neutralized (machine stopped through its own off switch).");
         }
 
-        private static double ReadMachineGoalMinutes()
+        // ── Our wait API (called by the MPCanvasUI wait button/panel) ─────────
+        public static double NowMinutes()
         {
-            try
+            var (d, h) = GameStateReader.GetGameTime();
+            return d * 1440.0 + h * 60.0;
+        }
+
+        /// <summary>Earliest other player's goal, for the "Match" button.  0 = none.</summary>
+        public static double OtherVoteGoal(out string who)
+        {
+            who = "";
+            double best = 0;
+            foreach (var v in Votes)
             {
-                var m = GetMachine();
-                var p = _machineType?.GetProperty("_goalTotalMinutes",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                if (m == null || p == null) return -1;
-                return Convert.ToDouble(p.GetValue(m) ?? -1f);
+                if (v.PlayerId == MPConfig.PlayerId) continue;
+                if (best == 0 || v.GoalMinutes < best) { best = v.GoalMinutes; who = v.PlayerId; }
             }
-            catch { return -1; }
+            return best;
+        }
+
+        public static void RequestWait(double goalMinutes)
+        {
+            if (!Seated)
+            {
+                LocalNotice = "Sit somewhere first (bench / bed / car) to request a wait.";
+                LocalNoticeUntil = Time.unscaledTime + 5f;
+                return;
+            }
+            double now = NowMinutes();
+            if (goalMinutes < now + MinVoteMinutes) goalMinutes = now + MinVoteMinutes;
+            goalMinutes = Math.Ceiling(goalMinutes / 5.0) * 5.0;   // clean 5-min boundary
+            _localGoal = goalMinutes;
+            _localVoteActive = true;
+            SendVote(true, goalMinutes, ActivityName);
+            Plugin.Logger.LogInfo($"[Rest] wait requested: until {Fmt(goalMinutes)} ({ActivityName}).");
+        }
+
+        public static void CancelWait()
+        {
+            if (!_localVoteActive) return;
+            _localVoteActive = false;
+            SendVote(false, 0, "");
+            Plugin.Logger.LogInfo("[Rest] wait cancelled by player.");
         }
 
         // ── Per-frame tick (main thread, MP active + in game) ─────────────────
         public static void Tick()
         {
-            // Deferred machine classification (see OnMachineStarted).
-            if (_pendingEvalAt > 0f && Time.unscaledTime >= _pendingEvalAt)
-            {
-                _pendingEvalAt = 0f;
-                EvaluateMachine();
-            }
+            if (Time.unscaledTime < _nextPollAt) return;
+            _nextPollAt = Time.unscaledTime + 0.5f;
 
-            // Sub-hour HOLD: machine frozen + hidden, player seated — release
-            // when the goal time arrives (the activity completed at 1×).
-            if (_localHold && Time.unscaledTime >= _nextHoldPollAt)
-            {
-                _nextHoldPollAt = Time.unscaledTime + 0.5f;
-                GameStateReader.SetNativePause(false);   // keep the pause/fade away (no-op when unpaused)
-                bool release = false;
-                if (!MachineRunning()) release = true;        // cancelled natively
-                else
-                {
-                    var (hd, hh) = GameStateReader.GetGameTime();
-                    if (hd * 1440.0 + hh * 60.0 >= _localGoal - 0.1)
-                    {
-                        Plugin.Logger.LogInfo("[Rest] hold goal reached — releasing machine.");
-                        StopLocalMachine();
-                        release = true;
-                    }
-                }
-                if (release)
-                {
-                    _localHold = false;
-                    SetMachineCanvasVisible(true);            // restore for future skips
-                    LocalNotice = ""; LocalNoticeUntil = 0f;  // clear the persistent notice
-                }
-            }
+            // Watchdog: nothing may freeze time outside our explicit systems.
+            if (!TimeSync.ManualPaused && !TimeSync.IsStartupHeld)
+                GameStateReader.EnsureTimeNotLocked();
 
-            // The frozen machine's clock label would otherwise sit still
-            // ("stuck not moving") — drive it from the live clock.
-            if ((_localVoteActive || _localHold) && Time.unscaledTime >= _nextLabelAt)
-            {
-                _nextLabelAt = Time.unscaledTime + 0.25f;
-                DriveMachineClockLabel();
-            }
+            // Seated state from the game's activity system.
+            UpdateSeated();
 
-            // Vote lifecycle = the machine's own isRunning: covers the native
-            // Cancel button, completion, and our own StopLocalMachine calls.
-            if (_localVoteActive && Time.unscaledTime >= _nextPollAt)
+            // Vote lifecycle: standing up (or losing the activity) drops it.
+            if (_localVoteActive)
             {
-                _nextPollAt = Time.unscaledTime + 0.5f;
-                GameStateReader.SetNativePause(false);   // keep the pause/fade away while waiting
-                if (!MachineRunning())
+                if (!Seated)
                 {
                     _localVoteActive = false;
                     SendVote(false, 0, "");
-                    Plugin.Logger.LogInfo("[Rest] vote OFF (machine stopped/cancelled).");
+                    Plugin.Logger.LogInfo("[Rest] vote OFF (stood up).");
                 }
-                else if (!SkipActive)
+                else if (!SkipActive && NowMinutes() >= _localGoal - 0.1)
                 {
-                    // Goal reached while the skip already ended (we were the
-                    // earliest sleeper) — close our machine; vote drops next poll.
-                    var (d, h) = GameStateReader.GetGameTime();
-                    if (d * 1440.0 + h * 60.0 >= _localGoal - 0.5)
-                    {
-                        Plugin.Logger.LogInfo("[Rest] local goal reached — stopping machine.");
-                        StopLocalMachine();
-                    }
+                    _localVoteActive = false;
+                    SendVote(false, 0, "");
+                    Plugin.Logger.LogInfo("[Rest] vote OFF (goal time reached).");
                 }
             }
 
             if (MPServer.IsRunning) HostTick();
         }
 
-        // ── Local TimeMachine instance helpers ────────────────────────────────
-        private static object? _machine;          // typed wrapper, cached per scene
-        private static Type?   _machineType;
-
-        private static object? GetMachine()
+        private static void UpdateSeated()
         {
             try
             {
-                if (_machine != null)
-                {
-                    // cached wrapper may have died with its scene
-                    try { if (MachineAlive()) return _machine; } catch { }
-                    _machine = null;
-                }
-                _machineType ??= VehicleManager.FindGameType("Timemachine.TimeMachine")
-                              ?? VehicleManager.FindGameType("TimeMachine");
-                if (_machineType == null) return null;
-                var objs = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(_machineType), true);
-                if (objs == null || objs.Length == 0) return null;
-                _machine = Activator.CreateInstance(_machineType, objs[0].Pointer);
-                return _machine;
-            }
-            catch { return null; }
-        }
-
-        private static bool MachineAlive()
-        {
-            var p = _machineType?.GetProperty("isRunning");
-            return p != null && _machine != null && p.GetValue(_machine) is bool;
-        }
-
-        private static bool MachineRunning()
-        {
-            try
-            {
-                var m = GetMachine();
-                var p = _machineType?.GetProperty("isRunning");
-                return m != null && p != null && (bool)(p.GetValue(m) ?? false);
-            }
-            catch { return false; }
-        }
-
-        private static bool _localHold;
-        private static float _nextHoldPollAt;
-        private static float _nextLabelAt;
-
-        /// <summary>Hide/show the native skip overlay (sub-hour hold keeps the
-        /// player seated without the screen takeover).</summary>
-        private static void SetMachineCanvasVisible(bool visible)
-        {
-            try
-            {
-                var m = GetMachine();
-                var p = _machineType?.GetProperty("canvas");
-                var canvas = p?.GetValue(m) as Canvas;
-                if (canvas != null) canvas.enabled = visible;
+                var (act, nm) = GetCurrentActivity();
+                bool seated = act != null;
+                if (seated != Seated)
+                    Plugin.Logger.LogInfo($"[Rest] seated → {seated}{(seated ? $" ({nm})" : "")}");
+                Seated = seated;
+                if (seated) ActivityName = nm;
             }
             catch { }
-        }
-
-        /// <summary>For the ≥1h vote overlay: make full-screen background/blur
-        /// images fully transparent so the world stays visible while waiting —
-        /// labels (TMP) and small images (buttons) keep their look.</summary>
-        private static void MakeOverlayBackgroundTransparent()
-        {
-            try
-            {
-                var m = GetMachine();
-                var p = _machineType?.GetProperty("canvas");
-                var canvas = p?.GetValue(m) as Canvas;
-                if (canvas == null) return;
-                var canvasRT = canvas.GetComponent<RectTransform>();
-                float big = (canvasRT != null ? canvasRT.rect.width : Screen.width) * 0.6f;
-                int dimmed = 0;
-                foreach (var g in canvas.GetComponentsInChildren<UnityEngine.UI.Image>(true))
-                {
-                    if (g == null) continue;
-                    if (g.rectTransform.rect.width >= big)
-                    {
-                        var c = g.color; c.a = 0f; g.color = c;
-                        dimmed++;
-                    }
-                }
-                foreach (var g in canvas.GetComponentsInChildren<UnityEngine.UI.RawImage>(true))
-                {
-                    if (g == null) continue;
-                    if (g.rectTransform.rect.width >= big)
-                    {
-                        var c = g.color; c.a = 0f; g.color = c;
-                        dimmed++;
-                    }
-                }
-                Plugin.Logger.LogInfo($"[Rest] overlay background made transparent ({dimmed} image(s)).");
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] MakeOverlayBackgroundTransparent: {ex.Message}"); }
-        }
-
-        /// <summary>The machine's Update is frozen in MP, so its clock label
-        /// never moves — write the live time into it ourselves.</summary>
-        private static void DriveMachineClockLabel()
-        {
-            try
-            {
-                var m = GetMachine();
-                if (m == null || !MachineRunning()) return;
-                var p = _machineType?.GetProperty("timeLabel");
-                var lbl = p?.GetValue(m) as TMPro.TextMeshProUGUI;
-                if (lbl == null) return;
-                var (d, h) = GameStateReader.GetGameTime();
-                int hh = (int)h;
-                int mm = (int)((h - hh) * 60.0);
-                lbl.text = $"{hh:D2}:{mm:D2}";
-            }
-            catch { }
-        }
-
-        private static void StopLocalMachine()
-        {
-            try
-            {
-                var m = GetMachine();
-                var mm = _machineType?.GetMethod("StopTimeMachine");
-                if (m != null && mm != null) mm.Invoke(m, new object[] { 0f });
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] StopLocalMachine: {ex.Message}"); }
         }
 
         // ── Host: consensus + clock executor ─────────────────────────────────
@@ -366,8 +195,7 @@ namespace BigAmbitionsMP
 
             if (SkipActive)
             {
-                var (d, h) = GameStateReader.GetGameTime();
-                double now = d * 1440.0 + h * 60.0;
+                double now = NowMinutes();
                 if (now >= _skipGoalMinutes)
                 {
                     SkipActive = false;
@@ -375,27 +203,36 @@ namespace BigAmbitionsMP
                     HostBroadcastState();
                     return;
                 }
-                double next = Math.Min(now + SkipMinutesPerRealSecond * Time.unscaledDeltaTime, _skipGoalMinutes);
-                MPCanvasUI.WriteWorldClockMinutes(next);
+                // The executor runs at frame rate, not at this 0.5s poll.
             }
+        }
+
+        /// <summary>Host clock executor — called every frame from MPCanvasUI so
+        /// the skip is smooth (Tick() itself is throttled to 0.5s).</summary>
+        public static void HostSkipFrame()
+        {
+            if (!MPServer.IsRunning || !SkipActive) return;
+            double now = NowMinutes();
+            if (now >= _skipGoalMinutes) return;   // HostTick will close it out
+            double next = Math.Min(now + SkipMinutesPerRealSecond * Time.unscaledDeltaTime, _skipGoalMinutes);
+            MPCanvasUI.WriteWorldClockMinutes(next);
         }
 
         private static void HostBroadcastState()
         {
             var st = new RestSkipStatePayload { Required = MPServer.LobbyPlayers?.Count ?? 1, SkipActive = SkipActive };
             foreach (var v in _hostVotes.Values) st.Votes.Add(v);
-            ApplyState(st);                     // host's own banner
+            ApplyState(st);
             MPServer.BroadcastRestState(st);
         }
 
-        /// <summary>Both roles: adopt the broadcast state (banner + stand-down).</summary>
         public static void ApplyState(RestSkipStatePayload? st)
         {
             if (st == null) return;
             Votes.Clear();
             Votes.AddRange(st.Votes);
             RequiredVotes = st.Required;
-            if (!MPServer.IsRunning) SkipActive = st.SkipActive;   // host owns its flag
+            if (!MPServer.IsRunning) SkipActive = st.SkipActive;
         }
 
         // ── Plumbing ──────────────────────────────────────────────────────────
@@ -412,15 +249,12 @@ namespace BigAmbitionsMP
             {
                 var uiType = VehicleManager.FindGameType("PlayerActivity.PlayerActivityUI")
                           ?? VehicleManager.FindGameType("PlayerActivityUI");
-                if (uiType == null) { Plugin.Logger.LogWarning("[Rest] PlayerActivityUI type NOT FOUND."); return (null, ""); }
+                if (uiType == null) return (null, "");
                 var objs = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(uiType));
                 if (objs == null || objs.Length == 0) return (null, "");
                 var wrap = Activator.CreateInstance(uiType, objs[0].Pointer);
-                var prop = uiType.GetProperty("GetCurrentActivity");
-                var act  = prop?.GetValue(wrap);
+                var act  = uiType.GetProperty("GetCurrentActivity")?.GetValue(wrap);
                 if (act == null) return (null, "");
-                // Concrete il2cpp class name — the managed wrapper is typed as
-                // the INTERFACE (was logging as 'IPlayer').
                 string nm;
                 try
                 {
@@ -430,17 +264,40 @@ namespace BigAmbitionsMP
                 catch { nm = "Rest"; }
                 return (act, nm);
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] GetCurrentActivity: {ex.Message}"); return (null, ""); }
+            catch { return (null, ""); }
         }
 
-        private static int GetRemainingMinutes(object act)
+        // ── Native TimeMachine helpers (neutralizer only) ─────────────────────
+        private static object? _machine;
+        private static Type?   _machineType;
+
+        private static object? GetMachine()
         {
             try
             {
-                var m = act.GetType().GetMethod("GetRemainingMinutesForTimeMachine");
-                return m != null ? Convert.ToInt32(m.Invoke(act, null)) : 0;
+                _machineType ??= VehicleManager.FindGameType("Timemachine.TimeMachine")
+                              ?? VehicleManager.FindGameType("TimeMachine");
+                if (_machineType == null) return null;
+                if (_machine == null)
+                {
+                    var objs = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(_machineType), true);
+                    if (objs == null || objs.Length == 0) return null;
+                    _machine = Activator.CreateInstance(_machineType, objs[0].Pointer);
+                }
+                return _machine;
             }
-            catch { return 0; }
+            catch { return null; }
+        }
+
+        private static void StopLocalMachine()
+        {
+            try
+            {
+                var m = GetMachine();
+                var mm = _machineType?.GetMethod("StopTimeMachine");
+                if (m != null && mm != null) mm.Invoke(m, new object[] { 0f });
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] StopLocalMachine: {ex.Message}"); }
         }
 
         public static string Fmt(double totalMinutes)

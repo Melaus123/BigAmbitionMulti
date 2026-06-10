@@ -643,6 +643,153 @@ namespace BigAmbitionsMP
         /// advance the authoritative clock to the given total game-minutes.</summary>
         public static void WriteWorldClockMinutes(double totalMinutes) => WriteWorldClock(totalMinutes / 60.0);
 
+        // ── Wait UI (rest v3) — small bottom-right button while seated; click
+        // opens a tiny target-time panel.  All our own wiring; the game's skip
+        // engine is never involved. ──────────────────────────────────────────
+        private GameObject? _waitBtn;     private RectTransform? _waitBtnRT;   private TextMeshProUGUI? _waitBtnLbl;
+        private GameObject? _matchBtn;    private RectTransform? _matchBtnRT;  private TextMeshProUGUI? _matchBtnLbl;
+        private GameObject? _waitPanel;   private RectTransform? _waitPanelRT;
+        private TextMeshProUGUI? _waitTargetLbl;
+        private RectTransform? _waitMinusRT, _waitPlusRT, _waitGoRT, _waitCloseRT;
+        private bool   _waitPanelOpen;
+        private double _waitTarget;          // total game-minutes
+        private bool   _restUiHover;         // suppress world clicks while hovering our UI
+
+        private void TickRestUI()
+        {
+            try
+            {
+                if (_waitBtn == null) BuildWaitUi();
+                if (_waitBtn == null) return;
+
+                bool seated  = MPRestSync.Seated;
+                bool voting  = MPRestSync.LocalVoteActive;
+                double other = MPRestSync.OtherVoteGoal(out string otherWho);
+
+                // Button: hidden unless seated.  Text flips between request/cancel.
+                bool showBtn = seated;
+                if (_waitBtn.activeSelf != showBtn) _waitBtn.SetActive(showBtn);
+                if (showBtn && _waitBtnLbl != null)
+                    _waitBtnLbl.text = voting
+                        ? $"Cancel wait (until {MPRestSync.Fmt(MPRestSync.LocalGoal)})"
+                        : "Wait until…  (group wait, min 1h)";
+
+                // Match button: seated, not voting, someone else waits.
+                bool showMatch = seated && !voting && other > 0;
+                if (_matchBtn != null && _matchBtn.activeSelf != showMatch) _matchBtn.SetActive(showMatch);
+                if (showMatch && _matchBtnLbl != null)
+                    _matchBtnLbl.text = $"Match {otherWho} ({MPRestSync.Fmt(other)})";
+
+                // Panel
+                bool showPanel = _waitPanelOpen && seated && !voting;
+                if (_waitPanel != null && _waitPanel.activeSelf != showPanel) _waitPanel.SetActive(showPanel);
+                if (showPanel && _waitTargetLbl != null)
+                {
+                    double min = MPRestSync.NowMinutes() + MPRestSync.MinVoteMinutes;
+                    if (_waitTarget < min) _waitTarget = Math.Ceiling(min / 15.0) * 15.0;
+                    _waitTargetLbl.text = $"until  <b>{MPRestSync.Fmt(_waitTarget)}</b>";
+                }
+
+                // Hover suppression + clicks.
+                var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+                _restUiHover = (showBtn && RectHit(_waitBtnRT, mp))
+                            || (showMatch && RectHit(_matchBtnRT, mp))
+                            || (showPanel && RectHit(_waitPanelRT, mp));
+                if (_restUiHover) MPChat.SuppressGameInput = true;
+
+                if (!Input.GetMouseButtonDown(0)) return;
+                if (showBtn && RectHit(_waitBtnRT, mp))
+                {
+                    if (voting) MPRestSync.CancelWait();
+                    else        _waitPanelOpen = !_waitPanelOpen;
+                }
+                else if (showMatch && RectHit(_matchBtnRT, mp))
+                {
+                    MPRestSync.RequestWait(other);
+                    _waitPanelOpen = false;
+                }
+                else if (showPanel)
+                {
+                    if      (RectHit(_waitMinusRT, mp)) _waitTarget -= 15;
+                    else if (RectHit(_waitPlusRT,  mp)) _waitTarget += 15;
+                    else if (RectHit(_waitGoRT,    mp)) { MPRestSync.RequestWait(_waitTarget); _waitPanelOpen = false; }
+                    else if (RectHit(_waitCloseRT, mp)) _waitPanelOpen = false;
+                }
+            }
+            catch { }
+        }
+
+        private void BuildWaitUi()
+        {
+            if (_canvasGO == null) return;
+
+            // Main button — bottom-right, clear of the phone (bottom-left).
+            _waitBtn = MakeGO("BAMP_WaitBtn", _canvasGO.transform);
+            _waitBtnRT = _waitBtn.GetComponent<RectTransform>();
+            _waitBtnRT.anchorMin = _waitBtnRT.anchorMax = _waitBtnRT.pivot = new Vector2(1f, 0f);
+            _waitBtnRT.anchoredPosition = new Vector2(-14f, 170f);
+            _waitBtnRT.sizeDelta = new Vector2(250f, 34f);
+            var bImg = _waitBtn.AddComponent<Image>();
+            bImg.color = new Color(0.13f, 0.16f, 0.24f, 0.94f);
+            if (_panelSprite != null) { try { bImg.sprite = _panelSprite; bImg.type = Image.Type.Sliced; } catch { } }
+            _waitBtnLbl = MakeLabel(_waitBtn.transform, "", 13, C_WHITE, 0f, 0f, 250f, 34f, TextAlignmentOptions.Center);
+            ApplyFont(_waitBtnLbl);
+            var blrt = _waitBtnLbl.rectTransform; blrt.anchorMin = Vector2.zero; blrt.anchorMax = Vector2.one; blrt.offsetMin = Vector2.zero; blrt.offsetMax = Vector2.zero;
+            _waitBtn.SetActive(false);
+
+            // Match button — just above the main button.
+            _matchBtn = MakeGO("BAMP_WaitMatch", _canvasGO.transform);
+            _matchBtnRT = _matchBtn.GetComponent<RectTransform>();
+            _matchBtnRT.anchorMin = _matchBtnRT.anchorMax = _matchBtnRT.pivot = new Vector2(1f, 0f);
+            _matchBtnRT.anchoredPosition = new Vector2(-14f, 210f);
+            _matchBtnRT.sizeDelta = new Vector2(250f, 30f);
+            var mImg = _matchBtn.AddComponent<Image>();
+            mImg.color = new Color(0.22f, 0.16f, 0.30f, 0.94f);
+            if (_panelSprite != null) { try { mImg.sprite = _panelSprite; mImg.type = Image.Type.Sliced; } catch { } }
+            _matchBtnLbl = MakeLabel(_matchBtn.transform, "", 12, C_WHITE, 0f, 0f, 250f, 30f, TextAlignmentOptions.Center);
+            ApplyFont(_matchBtnLbl);
+            var mlrt = _matchBtnLbl.rectTransform; mlrt.anchorMin = Vector2.zero; mlrt.anchorMax = Vector2.one; mlrt.offsetMin = Vector2.zero; mlrt.offsetMax = Vector2.zero;
+            _matchBtn.SetActive(false);
+
+            // Panel — above the buttons.
+            _waitPanel = MakeGO("BAMP_WaitPanel", _canvasGO.transform);
+            _waitPanelRT = _waitPanel.GetComponent<RectTransform>();
+            _waitPanelRT.anchorMin = _waitPanelRT.anchorMax = _waitPanelRT.pivot = new Vector2(1f, 0f);
+            _waitPanelRT.anchoredPosition = new Vector2(-14f, 250f);
+            _waitPanelRT.sizeDelta = new Vector2(250f, 108f);
+            var pImg = _waitPanel.AddComponent<Image>();
+            pImg.color = new Color(0.07f, 0.08f, 0.11f, 0.96f);
+            if (_panelSprite != null) { try { pImg.sprite = _panelSprite; pImg.type = Image.Type.Sliced; } catch { } }
+
+            var title = MakeLabel(_waitPanel.transform, "Group wait — time skips only when everyone waits", 11,
+                                  C_LBLGREY, 8f, -6f, 234f, 30f, TextAlignmentOptions.TopLeft);
+            ApplyFont(title); title.enableWordWrapping = true;
+
+            _waitTargetLbl = MakeLabel(_waitPanel.transform, "", 14, C_WHITE, 8f, -40f, 160f, 22f, TextAlignmentOptions.Left);
+            ApplyFont(_waitTargetLbl);
+
+            _waitMinusRT = MakeWaitMini("-15m", new Vector2(8f, 8f));
+            _waitPlusRT  = MakeWaitMini("+15m", new Vector2(66f, 8f));
+            _waitGoRT    = MakeWaitMini("Request", new Vector2(124f, 8f), 76f, new Color(0.20f, 0.42f, 0.24f, 1f));
+            _waitCloseRT = MakeWaitMini("X", new Vector2(208f, 8f), 32f, new Color(0.35f, 0.18f, 0.18f, 1f));
+            _waitPanel.SetActive(false);
+        }
+
+        private RectTransform MakeWaitMini(string label, Vector2 pos, float w = 54f, Color? bg = null)
+        {
+            var go = MakeGO("BAMP_Wait_" + label, _waitPanel!.transform);
+            var rt = go.GetComponent<RectTransform>();
+            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0f, 0f);
+            rt.anchoredPosition = pos; rt.sizeDelta = new Vector2(w, 26f);
+            var img = go.AddComponent<Image>();
+            img.color = bg ?? new Color(0.18f, 0.20f, 0.27f, 1f);
+            if (_panelSprite != null) { try { img.sprite = _panelSprite; img.type = Image.Type.Sliced; } catch { } }
+            var lbl = MakeLabel(go.transform, label, 12, C_WHITE, 0f, 0f, w, 26f, TextAlignmentOptions.Center);
+            ApplyFont(lbl);
+            var lrt = lbl.rectTransform; lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one; lrt.offsetMin = Vector2.zero; lrt.offsetMax = Vector2.zero;
+            return rt;
+        }
+
         // ── Rest-vote banner — small top-center overlay, NON-interactive (no
         // raycast target, no input capture: ignorable while playing). ─────────
         private TextMeshProUGUI? _restBanner;
@@ -696,7 +843,7 @@ namespace BigAmbitionsMP
                     sb.Append($"<color=#CFE3FF>{v.PlayerId}</color>: {v.Activity.ToLowerInvariant()} until {MPRestSync.Fmt(v.GoalMinutes)}");
                 }
                 if (!MPRestSync.SkipActive)
-                    sb.Append("\n<color=#9AA3B2><i>use a bed / bench / similar to join — time skips when everyone rests</i></color>");
+                    sb.Append("\n<color=#9AA3B2><i>sit anywhere and use the \"Wait until…\" button (bottom-right) to join — time skips when everyone waits</i></color>");
                 _restBanner.text = sb.ToString();
             }
             catch { }
@@ -1228,8 +1375,10 @@ namespace BigAmbitionsMP
             _pt = MPPerf.Begin(); BusinessSync.Tick();         MPPerf.End("BizHost",  _pt);   // host change detection (time-boxed sweep)
             _pt = MPPerf.Begin(); BusinessSync.TickClient();   MPPerf.End("BizClient",_pt);   // client pushes own businesses up
             _pt = MPPerf.Begin(); MPPriceSync.Tick();          MPPerf.End("Price",    _pt);   // live retail prices of own businesses (both roles)
-            _pt = MPPerf.Begin(); MPRestSync.Tick();           MPPerf.End("Rest",     _pt);   // consensus time-skip votes + host clock executor
+            _pt = MPPerf.Begin(); MPRestSync.Tick();           MPPerf.End("Rest",     _pt);   // votes, seated state, watchdog (0.5s)
+            MPRestSync.HostSkipFrame();   // host clock executor — every frame for smoothness
             TickRestBanner();
+            TickRestUI();
             _pt = MPPerf.Begin(); InteriorSync.Tick();         MPPerf.End("Interior", _pt);   // diff-push to subscribed clients
             _pt = MPPerf.Begin(); GameStatePatcher.DrainPendingLogoRefreshes(); MPPerf.End("LogoRefresh", _pt);
 
@@ -2772,7 +2921,7 @@ namespace BigAmbitionsMP
 
             // Suppress game input (movement/camera/hotkeys/world-click) while typing in,
             // hovering, or dragging the window — so it behaves like a real game UI panel.
-            MPChat.SuppressGameInput = _mpChatFocus || _mpDragging || _mpResizing || _mpOpacityDragging || RectHit(_mpWinRT, mp);
+            MPChat.SuppressGameInput = _mpChatFocus || _mpDragging || _mpResizing || _mpOpacityDragging || RectHit(_mpWinRT, mp) || _restUiHover;
 
             if (Input.GetMouseButtonDown(0))
             {
