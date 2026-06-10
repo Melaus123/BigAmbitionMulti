@@ -698,14 +698,26 @@ namespace BigAmbitionsMP
 
                 case MessageType.Chat:
                 {
-                    // A client chatted.  Append to the host's own log + relay to
-                    // every client (the sender included, so it sees its line in
-                    // host order).  Pure C# — safe on the poll thread.
+                    // A client chatted.  PUBLIC → append + relay to everyone (the
+                    // sender included — host-ordered echo).  PRIVATE → deliver to
+                    // the recipient ONLY (the sender already echoed locally).
+                    // Pure C# — safe on the poll thread.
                     var cp = env.GetPayload<ChatPayload>();
                     if (cp != null && !string.IsNullOrWhiteSpace(cp.Text))
                     {
-                        MPChat.AddLine(cp.PlayerId, cp.Text);
-                        Broadcast(MessageEnvelope.Create(MessageType.Chat, "host", cp));
+                        if (string.IsNullOrEmpty(cp.To))
+                        {
+                            MPChat.AddMessage(cp.PlayerId, "", cp.Text);
+                            Broadcast(MessageEnvelope.Create(MessageType.Chat, "host", cp));
+                        }
+                        else if (cp.To == MPConfig.PlayerId)
+                        {
+                            MPChat.AddMessage(cp.PlayerId, cp.To, cp.Text);   // private to the host
+                        }
+                        else
+                        {
+                            SendChatPrivate(cp.PlayerId, cp.To, cp.Text);     // client → client relay
+                        }
                     }
                     break;
                 }
@@ -1902,6 +1914,28 @@ namespace BigAmbitionsMP
             if (!_running || string.IsNullOrWhiteSpace(text)) return;
             Broadcast(MessageEnvelope.Create(MessageType.Chat, "host",
                 new ChatPayload { PlayerId = playerId, Text = text }));
+        }
+
+        /// <summary>Host: deliver a PRIVATE chat line to one player only.</summary>
+        public static void SendChatPrivate(string fromId, string toId, string text)
+        {
+            if (!_running || string.IsNullOrWhiteSpace(text) || string.IsNullOrEmpty(toId)) return;
+            try
+            {
+                foreach (var kv in _peerNames)
+                {
+                    if (kv.Value != toId) continue;
+                    foreach (var peer in _clients)
+                        if (peer.Id == kv.Key)
+                        {
+                            Send(peer, MessageEnvelope.Create(MessageType.Chat, "host",
+                                new ChatPayload { PlayerId = fromId, To = toId, Text = text }));
+                            return;
+                        }
+                }
+                Plugin.Logger.LogWarning($"[Server] private chat: '{toId}' not connected.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendChatPrivate: {ex.Message}"); }
         }
 
         private static void Send(NetPeer peer, MessageEnvelope env)

@@ -52,12 +52,14 @@ namespace BigAmbitionsMP
         /// <summary>True while the game is frozen waiting for all players to load.</summary>
         public static bool IsStartupHeld => _startupHold;
 
-        /// <summary>Begin the startup hold — freezes the game at timeScale 0.</summary>
+        /// <summary>Begin the startup hold — freezes the game at timeScale 0 and
+        /// engages the game's REAL pause so players can't walk during the wait.</summary>
         public static void BeginStartupHold()
         {
             if (_startupHold) return;
             _startupHold = true;
             ApplyNetwork(0f);
+            GameStatePatcher.EnqueueOnMainThread(() => GameStateReader.SetNativePause(true));
             MPLoadProfiler.Mark($"FREEZE begin — timeScale now {Time.timeScale}");
             Plugin.Logger.LogInfo("[TimeSync] Startup hold — game paused until all players have loaded.");
         }
@@ -68,6 +70,7 @@ namespace BigAmbitionsMP
             if (!_startupHold) return;
             _startupHold = false;
             ApplyNetwork(1f);
+            GameStatePatcher.EnqueueOnMainThread(() => GameStateReader.SetNativePause(false));
             MPLoadProfiler.Mark("FREEZE end — game running");
             Plugin.Logger.LogInfo("[TimeSync] Startup hold released — game running.");
         }
@@ -92,11 +95,16 @@ namespace BigAmbitionsMP
 
         public static bool ManualPaused { get; private set; }
 
-        /// <summary>Sets the shared manual-pause state (from a button press or the network).</summary>
+        /// <summary>Sets the shared manual-pause state (from a button press or the
+        /// network).  Also drives the game's REAL pause on this machine so a
+        /// network-applied pause shows the red border / stops movement exactly
+        /// like a local pause press (callable from the poll thread — the IL2CPP
+        /// part is marshalled).</summary>
         public static void SetManualPause(bool paused)
         {
             if (ManualPaused == paused) return;
             ManualPaused = paused;
+            GameStatePatcher.EnqueueOnMainThread(() => GameStateReader.SetNativePause(paused));
             Plugin.Logger.LogInfo($"[TimeSync] Manual pause = {paused}");
         }
 

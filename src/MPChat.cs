@@ -3,26 +3,36 @@ using System.Collections.Generic;
 
 namespace BigAmbitionsMP
 {
+    /// <summary>One chat entry — structured so the UI can color/route properly.</summary>
+    public sealed class ChatLine
+    {
+        public string From = "";    // sender player id ("" for notices)
+        public string To   = "";    // recipient player id ("" = everyone)
+        public string Text = "";
+        public bool   Notice;       // system line ("X joined")
+    }
+
     /// <summary>
-    /// In-game chat hub (Phase 6).  Holds the rolling chat log and routes locally
+    /// In-game chat hub.  Holds the rolling structured log and routes locally
     /// submitted lines onto the wire.  Lines arrive on the network poll thread
-    /// (AddLine) and are read on the Unity main thread (Tail) — guarded by a lock.
+    /// and are read on the Unity main thread — guarded by a lock.
     ///
-    /// Routing model (same as the rest of the host-authoritative protocol):
-    ///   * Host submits  → append to own log + Broadcast Chat to all clients.
-    ///   * Client submits → send Chat to host (no optimistic local echo); the host
-    ///                      relays it back so the sender sees it once, in host order.
-    ///   * On Chat received → append to the local log.
+    /// Routing model (host-authoritative):
+    ///   * PUBLIC — host appends + broadcasts; clients send to host, who relays
+    ///     to everyone (sender included → host-ordered echo).
+    ///   * PRIVATE — delivered only to the recipient (host relays client→client);
+    ///     the sender renders a local echo immediately.  The HOST process relays
+    ///     all traffic, so "private" means private from other PLAYERS.
     /// </summary>
     public static class MPChat
     {
-        private const int MaxLines = 100;
+        private const int MaxLines = 200;
 
-        private static readonly object       _lock  = new();
-        private static readonly List<string> _lines = new();
+        private static readonly object         _lock  = new();
+        private static readonly List<ChatLine> _lines = new();
 
-        /// <summary>Bumped on every append so the UI can cheaply detect changes
-        /// and only rebuild the visible log when something new arrived.</summary>
+        /// <summary>Bumped on every append so the UI / unread badge can cheaply
+        /// detect changes.</summary>
         public static int Version { get; private set; }
 
         /// <summary>True while the in-game MP window is being typed in / interacted with.
@@ -31,13 +41,27 @@ namespace BigAmbitionsMP
         /// fields — suppressing movement, camera and hotkeys (and world click-through).</summary>
         public static bool SuppressGameInput;
 
-        /// <summary>Append a received/own line to the rolling log.  Thread-safe.</summary>
-        public static void AddLine(string who, string text)
+        /// <summary>Append a message.  Thread-safe.</summary>
+        public static void AddMessage(string from, string to, string text)
         {
             if (string.IsNullOrWhiteSpace(text)) return;
             text = text.Trim();
             if (text.Length > 200) text = text.Substring(0, 200);
-            string line = string.IsNullOrEmpty(who) ? text : $"{who}:  {text}";
+            Append(new ChatLine { From = from ?? "", To = to ?? "", Text = text });
+        }
+
+        /// <summary>Legacy entry point (network receive paths).</summary>
+        public static void AddLine(string who, string text) => AddMessage(who, "", text);
+
+        /// <summary>System/notice line, e.g. "X joined".</summary>
+        public static void AddNotice(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return;
+            Append(new ChatLine { Text = text.Trim(), Notice = true });
+        }
+
+        private static void Append(ChatLine line)
+        {
             lock (_lock)
             {
                 _lines.Add(line);
@@ -46,20 +70,8 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>System/notice line (no sender prefix), e.g. "X joined".</summary>
-        public static void AddNotice(string text)
-        {
-            if (string.IsNullOrWhiteSpace(text)) return;
-            lock (_lock)
-            {
-                _lines.Add("— " + text.Trim());
-                if (_lines.Count > MaxLines) _lines.RemoveRange(0, _lines.Count - MaxLines);
-                Version++;
-            }
-        }
-
         /// <summary>The last <paramref name="n"/> lines, oldest-first.  Thread-safe copy.</summary>
-        public static List<string> Tail(int n)
+        public static List<ChatLine> Snapshot(int n)
         {
             lock (_lock)
             {
@@ -68,22 +80,27 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>The user submitted a chat line from the in-game window.  Routes
-        /// it according to role.  Safe to call on the main thread.</summary>
-        public static void SendFromLocal(string text)
+        /// <summary>The user submitted a chat line from the in-game window.
+        /// to = "" → everyone; otherwise a player id for a private message.</summary>
+        public static void SendFromLocal(string text, string to = "")
         {
             if (string.IsNullOrWhiteSpace(text)) return;
             string who = MPConfig.PlayerId;
+            to ??= "";
             try
             {
                 if (MPServer.IsRunning)
                 {
-                    AddLine(who, text);                 // host sees its own line immediately
-                    MPServer.BroadcastChat(who, text);  // relay to every client
+                    AddMessage(who, to, text);                       // host sees its line immediately
+                    if (string.IsNullOrEmpty(to))   MPServer.BroadcastChat(who, text);
+                    else if (to != who)             MPServer.SendChatPrivate(who, to, text);
                 }
                 else if (MPClient.IsConnected)
                 {
-                    MPClient.SendChat(text);            // host relays it back to us
+                    // Public: the host relays it back (host-ordered echo).
+                    // Private: the host will NOT echo it back — local echo now.
+                    if (!string.IsNullOrEmpty(to)) AddMessage(who, to, text);
+                    MPClient.SendChat(text, to);
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Chat] SendFromLocal: {ex.Message}"); }

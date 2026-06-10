@@ -872,6 +872,9 @@ namespace BigAmbitionsMP
         /// <summary>Display name of the sender (PlayerId / character name).</summary>
         public string PlayerId { get; set; } = "";
         public string Text     { get; set; } = "";
+        /// <summary>Recipient player id for a PRIVATE message; "" = everyone.
+        /// Private messages are delivered only to this player (host-relayed).</summary>
+        public string To       { get; set; } = "";
     }
 
     /// <summary>Client → Host: the user pressed Save (or Save-and-Exit) in the

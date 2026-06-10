@@ -925,6 +925,7 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogWarning($"[TrafficSync] strip '{model}': {ex.Message}");
             }
+            VehicleManager.StripCameras(go);   // stowaway cameras hijack the cursor pick ray
             try
             {
                 // EVERY rigidbody in the hierarchy, not just the root — vehicle

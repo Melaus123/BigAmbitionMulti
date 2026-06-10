@@ -1644,6 +1644,7 @@ namespace BigAmbitionsMP
         {
             private const float ReEnterWindowSeconds = 0.6f;
             private const float CursorIdleSqPixels   = 9f;     // ≤3 px = cursor didn't move
+            private static float _winStart; private static int _winCount;   // HiDiag (reinstated — highlight effort resumed)
 
             static bool Prefix(CityBuildingController __instance)
             {
@@ -1652,16 +1653,84 @@ namespace BigAmbitionsMP
                     if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
                     if (__instance == null) return true;
 
+                    // ★ THE root cause (2026-06-10, pick-trace-confirmed): on a
+                    // single machine the UNFOCUSED instance still receives the
+                    // system cursor position — as negative / out-of-bounds
+                    // coordinates (the mouse is over the OTHER instance's
+                    // window) — and the game picks buildings with them.  An
+                    // unfocused window, or a cursor outside the window, must
+                    // not hover-pick at all.
+                    if (!UnityEngine.Application.isFocused) return false;
+                    var mpos = UnityEngine.Input.mousePosition;
+                    if (mpos.x < 0f || mpos.y < 0f ||
+                        mpos.x >= UnityEngine.Screen.width || mpos.y >= UnityEngine.Screen.height)
+                        return false;
+
+                    float now = UnityEngine.Time.realtimeSinceStartup;
+
+                    // Rule 1 (same building): exited a moment ago with an idle
+                    // cursor → ghost re-pop, swallow.
+                    bool suppress = false;
                     if (Patch_CBC_OnIoExit_Record.LastExit.TryGetValue(__instance.GetInstanceID(), out var rec))
                     {
-                        float dt = UnityEngine.Time.realtimeSinceStartup - rec.t;
+                        float dt = now - rec.t;
                         var mp = new UnityEngine.Vector2(UnityEngine.Input.mousePosition.x, UnityEngine.Input.mousePosition.y);
-                        if (dt < ReEnterWindowSeconds && (mp - rec.mp).sqrMagnitude < CursorIdleSqPixels)
-                            return false;   // ghost popped through the idle cursor's ray — swallow the pulse
+                        suppress = dt < ReEnterWindowSeconds && (mp - rec.mp).sqrMagnitude < CursorIdleSqPixels;
                     }
-                    return true;
+
+                    // Rule 2 (any building): the mouse is idle AND the camera is
+                    // still — the world under the cursor can't legitimately
+                    // change, so ANY new hover is a ghost crossing/popping in
+                    // the ray (HiDiag showed the residual flicker ALTERNATES
+                    // between adjacent buildings, which Rule 1 can't catch).
+                    bool idleScene = now - MPCanvasUI.InputUnstableAt > 0.25f;
+                    if (idleScene) suppress = true;
+
+                    if (now - _winStart > 1f) { _winStart = now; _winCount = 0; }
+                    if (++_winCount <= 30)
+                    {
+                        string nm = "?"; try { nm = __instance.name; } catch { }
+                        // Pick-trace: where does this building sit ON SCREEN vs the
+                        // mouse?  Near-match ⇒ cursor-offset theory; far apart ⇒ the
+                        // pick ray comes from a different camera than the render one.
+                        string trace = "";
+                        try
+                        {
+                            var cam = UnityEngine.Camera.main;
+                            var mp2 = UnityEngine.Input.mousePosition;
+                            if (cam != null)
+                            {
+                                var sp = cam.WorldToScreenPoint(__instance.transform.position);
+                                trace = $" mouse=({mp2.x:F0},{mp2.y:F0}) bldg=({sp.x:F0},{sp.y:F0},z{sp.z:F0}) cam='{cam.name}'";
+                            }
+                        }
+                        catch { }
+                        Plugin.Logger.LogInfo($"[HiDiag/{(MPServer.IsRunning ? "HOST" : "CLIENT")}] OnIoEnter '{nm}'{(suppress ? (idleScene ? " SUPPRESSED-idle" : " SUPPRESSED") : "")}{trace}");
+                    }
+                    return !suppress;
                 }
                 catch { return true; }
+            }
+        }
+
+        // HiDiag (reinstated): every highlight transition, to correlate the next
+        // sighting against OnIoEnter / applies in the same log.
+        [HarmonyPatch(typeof(CityBuildingController), nameof(CityBuildingController.SetHighlight))]
+        public static class Patch_CBC_SetHighlight_Diag
+        {
+            private static float _winStart; private static int _winCount;
+            static void Postfix(CityBuildingController __instance, bool __0)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    float now = UnityEngine.Time.realtimeSinceStartup;
+                    if (now - _winStart > 1f) { _winStart = now; _winCount = 0; }
+                    if (++_winCount > 30) return;
+                    string nm = "?"; try { nm = __instance != null ? __instance.name : "null"; } catch { }
+                    Plugin.Logger.LogInfo($"[HiDiag/{(MPServer.IsRunning ? "HOST" : "CLIENT")}] SetHighlight({__0}) '{nm}'");
+                }
+                catch { }
             }
         }
 

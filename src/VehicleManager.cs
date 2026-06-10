@@ -965,10 +965,35 @@ namespace BigAmbitionsMP
             return go;
         }
 
+        /// <summary>Destroy any Camera hiding in a cloned ghost's hierarchy — a
+        /// stowaway ENABLED camera can hijack Camera.main, making the game's
+        /// cursor pick-ray fire from the wrong eye (buildings highlight away
+        /// from the cursor — 2026-06-10 investigation).</summary>
+        public static int StripCameras(GameObject go)
+        {
+            int n = 0;
+            try
+            {
+                var cams = go.GetComponentsInChildren(Il2CppType.Of<Camera>(), true);
+                for (int i = 0; i < cams.Length; i++)
+                {
+                    var c = cams[i].TryCast<Camera>();
+                    if (c == null) continue;
+                    UnityEngine.Object.Destroy(c);
+                    n++;
+                }
+                if (n > 0)
+                    Plugin.Logger.LogWarning($"[Ghost] STRIPPED {n} stowaway camera(s) from clone '{go.name}' — these hijack the cursor pick ray!");
+            }
+            catch { }
+            return n;
+        }
+
         /// <summary>Destroys the gameplay components that make a GameObject "a vehicle".</summary>
         private static int StripVehicleComponents(GameObject go)
         {
             int n = 0;
+            StripCameras(go);
             try
             {
                 var comps = go.GetComponents(Il2CppType.Of<Component>());

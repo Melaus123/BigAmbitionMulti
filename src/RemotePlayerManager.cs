@@ -1183,6 +1183,7 @@ namespace BigAmbitionsMP
                     model.transform.localPosition = Vector3.zero;
                     model.transform.localRotation = Quaternion.identity;
                     StripModelScripts(model);
+                    VehicleManager.StripCameras(model);   // stowaway cameras hijack the cursor pick ray
                 }
                 else
                 {

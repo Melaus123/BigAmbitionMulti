@@ -13,7 +13,7 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class MPPerf
     {
-        public static bool Enabled = true;   // perf investigation 2026-06-09 — flip off when done
+        public static bool Enabled = false;   // perf investigation done 2026-06-10 (host ≡ client baseline) — re-enable to re-measure
         private const float ReportSeconds = 10f;
 
         private sealed class Slot { public double Total; public double Max; public int Calls; }

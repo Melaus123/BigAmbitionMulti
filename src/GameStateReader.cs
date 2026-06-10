@@ -245,6 +245,44 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
+        private static System.Reflection.MethodBase? _gscMTogglePause;
+
+        /// <summary>Drive the game's REAL pause (red screen border, pulsing pause
+        /// button, player movement stops) to match <paramref name="paused"/>.
+        /// Used by the mod's freeze states (startup hold, disconnect pause,
+        /// host-loss notice) so they read as a true pause instead of a silent
+        /// clock stop.  MAIN THREAD ONLY (IL2CPP).  No-ops gracefully if the
+        /// controller can't be resolved — the timeScale clamps still hold.</summary>
+        public static void SetNativePause(bool paused)
+        {
+            try
+            {
+                EnsureGSCProbed();
+                if (_gscType == null) return;
+
+                // The Harmony postfix caches the instance on the first pause
+                // press, but our holds usually fire before any press — discover
+                // it (and re-discover if the cached one died with its scene).
+                bool dead = false;
+                try { var uo = _gscInstance as UnityEngine.Object; dead = _gscInstance != null && uo != null && uo == null; } catch { }
+                if (_gscInstance == null || dead)
+                {
+                    var arr = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.From(_gscType), true);
+                    if (arr != null && arr.Length > 0)
+                        _gscInstance = Activator.CreateInstance(_gscType, arr[0].Pointer);   // typed wrapper for reflection
+                }
+                if (_gscInstance == null) return;
+                if (GetGSCPaused() == paused) return;   // already in the wanted state
+
+                _gscMTogglePause ??= _gscType.GetMethod("TogglePause",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (_gscMTogglePause == null) return;
+                _gscMTogglePause.Invoke(_gscInstance, null);
+                Plugin.Logger.LogInfo($"[GSC] Native pause → {paused}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[GSC] SetNativePause({paused}): {ex.Message}"); }
+        }
+
         /// <summary>
         /// Returns true if GameSpeedController.isFastForwarding is true — i.e. the game
         /// is currently in a time-skip state (bench skip, sleep, or any other fast-forward).

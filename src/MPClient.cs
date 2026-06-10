@@ -146,6 +146,7 @@ namespace BigAmbitionsMP
                                    && Helpers.PlayerHelper.PlayerController != null)
                     {
                         SessionEnded = true;
+                        GameStateReader.SetNativePause(true);   // true pause (red border) under the notice
                         Plugin.Logger.LogWarning("[Client] Host connection lost in-game — session ended; notice shown (dismiss to continue offline as a single-player fork).");
                     }
                 }
@@ -286,7 +287,7 @@ namespace BigAmbitionsMP
                 case MessageType.Chat:
                 {
                     var cp = env.GetPayload<ChatPayload>();
-                    if (cp != null) MPChat.AddLine(cp.PlayerId, cp.Text);   // pure C# — safe on poll thread
+                    if (cp != null) MPChat.AddMessage(cp.PlayerId, cp.To ?? "", cp.Text);   // pure C# — safe on poll thread
                     break;
                 }
 
@@ -757,11 +758,11 @@ namespace BigAmbitionsMP
 
         /// <summary>Sends a chat line to the host, which relays it to everyone
         /// (including us) so the log stays consistent and host-ordered.</summary>
-        public static void SendChat(string text)
+        public static void SendChat(string text, string to = "")
         {
             if (!IsConnected || string.IsNullOrWhiteSpace(text)) return;
             Send(MessageEnvelope.Create(MessageType.Chat, MPConfig.PlayerId,
-                new ChatPayload { PlayerId = MPConfig.PlayerId, Text = text }));
+                new ChatPayload { PlayerId = MPConfig.PlayerId, Text = text, To = to ?? "" }));
         }
 
         /// <summary>Asks the host to run a coordinated MP save (the user hit Save /
