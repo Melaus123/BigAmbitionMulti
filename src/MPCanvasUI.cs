@@ -653,11 +653,13 @@ namespace BigAmbitionsMP
             try
             {
                 int n = MPRestSync.Votes.Count;
-                string sig = n == 0 ? "" : $"{n}|{MPRestSync.RequiredVotes}|{MPRestSync.SkipActive}|{string.Join(",", MPRestSync.Votes.ConvertAll(v => v.PlayerId + v.Activity + (int)v.GoalMinutes))}";
+                bool notice = MPRestSync.LocalNotice.Length > 0 && Time.unscaledTime < MPRestSync.LocalNoticeUntil;
+                string sig = (n == 0 && !notice) ? ""
+                    : $"{n}|{MPRestSync.RequiredVotes}|{MPRestSync.SkipActive}|{(notice ? MPRestSync.LocalNotice : "")}|{string.Join(",", MPRestSync.Votes.ConvertAll(v => v.PlayerId + v.Activity + (int)v.GoalMinutes))}";
                 if (sig == _restBannerSig) return;
                 _restBannerSig = sig;
 
-                if (n == 0)
+                if (n == 0 && !notice)
                 {
                     if (_restBanner != null) _restBanner.gameObject.SetActive(false);
                     return;
@@ -678,6 +680,11 @@ namespace BigAmbitionsMP
                 _restBanner.gameObject.SetActive(true);
 
                 var sb = new System.Text.StringBuilder();
+                if (n == 0 && notice)
+                {
+                    _restBanner.text = $"<color=#9AA3B2><i>{MPRestSync.LocalNotice}</i></color>";
+                    return;
+                }
                 if (MPRestSync.SkipActive)
                     sb.Append("<color=#8CE08C><b>Resting…</b></color>  ");
                 else

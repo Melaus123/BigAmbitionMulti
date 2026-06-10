@@ -40,6 +40,10 @@ namespace BigAmbitionsMP
         public static int  RequiredVotes;
         public static volatile bool SkipActive;      // detector stand-down everywhere
 
+        // Transient local-only banner line (e.g. "resting at normal speed").
+        public static string LocalNotice = "";
+        public static float  LocalNoticeUntil;
+
         // ── Host-only ─────────────────────────────────────────────────────────
         private static readonly Dictionary<string, RestVoteEntry> _hostVotes = new();
         private static double _skipGoalMinutes;
@@ -67,11 +71,18 @@ namespace BigAmbitionsMP
                 int remaining = GetRemainingMinutes(act);
                 if (remaining < MinVoteMinutes)
                 {
+                    LocalNotice      = $"Resting at normal speed ({remaining} min — under 1h, no group skip).";
+                    LocalNoticeUntil = Time.unscaledTime + 6f;
                     Plugin.Logger.LogInfo($"[Rest] '{actName}' ({remaining} min) below vote threshold — runs at 1x.");
                     return;
                 }
                 var (d, h) = GameStateReader.GetGameTime();
-                double goal = d * 1440.0 + h * 60.0 + remaining;
+                double now  = d * 1440.0 + h * 60.0;
+                // Lock the goal at press time as an ABSOLUTE target: round UP to
+                // a clean 5-minute boundary (stable "rest until" display) and
+                // never allow a goal at/behind the current clock.
+                double goal = Math.Ceiling((now + remaining) / 5.0) * 5.0;
+                if (goal <= now + 1.0) goal = now + 5.0;
                 _localActivity   = act;
                 _localVoteActive = true;
                 SendVote(true, goal, actName);
@@ -108,17 +119,18 @@ namespace BigAmbitionsMP
                 var m = act.GetType().GetMethod("GetState");
                 if (m == null) return false;
                 int state = Convert.ToInt32(m.Invoke(act, null));
-                // PlayerActivityState: started states are low values; finished/
-                // cancelled end the activity.  Empirically: 0=None? — treat
-                // anything other than the state captured while running as ended
-                // is fragile; instead: the activity is over when the player's
-                // CURRENT activity is no longer this instance.
+                // The activity is over when the player's CURRENT activity is no
+                // longer this il2cpp INSTANCE (pointer identity — the managed
+                // wrappers are all interface-typed) or its state moved on.
                 var (cur, _) = GetCurrentActivity();
-                return cur != null && ReferenceEquals(cur.GetType(), act.GetType()) && state == _runningState;
+                return cur != null && Ptr(cur) == Ptr(act) && state == _runningState;
             }
             catch { return false; }
         }
         private static int _runningState = -1;
+
+        private static IntPtr Ptr(object wrapper)
+            => wrapper is Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase b ? b.Pointer : IntPtr.Zero;
 
         // ── Host: consensus + clock executor ─────────────────────────────────
         public static void HostHandleVote(RestVotePayload p)
@@ -214,7 +226,15 @@ namespace BigAmbitionsMP
                     if (sm != null) _runningState = Convert.ToInt32(sm.Invoke(act, null));
                 }
                 catch { }
-                string nm = act.GetType().Name.Replace("Activity", "");
+                // Concrete il2cpp class name — the managed wrapper is typed as
+                // the INTERFACE (was logging as 'IPlayer').
+                string nm;
+                try
+                {
+                    nm = (act as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase)
+                         ?.GetIl2CppType()?.Name?.Replace("Activity", "") ?? "Rest";
+                }
+                catch { nm = "Rest"; }
                 return (act, nm);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] GetCurrentActivity: {ex.Message}"); return (null, ""); }
