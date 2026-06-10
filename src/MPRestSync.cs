@@ -31,8 +31,8 @@ namespace BigAmbitionsMP
         public const float SkipMinutesPerRealSecond = 25f;
 
         // ── Local vote state ──────────────────────────────────────────────────
-        private static object?  _localActivity;      // typed wrapper of the voting activity
         private static bool     _localVoteActive;
+        private static double   _localGoal;
         private static float    _nextPollAt;
 
         // ── Shared state (host-broadcast; used for banner + detector stand-down) ──
@@ -50,87 +50,125 @@ namespace BigAmbitionsMP
 
         public static void Reset()
         {
-            _localActivity = null; _localVoteActive = false;
+            _localVoteActive = false; _localGoal = 0;
+            _machine = null;
             Votes.Clear(); RequiredVotes = 0; SkipActive = false;
             _hostVotes.Clear(); _skipGoalMinutes = 0;
+            LocalNotice = "";
         }
 
-        // ── Native-skip interception (called from the MPPatches prefix) ───────
-        /// <summary>A native TimeMachine start was suppressed.  Decide vote vs
-        /// run-at-1×.  MAIN THREAD (called from the game's own UI flow).</summary>
-        public static void OnNativeSkipSuppressed()
+        // ── Machine-started hook (MPPatches Postfix — the machine RUNS but its
+        // Update is frozen; we classify and either stop it now or vote). ──────
+        public static void OnMachineStarted()
         {
             try
             {
                 var (act, actName) = GetCurrentActivity();
-                if (act == null)
-                {
-                    Plugin.Logger.LogInfo("[Rest] skip suppressed; no current activity found — runs at 1x.");
-                    return;
-                }
-                int remaining = GetRemainingMinutes(act);
+                int remaining = act != null ? GetRemainingMinutes(act) : 0;
                 if (remaining < MinVoteMinutes)
                 {
-                    LocalNotice      = $"Resting at normal speed ({remaining} min — under 1h, no group skip).";
+                    StopLocalMachine();   // close the native overlay immediately
+                    LocalNotice      = $"Resting at normal speed ({Math.Max(remaining, 1)} min — under 1h, no group skip).";
                     LocalNoticeUntil = Time.unscaledTime + 6f;
-                    Plugin.Logger.LogInfo($"[Rest] '{actName}' ({remaining} min) below vote threshold — runs at 1x.");
+                    Plugin.Logger.LogInfo($"[Rest] '{actName}' ({remaining} min) below vote threshold — machine stopped, runs at 1x.");
                     return;
                 }
                 var (d, h) = GameStateReader.GetGameTime();
                 double now  = d * 1440.0 + h * 60.0;
-                // Lock the goal at press time as an ABSOLUTE target: round UP to
-                // a clean 5-minute boundary (stable "rest until" display) and
-                // never allow a goal at/behind the current clock.
+                // Lock the goal as an ABSOLUTE target: round UP to a clean
+                // 5-minute boundary; never at/behind the current clock.
                 double goal = Math.Ceiling((now + remaining) / 5.0) * 5.0;
                 if (goal <= now + 1.0) goal = now + 5.0;
-                _localActivity   = act;
+                _localGoal       = goal;
                 _localVoteActive = true;
                 SendVote(true, goal, actName);
-                Plugin.Logger.LogInfo($"[Rest] vote ON: '{actName}' {remaining} min → goal {Fmt(goal)}.");
+                Plugin.Logger.LogInfo($"[Rest] vote ON: '{actName}' {remaining} min → goal {Fmt(goal)} (machine held).");
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] OnNativeSkipSuppressed: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] OnMachineStarted: {ex.Message}"); }
         }
 
         // ── Per-frame tick (main thread, MP active + in game) ─────────────────
         public static void Tick()
         {
-            // Local vote lifecycle: drop it when the activity ends/cancels.
+            // Vote lifecycle = the machine's own isRunning: covers the native
+            // Cancel button, completion, and our own StopLocalMachine calls.
             if (_localVoteActive && Time.unscaledTime >= _nextPollAt)
             {
                 _nextPollAt = Time.unscaledTime + 0.5f;
-                if (!ActivityStillRunning())
+                if (!MachineRunning())
                 {
                     _localVoteActive = false;
-                    _localActivity   = null;
                     SendVote(false, 0, "");
-                    Plugin.Logger.LogInfo("[Rest] vote OFF (activity ended/cancelled).");
+                    Plugin.Logger.LogInfo("[Rest] vote OFF (machine stopped/cancelled).");
+                }
+                else if (!SkipActive)
+                {
+                    // Goal reached while the skip already ended (we were the
+                    // earliest sleeper) — close our machine; vote drops next poll.
+                    var (d, h) = GameStateReader.GetGameTime();
+                    if (d * 1440.0 + h * 60.0 >= _localGoal - 0.5)
+                    {
+                        Plugin.Logger.LogInfo("[Rest] local goal reached — stopping machine.");
+                        StopLocalMachine();
+                    }
                 }
             }
 
             if (MPServer.IsRunning) HostTick();
         }
 
-        private static bool ActivityStillRunning()
+        // ── Local TimeMachine instance helpers ────────────────────────────────
+        private static object? _machine;          // typed wrapper, cached per scene
+        private static Type?   _machineType;
+
+        private static object? GetMachine()
         {
             try
             {
-                var act = _localActivity;
-                if (act == null) return false;
-                var m = act.GetType().GetMethod("GetState");
-                if (m == null) return false;
-                int state = Convert.ToInt32(m.Invoke(act, null));
-                // The activity is over when the player's CURRENT activity is no
-                // longer this il2cpp INSTANCE (pointer identity — the managed
-                // wrappers are all interface-typed) or its state moved on.
-                var (cur, _) = GetCurrentActivity();
-                return cur != null && Ptr(cur) == Ptr(act) && state == _runningState;
+                if (_machine != null)
+                {
+                    // cached wrapper may have died with its scene
+                    try { if (MachineAlive()) return _machine; } catch { }
+                    _machine = null;
+                }
+                _machineType ??= VehicleManager.FindGameType("Timemachine.TimeMachine")
+                              ?? VehicleManager.FindGameType("TimeMachine");
+                if (_machineType == null) return null;
+                var objs = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(_machineType), true);
+                if (objs == null || objs.Length == 0) return null;
+                _machine = Activator.CreateInstance(_machineType, objs[0].Pointer);
+                return _machine;
+            }
+            catch { return null; }
+        }
+
+        private static bool MachineAlive()
+        {
+            var p = _machineType?.GetProperty("isRunning");
+            return p != null && _machine != null && p.GetValue(_machine) is bool;
+        }
+
+        private static bool MachineRunning()
+        {
+            try
+            {
+                var m = GetMachine();
+                var p = _machineType?.GetProperty("isRunning");
+                return m != null && p != null && (bool)(p.GetValue(m) ?? false);
             }
             catch { return false; }
         }
-        private static int _runningState = -1;
 
-        private static IntPtr Ptr(object wrapper)
-            => wrapper is Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase b ? b.Pointer : IntPtr.Zero;
+        private static void StopLocalMachine()
+        {
+            try
+            {
+                var m = GetMachine();
+                var mm = _machineType?.GetMethod("StopTimeMachine");
+                if (m != null && mm != null) mm.Invoke(m, new object[] { 0f });
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] StopLocalMachine: {ex.Message}"); }
+        }
 
         // ── Host: consensus + clock executor ─────────────────────────────────
         public static void HostHandleVote(RestVotePayload p)
@@ -219,13 +257,6 @@ namespace BigAmbitionsMP
                 var prop = uiType.GetProperty("GetCurrentActivity");
                 var act  = prop?.GetValue(wrap);
                 if (act == null) return (null, "");
-                // capture the running state value once, for lifecycle polling
-                try
-                {
-                    var sm = act.GetType().GetMethod("GetState");
-                    if (sm != null) _runningState = Convert.ToInt32(sm.Invoke(act, null));
-                }
-                catch { }
                 // Concrete il2cpp class name — the managed wrapper is typed as
                 // the INTERFACE (was logging as 'IPlayer').
                 string nm;

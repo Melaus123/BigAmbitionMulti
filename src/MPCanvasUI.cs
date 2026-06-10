@@ -670,7 +670,7 @@ namespace BigAmbitionsMP
                     var go = MakeGO("BAMP_RestBanner", _canvasGO.transform);
                     var rt = go.GetComponent<RectTransform>();
                     rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 1f); rt.pivot = new Vector2(0.5f, 1f);
-                    rt.anchoredPosition = new Vector2(0f, -64f); rt.sizeDelta = new Vector2(860f, 54f);
+                    rt.anchoredPosition = new Vector2(0f, -150f); rt.sizeDelta = new Vector2(860f, 54f);
                     _restBanner = go.AddComponent<TextMeshProUGUI>();
                     _restBanner.fontSize = 17; _restBanner.alignment = TextAlignmentOptions.Top;
                     _restBanner.raycastTarget = false;          // never blocks clicks
@@ -682,7 +682,7 @@ namespace BigAmbitionsMP
                 var sb = new System.Text.StringBuilder();
                 if (n == 0 && notice)
                 {
-                    _restBanner.text = $"<color=#9AA3B2><i>{MPRestSync.LocalNotice}</i></color>";
+                    _restBanner.text = $"<color=#F2D98C><b>{MPRestSync.LocalNotice}</b></color>";
                     return;
                 }
                 if (MPRestSync.SkipActive)

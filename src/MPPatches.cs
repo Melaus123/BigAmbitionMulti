@@ -1580,20 +1580,20 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── Patch: TimeMachine.StartTimeMachine — consensus time-skip ─────────
-        // EVERY native skip (sleep/bench/work/gym/shower/TV/swim/school) goes
-        // through here.  In MP the native skip is ALWAYS suppressed; MPRestSync
-        // decides what happens instead (vote / run at 1×).  NOTE: the prefix
-        // deliberately declares NO parameters — the goal arg is a game struct
-        // (Timestamp) and structs stay out of our reflection/marshaling per the
-        // 2026-06-10 crash rule; goals are derived from the activity instead.
+        // ── Patches: TimeMachine — consensus time-skip (v2 architecture) ──────
+        // v1 suppressed StartTimeMachine outright; that WEDGED the activity
+        // flow (one press per session, then the skip button went inert) and
+        // crashed the taxi.  v2: the machine STARTS natively (caller state
+        // healthy, native overlay + working Cancel button) but its Update is
+        // FROZEN in MP — it never advances time itself.  MPRestSync watches
+        // isRunning for votes; the host's consensus executor moves the clock;
+        // our code calls StopTimeMachine when the goal is reached.
+        // Taxi bypasses BOTH patches (native behavior) until taxi v2.
         [HarmonyPatch]
         public static class Patch_TimeMachine_Start_Consensus
         {
             static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
             {
-                // Namespaced! (the bare name silently produced ZERO targets and
-                // the whole consensus feature was inert — 2026-06-10.)
                 var t = VehicleManager.FindGameType("Timemachine.TimeMachine")
                      ?? VehicleManager.FindGameType("TimeMachine");
                 int n = 0;
@@ -1606,14 +1606,30 @@ namespace BigAmbitionsMP
                     if (m.Name == "StartTimeMachine") yield return m;
             }
 
+            static void Postfix()
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (TrafficSync.LocalInTaxi) return;          // native taxi flow
+                try { MPRestSync.OnMachineStarted(); } catch { }
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_TimeMachine_Update_Freeze
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var t = VehicleManager.FindGameType("Timemachine.TimeMachine")
+                     ?? VehicleManager.FindGameType("TimeMachine");
+                return t?.GetMethod("Update",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            }
+
             static bool Prefix()
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
-                try { MPRestSync.OnNativeSkipSuppressed(); } catch { }
-                // The caller flow may have paused the sim expecting the machine
-                // to take over — make sure normal time resumes next frame.
-                try { GameStatePatcher.EnqueueOnMainThread(() => GameStateReader.SetNativePause(false)); } catch { }
-                return false;   // native skip never runs in MP
+                if (TrafficSync.LocalInTaxi) return true;     // taxi keeps native machine
+                return false;                                  // machine never self-advances in MP
             }
         }
 
