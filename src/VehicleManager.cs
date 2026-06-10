@@ -858,6 +858,10 @@ namespace BigAmbitionsMP
                             ride    = rvm.Go.transform;
                             rideOff = RideOffsetFor(e.TypeName);
                         }
+                        else if (_openVehicleLogged.Add(e.TypeName + ":noghost"))
+                        {
+                            Plugin.Logger.LogWarning($"[RideDiag] open '{e.TypeName}' driven but its ghost is NOT in _remoteVehicles — ride pin INACTIVE (id={e.VehicleId}).");
+                        }
                     }
                     else
                     {

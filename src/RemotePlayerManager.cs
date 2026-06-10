@@ -101,6 +101,16 @@ namespace BigAmbitionsMP
             if (paramIndex >= 0) _pendingTriggers.Add(paramIndex);
         }
 
+        private float _rideDiagAt;
+        private string DiagBool(string p)
+        {
+            try { return Anim!.GetBool(p).ToString(); } catch { return "ERR"; }
+        }
+        private int DiagL1()
+        {
+            try { return Anim!.GetCurrentAnimatorStateInfo(1).shortNameHash; } catch { return 0; }
+        }
+
         private void EnsureParamMap()
         {
             if (_paramNames != null || Anim == null) return;
@@ -124,6 +134,17 @@ namespace BigAmbitionsMP
                 {
                     transform.position = RideAttach.TransformPoint(RideOffset);
                     transform.rotation = Quaternion.Euler(0f, RideAttach.eulerAngles.y, 0f);
+
+                    // RideDiag: prove which link works — pin position, bool
+                    // arrival, animator state.  Sender truth while pushing:
+                    // HoldingBox=T UsingHands=T L1=0xB143454E.
+                    if (Time.unscaledTime >= _rideDiagAt)
+                    {
+                        _rideDiagAt = Time.unscaledTime + 3f;
+                        string a = Anim == null ? "anim=NULL"
+                            : $"HoldingBox={DiagBool("HoldingBox")} UsingHands={DiagBool("UsingHands")} OnScooter={DiagBool("OnScooter")} L1=0x{DiagL1():X8} enabled={Anim.enabled}";
+                        Plugin.Logger.LogInfo($"[RideDiag] '{name}' pinned to '{RideAttach.name}' at ({transform.position.x:F1},{transform.position.y:F1},{transform.position.z:F1}) | {a}");
+                    }
                 }
                 catch { RideAttach = null; }   // ghost despawned — resume normal sync
             }
