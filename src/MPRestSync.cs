@@ -150,21 +150,12 @@ namespace BigAmbitionsMP
                     }
                 }
 
-                // The activity-UI's close-out bookkeeping (clear current slot,
-                // re-enable navigation) normally runs when its panel closes —
-                // which we suppress.  Do it ourselves, or the game keeps the
-                // character "busy" and movement stays locked.
-                var (ui, uiType) = GetActivityUiCached();
-                if (ui != null && uiType != null)
-                {
-                    bool navBefore = false;
-                    try { navBefore = (bool)(uiType.GetMethod("HasNavigationDisabled", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.Invoke(null, null) ?? false); } catch { }
-                    try { uiType.GetProperty("GetCurrentActivity")?.SetValue(ui, null); } catch { }
-                    try { uiType.GetMethod("CancelActivityMovement")?.Invoke(ui, null); } catch { }
-                    bool navAfter = false;
-                    try { navAfter = (bool)(uiType.GetMethod("HasNavigationDisabled", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.Invoke(null, null) ?? false); } catch { }
-                    Plugin.Logger.LogInfo($"[Rest] StandUp close-out: navDisabled {navBefore} → {navAfter}.");
-                }
+                // NO force-clearing of the UI's activity slot here: the movement
+                // lock it tried to fix was actually the input-suppression latch
+                // (fixed at the source), and nulling the slot out-of-band skips
+                // the game's natural teardown — which is what frees the SEAT
+                // (bench became unusable after standing, 2026-06-10).  Let the
+                // UI's own Update see the finished state and tear down properly.
                 _curAct = null;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] StandUp: {ex.Message}"); }
@@ -287,9 +278,10 @@ namespace BigAmbitionsMP
                             bool waiting = (bool)(uiType.GetProperty("IsWaiting", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null) ?? false);
                             bool panel   = (bool)(uiType.GetProperty("IsPanelOpen", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null) ?? false);
                             bool moving  = (bool)(uiType.GetProperty("IsMovingTowardsActivity", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null) ?? false);
-                            Plugin.Logger.LogWarning($"[Rest] NAV LOCK while not seated (IsWaiting={waiting} IsPanelOpen={panel} IsMoving={moving}) — force-clearing.");
-                            try { uiType.GetProperty("GetCurrentActivity")?.SetValue(ui, null); } catch { }
-                            try { uiType.GetMethod("CancelActivityMovement")?.Invoke(ui, null); } catch { }
+                            // Diagnostic only — slot force-nulling breaks the
+                            // seat's release (bench unusable); if this ever
+                            // fires we fix the real cause instead.
+                            Plugin.Logger.LogWarning($"[Rest] NAV LOCK while not seated (IsWaiting={waiting} IsPanelOpen={panel} IsMoving={moving}).");
                         }
                     }
                 }
