@@ -820,13 +820,49 @@ namespace BigAmbitionsMP
                     .Select(kv => kv.Key).ToList();
                 foreach (var id in stale) DespawnByVehicleId(id);
 
-                // Hide the owner's walking model while they're driving any vehicle.
-                RemotePlayerManager.SetDriving(p.OwnerId, anyDriving);
+                // Hide the owner's walking model only when driving an ENCLOSED
+                // vehicle.  On OPEN ones (scooters, push carts/dollies) the
+                // rider/pusher must stay visible — hiding them made carts roll
+                // around with nobody pushing (user report 2026-06-10).  The
+                // avatar's own position sync keeps it at the vehicle.
+                bool hideAvatar = false;
+                foreach (var e in p.Vehicles)
+                {
+                    if (!e.Driving) continue;
+                    if (IsOpenVehicle(e.TypeName))
+                    {
+                        if (_openVehicleLogged.Add(e.TypeName))
+                            Plugin.Logger.LogInfo($"[Vehicle] '{e.TypeName}' driven — OPEN vehicle, avatar stays visible.");
+                    }
+                    else
+                    {
+                        hideAvatar = true;
+                        if (_openVehicleLogged.Add(e.TypeName))
+                            Plugin.Logger.LogInfo($"[Vehicle] '{e.TypeName}' driven — enclosed, avatar hidden (add to OpenVehicleNames if wrong).");
+                    }
+                }
+                RemotePlayerManager.SetDriving(p.OwnerId, hideAvatar);
             }
             catch (Exception ex)
             {
                 Plugin.Logger.LogError($"[Vehicle] ApplyVehicleFleet '{p.OwnerId}': {ex.Message}");
             }
+        }
+
+        // Vehicle types the player rides ON / pushes (avatar stays visible).
+        // Matched as substrings of VehicleTypeName — every driven type gets
+        // logged once so this list can be refined from real data.
+        private static readonly string[] OpenVehicleNames =
+            { "scooter", "cart", "dolly", "dollie", "trolley", "bike", "moped", "pallet", "hand",
+              "flatbed", "barrow", "wagon" };   // 'Flatbed' confirmed from the driven-type log 2026-06-10
+        private static readonly HashSet<string> _openVehicleLogged = new();
+
+        private static bool IsOpenVehicle(string typeName)
+        {
+            if (string.IsNullOrEmpty(typeName)) return false;
+            foreach (var k in OpenVehicleNames)
+                if (typeName.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return false;
         }
 
         private static RemoteVehicle? SpawnRemoteVehicle(string ownerId, VehicleEntry e,

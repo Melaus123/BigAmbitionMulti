@@ -124,7 +124,10 @@ namespace BigAmbitionsMP
 
         // Chat redesign: recipient chips, close button, To-prefix.
         private RectTransform?    _mpCloseRT;
-        private GameObject?       _mpChipsRow;
+        private GameObject?       _mpChipsRow;     private RectTransform? _mpChipsRowRT;
+        private GameObject?       _mpChipsContent;
+        private float             _chipsTotalW;
+        private float             _chipScroll;
         private TextMeshProUGUI?  _mpToLbl;  private RectTransform? _mpToRT;
         private readonly List<(RectTransform rt, Image img, string who)> _mpChips = new();
         private string            _chatTarget = "";   // "" = everyone
@@ -351,10 +354,11 @@ namespace BigAmbitionsMP
                           && (MPServer.IsRunning || MPClient.IsConnected);
             if (mpInGame && !_mpWasInGame)
             {
-                _mpWinVisible = true;   // default ON when entering a game
+                // Default CLOSED on entering a game (user 2026-06-10) — the
+                // phone Chat button opens it; the badge/pulse signal unread.
+                _mpWinVisible = false;
                 StyleMpWindow();        // round corners + native font once assets are captured
-                _mpWin!.SetActive(true);
-                SetMpOpacity(_mpOpacity);   // re-assert opacity now the canvas is laid out (track width valid)
+                _mpWin!.SetActive(false);
             }
             else if (!mpInGame && _mpWasInGame)
             {
@@ -2384,7 +2388,7 @@ namespace BigAmbitionsMP
         private const float MP_PAD  = 8f;
         private const float MP_INPUT_H = 26f;
         private const float MP_SEND_W  = 58f;
-        private const float MP_ROSTER_TOP = 74f;   // distance from window top to the roster block
+        private const float MP_ROSTER_TOP = 34f;   // chips row sits right under the title bar (opacity lives IN the bar)
 
         private Image AddFade(Image img) { _mpFade.Add((img, img.color.a)); return img; }
 
@@ -2444,12 +2448,14 @@ namespace BigAmbitionsMP
             closeLbl.color = new Color(0.85f, 0.58f, 0.58f, 1f);
             ApplyFont(closeLbl);
 
-            // Opacity slider — slim rounded track + purple fill + a round knob.
-            const float TRK_X = 70f, TRK_W = 196f, TRK_H = 6f;
-            ApplyFont(MakeLabel(_mpWin.transform, "Opacity", 11, grey, 10f, -32f, 56f, 16f, TextAlignmentOptions.Left));
-            var trackGO = MakeGO("OpacityTrack", _mpWin.transform);
+            // Opacity slider — lives IN the title bar (right side, before [X])
+            // so no vertical space is spent on it.  Slim track + fill + knob.
+            const float TRK_W = 110f, TRK_H = 6f;
+            var trackGO = MakeGO("OpacityTrack", titleGO.transform);
             _mpOpacityTrackRT = trackGO.GetComponent<RectTransform>();
-            SetAnchored(_mpOpacityTrackRT, TRK_X, -30f, TRK_W, TRK_H);
+            _mpOpacityTrackRT.anchorMin = _mpOpacityTrackRT.anchorMax = _mpOpacityTrackRT.pivot = new Vector2(1f, 0.5f);
+            _mpOpacityTrackRT.anchoredPosition = new Vector2(-44f, 0f);
+            _mpOpacityTrackRT.sizeDelta = new Vector2(TRK_W, TRK_H);
             var trackImg = trackGO.AddComponent<Image>();
             trackImg.color = new Color(0.26f, 0.26f, 0.32f, 1f);
             if (_panelSprite != null) { try { trackImg.sprite = _panelSprite; trackImg.type = Image.Type.Sliced; } catch { } }
@@ -2470,8 +2476,17 @@ namespace BigAmbitionsMP
             // chip is WHERE your next message goes; chips double as the roster.
             ApplyFont(MakeLabel(_mpWin.transform, "To:", 11, grey, 10f, -(MP_ROSTER_TOP + 3f), 24f, CHIP_H, TextAlignmentOptions.Left));
             _mpChipsRow = MakeGO("Chips", _mpWin.transform);
-            var chipsRT = _mpChipsRow.GetComponent<RectTransform>();
-            Stretch(chipsRT, MP_PAD + 26f, MP_ROSTER_TOP, MP_PAD, CHIP_H, top: true);
+            _mpChipsRowRT = _mpChipsRow.GetComponent<RectTransform>();
+            Stretch(_mpChipsRowRT, MP_PAD + 26f, MP_ROSTER_TOP, MP_PAD, CHIP_H, top: true);
+            // Clip + horizontally scroll (mouse wheel) when many/long player
+            // names overflow the row — chips live on an inner content rect.
+            try { _mpChipsRow.AddComponent<RectMask2D>(); } catch { }
+            _mpChipsContent = MakeGO("Content", _mpChipsRow.transform);
+            var ccrt = _mpChipsContent.GetComponent<RectTransform>();
+            ccrt.anchorMin = new Vector2(0f, 0f); ccrt.anchorMax = new Vector2(0f, 1f);
+            ccrt.pivot = new Vector2(0f, 0.5f);
+            ccrt.anchoredPosition = Vector2.zero;
+            ccrt.sizeDelta = new Vector2(2000f, 0f);
 
             // Chat log — background (fades) + text (stays opaque, fills the bg).
             var logGO = MakeGO("ChatPanel", _mpWin.transform);
@@ -2533,12 +2548,31 @@ namespace BigAmbitionsMP
             var strt = sTextGO.GetComponent<RectTransform>(); strt.anchorMin = Vector2.zero; strt.anchorMax = Vector2.one; strt.offsetMin = Vector2.zero; strt.offsetMax = Vector2.zero;
             var sTmp = sTextGO.AddComponent<TextMeshProUGUI>(); sTmp.text = "Send"; sTmp.fontSize = SZ_BTN; sTmp.color = C_WHITE; sTmp.alignment = TextAlignmentOptions.Center; ApplyFont(sTmp);
 
-            // Resize grip — anchored bottom-left corner.
+            // Resize grip — bottom-left corner, drawn as the standard three
+            // diagonal stripes (was a plain circle, which reads as a button).
             var gripGO = MakeGO("ResizeGrip", _mpWin.transform);
             _mpGripRT = gripGO.GetComponent<RectTransform>();
             _mpGripRT.anchorMin = _mpGripRT.anchorMax = _mpGripRT.pivot = new Vector2(0f, 0f);
             _mpGripRT.anchoredPosition = new Vector2(2f, 2f); _mpGripRT.sizeDelta = new Vector2(16f, 16f);
-            AddFade(gripGO.AddComponent<Image>()).color = new Color(0.5f, 0.5f, 0.62f, 0.95f);
+            var gripBg = gripGO.AddComponent<Image>();          // invisible hit area
+            gripBg.color = new Color(0f, 0f, 0f, 0f);
+            // Three PARALLEL stripes: oriented -45° (running upper-left to
+            // lower-right), centers stepped along the corner diagonal, shorter
+            // toward the corner.  (v1 offset the stripes ALONG their own
+            // direction — collinear, so they rendered as one line.)
+            var stripeCol = new Color(0.55f, 0.55f, 0.66f, 0.9f);
+            for (int i = 0; i < 3; i++)
+            {
+                var sgo = MakeGO("g" + i, gripGO.transform);
+                var sgr = sgo.GetComponent<RectTransform>();
+                sgr.anchorMin = sgr.anchorMax = new Vector2(0f, 0f);
+                sgr.pivot = new Vector2(0.5f, 0.5f);
+                float c = 2.5f + i * 2.6f;                       // center distance from the corner
+                sgr.anchoredPosition = new Vector2(c, c);
+                sgr.sizeDelta = new Vector2(5f + i * 4.6f, 1.8f); // longer away from the corner
+                sgr.localRotation = Quaternion.Euler(0f, 0f, -45f);
+                AddFade(sgo.AddComponent<Image>()).color = stripeCol;
+            }
 
             SetMpOpacity(_mpOpacity);
             LayoutMpWindow(1);         // initial roster + chat sizing
@@ -2569,11 +2603,15 @@ namespace BigAmbitionsMP
                 foreach (var p in players)
                     if (!string.IsNullOrEmpty(p) && p != MPConfig.PlayerId)
                         AddChip(p, p, ref x);
+            _chipsTotalW = x;
+            _chipScroll  = 0f;
+            if (_mpChipsContent != null)
+                _mpChipsContent.GetComponent<RectTransform>().anchoredPosition = Vector2.zero;
         }
 
         private void AddChip(string label, string who, ref float x)
         {
-            var go = MakeGO("Chip_" + label, _mpChipsRow!.transform);
+            var go = MakeGO("Chip_" + label, (_mpChipsContent != null ? _mpChipsContent : _mpChipsRow!).transform);
             var rt = go.GetComponent<RectTransform>();
             rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0f, 0.5f);
             float w = Mathf.Max(42f, 18f + label.Length * 7f);
@@ -2702,8 +2740,8 @@ namespace BigAmbitionsMP
                 if      (chipHit)                         { }
                 else if (RectHit(_mpCloseRT, mp))         { ToggleMpWindow(); return; }
                 else if (RectHit(_mpGripRT, mp))          { _mpResizing = true; _mpResizeStartMouse = mp; _mpResizeStartSize = _mpWinRT != null ? _mpWinRT.sizeDelta : new Vector2(MPW_W, MPW_H); }
+                else if (RectHit(_mpOpacityTrackRT, mp))  { _mpOpacityDragging = true; ApplyOpacityFromMouse(mp); }   // before title: the track lives IN the bar
                 else if (RectHit(_mpTitleRT, mp))         { _mpDragging = true; _mpDragLast = mp; }
-                else if (RectHit(_mpOpacityTrackRT, mp))  { _mpOpacityDragging = true; ApplyOpacityFromMouse(mp); }
                 else if (RectHit(_mpSendRT, mp))          SubmitMpChat();
                 else                                      _mpChatFocus = RectHit(_mpChatInputRT, mp);
             }
@@ -2739,6 +2777,20 @@ namespace BigAmbitionsMP
                 float sw = Input.mouseScrollDelta.y;
                 if (sw > 0f) _mpChatScroll += 3;
                 else if (sw < 0f) _mpChatScroll -= 3;
+            }
+
+            // Mouse-wheel over the chips row scrolls it horizontally when many
+            // (or long-named) players overflow the visible width.
+            if (_mpChipsRowRT != null && RectHit(_mpChipsRowRT, mp))
+            {
+                float sw = Input.mouseScrollDelta.y;
+                if (sw != 0f)
+                {
+                    float max = Mathf.Max(0f, _chipsTotalW - _mpChipsRowRT.rect.width);
+                    _chipScroll = Mathf.Clamp(_chipScroll - sw * 40f, 0f, max);
+                    if (_mpChipsContent != null)
+                        _mpChipsContent.GetComponent<RectTransform>().anchoredPosition = new Vector2(-_chipScroll, 0f);
+                }
             }
 
             // Chat typing (when the input is focused).

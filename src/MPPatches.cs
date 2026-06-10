@@ -1734,6 +1734,34 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: CollapsibleWindow.OnHover — phone only ─────────────────────
+        // The phone's hover-peek slides toward the uncollapsed position; with
+        // our taller phone (adjusted collapse slide) the peek travels far and
+        // turns the uncollapse button into a moving target.  Field writes
+        // didn't stick — skip the hover HANDLER itself for the phone instance
+        // (other collapsible windows keep their peek; click-toggle unaffected).
+        [HarmonyPatch]
+        public static class Patch_CollapsibleWindow_OnHover_PhoneOff
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+                => VehicleManager.FindGameType("UI.CollapsibleWindow")?.GetMethod("OnHover",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+
+            static bool Prefix(UnityEngine.Component __instance)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                    if (__instance != null && __instance.gameObject.name == "Container"
+                        && __instance.transform.parent != null
+                        && __instance.transform.parent.name == "Smartphone")
+                        return false;
+                }
+                catch { }
+                return true;
+            }
+        }
+
         // ── Patch: SaveGamePathHelper.CurrentVersionFolderPath ────────────────
         // Durable MP load: the game's SaveGameManager.Load locates a save by
         // re-scanning CurrentVersionFolderPath() (the single-player version folder).
