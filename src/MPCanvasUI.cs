@@ -730,10 +730,26 @@ namespace BigAmbitionsMP
             try
             {
                 bool show = MPRestSync.Seated;
+
+                // ESCAPE HATCH — independent of any UI existing: movement keys
+                // always stand you up (a half-built dock once trapped a player).
+                if (show && !_mpChatFocus &&
+                    (Input.GetKeyDown(KeyCode.W) || Input.GetKeyDown(KeyCode.A) ||
+                     Input.GetKeyDown(KeyCode.S) || Input.GetKeyDown(KeyCode.D)))
+                {
+                    if (MPRestSync.CancelButtonIndex >= 0)
+                    {
+                        Plugin.Logger.LogInfo("[RestDock] movement key — standing up.");
+                        MPRestSync.InvokeDockButton(MPRestSync.CancelButtonIndex);
+                    }
+                    return;
+                }
+
                 if (_dock == null)
                 {
-                    if (!show || _canvasGO == null) return;
+                    if (!show || _canvasGO == null || _dockBuildFailed) return;
                     BuildDock();
+                    if (_dock == null) return;
                 }
                 if (_dock!.activeSelf != show) _dock.SetActive(show);
                 _restUiHover = false;
@@ -758,8 +774,13 @@ namespace BigAmbitionsMP
                 var (dStr, tStr) = MPRestSync.FmtParts(shown);
                 if (_dockDay != null)
                 {
-                    bool otherDay = (int)(shown / 1440.0) != (int)(now / 1440.0);
-                    _dockDay.text  = otherDay ? $"<color=#FFD27A><b>{dStr} (tomorrow+)</b></color>" : dStr;
+                    int dayDiff = (int)(shown / 1440.0) - (int)(now / 1440.0);
+                    _dockDay.text = dayDiff switch
+                    {
+                        0 => $"today · {dStr}",
+                        1 => $"<b>tomorrow · {dStr}</b>",
+                        _ => $"<b>in {dayDiff} days · {dStr}</b>",
+                    };
                 }
                 if (_dockTime != null) _dockTime.text = tStr;
 
@@ -786,7 +807,7 @@ namespace BigAmbitionsMP
                             {
                                 _matchGoal[matchIdx] = g;
                                 var mrt = _matchRT[matchIdx]!;
-                                mrt.anchoredPosition = new Vector2(160f, -36f - row * 17f);
+                                mrt.anchoredPosition = new Vector2(144f, -52f - row * 16f);
                                 mrt.gameObject.SetActive(true);
                                 matchIdx++;
                             }
@@ -845,79 +866,105 @@ namespace BigAmbitionsMP
             catch { }
         }
 
+        private bool _dockBuildFailed;
+
         private void BuildDock()
         {
-            _dock = MakeGO("BAMP_RestDock", _canvasGO!.transform);
-            _dockRT = _dock.GetComponent<RectTransform>();
-            _dockRT.anchorMin = _dockRT.anchorMax = _dockRT.pivot = new Vector2(0.5f, 0f);
-            _dockRT.anchoredPosition = new Vector2(0f, 120f);
-            _dockRT.sizeDelta = new Vector2(720f, 212f);
-            var bg = _dock.AddComponent<Image>();
-            bg.color = new Color(0.07f, 0.08f, 0.11f, 0.96f);          // chat-window body
-            if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }
-
-            // Header band — chat title-bar look.
-            var hdr = MakeGO("Hdr", _dock.transform);
-            var hrt = hdr.GetComponent<RectTransform>();
-            Stretch(hrt, 0f, 0f, 0f, 28f, top: true);
-            var hImg = hdr.AddComponent<Image>();
-            hImg.color = new Color(0.15f, 0.18f, 0.27f, 1f);
-            if (_panelSprite != null) { try { hImg.sprite = _panelSprite; hImg.type = Image.Type.Sliced; } catch { } }
-            _dockTitle = MakeLabel(hdr.transform, "", 14, C_WHITE, 12f, 0f, 280f, 28f, TextAlignmentOptions.Left);
-            ApplyFont(_dockTitle);
-            var (xRT, xLbl) = MakeDockButton("X", default, 28f, new Color(0.45f, 0.22f, 0.22f, 1f), 22f);
-            xRT.SetParent(hdr.transform, false);
-            xRT.anchorMin = xRT.anchorMax = xRT.pivot = new Vector2(1f, 0.5f);
-            xRT.anchoredPosition = new Vector2(-6f, 0f);
-            xLbl.fontSize = 13;
-            _dockXRT = xRT;
-            xRT.gameObject.SetActive(false);
-
-            // Left column: checklist + match buttons (anchored top-left).
-            _dockPlayers = MakeLabel(_dock.transform, "", 12, C_WHITE, 14f, -34f, 210f, 170f, TextAlignmentOptions.TopLeft);
-            ApplyFont(_dockPlayers);
-            for (int i = 0; i < 3; i++)
+            try
             {
-                var (mrt, mlbl) = MakeDockButton("match", default, 50f, new Color(0.30f, 0.24f, 0.42f, 1f), 16f);
-                mrt.anchorMin = mrt.anchorMax = mrt.pivot = new Vector2(0f, 1f);
-                mrt.anchoredPosition = new Vector2(160f, -36f - i * 17f);
-                mlbl.fontSize = 10;
-                _matchRT[i] = mrt;
-                mrt.gameObject.SetActive(false);
+                _dock = MakeGO("BAMP_RestDock", _canvasGO!.transform);
+                _dockRT = _dock.GetComponent<RectTransform>();
+                _dockRT.anchorMin = _dockRT.anchorMax = _dockRT.pivot = new Vector2(0.5f, 0f);
+                _dockRT.anchoredPosition = new Vector2(0f, 120f);
+                _dockRT.sizeDelta = new Vector2(700f, 212f);
+                var bg = _dock.AddComponent<Image>();
+                bg.color = new Color(0.07f, 0.08f, 0.11f, 0.96f);
+                if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }
+
+                // Header band - chat title-bar look; title + red X.
+                var hdr = MakeGO("Hdr", _dock.transform);
+                var hrt = hdr.GetComponent<RectTransform>();
+                Stretch(hrt, 0f, 0f, 0f, 28f, top: true);
+                var hImg = hdr.AddComponent<Image>();
+                hImg.color = new Color(0.15f, 0.18f, 0.27f, 1f);
+                if (_panelSprite != null) { try { hImg.sprite = _panelSprite; hImg.type = Image.Type.Sliced; } catch { } }
+                _dockTitle = MakeLabel(hdr.transform, "", 14, C_WHITE, 14f, 0f, 300f, 28f, TextAlignmentOptions.Left);
+                ApplyFont(_dockTitle);
+                var (xRT, xLbl) = MakeDockButton("X", default, 30f, new Color(0.45f, 0.22f, 0.19f, 1f), 20f);
+                xRT.SetParent(hdr.transform, false);
+                xRT.anchorMin = xRT.anchorMax = xRT.pivot = new Vector2(1f, 0.5f);
+                xRT.anchoredPosition = new Vector2(-7f, 0f);
+                xLbl.fontSize = 12;
+                _dockXRT = xRT;
+                xRT.gameObject.SetActive(false);
+
+                // Left column: players header + checklist + match chips.
+                var ph = MakeLabel(_dock.transform, "players", 11, C_LBLGREY, 14f, -34f, 80f, 14f, TextAlignmentOptions.Left);
+                ApplyFont(ph);
+                _dockPlayers = MakeLabel(_dock.transform, "", 12, C_WHITE, 14f, -52f, 188f, 152f, TextAlignmentOptions.TopLeft);
+                ApplyFont(_dockPlayers);
+                for (int i = 0; i < 3; i++)
+                {
+                    var (mrt, mlbl) = MakeDockButton("match", default, 56f, new Color(0.24f, 0.19f, 0.34f, 1f), 17f);
+                    mrt.anchorMin = mrt.anchorMax = mrt.pivot = new Vector2(0f, 1f);
+                    mrt.anchoredPosition = new Vector2(144f, -52f - i * 17f);
+                    mlbl.fontSize = 10;
+                    mlbl.color = new Color(0.81f, 0.75f, 0.94f, 1f);
+                    _matchRT[i] = mrt;
+                    mrt.gameObject.SetActive(false);
+                }
+
+                // Divider between players and the time section.
+                var div = MakeGO("Div", _dock.transform);
+                var drt = div.GetComponent<RectTransform>();
+                drt.anchorMin = drt.anchorMax = drt.pivot = new Vector2(0f, 1f);
+                drt.anchoredPosition = new Vector2(212f, -36f);
+                drt.sizeDelta = new Vector2(1.5f, 166f);
+                div.AddComponent<Image>().color = new Color(0.27f, 0.30f, 0.37f, 0.8f);
+
+                // Center stack (x 224..686): the clock is the centerpiece.
+                const float CX = 224f, CW = 462f;
+                var until = MakeLabel(_dock.transform, "rest until", 11, C_LBLGREY, CX, -34f, CW, 14f, TextAlignmentOptions.Center);
+                ApplyFont(until);
+                _dockDay = MakeLabel(_dock.transform, "", 13, new Color(1f, 0.82f, 0.48f, 1f), CX, -50f, CW, 18f, TextAlignmentOptions.Center);
+                ApplyFont(_dockDay);
+                _dockTime = MakeLabel(_dock.transform, "", 42, C_WHITE, CX, -68f, CW, 48f, TextAlignmentOptions.Center);
+                ApplyFont(_dockTime);
+
+                // Nudges (grey) and presets (blue) - distinct rounded buttons.
+                float bw = 60f, gap = 8f;
+                float rowW = bw * 4 + gap * 3;
+                float x0 = CX + (CW - rowW) / 2f;
+                (_tgtM1h, _) = MakeDockButton("-1h",  new Vector2(x0,                 68f), bw, new Color(0.165f, 0.184f, 0.24f, 1f), 25f);
+                (_tgtM15, _) = MakeDockButton("-15m", new Vector2(x0 + (bw + gap),     68f), bw, new Color(0.165f, 0.184f, 0.24f, 1f), 25f);
+                (_tgtP15, _) = MakeDockButton("+15m", new Vector2(x0 + (bw + gap) * 2, 68f), bw, new Color(0.165f, 0.184f, 0.24f, 1f), 25f);
+                (_tgtP1h, _) = MakeDockButton("+1h",  new Vector2(x0 + (bw + gap) * 3, 68f), bw, new Color(0.165f, 0.184f, 0.24f, 1f), 25f);
+                for (int i = 0; i < PresetHours.Length; i++)
+                {
+                    var (prt, plbl) = MakeDockButton($"{PresetHours[i]:D2}:00", new Vector2(x0 + (bw + gap) * i, 38f), bw, new Color(0.133f, 0.188f, 0.29f, 1f), 25f);
+                    plbl.color = new Color(0.71f, 0.83f, 0.96f, 1f);
+                    _presetRT[i] = prt;
+                }
+
+                // Toggle - wide, centered.
+                var (tgRT, tgLbl) = MakeDockButton("", new Vector2(CX + (CW - 340f) / 2f, 6f), 340f, new Color(0.157f, 0.32f, 0.49f, 1f), 27f);
+                _skipToggleRT  = tgRT;
+                _dockSkipLbl   = tgLbl;
+                _skipToggleImg = tgRT.GetComponent<Image>();
+                _dockSkipLbl.fontSize = 13;
+
+                _dock.SetActive(false);
+                Plugin.Logger.LogInfo("[RestDock] dock built OK.");
             }
-
-            // Center stack (region x 240..706, centered): the star of the dock.
-            const float CX = 240f, CW = 466f;
-            var until = MakeLabel(_dock.transform, "Rest until", 12, C_LBLGREY, CX, -34f, CW, 16f, TextAlignmentOptions.Center);
-            ApplyFont(until);
-            _dockDay = MakeLabel(_dock.transform, "", 14, C_LBLGREY, CX, -52f, CW, 20f, TextAlignmentOptions.Center);
-            ApplyFont(_dockDay);
-            _dockTime = MakeLabel(_dock.transform, "", 38, C_WHITE, CX, -72f, CW, 44f, TextAlignmentOptions.Center);
-            ApplyFont(_dockTime);
-
-            // Nudges — four distinct buttons, centered (gap 10).
-            float bw = 58f, gap = 10f;
-            float rowW = bw * 4 + gap * 3;
-            float x0 = CX + (CW - rowW) / 2f;
-            (_tgtM1h, _) = MakeDockButton("-1h",  new Vector2(x0,                 64f), bw, new Color(0.18f, 0.20f, 0.27f, 1f), 26f);
-            (_tgtM15, _) = MakeDockButton("-15m", new Vector2(x0 + (bw + gap),     64f), bw, new Color(0.18f, 0.20f, 0.27f, 1f), 26f);
-            (_tgtP15, _) = MakeDockButton("+15m", new Vector2(x0 + (bw + gap) * 2, 64f), bw, new Color(0.18f, 0.20f, 0.27f, 1f), 26f);
-            (_tgtP1h, _) = MakeDockButton("+1h",  new Vector2(x0 + (bw + gap) * 3, 64f), bw, new Color(0.18f, 0.20f, 0.27f, 1f), 26f);
-            // Presets — same geometry, one row below.
-            for (int i = 0; i < PresetHours.Length; i++)
+            catch (Exception ex)
             {
-                var (rt, _) = MakeDockButton($"{PresetHours[i]:D2}:00", new Vector2(x0 + (bw + gap) * i, 34f), bw, new Color(0.16f, 0.24f, 0.38f, 1f), 26f);
-                _presetRT[i] = rt;
+                // A half-built dock trapped a player once (no X, no time) -
+                // never again: log LOUDLY and disable so the hatch (movement
+                // keys) is the only thing that matters.
+                _dockBuildFailed = true;
+                Plugin.Logger.LogError($"[RestDock] BuildDock FAILED: {ex}");
+                try { if (_dock != null) { UnityEngine.Object.Destroy(_dock); _dock = null; } } catch { }
             }
-
-            // Toggle — wide, centered at the bottom.
-            var (tgRT, tgLbl) = MakeDockButton("", new Vector2(CX + (CW - 320f) / 2f, 4f), 320f, new Color(0.20f, 0.36f, 0.60f, 1f), 26f);
-            _skipToggleRT  = tgRT;
-            _dockSkipLbl   = tgLbl;
-            _skipToggleImg = tgRT.GetComponent<Image>();
-            _dockSkipLbl.fontSize = 13;
-
-            _dock.SetActive(false);
         }
 
         private (RectTransform rt, TextMeshProUGUI lbl) MakeDockButton(string label, Vector2 pos, float w, Color bg, float h = 30f)
