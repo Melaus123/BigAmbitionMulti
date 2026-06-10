@@ -24,12 +24,12 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class MPRestSync
     {
-        public const double MinVoteMinutes = 60;     // minimum wait length
-        public const float  SkipMinutesPerRealSecond = 25f;
+        public const float SkipMinutesPerRealSecond = 25f;
 
         // ── Local state ───────────────────────────────────────────────────────
         public static bool   Seated       { get; private set; }
         public static string ActivityName { get; private set; } = "";
+        public static int    ActivityState { get; private set; } = -1;   // PlayerActivityState; -1 = none
         private static bool   _localVoteActive;
         private static double _localGoal;
         private static float  _nextPollAt;
@@ -37,14 +37,18 @@ namespace BigAmbitionsMP
         public static bool LocalVoteActive => _localVoteActive;
         public static double LocalGoal     => _localGoal;
 
+        // ── Dock data: passthrough of the activity's own buttons ─────────────
+        public sealed class DockButton
+        {
+            public string  Label = "";
+            public object? OnClick;
+        }
+        public static readonly List<DockButton> DockButtons = new();
+
         // ── Shared state (host-broadcast; banner + detector stand-down) ──────
         public static readonly List<RestVoteEntry> Votes = new();
         public static int  RequiredVotes;
         public static volatile bool SkipActive;
-
-        // Transient local-only banner line.
-        public static string LocalNotice = "";
-        public static float  LocalNoticeUntil;
 
         // ── Host-only ─────────────────────────────────────────────────────────
         private static readonly Dictionary<string, RestVoteEntry> _hostVotes = new();
@@ -52,21 +56,19 @@ namespace BigAmbitionsMP
 
         public static void Reset()
         {
-            Seated = false; ActivityName = "";
+            Seated = false; ActivityName = ""; ActivityState = -1;
+            DockButtons.Clear();
             _localVoteActive = false; _localGoal = 0;
             _machine = null;
             Votes.Clear(); RequiredVotes = 0; SkipActive = false;
             _hostVotes.Clear(); _skipGoalMinutes = 0;
-            LocalNotice = ""; LocalNoticeUntil = 0f;
         }
 
-        // ── Native skip button → clean neutralization (MPPatches Postfix) ─────
+        // ── Native skip engine → clean neutralization (MPPatches Postfix) ─────
         public static void OnNativeSkipButtonPressed()
         {
             StopLocalMachine();   // the game's own complete teardown
-            LocalNotice      = "Time skip is group-based in multiplayer — use the \"Wait until…\" button while seated.";
-            LocalNoticeUntil = Time.unscaledTime + 7f;
-            Plugin.Logger.LogInfo("[Rest] native skip press neutralized (machine stopped through its own off switch).");
+            Plugin.Logger.LogInfo("[Rest] native skip engine start neutralized (stopped through its own off switch).");
         }
 
         // ── Our wait API (called by the MPCanvasUI wait button/panel) ─────────
@@ -89,29 +91,72 @@ namespace BigAmbitionsMP
             return best;
         }
 
-        public static void RequestWait(double goalMinutes)
+        /// <summary>Toggle/update the skip request.  goalMinutes is absolute
+        /// (total game-minutes); clamped to a few minutes ahead — no other
+        /// minimum (user removed the 1h floor).</summary>
+        public static void SetSkipRequest(bool on, double goalMinutes = 0)
         {
-            if (!Seated)
+            if (!on)
             {
-                LocalNotice = "Sit somewhere first (bench / bed / car) to request a wait.";
-                LocalNoticeUntil = Time.unscaledTime + 5f;
+                if (!_localVoteActive) return;
+                _localVoteActive = false;
+                SendVote(false, 0, "");
+                Plugin.Logger.LogInfo("[Rest] skip request OFF.");
                 return;
             }
+            if (!Seated) return;
             double now = NowMinutes();
-            if (goalMinutes < now + MinVoteMinutes) goalMinutes = now + MinVoteMinutes;
-            goalMinutes = Math.Ceiling(goalMinutes / 5.0) * 5.0;   // clean 5-min boundary
+            if (goalMinutes < now + 5) goalMinutes = now + 5;
+            goalMinutes = Math.Ceiling(goalMinutes / 5.0) * 5.0;
             _localGoal = goalMinutes;
             _localVoteActive = true;
             SendVote(true, goalMinutes, ActivityName);
-            Plugin.Logger.LogInfo($"[Rest] wait requested: until {Fmt(goalMinutes)} ({ActivityName}).");
+            Plugin.Logger.LogInfo($"[Rest] skip request ON: until {Fmt(goalMinutes)} ({ActivityName}).");
         }
 
-        public static void CancelWait()
+        /// <summary>Drive the native duration slider (activity length) without
+        /// the native panel — PlayerActivityUI.ChangeSliderValue.</summary>
+        public static void ChangeDuration(float minutes)
         {
-            if (!_localVoteActive) return;
-            _localVoteActive = false;
-            SendVote(false, 0, "");
-            Plugin.Logger.LogInfo("[Rest] wait cancelled by player.");
+            try
+            {
+                var (ui, uiType) = GetActivityUi();
+                if (ui == null) return;
+                uiType!.GetMethod("ChangeSliderValue")?.Invoke(ui, new object[] { minutes, true });
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] ChangeDuration: {ex.Message}"); }
+        }
+
+        public static void InvokeDockButton(int index)
+        {
+            try
+            {
+                if (index < 0 || index >= DockButtons.Count) return;
+                var oc = DockButtons[index].OnClick;
+                if (oc == null) return;
+                oc.GetType().GetMethod("Invoke", Type.EmptyTypes)?.Invoke(oc, null);
+                Plugin.Logger.LogInfo($"[Rest] dock button '{DockButtons[index].Label}' invoked.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] InvokeDockButton: {ex.Message}"); }
+        }
+
+        /// <summary>Default skip target: the activity's own remaining time when
+        /// available, else one hour out.</summary>
+        public static double DefaultSkipGoal()
+        {
+            double now = NowMinutes();
+            try
+            {
+                var (act, _) = GetCurrentActivity();
+                if (act != null)
+                {
+                    var m = act.GetType().GetMethod("GetRemainingMinutesForTimeMachine");
+                    int rem = m != null ? Convert.ToInt32(m.Invoke(act, null)) : 0;
+                    if (rem > 0) return now + rem;
+                }
+            }
+            catch { }
+            return now + 60;
         }
 
         // ── Per-frame tick (main thread, MP active + in game) ─────────────────
@@ -156,9 +201,60 @@ namespace BigAmbitionsMP
                 if (seated != Seated)
                     Plugin.Logger.LogInfo($"[Rest] seated → {seated}{(seated ? $" ({nm})" : "")}");
                 Seated = seated;
-                if (seated) ActivityName = nm;
+                ActivityName = seated ? nm : "";
+                ActivityState = -1;
+                DockButtons.Clear();
+                if (!seated) return;
+
+                // State + button passthrough for the dock.
+                try
+                {
+                    var sm = act!.GetType().GetMethod("GetState");
+                    if (sm != null) ActivityState = Convert.ToInt32(sm.Invoke(act, null));
+                }
+                catch { }
+                try
+                {
+                    var gb = act!.GetType().GetMethod("GetButtons");
+                    if (gb?.Invoke(act, null) is System.Collections.IEnumerable arr)
+                    {
+                        foreach (var b in arr)
+                        {
+                            if (b == null || DockButtons.Count >= 4) continue;
+                            var bt = b.GetType();
+                            bool inter = true;
+                            try { inter = (bool)(bt.GetProperty("interactable")?.GetValue(b) ?? true); } catch { }
+                            if (!inter) continue;
+                            string label = "";
+                            try { label = bt.GetProperty("name")?.GetValue(b) as string ?? ""; } catch { }
+                            if (string.IsNullOrEmpty(label))
+                            {
+                                try { label = bt.GetProperty("key")?.GetValue(b) as string ?? ""; } catch { }
+                                if (label.Contains('.')) label = label.Substring(label.LastIndexOf('.') + 1);
+                            }
+                            object? oc = null;
+                            try { oc = bt.GetProperty("onClick")?.GetValue(b); } catch { }
+                            DockButtons.Add(new DockButton { Label = string.IsNullOrEmpty(label) ? "Action" : label, OnClick = oc });
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] buttons read: {ex.Message}"); }
             }
             catch { }
+        }
+
+        private static (object? ui, Type? type) GetActivityUi()
+        {
+            try
+            {
+                var uiType = VehicleManager.FindGameType("PlayerActivity.PlayerActivityUI")
+                          ?? VehicleManager.FindGameType("PlayerActivityUI");
+                if (uiType == null) return (null, null);
+                var objs = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(uiType));
+                if (objs == null || objs.Length == 0) return (null, null);
+                return (Activator.CreateInstance(uiType, objs[0].Pointer), uiType);
+            }
+            catch { return (null, null); }
         }
 
         // ── Host: consensus + clock executor ─────────────────────────────────

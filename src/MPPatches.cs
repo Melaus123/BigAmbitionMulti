@@ -1616,6 +1616,32 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: PlayerActivityUI.HidePanel — native rest panel never shows ──
+        // Rest v4 (user-designed): clicking a bench/bed must NOT open the
+        // game's rest dialog; our own dock (MPCanvasUI.TickRestUI) replaces it.
+        // The UI component keeps running (it drives the activity state machine)
+        // — only its VISIBILITY is forced off: every HidePanel call becomes
+        // HidePanel(true) in MP.
+        [HarmonyPatch]
+        public static class Patch_PlayerActivityUI_HidePanel
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var t = VehicleManager.FindGameType("PlayerActivity.PlayerActivityUI")
+                     ?? VehicleManager.FindGameType("PlayerActivityUI");
+                var m = t?.GetMethod("HidePanel",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Plugin.Logger.LogInfo($"[RestDock] HidePanel patch: {(m != null ? "patched" : "NOT FOUND")}");
+                return m;
+            }
+
+            static void Prefix(ref bool hide)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                hide = true;   // the native panel is replaced by our dock
+            }
+        }
+
         // ── Patches: blanket pause suppression in MP ──────────────────────────
         // "Nothing pauses outside the explicit vote system."  Every native pause
         // entry (rest dialogs, menus, the skip engine's time-control lock) is

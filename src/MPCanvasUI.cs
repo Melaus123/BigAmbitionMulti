@@ -643,153 +643,6 @@ namespace BigAmbitionsMP
         /// advance the authoritative clock to the given total game-minutes.</summary>
         public static void WriteWorldClockMinutes(double totalMinutes) => WriteWorldClock(totalMinutes / 60.0);
 
-        // ── Wait UI (rest v3) — small bottom-right button while seated; click
-        // opens a tiny target-time panel.  All our own wiring; the game's skip
-        // engine is never involved. ──────────────────────────────────────────
-        private GameObject? _waitBtn;     private RectTransform? _waitBtnRT;   private TextMeshProUGUI? _waitBtnLbl;
-        private GameObject? _matchBtn;    private RectTransform? _matchBtnRT;  private TextMeshProUGUI? _matchBtnLbl;
-        private GameObject? _waitPanel;   private RectTransform? _waitPanelRT;
-        private TextMeshProUGUI? _waitTargetLbl;
-        private RectTransform? _waitMinusRT, _waitPlusRT, _waitGoRT, _waitCloseRT;
-        private bool   _waitPanelOpen;
-        private double _waitTarget;          // total game-minutes
-        private bool   _restUiHover;         // suppress world clicks while hovering our UI
-
-        private void TickRestUI()
-        {
-            try
-            {
-                if (_waitBtn == null) BuildWaitUi();
-                if (_waitBtn == null) return;
-
-                bool seated  = MPRestSync.Seated;
-                bool voting  = MPRestSync.LocalVoteActive;
-                double other = MPRestSync.OtherVoteGoal(out string otherWho);
-
-                // Button: hidden unless seated.  Text flips between request/cancel.
-                bool showBtn = seated;
-                if (_waitBtn.activeSelf != showBtn) _waitBtn.SetActive(showBtn);
-                if (showBtn && _waitBtnLbl != null)
-                    _waitBtnLbl.text = voting
-                        ? $"Cancel wait (until {MPRestSync.Fmt(MPRestSync.LocalGoal)})"
-                        : "Wait until…  (group wait, min 1h)";
-
-                // Match button: seated, not voting, someone else waits.
-                bool showMatch = seated && !voting && other > 0;
-                if (_matchBtn != null && _matchBtn.activeSelf != showMatch) _matchBtn.SetActive(showMatch);
-                if (showMatch && _matchBtnLbl != null)
-                    _matchBtnLbl.text = $"Match {otherWho} ({MPRestSync.Fmt(other)})";
-
-                // Panel
-                bool showPanel = _waitPanelOpen && seated && !voting;
-                if (_waitPanel != null && _waitPanel.activeSelf != showPanel) _waitPanel.SetActive(showPanel);
-                if (showPanel && _waitTargetLbl != null)
-                {
-                    double min = MPRestSync.NowMinutes() + MPRestSync.MinVoteMinutes;
-                    if (_waitTarget < min) _waitTarget = Math.Ceiling(min / 15.0) * 15.0;
-                    _waitTargetLbl.text = $"until  <b>{MPRestSync.Fmt(_waitTarget)}</b>";
-                }
-
-                // Hover suppression + clicks.
-                var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
-                _restUiHover = (showBtn && RectHit(_waitBtnRT, mp))
-                            || (showMatch && RectHit(_matchBtnRT, mp))
-                            || (showPanel && RectHit(_waitPanelRT, mp));
-                if (_restUiHover) MPChat.SuppressGameInput = true;
-
-                if (!Input.GetMouseButtonDown(0)) return;
-                if (showBtn && RectHit(_waitBtnRT, mp))
-                {
-                    if (voting) MPRestSync.CancelWait();
-                    else        _waitPanelOpen = !_waitPanelOpen;
-                }
-                else if (showMatch && RectHit(_matchBtnRT, mp))
-                {
-                    MPRestSync.RequestWait(other);
-                    _waitPanelOpen = false;
-                }
-                else if (showPanel)
-                {
-                    if      (RectHit(_waitMinusRT, mp)) _waitTarget -= 15;
-                    else if (RectHit(_waitPlusRT,  mp)) _waitTarget += 15;
-                    else if (RectHit(_waitGoRT,    mp)) { MPRestSync.RequestWait(_waitTarget); _waitPanelOpen = false; }
-                    else if (RectHit(_waitCloseRT, mp)) _waitPanelOpen = false;
-                }
-            }
-            catch { }
-        }
-
-        private void BuildWaitUi()
-        {
-            if (_canvasGO == null) return;
-
-            // Main button — bottom-right, clear of the phone (bottom-left).
-            _waitBtn = MakeGO("BAMP_WaitBtn", _canvasGO.transform);
-            _waitBtnRT = _waitBtn.GetComponent<RectTransform>();
-            _waitBtnRT.anchorMin = _waitBtnRT.anchorMax = _waitBtnRT.pivot = new Vector2(1f, 0f);
-            _waitBtnRT.anchoredPosition = new Vector2(-14f, 170f);
-            _waitBtnRT.sizeDelta = new Vector2(250f, 34f);
-            var bImg = _waitBtn.AddComponent<Image>();
-            bImg.color = new Color(0.13f, 0.16f, 0.24f, 0.94f);
-            if (_panelSprite != null) { try { bImg.sprite = _panelSprite; bImg.type = Image.Type.Sliced; } catch { } }
-            _waitBtnLbl = MakeLabel(_waitBtn.transform, "", 13, C_WHITE, 0f, 0f, 250f, 34f, TextAlignmentOptions.Center);
-            ApplyFont(_waitBtnLbl);
-            var blrt = _waitBtnLbl.rectTransform; blrt.anchorMin = Vector2.zero; blrt.anchorMax = Vector2.one; blrt.offsetMin = Vector2.zero; blrt.offsetMax = Vector2.zero;
-            _waitBtn.SetActive(false);
-
-            // Match button — just above the main button.
-            _matchBtn = MakeGO("BAMP_WaitMatch", _canvasGO.transform);
-            _matchBtnRT = _matchBtn.GetComponent<RectTransform>();
-            _matchBtnRT.anchorMin = _matchBtnRT.anchorMax = _matchBtnRT.pivot = new Vector2(1f, 0f);
-            _matchBtnRT.anchoredPosition = new Vector2(-14f, 210f);
-            _matchBtnRT.sizeDelta = new Vector2(250f, 30f);
-            var mImg = _matchBtn.AddComponent<Image>();
-            mImg.color = new Color(0.22f, 0.16f, 0.30f, 0.94f);
-            if (_panelSprite != null) { try { mImg.sprite = _panelSprite; mImg.type = Image.Type.Sliced; } catch { } }
-            _matchBtnLbl = MakeLabel(_matchBtn.transform, "", 12, C_WHITE, 0f, 0f, 250f, 30f, TextAlignmentOptions.Center);
-            ApplyFont(_matchBtnLbl);
-            var mlrt = _matchBtnLbl.rectTransform; mlrt.anchorMin = Vector2.zero; mlrt.anchorMax = Vector2.one; mlrt.offsetMin = Vector2.zero; mlrt.offsetMax = Vector2.zero;
-            _matchBtn.SetActive(false);
-
-            // Panel — above the buttons.
-            _waitPanel = MakeGO("BAMP_WaitPanel", _canvasGO.transform);
-            _waitPanelRT = _waitPanel.GetComponent<RectTransform>();
-            _waitPanelRT.anchorMin = _waitPanelRT.anchorMax = _waitPanelRT.pivot = new Vector2(1f, 0f);
-            _waitPanelRT.anchoredPosition = new Vector2(-14f, 250f);
-            _waitPanelRT.sizeDelta = new Vector2(250f, 108f);
-            var pImg = _waitPanel.AddComponent<Image>();
-            pImg.color = new Color(0.07f, 0.08f, 0.11f, 0.96f);
-            if (_panelSprite != null) { try { pImg.sprite = _panelSprite; pImg.type = Image.Type.Sliced; } catch { } }
-
-            var title = MakeLabel(_waitPanel.transform, "Group wait — time skips only when everyone waits", 11,
-                                  C_LBLGREY, 8f, -6f, 234f, 30f, TextAlignmentOptions.TopLeft);
-            ApplyFont(title); title.enableWordWrapping = true;
-
-            _waitTargetLbl = MakeLabel(_waitPanel.transform, "", 14, C_WHITE, 8f, -40f, 160f, 22f, TextAlignmentOptions.Left);
-            ApplyFont(_waitTargetLbl);
-
-            _waitMinusRT = MakeWaitMini("-15m", new Vector2(8f, 8f));
-            _waitPlusRT  = MakeWaitMini("+15m", new Vector2(66f, 8f));
-            _waitGoRT    = MakeWaitMini("Request", new Vector2(124f, 8f), 76f, new Color(0.20f, 0.42f, 0.24f, 1f));
-            _waitCloseRT = MakeWaitMini("X", new Vector2(208f, 8f), 32f, new Color(0.35f, 0.18f, 0.18f, 1f));
-            _waitPanel.SetActive(false);
-        }
-
-        private RectTransform MakeWaitMini(string label, Vector2 pos, float w = 54f, Color? bg = null)
-        {
-            var go = MakeGO("BAMP_Wait_" + label, _waitPanel!.transform);
-            var rt = go.GetComponent<RectTransform>();
-            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0f, 0f);
-            rt.anchoredPosition = pos; rt.sizeDelta = new Vector2(w, 26f);
-            var img = go.AddComponent<Image>();
-            img.color = bg ?? new Color(0.18f, 0.20f, 0.27f, 1f);
-            if (_panelSprite != null) { try { img.sprite = _panelSprite; img.type = Image.Type.Sliced; } catch { } }
-            var lbl = MakeLabel(go.transform, label, 12, C_WHITE, 0f, 0f, w, 26f, TextAlignmentOptions.Center);
-            ApplyFont(lbl);
-            var lrt = lbl.rectTransform; lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one; lrt.offsetMin = Vector2.zero; lrt.offsetMax = Vector2.zero;
-            return rt;
-        }
-
         // ── Rest-vote banner — small top-center overlay, NON-interactive (no
         // raycast target, no input capture: ignorable while playing). ─────────
         private TextMeshProUGUI? _restBanner;
@@ -800,13 +653,12 @@ namespace BigAmbitionsMP
             try
             {
                 int n = MPRestSync.Votes.Count;
-                bool notice = MPRestSync.LocalNotice.Length > 0 && Time.unscaledTime < MPRestSync.LocalNoticeUntil;
-                string sig = (n == 0 && !notice) ? ""
-                    : $"{n}|{MPRestSync.RequiredVotes}|{MPRestSync.SkipActive}|{(notice ? MPRestSync.LocalNotice : "")}|{string.Join(",", MPRestSync.Votes.ConvertAll(v => v.PlayerId + v.Activity + (int)v.GoalMinutes))}";
+                string sig = n == 0 ? ""
+                    : $"{n}|{MPRestSync.RequiredVotes}|{MPRestSync.SkipActive}|{string.Join(",", MPRestSync.Votes.ConvertAll(v => v.PlayerId + v.Activity + (int)v.GoalMinutes))}";
                 if (sig == _restBannerSig) return;
                 _restBannerSig = sig;
 
-                if (n == 0 && !notice)
+                if (n == 0)
                 {
                     if (_restBanner != null) _restBanner.gameObject.SetActive(false);
                     return;
@@ -826,27 +678,193 @@ namespace BigAmbitionsMP
                 }
                 _restBanner.gameObject.SetActive(true);
 
+                // For other players: who is requesting the skip, doing what,
+                // until when — plus the count.
                 var sb = new System.Text.StringBuilder();
-                if (n == 0 && notice)
-                {
-                    _restBanner.text = $"<color=#F2D98C><b>{MPRestSync.LocalNotice}</b></color>";
-                    return;
-                }
                 if (MPRestSync.SkipActive)
-                    sb.Append("<color=#8CE08C><b>Resting…</b></color>  ");
+                    sb.Append("<color=#8CE08C><b>Skipping time…</b></color>  ");
                 else
-                    sb.Append($"<color=#FFD27A><b>Rest vote {n}/{MPRestSync.RequiredVotes}</b></color>  ");
+                    sb.Append($"<color=#FFD27A><b>Time-skip votes {n}/{MPRestSync.RequiredVotes}</b></color>  ");
                 for (int i = 0; i < MPRestSync.Votes.Count; i++)
                 {
                     var v = MPRestSync.Votes[i];
                     if (i > 0) sb.Append("   ");
-                    sb.Append($"<color=#CFE3FF>{v.PlayerId}</color>: {v.Activity.ToLowerInvariant()} until {MPRestSync.Fmt(v.GoalMinutes)}");
+                    sb.Append($"<color=#CFE3FF>{v.PlayerId}</color>: {NiceActivity(v.Activity)} until {MPRestSync.Fmt(v.GoalMinutes)}");
                 }
-                if (!MPRestSync.SkipActive)
-                    sb.Append("\n<color=#9AA3B2><i>sit anywhere and use the \"Wait until…\" button (bottom-right) to join — time skips when everyone waits</i></color>");
                 _restBanner.text = sb.ToString();
             }
             catch { }
+        }
+
+        private static string NiceActivity(string a) => a switch
+        {
+            "Sleep" => "sleeping",
+            "Rest"  => "resting on bench",
+            "Work"  => "working a shift",
+            "Workout" => "working out",
+            "Study" => "studying",
+            "Entertain" => "relaxing",
+            "Hygiene" => "showering",
+            "Swimming" => "swimming",
+            _ => string.IsNullOrEmpty(a) ? "resting" : a.ToLowerInvariant(),
+        };
+
+        // ── Rest dock (v4) — OUR replacement for the native rest dialog.
+        // Bottom-center, fully our wiring: native-button passthrough (Start/
+        // Stop/Cancel run the game's own handlers), duration nudges, the skip
+        // request toggle with target time, and the votes indicator. ──────────
+        private GameObject? _dock;          private RectTransform? _dockRT;
+        private TextMeshProUGUI? _dockTitle, _dockVotes, _dockSkipLbl;
+        private readonly RectTransform?[] _dockBtnRT = new RectTransform?[4];
+        private readonly TextMeshProUGUI?[] _dockBtnLbl = new TextMeshProUGUI?[4];
+        private RectTransform? _durM60, _durM15, _durP15, _durP60;
+        private RectTransform? _tgtM15, _tgtP15, _tgtP60, _skipToggleRT;
+        private Image? _skipToggleImg;
+        private double _skipTarget;
+        private bool _restUiHover;
+
+        private void TickRestUI()
+        {
+            try
+            {
+                bool show = MPRestSync.Seated;
+                if (_dock == null)
+                {
+                    if (!show || _canvasGO == null) return;
+                    BuildDock();
+                }
+                if (_dock!.activeSelf != show) _dock.SetActive(show);
+                _restUiHover = false;
+                if (!show) return;
+
+                bool voting = MPRestSync.LocalVoteActive;
+
+                // Title + votes line.
+                if (_dockTitle != null)
+                    _dockTitle.text = $"<b>{NiceActivity(MPRestSync.ActivityName)}</b>";
+                if (_dockVotes != null)
+                {
+                    int n = MPRestSync.Votes.Count;
+                    if (n == 0) _dockVotes.text = "<color=#9AA3B2>no skip votes</color>";
+                    else
+                    {
+                        var sb = new System.Text.StringBuilder();
+                        sb.Append(MPRestSync.SkipActive
+                            ? "<color=#8CE08C><b>skipping…</b></color>  "
+                            : $"<color=#FFD27A><b>{n}/{MPRestSync.RequiredVotes}</b></color>  ");
+                        for (int i = 0; i < MPRestSync.Votes.Count; i++)
+                        {
+                            var v = MPRestSync.Votes[i];
+                            if (i > 0) sb.Append("  ");
+                            sb.Append($"{v.PlayerId}→{MPRestSync.Fmt(v.GoalMinutes)}");
+                        }
+                        _dockVotes.text = sb.ToString();
+                    }
+                }
+
+                // Native buttons passthrough.
+                for (int i = 0; i < 4; i++)
+                {
+                    bool has = i < MPRestSync.DockButtons.Count;
+                    var rt = _dockBtnRT[i];
+                    if (rt != null && rt.gameObject.activeSelf != has) rt.gameObject.SetActive(has);
+                    if (has && _dockBtnLbl[i] != null) _dockBtnLbl[i]!.text = MPRestSync.DockButtons[i].Label;
+                }
+
+                // Skip toggle visuals.
+                if (_skipTarget <= 0) _skipTarget = MPRestSync.DefaultSkipGoal();
+                double minT = MPRestSync.NowMinutes() + 5;
+                if (_skipTarget < minT) _skipTarget = minT;
+                if (_dockSkipLbl != null)
+                    _dockSkipLbl.text = voting
+                        ? $"<b>Skip requested</b> — until {MPRestSync.Fmt(MPRestSync.LocalGoal)}"
+                        : $"Skip to {MPRestSync.Fmt(_skipTarget)}";
+                if (_skipToggleImg != null)
+                    _skipToggleImg.color = voting ? new Color(0.22f, 0.55f, 0.28f, 1f) : new Color(0.30f, 0.32f, 0.40f, 1f);
+
+                // Hover + clicks.
+                var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+                _restUiHover = RectHit(_dockRT, mp);
+                if (_restUiHover) MPChat.SuppressGameInput = true;
+                if (!Input.GetMouseButtonDown(0) || !_restUiHover) return;
+
+                for (int i = 0; i < 4; i++)
+                    if (_dockBtnRT[i] != null && _dockBtnRT[i]!.gameObject.activeSelf && RectHit(_dockBtnRT[i], mp))
+                    { MPRestSync.InvokeDockButton(i); return; }
+
+                if      (RectHit(_durM60, mp)) MPRestSync.ChangeDuration(-60f);
+                else if (RectHit(_durM15, mp)) MPRestSync.ChangeDuration(-15f);
+                else if (RectHit(_durP15, mp)) MPRestSync.ChangeDuration(15f);
+                else if (RectHit(_durP60, mp)) MPRestSync.ChangeDuration(60f);
+                else if (RectHit(_tgtM15, mp)) { _skipTarget -= 15; if (voting) MPRestSync.SetSkipRequest(true, _skipTarget); }
+                else if (RectHit(_tgtP15, mp)) { _skipTarget += 15; if (voting) MPRestSync.SetSkipRequest(true, _skipTarget); }
+                else if (RectHit(_tgtP60, mp)) { _skipTarget += 60; if (voting) MPRestSync.SetSkipRequest(true, _skipTarget); }
+                else if (RectHit(_skipToggleRT, mp))
+                {
+                    if (voting) MPRestSync.SetSkipRequest(false);
+                    else        MPRestSync.SetSkipRequest(true, _skipTarget);
+                }
+            }
+            catch { }
+        }
+
+        private void BuildDock()
+        {
+            _dock = MakeGO("BAMP_RestDock", _canvasGO!.transform);
+            _dockRT = _dock.GetComponent<RectTransform>();
+            _dockRT.anchorMin = _dockRT.anchorMax = _dockRT.pivot = new Vector2(0.5f, 0f);
+            _dockRT.anchoredPosition = new Vector2(0f, 14f);
+            _dockRT.sizeDelta = new Vector2(760f, 118f);
+            var bg = _dock.AddComponent<Image>();
+            bg.color = new Color(0.07f, 0.08f, 0.11f, 0.94f);
+            if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }
+
+            _dockTitle = MakeLabel(_dock.transform, "", 15, C_WHITE, 12f, -6f, 240f, 22f, TextAlignmentOptions.Left);
+            ApplyFont(_dockTitle);
+            _dockVotes = MakeLabel(_dock.transform, "", 12, C_WHITE, 250f, -8f, 500f, 20f, TextAlignmentOptions.Left);
+            ApplyFont(_dockVotes);
+
+            // Row 2: native activity buttons (passthrough).
+            for (int i = 0; i < 4; i++)
+            {
+                var (rt, lbl) = MakeDockButton("", new Vector2(12f + i * 130f, 54f), 124f, new Color(0.18f, 0.20f, 0.27f, 1f));
+                _dockBtnRT[i] = rt; _dockBtnLbl[i] = lbl;
+                rt.gameObject.SetActive(false);
+            }
+
+            // Row 3 left: activity length nudges.
+            var lenLbl = MakeLabel(_dock.transform, "length", 11, C_LBLGREY, 12f, -86f, 44f, 18f, TextAlignmentOptions.Left);
+            ApplyFont(lenLbl);
+            (_durM60, _) = MakeDockButton("-1h",  new Vector2(58f, 10f),  42f, new Color(0.18f, 0.20f, 0.27f, 1f));
+            (_durM15, _) = MakeDockButton("-15m", new Vector2(104f, 10f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f));
+            (_durP15, _) = MakeDockButton("+15m", new Vector2(154f, 10f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f));
+            (_durP60, _) = MakeDockButton("+1h",  new Vector2(204f, 10f), 42f, new Color(0.18f, 0.20f, 0.27f, 1f));
+
+            // Row 3 right: skip target + toggle.
+            (_tgtM15, _) = MakeDockButton("-15m", new Vector2(282f, 10f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f));
+            (_tgtP15, _) = MakeDockButton("+15m", new Vector2(332f, 10f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f));
+            (_tgtP60, _) = MakeDockButton("+1h",  new Vector2(382f, 10f), 42f, new Color(0.18f, 0.20f, 0.27f, 1f));
+            var (tgRT, tgLbl) = MakeDockButton("", new Vector2(430f, 10f), 318f, new Color(0.30f, 0.32f, 0.40f, 1f));
+            _skipToggleRT = tgRT;
+            _dockSkipLbl  = tgLbl;
+            _skipToggleImg = tgRT.GetComponent<Image>();
+
+            _dock.SetActive(false);
+        }
+
+        private (RectTransform rt, TextMeshProUGUI lbl) MakeDockButton(string label, Vector2 pos, float w, Color bg)
+        {
+            var go = MakeGO("BAMP_Dock_" + label + pos.x, _dock!.transform);
+            var rt = go.GetComponent<RectTransform>();
+            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0f, 0f);
+            rt.anchoredPosition = pos; rt.sizeDelta = new Vector2(w, 30f);
+            var img = go.AddComponent<Image>();
+            img.color = bg;
+            if (_panelSprite != null) { try { img.sprite = _panelSprite; img.type = Image.Type.Sliced; } catch { } }
+            var lbl = MakeLabel(go.transform, label, 12, C_WHITE, 0f, 0f, w, 30f, TextAlignmentOptions.Center);
+            ApplyFont(lbl);
+            var lrt = lbl.rectTransform; lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one; lrt.offsetMin = Vector2.zero; lrt.offsetMax = Vector2.zero;
+            return (rt, lbl);
         }
 
         private static void WriteWorldClock(double totalHours)
