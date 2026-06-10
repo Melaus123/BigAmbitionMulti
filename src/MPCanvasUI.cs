@@ -1198,7 +1198,12 @@ namespace BigAmbitionsMP
             // Send our character appearance once the character is ready.
             TrySendLocalAppearance();
 
-            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            if (!MPServer.IsRunning && !MPClient.IsConnected)
+            {
+                // RideProbe ground-truth capture works in single-player too.
+                VehicleManager.ProbeOwnFleetSolo();
+                return;
+            }
 
             // Smooth remote vehicles toward their networked transform (every frame).
             _pt = MPPerf.Begin(); VehicleManager.TickSmoothing(); MPPerf.End("Smooth", _pt);

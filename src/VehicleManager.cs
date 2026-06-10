@@ -741,10 +741,15 @@ namespace BigAmbitionsMP
                     var inst = vc.vehicleInstance;
                     if (inst == null || string.IsNullOrEmpty(inst.id)) continue;
                     var t = vc.transform;
+                    string tn = inst.vehicleTypeName.ToString();
+                    // Ground-truth capture: while WE drive/push, record the exact
+                    // character-to-vehicle offset + animator state so the remote
+                    // rendering can be modeled from data instead of guesses.
+                    if (vc.controlledByPlayer) MPRideProbe.Sample(tn, t);
                     fleet.Vehicles.Add(new VehicleEntry
                     {
                         VehicleId = inst.id,
-                        TypeName  = inst.vehicleTypeName.ToString(),
+                        TypeName  = tn,
                         ColorName = inst.vehicleColorName ?? "",
                         Driving   = vc.controlledByPlayer,
                         X = t.position.x, Y = t.position.y, Z = t.position.z,
@@ -758,6 +763,17 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning($"[Vehicle] ReadLocalFleet: {ex.Message}");
                 return null;
             }
+        }
+
+        /// <summary>Lets the RideProbe capture in SINGLE-PLAYER too (the fleet
+        /// reader that hosts the probe normally only runs while MP is active):
+        /// read-and-discard the local fleet at 1 Hz.</summary>
+        private static float _soloProbeNext;
+        public static void ProbeOwnFleetSolo()
+        {
+            if (Time.unscaledTime < _soloProbeNext) return;
+            _soloProbeNext = Time.unscaledTime + 1f;
+            try { ReadLocalFleet(); } catch { }
         }
 
         /// <summary>Applies a remote player's full vehicle fleet (main thread).</summary>
