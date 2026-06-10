@@ -325,7 +325,7 @@ namespace BigAmbitionsMP
             MPSaveCoordinator.DiagPhase("Update: TickProfileResend");    TickProfileResend();
             MPSaveCoordinator.DiagPhase("Update: TickIntroNamePrefill"); TickIntroNamePrefill();
             MPSaveCoordinator.DiagPhase("Update: TickSuppressBlackOverlay"); TickSuppressBlackOverlay(); // backlog #6 fix
-            MPSaveCoordinator.DiagPhase("Update: TickToggleClientSuppressions"); TickToggleClientSuppressions();  // F3-F12 runtime toggles
+            // (F3-F12 diagnostic toggle tick removed 2026-06-10.)
             MPSaveCoordinator.DiagPhase("Update: TickMpSave");           TickMpSave();   // Phase 4 — suppress SP autosave, upload saves, host autosave
             MPSaveCoordinator.DiagPhase("Update: TickCashSync");         TickCashSync(); // Phase 4 — live cash stream to host
             MPSaveCoordinator.DiagPhase("Update: MPAutopilot");          MPAutopilot.Tick();
@@ -369,10 +369,8 @@ namespace BigAmbitionsMP
             }
             _mpWasInGame = mpInGame;
 
-            // F10: one-shot smartphone-UI probe (BizPhone chat-app groundwork).
-            // Works in SP too — open the phone first for live data.
-            if (Input.GetKeyDown(KeyCode.F10) && IsInGame())
-                MPPhoneProbe.Run();
+            // (F10 phone-probe keybind removed 2026-06-10 — phone work done;
+            //  MPPhoneProbe.Run() can be re-wired if ever needed.)
 
             // (F7 test-row removed 2026-06-10 — capture complete: offsets are
             //  zero for all open types; passive RideProbe sampling remains.)
@@ -998,93 +996,10 @@ namespace BigAmbitionsMP
             }
         }
 
-        // CLAUDE-DIAGNOSTIC — F11/F6 toggles for the other two client
-        // suppressions (TrafficManager + ParkedVehicle spawn).  Per user's
-        // first-domino theory, if turning one of these OFF lets
-        // DelayedEnterBuildingActions fire on the client, we've found the
-        // upstream cause.
-        private bool _trafF11Down;
-        private bool _parkF6Down;
-        private bool _parkApplyF5Down;
-        private bool _killSwitchF4Down;
-        private bool _bandaidF3Down;
-        private static bool _killSwitchActive;       // true = ALL client sync disabled
-
-        private void TickToggleClientSuppressions()
-        {
-            if (!MPClient.IsConnected) return;
-            if (!IsInGame()) return;
-            try
-            {
-                bool f11 = Input.GetKey(KeyCode.F11);
-                if (f11 && !_trafF11Down) TrafficSync.ToggleClientTrafficSuppression();
-                _trafF11Down = f11;
-
-                bool f6 = Input.GetKey(KeyCode.F6);
-                if (f6 && !_parkF6Down) ParkedVehicleSync.ToggleSpawnSuppression();
-                _parkF6Down = f6;
-
-                bool f5 = Input.GetKey(KeyCode.F5);
-                if (f5 && !_parkApplyF5Down) ParkedVehicleSync.ToggleClientApply();
-                _parkApplyF5Down = f5;
-
-                // F3 toggle for the exit-bandaid kick.  Press to flip
-                // MPPatches.ExitBandaidKickEnabled at runtime.
-                bool f3 = Input.GetKey(KeyCode.F3);
-                if (f3 && !_bandaidF3Down)
-                {
-                    MPPatches.ExitBandaidKickEnabled = !MPPatches.ExitBandaidKickEnabled;
-                    Plugin.Logger.LogInfo($"[ClientFix] ExitBandaidKick toggled → {MPPatches.ExitBandaidKickEnabled}");
-                }
-                _bandaidF3Down = f3;
-
-// CLAUDE-DIAGNOSTIC — F4 MASTER kill switch.  Disables ALL client-side
-                // world-modifying sync at once (parked ghosts, traffic ghosts,
-                // remote-player spawns) and destroys/releases existing artifacts.
-                // If exit works with F4 active, SOMETHING in client sync is the
-                // cause; we then re-enable subsystems individually via F5/F6/F11
-                // to narrow down.
-                bool f4 = Input.GetKey(KeyCode.F4);
-                if (f4 && !_killSwitchF4Down) ToggleKillSwitch();
-                _killSwitchF4Down = f4;
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[ClientFix] toggle tick: {ex.Message}"); }
-        }
-
-        private static void ToggleKillSwitch()
-        {
-            _killSwitchActive = !_killSwitchActive;
-            if (_killSwitchActive)
-            {
-                // World-modifying syncs (ghosts/visuals).
-                ParkedVehicleSync.ClientApplyEnabled    = false;
-                TrafficSync.ClientGhostApplyEnabled     = false;
-                RemotePlayerManager.ClientSpawnEnabled  = false;
-                VehicleManager.ClientApplyFleetEnabled  = false;
-                // State-modifying syncs (game data on the local game instance).
-                GameStatePatcher.ClientApplyOwnership   = false;     // rent / building ownership
-                GameStatePatcher.ClientApplyTime        = false;     // clock + DayNightCycle
-                GameStatePatcher.ClientApplyMarket      = false;     // market prices
-
-                // Destroy / release existing world artifacts.
-                ParkedVehicleSync.ReleaseAllGhosts();
-                TrafficSync.DespawnAllGhosts();
-                RemotePlayerManager.DestroyAllRemotePlayers();
-                VehicleManager.DespawnAll();
-                Plugin.Logger.LogWarning("[ClientFix] KILL SWITCH ON — ALL client sync disabled (parked/traffic/remote-player/fleet/ownership/time/market), existing artifacts destroyed.");
-            }
-            else
-            {
-                ParkedVehicleSync.ClientApplyEnabled    = true;
-                TrafficSync.ClientGhostApplyEnabled     = true;
-                RemotePlayerManager.ClientSpawnEnabled  = true;
-                VehicleManager.ClientApplyFleetEnabled  = true;
-                GameStatePatcher.ClientApplyOwnership   = true;
-                GameStatePatcher.ClientApplyTime        = true;
-                GameStatePatcher.ClientApplyMarket      = true;
-                Plugin.Logger.LogWarning("[ClientFix] KILL SWITCH OFF — all client sync re-enabled; artifacts will rehydrate on next snapshots.");
-            }
-        }
+        // (Legacy diagnostic F-key suite REMOVED 2026-06-10 — F3 exit-bandaid
+        //  toggle, F4 master kill switch, F5/F6 parked-vehicle toggles, F11
+        //  traffic suppression.  All were enter/exit-investigation tooling;
+        //  the bandaid is retired and no test toggles ship with the mod.)
 
         // ── Backlog #6 fix: keep 'BlackOverlay' canvas suppressed on client ──
         //

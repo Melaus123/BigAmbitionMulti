@@ -17,56 +17,24 @@ namespace BigAmbitionsMP
         /// </summary>
         public static bool SuppressNextRentRequest = false;
 
-        // Re-entrancy depth counter for the despawner OnTriggerEnter
-        // bandaid.  Incremented on Prefix, decremented on Postfix.  Used by
-        // Patch_ExitFromBuilding to determine "did the game's natural code
-        // already kick the exit while we were inside the despawner trigger?"
-        // — if so, the bandaid Postfix won't double-kick.
-        internal static int _despawnerDepth = 0;
-
         // ════════════════════════════════════════════════════════════════════
-        // BANDAID REGISTRY (post-2026-05-21 cleanup)
+        // EXIT BANDAID — RETIRED 2026-06-10
         // ════════════════════════════════════════════════════════════════════
-        // After 21 rounds of investigation the bandaid has shrunk to two
-        // small pieces:
+        // History: on clients, ExitZoneDespawner.OnTriggerEnter silently
+        // short-circuited and a Harmony Postfix manually kicked
+        // BuildingManager.ExitFromBuilding (21 investigation rounds, 2026-05).
+        // Root cause turned out to be the client-side Player-layer colliders
+        // on remote ghosts (the despawner's player-identification check saw
+        // the wrong collider).  Those colliders were later removed (ghosts
+        // are visual-only on clients) — and a live test with the kick
+        // disabled confirmed native exit works again.  The kick, its F3
+        // toggle, and all tracking state were deleted; building enter/exit
+        // is fully vanilla now.
         //
-        //   1) ExitFromBuilding kick — in Patch_ExitZoneDespawner_OnTriggerEnter_Diag.Postfix.
-        //      When MPClient.IsConnected and the despawner silently short-
-        //      circuited (a different upstream bug that lives in cpp2il's
-        //      CallsUnknownMethods, which we never decompiled), we call
-        //      BuildingManager.ExitFromBuilding(exitToZoneId, true) ourselves.
-        //      Gated on ExitBandaidKickEnabled (below).
-        //
-        //   2) AiCarMusic suppression — Patch_AiCarMusic_StartB_NoOpOnClient.
-        //      The lambda <Start>b__1_* dereferences something null on the
-        //      client and crashes the exit coroutine mid-execution.  Prefix
-        //      returns false on client, host runs unchanged.  This is the
-        //      surgical root-cause fix.  See "REFERENCE — Key discoveries"
-        //      in the context log for details.
-        //
-        // To disable: set ExitBandaidKickEnabled=false (returns original
-        // can't-exit bug) and/or remove the AiCarMusic patch class (returns
-        // the NRE).  Search marker:  CLAUDE-DIAGNOSTIC[BANDAID]
+        // Still present (real root-cause fix, NOT a bandaid):
+        //   Patch_AiCarMusic_StartB_NoOpOnClient — an AiCarMusic lambda NREs
+        //   on clients mid-exit-coroutine; prefix skips it client-side only.
         // ════════════════════════════════════════════════════════════════════
-        public static bool ExitBandaidKickEnabled = true;
-
-        // CLAUDE-DIAGNOSTIC — bandaid fix tracking.  Set to true in
-        // Patch_ExitFromBuilding Prefix when _despawnerDepth > 0.  If after
-        // the despawner Postfix this is still false on the client, the
-        // despawner silently short-circuited and the Postfix kicks the exit
-        // manually.  Diagnostic logs from rounds 1-6 narrowed the bug to a
-        // check we can't intercept via Harmony — the bandaid bypasses it.
-        internal static bool _exitFromBuildingSeenDuringDespawn = false;
-        // Snapshot of the active despawner instance for the Postfix's manual
-        // ExitFromBuilding call (it needs exitToZoneId).
-        internal static object? _currentDespawnerInstance = null;
-        // De-double the bandaid.  Despawner trigger fires twice in rapid
-        // succession (once per Player collider, once per PlayerTriggerCollider)
-        // — two parallel ExitFromBuildingCoroutine state machines will trip
-        // over each other and the visual teleport never completes.  Track the
-        // realtime of the last successful bandaid kick and reject duplicates
-        // within a 3s cooldown.
-        internal static float _lastBandaidKickTime = -100f;
 
         // ── Diagnostic: Application.Quit ─────────────────────────────────────
         // Static method — reliably patchable on IL2CPP.
@@ -536,124 +504,6 @@ namespace BigAmbitionsMP
         //
         // Tag/layer fetch is wrapped in try/catch because IL2CPP wrappers can
         // throw NullRef on transient destroyed objects.
-        [HarmonyPatch]
-        public static class Patch_ExitZoneDespawner_OnTriggerEnter_Diag
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-            {
-                var t = VehicleManager.FindGameType("ExitZoneDespawner");
-                if (t == null) yield break;
-                var bf = System.Reflection.BindingFlags.Instance
-                       | System.Reflection.BindingFlags.NonPublic
-                       | System.Reflection.BindingFlags.Public
-                       | System.Reflection.BindingFlags.DeclaredOnly;
-                var m = t.GetMethod("OnTriggerEnter", bf);
-                if (m != null) yield return m;
-            }
-
-            static void Prefix(object __instance, UnityEngine.Collider other)
-            {
-                try
-                {
-                    _despawnerDepth++;
-                    // Reset bandaid tracking for THIS trigger fire and snapshot
-                    // the instance so the Postfix can call ExitFromBuilding
-                    // with its exitToZoneId field.
-                    _exitFromBuildingSeenDuringDespawn = false;
-                    _currentDespawnerInstance = __instance;
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] ExitDespawner OnTriggerEnter prefix: {ex.Message}"); }
-            }
-
-            static void Postfix()
-            {
-                try
-                {
-                    if (!ExitBandaidKickEnabled) return;
-                    if (!MPClient.IsConnected)   return;
-                    if (_exitFromBuildingSeenDuringDespawn) return;   // game already kicked it
-                    if (_currentDespawnerInstance == null)  return;
-
-                    var di = _currentDespawnerInstance;
-                    var dt = di.GetType();
-                    bool casino = ReadBool(dt, di, "isCasinoExit");
-                    bool parking = ReadBool(dt, di, "isParkingExit");
-                    int exitToZoneId = ReadInt(dt, di, "exitToZoneId");
-                    if (casino || parking) return;   // game's casino/parking paths still work fine
-
-                    // De-double: the despawner trigger fires twice in a row
-                    // (Player collider + PlayerTriggerCollider).  Two parallel
-                    // ExitFromBuildingCoroutine starts garble the visual teleport.
-                    float now = UnityEngine.Time.realtimeSinceStartup;
-                    if (now - _lastBandaidKickTime < 3f) return;
-                    _lastBandaidKickTime = now;
-
-                    string side = MPServer.IsRunning ? "HOST" : "CLIENT";
-                    Plugin.Logger.LogInfo($"[ExitBandaid/{side}] kicking ExitFromBuilding({exitToZoneId})");
-
-                    var bmType = VehicleManager.FindGameType("BuildingManager");
-                    if (bmType == null) return;
-                    var bmInst = GetBuildingManagerInstance(bmType);
-                    if (bmInst == null) { Plugin.Logger.LogWarning($"[ExitBandaid/{side}] BuildingManager singleton null."); return; }
-                    var exitMethod = bmType.GetMethod("ExitFromBuilding",
-                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                    if (exitMethod == null) { Plugin.Logger.LogWarning($"[ExitBandaid/{side}] ExitFromBuilding not found."); return; }
-                    exitMethod.Invoke(bmInst, new object[] { exitToZoneId, true });
-                }
-                catch (Exception ex)
-                {
-                    Plugin.Logger.LogWarning($"[ExitBandaid] Postfix: {ex.GetType().Name}: {ex.Message}");
-                }
-                finally
-                {
-                    _currentDespawnerInstance = null;
-                    _despawnerDepth--;
-                    if (_despawnerDepth < 0) _despawnerDepth = 0;
-                }
-            }
-
-            // Helpers — small reflection wrappers used by the bandaid Postfix.
-            private static bool ReadBool(Type t, object inst, string field)
-            {
-                try
-                {
-                    var f = t.GetField(field, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                    return f != null && (bool)(f.GetValue(inst) ?? false);
-                }
-                catch { return false; }
-            }
-            private static int ReadInt(Type t, object inst, string field)
-            {
-                try
-                {
-                    var f = t.GetField(field, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                    return f == null ? -1 : (int)(f.GetValue(inst) ?? -1);
-                }
-                catch { return -1; }
-            }
-            private static object? GetBuildingManagerInstance(Type bmType)
-            {
-                try
-                {
-                    // Walk BaseType chain to InstanceBehavior<BuildingManager>.GetInstance(bool).
-                    var bt = bmType.BaseType;
-                    while (bt != null)
-                    {
-                        var get = bt.GetMethod("GetInstance",
-                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                        if (get != null)
-                        {
-                            try { return get.Invoke(null, new object[] { true }); }
-                            catch { try { return get.Invoke(null, new object[] { false }); } catch { return null; } }
-                        }
-                        bt = bt.BaseType;
-                    }
-                }
-                catch { }
-                return null;
-            }
-        }
-
         // ════════════════════════════════════════════════════════════════
         // CLAUDE-DIAGNOSTIC[BANDAID] — Round 20: REAL ROOT-CAUSE FIX.
         // ════════════════════════════════════════════════════════════════
@@ -672,14 +522,10 @@ namespace BigAmbitionsMP
         // skips it entirely when MPClient.IsConnected.  On the host the
         // lambda runs normally so AI-car music keeps working.
         //
-        // Effect on the bandaid:
-        //   - Coroutine no longer NREs → can reach its terminal state-reset.
-        //   - Bandaid's force-reset (set_enteringBuilding/exitingBuilding(false))
-        //     is hopefully no longer needed.  Test by toggling
-        //     `MPPatches.ExitBandaidStateResetEnabled = false`.
-        //   - The kick (manual ExitFromBuilding) is still needed because
-        //     the despawner's silent short-circuit is a separate bug we
-        //     haven't fixed.
+        // (2026-06-10: the companion exit-kick bandaid was RETIRED — its root
+        //  cause, client-side Player-layer ghost colliders, is long removed
+        //  and vanilla exit was verified working with the kick disabled.
+        //  This patch remains the only intervention in the exit chain.)
         // ════════════════════════════════════════════════════════════════
         [HarmonyPatch]
         public static class Patch_AiCarMusic_StartB_NoOpOnClient
