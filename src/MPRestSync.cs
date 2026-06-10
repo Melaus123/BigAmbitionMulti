@@ -119,18 +119,6 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Rest] skip request ON: until {Fmt(goalMinutes)} ({ActivityName}).");
         }
 
-        /// <summary>Drive the native duration slider (activity length) without
-        /// the native panel — PlayerActivityUI.ChangeSliderValue.</summary>
-        public static void ChangeDuration(float minutes)
-        {
-            try
-            {
-                var (ui, uiType) = GetActivityUi();
-                if (ui == null) return;
-                uiType!.GetMethod("ChangeSliderValue")?.Invoke(ui, new object[] { minutes, true });
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] ChangeDuration: {ex.Message}"); }
-        }
 
         public static void InvokeDockButton(int index)
         {
@@ -145,12 +133,13 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] InvokeDockButton: {ex.Message}"); }
         }
 
-        /// <summary>The current activity's remaining minutes (0 if unknown).</summary>
+        /// <summary>The current activity's remaining minutes (0 if unknown).
+        /// Uses the activity cached by the last seated-poll (no scene walks).</summary>
         public static int RemainingActivityMinutes()
         {
             try
             {
-                var (act, _) = GetCurrentActivity();
+                var act = _curAct;
                 if (act == null) return 0;
                 var m = act.GetType().GetMethod("GetRemainingMinutesForTimeMachine");
                 return m != null ? Math.Max(0, Convert.ToInt32(m.Invoke(act, null))) : 0;
@@ -159,17 +148,40 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Make sure the activity itself lasts at least until the goal,
-        /// so the game can't auto-stand the player mid-vote.  Silent wiring.</summary>
+        /// so the game can't auto-stand the player mid-vote or mid-skip.
+        /// WRITES THE ACTIVITY'S OWN DURATION FIELD (the *_minutesTo*** int) —
+        /// the slider API (ChangeSliderValue) silently no-ops with the native
+        /// panel hidden, which is why players kept auto-standing and skips
+        /// self-cancelled the moment they started.</summary>
         public static void EnsureActivityCovers(double goalMinutes)
         {
             try
             {
+                var act = _curAct;
+                if (act == null) return;
                 double need = goalMinutes - NowMinutes();
                 int rem = RemainingActivityMinutes();
-                if (need > rem + 1) ChangeDuration((float)(need - rem));
+                if (need <= rem + 1) return;
+
+                var t = act.GetType();
+                if (!_durProps.TryGetValue(t, out var prop))
+                {
+                    prop = null;
+                    foreach (var p in t.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                        if (p.PropertyType == typeof(int) && p.CanRead && p.CanWrite
+                            && p.Name.IndexOf("minutesTo", StringComparison.OrdinalIgnoreCase) >= 0)
+                        { prop = p; break; }
+                    _durProps[t] = prop;
+                    Plugin.Logger.LogInfo($"[Rest] duration field for {t.Name}: {(prop != null ? prop.Name : "NOT FOUND")}");
+                }
+                if (prop == null) return;
+                int total = Convert.ToInt32(prop.GetValue(act) ?? 0);
+                int delta = (int)Math.Ceiling(need - rem);
+                prop.SetValue(act, total + delta);
             }
-            catch { }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] EnsureActivityCovers: {ex.Message}"); }
         }
+        private static readonly Dictionary<Type, System.Reflection.PropertyInfo?> _durProps = new();
 
         /// <summary>All session player names (for the who-voted checklist).</summary>
         public static List<string> AllPlayers()
@@ -202,7 +214,7 @@ namespace BigAmbitionsMP
             if (Seated)
             {
                 double need = _localVoteActive ? Math.Max(30, _localGoal - NowMinutes()) : 30;
-                if (RemainingActivityMinutes() < need) ChangeDuration(60f);
+                EnsureActivityCovers(NowMinutes() + need + 10);
             }
 
             // Vote lifecycle: standing up (or losing the activity) drops it.
@@ -234,6 +246,7 @@ namespace BigAmbitionsMP
                 if (seated != Seated)
                     Plugin.Logger.LogInfo($"[Rest] seated → {seated}{(seated ? $" ({nm})" : "")}");
                 Seated = seated;
+                _curAct = act;
                 ActivityName = seated ? nm : "";
                 ActivityState = -1;
                 DockButtons.Clear();
@@ -291,20 +304,6 @@ namespace BigAmbitionsMP
                 }
             }
             catch { }
-        }
-
-        private static (object? ui, Type? type) GetActivityUi()
-        {
-            try
-            {
-                var uiType = VehicleManager.FindGameType("PlayerActivity.PlayerActivityUI")
-                          ?? VehicleManager.FindGameType("PlayerActivityUI");
-                if (uiType == null) return (null, null);
-                var objs = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(uiType));
-                if (objs == null || objs.Length == 0) return (null, null);
-                return (Activator.CreateInstance(uiType, objs[0].Pointer), uiType);
-            }
-            catch { return (null, null); }
         }
 
         // ── Host: consensus + clock executor ─────────────────────────────────
@@ -389,17 +388,41 @@ namespace BigAmbitionsMP
             else if (MPClient.IsConnected) MPClient.SendRestVote(p);
         }
 
+        // Cached PlayerActivityUI wrapper + current activity.  FindObjectsOfType
+        // is a full scene walk — doing it 3× per 0.5s poll caused rhythmic ghost
+        // pulsing while the dock was open (same disease as the old traffic
+        // hitch).  Find once, reuse; re-find only when the cached wrapper dies.
+        private static object? _uiWrap;
+        private static Type?   _uiType;
+        private static object? _curAct;
+
+        private static (object? ui, Type? type) GetActivityUiCached()
+        {
+            try
+            {
+                if (_uiWrap != null && _uiType != null)
+                {
+                    try { _uiType.GetProperty("GetCurrentActivity")?.GetValue(_uiWrap); return (_uiWrap, _uiType); }
+                    catch { _uiWrap = null; }   // died with its scene — re-find
+                }
+                _uiType ??= VehicleManager.FindGameType("PlayerActivity.PlayerActivityUI")
+                         ?? VehicleManager.FindGameType("PlayerActivityUI");
+                if (_uiType == null) return (null, null);
+                var objs = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(_uiType));
+                if (objs == null || objs.Length == 0) return (null, null);
+                _uiWrap = Activator.CreateInstance(_uiType, objs[0].Pointer);
+                return (_uiWrap, _uiType);
+            }
+            catch { return (null, null); }
+        }
+
         private static (object? act, string name) GetCurrentActivity()
         {
             try
             {
-                var uiType = VehicleManager.FindGameType("PlayerActivity.PlayerActivityUI")
-                          ?? VehicleManager.FindGameType("PlayerActivityUI");
-                if (uiType == null) return (null, "");
-                var objs = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(uiType));
-                if (objs == null || objs.Length == 0) return (null, "");
-                var wrap = Activator.CreateInstance(uiType, objs[0].Pointer);
-                var act  = uiType.GetProperty("GetCurrentActivity")?.GetValue(wrap);
+                var (ui, uiType) = GetActivityUiCached();
+                if (ui == null) return (null, "");
+                var act = uiType!.GetProperty("GetCurrentActivity")?.GetValue(ui);
                 if (act == null) return (null, "");
                 string nm;
                 try

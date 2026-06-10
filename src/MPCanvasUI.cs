@@ -928,8 +928,10 @@ namespace BigAmbitionsMP
                 ApplyFont(until);
                 _dockDay = MakeLabel(_dock.transform, "", 13, new Color(1f, 0.82f, 0.48f, 1f), CX, -50f, CW, 18f, TextAlignmentOptions.Center);
                 ApplyFont(_dockDay);
-                _dockTime = MakeLabel(_dock.transform, "", 42, C_WHITE, CX, -68f, CW, 48f, TextAlignmentOptions.Center);
+                _dockTime = MakeLabel(_dock.transform, "", 42, C_WHITE, CX, -64f, CW, 58f, TextAlignmentOptions.Center);
                 ApplyFont(_dockTime);
+                _dockTime.enableWordWrapping = false;
+                _dockTime.overflowMode = TextOverflowModes.Overflow;   // a 42pt line MUST render (48px box truncated it to nothing)
 
                 // Nudges (grey) and presets (blue) - distinct rounded buttons.
                 float bw = 60f, gap = 8f;
