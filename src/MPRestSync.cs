@@ -123,10 +123,18 @@ namespace BigAmbitionsMP
         /// <summary>Guaranteed stand-up: the activity's own Stop/Cancel button
         /// when present, else the activity's Finish() directly (concrete cast).
         /// The exit must never depend on a button existing.</summary>
+        private static float _suppressAutoStartUntil;
+        private static float _navHealNext;
+
         public static void StandUp()
         {
             try
             {
+                // Standing must STAY stood: without this cooldown the auto-sit
+                // re-engaged the lingering activity ~1.5s after every cancel
+                // (visible stand, then silently busy again = movement lock).
+                _suppressAutoStartUntil = Time.unscaledTime + 4f;
+
                 if (CancelButtonIndex >= 0) InvokeDockButton(CancelButtonIndex);
                 else
                 {
@@ -262,6 +270,32 @@ namespace BigAmbitionsMP
             // Seated state from the game's activity system.
             UpdateSeated();
 
+            // Self-healing nav watchdog: NOT seated but navigation disabled =
+            // a lingering activity state (the lock the user kept hitting).
+            // Name the guilty flag and force the close-out again.
+            if (!Seated && Time.unscaledTime >= _navHealNext)
+            {
+                _navHealNext = Time.unscaledTime + 2f;
+                try
+                {
+                    var (ui, uiType) = GetActivityUiCached();
+                    if (ui != null && uiType != null)
+                    {
+                        bool nav = (bool)(uiType.GetMethod("HasNavigationDisabled", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.Invoke(null, null) ?? false);
+                        if (nav)
+                        {
+                            bool waiting = (bool)(uiType.GetProperty("IsWaiting", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null) ?? false);
+                            bool panel   = (bool)(uiType.GetProperty("IsPanelOpen", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null) ?? false);
+                            bool moving  = (bool)(uiType.GetProperty("IsMovingTowardsActivity", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null) ?? false);
+                            Plugin.Logger.LogWarning($"[Rest] NAV LOCK while not seated (IsWaiting={waiting} IsPanelOpen={panel} IsMoving={moving}) — force-clearing.");
+                            try { uiType.GetProperty("GetCurrentActivity")?.SetValue(ui, null); } catch { }
+                            try { uiType.GetMethod("CancelActivityMovement")?.Invoke(ui, null); } catch { }
+                        }
+                    }
+                }
+                catch { }
+            }
+
             // Sitting is INDEFINITE: the game's default duration (30 min) was
             // auto-standing players while they pondered the dock ("the window
             // auto-closed").  Top the activity up so only X / walking ends it.
@@ -351,7 +385,8 @@ namespace BigAmbitionsMP
                     if (startIdx < 0 && l.Contains("start")) startIdx = i;
                     else if (CancelButtonIndex < 0 && (l.Contains("stop") || l.Contains("cancel"))) CancelButtonIndex = i;
                 }
-                if (startIdx >= 0 && Time.unscaledTime - _lastAutoStartAt > 1.5f)
+                if (startIdx >= 0 && Time.unscaledTime - _lastAutoStartAt > 1.5f
+                    && Time.unscaledTime >= _suppressAutoStartUntil)
                 {
                     _lastAutoStartAt = Time.unscaledTime;
                     InvokeDockButton(startIdx);
