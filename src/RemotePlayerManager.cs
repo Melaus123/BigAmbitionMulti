@@ -105,37 +105,28 @@ namespace BigAmbitionsMP
         // That was the cart-pusher bug: push state active, blend invisible.
         private List<float>? _layerW;
 
-        // Mirrored hand-IK (pushing): vehicle-local target positions + rig
-        // weights from the sender, applied to the clone's own constraints.
+        // Mirrored hand-IK (pushing): vehicle-local hand anchors from the
+        // sender; manual two-bone solve on the clone's arm bones AFTER the
+        // animation pass (LateUpdate) so it overrides the frame's pose.
         private List<float>? _ikT;
-        private MPHandIk.Refs? _ikRefs;
-        private bool _ikSearched;
-        private bool _ikActive;
+        private bool _ikHumanChecked;
+        private bool _ikHuman;
 
-        private void TickHandIk()
+        private void LateUpdate()
         {
-            if (RideAttach != null && _ikT != null)
+            if (RideAttach == null || _ikT == null || Anim == null) return;
+            try
             {
-                if (!_ikSearched) { _ikSearched = true; _ikRefs = MPHandIk.Discover(transform, "clone:" + name); }
-                var r = _ikRefs;
-                if (r == null || r.LTarget == null || r.RTarget == null) return;
-                r.LTarget.position = RideAttach.TransformPoint(new Vector3(_ikT[0], _ikT[1], _ikT[2]));
-                r.RTarget.position = RideAttach.TransformPoint(new Vector3(_ikT[3], _ikT[4], _ikT[5]));
-                MPHandIk.WriteWeight(r, r.LRig, _ikT[6]);
-                MPHandIk.WriteWeight(r, r.RRig, _ikT[7]);
-                _ikActive = true;
+                if (!_ikHumanChecked) { _ikHumanChecked = true; _ikHuman = Anim.isHuman; }
+                if (!_ikHuman) return;
+                var lT = RideAttach.TransformPoint(new Vector3(_ikT[0], _ikT[1], _ikT[2]));
+                var rT = RideAttach.TransformPoint(new Vector3(_ikT[3], _ikT[4], _ikT[5]));
+                // Elbows bend down-and-slightly-forward — natural for pushing.
+                Vector3 pole = (-transform.up + transform.forward * 0.25f).normalized;
+                MPHandIk.SolveArm(Anim, true,  lT, pole);
+                MPHandIk.SolveArm(Anim, false, rT, pole);
             }
-            else if (_ikActive)
-            {
-                // Stopped pushing — release the hands.
-                _ikActive = false;
-                var r = _ikRefs;
-                if (r != null)
-                {
-                    MPHandIk.WriteWeight(r, r.LRig, 0f);
-                    MPHandIk.WriteWeight(r, r.RRig, 0f);
-                }
-            }
+            catch { }
         }
 
         /// <summary>Queues a one-off trigger to fire on the next frame.</summary>
@@ -213,7 +204,6 @@ namespace BigAmbitionsMP
                 transform.rotation = Quaternion.Slerp(transform.rotation, TargetRotation, k);
             }
 
-            TickHandIk();   // mirrored hand-IK while pushing (and release after)
 
             // Mirror the owner's real animator state (no local guessing).
             if (Anim != null)

@@ -1,84 +1,34 @@
 using System;
-using System.Reflection;
 using Il2CppInterop.Runtime;
 using UnityEngine;
 
 namespace BigAmbitionsMP
 {
     /// <summary>
-    /// Hand-IK mirroring for open-vehicle pushing.  The game glues the pusher's
-    /// hands to the cart handles with Animation Rigging TwoBoneIKConstraints
-    /// (LHandConstraint/RHandConstraint under the character Model) — component
-    /// state, invisible to the animator sync.  The clone carries the SAME rig
-    /// (Instantiate keeps Unity package components; script-stripping only kills
-    /// game scripts), so: the sender ships its IK target positions in
-    /// VEHICLE-LOCAL space + rig weights each tick, and the observer drives the
-    /// clone's identical constraints to the same spots on the ghost cart — the
-    /// clone's own RigBuilder solves the arms.
-    /// PlayerPositionPayload.IkT packing: [Lx,Ly,Lz, Rx,Ry,Rz, Lweight,Rweight].
+    /// Hand-IK mirroring for open-vehicle pushing — SAFE implementation.
+    ///
+    /// v1 reflected into Animation Rigging's TwoBoneIKConstraint.data — that
+    /// property returns a GENERIC IL2CPP STRUCT, and boxing one through
+    /// reflection hard-faults the process (host crash on flatbed mount,
+    /// 2026-06-10).  Never reflect generic interop struct properties.
+    ///
+    /// v2 uses only standard humanoid-Animator APIs:
+    ///   * Sender: reads its HAND BONE world positions (while pushing, the
+    ///     game's own IK has glued them to the cart handles) in VEHICLE-local
+    ///     space → PlayerPositionPayload.IkT = [Lxyz, Rxyz, 1, 1].
+    ///   * Observer: manual two-bone IK on the clone's arm bones in
+    ///     LateUpdate (after animation), aiming the hands at the same
+    ///     cart-relative points on the ghost.
     /// </summary>
     public static class MPHandIk
     {
-        public sealed class Refs
-        {
-            public Transform?    LTarget, RTarget;
-            public object?       LRig, RRig;
-            public PropertyInfo? WeightProp;
-        }
+        private static Animator? _localAnim;
+        private static bool _searched;
+        private static bool _loggedFill;
 
-        private static Refs? _local;          // local player's rig (sender side)
-        private static bool  _localSearched;
-        private static bool  _loggedFill;
+        public static void Reset() { _localAnim = null; _searched = false; _loggedFill = false; }
 
-        public static void Reset() { _local = null; _localSearched = false; _loggedFill = false; }
-
-        /// <summary>Discover the hand-IK pieces under a character root — works
-        /// for the local player and for clones (identical hierarchy).</summary>
-        public static Refs? Discover(Transform root, string tag)
-        {
-            try
-            {
-                var refs = new Refs();
-                foreach (var c in root.GetComponentsInChildren(Il2CppType.Of<Component>(), true))
-                {
-                    if (c == null) continue;
-                    var it = c.GetIl2CppType();
-                    if (it.Name == "TwoBoneIKConstraint")
-                    {
-                        var mt = VehicleManager.FindGameType(it.FullName ?? "");
-                        if (mt == null) continue;
-                        var wrap   = Activator.CreateInstance(mt, c.Pointer);
-                        var data   = mt.GetProperty("data", BindingFlags.Public | BindingFlags.Instance)?.GetValue(wrap);
-                        var target = data?.GetType().GetProperty("target", BindingFlags.Public | BindingFlags.Instance)?.GetValue(data) as Transform;
-                        if (target == null) continue;
-                        string go = c.TryCast<Component>()?.gameObject?.name ?? "";
-                        if (go.StartsWith("L")) refs.LTarget = target;
-                        else if (go.StartsWith("R")) refs.RTarget = target;
-                    }
-                    else if (it.Name == "Rig")
-                    {
-                        string go = c.TryCast<Component>()?.gameObject?.name ?? "";
-                        if (!go.Contains("HandIKRig")) continue;
-                        var mt = VehicleManager.FindGameType(it.FullName ?? "");
-                        if (mt == null) continue;
-                        var wrap = Activator.CreateInstance(mt, c.Pointer);
-                        refs.WeightProp ??= mt.GetProperty("weight", BindingFlags.Public | BindingFlags.Instance);
-                        if (go.StartsWith("L")) refs.LRig = wrap;
-                        else if (go.StartsWith("R")) refs.RRig = wrap;
-                    }
-                }
-                bool ok = refs.LTarget != null && refs.RTarget != null && refs.WeightProp != null;
-                Plugin.Logger.LogInfo($"[HandIK] discover({tag}): Ltarget={(refs.LTarget != null ? refs.LTarget.name : "MISS")} Rtarget={(refs.RTarget != null ? refs.RTarget.name : "MISS")} rigs={(refs.LRig != null ? 1 : 0)}+{(refs.RRig != null ? 1 : 0)} weightProp={refs.WeightProp != null} → {(ok ? "OK" : "INCOMPLETE")}");
-                return ok ? refs : null;
-            }
-            catch (Exception ex)
-            {
-                Plugin.Logger.LogWarning($"[HandIK] discover({tag}): {ex.Message}");
-                return null;
-            }
-        }
-
-        /// <summary>Sender: append vehicle-local IK targets + rig weights to the
+        /// <summary>Sender: append vehicle-local hand-bone positions to the
         /// outgoing position payload (only while driving an open vehicle).</summary>
         public static void FillPayload(PlayerPositionPayload p)
         {
@@ -86,41 +36,64 @@ namespace BigAmbitionsMP
             {
                 var veh = VehicleManager.CurrentOpenDriven;
                 if (veh == null) return;
-                if (!_localSearched)
+                if (!_searched)
                 {
-                    _localSearched = true;
+                    _searched = true;
                     var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
-                    if (ch != null) _local = Discover(ch, "local");
+                    var model = ch != null ? ch.Find("Model") : null;
+                    var ac = model != null ? model.GetComponent(Il2CppType.Of<Animator>()) : null;
+                    _localAnim = ac != null ? ac.TryCast<Animator>() : null;
+                    Plugin.Logger.LogInfo($"[HandIK] local animator: {(_localAnim != null ? $"ok, human={_localAnim.isHuman}" : "MISS")}");
                 }
-                var r = _local;
-                if (r == null || r.LTarget == null || r.RTarget == null) return;
+                var anim = _localAnim;
+                if (anim == null || !anim.isHuman) return;
 
-                var l  = veh.InverseTransformPoint(r.LTarget.position);
-                var rr = veh.InverseTransformPoint(r.RTarget.position);
-                float lw = ReadWeight(r, r.LRig), rw = ReadWeight(r, r.RRig);
-                p.IkT.Add(l.x);  p.IkT.Add(l.y);  p.IkT.Add(l.z);
-                p.IkT.Add(rr.x); p.IkT.Add(rr.y); p.IkT.Add(rr.z);
-                p.IkT.Add(lw);   p.IkT.Add(rw);
+                var lh = anim.GetBoneTransform(HumanBodyBones.LeftHand);
+                var rh = anim.GetBoneTransform(HumanBodyBones.RightHand);
+                if (lh == null || rh == null) return;
+                var l = veh.InverseTransformPoint(lh.position);
+                var r = veh.InverseTransformPoint(rh.position);
+                p.IkT.Add(l.x); p.IkT.Add(l.y); p.IkT.Add(l.z);
+                p.IkT.Add(r.x); p.IkT.Add(r.y); p.IkT.Add(r.z);
+                p.IkT.Add(1f);  p.IkT.Add(1f);
 
                 if (!_loggedFill)
                 {
                     _loggedFill = true;
-                    Plugin.Logger.LogInfo($"[HandIK] sending: L=({l.x:F2},{l.y:F2},{l.z:F2}) R=({rr.x:F2},{rr.y:F2},{rr.z:F2}) w=({lw:F2},{rw:F2})");
+                    Plugin.Logger.LogInfo($"[HandIK] sending hand anchors: L=({l.x:F2},{l.y:F2},{l.z:F2}) R=({r.x:F2},{r.y:F2},{r.z:F2})");
                 }
             }
             catch { }
         }
 
-        private static float ReadWeight(Refs r, object? rig)
+        /// <summary>Observer: classic two-bone IK — rotate upper arm and forearm
+        /// so the hand lands on the target; elbow bends along the pole side.
+        /// Call in LateUpdate so it overrides the frame's animation pose.</summary>
+        public static void SolveArm(Animator anim, bool left, Vector3 target, Vector3 poleDir)
         {
-            try { return rig != null && r.WeightProp != null ? (float)(r.WeightProp.GetValue(rig) ?? 0f) : 0f; }
-            catch { return 0f; }
-        }
+            var upper = anim.GetBoneTransform(left ? HumanBodyBones.LeftUpperArm : HumanBodyBones.RightUpperArm);
+            var lower = anim.GetBoneTransform(left ? HumanBodyBones.LeftLowerArm : HumanBodyBones.RightLowerArm);
+            var hand  = anim.GetBoneTransform(left ? HumanBodyBones.LeftHand    : HumanBodyBones.RightHand);
+            if (upper == null || lower == null || hand == null) return;
 
-        public static void WriteWeight(Refs r, object? rig, float w)
-        {
-            try { if (rig != null && r.WeightProp != null && r.WeightProp.CanWrite) r.WeightProp.SetValue(rig, w); }
-            catch { }
+            float a = (lower.position - upper.position).magnitude;
+            float b = (hand.position  - lower.position).magnitude;
+            Vector3 toT = target - upper.position;
+            if (toT.sqrMagnitude < 1e-6f || a < 1e-4f || b < 1e-4f) return;
+            float d = Mathf.Clamp(toT.magnitude, 0.05f, a + b - 0.01f);
+            Vector3 dir = toT.normalized;
+
+            Vector3 bendNormal = Vector3.Cross(dir, poleDir);
+            if (bendNormal.sqrMagnitude < 1e-6f) bendNormal = Vector3.Cross(dir, Vector3.up);
+            bendNormal.Normalize();
+
+            // Law of cosines: angle at the shoulder between target-line and upper arm.
+            float cosU = Mathf.Clamp((a * a + d * d - b * b) / (2f * a * d), -1f, 1f);
+            float angU = Mathf.Acos(cosU) * Mathf.Rad2Deg;
+
+            Vector3 wantUpperDir = Quaternion.AngleAxis(angU, bendNormal) * dir;
+            upper.rotation = Quaternion.FromToRotation(lower.position - upper.position, wantUpperDir) * upper.rotation;
+            lower.rotation = Quaternion.FromToRotation(hand.position - lower.position, target - lower.position) * lower.rotation;
         }
     }
 }
