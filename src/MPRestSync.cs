@@ -110,6 +110,7 @@ namespace BigAmbitionsMP
             goalMinutes = Math.Ceiling(goalMinutes / 5.0) * 5.0;
             _localGoal = goalMinutes;
             _localVoteActive = true;
+            EnsureActivityCovers(goalMinutes);   // game must not auto-stand us mid-vote
             SendVote(true, goalMinutes, ActivityName);
             Plugin.Logger.LogInfo($"[Rest] skip request ON: until {Fmt(goalMinutes)} ({ActivityName}).");
         }
@@ -140,23 +141,42 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] InvokeDockButton: {ex.Message}"); }
         }
 
-        /// <summary>Default skip target: the activity's own remaining time when
-        /// available, else one hour out.</summary>
-        public static double DefaultSkipGoal()
+        /// <summary>The current activity's remaining minutes (0 if unknown).</summary>
+        public static int RemainingActivityMinutes()
         {
-            double now = NowMinutes();
             try
             {
                 var (act, _) = GetCurrentActivity();
-                if (act != null)
-                {
-                    var m = act.GetType().GetMethod("GetRemainingMinutesForTimeMachine");
-                    int rem = m != null ? Convert.ToInt32(m.Invoke(act, null)) : 0;
-                    if (rem > 0) return now + rem;
-                }
+                if (act == null) return 0;
+                var m = act.GetType().GetMethod("GetRemainingMinutesForTimeMachine");
+                return m != null ? Math.Max(0, Convert.ToInt32(m.Invoke(act, null))) : 0;
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>Make sure the activity itself lasts at least until the goal,
+        /// so the game can't auto-stand the player mid-vote.  Silent wiring.</summary>
+        public static void EnsureActivityCovers(double goalMinutes)
+        {
+            try
+            {
+                double need = goalMinutes - NowMinutes();
+                int rem = RemainingActivityMinutes();
+                if (need > rem + 1) ChangeDuration((float)(need - rem));
             }
             catch { }
-            return now + 60;
+        }
+
+        /// <summary>All session player names (for the who-voted checklist).</summary>
+        public static List<string> AllPlayers()
+            => MPServer.IsRunning ? MPServer.LobbyPlayers
+             : MPClient.IsConnected ? MPClient.LobbyPlayers : new List<string>();
+
+        public static bool HasVote(string playerId, out double goal)
+        {
+            foreach (var v in Votes)
+                if (v.PlayerId == playerId) { goal = v.GoalMinutes; return true; }
+            goal = 0; return false;
         }
 
         // ── Per-frame tick (main thread, MP active + in game) ─────────────────
@@ -402,7 +422,28 @@ namespace BigAmbitionsMP
             double rem = totalMinutes - d * 1440.0;
             int hh = (int)(rem / 60.0);
             int mm = (int)(rem - hh * 60.0);
-            return $"Day {d} {hh:D2}:{mm:D2}";
+            return $"Day {d} · {hh:D2}:{mm:D2}";
+        }
+
+        /// <summary>Day and time as separate strings (for clear UI display).</summary>
+        public static (string day, string time) FmtParts(double totalMinutes)
+        {
+            int d = (int)(totalMinutes / 1440.0);
+            double rem = totalMinutes - d * 1440.0;
+            int hh = (int)(rem / 60.0);
+            int mm = (int)(rem - hh * 60.0);
+            return ($"Day {d}", $"{hh:D2}:{mm:D2}");
+        }
+
+        /// <summary>The NEXT occurrence of a clock time (today if still ahead,
+        /// else tomorrow) as total game-minutes.</summary>
+        public static double NextOccurrence(int hour, int minute = 0)
+        {
+            double now = NowMinutes();
+            int day = (int)(now / 1440.0);
+            double candidate = day * 1440.0 + hour * 60.0 + minute;
+            if (candidate <= now + 1) candidate += 1440.0;
+            return candidate;
         }
     }
 }

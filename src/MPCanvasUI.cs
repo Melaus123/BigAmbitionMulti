@@ -709,16 +709,17 @@ namespace BigAmbitionsMP
             _ => string.IsNullOrEmpty(a) ? "resting" : a.ToLowerInvariant(),
         };
 
-        // ── Rest dock (v4) — OUR replacement for the native rest dialog.
-        // Bottom-center, fully our wiring: native-button passthrough (Start/
-        // Stop/Cancel run the game's own handlers), duration nudges, the skip
-        // request toggle with target time, and the votes indicator. ──────────
+        // ── Rest dock (v5) — destination-time design, chat-window styling.
+        // One concept: "rest until <time of day>".  No durations.  Shows a
+        // named checklist of who has / hasn't voted.  Native Start/Stop/
+        // Cancel passthrough buttons live in the header. ─────────────────────
         private GameObject? _dock;          private RectTransform? _dockRT;
-        private TextMeshProUGUI? _dockTitle, _dockVotes, _dockSkipLbl;
-        private readonly RectTransform?[] _dockBtnRT = new RectTransform?[4];
-        private readonly TextMeshProUGUI?[] _dockBtnLbl = new TextMeshProUGUI?[4];
-        private RectTransform? _durM60, _durM15, _durP15, _durP60;
-        private RectTransform? _tgtM15, _tgtP15, _tgtP60, _skipToggleRT;
+        private TextMeshProUGUI? _dockTitle, _dockDay, _dockTime, _dockPlayers, _dockSkipLbl;
+        private readonly RectTransform?[] _dockBtnRT = new RectTransform?[3];
+        private readonly TextMeshProUGUI?[] _dockBtnLbl = new TextMeshProUGUI?[3];
+        private RectTransform? _tgtM1h, _tgtM15, _tgtP15, _tgtP1h, _skipToggleRT;
+        private readonly RectTransform?[] _presetRT = new RectTransform?[4];
+        private static readonly int[] PresetHours = { 7, 12, 18, 22 };
         private Image? _skipToggleImg;
         private double _skipTarget;
         private bool _restUiHover;
@@ -739,31 +740,11 @@ namespace BigAmbitionsMP
 
                 bool voting = MPRestSync.LocalVoteActive;
 
-                // Title + votes line.
                 if (_dockTitle != null)
-                    _dockTitle.text = $"<b>{NiceActivity(MPRestSync.ActivityName)}</b>";
-                if (_dockVotes != null)
-                {
-                    int n = MPRestSync.Votes.Count;
-                    if (n == 0) _dockVotes.text = "<color=#9AA3B2>no skip votes</color>";
-                    else
-                    {
-                        var sb = new System.Text.StringBuilder();
-                        sb.Append(MPRestSync.SkipActive
-                            ? "<color=#8CE08C><b>skipping…</b></color>  "
-                            : $"<color=#FFD27A><b>{n}/{MPRestSync.RequiredVotes}</b></color>  ");
-                        for (int i = 0; i < MPRestSync.Votes.Count; i++)
-                        {
-                            var v = MPRestSync.Votes[i];
-                            if (i > 0) sb.Append("  ");
-                            sb.Append($"{v.PlayerId}→{MPRestSync.Fmt(v.GoalMinutes)}");
-                        }
-                        _dockVotes.text = sb.ToString();
-                    }
-                }
+                    _dockTitle.text = NiceActivity(MPRestSync.ActivityName);
 
-                // Native buttons passthrough.
-                for (int i = 0; i < 4; i++)
+                // Native activity buttons (Start / Stop / Cancel) in the header.
+                for (int i = 0; i < 3; i++)
                 {
                     bool has = i < MPRestSync.DockButtons.Count;
                     var rt = _dockBtnRT[i];
@@ -771,16 +752,42 @@ namespace BigAmbitionsMP
                     if (has && _dockBtnLbl[i] != null) _dockBtnLbl[i]!.text = MPRestSync.DockButtons[i].Label;
                 }
 
-                // Skip toggle visuals.
-                if (_skipTarget <= 0) _skipTarget = MPRestSync.DefaultSkipGoal();
+                // Destination time — day and time clearly separated.
+                if (_skipTarget <= 0) _skipTarget = MPRestSync.NextOccurrence(7);
                 double minT = MPRestSync.NowMinutes() + 5;
                 if (_skipTarget < minT) _skipTarget = minT;
+                double shown = voting ? MPRestSync.LocalGoal : _skipTarget;
+                var (dStr, tStr) = MPRestSync.FmtParts(shown);
+                if (_dockDay  != null) _dockDay.text  = dStr;
+                if (_dockTime != null) _dockTime.text = tStr;
+
                 if (_dockSkipLbl != null)
-                    _dockSkipLbl.text = voting
-                        ? $"<b>Skip requested</b> — until {MPRestSync.Fmt(MPRestSync.LocalGoal)}"
-                        : $"Skip to {MPRestSync.Fmt(_skipTarget)}";
+                    _dockSkipLbl.text = voting ? "Skip requested — click to cancel" : "Request time skip";
                 if (_skipToggleImg != null)
-                    _skipToggleImg.color = voting ? new Color(0.22f, 0.55f, 0.28f, 1f) : new Color(0.30f, 0.32f, 0.40f, 1f);
+                    _skipToggleImg.color = voting ? new Color(0.22f, 0.55f, 0.28f, 1f) : new Color(0.20f, 0.36f, 0.60f, 1f);
+
+                // Named checklist: who has / hasn't voted.
+                if (_dockPlayers != null)
+                {
+                    var sb = new System.Text.StringBuilder();
+                    sb.Append(MPRestSync.SkipActive
+                        ? "<color=#8CE08C><b>Skipping time…</b></color>\n"
+                        : "<color=#9AA3B2>waiting on:</color>\n");
+                    foreach (var pl in MPRestSync.AllPlayers())
+                    {
+                        bool me = pl == MPConfig.PlayerId;
+                        if (MPRestSync.HasVote(pl, out double g))
+                        {
+                            var (gd, gt) = MPRestSync.FmtParts(g);
+                            sb.Append($"<color=#8CE08C>{pl}{(me ? " (you)" : "")}</color>  <color=#CFE3FF>{gd} {gt}</color>\n");
+                        }
+                        else
+                        {
+                            sb.Append($"<color=#8A93A6>{pl}{(me ? " (you)" : "")}  — not voted</color>\n");
+                        }
+                    }
+                    _dockPlayers.text = sb.ToString();
+                }
 
                 // Hover + clicks.
                 var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
@@ -788,18 +795,29 @@ namespace BigAmbitionsMP
                 if (_restUiHover) MPChat.SuppressGameInput = true;
                 if (!Input.GetMouseButtonDown(0) || !_restUiHover) return;
 
-                for (int i = 0; i < 4; i++)
+                for (int i = 0; i < 3; i++)
                     if (_dockBtnRT[i] != null && _dockBtnRT[i]!.gameObject.activeSelf && RectHit(_dockBtnRT[i], mp))
                     { MPRestSync.InvokeDockButton(i); return; }
 
-                if      (RectHit(_durM60, mp)) MPRestSync.ChangeDuration(-60f);
-                else if (RectHit(_durM15, mp)) MPRestSync.ChangeDuration(-15f);
-                else if (RectHit(_durP15, mp)) MPRestSync.ChangeDuration(15f);
-                else if (RectHit(_durP60, mp)) MPRestSync.ChangeDuration(60f);
-                else if (RectHit(_tgtM15, mp)) { _skipTarget -= 15; if (voting) MPRestSync.SetSkipRequest(true, _skipTarget); }
-                else if (RectHit(_tgtP15, mp)) { _skipTarget += 15; if (voting) MPRestSync.SetSkipRequest(true, _skipTarget); }
-                else if (RectHit(_tgtP60, mp)) { _skipTarget += 60; if (voting) MPRestSync.SetSkipRequest(true, _skipTarget); }
-                else if (RectHit(_skipToggleRT, mp))
+                double step = 0;
+                if      (RectHit(_tgtM1h, mp)) step = -60;
+                else if (RectHit(_tgtM15, mp)) step = -15;
+                else if (RectHit(_tgtP15, mp)) step = 15;
+                else if (RectHit(_tgtP1h, mp)) step = 60;
+                if (step != 0)
+                {
+                    _skipTarget = Math.Max(minT, (voting ? MPRestSync.LocalGoal : _skipTarget) + step);
+                    if (voting) MPRestSync.SetSkipRequest(true, _skipTarget);
+                    return;
+                }
+                for (int i = 0; i < _presetRT.Length; i++)
+                    if (RectHit(_presetRT[i], mp))
+                    {
+                        _skipTarget = MPRestSync.NextOccurrence(PresetHours[i]);
+                        if (voting) MPRestSync.SetSkipRequest(true, _skipTarget);
+                        return;
+                    }
+                if (RectHit(_skipToggleRT, mp))
                 {
                     if (voting) MPRestSync.SetSkipRequest(false);
                     else        MPRestSync.SetSkipRequest(true, _skipTarget);
@@ -813,60 +831,79 @@ namespace BigAmbitionsMP
             _dock = MakeGO("BAMP_RestDock", _canvasGO!.transform);
             _dockRT = _dock.GetComponent<RectTransform>();
             _dockRT.anchorMin = _dockRT.anchorMax = _dockRT.pivot = new Vector2(0.5f, 0f);
-            _dockRT.anchoredPosition = new Vector2(0f, 14f);
-            _dockRT.sizeDelta = new Vector2(760f, 118f);
+            _dockRT.anchoredPosition = new Vector2(0f, 120f);          // up off the bottom edge
+            _dockRT.sizeDelta = new Vector2(720f, 168f);
             var bg = _dock.AddComponent<Image>();
-            bg.color = new Color(0.07f, 0.08f, 0.11f, 0.94f);
+            bg.color = new Color(0.07f, 0.08f, 0.11f, 0.96f);          // chat-window body
             if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }
 
-            _dockTitle = MakeLabel(_dock.transform, "", 15, C_WHITE, 12f, -6f, 240f, 22f, TextAlignmentOptions.Left);
+            // Header bar — same look as the chat title bar.
+            var hdr = MakeGO("Hdr", _dock.transform);
+            var hrt = hdr.GetComponent<RectTransform>();
+            Stretch(hrt, 0f, 0f, 0f, 30f, top: true);
+            var hImg = hdr.AddComponent<Image>();
+            hImg.color = new Color(0.15f, 0.18f, 0.27f, 1f);
+            if (_panelSprite != null) { try { hImg.sprite = _panelSprite; hImg.type = Image.Type.Sliced; } catch { } }
+            _dockTitle = MakeLabel(hdr.transform, "", 14, C_WHITE, 12f, 0f, 250f, 30f, TextAlignmentOptions.Left);
             ApplyFont(_dockTitle);
-            _dockVotes = MakeLabel(_dock.transform, "", 12, C_WHITE, 250f, -8f, 500f, 20f, TextAlignmentOptions.Left);
-            ApplyFont(_dockVotes);
-
-            // Row 2: native activity buttons (passthrough).
-            for (int i = 0; i < 4; i++)
+            // Native buttons live on the right of the header.
+            for (int i = 0; i < 3; i++)
             {
-                var (rt, lbl) = MakeDockButton("", new Vector2(12f + i * 130f, 54f), 124f, new Color(0.18f, 0.20f, 0.27f, 1f));
+                var (rt, lbl) = MakeDockButton("", default, 96f, new Color(0.20f, 0.36f, 0.60f, 1f), 22f);
+                rt.SetParent(hdr.transform, false);
+                rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(1f, 0.5f);
+                rt.anchoredPosition = new Vector2(-8f - i * 102f, 0f);
                 _dockBtnRT[i] = rt; _dockBtnLbl[i] = lbl;
                 rt.gameObject.SetActive(false);
             }
 
-            // Row 3 left: activity length nudges.
-            var lenLbl = MakeLabel(_dock.transform, "length", 11, C_LBLGREY, 12f, -86f, 44f, 18f, TextAlignmentOptions.Left);
-            ApplyFont(lenLbl);
-            (_durM60, _) = MakeDockButton("-1h",  new Vector2(58f, 10f),  42f, new Color(0.18f, 0.20f, 0.27f, 1f));
-            (_durM15, _) = MakeDockButton("-15m", new Vector2(104f, 10f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f));
-            (_durP15, _) = MakeDockButton("+15m", new Vector2(154f, 10f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f));
-            (_durP60, _) = MakeDockButton("+1h",  new Vector2(204f, 10f), 42f, new Color(0.18f, 0.20f, 0.27f, 1f));
+            // Left column (x 16..395): destination time + controls.
+            var until = MakeLabel(_dock.transform, "Rest until", 12, C_LBLGREY, 16f, -38f, 100f, 18f, TextAlignmentOptions.Left);
+            ApplyFont(until);
+            _dockDay = MakeLabel(_dock.transform, "", 13, C_LBLGREY, 110f, -38f, 120f, 18f, TextAlignmentOptions.Left);
+            ApplyFont(_dockDay);
+            _dockTime = MakeLabel(_dock.transform, "", 30, C_WHITE, 16f, -58f, 130f, 36f, TextAlignmentOptions.Left);
+            ApplyFont(_dockTime);
 
-            // Row 3 right: skip target + toggle.
-            (_tgtM15, _) = MakeDockButton("-15m", new Vector2(282f, 10f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f));
-            (_tgtP15, _) = MakeDockButton("+15m", new Vector2(332f, 10f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f));
-            (_tgtP60, _) = MakeDockButton("+1h",  new Vector2(382f, 10f), 42f, new Color(0.18f, 0.20f, 0.27f, 1f));
-            var (tgRT, tgLbl) = MakeDockButton("", new Vector2(430f, 10f), 318f, new Color(0.30f, 0.32f, 0.40f, 1f));
-            _skipToggleRT = tgRT;
-            _dockSkipLbl  = tgLbl;
+            // Nudges - beside the big time.
+            (_tgtM1h, _) = MakeDockButton("-1h",  new Vector2(150f, 78f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f));
+            (_tgtM15, _) = MakeDockButton("-15m", new Vector2(200f, 78f), 50f, new Color(0.18f, 0.20f, 0.27f, 1f));
+            (_tgtP15, _) = MakeDockButton("+15m", new Vector2(254f, 78f), 50f, new Color(0.18f, 0.20f, 0.27f, 1f));
+            (_tgtP1h, _) = MakeDockButton("+1h",  new Vector2(308f, 78f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f));
+            // Presets - quick times of day (next occurrence).
+            for (int i = 0; i < PresetHours.Length; i++)
+            {
+                var (rt, _) = MakeDockButton($"{PresetHours[i]:D2}:00", new Vector2(150f + i * 54f, 44f), 50f, new Color(0.18f, 0.20f, 0.27f, 1f));
+                _presetRT[i] = rt;
+            }
+
+            // Toggle - big, unmistakable, full left-column width at the bottom.
+            var (tgRT, tgLbl) = MakeDockButton("", new Vector2(16f, 6f), 360f, new Color(0.20f, 0.36f, 0.60f, 1f), 32f);
+            _skipToggleRT  = tgRT;
+            _dockSkipLbl   = tgLbl;
             _skipToggleImg = tgRT.GetComponent<Image>();
+            _dockSkipLbl.fontSize = 13;
 
+            // Right column: the who-voted checklist.
+            _dockPlayers = MakeLabel(_dock.transform, "", 13, C_WHITE, 410f, -38f, 300f, 124f, TextAlignmentOptions.TopLeft);
+            ApplyFont(_dockPlayers);
             _dock.SetActive(false);
         }
 
-        private (RectTransform rt, TextMeshProUGUI lbl) MakeDockButton(string label, Vector2 pos, float w, Color bg)
+        private (RectTransform rt, TextMeshProUGUI lbl) MakeDockButton(string label, Vector2 pos, float w, Color bg, float h = 30f)
         {
             var go = MakeGO("BAMP_Dock_" + label + pos.x, _dock!.transform);
             var rt = go.GetComponent<RectTransform>();
             rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0f, 0f);
-            rt.anchoredPosition = pos; rt.sizeDelta = new Vector2(w, 30f);
+            rt.anchoredPosition = pos; rt.sizeDelta = new Vector2(w, h);
             var img = go.AddComponent<Image>();
             img.color = bg;
             if (_panelSprite != null) { try { img.sprite = _panelSprite; img.type = Image.Type.Sliced; } catch { } }
-            var lbl = MakeLabel(go.transform, label, 12, C_WHITE, 0f, 0f, w, 30f, TextAlignmentOptions.Center);
+            var lbl = MakeLabel(go.transform, label, 12, C_WHITE, 0f, 0f, w, h, TextAlignmentOptions.Center);
             ApplyFont(lbl);
             var lrt = lbl.rectTransform; lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one; lrt.offsetMin = Vector2.zero; lrt.offsetMax = Vector2.zero;
             return (rt, lbl);
         }
-
         private static void WriteWorldClock(double totalHours)
         {
             if (totalHours < 0) totalHours = 0;
