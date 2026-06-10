@@ -1622,6 +1622,75 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── DIAGNOSTIC: taxi-flow breadcrumbs ─────────────────────────────────
+        // The taxi crash dies between the map's filter pass and the map
+        // showing, with NO managed exception logged — these entry/exception
+        // probes bisect the flow: the last "[TaxiProbe] ENTER" line before
+        // death names the failing step.  REMOVE once the taxi is fixed.
+        [HarmonyPatch]
+        public static class Patch_TaxiFlow_Probes
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var targets = new (string type, string method)[]
+                {
+                    ("CityMap",                  "ToggleTaxiMode"),
+                    ("TaxiController",           "OnClickToUseTaxi"),
+                    ("TaxiController",           "RequestVehicleStop"),
+                    ("PermanentTaxiController",  "OnClickToUseTaxi"),
+                    ("TaxiSystem",               "TravelTo"),
+                    ("TaxiSystem",               "OnTimeMachineEnded"),
+                };
+                int n = 0;
+                foreach (var (tn, mn) in targets)
+                {
+                    var t = VehicleManager.FindGameType(tn);
+                    var m = t?.GetMethod(mn, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static);
+                    if (m != null) { n++; yield return m; }
+                }
+                Plugin.Logger.LogInfo($"[TaxiProbe] breadcrumb probes bound: {n}/6");
+            }
+
+            static void Prefix(System.Reflection.MethodBase __originalMethod)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                Plugin.Logger.LogInfo($"[TaxiProbe] ENTER {__originalMethod.DeclaringType?.Name}.{__originalMethod.Name}");
+            }
+
+            static void Finalizer(Exception? __exception, System.Reflection.MethodBase __originalMethod)
+            {
+                if (__exception != null)
+                    Plugin.Logger.LogError($"[TaxiProbe] EXCEPTION in {__originalMethod.DeclaringType?.Name}.{__originalMethod.Name}: {__exception}");
+            }
+        }
+
+        // ── Patch: PlayerActivityUI.Update NRE shield ─────────────────────────
+        // One taxi-crash flavor died on an NRE inside this Update (state
+        // machine tripped mid-flow).  In MP, log + swallow: skipping one UI
+        // tick is benign; killing the game is not.
+        [HarmonyPatch]
+        public static class Patch_ActivityUI_Update_Shield
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var t = VehicleManager.FindGameType("PlayerActivity.PlayerActivityUI")
+                     ?? VehicleManager.FindGameType("PlayerActivityUI");
+                return t?.GetMethod("Update",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            }
+
+            private static int _swallowed;
+            static Exception? Finalizer(Exception? __exception)
+            {
+                if (__exception == null) return null;
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return __exception;
+                _swallowed++;
+                if (_swallowed <= 5 || _swallowed % 200 == 0)
+                    Plugin.Logger.LogWarning($"[ActivityUI] swallowed {__exception.GetType().Name} in Update (#{_swallowed}).");
+                return null;
+            }
+        }
+
         // ── Patch: PlayerActivityUI.HidePanel — native rest panel never shows ──
         // Rest v4 (user-designed): clicking a bench/bed must NOT open the
         // game's rest dialog; our own dock (MPCanvasUI.TickRestUI) replaces it.
