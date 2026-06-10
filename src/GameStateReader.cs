@@ -277,6 +277,10 @@ namespace BigAmbitionsMP
                 _gscMTogglePause ??= _gscType.GetMethod("TogglePause",
                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                 if (_gscMTogglePause == null) return;
+                // Rate limit: a state fight must never spin at frame rate (the
+                // 2026-06-10 pause tug-of-war froze the host).
+                if (UnityEngine.Time.realtimeSinceStartup - _lastPauseToggleAt < 0.25f) return;
+                _lastPauseToggleAt = UnityEngine.Time.realtimeSinceStartup;
                 AllowNativePauseCall = true;            // our key through the MP pause-suppression patches
                 try { _gscMTogglePause.Invoke(_gscInstance, null); }
                 finally { AllowNativePauseCall = false; }
@@ -288,6 +292,7 @@ namespace BigAmbitionsMP
         /// <summary>True while OUR code is intentionally driving the pause state —
         /// the only key through the MP blanket pause-suppression patches.</summary>
         public static bool AllowNativePauseCall;
+        private static float _lastPauseToggleAt;
 
         /// <summary>Watchdog (rest-v3): nothing may freeze time in MP outside the
         /// explicit pause/vote systems.  Clears BOTH freeze switches: the pause

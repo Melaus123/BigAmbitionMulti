@@ -134,6 +134,12 @@ namespace BigAmbitionsMP
                 // Not in a multiplayer session — leave pause handling to the game.
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
 
+                // OUR OWN TogglePause invokes (SetNativePause / watchdog) are NOT
+                // player pause presses — without this guard they re-enter the
+                // manual-pause vote, which re-invokes TogglePause: the infinite
+                // pause tug-of-war that froze the host (2026-06-10).
+                if (GameStateReader.AllowNativePauseCall) return;
+
                 // TogglePause fires ONLY for the deliberate pause button — menus and
                 // benches pause through a different path.  Read the resulting absolute
                 // pause state and share it so the world pauses/resumes for everyone.
