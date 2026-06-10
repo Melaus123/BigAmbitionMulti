@@ -92,14 +92,15 @@ namespace BigAmbitionsMP
                 }
                 if (remaining < MinVoteMinutes)
                 {
-                    // Stay seated, overlay up (user 2026-06-10): HOLD the frozen
-                    // machine; the rest runs at 1× and we release the machine
-                    // when the goal time arrives naturally.
+                    // Stay seated, NO native overlay (user 2026-06-10): hold the
+                    // frozen machine with its canvas hidden; our banner notice
+                    // persists until the goal time arrives at 1×.
                     _localHold = true;
                     _localGoal = goalTotal;
-                    LocalNotice      = $"Resting at normal speed ({remaining:F0} min — under 1h, no group skip).";
-                    LocalNoticeUntil = Time.unscaledTime + 6f;
-                    Plugin.Logger.LogInfo($"[Rest] '{actName}' ({remaining:F0} min) below vote threshold — held at 1x until {Fmt(goalTotal)}.");
+                    SetMachineCanvasVisible(false);
+                    LocalNotice      = $"Resting until {Fmt(goalTotal)} — under 1h, no group skip needed.";
+                    LocalNoticeUntil = float.MaxValue;   // cleared on release
+                    Plugin.Logger.LogInfo($"[Rest] '{actName}' ({remaining:F0} min) below vote threshold — held at 1x until {Fmt(goalTotal)}, overlay hidden.");
                     return;
                 }
                 // Lock the goal as an ABSOLUTE target on a clean 5-min boundary.
@@ -107,6 +108,7 @@ namespace BigAmbitionsMP
                 if (goal <= now + 1.0) goal = now + 5.0;
                 _localGoal       = goal;
                 _localVoteActive = true;
+                MakeOverlayBackgroundTransparent();   // see the world while waiting
                 SendVote(true, goal, actName);
                 Plugin.Logger.LogInfo($"[Rest] vote ON: '{actName}' {remaining:F0} min → goal {Fmt(goal)} (machine held).");
             }
@@ -136,12 +138,13 @@ namespace BigAmbitionsMP
                 EvaluateMachine();
             }
 
-            // Sub-hour HOLD: machine frozen, player seated, overlay up — release
+            // Sub-hour HOLD: machine frozen + hidden, player seated — release
             // when the goal time arrives (the activity completed at 1×).
             if (_localHold && Time.unscaledTime >= _nextHoldPollAt)
             {
                 _nextHoldPollAt = Time.unscaledTime + 0.5f;
-                if (!MachineRunning()) _localHold = false;   // cancelled natively
+                bool release = false;
+                if (!MachineRunning()) release = true;        // cancelled natively
                 else
                 {
                     var (hd, hh) = GameStateReader.GetGameTime();
@@ -149,8 +152,14 @@ namespace BigAmbitionsMP
                     {
                         Plugin.Logger.LogInfo("[Rest] hold goal reached — releasing machine.");
                         StopLocalMachine();
-                        _localHold = false;
+                        release = true;
                     }
+                }
+                if (release)
+                {
+                    _localHold = false;
+                    SetMachineCanvasVisible(true);            // restore for future skips
+                    LocalNotice = ""; LocalNoticeUntil = 0f;  // clear the persistent notice
                 }
             }
 
@@ -234,6 +243,57 @@ namespace BigAmbitionsMP
         private static bool _localHold;
         private static float _nextHoldPollAt;
         private static float _nextLabelAt;
+
+        /// <summary>Hide/show the native skip overlay (sub-hour hold keeps the
+        /// player seated without the screen takeover).</summary>
+        private static void SetMachineCanvasVisible(bool visible)
+        {
+            try
+            {
+                var m = GetMachine();
+                var p = _machineType?.GetProperty("canvas");
+                var canvas = p?.GetValue(m) as Canvas;
+                if (canvas != null) canvas.enabled = visible;
+            }
+            catch { }
+        }
+
+        /// <summary>For the ≥1h vote overlay: make full-screen background/blur
+        /// images fully transparent so the world stays visible while waiting —
+        /// labels (TMP) and small images (buttons) keep their look.</summary>
+        private static void MakeOverlayBackgroundTransparent()
+        {
+            try
+            {
+                var m = GetMachine();
+                var p = _machineType?.GetProperty("canvas");
+                var canvas = p?.GetValue(m) as Canvas;
+                if (canvas == null) return;
+                var canvasRT = canvas.GetComponent<RectTransform>();
+                float big = (canvasRT != null ? canvasRT.rect.width : Screen.width) * 0.6f;
+                int dimmed = 0;
+                foreach (var g in canvas.GetComponentsInChildren<UnityEngine.UI.Image>(true))
+                {
+                    if (g == null) continue;
+                    if (g.rectTransform.rect.width >= big)
+                    {
+                        var c = g.color; c.a = 0f; g.color = c;
+                        dimmed++;
+                    }
+                }
+                foreach (var g in canvas.GetComponentsInChildren<UnityEngine.UI.RawImage>(true))
+                {
+                    if (g == null) continue;
+                    if (g.rectTransform.rect.width >= big)
+                    {
+                        var c = g.color; c.a = 0f; g.color = c;
+                        dimmed++;
+                    }
+                }
+                Plugin.Logger.LogInfo($"[Rest] overlay background made transparent ({dimmed} image(s)).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] MakeOverlayBackgroundTransparent: {ex.Message}"); }
+        }
 
         /// <summary>The machine's Update is frozen in MP, so its clock label
         /// never moves — write the live time into it ourselves.</summary>

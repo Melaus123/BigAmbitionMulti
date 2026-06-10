@@ -1614,6 +1614,37 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: EntityController.UpdateNavMeshTargets NRE shield ───────────
+        // Taxi boarding round 2 (2026-06-10): with the Gley storm silenced,
+        // boarding still died — final exception before shutdown is an NRE in
+        // EntityController.UpdateNavMeshTargets fired from a frame-delayed
+        // coroutine (the boarding transition tears the agent down before the
+        // delayed update runs).  Swallow it in MP: skipping one transient
+        // navmesh-target refresh is harmless.
+        [HarmonyPatch]
+        public static class Patch_EntityNavMesh_NREShield
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var t = VehicleManager.FindGameType("EntityController");
+                var m = t?.GetMethod("UpdateNavMeshTargets",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Plugin.Logger.LogInfo($"[NavShield] EntityController.UpdateNavMeshTargets: {(m != null ? "patched" : "NOT FOUND")}");
+                if (m != null) yield return m;
+            }
+
+            private static int _swallowed;
+            static Exception? Finalizer(Exception __exception)
+            {
+                if (__exception == null) return null;
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return __exception;
+                _swallowed++;
+                if (_swallowed <= 5 || _swallowed % 200 == 0)
+                    Plugin.Logger.LogWarning($"[NavShield] swallowed {__exception.GetType().Name} in UpdateNavMeshTargets (#{_swallowed}).");
+                return null;
+            }
+        }
+
         // ── Patch: Gley traffic collider NRE shield ───────────────────────────
         // Real traffic cars' collision sensors throw NullReferenceExceptions
         // when they touch OUR ghost objects (script-stripped clones lack the
