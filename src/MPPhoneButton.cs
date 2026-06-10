@@ -61,6 +61,7 @@ namespace BigAmbitionsMP
             _badgeGO = null; _badgeText = null;
             _keeperRT = null; _keeperNext = 0f; _keeperLogs = 0;
             _hubIconRT = null; _hubIconBaseScale = Vector3.one;
+            _hubRecopyGo = null; _hubRecopyIcon = null;
             _hubBadgeGO = null; _hubBadgeText = null;
         }
 
@@ -102,11 +103,17 @@ namespace BigAmbitionsMP
         /// the first seconds of a scene).</summary>
         public static void Tick(bool inGame, bool mpActive)
         {
-            // Pending post-layout icon re-copy (after inject).
+            // Pending post-layout icon re-copy (after inject) — both buttons:
+            // the natives' own script re-fits their icons after the grid lays
+            // out; our clones have no script, so we mirror a sibling late.
             if (_recopyAt > 0f && Time.unscaledTime >= _recopyAt)
             {
                 _recopyAt = 0f;
-                try { if (_recopyButtons != null && _recopyGo != null) CopyIconMetricsFromSibling(_recopyButtons, _recopyGo, _recopyIcon); }
+                try
+                {
+                    if (_recopyButtons != null && _recopyGo != null) CopyIconMetricsFromSibling(_recopyButtons, _recopyGo, _recopyIcon);
+                    if (_recopyButtons != null && _hubRecopyGo != null) CopyIconMetricsFromSibling(_recopyButtons, _hubRecopyGo, _hubRecopyIcon);
+                }
                 catch { }
             }
 
@@ -381,9 +388,13 @@ namespace BigAmbitionsMP
 
             try { LayoutRebuilder.ForceRebuildLayoutImmediate(buttons.TryCast<RectTransform>()); } catch { }
             CopyIconMetricsFromSibling(buttons, go, target);
+            _hubRecopyGo = go; _hubRecopyIcon = target;   // late re-fit with the chat one
             _seenHubVersion = MPHub.Version;
             Plugin.Logger.LogInfo("[PhoneBtn] Business Hub button injected.");
         }
+
+        private static GameObject? _hubRecopyGo;
+        private static Image? _hubRecopyIcon;
 
         /// <summary>Pulse + badge for the HUB button while offers are pending
         /// and the hub window is closed.</summary>

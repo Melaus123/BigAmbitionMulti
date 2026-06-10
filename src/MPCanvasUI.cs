@@ -1039,6 +1039,13 @@ namespace BigAmbitionsMP
         private double _hubAmount = 10000;
         private int _hubSeenVersion = -1;
         private string _hubRosterSig = "";
+        // Typed inputs (click value → type digits; Enter/click-away commits).
+        private bool _hubAmountFocus;
+        private string _hubAmountStr = "10000";
+        private bool _hubRateFocus;
+        private string _hubRateStr = "1.0";
+        private RectTransform? _hubAmountRT, _hubRateRT;
+        private TextMeshProUGUI? _hubRateLbl;
 
         private void TickHubWindow()
         {
@@ -1079,14 +1086,25 @@ namespace BigAmbitionsMP
                                 ? MpPurple : new Color(0.18f, 0.20f, 0.27f, 1f);
                 }
 
-                // Balance + amount + auto loan terms.
+                // Typed inputs: amount (digits) and rate (digits + dot).
+                HandleHubTyping();
                 if (_hubBalance != null) _hubBalance.text = $"balance  <b>${MPHub.MyMoney():N0}</b>";
-                if (_hubAmountLbl != null) _hubAmountLbl.text = $"<b>${_hubAmount:N0}</b>";
+                bool caretOn = Mathf.FloorToInt(Time.unscaledTime * 2f) % 2 == 0;
+                if (_hubAmountLbl != null)
+                    _hubAmountLbl.text = _hubAmountFocus
+                        ? $"<b>${_hubAmountStr}</b>{(caretOn ? "|" : "")}"
+                        : $"<b>${_hubAmount:N0}</b>";
+                if (_hubRateLbl != null)
+                    _hubRateLbl.text = _hubRateFocus
+                        ? $"<b>{_hubRateStr}</b>{(caretOn ? "|" : "")} %/day"
+                        : $"<b>{HubRate():F1}</b> %/day";
                 if (_hubTermsLbl != null)
                 {
-                    double di = Math.Max(50, Math.Round(_hubAmount * 0.01 / 50) * 50);
+                    double pct = HubRate();
+                    double di = Math.Max(0, Math.Round(_hubAmount * pct / 100.0));
                     double dp = Math.Max(100, Math.Round(_hubAmount / 20 / 100) * 100);
-                    _hubTermsLbl.text = $"<color=#9AA3B2>loan terms: ${di:N0}/day interest · ${dp:N0}/day payment (~20 days)</color>";
+                    string warn = pct > MPHub.PredatoryDailyPct ? "  <color=#FF6B6B><b>PREDATORY RATE</b></color>" : "";
+                    _hubTermsLbl.text = $"<color=#9AA3B2>loan terms: ${di:N0}/day interest ({pct:F1}%/day) · ${dp:N0}/day payment (~20 days)</color>{warn}";
                 }
 
                 // Offers + loans lists (rebuild on Version change).
@@ -1103,7 +1121,14 @@ namespace BigAmbitionsMP
                         if (!has) continue;
                         var o = MPHub.IncomingOffers[i];
                         _hubOfferIds[i] = o.Id;
-                        so.Append($"<color=#FFD27A>{o.From}</color> offers <b>${o.Principal:N0}</b>  (${o.DailyInterest:N0}/day int · ${o.DailyPayment:N0}/day pay)\n");
+                        if (o.Kind == "gift")
+                            so.Append($"<color=#8CE08C>{o.From}</color> offers you a <b>${o.Principal:N0}</b> GIFT\n");
+                        else
+                        {
+                            float pct = MPHub.OfferDailyPct(o);
+                            string warn = pct > MPHub.PredatoryDailyPct ? " <color=#FF6B6B><b>PREDATORY RATE</b></color>" : "";
+                            so.Append($"<color=#FFD27A>{o.From}</color> offers a <b>${o.Principal:N0}</b> loan at <b>{pct:F1}%/day</b> (${o.DailyInterest:N0}/day int · ${o.DailyPayment:N0}/day pay){warn}\n");
+                        }
                     }
                     if (_hubOffers != null) _hubOffers.text = so.Length > 0 ? so.ToString() : "<color=#6B7384>no pending offers</color>";
 
@@ -1120,10 +1145,16 @@ namespace BigAmbitionsMP
                     if (_hubLoans != null) _hubLoans.text = sl.Length > 0 ? sl.ToString() : "<color=#6B7384>no active loans</color>";
                 }
 
-                // Hover + clicks.
+                // Hover + clicks.  (Typing focus counts as "interacting" so the
+                // keystrokes never reach the game.)
                 var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
-                _hubUiHover = RectHit(_hubRT, mp);
-                if (!Input.GetMouseButtonDown(0) || !_hubUiHover) return;
+                _hubUiHover = RectHit(_hubRT, mp) || _hubAmountFocus || _hubRateFocus;
+                if (!Input.GetMouseButtonDown(0)) return;
+                if (!RectHit(_hubRT, mp)) { CommitHubInputs(); return; }   // click-away commits typing
+
+                if (RectHit(_hubAmountRT, mp)) { _hubAmountFocus = true; _hubRateFocus = false; _hubAmountStr = ((long)_hubAmount).ToString(); return; }
+                if (RectHit(_hubRateRT, mp))   { _hubRateFocus = true; _hubAmountFocus = false; _hubRateStr = HubRate().ToString("F1"); return; }
+                CommitHubInputs();
 
                 if (RectHit(_hubXRT, mp)) { _hubVisible = false; return; }
                 for (int i = 0; i < 4; i++)
@@ -1137,10 +1168,11 @@ namespace BigAmbitionsMP
                 else if (RectHit(_hubAm10kP, mp)) step = 10000;
                 if (step != 0) { _hubAmount = Math.Max(1000, _hubAmount + step); return; }
 
-                if (RectHit(_hubSendRT, mp)) { MPHub.SendMoney(_hubTarget, (float)_hubAmount); return; }
+                if (RectHit(_hubSendRT, mp)) { MPHub.OfferGift(_hubTarget, (float)_hubAmount); return; }
                 if (RectHit(_hubLoanRT, mp))
                 {
-                    double di = Math.Max(50, Math.Round(_hubAmount * 0.01 / 50) * 50);
+                    double pct = HubRate();
+                    double di = Math.Max(0, Math.Round(_hubAmount * pct / 100.0));
                     double dp = Math.Max(100, Math.Round(_hubAmount / 20 / 100) * 100);
                     MPHub.OfferLoan(_hubTarget, (float)_hubAmount, (float)di, (float)dp);
                     return;
@@ -1205,31 +1237,38 @@ namespace BigAmbitionsMP
                 ApplyFont(amLbl);
                 _hubAmountLbl = MakeLabel(_hub.transform, "", 20, C_WHITE, 84f, -68f, 140f, 28f, TextAlignmentOptions.Left);
                 ApplyFont(_hubAmountLbl);
+                _hubAmountRT = _hubAmountLbl.rectTransform;   // click → type the amount
                 (_hubAm10kM, _) = MakeHubButton("-10k", new Vector2(234f, 0f), 52f, new Color(0.18f, 0.20f, 0.27f, 1f), 24f, sprite); SetTopLeft(_hubAm10kM, 234f, -70f);
                 (_hubAm1kM,  _) = MakeHubButton("-1k",  new Vector2(290f, 0f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f), 24f, sprite); SetTopLeft(_hubAm1kM, 290f, -70f);
                 (_hubAm1kP,  _) = MakeHubButton("+1k",  new Vector2(340f, 0f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f), 24f, sprite); SetTopLeft(_hubAm1kP, 340f, -70f);
                 (_hubAm10kP, _) = MakeHubButton("+10k", new Vector2(390f, 0f), 52f, new Color(0.18f, 0.20f, 0.27f, 1f), 24f, sprite); SetTopLeft(_hubAm10kP, 390f, -70f);
 
-                (_hubSendRT, _) = MakeHubButton("Send money", new Vector2(14f, 0f), 160f, new Color(0.19f, 0.42f, 0.67f, 1f), 28f, sprite); SetTopLeft(_hubSendRT, 14f, -104f);
-                (_hubLoanRT, _) = MakeHubButton("Offer as loan", new Vector2(182f, 0f), 160f, new Color(0.24f, 0.50f, 0.33f, 1f), 28f, sprite); SetTopLeft(_hubLoanRT, 182f, -104f);
-                _hubTermsLbl = MakeLabel(_hub.transform, "", 11, C_LBLGREY, 14f, -136f, 492f, 18f, TextAlignmentOptions.Left);
+                var rtLbl = MakeLabel(_hub.transform, "loan rate:", 12, C_LBLGREY, 14f, -100f, 80f, 22f, TextAlignmentOptions.Left);
+                ApplyFont(rtLbl);
+                _hubRateLbl = MakeLabel(_hub.transform, "", 14, C_WHITE, 96f, -100f, 160f, 22f, TextAlignmentOptions.Left);
+                ApplyFont(_hubRateLbl);
+                _hubRateRT = _hubRateLbl.rectTransform;       // click → type the %/day
+
+                (_hubSendRT, _) = MakeHubButton("Offer gift",   new Vector2(14f, 0f), 160f, new Color(0.19f, 0.42f, 0.67f, 1f), 28f, sprite); SetTopLeft(_hubSendRT, 14f, -130f);
+                (_hubLoanRT, _) = MakeHubButton("Offer as loan", new Vector2(182f, 0f), 160f, new Color(0.24f, 0.50f, 0.33f, 1f), 28f, sprite); SetTopLeft(_hubLoanRT, 182f, -130f);
+                _hubTermsLbl = MakeLabel(_hub.transform, "", 11, C_LBLGREY, 14f, -162f, 492f, 18f, TextAlignmentOptions.Left);
                 ApplyFont(_hubTermsLbl);
 
-                var offersHdr = MakeLabel(_hub.transform, "incoming offers", 11, C_LBLGREY, 14f, -160f, 200f, 16f, TextAlignmentOptions.Left);
+                var offersHdr = MakeLabel(_hub.transform, "incoming offers", 11, C_LBLGREY, 14f, -186f, 200f, 16f, TextAlignmentOptions.Left);
                 ApplyFont(offersHdr);
-                _hubOffers = MakeLabel(_hub.transform, "", 12, C_WHITE, 14f, -178f, 380f, 56f, TextAlignmentOptions.TopLeft);
+                _hubOffers = MakeLabel(_hub.transform, "", 12, C_WHITE, 14f, -204f, 380f, 56f, TextAlignmentOptions.TopLeft);
                 ApplyFont(_hubOffers);
                 for (int i = 0; i < 2; i++)
                 {
-                    var (aRT, _) = MakeHubButton("accept",  new Vector2(0f, 0f), 58f, new Color(0.24f, 0.50f, 0.33f, 1f), 18f, sprite); SetTopLeft(aRT, 400f, -176f - i * 22f);
-                    var (dRT, _) = MakeHubButton("decline", new Vector2(0f, 0f), 58f, new Color(0.45f, 0.24f, 0.22f, 1f), 18f, sprite); SetTopLeft(dRT, 462f, -176f - i * 22f);
+                    var (aRT, _) = MakeHubButton("accept",  new Vector2(0f, 0f), 58f, new Color(0.24f, 0.50f, 0.33f, 1f), 18f, sprite); SetTopLeft(aRT, 400f, -202f - i * 26f);
+                    var (dRT, _) = MakeHubButton("decline", new Vector2(0f, 0f), 58f, new Color(0.45f, 0.24f, 0.22f, 1f), 18f, sprite); SetTopLeft(dRT, 462f, -202f - i * 26f);
                     _hubAcceptRT[i] = aRT; _hubDeclineRT[i] = dRT;
                     aRT.gameObject.SetActive(false); dRT.gameObject.SetActive(false);
                 }
 
-                var loansHdr = MakeLabel(_hub.transform, "active loans", 11, C_LBLGREY, 14f, -242f, 200f, 16f, TextAlignmentOptions.Left);
+                var loansHdr = MakeLabel(_hub.transform, "active loans", 11, C_LBLGREY, 14f, -266f, 200f, 16f, TextAlignmentOptions.Left);
                 ApplyFont(loansHdr);
-                _hubLoans = MakeLabel(_hub.transform, "", 12, C_WHITE, 14f, -260f, 492f, 110f, TextAlignmentOptions.TopLeft);
+                _hubLoans = MakeLabel(_hub.transform, "", 12, C_WHITE, 14f, -284f, 492f, 90f, TextAlignmentOptions.TopLeft);
                 ApplyFont(_hubLoans);
 
                 _hubSeenVersion = -1;
@@ -1242,6 +1281,42 @@ namespace BigAmbitionsMP
                 try { if (_hub != null) { UnityEngine.Object.Destroy(_hub); _hub = null; } } catch { }
                 _hubVisible = false;
             }
+        }
+
+        private double HubRate()
+            => double.TryParse(_hubRateStr, System.Globalization.NumberStyles.Float,
+                               System.Globalization.CultureInfo.InvariantCulture, out var r)
+               ? Math.Clamp(r, 0.0, 50.0) : 1.0;
+
+        private void CommitHubInputs()
+        {
+            if (_hubAmountFocus)
+            {
+                _hubAmountFocus = false;
+                if (long.TryParse(_hubAmountStr, out var v) && v > 0) _hubAmount = Math.Max(100, v);
+            }
+            if (_hubRateFocus)
+            {
+                _hubRateFocus = false;
+                _hubRateStr = HubRate().ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
+
+        private void HandleHubTyping()
+        {
+            if (!_hubAmountFocus && !_hubRateFocus) return;
+            foreach (char c in Input.inputString)
+            {
+                if (c == '\b')
+                {
+                    if (_hubAmountFocus && _hubAmountStr.Length > 0) _hubAmountStr = _hubAmountStr.Substring(0, _hubAmountStr.Length - 1);
+                    else if (_hubRateFocus && _hubRateStr.Length > 0) _hubRateStr = _hubRateStr.Substring(0, _hubRateStr.Length - 1);
+                }
+                else if (c == '\n' || c == '\r') CommitHubInputs();
+                else if (_hubAmountFocus && char.IsDigit(c) && _hubAmountStr.Length < 9) _hubAmountStr += c;
+                else if (_hubRateFocus && (char.IsDigit(c) || (c == '.' && !_hubRateStr.Contains('.'))) && _hubRateStr.Length < 5) _hubRateStr += c;
+            }
+            if (Input.GetKeyDown(KeyCode.Escape)) { _hubAmountFocus = false; _hubRateFocus = false; }
         }
 
         private void SetTopLeft(RectTransform? rt, float x, float y)

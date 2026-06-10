@@ -716,11 +716,14 @@ namespace BigAmbitionsMP
     public class LoanOfferPayload
     {
         public string Id            { get; set; } = "";
-        public string From          { get; set; } = "";   // lender
-        public string To            { get; set; } = "";   // borrower
+        public string From          { get; set; } = "";   // lender / gift sender
+        public string To            { get; set; } = "";   // borrower / gift receiver
         public float  Principal     { get; set; }
         public float  DailyInterest { get; set; }
         public float  DailyPayment  { get; set; }
+        /// <summary>"loan" or "gift" — gifts also require an accept (no silent
+        /// handouts; acceptance doubles as the read receipt).</summary>
+        public string Kind          { get; set; } = "loan";
     }
 
     public class LoanAnswerPayload
