@@ -372,10 +372,7 @@ namespace BigAmbitionsMP
             // (F10 phone-probe keybind removed 2026-06-10 — phone work done;
             //  MPPhoneProbe.Run() can be re-wired if ever needed.)
 
-            // F3: spawn/cleanup the open-vehicle TEST ROW (hand-IK testing —
-            // restored at user request 2026-06-10; REMOVE before release).
-            if (Input.GetKeyDown(KeyCode.F3) && IsInGame())
-                MPRideProbe.ToggleTestRow();
+            // (F3 test row removed for release 2026-06-10 — no debug keys ship.)
 
             // (F7 test-row removed 2026-06-10 — capture complete: offsets are
             //  zero for all open types; passive RideProbe sampling remains.)
@@ -1096,7 +1093,6 @@ namespace BigAmbitionsMP
                 TrafficSync.InvalidateVehiclePool();   // pool objects die with the scene
                 MPPhoneButton.Reset();                 // re-inject in the next game scene
                 MPHandIk.Reset();                      // cached refs die with the scene
-                MPRideProbe.CleanupTestRow();          // never leave test spawns behind
                 MPPriceSync.Reset();                   // price hashes are per-session
                 MPRestSync.Reset();                    // votes/skip die with the session
                 // The session-over lock is for the in-game world only — back at
