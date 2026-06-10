@@ -24,6 +24,14 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class MPPriceSync
     {
+        /// <summary>DIAGNOSTIC (2026-06-10): temporarily OFF — our hand-built
+        /// RetailPrice entries are the prime suspect for the native crash in
+        /// the taxi map's ApplyFilters tail (it renders business price info
+        /// the normal map doesn't read).  One taxi run with this off is the
+        /// decisive experiment; re-enable with a proper entry-construction fix
+        /// if confirmed.</summary>
+        public static bool Enabled = false;
+
         private const float ScanSeconds = 5f;
 
         private static readonly Dictionary<string, int> _lastHash = new();
@@ -44,6 +52,7 @@ namespace BigAmbitionsMP
         /// price lists of locally-run businesses.</summary>
         public static void Tick()
         {
+            if (!Enabled) return;
             if (Time.unscaledTime < _nextScanAt) return;
             _nextScanAt = Time.unscaledTime + ScanSeconds;
             try
@@ -98,6 +107,7 @@ namespace BigAmbitionsMP
         {
             try
             {
+                if (!Enabled) return;
                 if (p == null || string.IsNullOrEmpty(p.AddressKey)) return;
                 if (p.OwnerId == MPConfig.PlayerId) return;   // own relay echo
                 _foreignAddrs.Add(p.AddressKey);
