@@ -24,13 +24,10 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class MPPriceSync
     {
-        /// <summary>DIAGNOSTIC (2026-06-10): temporarily OFF — our hand-built
-        /// RetailPrice entries are the prime suspect for the native crash in
-        /// the taxi map's ApplyFilters tail (it renders business price info
-        /// the normal map doesn't read).  One taxi run with this off is the
-        /// decisive experiment; re-enable with a proper entry-construction fix
-        /// if confirmed.</summary>
-        public static bool Enabled = false;
+        /// <summary>Re-enabled 2026-06-10: the taxi-crash experiment ACQUITTED
+        /// price sync (the killer was a leftover SetHighlight diagnostic
+        /// detour).</summary>
+        public static bool Enabled = true;
 
         private const float ScanSeconds = 5f;
 

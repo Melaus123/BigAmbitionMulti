@@ -1462,22 +1462,7 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_ApplyFilters] {ex.Message}"); }
             }
-
-            // Taxi-crash bisect: all the prefix lines above print BEFORE the
-            // game's own filter body runs.  This EXIT line proves whether the
-            // native ApplyFilters survived — its absence convicts the body.
-            static void Postfix()
-            {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                Plugin.Logger.LogInfo("[TaxiProbe] EXIT CityMapFilters.ApplyFilters ok");
-            }
-
-            static Exception? Finalizer(Exception? __exception)
-            {
-                if (__exception != null)
-                    Plugin.Logger.LogError($"[TaxiProbe] EXCEPTION in CityMapFilters.ApplyFilters: {__exception}");
-                return __exception;
-            }
+            // (Taxi-crash bisect Postfix/Finalizer removed 2026-06-10 — solved.)
         }
 
         // ── FIX: spurious hover re-entry pulses (the "highlight leak") ────────
@@ -1629,63 +1614,8 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── DIAGNOSTIC: taxi-flow breadcrumbs ─────────────────────────────────
-        // The taxi crash dies between the map's filter pass and the map
-        // showing, with NO managed exception logged — these entry/exception
-        // probes bisect the flow: the last "[TaxiProbe] ENTER" line before
-        // death names the failing step.  REMOVE once the taxi is fixed.
-        [HarmonyPatch]
-        public static class Patch_TaxiFlow_Probes
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-            {
-                var targets = new (string type, string method)[]
-                {
-                    ("CityMap",                  "ToggleTaxiMode"),
-                    ("CityMap",                  "Init"),
-                    ("CityMap",                  "UpdateNonePermanentPointOfInterests"),
-                    ("CityMap",                  "FocusOnBuilding"),
-                    ("TaxiController",           "OnClickToUseTaxi"),
-                    ("TaxiController",           "RequestVehicleStop"),
-                    ("PermanentTaxiController",  "OnClickToUseTaxi"),
-                    ("TaxiSystem",               "TravelTo"),
-                    ("TaxiSystem",               "OnTimeMachineEnded"),
-                    // ApplyFilters' internal stages (the crash is INSIDE its body):
-                    ("CityMapFilters",           "HideAllOutlines"),
-                    ("CityMapFilters",           "ShowHiddenPermanentPois"),
-                    ("CityMapFilters",           "UpdateVisibleNeighborhoods"),
-                    ("CityMapFilters",           "UpdateVisibleBuildingTypes"),
-                    ("CityMapFilters",           "UpdateVisibleBusinesses"),
-                    ("CityMapFilters",           "PopulateSearchDropdown"),
-                };
-                int n = 0;
-                foreach (var (tn, mn) in targets)
-                {
-                    var t = VehicleManager.FindGameType(tn);
-                    var m = t?.GetMethod(mn, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static);
-                    if (m != null) { n++; yield return m; }
-                }
-                Plugin.Logger.LogInfo($"[TaxiProbe] breadcrumb probes bound: {n}/15");
-            }
-
-            static void Prefix(System.Reflection.MethodBase __originalMethod)
-            {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                Plugin.Logger.LogInfo($"[TaxiProbe] ENTER {__originalMethod.DeclaringType?.Name}.{__originalMethod.Name}");
-            }
-
-            static void Postfix(System.Reflection.MethodBase __originalMethod)
-            {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                Plugin.Logger.LogInfo($"[TaxiProbe] EXIT  {__originalMethod.DeclaringType?.Name}.{__originalMethod.Name}");
-            }
-
-            static void Finalizer(Exception? __exception, System.Reflection.MethodBase __originalMethod)
-            {
-                if (__exception != null)
-                    Plugin.Logger.LogError($"[TaxiProbe] EXCEPTION in {__originalMethod.DeclaringType?.Name}.{__originalMethod.Name}: {__exception}");
-            }
-        }
+        // (Taxi breadcrumb probe pack REMOVED 2026-06-10 — crash solved:
+        //  leftover SetHighlight diagnostic detour.  See context log.)
 
         // ── Patch: PlayerActivityUI.Update NRE shield ─────────────────────────
         // One taxi-crash flavor died on an NRE inside this Update (state
