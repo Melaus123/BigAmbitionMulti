@@ -1581,26 +1581,10 @@ namespace BigAmbitionsMP
             }
         }
 
-        // HiDiag (reinstated): every highlight transition, to correlate the next
-        // sighting against OnIoEnter / applies in the same log.
-        [HarmonyPatch(typeof(CityBuildingController), nameof(CityBuildingController.SetHighlight))]
-        public static class Patch_CBC_SetHighlight_Diag
-        {
-            private static float _winStart; private static int _winCount;
-            static void Postfix(CityBuildingController __instance, bool __0)
-            {
-                try
-                {
-                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                    float now = UnityEngine.Time.realtimeSinceStartup;
-                    if (now - _winStart > 1f) { _winStart = now; _winCount = 0; }
-                    if (++_winCount > 30) return;
-                    string nm = "?"; try { nm = __instance != null ? __instance.name : "null"; } catch { }
-                    Plugin.Logger.LogInfo($"[HiDiag/{(MPServer.IsRunning ? "HOST" : "CLIENT")}] SetHighlight({__0}) '{nm}'");
-                }
-                catch { }
-            }
-        }
+        // (Patch_CBC_SetHighlight_Diag REMOVED 2026-06-10 — leftover highlight
+        //  diagnostic.  Its detour sat on a method the taxi-map filter tail
+        //  calls hundreds of times per frame: prime suspect for the silent
+        //  native taxi crash, and timeline-consistent with its first report.)
 
         // ── Patches: TimeMachine — consensus time-skip (v2 architecture) ──────
         // v1 suppressed StartTimeMachine outright; that WEDGED the activity
