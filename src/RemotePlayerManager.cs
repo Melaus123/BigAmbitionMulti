@@ -32,6 +32,13 @@ namespace BigAmbitionsMP
         /// <summary>The cloned character's Animator, if a model was spawned.</summary>
         public Animator?  Anim;
 
+        /// <summary>While set, the avatar is PINNED to this transform (an open
+        /// vehicle's ghost — scooter deck / cart handles) instead of chasing its
+        /// own network targets: the avatar and vehicle are smoothed as separate
+        /// streams and drift apart otherwise.</summary>
+        public Transform? RideAttach;
+        public Vector3    RideOffset;
+
         private const float LerpSpeed  = 20f;    // how quickly we chase the network target
         private const float AnimFLerp  = 14f;    // float-param chase rate (smooths 10 Hz steps)
         private const float SnapDist   = 10f;    // bigger jump = teleport, don't slide
@@ -109,13 +116,27 @@ namespace BigAmbitionsMP
 
         private void Update()
         {
-            // Smooth position/rotation toward the dead-reckoned network target.
-            // Blend capped so packet corrections spread over frames at low FPS.
-            float k = Mathf.Min(Time.deltaTime * LerpSpeed, 0.5f);
-            float ahead = Mathf.Min(Time.unscaledTime - TargetAt, MaxExtrapolate);
-            var predicted = TargetPosition + Velocity * ahead;
-            transform.position = Vector3.Lerp(transform.position, predicted, k);
-            transform.rotation = Quaternion.Slerp(transform.rotation, TargetRotation, k);
+            // Riding/pushing an open vehicle: follow the vehicle ghost rigidly
+            // (position + facing) — its own dead reckoning does the smoothing.
+            if (RideAttach != null)
+            {
+                try
+                {
+                    transform.position = RideAttach.TransformPoint(RideOffset);
+                    transform.rotation = Quaternion.Euler(0f, RideAttach.eulerAngles.y, 0f);
+                }
+                catch { RideAttach = null; }   // ghost despawned — resume normal sync
+            }
+            else
+            {
+                // Smooth position/rotation toward the dead-reckoned network target.
+                // Blend capped so packet corrections spread over frames at low FPS.
+                float k = Mathf.Min(Time.deltaTime * LerpSpeed, 0.5f);
+                float ahead = Mathf.Min(Time.unscaledTime - TargetAt, MaxExtrapolate);
+                var predicted = TargetPosition + Velocity * ahead;
+                transform.position = Vector3.Lerp(transform.position, predicted, k);
+                transform.rotation = Quaternion.Slerp(transform.rotation, TargetRotation, k);
+            }
 
             // Mirror the owner's real animator state (no local guessing).
             if (Anim != null)
@@ -571,6 +592,22 @@ namespace BigAmbitionsMP
             _appearances[dto.PlayerId] = dto;
             if (_players.TryGetValue(dto.PlayerId, out var root) && root != null)
                 ApplyAppearance(root, dto);
+        }
+
+        /// <summary>Pin (or release: vehicle=null) a remote player's avatar to an
+        /// open vehicle's ghost — scooters/carts, where the rider must stay
+        /// visible AND glued to the vehicle.</summary>
+        public static void SetRide(string playerId, Transform? vehicle, Vector3 offset)
+        {
+            try
+            {
+                if (!_players.TryGetValue(playerId, out var go) || go == null) return;
+                var mover = go.GetComponent<RemotePlayerMover>();
+                if (mover == null) return;
+                mover.RideAttach = vehicle;
+                mover.RideOffset = offset;
+            }
+            catch { }
         }
 
         /// <summary>Hides/shows a remote player's walking model while they're driving a vehicle.</summary>

@@ -826,6 +826,8 @@ namespace BigAmbitionsMP
                 // around with nobody pushing (user report 2026-06-10).  The
                 // avatar's own position sync keeps it at the vehicle.
                 bool hideAvatar = false;
+                Transform? ride = null;
+                Vector3 rideOff = Vector3.zero;
                 foreach (var e in p.Vehicles)
                 {
                     if (!e.Driving) continue;
@@ -833,6 +835,13 @@ namespace BigAmbitionsMP
                     {
                         if (_openVehicleLogged.Add(e.TypeName))
                             Plugin.Logger.LogInfo($"[Vehicle] '{e.TypeName}' driven — OPEN vehicle, avatar stays visible.");
+                        // Pin the avatar to the vehicle ghost (separately smoothed
+                        // streams drift apart — the pusher floated off the cart).
+                        if (_remoteVehicles.TryGetValue(e.VehicleId, out var rvm) && rvm.Go != null)
+                        {
+                            ride    = rvm.Go.transform;
+                            rideOff = RideOffsetFor(e.TypeName);
+                        }
                     }
                     else
                     {
@@ -842,6 +851,7 @@ namespace BigAmbitionsMP
                     }
                 }
                 RemotePlayerManager.SetDriving(p.OwnerId, hideAvatar);
+                RemotePlayerManager.SetRide(p.OwnerId, ride, rideOff);
             }
             catch (Exception ex)
             {
@@ -863,6 +873,17 @@ namespace BigAmbitionsMP
             foreach (var k in OpenVehicleNames)
                 if (typeName.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0) return true;
             return false;
+        }
+
+        /// <summary>Where the rider/pusher stands relative to the vehicle ghost.
+        /// Rideables: on the deck.  Pushables: behind the handles.  First-guess
+        /// offsets — tune from sightings.</summary>
+        private static Vector3 RideOffsetFor(string typeName)
+        {
+            bool rideOn = typeName.IndexOf("scooter", StringComparison.OrdinalIgnoreCase) >= 0
+                       || typeName.IndexOf("bike",    StringComparison.OrdinalIgnoreCase) >= 0
+                       || typeName.IndexOf("moped",   StringComparison.OrdinalIgnoreCase) >= 0;
+            return rideOn ? new Vector3(0f, 0f, -0.1f) : new Vector3(0f, 0f, -0.9f);
         }
 
         private static RemoteVehicle? SpawnRemoteVehicle(string ownerId, VehicleEntry e,
