@@ -715,14 +715,35 @@ namespace BigAmbitionsMP
         // Cancel passthrough buttons live in the header. ─────────────────────
         private GameObject? _dock;          private RectTransform? _dockRT;
         private TextMeshProUGUI? _dockTitle, _dockDay, _dockTime, _dockPlayers, _dockSkipLbl;
-        private readonly RectTransform?[] _dockBtnRT = new RectTransform?[3];
-        private readonly TextMeshProUGUI?[] _dockBtnLbl = new TextMeshProUGUI?[3];
+        private RectTransform? _dockXRT;    // header X = the native Stop/Cancel
         private RectTransform? _tgtM1h, _tgtM15, _tgtP15, _tgtP1h, _skipToggleRT;
         private readonly RectTransform?[] _presetRT = new RectTransform?[4];
         private static readonly int[] PresetHours = { 7, 12, 18, 22 };
+        // Per-player quick-match buttons, aligned with the checklist rows.
+        private readonly RectTransform?[] _matchRT = new RectTransform?[3];
+        private readonly double[] _matchGoal = new double[3];
         private Image? _skipToggleImg;
         private double _skipTarget;
         private bool _restUiHover;
+        // Native BizPhone art (alive in-game) — the dock wears the game's look.
+        private static Sprite? _dockBgSprite;     // 'darkgreybox@2x'
+        private static Sprite? _dockBtnSprite;    // 'button-ws-grey@2x'
+
+        private static void CapturePhoneArt()
+        {
+            if (_dockBgSprite != null && _dockBtnSprite != null) return;
+            try
+            {
+                var phone = GameObject.Find("Canvases/Smartphone/Container/Phone");
+                if (phone != null && _dockBgSprite == null)
+                    _dockBgSprite = phone.GetComponent<Image>()?.sprite;
+                var skip = GameObject.Find("Canvases/Smartphone/Container/Phone/Radio/Skip");
+                if (skip != null && _dockBtnSprite == null)
+                    _dockBtnSprite = skip.GetComponent<Image>()?.sprite;
+                Plugin.Logger.LogInfo($"[RestDock] phone art: bg={(_dockBgSprite != null ? "ok" : "miss")} btn={(_dockBtnSprite != null ? "ok" : "miss")}");
+            }
+            catch { }
+        }
 
         private void TickRestUI()
         {
@@ -743,14 +764,10 @@ namespace BigAmbitionsMP
                 if (_dockTitle != null)
                     _dockTitle.text = NiceActivity(MPRestSync.ActivityName);
 
-                // Native activity buttons (Start / Stop / Cancel) in the header.
-                for (int i = 0; i < 3; i++)
-                {
-                    bool has = i < MPRestSync.DockButtons.Count;
-                    var rt = _dockBtnRT[i];
-                    if (rt != null && rt.gameObject.activeSelf != has) rt.gameObject.SetActive(has);
-                    if (has && _dockBtnLbl[i] != null) _dockBtnLbl[i]!.text = MPRestSync.DockButtons[i].Label;
-                }
+                // Header X = the native Stop/Cancel (Start is auto-pressed).
+                bool hasX = MPRestSync.CancelButtonIndex >= 0;
+                if (_dockXRT != null && _dockXRT.gameObject.activeSelf != hasX)
+                    _dockXRT.gameObject.SetActive(hasX);
 
                 // Destination time — day and time clearly separated.
                 if (_skipTarget <= 0) _skipTarget = MPRestSync.NextOccurrence(7);
@@ -766,25 +783,35 @@ namespace BigAmbitionsMP
                 if (_skipToggleImg != null)
                     _skipToggleImg.color = voting ? new Color(0.22f, 0.55f, 0.28f, 1f) : new Color(0.20f, 0.36f, 0.60f, 1f);
 
-                // Named checklist: who has / hasn't voted.
+                // Compact named checklist + per-player quick-match buttons.
                 if (_dockPlayers != null)
                 {
                     var sb = new System.Text.StringBuilder();
-                    sb.Append(MPRestSync.SkipActive
-                        ? "<color=#8CE08C><b>Skipping time…</b></color>\n"
-                        : "<color=#9AA3B2>waiting on:</color>\n");
+                    if (MPRestSync.SkipActive) sb.Append("<color=#8CE08C><b>Skipping time…</b></color>\n");
+                    int row = 0, matchIdx = 0;
+                    for (int i = 0; i < 3; i++) { _matchGoal[i] = 0; _matchRT[i]?.gameObject.SetActive(false); }
                     foreach (var pl in MPRestSync.AllPlayers())
                     {
                         bool me = pl == MPConfig.PlayerId;
                         if (MPRestSync.HasVote(pl, out double g))
                         {
                             var (gd, gt) = MPRestSync.FmtParts(g);
-                            sb.Append($"<color=#8CE08C>{pl}{(me ? " (you)" : "")}</color>  <color=#CFE3FF>{gd} {gt}</color>\n");
+                            sb.Append($"<color=#8CE08C>{pl}{(me ? " (you)" : "")}</color> <color=#CFE3FF>{gd} {gt}</color>\n");
+                            // quick-match button on this row (other players only)
+                            if (!me && matchIdx < 3 && _matchRT[matchIdx] != null)
+                            {
+                                _matchGoal[matchIdx] = g;
+                                var mrt = _matchRT[matchIdx]!;
+                                mrt.anchoredPosition = new Vector2(-12f, -(40f + (row + (MPRestSync.SkipActive ? 1 : 0)) * 19f));
+                                mrt.gameObject.SetActive(true);
+                                matchIdx++;
+                            }
                         }
                         else
                         {
-                            sb.Append($"<color=#8A93A6>{pl}{(me ? " (you)" : "")}  — not voted</color>\n");
+                            sb.Append($"<color=#8A93A6>{pl}{(me ? " (you)" : "")} — not voted</color>\n");
                         }
+                        row++;
                     }
                     _dockPlayers.text = sb.ToString();
                 }
@@ -795,9 +822,16 @@ namespace BigAmbitionsMP
                 if (_restUiHover) MPChat.SuppressGameInput = true;
                 if (!Input.GetMouseButtonDown(0) || !_restUiHover) return;
 
+                if (hasX && _dockXRT != null && _dockXRT.gameObject.activeSelf && RectHit(_dockXRT, mp))
+                { MPRestSync.InvokeDockButton(MPRestSync.CancelButtonIndex); return; }
+
                 for (int i = 0; i < 3; i++)
-                    if (_dockBtnRT[i] != null && _dockBtnRT[i]!.gameObject.activeSelf && RectHit(_dockBtnRT[i], mp))
-                    { MPRestSync.InvokeDockButton(i); return; }
+                    if (_matchRT[i] != null && _matchRT[i]!.gameObject.activeSelf && _matchGoal[i] > 0 && RectHit(_matchRT[i], mp))
+                    {
+                        _skipTarget = _matchGoal[i];
+                        MPRestSync.SetSkipRequest(true, _skipTarget);
+                        return;
+                    }
 
                 double step = 0;
                 if      (RectHit(_tgtM1h, mp)) step = -60;
@@ -833,29 +867,28 @@ namespace BigAmbitionsMP
             _dockRT.anchorMin = _dockRT.anchorMax = _dockRT.pivot = new Vector2(0.5f, 0f);
             _dockRT.anchoredPosition = new Vector2(0f, 120f);          // up off the bottom edge
             _dockRT.sizeDelta = new Vector2(720f, 168f);
+            CapturePhoneArt();   // wear the game's own BizPhone art when available
             var bg = _dock.AddComponent<Image>();
-            bg.color = new Color(0.07f, 0.08f, 0.11f, 0.96f);          // chat-window body
-            if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }
-
-            // Header bar — same look as the chat title bar.
-            var hdr = MakeGO("Hdr", _dock.transform);
-            var hrt = hdr.GetComponent<RectTransform>();
-            Stretch(hrt, 0f, 0f, 0f, 30f, top: true);
-            var hImg = hdr.AddComponent<Image>();
-            hImg.color = new Color(0.15f, 0.18f, 0.27f, 1f);
-            if (_panelSprite != null) { try { hImg.sprite = _panelSprite; hImg.type = Image.Type.Sliced; } catch { } }
-            _dockTitle = MakeLabel(hdr.transform, "", 14, C_WHITE, 12f, 0f, 250f, 30f, TextAlignmentOptions.Left);
-            ApplyFont(_dockTitle);
-            // Native buttons live on the right of the header.
-            for (int i = 0; i < 3; i++)
+            if (_dockBgSprite != null)
             {
-                var (rt, lbl) = MakeDockButton("", default, 96f, new Color(0.20f, 0.36f, 0.60f, 1f), 22f);
-                rt.SetParent(hdr.transform, false);
-                rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(1f, 0.5f);
-                rt.anchoredPosition = new Vector2(-8f - i * 102f, 0f);
-                _dockBtnRT[i] = rt; _dockBtnLbl[i] = lbl;
-                rt.gameObject.SetActive(false);
+                bg.sprite = _dockBgSprite; bg.type = Image.Type.Sliced;
+                bg.color = Color.white;                                // sprite carries the look
             }
+            else
+            {
+                bg.color = new Color(0.07f, 0.08f, 0.11f, 0.96f);
+                if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }
+            }
+
+            // Header: just the title + the X (the native Stop/Cancel).
+            _dockTitle = MakeLabel(_dock.transform, "", 15, C_WHITE, 16f, -8f, 280f, 22f, TextAlignmentOptions.Left);
+            ApplyFont(_dockTitle);
+            var (xRT, xLbl) = MakeDockButton("X", default, 30f, new Color(0.45f, 0.22f, 0.22f, 1f), 24f);
+            xRT.anchorMin = xRT.anchorMax = xRT.pivot = new Vector2(1f, 1f);
+            xRT.anchoredPosition = new Vector2(-8f, -6f);
+            xLbl.fontSize = 13;
+            _dockXRT = xRT;
+            xRT.gameObject.SetActive(false);
 
             // Left column (x 16..395): destination time + controls.
             var until = MakeLabel(_dock.transform, "Rest until", 12, C_LBLGREY, 16f, -38f, 100f, 18f, TextAlignmentOptions.Left);
@@ -884,9 +917,18 @@ namespace BigAmbitionsMP
             _skipToggleImg = tgRT.GetComponent<Image>();
             _dockSkipLbl.fontSize = 13;
 
-            // Right column: the who-voted checklist.
-            _dockPlayers = MakeLabel(_dock.transform, "", 13, C_WHITE, 410f, -38f, 300f, 124f, TextAlignmentOptions.TopLeft);
+            // Right column: the who-voted checklist (compact) + match buttons.
+            _dockPlayers = MakeLabel(_dock.transform, "", 12, C_WHITE, 410f, -38f, 250f, 124f, TextAlignmentOptions.TopLeft);
             ApplyFont(_dockPlayers);
+            for (int i = 0; i < 3; i++)
+            {
+                var (mrt, mlbl) = MakeDockButton("match", default, 52f, new Color(0.30f, 0.24f, 0.42f, 1f), 17f);
+                mrt.anchorMin = mrt.anchorMax = mrt.pivot = new Vector2(1f, 1f);
+                mrt.anchoredPosition = new Vector2(-12f, -40f - i * 19f);
+                mlbl.fontSize = 10;
+                _matchRT[i] = mrt;
+                mrt.gameObject.SetActive(false);
+            }
             _dock.SetActive(false);
         }
 
@@ -897,8 +939,17 @@ namespace BigAmbitionsMP
             rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0f, 0f);
             rt.anchoredPosition = pos; rt.sizeDelta = new Vector2(w, h);
             var img = go.AddComponent<Image>();
-            img.color = bg;
-            if (_panelSprite != null) { try { img.sprite = _panelSprite; img.type = Image.Type.Sliced; } catch { } }
+            if (_dockBtnSprite != null)
+            {
+                // The game's own button art; tint carries our accent color.
+                img.sprite = _dockBtnSprite; img.type = Image.Type.Sliced;
+                img.color = Color.Lerp(Color.white, bg, 0.45f);
+            }
+            else
+            {
+                img.color = bg;
+                if (_panelSprite != null) { try { img.sprite = _panelSprite; img.type = Image.Type.Sliced; } catch { } }
+            }
             var lbl = MakeLabel(go.transform, label, 12, C_WHITE, 0f, 0f, w, h, TextAlignmentOptions.Center);
             ApplyFont(lbl);
             var lrt = lbl.rectTransform; lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one; lrt.offsetMin = Vector2.zero; lrt.offsetMax = Vector2.zero;

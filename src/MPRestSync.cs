@@ -44,6 +44,10 @@ namespace BigAmbitionsMP
             public object? OnClick;
         }
         public static readonly List<DockButton> DockButtons = new();
+        /// <summary>Index of the Stop/Cancel button in DockButtons (-1 = none) —
+        /// rendered as the dock's header X.</summary>
+        public static int CancelButtonIndex { get; private set; } = -1;
+        private static float _lastAutoStartAt;
 
         // ── Shared state (host-broadcast; banner + detector stand-down) ──────
         public static readonly List<RestVoteEntry> Votes = new();
@@ -259,6 +263,23 @@ namespace BigAmbitionsMP
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] buttons read: {ex.Message}"); }
+
+                // Classify: Start is AUTO-pressed (click bench → character sits,
+                // no redundant button); Stop/Cancel renders as the header X.
+                CancelButtonIndex = -1;
+                int startIdx = -1;
+                for (int i = 0; i < DockButtons.Count; i++)
+                {
+                    string l = DockButtons[i].Label.ToLowerInvariant();
+                    if (startIdx < 0 && l.Contains("start")) startIdx = i;
+                    else if (CancelButtonIndex < 0 && (l.Contains("stop") || l.Contains("cancel"))) CancelButtonIndex = i;
+                }
+                if (startIdx >= 0 && Time.unscaledTime - _lastAutoStartAt > 1.5f)
+                {
+                    _lastAutoStartAt = Time.unscaledTime;
+                    InvokeDockButton(startIdx);
+                    Plugin.Logger.LogInfo("[Rest] auto-start invoked — sit immediately, no Start button.");
+                }
             }
             catch { }
         }
