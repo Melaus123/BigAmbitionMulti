@@ -892,15 +892,11 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Where the rider/pusher stands relative to the vehicle ghost.
-        /// Rideables: on the deck.  Pushables: behind the handles.  First-guess
-        /// offsets — tune from sightings.</summary>
-        private static Vector3 RideOffsetFor(string typeName)
-        {
-            bool rideOn = typeName.IndexOf("scooter", StringComparison.OrdinalIgnoreCase) >= 0
-                       || typeName.IndexOf("bike",    StringComparison.OrdinalIgnoreCase) >= 0
-                       || typeName.IndexOf("moped",   StringComparison.OrdinalIgnoreCase) >= 0;
-            return rideOn ? new Vector3(0f, 0f, -0.1f) : new Vector3(0f, 0f, -0.9f);
-        }
+        /// RideProbe-MEASURED (2026-06-10, all three open types): the character
+        /// transform sits EXACTLY at the vehicle transform — offset zero, yaw
+        /// zero.  The pose itself is animator-bool-driven (HoldingBox/
+        /// UsingHands/OnScooter) and already mirrored by the anim sync.</summary>
+        private static Vector3 RideOffsetFor(string typeName) => Vector3.zero;
 
         private static RemoteVehicle? SpawnRemoteVehicle(string ownerId, VehicleEntry e,
                                                          Vector3 pos, Quaternion rot)

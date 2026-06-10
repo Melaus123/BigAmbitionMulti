@@ -374,10 +374,8 @@ namespace BigAmbitionsMP
             if (Input.GetKeyDown(KeyCode.F10) && IsInGame())
                 MPPhoneProbe.Run();
 
-            // F7: spawn/cleanup the open-vehicle TEST ROW (RideProbe capture —
-            // HandTruck/Flatbed/ElectricScooter next to the player; SP fine).
-            if (Input.GetKeyDown(KeyCode.F7) && IsInGame())
-                MPRideProbe.ToggleTestRow();
+            // (F7 test-row removed 2026-06-10 — capture complete: offsets are
+            //  zero for all open types; passive RideProbe sampling remains.)
 
             // Input-stability tracking for the hover-flicker suppressor: while
             // the MOUSE is idle and the CAMERA isn't moving, nothing new can
@@ -670,7 +668,6 @@ namespace BigAmbitionsMP
                 GameStatePatcher.ResetVisualSigCache();
                 TrafficSync.InvalidateVehiclePool();   // pool objects die with the scene
                 MPPhoneButton.Reset();                 // re-inject in the next game scene
-                MPRideProbe.CleanupTestRow();          // never leave test spawns behind
                 // The session-over lock is for the in-game world only — back at
                 // the menu the player is free to host/join again.
                 MPClient.SessionEnded = false;
