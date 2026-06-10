@@ -462,6 +462,11 @@ namespace BigAmbitionsMP
 
         private void LateUpdate()
         {
+            // SOLE OWNER of the input-suppression flag: computed fresh every
+            // frame from live contributions — a stale latch once locked a
+            // player's keyboard permanently (2026-06-10).
+            MPChat.SuppressGameInput = _chatSuppress || _restUiHover;
+
             if (!MPServer.IsRunning && !MPClient.IsConnected) return;
 
             // The startup hold freezes the game from the moment our loading overlay
@@ -730,6 +735,7 @@ namespace BigAmbitionsMP
             try
             {
                 bool show = MPRestSync.Seated;
+                _restUiHover = false;   // recomputed below; EVERY early return must leave it false
 
                 // ESCAPE HATCH — independent of any UI existing: movement keys
                 // always stand you up (a half-built dock once trapped a player).
@@ -819,10 +825,10 @@ namespace BigAmbitionsMP
                     _dockPlayers.text = sb.ToString();
                 }
 
-                // Hover + drag + clicks.
+                // Hover + drag + clicks.  (_restUiHover feeds the LateUpdate-
+                // owned suppression flag — never write the flag directly.)
                 var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
                 _restUiHover = RectHit(_dockRT, mp) || _dockDragging;
-                if (_restUiHover) MPChat.SuppressGameInput = true;
 
                 if (Input.GetMouseButtonUp(0)) _dockDragging = false;
                 if (_dockDragging && _dockRT != null)
@@ -879,6 +885,9 @@ namespace BigAmbitionsMP
 
         private bool _dockBuildFailed;
         private Sprite? _dockSprite;
+        // Chat's per-frame contribution to the input-suppression flag (the
+        // flag itself is owned by LateUpdate).
+        private bool _chatSuppress;
         // Drag + position memory (per session: re-opens where you left it).
         private RectTransform? _dockHdrRT;
         private bool _dockDragging;
@@ -3076,12 +3085,14 @@ namespace BigAmbitionsMP
 
         private void TickMpWindow()
         {
-            if (_mpWin == null || !_mpWin.activeSelf) return;
+            if (_mpWin == null || !_mpWin.activeSelf) { _chatSuppress = false; return; }
             var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
 
-            // Suppress game input (movement/camera/hotkeys/world-click) while typing in,
-            // hovering, or dragging the window — so it behaves like a real game UI panel.
-            MPChat.SuppressGameInput = _mpChatFocus || _mpDragging || _mpResizing || _mpOpacityDragging || RectHit(_mpWinRT, mp) || _restUiHover;
+            // Chat's contribution to the input-suppression flag.  The FLAG
+            // ITSELF is owned by LateUpdate (computed fresh every frame) —
+            // direct latching writes here once locked a player's keyboard
+            // forever when the chat window was closed (2026-06-10).
+            _chatSuppress = _mpChatFocus || _mpDragging || _mpResizing || _mpOpacityDragging || RectHit(_mpWinRT, mp);
 
             if (Input.GetMouseButtonDown(0))
             {
