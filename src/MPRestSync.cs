@@ -57,39 +57,80 @@ namespace BigAmbitionsMP
             LocalNotice = "";
         }
 
-        // ── Machine-started hook (MPPatches Postfix — the machine RUNS but its
-        // Update is frozen; we classify and either stop it now or vote). ──────
-        public static void OnMachineStarted()
+        // ── Machine-started hook (MPPatches Postfix) ──────────────────────────
+        // Classification is DEFERRED ~0.35s: the taxi also starts a TimeMachine
+        // and LocalInTaxi isn't reliably set yet at start time — stopping the
+        // taxi's machine mid-coroutine was the host crash.  By eval time the
+        // taxi identifies itself and we leave it fully native.
+        private static float _pendingEvalAt;
+
+        public static void OnMachineStarted() => _pendingEvalAt = Time.unscaledTime + 0.35f;
+
+        private static void EvaluateMachine()
         {
             try
             {
-                var (act, actName) = GetCurrentActivity();
-                int remaining = act != null ? GetRemainingMinutes(act) : 0;
+                if (TrafficSync.LocalInTaxi) { Plugin.Logger.LogInfo("[Rest] machine belongs to a TAXI ride — native."); return; }
+                if (!MachineRunning()) return;   // already gone (cancelled instantly)
+
+                // Authoritative remaining time from the machine itself —
+                // _goalTotalMinutes is set before our hook fires.  (The old
+                // source, PlayerActivityUI.GetCurrentActivity, is already null
+                // by machine-start time: that was the '' (0 min) bug.)
+                var (d, h) = GameStateReader.GetGameTime();
+                double now = d * 1440.0 + h * 60.0;
+                double goalTotal = ReadMachineGoalMinutes();
+                double remaining = goalTotal - now;
+                var (_, actName) = GetCurrentActivity();
+                if (string.IsNullOrEmpty(actName)) actName = "Rest";
+
+                if (goalTotal <= 0 || remaining <= 0)
+                {
+                    Plugin.Logger.LogWarning($"[Rest] machine running but goal unreadable (goal={goalTotal:F0}, now={now:F0}) — leaving it frozen; cancel via its button.");
+                    return;
+                }
                 if (remaining < MinVoteMinutes)
                 {
                     StopLocalMachine();   // close the native overlay immediately
-                    LocalNotice      = $"Resting at normal speed ({Math.Max(remaining, 1)} min — under 1h, no group skip).";
+                    LocalNotice      = $"Resting at normal speed ({remaining:F0} min — under 1h, no group skip).";
                     LocalNoticeUntil = Time.unscaledTime + 6f;
-                    Plugin.Logger.LogInfo($"[Rest] '{actName}' ({remaining} min) below vote threshold — machine stopped, runs at 1x.");
+                    Plugin.Logger.LogInfo($"[Rest] '{actName}' ({remaining:F0} min) below vote threshold — machine stopped, runs at 1x.");
                     return;
                 }
-                var (d, h) = GameStateReader.GetGameTime();
-                double now  = d * 1440.0 + h * 60.0;
-                // Lock the goal as an ABSOLUTE target: round UP to a clean
-                // 5-minute boundary; never at/behind the current clock.
-                double goal = Math.Ceiling((now + remaining) / 5.0) * 5.0;
+                // Lock the goal as an ABSOLUTE target on a clean 5-min boundary.
+                double goal = Math.Ceiling(goalTotal / 5.0) * 5.0;
                 if (goal <= now + 1.0) goal = now + 5.0;
                 _localGoal       = goal;
                 _localVoteActive = true;
                 SendVote(true, goal, actName);
-                Plugin.Logger.LogInfo($"[Rest] vote ON: '{actName}' {remaining} min → goal {Fmt(goal)} (machine held).");
+                Plugin.Logger.LogInfo($"[Rest] vote ON: '{actName}' {remaining:F0} min → goal {Fmt(goal)} (machine held).");
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] OnMachineStarted: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] EvaluateMachine: {ex.Message}"); }
+        }
+
+        private static double ReadMachineGoalMinutes()
+        {
+            try
+            {
+                var m = GetMachine();
+                var p = _machineType?.GetProperty("_goalTotalMinutes",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                if (m == null || p == null) return -1;
+                return Convert.ToDouble(p.GetValue(m) ?? -1f);
+            }
+            catch { return -1; }
         }
 
         // ── Per-frame tick (main thread, MP active + in game) ─────────────────
         public static void Tick()
         {
+            // Deferred machine classification (see OnMachineStarted).
+            if (_pendingEvalAt > 0f && Time.unscaledTime >= _pendingEvalAt)
+            {
+                _pendingEvalAt = 0f;
+                EvaluateMachine();
+            }
+
             // Vote lifecycle = the machine's own isRunning: covers the native
             // Cancel button, completion, and our own StopLocalMachine calls.
             if (_localVoteActive && Time.unscaledTime >= _nextPollAt)
