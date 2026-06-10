@@ -1592,7 +1592,15 @@ namespace BigAmbitionsMP
         {
             static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
             {
-                var t = VehicleManager.FindGameType("TimeMachine");
+                // Namespaced! (the bare name silently produced ZERO targets and
+                // the whole consensus feature was inert — 2026-06-10.)
+                var t = VehicleManager.FindGameType("Timemachine.TimeMachine")
+                     ?? VehicleManager.FindGameType("TimeMachine");
+                int n = 0;
+                if (t != null)
+                    foreach (var m in t.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+                        if (m.Name == "StartTimeMachine") { n++; }
+                Plugin.Logger.LogInfo($"[Rest] TimeMachine patch: type={(t != null ? t.FullName : "NOT FOUND")} targets={n}");
                 if (t == null) yield break;
                 foreach (var m in t.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
                     if (m.Name == "StartTimeMachine") yield return m;
@@ -1602,6 +1610,9 @@ namespace BigAmbitionsMP
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
                 try { MPRestSync.OnNativeSkipSuppressed(); } catch { }
+                // The caller flow may have paused the sim expecting the machine
+                // to take over — make sure normal time resumes next frame.
+                try { GameStatePatcher.EnqueueOnMainThread(() => GameStateReader.SetNativePause(false)); } catch { }
                 return false;   // native skip never runs in MP
             }
         }

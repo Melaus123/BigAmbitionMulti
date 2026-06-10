@@ -198,8 +198,9 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var uiType = VehicleManager.FindGameType("PlayerActivityUI");
-                if (uiType == null) return (null, "");
+                var uiType = VehicleManager.FindGameType("PlayerActivity.PlayerActivityUI")
+                          ?? VehicleManager.FindGameType("PlayerActivityUI");
+                if (uiType == null) { Plugin.Logger.LogWarning("[Rest] PlayerActivityUI type NOT FOUND."); return (null, ""); }
                 var objs = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(uiType));
                 if (objs == null || objs.Length == 0) return (null, "");
                 var wrap = Activator.CreateInstance(uiType, objs[0].Pointer);
