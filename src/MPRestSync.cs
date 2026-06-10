@@ -120,6 +120,29 @@ namespace BigAmbitionsMP
         }
 
 
+        /// <summary>Guaranteed stand-up: the activity's own Stop/Cancel button
+        /// when present, else the activity's Finish() directly (concrete cast).
+        /// The exit must never depend on a button existing.</summary>
+        public static void StandUp()
+        {
+            try
+            {
+                if (CancelButtonIndex >= 0) { InvokeDockButton(CancelButtonIndex); return; }
+                var act = _curAct;
+                if (act == null) return;
+                var b = act as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase;
+                string? full = b?.TryCast<Il2CppSystem.Object>()?.GetIl2CppType()?.FullName;
+                var ct = full != null ? VehicleManager.FindGameType(full) : null;
+                if (ct != null && b != null)
+                {
+                    var target = Activator.CreateInstance(ct, b.Pointer);
+                    ct.GetMethod("Finish")?.Invoke(target, null);
+                    Plugin.Logger.LogInfo("[Rest] StandUp via Finish() fallback.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] StandUp: {ex.Message}"); }
+        }
+
         public static void InvokeDockButton(int index)
         {
             try
@@ -242,7 +265,8 @@ namespace BigAmbitionsMP
                 {
                     _localVoteActive = false;
                     SendVote(false, 0, "");
-                    Plugin.Logger.LogInfo("[Rest] vote OFF (goal time reached).");
+                    Plugin.Logger.LogInfo("[Rest] vote OFF (goal time reached) — standing up.");
+                    StandUp();   // wake at the chosen time, like vanilla — movement restored
                 }
             }
 

@@ -737,11 +737,8 @@ namespace BigAmbitionsMP
                     (Input.GetKeyDown(KeyCode.W) || Input.GetKeyDown(KeyCode.A) ||
                      Input.GetKeyDown(KeyCode.S) || Input.GetKeyDown(KeyCode.D)))
                 {
-                    if (MPRestSync.CancelButtonIndex >= 0)
-                    {
-                        Plugin.Logger.LogInfo("[RestDock] movement key — standing up.");
-                        MPRestSync.InvokeDockButton(MPRestSync.CancelButtonIndex);
-                    }
+                    Plugin.Logger.LogInfo("[RestDock] movement key — standing up.");
+                    MPRestSync.StandUp();
                     return;
                 }
 
@@ -881,6 +878,7 @@ namespace BigAmbitionsMP
                 // Same rounded-corner source the chat window uses: the captured
                 // menu sprite is DEAD in-game — fall back to our immortal one.
                 _dockSprite = IsAlive(_panelSprite) ? _panelSprite : EnsureRoundedSprite();
+                Plugin.Logger.LogInfo($"[RestDock] sprite source: {(_dockSprite == null ? "NONE (square!)" : ReferenceEquals(_dockSprite, _panelSprite) ? "captured-native" : "owned-rounded")}");
                 var bg = _dock.AddComponent<Image>();
                 bg.color = new Color(0.07f, 0.08f, 0.11f, 0.96f);
                 if (_dockSprite != null) { try { bg.sprite = _dockSprite; bg.type = Image.Type.Sliced; } catch { } }
@@ -981,7 +979,7 @@ namespace BigAmbitionsMP
             rt.anchoredPosition = pos; rt.sizeDelta = new Vector2(w, h);
             var img = go.AddComponent<Image>();
             img.color = bg;
-            if (_panelSprite != null) { try { img.sprite = _panelSprite; img.type = Image.Type.Sliced; } catch { } }
+            if (_dockSprite != null) { try { img.sprite = _dockSprite; img.type = Image.Type.Sliced; } catch { } }
             var lbl = MakeLabel(go.transform, label, 12, C_WHITE, 0f, 0f, w, h, TextAlignmentOptions.Center);
             ApplyFont(lbl);
             var lrt = lbl.rectTransform; lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one; lrt.offsetMin = Vector2.zero; lrt.offsetMax = Vector2.zero;
