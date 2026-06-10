@@ -96,7 +96,6 @@ namespace BigAmbitionsMP
                 var m = _sumOff / _n;
                 Plugin.Logger.LogInfo($"[RideProbe] '{typeName}' n={_n} meanLocalOffset=({m.x:F2},{m.y:F2},{m.z:F2}) meanYawDelta={_sumYaw / _n:F1}deg");
                 LogAnimState(ch);
-                LogGeometry(ch, vehicle);
             }
             catch { }
         }

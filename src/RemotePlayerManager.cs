@@ -158,19 +158,6 @@ namespace BigAmbitionsMP
             if (paramIndex >= 0) _pendingTriggers.Add(paramIndex);
         }
 
-        private float _rideDiagAt;
-        private string DiagBool(string p)
-        {
-            try { return Anim!.GetBool(p).ToString(); } catch { return "ERR"; }
-        }
-        private int DiagL1()
-        {
-            try { return Anim!.GetCurrentAnimatorStateInfo(1).shortNameHash; } catch { return 0; }
-        }
-        private float DiagL1Weight()
-        {
-            try { return Anim!.GetLayerWeight(1); } catch { return -1f; }
-        }
 
         private void EnsureParamMap()
         {
@@ -195,24 +182,6 @@ namespace BigAmbitionsMP
                 {
                     transform.position = RideAttach.TransformPoint(RideOffset);
                     transform.rotation = Quaternion.Euler(0f, RideAttach.eulerAngles.y, 0f);
-
-                    // RideDiag: prove which link works — pin position, bool
-                    // arrival, animator state.  Sender truth while pushing:
-                    // HoldingBox=T UsingHands=T L1=0xB143454E.
-                    if (Time.unscaledTime >= _rideDiagAt)
-                    {
-                        _rideDiagAt = Time.unscaledTime + 3f;
-                        string a = Anim == null ? "anim=NULL"
-                            : $"HoldingBox={DiagBool("HoldingBox")} UsingHands={DiagBool("UsingHands")} OnScooter={DiagBool("OnScooter")} L1=0x{DiagL1():X8} L1w={DiagL1Weight():F2} enabled={Anim.enabled}";
-                        Plugin.Logger.LogInfo($"[RideDiag] '{name}' pinned to '{RideAttach.name}' at ({transform.position.x:F1},{transform.position.y:F1},{transform.position.z:F1}) | {a}");
-                        // Rendered geometry, comparable with the sender's
-                        // "[RideProbe] geom:" line (same vehicle-local space).
-                        var body = MPRideProbe.BoundsCenter(transform, skinnedOnly: true);
-                        var cart = MPRideProbe.BoundsCenter(RideAttach, skinnedOnly: false);
-                        var bOff = body.HasValue ? RideAttach.InverseTransformPoint(body.Value) : Vector3.zero;
-                        var cOff = cart.HasValue ? RideAttach.InverseTransformPoint(cart.Value) : Vector3.zero;
-                        Plugin.Logger.LogInfo($"[RideDiag] geom: bodyInGhost=({bOff.x:F2},{bOff.y:F2},{bOff.z:F2}) cartVisualInGhost=({cOff.x:F2},{cOff.y:F2},{cOff.z:F2})");
-                    }
                 }
                 catch { RideAttach = null; }   // ghost despawned — resume normal sync
             }
