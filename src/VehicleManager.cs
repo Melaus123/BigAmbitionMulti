@@ -701,7 +701,15 @@ namespace BigAmbitionsMP
             public Transform?  Label;
             public Vector3     TargetPos;
             public Quaternion  TargetRot = Quaternion.identity;
+            // Dead reckoning (same as traffic ghosts): chase a target
+            // extrapolated along measured velocity so a driven car never
+            // stutters between network updates at low FPS.
+            public Vector3     Velocity;
+            public float       TargetAt;   // receiver clock at arrival (extrapolation base)
+            public float       SenderT;    // sender's sample clock (velocity measurement)
         }
+        private const float MaxVehicleExtrapolateSeconds = 0.3f;
+        private const float VehicleSnapDistance          = 15f;
 
         // Gameplay components destroyed on a ghost so the game stops treating it
         // as a vehicle anyone owns — no map icon, no tickets, not enterable.
@@ -725,7 +733,7 @@ namespace BigAmbitionsMP
                 var list = VehicleHelper.AllPlayerVehicles;
                 if (list == null) return null;
 
-                var fleet = new VehicleFleetPayload { OwnerId = MPConfig.PlayerId };
+                var fleet = new VehicleFleetPayload { OwnerId = MPConfig.PlayerId, T = Time.unscaledTime };
                 for (int i = 0; i < list.Count; i++)
                 {
                     var vc = list[i];
@@ -782,10 +790,28 @@ namespace BigAmbitionsMP
                         var spawned = SpawnRemoteVehicle(p.OwnerId, e, pos, rot);
                         if (spawned == null) continue;
                         rv = spawned;
+                        rv.TargetAt = Time.unscaledTime;
                         _remoteVehicles[e.VehicleId] = rv;
+                    }
+                    if (rv.Go != null && Vector3.Distance(rv.Go.transform.position, pos) > VehicleSnapDistance)
+                    {
+                        // Teleport (ferry, recovery) — snap, don't slide.
+                        rv.Go.transform.position = pos;
+                        rv.Go.transform.rotation = rot;
+                        rv.Velocity = Vector3.zero;
+                    }
+                    else
+                    {
+                        // Velocity from the SENDER's clock (packet stamp); tiny
+                        // delta = two packets in one frame → keep prior velocity.
+                        float vdt = p.T - rv.SenderT;
+                        if (vdt > 0.005f)
+                            rv.Velocity = (pos - rv.TargetPos) / vdt;
                     }
                     rv.TargetPos = pos;
                     rv.TargetRot = rot;
+                    rv.TargetAt  = Time.unscaledTime;
+                    rv.SenderT   = p.T;
                 }
 
                 // Vehicles this owner no longer lists have been sold — despawn them.
@@ -924,8 +950,16 @@ namespace BigAmbitionsMP
             StripVehicleComponents(go);
             try
             {
-                var rb = go.GetComponent<Rigidbody>();
-                if (rb != null) rb.isKinematic = true;
+                // EVERY rigidbody in the hierarchy, not just the root — a dynamic
+                // child rb lets the local player physically shove the ghost.
+                var rbs = go.GetComponentsInChildren(Il2CppType.Of<Rigidbody>(), true);
+                for (int i = 0; i < rbs.Length; i++)
+                {
+                    var rb = rbs[i].TryCast<Rigidbody>();
+                    if (rb == null) continue;
+                    rb.isKinematic = true;
+                    rb.useGravity  = false;
+                }
             }
             catch { }
             return go;
@@ -1023,13 +1057,19 @@ namespace BigAmbitionsMP
         public static void TickSmoothing()
         {
             if (_remoteVehicles.Count == 0) return;
-            float k = Time.deltaTime * 12f;
+            // Capped so packet corrections blend over frames at low FPS.
+            float k   = Mathf.Min(Time.deltaTime * 12f, 0.5f);
+            float now = Time.unscaledTime;
             var cam = Camera.main;
             foreach (var rv in _remoteVehicles.Values)
             {
                 if (rv.Go == null) continue;
                 var t = rv.Go.transform;
-                t.position = Vector3.Lerp(t.position, rv.TargetPos, k);
+                // Chase the dead-reckoned point (target + velocity·elapsed) so
+                // motion stays continuous between packets even at low FPS.
+                float ahead = Mathf.Min(now - rv.TargetAt, MaxVehicleExtrapolateSeconds);
+                var predicted = rv.TargetPos + rv.Velocity * ahead;
+                t.position = Vector3.Lerp(t.position, predicted, k);
                 t.rotation = Quaternion.Slerp(t.rotation, rv.TargetRot, k);
                 if (rv.Label != null && cam != null)
                     rv.Label.rotation = cam.transform.rotation;

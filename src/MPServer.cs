@@ -169,12 +169,44 @@ namespace BigAmbitionsMP
         private static bool _hostSnapshotsReady;   // host's own world loaded → can serve snapshots
         private static readonly object _startupLock = new();
         private static bool _startupReleased;
+        // True while the session is paused because a player DROPPED (set in
+        // OnPeerDisconnected, cleared when they reconnect) — distinguishes the
+        // disconnect pause from a deliberate manual pause so the reconnect path
+        // only lifts the former.
+        private static volatile bool _pausedByDisconnect;
+        /// <summary>Who dropped (for the host's pause overlay).</summary>
+        public static volatile string DisconnectPauseWho = "";
+        public static bool PausedByDisconnect => _pausedByDisconnect;
+
+        /// <summary>Lift a disconnect pause — from the overlay's "keep playing"
+        /// click or automatically when the dropped player reconnects.</summary>
+        public static void ResumeFromDisconnectPause()
+        {
+            if (!_pausedByDisconnect) return;
+            _pausedByDisconnect = false;
+            DisconnectPauseWho  = "";
+            BroadcastManualPause(false);
+            GameStatePatcher.EnqueueOnMainThread(() => TimeSync.SetManualPause(false));
+            Plugin.Logger.LogInfo("[Server] Disconnect pause lifted.");
+        }
 
         public static bool IsRunning      => _running;
         public static int  ConnectedCount => _clients.Count;
 
-        public static void Start(int port)
+        public static bool Start(int port)
         {
+            // A previous session may still be live (e.g. the host exited to the
+            // menu without Leave — nothing stops the server on scene exit prior
+            // to this guard).  Tear it down first: the old NetManager still holds
+            // the port, so the new bind fails with AddressAlreadyInUse while
+            // _running still reads true — a zombie host whose lobby looks alive
+            // but that nobody can connect to.
+            if (_running)
+            {
+                Plugin.Logger.LogInfo("[Server] Start: previous session still running — stopping it first.");
+                Stop();
+            }
+
             // Reset lobby state for a fresh session
             IsInLobby = true;
             LobbyPlayers.Clear();
@@ -183,9 +215,14 @@ namespace BigAmbitionsMP
             StartingCashByPlayer.Clear();
             StartingAgeByPlayer.Clear();
             ChosenLoadSession = "";   // cleared each host session; set only when a save is picked
+            MPSaveCoordinator.ActiveSessionName = "";   // stale session must not leak into a new lobby
+                                                        // (HostLoadSession / first save re-set it)
             _peerNames.Clear();
             StableIdByPlayer.Clear();
             StableIdByPlayer[MPConfig.PlayerId] = MPConfig.StableId; // host's own
+            _clients.Clear();         // stale peers from a torn-down session
+            BuildingOwners.Clear();   // per-session state — a new game must not inherit
+            CashByStableId.Clear();   // owners/cash; the load path re-seeds from the manifest
             _listener = new EventBasedNetListener();
             _server   = new NetManager(_listener)
             {
@@ -206,7 +243,7 @@ namespace BigAmbitionsMP
             if (!_server.Start(port))
             {
                 Plugin.Logger.LogError($"[Server] Failed to start on port {port}");
-                return;
+                return false;
             }
 
             _running = true;
@@ -214,6 +251,7 @@ namespace BigAmbitionsMP
             _pollThread.Start();
 
             Plugin.Logger.LogInfo($"[Server] Listening on port {port}");
+            return true;
         }
 
         public static void Stop()
@@ -225,7 +263,7 @@ namespace BigAmbitionsMP
             LobbyPlayers.Clear();
             _peerNames.Clear();
             _clients.Clear();
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _hostSnapshotsReady = false; _startupReleased = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
         }
 
         /// <summary>Host clicked "Start New Game" in the lobby.</summary>
@@ -236,7 +274,7 @@ namespace BigAmbitionsMP
             IsInLobby = false;
 
             // Re-arm the startup pause hold for this new game.
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _hostSnapshotsReady = false; _startupReleased = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
 
             // Per-player starting cash: each client gets the host-designated amount
             // (their override, else the difficulty base).  The host now designates
@@ -299,7 +337,7 @@ namespace BigAmbitionsMP
             IsInLobby = false;
 
             // Re-arm the startup pause hold for this new game.
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _hostSnapshotsReady = false; _startupReleased = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
 
             // Phase 4: if a multiplayer session exists, resume it — the host holds
             // every player's .hsg, so it ships each connected client its own and
@@ -422,19 +460,36 @@ namespace BigAmbitionsMP
             if (leftPlayer != null)
                 GameStatePatcher.EnqueueOnMainThread(() => RemotePlayerManager.Remove(leftPlayer));
 
-            // In-game drop → pause the session (so remaining players don't pull
-            // ahead while someone's gone) and run a coordinated save so the dropped
-            // player's last-known state is preserved on the host.  Lobby drops skip
-            // this (no game in progress).
+            // In-game drop → always announce WHO left (the silent pause looked
+            // like a freeze), save their state, and pause ONLY for timeout-style
+            // drops (crash/network — a reconnect is plausible and supported).  A
+            // clean close means the player deliberately quit: keep playing.
             if (leftPlayer != null && !IsInLobby)
             {
+                bool cleanLeave = info.Reason == DisconnectReason.RemoteConnectionClose
+                               || info.Reason == DisconnectReason.DisconnectPeerCalled;
                 try
                 {
-                    BroadcastManualPause(true);
-                    GameStatePatcher.EnqueueOnMainThread(() => TimeSync.SetManualPause(true));
-                    Plugin.Logger.LogInfo($"[Server] Paused session — '{leftPlayer}' disconnected.");
+                    string notice = cleanLeave
+                        ? $"{leftPlayer} left the game."
+                        : $"{leftPlayer} lost connection — game paused until they rejoin.";
+                    MPChat.AddNotice(notice);          // host's own F9 chat
+                    BroadcastChat("", "— " + notice);  // remaining clients' chat (no sender prefix)
+
+                    if (!cleanLeave)
+                    {
+                        _pausedByDisconnect = true;    // cleared on reconnect or overlay dismiss
+                        DisconnectPauseWho  = leftPlayer;
+                        BroadcastManualPause(true);
+                        GameStatePatcher.EnqueueOnMainThread(() => TimeSync.SetManualPause(true));
+                        Plugin.Logger.LogInfo($"[Server] Paused session — '{leftPlayer}' dropped ({info.Reason}).");
+                    }
+                    else
+                    {
+                        Plugin.Logger.LogInfo($"[Server] '{leftPlayer}' left cleanly — game continues.");
+                    }
                 }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Disconnect pause: {ex.Message}"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Disconnect handling: {ex.Message}"); }
 
                 try { MPSaveCoordinator.HostSaveNow("disconnect"); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Disconnect save: {ex.Message}"); }
@@ -713,6 +768,57 @@ namespace BigAmbitionsMP
                 if (!LobbyPlayers.Contains(hello.PlayerId)) LobbyPlayers.Add(hello.PlayerId);
                 BroadcastLobbyUpdate();
 
+                // Mid-session JOIN/RECONNECT into an active MP save session (Phase
+                // 4d core): if we hold a stored .hsg for this stableId, send it as
+                // LoadData so they load in under their character.  The lobby flow
+                // only covers peers present at StartLoadGame — anyone arriving
+                // after (e.g. the host re-hosted a save and clicked Start before
+                // the client finished re-joining) lands HERE; without this they
+                // sat in the lobby forever.  World snapshots are NOT sent now:
+                // they flow via MarkPlayerInGame once their scene loads (pre-
+                // release: the frozen-until-synced path; post-release: the
+                // reconnect branch).  Everything below is pure C# (version path
+                // pre-cached) — safe on this poll thread.
+                bool sentLoad = false;
+                try
+                {
+                    string session = MPSaveCoordinator.ActiveSessionName;
+                    string stable  = hello.StableId ?? "";
+                    if (!string.IsNullOrEmpty(session) && !string.IsNullOrEmpty(stable))
+                    {
+                        var data = MPSaveCoordinator.ReadSaveBytesGzip(session, stable);
+                        if (data != null)
+                        {
+                            // Reclaim: ownership reserved under the absent owner's
+                            // stableId (manifest load) re-keys to their live playerId.
+                            int rekeyed = 0;
+                            foreach (var kv in BuildingOwners)
+                                if (kv.Value == stable) { BuildingOwners[kv.Key] = hello.PlayerId; rekeyed++; }
+                            if (rekeyed > 0)
+                                Plugin.Logger.LogInfo($"[Server] Re-keyed {rekeyed} reserved building(s) to '{hello.PlayerId}'.");
+
+                            var m = MPSaveManager.ReadManifest(session);
+                            float cash = m != null ? MPSaveCoordinator.BestCashFor(m, stable)
+                                                   : (CashByStableId.TryGetValue(stable, out var c) ? c : 0f);
+                            Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
+                            {
+                                SessionName   = session,
+                                HsgGzipBase64 = data.Value.b64,
+                                RawLength     = data.Value.raw,
+                                Money         = cash,
+                            }));
+                            sentLoad = true;
+                            Plugin.Logger.LogInfo($"[Server] Mid-session join: sent LoadData to '{hello.PlayerId}' (session='{session}', {data.Value.raw}B, ${cash:F0}); world state follows once their scene loads.");
+                        }
+                        else
+                        {
+                            Plugin.Logger.LogInfo($"[Server] Mid-session join by '{hello.PlayerId}': no stored .hsg in '{session}' for stable={stable} — snapshot-only late join.");
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Mid-session LoadData: {ex.Message}"); }
+                if (sentLoad) return;
+
                 // Late join — game already in progress, send world snapshot immediately
                 if (!BroadcastWorldSnapshotEnabled)
                 {
@@ -787,7 +893,37 @@ namespace BigAmbitionsMP
         public static void MarkPlayerInGame(string playerId)
         {
             bool hostJustReady = false;
+            bool released;
             List<NetPeer> sendTo = new();
+            lock (_startupLock)
+            {
+                released = _startupReleased;
+                if (released)
+                {
+                    // Mid-session reconnect (Phase 4d): the session is already live,
+                    // so the frozen-until-synced flow won't run for this player —
+                    // serve their world state directly now their scene is loaded.
+                    if (playerId != MPConfig.PlayerId)
+                        foreach (var p in _clients)
+                            if (_peerNames.TryGetValue(p.Id, out var nm) && nm == playerId)
+                                sendTo.Add(p);
+                }
+            }
+            if (released)
+            {
+                foreach (var p in sendTo) SendWorldStateTo(p);
+                if (sendTo.Count > 0)
+                {
+                    Plugin.Logger.LogInfo($"[Server] Reconnect: '{playerId}' scene loaded — sent live world state.");
+                    MPChat.AddNotice($"{playerId} reconnected.");
+                    BroadcastChat("", $"— {playerId} reconnected.");
+                    // Lift the pause we applied when they dropped (only the
+                    // disconnect pause — a deliberate manual pause stays).
+                    ResumeFromDisconnectPause();
+                }
+                return;
+            }
+
             lock (_startupLock)
             {
                 if (_startupReleased) return;
@@ -836,7 +972,21 @@ namespace BigAmbitionsMP
             bool release = false;
             lock (_startupLock)
             {
-                if (_startupReleased) return;
+                if (_startupReleased)
+                {
+                    // Mid-session reconnect: the session-wide release already
+                    // happened (one-shot), but THIS player just froze on their
+                    // local startup hold and applied the world — ack them with a
+                    // direct StartupRelease so they unfreeze.  Idempotent.
+                    foreach (var p in _clients)
+                        if (_peerNames.TryGetValue(p.Id, out var nm) && nm == playerId)
+                        {
+                            Send(p, MessageEnvelope.Create(
+                                MessageType.StartupRelease, "host", new StartupReleasePayload()));
+                            Plugin.Logger.LogInfo($"[Server] Reconnect: released startup hold for '{playerId}'.");
+                        }
+                    return;
+                }
                 if (string.IsNullOrEmpty(playerId)) return;
                 if (hostSelf && !_hostSnapshotsReady) return;   // host world not loaded yet
                 _worldReadyPlayers.Add(playerId);

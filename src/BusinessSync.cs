@@ -28,7 +28,6 @@ namespace BigAmbitionsMP
         private const float PollIntervalSeconds = 2f;
 
         private static readonly Dictionary<string, BusinessInfo> _lastSent = new();
-        private static float _lastPollAt;
 
         /// <summary>
         /// Build the full table — used by Hello/Welcome to bootstrap a connecting
@@ -351,9 +350,24 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[BusinessSync] {label}: totalRegs={totalRegs} unknownType={unknown} | {sb}");
         }
 
+        // ── Time-boxed host sweep ─────────────────────────────────────────────
+        // Reading all ~825 registrations in one frame cost 70–150ms of main-
+        // thread time every PollIntervalSeconds (a visible stutter cadence,
+        // profiler-measured).  Instead, walk the list with a persistent cursor
+        // and stop after HostScanBudgetMs per frame — a full cycle completes in
+        // ~15–25 frames (a fraction of a second), then the next cycle starts no
+        // sooner than PollIntervalSeconds after the previous one BEGAN.  Worst-
+        // case change-detection latency rises to PollInterval + sweep length;
+        // rent/ownership stays instant (event-driven, not this poll).
+        private const float HostScanBudgetMs = 6f;
+        private static bool  _scanInProgress;
+        private static int   _scanCursor;
+        private static float _cycleStartedAt;
+        private static int   _cycleChanges;
+
         /// <summary>
-        /// Called once per Update on the host.  Runs the change detector every
-        /// PollIntervalSeconds.
+        /// Called once per Update on the host.  Runs the change detector as a
+        /// time-boxed incremental sweep (resumes every frame until complete).
         /// </summary>
         public static void Tick()
         {
@@ -365,47 +379,62 @@ namespace BigAmbitionsMP
             // world is live; steady-state deltas resume after release.
             if (TimeSync.IsStartupHeld) return;
             float now = UnityEngine.Time.realtimeSinceStartup;
-            if (now - _lastPollAt < PollIntervalSeconds) return;
-            _lastPollAt = now;
+            if (!_scanInProgress)
+            {
+                if (now - _cycleStartedAt < PollIntervalSeconds) return;
+                _cycleStartedAt = now;
+                _scanInProgress = true;
+                _scanCursor     = 0;
+                _cycleChanges   = 0;
+            }
 
             try
             {
                 var gi = SaveGameManager.Current;
-                if (gi == null) return;
+                if (gi == null) { _scanInProgress = false; return; }
+                var regs  = gi.BuildingRegistrations;
+                int count = regs.Count;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
 
-                int changes = 0;
-                foreach (var reg in gi.BuildingRegistrations)
+                while (_scanCursor < count)
                 {
-                    if (reg == null) continue;
-                    var info = ReadInfo(reg);
-                    if (info == null) continue;
-
-                    if (_lastSent.TryGetValue(info.AddressKey, out var prev) && EqualInfo(prev, info))
-                        continue;   // unchanged
-
-                    _lastSent[info.AddressKey] = info;
-                    MPServer.BroadcastBusinessChange(info);
-                    changes++;
-                    // Log only non-trivial changes (something that has a name or
-                    // isn't BusinessTypeName.Empty) so we don't spam at startup.
-                    if (!string.IsNullOrEmpty(info.BusinessName) || info.BusinessTypeName != 0
-                        || !string.IsNullOrEmpty(info.BuildingOwnerRivalId)
-                        || !string.IsNullOrEmpty(info.BusinessOwnerRivalId)
-                        || info.RentedByPlayer)
+                    var reg = regs[_scanCursor];
+                    _scanCursor++;
+                    if (reg != null)
                     {
-                        Plugin.Logger.LogInfo($"[BusinessSync] Sent change {info.AddressKey}: name='{info.BusinessName}' type={info.BusinessTypeName} owners[bldg='{info.BuildingOwnerRivalId}' biz='{info.BusinessOwnerRivalId}' rented={info.RentedByPlayer}] sign=0x{info.SignLightPacked:X8}");
+                        var info = ReadInfo(reg);
+                        if (info != null
+                            && !(_lastSent.TryGetValue(info.AddressKey, out var prev) && EqualInfo(prev, info)))
+                        {
+                            _lastSent[info.AddressKey] = info;
+                            MPServer.BroadcastBusinessChange(info);
+                            _cycleChanges++;
+                            // Log only non-trivial changes (something that has a name or
+                            // isn't BusinessTypeName.Empty) so we don't spam at startup.
+                            if (!string.IsNullOrEmpty(info.BusinessName) || info.BusinessTypeName != 0
+                                || !string.IsNullOrEmpty(info.BuildingOwnerRivalId)
+                                || !string.IsNullOrEmpty(info.BusinessOwnerRivalId)
+                                || info.RentedByPlayer)
+                            {
+                                Plugin.Logger.LogInfo($"[BusinessSync] Sent change {info.AddressKey}: name='{info.BusinessName}' type={info.BusinessTypeName} owners[bldg='{info.BuildingOwnerRivalId}' biz='{info.BusinessOwnerRivalId}' rented={info.RentedByPlayer}] sign=0x{info.SignLightPacked:X8}");
+                            }
+                        }
                     }
+                    if (sw.ElapsedMilliseconds >= HostScanBudgetMs) return;   // out of budget — resume next frame
                 }
-                if (changes > 0)
-                    Plugin.Logger.LogInfo($"[BusinessSync] Broadcast {changes} business change(s).");
+
+                // Cycle complete.
+                _scanInProgress = false;
+                if (_cycleChanges > 0)
+                    Plugin.Logger.LogInfo($"[BusinessSync] Broadcast {_cycleChanges} business change(s) this sweep.");
 
                 // Buy marketplace (gi.buildingsForSale) — host's daily real-
                 // estate update modifies this list once per game day.  Hash-
-                // diff on each Tick; re-broadcast the full snapshot when it
-                // changes.  Cheap: hash compute is O(N), N ~10-15 entries.
+                // diff once per completed sweep; re-broadcast the full snapshot
+                // when it changes.  Cheap: hash compute is O(N), N ~10-15 entries.
                 CheckBuildingsForSaleChange();
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] Tick: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] Tick: {ex.Message}"); _scanInProgress = false; }
         }
 
         // ── Client → host: push THIS player's owned-business changes up ───────
@@ -461,7 +490,10 @@ namespace BigAmbitionsMP
             _lastSent.Clear();
             _lastSentClient.Clear();
             _lastClientPollAt = 0f;
-            _lastPollAt = 0f;
+            _logoCache.Clear();
+            _scanInProgress = false;
+            _scanCursor     = 0;
+            _cycleStartedAt = 0f;
         }
 
         // ── Field reading ─────────────────────────────────────────────────────
@@ -561,37 +593,7 @@ namespace BigAmbitionsMP
                 // such directory (they use Addressables), so we just get
                 // an empty list.
                 if (!string.IsNullOrEmpty(info.BusinessName))
-                {
-                    try
-                    {
-                        string dir = LogoHelper.GetPlayerBusinessLogoPath(info.BusinessName);
-                        if (!string.IsNullOrEmpty(dir) && System.IO.Directory.Exists(dir))
-                        {
-                            int total = 0;
-                            foreach (var f in System.IO.Directory.GetFiles(dir))
-                            {
-                                try
-                                {
-                                    var bytes = System.IO.File.ReadAllBytes(f);
-                                    info.LogoFiles.Add(new LogoFile
-                                    {
-                                        Name   = System.IO.Path.GetFileName(f),
-                                        Base64 = Convert.ToBase64String(bytes),
-                                    });
-                                    total += bytes.Length;
-                                }
-                                catch (Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] read {f}: {ex.Message}"); }
-                            }
-                            if (info.LogoFiles.Count > 0)
-                                Plugin.Logger.LogInfo($"[BusinessSync] Logo files for '{info.BusinessName}': {info.LogoFiles.Count} file(s), {total}B total");
-                        }
-                        else if (!string.IsNullOrEmpty(info.LogoShape))
-                        {
-                            Plugin.Logger.LogInfo($"[BusinessSync] No logo dir yet for '{info.BusinessName}' (dir='{dir}')");
-                        }
-                    }
-                    catch (Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] Logo dir read for {info.BusinessName}: {ex.Message}"); }
-                }
+                    info.LogoFiles = ReadLogoFilesCached(info.BusinessName, info.LogoShape);
                 return info;
             }
             catch
@@ -681,6 +683,70 @@ namespace BigAmbitionsMP
                 }
             }
             return true;
+        }
+
+        // ── Logo-file payload cache ───────────────────────────────────────────
+        // ReadInfo runs for every business each poll tick; re-scanning the logo
+        // directory (and re-reading ~50KB of JPGs) every 2s was pure disk churn
+        // (43k "No logo dir" log lines in one session).  Cache per business and
+        // rescan at most every LogoRescanSeconds — sign/logo edits are rare, so
+        // a ≤12s propagation delay is invisible while the I/O drops to ~zero.
+        // LogoFilesEqual is content-based, so a same-content rescan never
+        // triggers a rebroadcast.
+        private const float LogoRescanSeconds = 10f;
+        private sealed class LogoCacheEntry
+        {
+            public float NextScanAt;
+            public System.Collections.Generic.List<LogoFile> Files = new();
+            public bool DirMissingLogged;   // "No logo dir yet" logged once per business
+            public int  LastSig;            // count/bytes signature — log only on change
+        }
+        private static readonly System.Collections.Generic.Dictionary<string, LogoCacheEntry> _logoCache = new();
+
+        private static System.Collections.Generic.List<LogoFile> ReadLogoFilesCached(string businessName, string logoShape)
+        {
+            if (!_logoCache.TryGetValue(businessName, out var e))
+            { e = new LogoCacheEntry(); _logoCache[businessName] = e; }
+
+            float now = UnityEngine.Time.realtimeSinceStartup;
+            if (now < e.NextScanAt) return e.Files;
+            e.NextScanAt = now + LogoRescanSeconds;
+
+            try
+            {
+                string dir = LogoHelper.GetPlayerBusinessLogoPath(businessName);
+                if (!string.IsNullOrEmpty(dir) && System.IO.Directory.Exists(dir))
+                {
+                    var files = new System.Collections.Generic.List<LogoFile>();
+                    int total = 0;
+                    foreach (var f in System.IO.Directory.GetFiles(dir))
+                    {
+                        try
+                        {
+                            var bytes = System.IO.File.ReadAllBytes(f);
+                            files.Add(new LogoFile
+                            {
+                                Name   = System.IO.Path.GetFileName(f),
+                                Base64 = Convert.ToBase64String(bytes),
+                            });
+                            total += bytes.Length;
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] read {f}: {ex.Message}"); }
+                    }
+                    e.Files = files;
+                    int sig = files.Count * 31 + total;
+                    if (files.Count > 0 && sig != e.LastSig)
+                        Plugin.Logger.LogInfo($"[BusinessSync] Logo files for '{businessName}': {files.Count} file(s), {total}B total");
+                    e.LastSig = sig;
+                }
+                else if (!string.IsNullOrEmpty(logoShape) && !e.DirMissingLogged)
+                {
+                    e.DirMissingLogged = true;
+                    Plugin.Logger.LogInfo($"[BusinessSync] No logo dir yet for '{businessName}' (dir='{dir}') — logged once.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] Logo dir read for {businessName}: {ex.Message}"); }
+            return e.Files;
         }
 
         // List comparison — order- and content-sensitive; both produced by

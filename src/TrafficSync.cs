@@ -35,7 +35,23 @@ namespace BigAmbitionsMP
             public Vector3       TargetPos;
             public Quaternion    TargetRot = Quaternion.identity;
             public List<float>?  LastColors;          // last applied body colours
+            // Dead reckoning: chase a target EXTRAPOLATED along the car's
+            // measured velocity, so the ghost never sits still between 10 Hz
+            // snapshots.  (Plain lerp-to-last-target made cars move in stints
+            // at low client FPS — reach target, freeze, jump on next packet.)
+            public Vector3       Velocity;
+            public float         TargetAt;            // CLIENT unscaled time TargetPos arrived
+            public float         HostT;               // HOST sample time of TargetPos (packet stamp)
         }
+        // Don't predict further than this past the last packet — a stopped or
+        // turning car otherwise overshoots while we wait for fresh data.
+        private const float MaxExtrapolateSeconds = 0.3f;
+
+        // Client view culling for traffic ghosts: only embody cars near OUR
+        // player (the stream covers cars around every player).  Spawn inside
+        // ViewRadius, release beyond CullRadius (hysteresis).
+        private const float GhostViewRadius = 130f;
+        private const float GhostCullRadius = 160f;
 
         // Keyed by the host's Gley pool index.
         private static readonly Dictionary<int, TrafficGhost> _ghosts = new();
@@ -45,6 +61,11 @@ namespace BigAmbitionsMP
         private const float SnapDistance = 12f;
 
         // One-time colour diagnostics (host reads / client applies).
+        // ColorDumpEnabled gates the FULL per-vehicle material dump (~360 log
+        // lines + a renderer/property sweep per dumped car).  It produced 79k
+        // log lines in one session — re-enable only when actively debugging
+        // vehicle colours.
+        private static readonly bool ColorDumpEnabled = false;
         private static int _colorDiagHost;
         private static int _colorDiagClient;
         // Indices whose full colour state has been dumped (host / client).
@@ -116,22 +137,25 @@ namespace BigAmbitionsMP
                 {
                     // Citywide: keep the traffic system spawning around every
                     // player, not just the host.
-                    UpdateTrafficAnchors();
+                    long tb = MPPerf.Begin(); UpdateTrafficAnchors(); MPPerf.End("Tr.Anchor", tb);
                     TickTaxiResumes();
 
                     _hostBroadcastTimer -= Time.unscaledDeltaTime;
                     if (_hostBroadcastTimer <= 0f)
                     {
                         _hostBroadcastTimer = BroadcastInterval;
-                        MPServer.BroadcastTrafficSnapshot(BuildSnapshot());
+                        tb = MPPerf.Begin(); var s = BuildSnapshot(); MPPerf.End("Tr.Build", tb);
+                        tb = MPPerf.Begin(); MPServer.BroadcastTrafficSnapshot(s); MPPerf.End("Tr.Send", tb);
                     }
 
                     _lightBroadcastTimer -= Time.unscaledDeltaTime;
                     if (_lightBroadcastTimer <= 0f)
                     {
                         _lightBroadcastTimer = 0.5f;     // lights change slowly
+                        tb = MPPerf.Begin();
                         var lights = BuildLightSnapshot();
                         if (lights != null) MPServer.BroadcastTrafficLights(lights);
+                        MPPerf.End("Tr.Light", tb);
                     }
                 }
                 else if (MPClient.IsConnected)
@@ -147,26 +171,71 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Cached vehicle-pool enumeration ───────────────────────────────────
+        // FindObjectsOfType walks the ENTIRE scene (tens of thousands of
+        // objects) — at the 10 Hz broadcast rate it alone made TrafficSync cost
+        // ~59ms per frame on the host (profiler-measured 2026-06-09, the host
+        // choppiness).  Gley pre-instantiates its vehicle pool, so the
+        // VehicleComponent set is stable: enumerate ONCE including inactive
+        // pool members, refresh rarely, and filter activeInHierarchy per use.
+        private static Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<UnityEngine.Object>? _vcPool;
+        private static float _vcPoolAt = -999f;
+        // 10s: one scene scan per 10s is ~free (vs 10/sec before) and picks up
+        // any pool growth (UpdateMaxCars raises the budget per player) quickly.
+        private const float VcPoolRefreshSeconds = 10f;
+
+        private static Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<UnityEngine.Object>? GetVehiclePool()
+        {
+            float now = Time.unscaledTime;
+            if (_vcPool != null && now - _vcPoolAt < VcPoolRefreshSeconds) return _vcPool;
+            try
+            {
+                _vcPool   = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<VehicleComponent>(), true);
+                _vcPoolAt = now;
+            }
+            catch { _vcPool = null; }
+            return _vcPool;
+        }
+
+        /// <summary>Drop the cached pool (scene unload / session end).</summary>
+        public static void InvalidateVehiclePool() { _vcPool = null; _vcPoolAt = -999f; _carColors.Clear(); }
+
         /// <summary>Host-side count of active driving vehicles in the world — for the
         /// startup "world is populated" gate.</summary>
         public static int HostTrafficCount()
         {
             try
             {
-                var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<VehicleComponent>());
-                return arr == null ? 0 : arr.Length;
+                var arr = GetVehiclePool();
+                if (arr == null) return 0;
+                int n = 0;
+                for (int i = 0; i < arr.Length; i++)
+                {
+                    var vc = arr[i].TryCast<VehicleComponent>();
+                    if (vc == null) continue;
+                    var go = vc.gameObject;
+                    if (go != null && go.activeInHierarchy) n++;
+                }
+                return n;
             }
             catch { return 0; }
         }
 
         // ── Host: build the traffic snapshot ──────────────────────────────────
 
+        // Body colours cached per pool index.  Gley repaints a slot only when it
+        // recycles it for a new spawn — which teleports the car — so re-read on
+        // model change or a >SnapDistance jump instead of every snapshot (the
+        // per-renderer material reads were the other half of the 59ms).
+        private sealed class CarColorEntry { public string Model = ""; public Vector3 Pos; public List<float> Colors = new(); }
+        private static readonly Dictionary<int, CarColorEntry> _carColors = new();
+
         private static TrafficSnapshotPayload BuildSnapshot()
         {
-            var snap = new TrafficSnapshotPayload();
+            var snap = new TrafficSnapshotPayload { T = Time.unscaledTime };
             try
             {
-                var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<VehicleComponent>());
+                var arr = GetVehiclePool();
                 if (arr == null) return snap;
                 for (int i = 0; i < arr.Length; i++)
                 {
@@ -179,12 +248,27 @@ namespace BigAmbitionsMP
                     var pos = t.position;
                     var rot = t.rotation;
                     int index = vc.GetIndex();
-                    string model = StripCloneSuffix(go.name);
 
-                    // Body colour — read FRESH every snapshot (Gley reuses pool
-                    // indices, so a cache goes stale on recycle).  One colour
-                    // group per SH_Vehicle renderer (collapsed if uniform).
-                    var colors = ReadBodyColors(index, go);
+                    // Model name + paint cached per pool slot.  A recycle (new
+                    // car in this slot) ALWAYS teleports, so a small move means
+                    // it's the same live car — skip the go.name read too (it
+                    // allocated an IL2CPP string per car per broadcast: ~480
+                    // allocs/sec of collector pressure = rhythmic GC hitches).
+                    string model;
+                    List<float> colors;
+                    if (_carColors.TryGetValue(index, out var cc)
+                        && (pos - cc.Pos).sqrMagnitude < SnapDistance * SnapDistance)
+                    {
+                        model  = cc.Model;
+                        colors = cc.Colors;
+                        cc.Pos = pos;
+                    }
+                    else
+                    {
+                        model  = StripCloneSuffix(go.name);
+                        colors = ReadBodyColors(index, go);
+                        _carColors[index] = new CarColorEntry { Model = model, Pos = pos, Colors = colors };
+                    }
 
                     if (_colorDiagHost < 8)
                     {
@@ -193,9 +277,9 @@ namespace BigAmbitionsMP
                             $"[TrafficColor] host car[{index}] '{model}' {colors.Count / 6} group(s)");
                     }
                     bool truckH = LooksLikeTruck(model);
-                    bool dumpH  = truckH
+                    bool dumpH  = ColorDumpEnabled && (truckH
                         ? (_truckDumpHost.Count < 4 && _truckDumpHost.Add(index))
-                        : (_colorDumpHost.Count < 2 && _colorDumpHost.Add(index));
+                        : (_colorDumpHost.Count < 2 && _colorDumpHost.Add(index)));
                     if (dumpH) DumpFullCarColor(go, index, "HOST", model);
 
                     snap.Cars.Add(new TrafficCarDto
@@ -589,6 +673,15 @@ namespace BigAmbitionsMP
             if (!ClientGhostApplyEnabled) return;     // CLAUDE-DIAGNOSTIC kill-switch
             try
             {
+                // View culling: ghosts only need to exist near OUR player — the
+                // host streams cars simulated around EVERY player, and the ~half
+                // near the other player are invisible from here.  Mirrors the
+                // parked-ghost culling (spawn inside ViewRadius, release beyond
+                // CullRadius — hysteresis so boundary cars don't flap).  Targets
+                // keep streaming, so a car pops back in the moment it's near.
+                Vector3 me = default; bool haveMe = false;
+                try { me = PlayerHelper.GetPosition(); haveMe = true; } catch { }
+
                 var seen = new HashSet<int>();
                 foreach (var car in snap.Cars)
                 {
@@ -597,6 +690,21 @@ namespace BigAmbitionsMP
                     var rot = new Quaternion(car.Qx, car.Qy, car.Qz, car.Qw);
 
                     _ghosts.TryGetValue(car.Index, out var g);
+
+                    if (haveMe)
+                    {
+                        float sq = (pos - me).sqrMagnitude;
+                        bool isGhost = g != null && g.Go != null;
+                        if (!isGhost && sq > GhostViewRadius * GhostViewRadius)
+                            continue;                                  // out of view — don't spawn
+                        if (isGhost && sq > GhostCullRadius * GhostCullRadius)
+                        {
+                            try { UnityEngine.Object.Destroy(g!.Go); } catch { }
+                            _ghosts.Remove(car.Index);
+                            continue;                                  // left view — release
+                        }
+                    }
+
                     // A pool slot reused by a DIFFERENT model = a different car —
                     // respawn fresh so the wrong mesh doesn't slide into view.
                     if (g != null && g.Go != null && g.Model != car.Model)
@@ -609,7 +717,7 @@ namespace BigAmbitionsMP
                     {
                         var go = SpawnTrafficGhost(car.Model, pos, rot);
                         if (go == null) { _ghosts.Remove(car.Index); continue; }
-                        g = new TrafficGhost { Go = go, Model = car.Model, TargetPos = pos, TargetRot = rot };
+                        g = new TrafficGhost { Go = go, Model = car.Model, TargetPos = pos, TargetRot = rot, TargetAt = Time.unscaledTime, HostT = snap.T };
                         _ghosts[car.Index] = g;
                     }
                     else
@@ -620,9 +728,23 @@ namespace BigAmbitionsMP
                         {
                             g.Go.transform.position = pos;
                             g.Go.transform.rotation = rot;
+                            g.Velocity = Vector3.zero;
+                        }
+                        else
+                        {
+                            // Velocity from the HOST's sample clock (packet stamp)
+                            // — client arrival times are frame-quantized and made
+                            // the velocity estimate jitter.  If two packets land
+                            // in one frame (tiny dt), KEEP the previous velocity
+                            // (zeroing it froze extrapolation = visible stutter).
+                            float hdt = snap.T - g.HostT;
+                            if (hdt > 0.005f)
+                                g.Velocity = (pos - g.TargetPos) / hdt;
                         }
                         g.TargetPos = pos;
                         g.TargetRot = rot;
+                        g.TargetAt  = Time.unscaledTime;
+                        g.HostT     = snap.T;
                     }
 
                     // Apply body colours on spawn AND whenever they change (a car
@@ -635,7 +757,7 @@ namespace BigAmbitionsMP
                     }
 
                     // Diagnostic — full colour dump of the first few coloured ghosts.
-                    if (g.Go != null && g.LastColors != null)
+                    if (ColorDumpEnabled && g.Go != null && g.LastColors != null)
                     {
                         bool truckC = LooksLikeTruck(car.Model);
                         bool dumpC  = truckC
@@ -805,23 +927,41 @@ namespace BigAmbitionsMP
             }
             try
             {
-                var rb = go.GetComponent<Rigidbody>();
-                if (rb != null) rb.isKinematic = true;
+                // EVERY rigidbody in the hierarchy, not just the root — vehicle
+                // prefabs carry rbs on children (carHolder/wheels), and a dynamic
+                // one lets the local player physically shove the ghost around.
+                // Kinematic = transform-driven immovable obstacle, like a wall.
+                var rbs = go.GetComponentsInChildren(Il2CppType.Of<Rigidbody>(), true);
+                for (int i = 0; i < rbs.Length; i++)
+                {
+                    var rb = rbs[i].TryCast<Rigidbody>();
+                    if (rb == null) continue;
+                    rb.isKinematic = true;
+                    rb.useGravity  = false;
+                }
             }
             catch { }
             return go;
         }
 
-        /// <summary>Smooths each traffic ghost toward its networked transform.</summary>
+        /// <summary>Smooths each traffic ghost toward its networked transform —
+        /// chasing a target extrapolated along the car's measured velocity so
+        /// motion stays continuous between 10 Hz packets even at low FPS.</summary>
         private static void TickGhosts()
         {
             if (_ghosts.Count == 0) return;
-            float k = Time.deltaTime * GhostLerp;
+            // Cap the blend below 1 so packet corrections spread over a couple
+            // of frames instead of landing as a visible pop at low FPS (the
+            // uncapped factor saturates past ~70ms frames).
+            float k   = Mathf.Min(Time.deltaTime * GhostLerp, 0.5f);
+            float now = Time.unscaledTime;
             foreach (var g in _ghosts.Values)
             {
                 if (g.Go == null) continue;
                 var t = g.Go.transform;
-                t.position = Vector3.Lerp(t.position, g.TargetPos, k);
+                float ahead = Mathf.Min(now - g.TargetAt, MaxExtrapolateSeconds);
+                var predicted = g.TargetPos + g.Velocity * ahead;
+                t.position = Vector3.Lerp(t.position, predicted, k);
                 t.rotation = Quaternion.Slerp(t.rotation, g.TargetRot, k);
             }
         }
@@ -1033,7 +1173,7 @@ namespace BigAmbitionsMP
         /// <summary>Finds a live traffic taxi's TaxiController by Gley pool index.</summary>
         private static TaxiController? FindTaxiByIndex(int index)
         {
-            var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<VehicleComponent>());
+            var arr = GetVehiclePool();
             if (arr == null) return null;
             for (int i = 0; i < arr.Length; i++)
             {

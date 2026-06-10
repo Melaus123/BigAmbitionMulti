@@ -1444,6 +1444,18 @@ namespace BigAmbitionsMP
                 // not auto-refresh.  Find the matching CityBuildingController
                 // and call UpdateSign + UpdatePoi to repaint the visuals.
                 //
+                // REPAINT ONLY WHEN THE VISUALS ACTUALLY CHANGED.  Every repaint
+                // wave makes the game's interactive-object system re-fire
+                // OnIoEnter on buildings near the local player — visible as
+                // street buildings "highlight flickering" whenever deltas apply
+                // (HiDiag-confirmed 2026-06-09).  Post-load field noise sends
+                // deltas whose visible fields didn't change at all; the data is
+                // already written above, so skip the repaint for those entirely.
+                string vsig = VisualSig(info);
+                if (_lastVisualSig.TryGetValue(info.AddressKey, out var prevVs) && prevVs == vsig)
+                    return true;
+                _lastVisualSig[info.AddressKey] = vsig;
+
                 // Phase-1 v3 also walks the CBC's children for the two sign
                 // controller MonoBehaviours and calls ConfigureSign / UpdateSign
                 // directly — because cbc.UpdateSign() may be a no-op when LOD
@@ -1568,6 +1580,30 @@ namespace BigAmbitionsMP
         // is expensive; building positions don't change.  Cleared on game load.
         private static readonly System.Collections.Generic.Dictionary<string, CityBuildingController?> _cbcCache = new();
         public static void ResetCBCCache() => _cbcCache.Clear();
+
+        // Last-repainted visual signature per building (see ApplyBusinessInfoLocal)
+        // — a delta whose visible fields match what we last painted skips the
+        // repaint (and its OnIoEnter highlight-flicker side effect) entirely.
+        private static readonly System.Collections.Generic.Dictionary<string, string> _lastVisualSig = new();
+        public static void ResetVisualSigCache() => _lastVisualSig.Clear();
+
+        /// <summary>Signature over the fields that affect a building's EXTERIOR
+        /// visuals (sign, logo, ownership/for-rent state).  Schedule, deposits,
+        /// prices etc. are data-only — they don't require a repaint.</summary>
+        private static string VisualSig(BusinessInfo info)
+        {
+            int logoBytes = 0, logoCount = 0;
+            if (info.LogoFiles != null)
+            {
+                logoCount = info.LogoFiles.Count;
+                for (int i = 0; i < info.LogoFiles.Count; i++)
+                    logoBytes += info.LogoFiles[i]?.Base64?.Length ?? 0;
+            }
+            return $"{info.BusinessName}|{info.BusinessTypeName}|{info.SignType}|{info.SignLightPacked}|{info.LampPacked}"
+                 + $"|{info.LogoShape}|{info.LogoFont}|{info.LogoColorPacked}|{info.FontColorPacked}|{info.BackgroundColorPacked}"
+                 + $"|{logoCount}:{logoBytes}|{info.AvailableForRent}|{info.TemporarilyClosed}"
+                 + $"|{info.BuildingOwnerRivalId}|{info.BusinessOwnerRivalId}|{info.RentedByPlayer}";
+        }
 
         // Queue of addresses whose logo we asked BusinessLogoGenerator.Create
         // to generate.  Ticked from MPCanvasUI.LateUpdate via DrainPendingLogoRefreshes.

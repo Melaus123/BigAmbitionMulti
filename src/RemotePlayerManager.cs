@@ -21,12 +21,44 @@ namespace BigAmbitionsMP
 
         public Vector3    TargetPosition;
         public Quaternion TargetRotation = Quaternion.identity;
+        // Dead reckoning: measured velocity between packets + the time of the
+        // last packet — Update() chases an extrapolated point so motion stays
+        // continuous between 10 Hz updates even at low FPS (plain lerp made
+        // remote players/vehicles step move-pause-move).
+        public Vector3    Velocity;
+        public float      TargetAt;   // receiver clock at arrival (extrapolation base)
+        public float      SenderT;    // sender's sample clock (velocity measurement)
 
         /// <summary>The cloned character's Animator, if a model was spawned.</summary>
         public Animator?  Anim;
 
         private const float LerpSpeed  = 20f;    // how quickly we chase the network target
         private const float AnimFLerp  = 14f;    // float-param chase rate (smooths 10 Hz steps)
+        private const float SnapDist   = 10f;    // bigger jump = teleport, don't slide
+        private const float MaxExtrapolate = 0.3f;
+
+        /// <summary>Feed a new network target (computes velocity for dead reckoning).
+        /// senderT = the sender's sample clock from the packet — velocity must be
+        /// measured against THAT, not against frame-quantized arrival times.</summary>
+        public void SetTarget(Vector3 pos, Quaternion rot, float senderT)
+        {
+            if (Vector3.Distance(transform.position, pos) > SnapDist)
+            {
+                transform.position = pos;
+                transform.rotation = rot;
+                Velocity = Vector3.zero;
+            }
+            else
+            {
+                float dt = senderT - SenderT;
+                if (dt > 0.005f)                    // tiny = two packets one frame — keep prior velocity
+                    Velocity = (pos - TargetPosition) / dt;
+            }
+            TargetPosition = pos;
+            TargetRotation = rot;
+            TargetAt       = Time.unscaledTime;
+            SenderT        = senderT;
+        }
 
         // Animator parameter map (index → name/type), built once from Anim.parameters.
         private string[]?                            _paramNames;
@@ -77,11 +109,13 @@ namespace BigAmbitionsMP
 
         private void Update()
         {
-            // Smooth position/rotation toward the latest network target
-            transform.position = Vector3.Lerp(
-                transform.position, TargetPosition, Time.deltaTime * LerpSpeed);
-            transform.rotation = Quaternion.Slerp(
-                transform.rotation, TargetRotation, Time.deltaTime * LerpSpeed);
+            // Smooth position/rotation toward the dead-reckoned network target.
+            // Blend capped so packet corrections spread over frames at low FPS.
+            float k = Mathf.Min(Time.deltaTime * LerpSpeed, 0.5f);
+            float ahead = Mathf.Min(Time.unscaledTime - TargetAt, MaxExtrapolate);
+            var predicted = TargetPosition + Velocity * ahead;
+            transform.position = Vector3.Lerp(transform.position, predicted, k);
+            transform.rotation = Quaternion.Slerp(transform.rotation, TargetRotation, k);
 
             // Mirror the owner's real animator state (no local guessing).
             if (Anim != null)
@@ -193,12 +227,11 @@ namespace BigAmbitionsMP
             if (!_players.TryGetValue(p.PlayerId, out var go) || go == null)
                 go = SpawnRemotePlayer(p.PlayerId);
 
-            // Give the target to the mover component; it lerps every frame
+            // Give the target to the mover component; it dead-reckons every frame
             var mover = go.GetComponent<RemotePlayerMover>();
             if (mover != null)
             {
-                mover.TargetPosition = new Vector3(p.X, p.Y, p.Z);
-                mover.TargetRotation = Quaternion.Euler(0f, p.RotY, 0f);
+                mover.SetTarget(new Vector3(p.X, p.Y, p.Z), Quaternion.Euler(0f, p.RotY, 0f), p.T);
                 mover.ApplyAnimState(p.AnimF, p.AnimB, p.AnimI);
             }
             else
@@ -868,8 +901,16 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<string, float> _animBaseline = new();
         private static readonly HashSet<string> _animChanged = new();
 
+        // Discovery probe — reads the FULL animator parameter array through
+        // interop EVERY FRAME (~110ms/frame while it ran, profiler-measured
+        // 2026-06-09: most of the host's terrible first minute).  The action-
+        // anim relay it informed shipped 2026-05-31; re-enable only for new
+        // animator research.
+        private static readonly bool AnimProbeEnabled = false;
+
         public static void ProbeAnimatorLive()
         {
+            if (!AnimProbeEnabled) return;
             try
             {
                 if (_animProbeAnim == null)

@@ -21,7 +21,7 @@ namespace BigAmbitionsMP
     public static class MPLoadProfiler
     {
         /// <summary>Master on/off — flip to false to silence in normal play.</summary>
-        public static bool Enabled = true;
+        public static bool Enabled = false;   // load-timing investigation done — re-enable when profiling
 
         private static readonly Stopwatch _sw = Stopwatch.StartNew();
         private static readonly string    _file = $@"C:\dumps\loadprof.{Environment.ProcessId}.txt";

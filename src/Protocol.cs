@@ -293,6 +293,8 @@ namespace BigAmbitionsMP
         public float Z    { get; set; }
         /// <summary>Y-axis rotation (yaw) in degrees.</summary>
         public float RotY { get; set; }
+        /// <summary>Sender's unscaled clock at sample time (see VehicleFleetPayload.T).</summary>
+        public float T    { get; set; }
 
         // ── Animator state (generic full-mirror) ──────────────────────────────
         // Parameter indices are positions in Animator.parameters; the controller
@@ -349,6 +351,11 @@ namespace BigAmbitionsMP
     {
         public string OwnerId { get; set; } = "";
         public List<VehicleEntry> Vehicles { get; set; } = new();
+        /// <summary>Sender's unscaled clock at sample time.  Receivers use the
+        /// DIFFERENCE between two stamps from the same sender to measure true
+        /// velocity for dead reckoning — packet arrival times are quantized to
+        /// the receiver's frames and useless for velocity at low FPS.</summary>
+        public float  T { get; set; }
     }
 
     /// <summary>One AI-traffic car in a host traffic snapshot.</summary>
@@ -380,6 +387,8 @@ namespace BigAmbitionsMP
     public class TrafficSnapshotPayload
     {
         public List<TrafficCarDto> Cars { get; set; } = new();
+        /// <summary>Host's unscaled clock at sample time (see VehicleFleetPayload.T).</summary>
+        public float T { get; set; }
     }
 
     /// <summary>One parked vehicle in a host parked-vehicle snapshot.

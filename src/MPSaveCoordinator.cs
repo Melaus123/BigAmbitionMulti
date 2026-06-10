@@ -576,6 +576,16 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] SuppressNativeAutosave: {ex.Message}"); }
         }
 
+        /// <summary>Re-enable the game's native autosave.  The suppress flag is
+        /// STICKY (nothing in the game resets it mid-world) — required when a
+        /// host-loss turns the MP world into an offline single-player fork, or
+        /// the fork would silently never autosave.</summary>
+        public static void AllowNativeAutosave()
+        {
+            try { GameManager.preventAutoSave = false; }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] AllowNativeAutosave: {ex.Message}"); }
+        }
+
         /// <summary>Coordinated-autosave interval.  Uses the host's control if set
         /// (MPConfig.AutosaveMinutes); otherwise mirrors the player's SP "minutes
         /// between autosaves" setting.  Clamped to a 60s floor.</summary>

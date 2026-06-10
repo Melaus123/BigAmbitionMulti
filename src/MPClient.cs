@@ -44,8 +44,33 @@ namespace BigAmbitionsMP
         public static bool IsConnected  => _server?.ConnectionState == ConnectionState.Connected;
         public static bool IsConnecting => _running && !IsConnected;
 
+        /// <summary>Why the last connection ended ("ConnectionFailed", "Timeout", …).
+        /// Set in OnDisconnected, cleared on Connect — the lobby UI shows it so a
+        /// failed join doesn't sit silently behind an alive-looking lobby window.</summary>
+        public static string LastDisconnectReason = "";
+
+        /// <summary>True after the connection to the host dropped WHILE IN-GAME
+        /// (host quit/crash/network).  Freezes the game and shows a "session
+        /// ended" notice; dismissing it (click/Enter in TickStartupScreen) clears
+        /// the flag and lets the player continue OFFLINE as a single-player fork
+        /// — allowed by design, since the host's save copies are canonical and
+        /// overwrite this world on the next rejoin.  Cleared on dismissal /
+        /// exit-to-menu / next Connect.</summary>
+        public static volatile bool SessionEnded;
+        // Set by Disconnect() so a deliberate leave (Leave button, exit-to-menu
+        // teardown, reconnect guard) never triggers the session-over lock.
+        private static bool _voluntaryDisconnect;
+
         public static void Connect(string hostIp, int port)
         {
+            // A previous session/attempt may still be live (exited to the menu
+            // without disconnecting, or an autopilot retry).  Tear it down so we
+            // never run two NetManagers/poll threads at once.
+            if (_running || _client != null) Disconnect();
+            LastDisconnectReason = "";
+            SessionEnded = false;
+            _voluntaryDisconnect = false;
+
             _listener = new EventBasedNetListener();
             _client   = new NetManager(_listener) { AutoRecycle = true };
 
@@ -65,12 +90,14 @@ namespace BigAmbitionsMP
 
         public static void Disconnect()
         {
+            _voluntaryDisconnect = true;   // deliberate — never the session-over lock
             _running = false;
             _client?.Stop();
             _pollThread?.Join(1000);
             IsInLobby = true;
             LobbyPlayers.Clear();
             _server = null;
+            _client = null;
         }
 
         // ── Events ────────────────────────────────────────────────────────────
@@ -95,13 +122,34 @@ namespace BigAmbitionsMP
         private static void OnDisconnected(NetPeer peer, DisconnectInfo info)
         {
             Plugin.Logger.LogWarning($"[Client] Disconnected from host: {info.Reason}");
-            _server = null;
+            LastDisconnectReason = info.Reason.ToString();
+            _server  = null;
+            // The connection is gone either way — let the poll loop exit so
+            // IsConnecting goes false (the UI was stuck showing "Connecting…"
+            // forever after a ConnectionFailed).  The NetManager itself is
+            // stopped by the next Connect()'s teardown guard.
+            _running = false;
+            bool voluntary = _voluntaryDisconnect;
             // Clean up all remote-player capsules on the main thread, and release
             // the startup hold — we must not stay frozen after losing the host.
             GameStatePatcher.EnqueueOnMainThread(() =>
             {
                 RemotePlayerManager.RemoveAll();
                 TimeSync.EndStartupHold();
+                // Involuntary drop while IN-GAME → the MP session is over for this
+                // client.  Freeze + notice; the player can dismiss it and keep
+                // playing offline as an SP fork.  (IL2CPP in-game check must run
+                // here on the main thread.)
+                try
+                {
+                    if (!voluntary && SaveGameManager.Current != null
+                                   && Helpers.PlayerHelper.PlayerController != null)
+                    {
+                        SessionEnded = true;
+                        Plugin.Logger.LogWarning("[Client] Host connection lost in-game — session ended; notice shown (dismiss to continue offline as a single-player fork).");
+                    }
+                }
+                catch { }
             });
         }
 

@@ -1612,6 +1612,59 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── FIX: spurious hover re-entry pulses (the "highlight leak") ────────
+        // HiDiag showed the client's building highlights are its OWN cursor
+        // system re-firing OnIoEnter: ghost vehicles popping in/out or driving
+        // through the idle cursor's ray flip MouseController's target, and when
+        // the ray lands back on the building it re-enters → highlight pulse
+        // with no local cause.  A GENUINE hover always involves the mouse
+        // moving, so: skip OnIoEnter when this same building was exited a
+        // moment ago with the cursor in (almost) the same spot.  MP-gated —
+        // single-player behaviour untouched.
+        [HarmonyPatch(typeof(CityBuildingController), nameof(CityBuildingController.OnIoExit))]
+        public static class Patch_CBC_OnIoExit_Record
+        {
+            internal static readonly Dictionary<int, (float t, UnityEngine.Vector2 mp)> LastExit = new();
+            static void Postfix(CityBuildingController __instance)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    if (__instance == null) return;
+                    LastExit[__instance.GetInstanceID()] = (
+                        UnityEngine.Time.realtimeSinceStartup,
+                        new UnityEngine.Vector2(UnityEngine.Input.mousePosition.x, UnityEngine.Input.mousePosition.y));
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(CityBuildingController), nameof(CityBuildingController.OnIoEnter))]
+        public static class Patch_CBC_OnIoEnter_HoverDebounce
+        {
+            private const float ReEnterWindowSeconds = 0.6f;
+            private const float CursorIdleSqPixels   = 9f;     // ≤3 px = cursor didn't move
+
+            static bool Prefix(CityBuildingController __instance)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                    if (__instance == null) return true;
+
+                    if (Patch_CBC_OnIoExit_Record.LastExit.TryGetValue(__instance.GetInstanceID(), out var rec))
+                    {
+                        float dt = UnityEngine.Time.realtimeSinceStartup - rec.t;
+                        var mp = new UnityEngine.Vector2(UnityEngine.Input.mousePosition.x, UnityEngine.Input.mousePosition.y);
+                        if (dt < ReEnterWindowSeconds && (mp - rec.mp).sqrMagnitude < CursorIdleSqPixels)
+                            return false;   // ghost popped through the idle cursor's ray — swallow the pulse
+                    }
+                    return true;
+                }
+                catch { return true; }
+            }
+        }
+
         // ── Patch: SaveGamePathHelper.CurrentVersionFolderPath ────────────────
         // Durable MP load: the game's SaveGameManager.Load locates a save by
         // re-scanning CurrentVersionFolderPath() (the single-player version folder).
@@ -1757,6 +1810,9 @@ namespace BigAmbitionsMP
 
             static bool Prefix(object __instance)
             {
+                // After a host loss the client is offline (forking into SP is
+                // allowed by design) — the connection checks below already route
+                // to the vanilla SP save.
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return true;   // SP → normal save
                 try
                 {
