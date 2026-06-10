@@ -51,6 +51,7 @@ namespace BigAmbitionsMP
         public static void Reset()
         {
             _localVoteActive = false; _localGoal = 0;
+            _localHold = false; _pendingEvalAt = 0f;
             _machine = null;
             Votes.Clear(); RequiredVotes = 0; SkipActive = false;
             _hostVotes.Clear(); _skipGoalMinutes = 0;
@@ -91,10 +92,14 @@ namespace BigAmbitionsMP
                 }
                 if (remaining < MinVoteMinutes)
                 {
-                    StopLocalMachine();   // close the native overlay immediately
+                    // Stay seated, overlay up (user 2026-06-10): HOLD the frozen
+                    // machine; the rest runs at 1× and we release the machine
+                    // when the goal time arrives naturally.
+                    _localHold = true;
+                    _localGoal = goalTotal;
                     LocalNotice      = $"Resting at normal speed ({remaining:F0} min — under 1h, no group skip).";
                     LocalNoticeUntil = Time.unscaledTime + 6f;
-                    Plugin.Logger.LogInfo($"[Rest] '{actName}' ({remaining:F0} min) below vote threshold — machine stopped, runs at 1x.");
+                    Plugin.Logger.LogInfo($"[Rest] '{actName}' ({remaining:F0} min) below vote threshold — held at 1x until {Fmt(goalTotal)}.");
                     return;
                 }
                 // Lock the goal as an ABSOLUTE target on a clean 5-min boundary.
@@ -129,6 +134,32 @@ namespace BigAmbitionsMP
             {
                 _pendingEvalAt = 0f;
                 EvaluateMachine();
+            }
+
+            // Sub-hour HOLD: machine frozen, player seated, overlay up — release
+            // when the goal time arrives (the activity completed at 1×).
+            if (_localHold && Time.unscaledTime >= _nextHoldPollAt)
+            {
+                _nextHoldPollAt = Time.unscaledTime + 0.5f;
+                if (!MachineRunning()) _localHold = false;   // cancelled natively
+                else
+                {
+                    var (hd, hh) = GameStateReader.GetGameTime();
+                    if (hd * 1440.0 + hh * 60.0 >= _localGoal - 0.1)
+                    {
+                        Plugin.Logger.LogInfo("[Rest] hold goal reached — releasing machine.");
+                        StopLocalMachine();
+                        _localHold = false;
+                    }
+                }
+            }
+
+            // The frozen machine's clock label would otherwise sit still
+            // ("stuck not moving") — drive it from the live clock.
+            if ((_localVoteActive || _localHold) && Time.unscaledTime >= _nextLabelAt)
+            {
+                _nextLabelAt = Time.unscaledTime + 0.25f;
+                DriveMachineClockLabel();
             }
 
             // Vote lifecycle = the machine's own isRunning: covers the native
@@ -198,6 +229,29 @@ namespace BigAmbitionsMP
                 return m != null && p != null && (bool)(p.GetValue(m) ?? false);
             }
             catch { return false; }
+        }
+
+        private static bool _localHold;
+        private static float _nextHoldPollAt;
+        private static float _nextLabelAt;
+
+        /// <summary>The machine's Update is frozen in MP, so its clock label
+        /// never moves — write the live time into it ourselves.</summary>
+        private static void DriveMachineClockLabel()
+        {
+            try
+            {
+                var m = GetMachine();
+                if (m == null || !MachineRunning()) return;
+                var p = _machineType?.GetProperty("timeLabel");
+                var lbl = p?.GetValue(m) as TMPro.TextMeshProUGUI;
+                if (lbl == null) return;
+                var (d, h) = GameStateReader.GetGameTime();
+                int hh = (int)h;
+                int mm = (int)((h - hh) * 60.0);
+                lbl.text = $"{hh:D2}:{mm:D2}";
+            }
+            catch { }
         }
 
         private static void StopLocalMachine()

@@ -1614,6 +1614,41 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: Gley traffic collider NRE shield ───────────────────────────
+        // Real traffic cars' collision sensors throw NullReferenceExceptions
+        // when they touch OUR ghost objects (script-stripped clones lack the
+        // Gley data the handler reads).  Mostly harmless spam — but a taxi the
+        // player RIDES dies mid-coroutine on it (the 2026-06-10 "taxi crash":
+        // ride hangs, game must be killed).  In MP, swallow those exceptions:
+        // the traffic car simply ignores the ghost, which is correct.
+        [HarmonyPatch]
+        public static class Patch_GleyVehicle_NREShield
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var t = VehicleManager.FindGameType("GleyTrafficSystem.VehicleComponent");
+                int n = 0;
+                if (t != null)
+                    foreach (var name in new[] { "NewColliderHit", "OnTriggerEnter", "OnTriggerExit" })
+                    {
+                        var m = t.GetMethod(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                        if (m != null) { n++; yield return m; }
+                    }
+                Plugin.Logger.LogInfo($"[Gley] NRE shield: type={(t != null ? "ok" : "NOT FOUND")} targets={n}");
+            }
+
+            private static int _swallowed;
+            static Exception? Finalizer(Exception __exception)
+            {
+                if (__exception == null) return null;
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return __exception;
+                _swallowed++;
+                if (_swallowed <= 5 || _swallowed % 500 == 0)
+                    Plugin.Logger.LogWarning($"[Gley] swallowed {__exception.GetType().Name} in traffic collider handler (#{_swallowed}) — ghost contact.");
+                return null;
+            }
+        }
+
         [HarmonyPatch]
         public static class Patch_TimeMachine_Update_Freeze
         {
