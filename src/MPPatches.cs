@@ -1616,6 +1616,57 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patches: blanket pause suppression in MP ──────────────────────────
+        // "Nothing pauses outside the explicit vote system."  Every native pause
+        // entry (rest dialogs, menus, the skip engine's time-control lock) is
+        // suppressed unless OUR code holds the key (GameStateReader.
+        // AllowNativePauseCall — set around the pause-vote system's own calls).
+        [HarmonyPatch]
+        public static class Patch_GSC_SetPause_Suppress
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var t = VehicleManager.FindGameType("GameSpeedController");
+                var m = t?.GetMethod("SetPause", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Plugin.Logger.LogInfo($"[Pause] SetPause suppression: {(m != null ? "patched" : "NOT FOUND")}");
+                return m;
+            }
+
+            private static int _n;
+            static bool Prefix(bool newPause)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                if (GameStateReader.AllowNativePauseCall) return true;
+                if (!newPause) return true;                  // un-pausing is always fine
+                if (_n++ < 5 || _n % 100 == 0)
+                    Plugin.Logger.LogInfo($"[Pause] native pause suppressed (#{_n}).");
+                return false;
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_GSC_DisableTimeControl_Suppress
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var t = VehicleManager.FindGameType("GameSpeedController");
+                var m = t?.GetMethod("DisableTimeControl", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Plugin.Logger.LogInfo($"[Pause] DisableTimeControl suppression: {(m != null ? "patched" : "NOT FOUND")}");
+                return m;
+            }
+
+            private static int _n;
+            static bool Prefix(bool disabled)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                if (GameStateReader.AllowNativePauseCall) return true;
+                if (!disabled) return true;                  // re-enabling is always fine
+                if (_n++ < 5 || _n % 100 == 0)
+                    Plugin.Logger.LogInfo($"[Pause] time-control lock suppressed (#{_n}).");
+                return false;
+            }
+        }
+
         // ── Patch: EntityController.UpdateNavMeshTargets NRE shield ───────────
         // Taxi boarding round 2 (2026-06-10): with the Gley storm silenced,
         // boarding still died — final exception before shutdown is an NRE in

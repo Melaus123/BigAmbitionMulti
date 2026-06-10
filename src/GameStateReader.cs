@@ -277,11 +277,17 @@ namespace BigAmbitionsMP
                 _gscMTogglePause ??= _gscType.GetMethod("TogglePause",
                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                 if (_gscMTogglePause == null) return;
-                _gscMTogglePause.Invoke(_gscInstance, null);
+                AllowNativePauseCall = true;            // our key through the MP pause-suppression patches
+                try { _gscMTogglePause.Invoke(_gscInstance, null); }
+                finally { AllowNativePauseCall = false; }
                 Plugin.Logger.LogInfo($"[GSC] Native pause → {paused}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[GSC] SetNativePause({paused}): {ex.Message}"); }
         }
+
+        /// <summary>True while OUR code is intentionally driving the pause state —
+        /// the only key through the MP blanket pause-suppression patches.</summary>
+        public static bool AllowNativePauseCall;
 
         /// <summary>Watchdog (rest-v3): nothing may freeze time in MP outside the
         /// explicit pause/vote systems.  Clears BOTH freeze switches: the pause
@@ -298,7 +304,9 @@ namespace BigAmbitionsMP
                         BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                     if (m != null && _gscInstance != null)
                     {
-                        m.Invoke(_gscInstance, new object[] { false });
+                        AllowNativePauseCall = true;
+                        try { m.Invoke(_gscInstance, new object[] { false }); }
+                        finally { AllowNativePauseCall = false; }
                         Plugin.Logger.LogWarning("[GSC] WATCHDOG: time-control lock cleared (nothing may freeze time outside the vote system).");
                     }
                 }
