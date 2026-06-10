@@ -98,6 +98,10 @@ namespace BigAmbitionsMP
                     _localHold = true;
                     _localGoal = goalTotal;
                     SetMachineCanvasVisible(false);
+                    // Starting the machine also PAUSED the game (its normal mode
+                    // pauses the sim and drives time itself) — that pause is the
+                    // translucent click-blocking overlay AND a frozen clock.
+                    GameStateReader.SetNativePause(false);
                     LocalNotice      = $"Resting until {Fmt(goalTotal)} — under 1h, no group skip needed.";
                     LocalNoticeUntil = float.MaxValue;   // cleared on release
                     Plugin.Logger.LogInfo($"[Rest] '{actName}' ({remaining:F0} min) below vote threshold — held at 1x until {Fmt(goalTotal)}, overlay hidden.");
@@ -109,6 +113,7 @@ namespace BigAmbitionsMP
                 _localGoal       = goal;
                 _localVoteActive = true;
                 MakeOverlayBackgroundTransparent();   // see the world while waiting
+                GameStateReader.SetNativePause(false);   // kill the machine's pause/fade
                 SendVote(true, goal, actName);
                 Plugin.Logger.LogInfo($"[Rest] vote ON: '{actName}' {remaining:F0} min → goal {Fmt(goal)} (machine held).");
             }
@@ -143,6 +148,7 @@ namespace BigAmbitionsMP
             if (_localHold && Time.unscaledTime >= _nextHoldPollAt)
             {
                 _nextHoldPollAt = Time.unscaledTime + 0.5f;
+                GameStateReader.SetNativePause(false);   // keep the pause/fade away (no-op when unpaused)
                 bool release = false;
                 if (!MachineRunning()) release = true;        // cancelled natively
                 else
@@ -176,6 +182,7 @@ namespace BigAmbitionsMP
             if (_localVoteActive && Time.unscaledTime >= _nextPollAt)
             {
                 _nextPollAt = Time.unscaledTime + 0.5f;
+                GameStateReader.SetNativePause(false);   // keep the pause/fade away while waiting
                 if (!MachineRunning())
                 {
                     _localVoteActive = false;
