@@ -673,6 +673,7 @@ namespace BigAmbitionsMP
                 MPPhoneButton.Reset();                 // re-inject in the next game scene
                 MPHandIk.Reset();                      // cached refs die with the scene
                 MPRideProbe.CleanupTestRow();          // never leave test spawns behind
+                MPPriceSync.Reset();                   // price hashes are per-session
                 // The session-over lock is for the in-game world only — back at
                 // the menu the player is free to host/join again.
                 MPClient.SessionEnded = false;
@@ -1117,6 +1118,7 @@ namespace BigAmbitionsMP
             _pt = MPPerf.Begin(); ParkedVehicleSync.Tick();    MPPerf.End("Parked",   _pt);   // backlog #3 phase 3a — host capture
             _pt = MPPerf.Begin(); BusinessSync.Tick();         MPPerf.End("BizHost",  _pt);   // host change detection (time-boxed sweep)
             _pt = MPPerf.Begin(); BusinessSync.TickClient();   MPPerf.End("BizClient",_pt);   // client pushes own businesses up
+            _pt = MPPerf.Begin(); MPPriceSync.Tick();          MPPerf.End("Price",    _pt);   // live retail prices of own businesses (both roles)
             _pt = MPPerf.Begin(); InteriorSync.Tick();         MPPerf.End("Interior", _pt);   // diff-push to subscribed clients
             _pt = MPPerf.Begin(); GameStatePatcher.DrainPendingLogoRefreshes(); MPPerf.End("LogoRefresh", _pt);
 

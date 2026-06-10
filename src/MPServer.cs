@@ -696,6 +696,20 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.RetailPrices:
+                {
+                    // A client's business changed its retail prices: apply to the
+                    // host's local registration copy (main thread) + relay to all
+                    // (the sender's own echo is dropped by the OwnerId guard).
+                    var rp = env.GetPayload<RetailPricesPayload>();
+                    if (rp != null && !string.IsNullOrEmpty(rp.AddressKey))
+                    {
+                        GameStatePatcher.EnqueueOnMainThread(() => MPPriceSync.Apply(rp));
+                        Broadcast(MessageEnvelope.Create(MessageType.RetailPrices, "host", rp));
+                    }
+                    break;
+                }
+
                 case MessageType.Chat:
                 {
                     // A client chatted.  PUBLIC → append + relay to everyone (the
@@ -1907,6 +1921,13 @@ namespace BigAmbitionsMP
 
         /// <summary>Public wrapper around Broadcast so external code (e.g. Harmony patches) can use it.</summary>
         public static void BroadcastAny(MessageEnvelope env) => Broadcast(env);
+
+        /// <summary>Host: broadcast the host's own changed retail prices.</summary>
+        public static void BroadcastRetailPrices(RetailPricesPayload p)
+        {
+            if (!_running || p == null) return;
+            Broadcast(MessageEnvelope.Create(MessageType.RetailPrices, "host", p));
+        }
 
         /// <summary>Host: relay a chat line to every connected client.</summary>
         public static void BroadcastChat(string playerId, string text)

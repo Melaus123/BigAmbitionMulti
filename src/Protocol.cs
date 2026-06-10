@@ -82,6 +82,7 @@ namespace BigAmbitionsMP
 
         // In-game chat (Phase 6: connected-players window + chat).
         Chat                 = 100, // Any → Host → All: a chat line.  Clients send to host; host relays to everyone (incl. sender) so the log is consistent.
+        RetailPrices         = 101, // Any → Host → Others: live retail prices of a business the SENDER runs — keeps per-neighbourhood price competition fed with current numbers on every machine.
     }
 
     // ── Envelope ───────────────────────────────────────────────────────────────
@@ -697,6 +698,17 @@ namespace BigAmbitionsMP
     }
 
     /// <summary>A single retail-shelf price tag.</summary>
+    /// <summary>Live retail prices for one business (MessageType.RetailPrices).
+    /// Sent by the machine that RUNS the business whenever its prices change;
+    /// receivers write them into their local registration copy so the game's
+    /// per-neighbourhood price competition reads current numbers.</summary>
+    public class RetailPricesPayload
+    {
+        public string AddressKey { get; set; } = "";
+        public string OwnerId    { get; set; } = "";
+        public List<RetailPriceInfo> Prices { get; set; } = new();
+    }
+
     public class RetailPriceInfo
     {
         /// <summary>ItemName enum value (as int for cross-version safety).</summary>

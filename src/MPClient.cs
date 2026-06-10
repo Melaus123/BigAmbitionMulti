@@ -291,6 +291,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.RetailPrices:
+                {
+                    var rp = env.GetPayload<RetailPricesPayload>();
+                    if (rp != null) GameStatePatcher.EnqueueOnMainThread(() => MPPriceSync.Apply(rp));
+                    break;
+                }
+
                 default:
                     Plugin.Logger.LogWarning($"[Client] Unknown message type: {env.Type}");
                     break;
@@ -758,6 +765,14 @@ namespace BigAmbitionsMP
 
         /// <summary>Sends a chat line to the host, which relays it to everyone
         /// (including us) so the log stays consistent and host-ordered.</summary>
+        /// <summary>Sends this player's changed retail prices to the host (who
+        /// applies + relays to the other clients).</summary>
+        public static void SendRetailPrices(RetailPricesPayload p)
+        {
+            if (!IsConnected || p == null) return;
+            Send(MessageEnvelope.Create(MessageType.RetailPrices, MPConfig.PlayerId, p));
+        }
+
         public static void SendChat(string text, string to = "")
         {
             if (!IsConnected || string.IsNullOrWhiteSpace(text)) return;

@@ -1832,7 +1832,7 @@ namespace BigAmbitionsMP
             }
         }
 
-        private static BuildingRegistration? FindRegistration(string addressKey)
+        internal static BuildingRegistration? FindRegistration(string addressKey)
         {
             var gi = SaveGameManager.Current;
             if (gi == null) return null;
