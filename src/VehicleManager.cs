@@ -733,6 +733,7 @@ namespace BigAmbitionsMP
                 var list = VehicleHelper.AllPlayerVehicles;
                 if (list == null) return null;
 
+                Transform? openDriven = null;
                 var fleet = new VehicleFleetPayload { OwnerId = MPConfig.PlayerId, T = Time.unscaledTime };
                 for (int i = 0; i < list.Count; i++)
                 {
@@ -745,7 +746,11 @@ namespace BigAmbitionsMP
                     // Ground-truth capture: while WE drive/push, record the exact
                     // character-to-vehicle offset + animator state so the remote
                     // rendering can be modeled from data instead of guesses.
-                    if (vc.controlledByPlayer) MPRideProbe.Sample(tn, t);
+                    if (vc.controlledByPlayer)
+                    {
+                        MPRideProbe.Sample(tn, t);
+                        if (IsOpenVehicle(tn)) openDriven = t;   // hand-IK sync anchor
+                    }
                     fleet.Vehicles.Add(new VehicleEntry
                     {
                         VehicleId = inst.id,
@@ -756,6 +761,7 @@ namespace BigAmbitionsMP
                         Qx = t.rotation.x, Qy = t.rotation.y, Qz = t.rotation.z, Qw = t.rotation.w,
                     });
                 }
+                CurrentOpenDriven = openDriven;
                 return fleet;
             }
             catch (Exception ex)
@@ -764,6 +770,11 @@ namespace BigAmbitionsMP
                 return null;
             }
         }
+
+        /// <summary>The open vehicle WE are currently pushing/riding, if any —
+        /// the vehicle-local anchor for the hand-IK sync (refreshed each fleet
+        /// read; null when on foot or in an enclosed vehicle).</summary>
+        public static Transform? CurrentOpenDriven;
 
         /// <summary>Lets the RideProbe capture in SINGLE-PLAYER too (the fleet
         /// reader that hosts the probe normally only runs while MP is active):

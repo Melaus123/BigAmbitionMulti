@@ -666,6 +666,7 @@ namespace BigAmbitionsMP
                 GameStatePatcher.ResetVisualSigCache();
                 TrafficSync.InvalidateVehiclePool();   // pool objects die with the scene
                 MPPhoneButton.Reset();                 // re-inject in the next game scene
+                MPHandIk.Reset();                      // cached rig refs die with the scene
                 // The session-over lock is for the in-game world only — back at
                 // the menu the player is free to host/join again.
                 MPClient.SessionEnded = false;
@@ -1151,6 +1152,7 @@ namespace BigAmbitionsMP
                     T = Time.unscaledTime
                 };
                 RemotePlayerManager.ReadLocalAnimState(payload);
+                MPHandIk.FillPayload(payload);   // hand-IK mirror while pushing
 
                 if (MPServer.IsRunning)
                     MPServer.BroadcastPlayerPosition(payload);

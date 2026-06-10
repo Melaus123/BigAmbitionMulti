@@ -316,6 +316,10 @@ namespace BigAmbitionsMP
         /// cart etc.); the script-stripped clone needs them mirrored or a
         /// state can be entered yet render at blend weight 0.</summary>
         public List<float> LayerW { get; set; } = new();
+        /// <summary>Hand-IK mirror while pushing an open vehicle (else empty):
+        /// [Lx,Ly,Lz, Rx,Ry,Rz, Lweight,Rweight] — IK target positions in
+        /// VEHICLE-local space + Animation Rigging hand-rig weights.</summary>
+        public List<float> IkT { get; set; } = new();
     }
 
     /// <summary>One animator trigger fired by a player (one-off action animation).</summary>

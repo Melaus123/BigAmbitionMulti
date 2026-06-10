@@ -85,7 +85,8 @@ namespace BigAmbitionsMP
         public void ApplyAnimState(Dictionary<int, float>? floats,
                                    List<int>? trueBools,
                                    Dictionary<int, int>? ints,
-                                   List<float>? layerWeights = null)
+                                   List<float>? layerWeights = null,
+                                   List<float>? ikTargets = null)
         {
             if (floats != null)
                 foreach (var kv in floats) _targetF[kv.Key] = kv.Value;
@@ -95,6 +96,7 @@ namespace BigAmbitionsMP
             if (trueBools != null)
                 foreach (var b in trueBools) _trueB.Add(b);
             _layerW = layerWeights;
+            _ikT = (ikTargets != null && ikTargets.Count >= 8) ? ikTargets : null;
         }
 
         // Mirrored animator-layer weights.  The clone's game scripts are
@@ -102,6 +104,39 @@ namespace BigAmbitionsMP
         // ENTERED (transitions are parameter-driven) yet render at weight 0.
         // That was the cart-pusher bug: push state active, blend invisible.
         private List<float>? _layerW;
+
+        // Mirrored hand-IK (pushing): vehicle-local target positions + rig
+        // weights from the sender, applied to the clone's own constraints.
+        private List<float>? _ikT;
+        private MPHandIk.Refs? _ikRefs;
+        private bool _ikSearched;
+        private bool _ikActive;
+
+        private void TickHandIk()
+        {
+            if (RideAttach != null && _ikT != null)
+            {
+                if (!_ikSearched) { _ikSearched = true; _ikRefs = MPHandIk.Discover(transform, "clone:" + name); }
+                var r = _ikRefs;
+                if (r == null || r.LTarget == null || r.RTarget == null) return;
+                r.LTarget.position = RideAttach.TransformPoint(new Vector3(_ikT[0], _ikT[1], _ikT[2]));
+                r.RTarget.position = RideAttach.TransformPoint(new Vector3(_ikT[3], _ikT[4], _ikT[5]));
+                MPHandIk.WriteWeight(r, r.LRig, _ikT[6]);
+                MPHandIk.WriteWeight(r, r.RRig, _ikT[7]);
+                _ikActive = true;
+            }
+            else if (_ikActive)
+            {
+                // Stopped pushing — release the hands.
+                _ikActive = false;
+                var r = _ikRefs;
+                if (r != null)
+                {
+                    MPHandIk.WriteWeight(r, r.LRig, 0f);
+                    MPHandIk.WriteWeight(r, r.RRig, 0f);
+                }
+            }
+        }
 
         /// <summary>Queues a one-off trigger to fire on the next frame.</summary>
         public void FireTrigger(int paramIndex)
@@ -177,6 +212,8 @@ namespace BigAmbitionsMP
                 transform.position = Vector3.Lerp(transform.position, predicted, k);
                 transform.rotation = Quaternion.Slerp(transform.rotation, TargetRotation, k);
             }
+
+            TickHandIk();   // mirrored hand-IK while pushing (and release after)
 
             // Mirror the owner's real animator state (no local guessing).
             if (Anim != null)
@@ -298,7 +335,7 @@ namespace BigAmbitionsMP
             if (mover != null)
             {
                 mover.SetTarget(new Vector3(p.X, p.Y, p.Z), Quaternion.Euler(0f, p.RotY, 0f), p.T);
-                mover.ApplyAnimState(p.AnimF, p.AnimB, p.AnimI, p.LayerW);
+                mover.ApplyAnimState(p.AnimF, p.AnimB, p.AnimI, p.LayerW, p.IkT);
             }
             else
             {
