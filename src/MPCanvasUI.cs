@@ -867,6 +867,7 @@ namespace BigAmbitionsMP
         }
 
         private bool _dockBuildFailed;
+        private Sprite? _dockSprite;
 
         private void BuildDock()
         {
@@ -877,9 +878,12 @@ namespace BigAmbitionsMP
                 _dockRT.anchorMin = _dockRT.anchorMax = _dockRT.pivot = new Vector2(0.5f, 0f);
                 _dockRT.anchoredPosition = new Vector2(0f, 120f);
                 _dockRT.sizeDelta = new Vector2(700f, 212f);
+                // Same rounded-corner source the chat window uses: the captured
+                // menu sprite is DEAD in-game — fall back to our immortal one.
+                _dockSprite = IsAlive(_panelSprite) ? _panelSprite : EnsureRoundedSprite();
                 var bg = _dock.AddComponent<Image>();
                 bg.color = new Color(0.07f, 0.08f, 0.11f, 0.96f);
-                if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }
+                if (_dockSprite != null) { try { bg.sprite = _dockSprite; bg.type = Image.Type.Sliced; } catch { } }
 
                 // Header band - chat title-bar look; title + red X.
                 var hdr = MakeGO("Hdr", _dock.transform);
@@ -887,7 +891,7 @@ namespace BigAmbitionsMP
                 Stretch(hrt, 0f, 0f, 0f, 28f, top: true);
                 var hImg = hdr.AddComponent<Image>();
                 hImg.color = new Color(0.15f, 0.18f, 0.27f, 1f);
-                if (_panelSprite != null) { try { hImg.sprite = _panelSprite; hImg.type = Image.Type.Sliced; } catch { } }
+                if (_dockSprite != null) { try { hImg.sprite = _dockSprite; hImg.type = Image.Type.Sliced; } catch { } }
                 _dockTitle = MakeLabel(hdr.transform, "", 14, C_WHITE, 14f, 0f, 300f, 28f, TextAlignmentOptions.Left);
                 ApplyFont(_dockTitle);
                 var (xRT, xLbl) = MakeDockButton("X", default, 30f, new Color(0.45f, 0.22f, 0.19f, 1f), 20f);

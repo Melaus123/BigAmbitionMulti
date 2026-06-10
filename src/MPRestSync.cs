@@ -163,7 +163,19 @@ namespace BigAmbitionsMP
                 int rem = RemainingActivityMinutes();
                 if (need <= rem + 1) return;
 
+                // The cached wrapper is INTERFACE-typed (IPlayerActivity exposes
+                // no fields) — cast down to the concrete activity class first.
+                object target = act;
                 var t = act.GetType();
+                try
+                {
+                    var b = act as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase;
+                    string? full = b?.TryCast<Il2CppSystem.Object>()?.GetIl2CppType()?.FullName;
+                    var ct = full != null ? VehicleManager.FindGameType(full) : null;
+                    if (ct != null && b != null) { target = Activator.CreateInstance(ct, b.Pointer); t = ct; }
+                }
+                catch { }
+
                 if (!_durProps.TryGetValue(t, out var prop))
                 {
                     prop = null;
@@ -175,9 +187,9 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Rest] duration field for {t.Name}: {(prop != null ? prop.Name : "NOT FOUND")}");
                 }
                 if (prop == null) return;
-                int total = Convert.ToInt32(prop.GetValue(act) ?? 0);
+                int total = Convert.ToInt32(prop.GetValue(target) ?? 0);
                 int delta = (int)Math.Ceiling(need - rem);
-                prop.SetValue(act, total + delta);
+                prop.SetValue(target, total + delta);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] EnsureActivityCovers: {ex.Message}"); }
         }
