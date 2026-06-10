@@ -1462,6 +1462,22 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_ApplyFilters] {ex.Message}"); }
             }
+
+            // Taxi-crash bisect: all the prefix lines above print BEFORE the
+            // game's own filter body runs.  This EXIT line proves whether the
+            // native ApplyFilters survived — its absence convicts the body.
+            static void Postfix()
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                Plugin.Logger.LogInfo("[TaxiProbe] EXIT CityMapFilters.ApplyFilters ok");
+            }
+
+            static Exception? Finalizer(Exception? __exception)
+            {
+                if (__exception != null)
+                    Plugin.Logger.LogError($"[TaxiProbe] EXCEPTION in CityMapFilters.ApplyFilters: {__exception}");
+                return __exception;
+            }
         }
 
         // ── FIX: spurious hover re-entry pulses (the "highlight leak") ────────
@@ -1635,6 +1651,9 @@ namespace BigAmbitionsMP
                 var targets = new (string type, string method)[]
                 {
                     ("CityMap",                  "ToggleTaxiMode"),
+                    ("CityMap",                  "Init"),
+                    ("CityMap",                  "UpdateNonePermanentPointOfInterests"),
+                    ("CityMap",                  "FocusOnBuilding"),
                     ("TaxiController",           "OnClickToUseTaxi"),
                     ("TaxiController",           "RequestVehicleStop"),
                     ("PermanentTaxiController",  "OnClickToUseTaxi"),
@@ -1648,7 +1667,7 @@ namespace BigAmbitionsMP
                     var m = t?.GetMethod(mn, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static);
                     if (m != null) { n++; yield return m; }
                 }
-                Plugin.Logger.LogInfo($"[TaxiProbe] breadcrumb probes bound: {n}/6");
+                Plugin.Logger.LogInfo($"[TaxiProbe] breadcrumb probes bound: {n}/9");
             }
 
             static void Prefix(System.Reflection.MethodBase __originalMethod)
