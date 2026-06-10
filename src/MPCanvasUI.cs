@@ -390,10 +390,16 @@ namespace BigAmbitionsMP
             // pulses while chat lines are unread (window closed).
             MPPhoneButton.Tick(IsInGame(), MPServer.IsRunning || MPClient.IsConnected);
             MPPhoneButton.TickPulse(_mpWinVisible);
+            MPPhoneButton.TickHubPulse(_hubVisible);
             if (MPPhoneButton.OpenRequested)
             {
                 MPPhoneButton.OpenRequested = false;
                 if (mpInGame) ToggleMpWindow();
+            }
+            if (MPPhoneButton.HubOpenRequested)
+            {
+                MPPhoneButton.HubOpenRequested = false;
+                if (mpInGame) _hubVisible = !_hubVisible;
             }
 
             // (F9 toggle removed — the BizPhone Chat button + [X] are the toggles.)
@@ -462,7 +468,7 @@ namespace BigAmbitionsMP
             // SOLE OWNER of the input-suppression flag: computed fresh every
             // frame from live contributions — a stale latch once locked a
             // player's keyboard permanently (2026-06-10).
-            MPChat.SuppressGameInput = _chatSuppress || _restUiHover;
+            MPChat.SuppressGameInput = _chatSuppress || _restUiHover || _hubUiHover;
 
             if (!MPServer.IsRunning && !MPClient.IsConnected) return;
 
@@ -1015,6 +1021,251 @@ namespace BigAmbitionsMP
             return (rt, lbl);
         }
 
+        // ── Business Hub window (wave 1: send money + loans) ──────────────────
+        private bool _hubVisible;
+        private bool _hubUiHover;
+        private GameObject? _hub;            private RectTransform? _hubRT;
+        private TextMeshProUGUI? _hubBalance, _hubAmountLbl, _hubTermsLbl, _hubOffers, _hubLoans;
+        private RectTransform? _hubXRT, _hubSendRT, _hubLoanRT;
+        private RectTransform? _hubAm10kM, _hubAm1kM, _hubAm1kP, _hubAm10kP;
+        private readonly RectTransform?[] _hubChipRT = new RectTransform?[4];
+        private readonly Image?[] _hubChipImg = new Image?[4];
+        private readonly TextMeshProUGUI?[] _hubChipLbl = new TextMeshProUGUI?[4];
+        private readonly string[] _hubChipWho = new string[4];
+        private readonly RectTransform?[] _hubAcceptRT = new RectTransform?[2];
+        private readonly RectTransform?[] _hubDeclineRT = new RectTransform?[2];
+        private readonly string[] _hubOfferIds = new string[2];
+        private string _hubTarget = "";
+        private double _hubAmount = 10000;
+        private int _hubSeenVersion = -1;
+        private string _hubRosterSig = "";
+
+        private void TickHubWindow()
+        {
+            try
+            {
+                if (_hub == null)
+                {
+                    if (!_hubVisible || _canvasGO == null) return;
+                    BuildHubWindow();
+                    if (_hub == null) return;
+                }
+                if (_hub!.activeSelf != _hubVisible) _hub.SetActive(_hubVisible);
+                _hubUiHover = false;
+                if (!_hubVisible) return;
+
+                // Player chips (everyone but me).
+                var players = MPRestSync.AllPlayers();
+                string sig = string.Join(",", players) + "|" + _hubTarget;
+                if (sig != _hubRosterSig)
+                {
+                    _hubRosterSig = sig;
+                    int slot = 0;
+                    bool targetOk = false;
+                    foreach (var pl in players)
+                    {
+                        if (pl == MPConfig.PlayerId || slot >= 4) continue;
+                        _hubChipWho[slot] = pl;
+                        if (_hubChipLbl[slot] != null) _hubChipLbl[slot]!.text = pl;
+                        _hubChipRT[slot]?.gameObject.SetActive(true);
+                        if (_hubTarget == pl) targetOk = true;
+                        slot++;
+                    }
+                    for (int i = slot; i < 4; i++) { _hubChipWho[i] = ""; _hubChipRT[i]?.gameObject.SetActive(false); }
+                    if (!targetOk) _hubTarget = slot > 0 ? _hubChipWho[0] : "";
+                    for (int i = 0; i < 4; i++)
+                        if (_hubChipImg[i] != null)
+                            _hubChipImg[i]!.color = _hubChipWho[i] == _hubTarget && _hubTarget != ""
+                                ? MpPurple : new Color(0.18f, 0.20f, 0.27f, 1f);
+                }
+
+                // Balance + amount + auto loan terms.
+                if (_hubBalance != null) _hubBalance.text = $"balance  <b>${MPHub.MyMoney():N0}</b>";
+                if (_hubAmountLbl != null) _hubAmountLbl.text = $"<b>${_hubAmount:N0}</b>";
+                if (_hubTermsLbl != null)
+                {
+                    double di = Math.Max(50, Math.Round(_hubAmount * 0.01 / 50) * 50);
+                    double dp = Math.Max(100, Math.Round(_hubAmount / 20 / 100) * 100);
+                    _hubTermsLbl.text = $"<color=#9AA3B2>loan terms: ${di:N0}/day interest · ${dp:N0}/day payment (~20 days)</color>";
+                }
+
+                // Offers + loans lists (rebuild on Version change).
+                if (MPHub.Version != _hubSeenVersion)
+                {
+                    _hubSeenVersion = MPHub.Version;
+                    var so = new System.Text.StringBuilder();
+                    for (int i = 0; i < 2; i++)
+                    {
+                        bool has = i < MPHub.IncomingOffers.Count;
+                        _hubAcceptRT[i]?.gameObject.SetActive(has);
+                        _hubDeclineRT[i]?.gameObject.SetActive(has);
+                        _hubOfferIds[i] = "";
+                        if (!has) continue;
+                        var o = MPHub.IncomingOffers[i];
+                        _hubOfferIds[i] = o.Id;
+                        so.Append($"<color=#FFD27A>{o.From}</color> offers <b>${o.Principal:N0}</b>  (${o.DailyInterest:N0}/day int · ${o.DailyPayment:N0}/day pay)\n");
+                    }
+                    if (_hubOffers != null) _hubOffers.text = so.Length > 0 ? so.ToString() : "<color=#6B7384>no pending offers</color>";
+
+                    var sl = new System.Text.StringBuilder();
+                    foreach (var ln in MPHub.Loans)
+                    {
+                        bool meB = ln.Borrower == MPConfig.PlayerId;
+                        bool meL = ln.Lender == MPConfig.PlayerId;
+                        if (!meB && !meL) continue;
+                        sl.Append(meB
+                            ? $"you owe <color=#CFE3FF>{ln.Lender}</color>: <b>${ln.Remaining:N0}</b> left (${ln.DailyInterest:N0}+${ln.DailyPayment:N0}/day)\n"
+                            : $"<color=#8CE08C>{ln.Borrower}</color> owes you: <b>${ln.Remaining:N0}</b> left (${ln.DailyInterest:N0}+${ln.DailyPayment:N0}/day)\n");
+                    }
+                    if (_hubLoans != null) _hubLoans.text = sl.Length > 0 ? sl.ToString() : "<color=#6B7384>no active loans</color>";
+                }
+
+                // Hover + clicks.
+                var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+                _hubUiHover = RectHit(_hubRT, mp);
+                if (!Input.GetMouseButtonDown(0) || !_hubUiHover) return;
+
+                if (RectHit(_hubXRT, mp)) { _hubVisible = false; return; }
+                for (int i = 0; i < 4; i++)
+                    if (_hubChipRT[i] != null && _hubChipRT[i]!.gameObject.activeSelf && RectHit(_hubChipRT[i], mp))
+                    { _hubTarget = _hubChipWho[i]; _hubRosterSig = ""; return; }
+
+                double step = 0;
+                if      (RectHit(_hubAm10kM, mp)) step = -10000;
+                else if (RectHit(_hubAm1kM,  mp)) step = -1000;
+                else if (RectHit(_hubAm1kP,  mp)) step = 1000;
+                else if (RectHit(_hubAm10kP, mp)) step = 10000;
+                if (step != 0) { _hubAmount = Math.Max(1000, _hubAmount + step); return; }
+
+                if (RectHit(_hubSendRT, mp)) { MPHub.SendMoney(_hubTarget, (float)_hubAmount); return; }
+                if (RectHit(_hubLoanRT, mp))
+                {
+                    double di = Math.Max(50, Math.Round(_hubAmount * 0.01 / 50) * 50);
+                    double dp = Math.Max(100, Math.Round(_hubAmount / 20 / 100) * 100);
+                    MPHub.OfferLoan(_hubTarget, (float)_hubAmount, (float)di, (float)dp);
+                    return;
+                }
+                for (int i = 0; i < 2; i++)
+                {
+                    if (_hubOfferIds[i] == "") continue;
+                    if (RectHit(_hubAcceptRT[i], mp))  { MPHub.AnswerOffer(_hubOfferIds[i], true);  return; }
+                    if (RectHit(_hubDeclineRT[i], mp)) { MPHub.AnswerOffer(_hubOfferIds[i], false); return; }
+                }
+            }
+            catch { }
+        }
+
+        private void BuildHubWindow()
+        {
+            try
+            {
+                _hub = MakeGO("BAMP_Hub", _canvasGO!.transform);
+                _hubRT = _hub.GetComponent<RectTransform>();
+                _hubRT.anchorMin = _hubRT.anchorMax = _hubRT.pivot = new Vector2(0.5f, 0.5f);
+                _hubRT.anchoredPosition = new Vector2(220f, 0f);
+                _hubRT.sizeDelta = new Vector2(520f, 380f);
+                var sprite = IsAlive(_panelSprite) ? _panelSprite : EnsureRoundedSprite();
+                var bg = _hub.AddComponent<Image>();
+                bg.color = new Color(0.07f, 0.08f, 0.11f, 0.97f);
+                if (sprite != null) { try { bg.sprite = sprite; bg.type = Image.Type.Sliced; } catch { } }
+
+                var hdr = MakeGO("Hdr", _hub.transform);
+                var hrt = hdr.GetComponent<RectTransform>();
+                Stretch(hrt, 0f, 0f, 0f, 28f, top: true);
+                var hImg = hdr.AddComponent<Image>();
+                hImg.color = new Color(0.18f, 0.23f, 0.36f, 1f);
+                if (sprite != null) { try { hImg.sprite = sprite; hImg.type = Image.Type.Sliced; } catch { } }
+                var title = MakeLabel(hdr.transform, "Business Hub", 14, C_WHITE, 12f, 0f, 200f, 28f, TextAlignmentOptions.Left);
+                ApplyFont(title);
+                _hubBalance = MakeLabel(hdr.transform, "", 12, C_LBLGREY, 0f, 0f, 220f, 28f, TextAlignmentOptions.Right);
+                ApplyFont(_hubBalance);
+                var brt = _hubBalance.rectTransform;
+                brt.anchorMin = brt.anchorMax = brt.pivot = new Vector2(1f, 0.5f);
+                brt.anchoredPosition = new Vector2(-44f, 0f); brt.sizeDelta = new Vector2(220f, 28f);
+                var (xRT, xLbl) = MakeHubButton("X", new Vector2(0f, 0f), 28f, new Color(0.56f, 0.27f, 0.20f, 1f), 20f, sprite);
+                xRT.SetParent(hdr.transform, false);
+                xRT.anchorMin = xRT.anchorMax = xRT.pivot = new Vector2(1f, 0.5f);
+                xRT.anchoredPosition = new Vector2(-7f, 0f);
+                xLbl.fontSize = 12;
+                _hubXRT = xRT;
+
+                var toLbl = MakeLabel(_hub.transform, "to:", 12, C_LBLGREY, 14f, -38f, 30f, 22f, TextAlignmentOptions.Left);
+                ApplyFont(toLbl);
+                for (int i = 0; i < 4; i++)
+                {
+                    var (crt, clbl) = MakeHubButton("", new Vector2(46f + i * 112f, 0f), 106f, new Color(0.18f, 0.20f, 0.27f, 1f), 24f, sprite);
+                    crt.anchorMin = crt.anchorMax = crt.pivot = new Vector2(0f, 1f);
+                    crt.anchoredPosition = new Vector2(46f + i * 112f, -36f);
+                    _hubChipRT[i] = crt; _hubChipLbl[i] = clbl;
+                    _hubChipImg[i] = crt.GetComponent<Image>();
+                    crt.gameObject.SetActive(false);
+                }
+
+                var amLbl = MakeLabel(_hub.transform, "amount:", 12, C_LBLGREY, 14f, -72f, 64f, 22f, TextAlignmentOptions.Left);
+                ApplyFont(amLbl);
+                _hubAmountLbl = MakeLabel(_hub.transform, "", 20, C_WHITE, 84f, -68f, 140f, 28f, TextAlignmentOptions.Left);
+                ApplyFont(_hubAmountLbl);
+                (_hubAm10kM, _) = MakeHubButton("-10k", new Vector2(234f, 0f), 52f, new Color(0.18f, 0.20f, 0.27f, 1f), 24f, sprite); SetTopLeft(_hubAm10kM, 234f, -70f);
+                (_hubAm1kM,  _) = MakeHubButton("-1k",  new Vector2(290f, 0f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f), 24f, sprite); SetTopLeft(_hubAm1kM, 290f, -70f);
+                (_hubAm1kP,  _) = MakeHubButton("+1k",  new Vector2(340f, 0f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f), 24f, sprite); SetTopLeft(_hubAm1kP, 340f, -70f);
+                (_hubAm10kP, _) = MakeHubButton("+10k", new Vector2(390f, 0f), 52f, new Color(0.18f, 0.20f, 0.27f, 1f), 24f, sprite); SetTopLeft(_hubAm10kP, 390f, -70f);
+
+                (_hubSendRT, _) = MakeHubButton("Send money", new Vector2(14f, 0f), 160f, new Color(0.19f, 0.42f, 0.67f, 1f), 28f, sprite); SetTopLeft(_hubSendRT, 14f, -104f);
+                (_hubLoanRT, _) = MakeHubButton("Offer as loan", new Vector2(182f, 0f), 160f, new Color(0.24f, 0.50f, 0.33f, 1f), 28f, sprite); SetTopLeft(_hubLoanRT, 182f, -104f);
+                _hubTermsLbl = MakeLabel(_hub.transform, "", 11, C_LBLGREY, 14f, -136f, 492f, 18f, TextAlignmentOptions.Left);
+                ApplyFont(_hubTermsLbl);
+
+                var offersHdr = MakeLabel(_hub.transform, "incoming offers", 11, C_LBLGREY, 14f, -160f, 200f, 16f, TextAlignmentOptions.Left);
+                ApplyFont(offersHdr);
+                _hubOffers = MakeLabel(_hub.transform, "", 12, C_WHITE, 14f, -178f, 380f, 56f, TextAlignmentOptions.TopLeft);
+                ApplyFont(_hubOffers);
+                for (int i = 0; i < 2; i++)
+                {
+                    var (aRT, _) = MakeHubButton("accept",  new Vector2(0f, 0f), 58f, new Color(0.24f, 0.50f, 0.33f, 1f), 18f, sprite); SetTopLeft(aRT, 400f, -176f - i * 22f);
+                    var (dRT, _) = MakeHubButton("decline", new Vector2(0f, 0f), 58f, new Color(0.45f, 0.24f, 0.22f, 1f), 18f, sprite); SetTopLeft(dRT, 462f, -176f - i * 22f);
+                    _hubAcceptRT[i] = aRT; _hubDeclineRT[i] = dRT;
+                    aRT.gameObject.SetActive(false); dRT.gameObject.SetActive(false);
+                }
+
+                var loansHdr = MakeLabel(_hub.transform, "active loans", 11, C_LBLGREY, 14f, -242f, 200f, 16f, TextAlignmentOptions.Left);
+                ApplyFont(loansHdr);
+                _hubLoans = MakeLabel(_hub.transform, "", 12, C_WHITE, 14f, -260f, 492f, 110f, TextAlignmentOptions.TopLeft);
+                ApplyFont(_hubLoans);
+
+                _hubSeenVersion = -1;
+                _hub.SetActive(false);
+                Plugin.Logger.LogInfo("[Hub] window built OK.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError($"[Hub] BuildHubWindow FAILED: {ex}");
+                try { if (_hub != null) { UnityEngine.Object.Destroy(_hub); _hub = null; } } catch { }
+                _hubVisible = false;
+            }
+        }
+
+        private void SetTopLeft(RectTransform? rt, float x, float y)
+        {
+            if (rt == null) return;
+            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0f, 1f);
+            rt.anchoredPosition = new Vector2(x, y);
+        }
+
+        private (RectTransform rt, TextMeshProUGUI lbl) MakeHubButton(string label, Vector2 pos, float w, Color bg, float h, Sprite? sprite)
+        {
+            var go = MakeGO("BAMP_Hub_" + label + pos.x, _hub!.transform);
+            var rt = go.GetComponent<RectTransform>();
+            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0f, 0f);
+            rt.anchoredPosition = pos; rt.sizeDelta = new Vector2(w, h);
+            var img = go.AddComponent<Image>();
+            img.color = bg;
+            if (sprite != null) { try { img.sprite = sprite; img.type = Image.Type.Sliced; } catch { } }
+            var lbl = MakeLabel(go.transform, label, 11, C_WHITE, 0f, 0f, w, h, TextAlignmentOptions.Center);
+            ApplyFont(lbl);
+            var lrt = lbl.rectTransform; lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one; lrt.offsetMin = Vector2.zero; lrt.offsetMax = Vector2.zero;
+            return (rt, lbl);
+        }
+
         private static void WriteWorldClock(double totalHours)
         {
             if (totalHours < 0) totalHours = 0;
@@ -1095,6 +1346,7 @@ namespace BigAmbitionsMP
                 MPHandIk.Reset();                      // cached refs die with the scene
                 MPPriceSync.Reset();                   // price hashes are per-session
                 MPRestSync.Reset();                    // votes/skip die with the session
+                MPHub.Reset(); _hubVisible = false;    // hub ledger is per-session
                 // The session-over lock is for the in-game world only — back at
                 // the menu the player is free to host/join again.
                 MPClient.SessionEnded = false;
@@ -1542,8 +1794,10 @@ namespace BigAmbitionsMP
             _pt = MPPerf.Begin(); MPPriceSync.Tick();          MPPerf.End("Price",    _pt);   // live retail prices of own businesses (both roles)
             _pt = MPPerf.Begin(); MPRestSync.Tick();           MPPerf.End("Rest",     _pt);   // votes, seated state, watchdog (0.5s)
             MPRestSync.HostSkipFrame();   // host clock executor — every frame for smoothness
+            MPHub.HostTick();             // loan ledger: daily interest/payment drafts
             TickRestBanner();
             TickRestUI();
+            TickHubWindow();
             _pt = MPPerf.Begin(); InteriorSync.Tick();         MPPerf.End("Interior", _pt);   // diff-push to subscribed clients
             _pt = MPPerf.Begin(); GameStatePatcher.DrainPendingLogoRefreshes(); MPPerf.End("LogoRefresh", _pt);
 

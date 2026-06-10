@@ -305,6 +305,27 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.LoanOffer:
+                {
+                    var lo = env.GetPayload<LoanOfferPayload>();
+                    if (lo != null) GameStatePatcher.EnqueueOnMainThread(() => MPHub.ReceiveOffer(lo));
+                    break;
+                }
+
+                case MessageType.LoanState:
+                {
+                    var ls = env.GetPayload<LoanStatePayload>();
+                    if (ls != null) GameStatePatcher.EnqueueOnMainThread(() => MPHub.ApplyLoanState(ls));
+                    break;
+                }
+
+                case MessageType.MoneyAdjust:
+                {
+                    var ma = env.GetPayload<MoneyAdjustPayload>();
+                    if (ma != null) GameStatePatcher.EnqueueOnMainThread(() => MPHub.ApplyMoneyDelta(ma.Amount, ma.Reason));
+                    break;
+                }
+
                 default:
                     Plugin.Logger.LogWarning($"[Client] Unknown message type: {env.Type}");
                     break;
@@ -772,6 +793,13 @@ namespace BigAmbitionsMP
 
         /// <summary>Sends a chat line to the host, which relays it to everyone
         /// (including us) so the log stays consistent and host-ordered.</summary>
+        /// <summary>Sends a Business Hub payload to the host.</summary>
+        public static void SendHub<T>(MessageType type, T payload) where T : class
+        {
+            if (!IsConnected || payload == null) return;
+            Send(MessageEnvelope.Create(type, MPConfig.PlayerId, payload));
+        }
+
         /// <summary>Sends this player's rest-vote (started/ended a rest activity).</summary>
         public static void SendRestVote(RestVotePayload p)
         {

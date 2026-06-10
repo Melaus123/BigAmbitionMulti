@@ -60,6 +60,8 @@ namespace BigAmbitionsMP
             _recopyButtons = null; _recopyGo = null; _recopyIcon = null; _recopyAt = 0f;
             _badgeGO = null; _badgeText = null;
             _keeperRT = null; _keeperNext = 0f; _keeperLogs = 0;
+            _hubIconRT = null; _hubIconBaseScale = Vector3.one;
+            _hubBadgeGO = null; _hubBadgeText = null;
         }
 
         /// <summary>Unread-message pulse: while the MP window is closed and chat
@@ -286,8 +288,127 @@ namespace BigAmbitionsMP
             _recopyAt = Time.unscaledTime + 0.75f;
 
             _seenChatVersion = MPChat.Version;   // pre-existing lines aren't "unread"
+
+            // ── Second app: Business Hub (fills the open row-5 slot). ────────
+            try { InjectHubButton(buttons, src); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[PhoneBtn] hub inject: {ex.Message}"); }
+
             _injected = true;
             Plugin.Logger.LogInfo("[PhoneBtn] Chat button injected.");
+        }
+
+        // Hub button state (mirrors the chat button's).
+        public static volatile bool HubOpenRequested;
+        private static RectTransform? _hubIconRT;
+        private static Vector3 _hubIconBaseScale = Vector3.one;
+        private static GameObject? _hubBadgeGO;
+        private static TMPro.TextMeshProUGUI? _hubBadgeText;
+        private static int _seenHubVersion;
+
+        private static void InjectHubButton(Transform buttons, GameObject src)
+        {
+            const string HubName = "BAMP_HubButton";
+            if (buttons.Find(HubName) != null) return;
+            var go = UnityEngine.Object.Instantiate(src, buttons);
+            go.name = HubName;
+
+            foreach (var c in go.GetComponents(Il2CppType.Of<Component>()))
+            {
+                if (c == null) continue;
+                if (c.GetIl2CppType().Name == "SmartphoneAppButton") UnityEngine.Object.Destroy(c);
+            }
+            foreach (var c in go.GetComponentsInChildren(Il2CppType.Of<Component>(), true))
+            {
+                var cc = c.TryCast<Component>();
+                if (cc == null) continue;
+                if (cc.GetIl2CppType().Name.Contains("Localization"))
+                { var b = cc.TryCast<Behaviour>(); if (b != null) b.enabled = false; }
+            }
+            foreach (var txt in go.GetComponentsInChildren<TMPro.TMP_Text>(true))
+                if (txt != null) txt.text = "Business";
+
+            var icon = LoadIconFile("BAMP_HubIcon.png");
+            Image? target = null;
+            var images = go.GetComponentsInChildren<Image>(true);
+            foreach (var img in images)
+            {
+                if (img == null) continue;
+                if (img.gameObject.name.IndexOf("icon", StringComparison.OrdinalIgnoreCase) >= 0) { target = img; break; }
+                if (target == null || img.rectTransform.rect.width > target.rectTransform.rect.width) target = img;
+            }
+            if (icon != null && target != null)
+            {
+                target.sprite = icon;
+                target.color  = Color.white;
+                target.type   = Image.Type.Simple;
+                target.preserveAspect = true;
+            }
+            foreach (var img in images)
+            {
+                if (img == null || ReferenceEquals(img, target)) continue;
+                img.color = new Color(1f, 1f, 1f, 0f);
+            }
+            _hubIconRT = target != null ? target.rectTransform : null;
+
+            var btnComp = go.GetComponent(Il2CppType.Of<Button>());
+            var btn = btnComp != null ? btnComp.TryCast<Button>() : null;
+            if (btn == null) btn = go.AddComponent(Il2CppType.Of<Button>())!.TryCast<Button>();
+            if (btn != null)
+            {
+                btn.onClick = new Button.ButtonClickedEvent();
+                btn.onClick.AddListener((UnityAction)(() => { HubOpenRequested = true; }));
+                if (target != null) btn.targetGraphic = target;
+            }
+            go.SetActive(true);
+
+            try
+            {
+                var badge = go.transform.Find("Badge");
+                if (badge != null)
+                {
+                    _hubBadgeGO = badge.gameObject;
+                    foreach (var c in badge.GetComponents(Il2CppType.Of<Component>()))
+                    {
+                        var cc = c.TryCast<Behaviour>();
+                        if (cc != null && cc.GetIl2CppType().Name == "Badge") cc.enabled = false;
+                    }
+                    var btx = badge.Find("BadgeText");
+                    _hubBadgeText = btx != null ? btx.GetComponent<TMPro.TextMeshProUGUI>() : null;
+                    _hubBadgeGO.SetActive(false);
+                }
+            }
+            catch { }
+
+            try { LayoutRebuilder.ForceRebuildLayoutImmediate(buttons.TryCast<RectTransform>()); } catch { }
+            CopyIconMetricsFromSibling(buttons, go, target);
+            _seenHubVersion = MPHub.Version;
+            Plugin.Logger.LogInfo("[PhoneBtn] Business Hub button injected.");
+        }
+
+        /// <summary>Pulse + badge for the HUB button while offers are pending
+        /// and the hub window is closed.</summary>
+        public static void TickHubPulse(bool windowVisible)
+        {
+            if (_hubIconRT == null) return;
+            try
+            {
+                bool pending = MPHub.PendingCount > 0;
+                if (windowVisible) _seenHubVersion = MPHub.Version;
+                if (!pending || windowVisible)
+                {
+                    if (_hubIconRT.localScale != _hubIconBaseScale) _hubIconRT.localScale = _hubIconBaseScale;
+                    if (_hubBadgeGO != null && _hubBadgeGO.activeSelf) _hubBadgeGO.SetActive(false);
+                    return;
+                }
+                float s = 1f + 0.06f * (1f + Mathf.Sin(Time.unscaledTime * 5f));
+                _hubIconRT.localScale = _hubIconBaseScale * s;
+                if (_hubBadgeGO != null)
+                {
+                    if (!_hubBadgeGO.activeSelf) _hubBadgeGO.SetActive(true);
+                    if (_hubBadgeText != null) _hubBadgeText.text = Mathf.Clamp(MPHub.PendingCount, 1, 9).ToString();
+                }
+            }
+            catch { _hubIconRT = null; }
         }
 
         // ── Phone expansion (CollapsibleWindow-aware) ─────────────────────────
@@ -530,6 +651,29 @@ namespace BigAmbitionsMP
                 return sb.ToString();
             }
             catch { return tr.name; }
+        }
+
+        /// <summary>Load any icon PNG from the plugins folder (owned texture).</summary>
+        private static Sprite? LoadIconFile(string file)
+        {
+            try
+            {
+                string path = System.IO.Path.Combine(BepInEx.Paths.PluginPath, file);
+                if (!System.IO.File.Exists(path))
+                {
+                    Plugin.Logger.LogWarning($"[PhoneBtn] icon not found: {path}");
+                    return null;
+                }
+                var bytes = System.IO.File.ReadAllBytes(path);
+                var tex = new Texture2D(2, 2);
+                tex.hideFlags = HideFlags.HideAndDontSave;
+                if (!ImageConversion.LoadImage(tex, (Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<byte>)bytes))
+                { Plugin.Logger.LogWarning($"[PhoneBtn] icon decode failed: {file}"); return null; }
+                var sp = Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f));
+                sp.hideFlags = HideFlags.HideAndDontSave;
+                return sp;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[PhoneBtn] LoadIconFile({file}): {ex.Message}"); return null; }
         }
 
         private static Sprite? LoadIcon()

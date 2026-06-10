@@ -696,6 +696,27 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.MoneyTransfer:
+                {
+                    var mt = env.GetPayload<MoneyTransferPayload>();
+                    if (mt != null) GameStatePatcher.EnqueueOnMainThread(() => MPHub.HostRouteTransfer(mt));
+                    break;
+                }
+
+                case MessageType.LoanOffer:
+                {
+                    var lo = env.GetPayload<LoanOfferPayload>();
+                    if (lo != null) GameStatePatcher.EnqueueOnMainThread(() => MPHub.HostRouteOffer(lo));
+                    break;
+                }
+
+                case MessageType.LoanAnswer:
+                {
+                    var la = env.GetPayload<LoanAnswerPayload>();
+                    if (la != null) GameStatePatcher.EnqueueOnMainThread(() => MPHub.HostHandleAnswer(la));
+                    break;
+                }
+
                 case MessageType.RestVote:
                 {
                     var rv = env.GetPayload<RestVotePayload>();
@@ -1928,6 +1949,34 @@ namespace BigAmbitionsMP
 
         /// <summary>Public wrapper around Broadcast so external code (e.g. Harmony patches) can use it.</summary>
         public static void BroadcastAny(MessageEnvelope env) => Broadcast(env);
+
+        /// <summary>Host: broadcast a Business Hub payload to every client.</summary>
+        public static void BroadcastHub<T>(MessageType type, T payload) where T : class
+        {
+            if (!_running || payload == null) return;
+            Broadcast(MessageEnvelope.Create(type, "host", payload));
+        }
+
+        /// <summary>Host: send a Business Hub payload to ONE player.</summary>
+        public static void SendHubTo<T>(string playerId, MessageType type, T payload) where T : class
+        {
+            if (!_running || payload == null || string.IsNullOrEmpty(playerId)) return;
+            try
+            {
+                foreach (var kv in _peerNames)
+                {
+                    if (kv.Value != playerId) continue;
+                    foreach (var peer in _clients)
+                        if (peer.Id == kv.Key)
+                        {
+                            Send(peer, MessageEnvelope.Create(type, "host", payload));
+                            return;
+                        }
+                }
+                Plugin.Logger.LogWarning($"[Server] hub message: '{playerId}' not connected.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendHubTo: {ex.Message}"); }
+        }
 
         /// <summary>Host: broadcast the consensus rest/skip state.</summary>
         public static void BroadcastRestState(RestSkipStatePayload p)

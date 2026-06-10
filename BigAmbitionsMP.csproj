@@ -158,5 +158,12 @@
     <Exec Condition="Exists('$(ProjectDir)assets\BAMP_ChatIcon.png')"
           Command="xcopy /Y &quot;$(ProjectDir)assets\BAMP_ChatIcon.png&quot; &quot;C:\BigAmbitions2\BepInEx\plugins\&quot;"
           ContinueOnError="true" />
+    <!-- Business Hub icon rides along too. -->
+    <Exec Condition="Exists('$(ProjectDir)assets\BAMP_HubIcon.png')"
+          Command="xcopy /Y &quot;$(ProjectDir)assets\BAMP_HubIcon.png&quot; &quot;C:\Program Files (x86)\Steam\steamapps\common\Big Ambitions\BepInEx\plugins\&quot;"
+          ContinueOnError="true" />
+    <Exec Condition="Exists('$(ProjectDir)assets\BAMP_HubIcon.png')"
+          Command="xcopy /Y &quot;$(ProjectDir)assets\BAMP_HubIcon.png&quot; &quot;C:\BigAmbitions2\BepInEx\plugins\&quot;"
+          ContinueOnError="true" />
   </Target>
 </Project>

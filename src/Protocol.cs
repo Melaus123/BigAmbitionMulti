@@ -85,6 +85,11 @@ namespace BigAmbitionsMP
         RetailPrices         = 101, // Any → Host → Others: live retail prices of a business the SENDER runs — keeps per-neighbourhood price competition fed with current numbers on every machine.
         RestVote             = 102, // Client → Host: this player started/ended a rest-class activity (consensus time-skip voting).
         RestSkipState        = 103, // Host → All: current votes + whether the consensus skip is running (banner + skip-detector stand-down).
+        MoneyTransfer        = 104, // Client → Host: "I sent $X to player Y" (sender already debited locally; host routes the credit).
+        LoanOffer            = 105, // Any → Host → target: a player offers another a loan (principal, daily interest, daily payment).
+        LoanAnswer           = 106, // Target → Host: accept/decline a loan offer.
+        LoanState            = 107, // Host → All: the authoritative active-loan ledger (Business Hub display).
+        MoneyAdjust          = 108, // Host → one player: credit/debit your wallet by Amount (transfer delivery, loan principal, daily loan payments).
     }
 
     // ── Envelope ───────────────────────────────────────────────────────────────
@@ -700,6 +705,53 @@ namespace BigAmbitionsMP
     }
 
     /// <summary>A single retail-shelf price tag.</summary>
+    /// <summary>Business Hub payloads (MessageTypes 104-108).</summary>
+    public class MoneyTransferPayload
+    {
+        public string From   { get; set; } = "";
+        public string To     { get; set; } = "";
+        public float  Amount { get; set; }
+    }
+
+    public class LoanOfferPayload
+    {
+        public string Id            { get; set; } = "";
+        public string From          { get; set; } = "";   // lender
+        public string To            { get; set; } = "";   // borrower
+        public float  Principal     { get; set; }
+        public float  DailyInterest { get; set; }
+        public float  DailyPayment  { get; set; }
+    }
+
+    public class LoanAnswerPayload
+    {
+        public string Id     { get; set; } = "";
+        public string From   { get; set; } = "";   // the borrower answering
+        public bool   Accept { get; set; }
+    }
+
+    public class LoanEntry
+    {
+        public string Id            { get; set; } = "";
+        public string Lender        { get; set; } = "";
+        public string Borrower      { get; set; } = "";
+        public float  Remaining     { get; set; }
+        public float  DailyInterest { get; set; }
+        public float  DailyPayment  { get; set; }
+    }
+
+    public class LoanStatePayload
+    {
+        public List<LoanEntry> Loans { get; set; } = new();
+    }
+
+    public class MoneyAdjustPayload
+    {
+        public string To     { get; set; } = "";
+        public float  Amount { get; set; }
+        public string Reason { get; set; } = "";
+    }
+
     /// <summary>One player's rest-vote (MessageType.RestVote).</summary>
     public class RestVotePayload
     {
