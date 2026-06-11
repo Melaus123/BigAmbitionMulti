@@ -473,7 +473,7 @@ namespace BigAmbitionsMP
             // SOLE OWNER of the input-suppression flag: computed fresh every
             // frame from live contributions — a stale latch once locked a
             // player's keyboard permanently (2026-06-10).
-            MPChat.SuppressGameInput = _chatSuppress || _restUiHover || _hubUiHover;
+            MPChat.SuppressGameInput = _chatSuppress || _restUiHover || _hubUiHover || _joinPopHover;
 
             if (!MPServer.IsRunning && !MPClient.IsConnected) return;
 
@@ -1181,6 +1181,104 @@ namespace BigAmbitionsMP
             ch.position = target;
             if (cc != null) cc.enabled = true;
             try { Physics.SyncTransforms(); } catch { }
+        }
+
+        // ── Mid-game join approval (HOST): a joiner parks at the door until
+        //    the host accepts or rejects (reject = banned until re-host). ────
+        private GameObject? _joinPop;
+        private RectTransform? _joinPopRT, _joinAcceptRT, _joinRejectRT;
+        private TextMeshProUGUI? _joinPopLbl;
+        private int _joinPopPeerId = -1;
+        private bool _joinPopHover;
+
+        private void TickJoinPopup()
+        {
+            try
+            {
+                _joinPopHover = false;
+                if (!MPServer.IsRunning) { if (_joinPop != null && _joinPop.activeSelf) _joinPop.SetActive(false); return; }
+                var pending = MPServer.PendingJoinList;
+                if (pending.Count == 0)
+                {
+                    _joinPopPeerId = -1;
+                    if (_joinPop != null && _joinPop.activeSelf) _joinPop.SetActive(false);
+                    return;
+                }
+                if (_joinPop == null)
+                {
+                    if (_canvasGO == null) return;
+                    var sprite = IsAlive(_panelSprite) ? _panelSprite : EnsureRoundedSprite();
+                    _joinPop = MakeGO("BAMP_JoinPop", _canvasGO.transform);
+                    _joinPopRT = _joinPop.GetComponent<RectTransform>();
+                    _joinPopRT.anchorMin = _joinPopRT.anchorMax = new Vector2(0.5f, 1f);
+                    _joinPopRT.pivot = new Vector2(0.5f, 1f);
+                    _joinPopRT.anchoredPosition = new Vector2(0f, -120f);
+                    _joinPopRT.sizeDelta = new Vector2(480f, 96f);
+                    var bg = _joinPop.AddComponent<Image>();
+                    bg.color = new Color(0.10f, 0.11f, 0.15f, 0.97f);
+                    if (sprite != null) { try { bg.sprite = sprite; bg.type = Image.Type.Sliced; } catch { } }
+                    _joinPopLbl = MakeLabel(_joinPop.transform, "", 14, C_WHITE, 16f, -12f, 448f, 26f, TextAlignmentOptions.Center);
+                    ApplyFont(_joinPopLbl);
+                    var hubSprite = sprite;
+                    var (aRT, aLbl) = MakeHubButton("Accept", Vector2.zero, 130f, new Color(0.24f, 0.50f, 0.33f, 1f), 32f, hubSprite);
+                    aRT.SetParent(_joinPop.transform, false); SetTopLeft(aRT, 96f, -48f); aLbl.fontSize = 13;
+                    _joinAcceptRT = aRT;
+                    var (dRT, dLbl) = MakeHubButton("Reject", Vector2.zero, 130f, new Color(0.45f, 0.24f, 0.22f, 1f), 32f, hubSprite);
+                    dRT.SetParent(_joinPop.transform, false); SetTopLeft(dRT, 254f, -48f); dLbl.fontSize = 13;
+                    _joinRejectRT = dRT;
+                }
+                _joinPopPeerId = pending[0].peerId;
+                if (_joinPopLbl != null)
+                    _joinPopLbl.text = $"<b>{pending[0].playerId}</b> wants to join the game" + (pending.Count > 1 ? $"  <color=#9AA3B2>(+{pending.Count - 1} waiting)</color>" : "");
+                if (!_joinPop!.activeSelf) _joinPop.SetActive(true);
+
+                var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+                _joinPopHover = RectHit(_joinPopRT, mp);
+                if (!Input.GetMouseButtonDown(0) || !_joinPopHover) return;
+                if (RectHit(_joinAcceptRT, mp)) { MPServer.AcceptPendingJoin(_joinPopPeerId); return; }
+                if (RectHit(_joinRejectRT, mp)) { MPServer.RejectPendingJoin(_joinPopPeerId); return; }
+            }
+            catch { }
+        }
+
+        // ── Lobby kick (HOST): click a player row, click again to confirm. ──
+        private string _kickArmName = "";
+        private float _kickArmUntil;
+
+        private void TickLobbyKick()
+        {
+            try
+            {
+                if (_txtLHSlots == null) return;
+                if (_kickArmUntil > 0f && Time.unscaledTime > _kickArmUntil) { _kickArmName = ""; _kickArmUntil = 0f; }
+                var players = MPServer.LobbyPlayers;
+                for (int i = 1; i < _txtLHSlots.Length && i < players.Count; i++)
+                {
+                    var slot = _txtLHSlots[i];
+                    if (slot == null) continue;
+                    if (_kickArmName == players[i])
+                        slot.text = $"• {players[i]}  <color=#FF6B6B><b>click again to kick</b></color>";
+                }
+                if (!Input.GetMouseButtonDown(0)) return;
+                var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+                for (int i = 1; i < _txtLHSlots.Length && i < players.Count; i++)
+                {
+                    var slot = _txtLHSlots[i];
+                    if (slot == null || !RectHit(slot.rectTransform, mp)) continue;
+                    if (_kickArmName == players[i] && Time.unscaledTime <= _kickArmUntil)
+                    {
+                        MPServer.KickFromLobby(players[i]);
+                        _kickArmName = ""; _kickArmUntil = 0f;
+                    }
+                    else
+                    {
+                        _kickArmName = players[i];
+                        _kickArmUntil = Time.unscaledTime + 3f;
+                    }
+                    return;
+                }
+            }
+            catch { }
         }
 
         /// <summary>Open the Business page inside the native full menu (and the

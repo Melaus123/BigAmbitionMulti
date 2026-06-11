@@ -333,38 +333,17 @@ namespace BigAmbitionsMP
         public static void ClientHandleLoadData(LoadDataPayload p)
         {
             if (p == null) return;
-            // Mid-join FALLBACK (empty .hsg): the host has no stored save for
-            // us — load our own LOCAL copy of this session if we have one,
-            // else start a fresh character with the host''s settings.
+            // Mid-join fallback (empty .hsg): the host has no stored save for
+            // us — start a fresh character with the host's settings.  (The
+            // "load your own local copy" variant was REMOVED 2026-06-10: a
+            // client-supplied save is an obvious edit/exploit vector; only
+            // host-stored saves are trusted.)
             if (string.IsNullOrEmpty(p.HsgGzipBase64))
             {
-                string fbSession = p.SessionName;
-                bool hasLocal = false;
-                try
-                {
-                    if (!string.IsNullOrEmpty(fbSession))
-                    {
-                        lock (_lock) { _activeSessionName = fbSession; }
-                        string f = Path.Combine(MPSaveManager.MpCharacterFolder(fbSession, MPConfig.StableId), SaveFileName + ".hsg");
-                        hasLocal = File.Exists(f);
-                    }
-                }
-                catch { }
-                if (hasLocal)
-                {
-                    float fbMoney = p.Money;
-                    Plugin.Logger.LogInfo($"[MPSave] Mid-join: loading LOCAL .hsg for session ''{fbSession}''.");
-                    GameStatePatcher.EnqueueOnMainThread(() =>
-                    {
-                        try { LoadOwnHsg(fbSession, MPConfig.StableId); if (fbMoney > 0f) QueueCashApply(fbMoney); }
-                        catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] Mid-join local load: {ex}"); }
-                    });
-                }
-                else
-                {
-                    Plugin.Logger.LogInfo("[MPSave] Mid-join: no local save either — fresh character with host settings.");
-                    MPClient.StartFreshFromHost(p.FallbackSettings);
-                }
+                if (!string.IsNullOrEmpty(p.SessionName))
+                    lock (_lock) { _activeSessionName = p.SessionName; }
+                Plugin.Logger.LogInfo("[MPSave] Mid-join: no host-stored save — fresh character with host settings.");
+                MPClient.StartFreshFromHost(p.FallbackSettings);
                 return;
             }
             string session = p.SessionName;

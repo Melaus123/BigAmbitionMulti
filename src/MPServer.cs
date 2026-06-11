@@ -256,6 +256,7 @@ namespace BigAmbitionsMP
             }
 
             _running = true;
+            ResetJoinControl();   // fresh hosting session — bans lift, pending requests drop
             _pollThread = new Thread(PollLoop) { IsBackground = true, Name = "BAMP-Server" };
             _pollThread.Start();
 
@@ -810,27 +811,129 @@ namespace BigAmbitionsMP
 
         // ── Message handlers ──────────────────────────────────────────────────
 
+        // ── Join control: bans (kick/reject — stand until the host re-hosts)
+        //    and mid-game join requests awaiting the host's approval. ────────
+        private static readonly HashSet<string> _banned = new();
+        private static readonly Dictionary<int, (NetPeer peer, HelloPayload hello)> _pendingJoins = new();
+
+        /// <summary>Snapshot for the host's approval popup.</summary>
+        public static List<(int peerId, string playerId)> PendingJoinList
+        {
+            get
+            {
+                var outp = new List<(int, string)>();
+                lock (_pendingJoins)
+                    foreach (var kv in _pendingJoins) outp.Add((kv.Key, kv.Value.hello.PlayerId));
+                return outp;
+            }
+        }
+
+        /// <summary>Host approved a mid-game joiner.</summary>
+        public static void AcceptPendingJoin(int peerId)
+        {
+            (NetPeer peer, HelloPayload hello) entry;
+            lock (_pendingJoins)
+            {
+                if (!_pendingJoins.TryGetValue(peerId, out entry)) return;
+                _pendingJoins.Remove(peerId);
+            }
+            if (entry.peer.ConnectionState != ConnectionState.Connected)
+            { Plugin.Logger.LogInfo($"[Server] join request from '{entry.hello.PlayerId}' expired (disconnected)."); return; }
+            Plugin.Logger.LogInfo($"[Server] host ACCEPTED mid-game join: '{entry.hello.PlayerId}'.");
+            RegisterAndProcessJoin(entry.peer, entry.hello);
+        }
+
+        /// <summary>Host rejected a mid-game joiner — banned until re-host.</summary>
+        public static void RejectPendingJoin(int peerId)
+        {
+            (NetPeer peer, HelloPayload hello) entry;
+            lock (_pendingJoins)
+            {
+                if (!_pendingJoins.TryGetValue(peerId, out entry)) return;
+                _pendingJoins.Remove(peerId);
+            }
+            Ban(entry.hello);
+            try { entry.peer.Disconnect(); } catch { }
+            Plugin.Logger.LogInfo($"[Server] host REJECTED mid-game join: '{entry.hello.PlayerId}' (banned until re-host).");
+        }
+
+        /// <summary>Host kicked a lobby player — banned until re-host.</summary>
+        public static void KickFromLobby(string playerId)
+        {
+            if (string.IsNullOrEmpty(playerId) || playerId == MPConfig.PlayerId) return;
+            _banned.Add(playerId);
+            if (StableIdByPlayer.TryGetValue(playerId, out var st) && !string.IsNullOrEmpty(st)) _banned.Add(st);
+            foreach (var kv in _peerNames)
+                if (kv.Value == playerId)
+                {
+                    foreach (var p in _clients)
+                        if (p.Id == kv.Key) { try { p.Disconnect(); } catch { } break; }
+                    break;
+                }
+            LobbyPlayers.Remove(playerId);
+            BroadcastLobbyUpdate();
+            Plugin.Logger.LogInfo($"[Server] KICKED '{playerId}' from the lobby (banned until re-host).");
+        }
+
+        private static void Ban(HelloPayload hello)
+        {
+            _banned.Add(hello.PlayerId);
+            if (!string.IsNullOrEmpty(hello.StableId)) _banned.Add(hello.StableId);
+        }
+
+        /// <summary>Clear join control on a fresh hosting session ("re-form
+        /// the lobby" = bans lift, pending requests drop).</summary>
+        public static void ResetJoinControl()
+        {
+            _banned.Clear();
+            lock (_pendingJoins) _pendingJoins.Clear();
+        }
+
         private static void HandleHello(NetPeer peer, MessageEnvelope env)
         {
             var hello = env.GetPayload<HelloPayload>();
             if (hello == null) return;
 
+            // Banned (kicked or rejected) — out until the host re-hosts.
+            if (_banned.Contains(hello.PlayerId) || (!string.IsNullOrEmpty(hello.StableId) && _banned.Contains(hello.StableId)))
+            {
+                Plugin.Logger.LogInfo($"[Server] Hello from BANNED '{hello.PlayerId}' — disconnected.");
+                try { peer.Disconnect(); } catch { }
+                return;
+            }
+
             Plugin.Logger.LogInfo($"[Server] Hello from '{hello.PlayerId}' (v{hello.Version})");
+
+            // Mid-game joins need the HOST'S APPROVAL — park the request; the
+            // in-game popup accepts or rejects it.
+            if (!IsInLobby)
+            {
+                lock (_pendingJoins) _pendingJoins[peer.Id] = (peer, hello);
+                Plugin.Logger.LogInfo($"[Server] mid-game join request from '{hello.PlayerId}' — awaiting host approval.");
+                return;
+            }
+
             _clients.Add(peer);
             _peerNames[peer.Id] = hello.PlayerId;
             if (!string.IsNullOrEmpty(hello.StableId))
                 StableIdByPlayer[hello.PlayerId] = hello.StableId;
 
-            if (IsInLobby)
+            // Add to lobby and tell everyone
+            if (!LobbyPlayers.Contains(hello.PlayerId))
+                LobbyPlayers.Add(hello.PlayerId);
+            BroadcastLobbyUpdate();
+            Plugin.Logger.LogInfo($"[Server] '{hello.PlayerId}' joined lobby. Players: {string.Join(", ", LobbyPlayers)}");
+        }
+
+        /// <summary>Approved mid-game join: register the peer and run the
+        /// load chain (host-stored save → fresh character).</summary>
+        private static void RegisterAndProcessJoin(NetPeer peer, HelloPayload hello)
+        {
             {
-                // Add to lobby and tell everyone
-                if (!LobbyPlayers.Contains(hello.PlayerId))
-                    LobbyPlayers.Add(hello.PlayerId);
-                BroadcastLobbyUpdate();
-                Plugin.Logger.LogInfo($"[Server] '{hello.PlayerId}' joined lobby. Players: {string.Join(", ", LobbyPlayers)}");
-            }
-            else
-            {
+                _clients.Add(peer);
+                _peerNames[peer.Id] = hello.PlayerId;
+                if (!string.IsNullOrEmpty(hello.StableId))
+                    StableIdByPlayer[hello.PlayerId] = hello.StableId;
                 // Late join — keep the roster current for everyone (the in-game F9
                 // window reads LobbyPlayers) by adding + re-broadcasting it.
                 if (!LobbyPlayers.Contains(hello.PlayerId)) LobbyPlayers.Add(hello.PlayerId);
