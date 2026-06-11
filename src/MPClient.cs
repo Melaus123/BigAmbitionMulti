@@ -365,6 +365,15 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+                    // The intro may not load over a RUNNING world (GameManager
+                    // NRE storm) — detour via the main menu first.
+                    if (Helpers.PlayerHelper.PlayerController != null)
+                    {
+                        Plugin.Logger.LogInfo("[Client] Fresh start while IN-GAME — detouring via main menu.");
+                        MPSaveCoordinator.DeferFreshStart(settings);
+                        LoadScene.LoadMainMenu();
+                        return;
+                    }
                     SaveGameManager.New(MPServer.BuildGameVariables(s));
                     LoadScene.LoadIntro(false);
                 }

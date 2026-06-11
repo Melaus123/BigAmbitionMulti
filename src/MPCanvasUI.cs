@@ -286,6 +286,7 @@ namespace BigAmbitionsMP
             MPSaveManager.EnsureVersionCached();
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
+            MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion
             TickJoinDialog();        // Phase 5 — connect-dialog input (when open)
             TickLobbyWindow();       // Phase 5 — lobby window input (when open)
             TickSavePicker();        // Phase 5 — save-picker input (when open)

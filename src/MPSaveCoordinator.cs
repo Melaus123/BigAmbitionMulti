@@ -365,9 +365,73 @@ namespace BigAmbitionsMP
             float money = p.Money;
             GameStatePatcher.EnqueueOnMainThread(() =>
             {
-                try { LoadOwnHsg(session, MPConfig.StableId); QueueCashApply(money); }
+                try
+                {
+                    // Loading a save OVER A RUNNING WORLD permanently breaks
+                    // GameManager.Update (endless NRE storm, no avatar —
+                    // 2026-06-11).  In-game → detour via the main menu first;
+                    // TickPendingLoad finishes the load once we're there.
+                    if (Helpers.PlayerHelper.PlayerController != null)
+                    {
+                        Plugin.Logger.LogInfo("[MPSave] Mid-join while IN-GAME — detouring via main menu before loading.");
+                        _pendingLoadSession = session;
+                        _pendingLoadCash    = money;
+                        UI.Load.LoadScene.LoadMainMenu();
+                        return;
+                    }
+                    LoadOwnHsg(session, MPConfig.StableId);
+                    QueueCashApply(money);
+                }
                 catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] Client load: {ex}"); }
             });
+        }
+
+        // ── Mid-join menu detour (load may not run over a live world) ─────────
+        private static string? _pendingLoadSession;
+        private static float   _pendingLoadCash;
+        private static GameVariablesDto? _pendingFreshSettings;
+        private static bool    _pendingFresh;
+        private static float   _pendingCheckAt;
+
+        /// <summary>Fresh-character start deferred until the menu (same hazard).</summary>
+        public static void DeferFreshStart(GameVariablesDto? settings)
+        {
+            _pendingFresh = true;
+            _pendingFreshSettings = settings;
+        }
+
+        /// <summary>Main thread, every frame (any scene): completes a deferred
+        /// mid-join load once the world is gone and the menu has settled.</summary>
+        public static void TickPendingLoad()
+        {
+            if (_pendingLoadSession == null && !_pendingFresh) return;
+            if (UnityEngine.Time.unscaledTime < _pendingCheckAt) return;
+            _pendingCheckAt = UnityEngine.Time.unscaledTime + 0.5f;
+            try
+            {
+                if (Helpers.PlayerHelper.PlayerController != null) return;   // world still up
+                if (MPCanvasUI.IsLoadingOverlayUp()) return;                 // menu still loading
+                if (_pendingLoadSession != null)
+                {
+                    var session = _pendingLoadSession; var cash = _pendingLoadCash;
+                    _pendingLoadSession = null;
+                    Plugin.Logger.LogInfo($"[MPSave] Menu reached — completing deferred mid-join load ('{session}').");
+                    LoadOwnHsg(session, MPConfig.StableId);
+                    QueueCashApply(cash);
+                }
+                else if (_pendingFresh)
+                {
+                    _pendingFresh = false;
+                    Plugin.Logger.LogInfo("[MPSave] Menu reached — completing deferred fresh start.");
+                    MPClient.StartFreshFromHost(_pendingFreshSettings);
+                    _pendingFreshSettings = null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError($"[MPSave] TickPendingLoad: {ex}");
+                _pendingLoadSession = null; _pendingFresh = false;
+            }
         }
 
         /// <summary>While non-null, the game's CurrentVersionFolderPath is redirected
