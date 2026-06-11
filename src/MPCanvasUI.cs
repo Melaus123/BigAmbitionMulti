@@ -1396,6 +1396,9 @@ namespace BigAmbitionsMP
                 if (sig != _hubRosterSig)
                 {
                     _hubRosterSig = sig;
+                    // [HubRoster] probe: host couldn't see the client in the
+                    // target list (2026-06-11) — log what this machine sees.
+                    Plugin.Logger.LogInfo($"[HubRoster] players=[{string.Join(",", players)}] self='{MPConfig.PlayerId}'");
                     int slot = 0;
                     bool targetOk = false;
                     foreach (var pl in players)
@@ -2569,7 +2572,7 @@ namespace BigAmbitionsMP
             long _pt = MPPerf.Begin();
             RemotePlayerManager.ProbeLocalCharacter();
             RemotePlayerManager.ProbeAppearance();
-            RemotePlayerManager.ProbeColors();
+            // (ProbeColors removed 2026-06-11 — dye mechanism classified, sync user-verified.)
             RemotePlayerManager.ProbeMorphs();
             RemotePlayerManager.ProbeAnimatorLive();
             VehicleManager.ProbeTraffic();
