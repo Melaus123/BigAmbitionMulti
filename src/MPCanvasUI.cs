@@ -1106,14 +1106,14 @@ namespace BigAmbitionsMP
                         : $"<b>{HubTerm()}</b> days";
                 if (_hubTermsLbl != null)
                 {
-                    // Bank convention: the rate is a TOTAL premium on the
-                    // principal, spread flat over the term.
+                    // Bank convention (dump-confirmed): rate = TOTAL premium,
+                    // dailies = ceil(P*rate/term) + ceil(P/term).  Bank's own
+                    // fixed deal is 20% over 244 days, for reference.
                     double pct = HubRate();
                     int term = HubTerm();
-                    double di = Math.Max(0, Math.Round(_hubAmount * pct / 100.0 / term));
-                    double dp = Math.Max(1, Math.Round(_hubAmount / term));
-                    string warn = pct > MPHub.PredatoryTotalPct ? "  <color=#FF6B6B><b>PREDATORY RATE</b></color>" : "";
-                    _hubTermsLbl.text = $"<color=#9AA3B2>loan: ${di:N0}/day interest + ${dp:N0}/day payment over {term} days · total interest ${_hubAmount * pct / 100.0:N0} ({pct:F0}%)</color>{warn}";
+                    double di = Math.Max(0, Math.Ceiling(_hubAmount * pct / 100.0 / term));
+                    double dp = Math.Max(1, Math.Ceiling(_hubAmount / term));
+                    _hubTermsLbl.text = $"<color=#9AA3B2>loan: ${di:N0}/day interest + ${dp:N0}/day payment over {term} days · total interest ${_hubAmount * pct / 100.0:N0} ({pct:F0}%) · bank: 20% / 244d</color>";
                 }
 
                 // Offers + loans lists (rebuild on Version change).
@@ -1135,8 +1135,7 @@ namespace BigAmbitionsMP
                         else
                         {
                             float pct = MPHub.OfferTotalPct(o);
-                            string warn = pct > MPHub.PredatoryTotalPct ? " <color=#FF6B6B><b>PREDATORY RATE</b></color>" : "";
-                            so.Append($"<color=#FFD27A>{o.From}</color> offers a <b>${o.Principal:N0}</b> loan at <b>{pct:F0}% total</b> over {MPHub.OfferTermDays(o)} days (${o.DailyInterest:N0}/day int · ${o.DailyPayment:N0}/day pay){warn}\n");
+                            so.Append($"<color=#FFD27A>{o.From}</color> offers a <b>${o.Principal:N0}</b> loan at <b>{pct:F0}% total</b> over {MPHub.OfferTermDays(o)} days (${o.DailyInterest:N0}/day int · ${o.DailyPayment:N0}/day pay)\n");
                         }
                     }
                     if (_hubOffers != null) _hubOffers.text = so.Length > 0 ? so.ToString() : "<color=#6B7384>no pending offers</color>";
@@ -1180,9 +1179,12 @@ namespace BigAmbitionsMP
                 if (RectHit(_hubSendRT, mp)) { MPHub.OfferGift(_hubTarget, (float)_hubAmount); return; }
                 if (RectHit(_hubLoanRT, mp))
                 {
+                    // Same math the bank uses: total premium spread over the
+                    // term, daily amounts rounded UP.
                     double pct = HubRate();
-                    double di = Math.Max(0, Math.Round(_hubAmount * pct / 100.0));
-                    double dp = Math.Max(100, Math.Round(_hubAmount / 20 / 100) * 100);
+                    int term = HubTerm();
+                    double di = Math.Max(0, Math.Ceiling(_hubAmount * pct / 100.0 / term));
+                    double dp = Math.Max(1, Math.Ceiling(_hubAmount / term));
                     MPHub.OfferLoan(_hubTarget, (float)_hubAmount, (float)di, (float)dp);
                     return;
                 }

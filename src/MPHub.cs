@@ -110,10 +110,12 @@ namespace BigAmbitionsMP
             else MPClient.SendHub(MessageType.LoanAnswer, a);
         }
 
-        /// <summary>The bank's convention (measured from its own UI): the rate
-        /// is a TOTAL premium on the principal, spread flat over the term.
-        /// Given the game's fast ROI, only triple-digit totals are predatory.</summary>
-        public const float PredatoryTotalPct = 100f;
+        // Bank reference (dump-CONFIRMED consts): InterestRate=20 (a TOTAL
+        // premium on the principal), YearsToPayLoan=4 → 244-day term (61-day
+        // game year); dailies = ceil(P*0.20/244) and ceil(P/244) — matches the
+        // user's observed $9 + $41 on $10k exactly.  NO "predatory" indicator
+        // by design: what's predatory depends on business ROI, which we can't
+        // judge — the borrower decides (user call, 2026-06-10).
 
         public static int OfferTermDays(LoanOfferPayload o)
             => o.DailyPayment > 0 ? Mathf.Max(1, Mathf.RoundToInt(o.Principal / o.DailyPayment)) : 1;
@@ -129,11 +131,7 @@ namespace BigAmbitionsMP
             if (p.Kind == "gift")
                 MPChat.AddNotice($"{p.From} offers you a ${p.Principal:N0} GIFT — see the Business Hub");
             else
-            {
-                float pct = OfferTotalPct(p);
-                MPChat.AddNotice($"{p.From} offers you a ${p.Principal:N0} loan at {pct:F0}% total over {OfferTermDays(p)} days — see the Business Hub"
-                                 + (pct > PredatoryTotalPct ? "  (PREDATORY RATE!)" : ""));
-            }
+                MPChat.AddNotice($"{p.From} offers you a ${p.Principal:N0} loan at {OfferTotalPct(p):F0}% total over {OfferTermDays(p)} days — see the Business Hub");
             Version++;
         }
 
