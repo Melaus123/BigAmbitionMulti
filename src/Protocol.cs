@@ -724,6 +724,10 @@ namespace BigAmbitionsMP
         /// <summary>"loan" or "gift" — gifts also require an accept (no silent
         /// handouts; acceptance doubles as the read receipt).</summary>
         public string Kind          { get; set; } = "loan";
+        /// <summary>Offer lifecycle: "offer" (new), "revoke" (offerer
+        /// cancelled), "accepted"/"declined" (host → offerer: result, clears
+        /// their outgoing list).</summary>
+        public string State         { get; set; } = "offer";
     }
 
     public class LoanAnswerPayload

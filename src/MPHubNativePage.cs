@@ -221,18 +221,46 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Open the full menu (if closed) and land on Business —
-        /// used by the phone's Business app icon.</summary>
+        /// used by the phone's Business app icon.  Opens through the SAME
+        /// pipeline the native phone icons use (SmartphoneUI.OpenApp) — the
+        /// canvas child is inactive while closed, so a bare Toggle invoke was
+        /// unreliable (phone button "did nothing", 2026-06-10).</summary>
         public static void OpenMenuToBusiness()
         {
             try
             {
                 if (!Ready || _menu == null) return;
                 var canvasT = _menu.transform.Find("Canvas");
-                bool open = canvasT != null && canvasT.gameObject.activeInHierarchy && (canvasT.GetComponent<CanvasGroup>()?.alpha ?? 1f) > 0.5f;
+                bool open = canvasT != null && canvasT.gameObject.activeInHierarchy;
                 if (!open)
                 {
-                    var toggle = _menuType?.GetMethod("Toggle", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    toggle?.Invoke(_menu, null);
+                    bool opened = false;
+                    // Native pipeline: SmartphoneUI.OpenApp(anyApp) — our
+                    // ShowPage immediately replaces the page it selected.
+                    try
+                    {
+                        var suiType = VehicleManager.FindGameType("SmartphoneUI");
+                        var openApp = suiType?.GetMethod("OpenApp", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                        if (suiType != null && openApp != null)
+                        {
+                            var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(suiType), true);
+                            var sui = arr != null && arr.Length > 0 ? arr[0].TryCast<Component>() : null;
+                            var ps = openApp.GetParameters();
+                            if (sui != null && ps.Length == 1 && ps[0].ParameterType.IsEnum)
+                            {
+                                var first = Enum.GetValues(ps[0].ParameterType).GetValue(0);
+                                openApp.Invoke(sui, new object[] { first! });
+                                opened = true;
+                            }
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[HubApp] OpenApp path: {ex.Message}"); }
+                    if (!opened)
+                    {
+                        var toggle = _menuType?.GetMethod("Toggle", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                        toggle?.Invoke(_menu, null);
+                    }
+                    Plugin.Logger.LogInfo($"[HubApp] menu open requested (viaOpenApp={opened}); canvas active={canvasT != null && canvasT.gameObject.activeInHierarchy}.");
                 }
                 ShowPage();
             }

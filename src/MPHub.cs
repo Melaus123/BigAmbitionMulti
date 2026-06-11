@@ -25,6 +25,8 @@ namespace BigAmbitionsMP
 
         // Incoming offers awaiting MY answer (this machine).
         public static readonly List<LoanOfferPayload> IncomingOffers = new();
+        // Offers I sent that are still pending (cancellable).
+        public static readonly List<LoanOfferPayload> OutgoingOffers = new();
         public static int PendingCount => IncomingOffers.Count;
         public static int Version;                 // bump = UI refresh + badge
 
@@ -32,6 +34,7 @@ namespace BigAmbitionsMP
         {
             Loans.Clear();
             IncomingOffers.Clear();
+            OutgoingOffers.Clear();
             _hostLoans.Clear();
             _hostOffers.Clear();
             _lastDay = -1;
@@ -73,10 +76,23 @@ namespace BigAmbitionsMP
                 From = MPConfig.PlayerId, To = to,
                 Principal = amount, Kind = "gift",
             };
-            MPChat.AddNotice($"gift of ${amount:N0} offered to {to} (awaiting their accept)");
+            OutgoingOffers.Add(p);
+            Version++;
             if (MPServer.IsRunning) HostRouteOffer(p);
             else MPClient.SendHub(MessageType.LoanOffer, p);
             return true;
+        }
+
+        /// <summary>Cancel one of MY pending offers (the outgoing list's X).</summary>
+        public static void CancelOffer(string id)
+        {
+            var mine = OutgoingOffers.Find(o => o.Id == id);
+            if (mine == null) return;
+            OutgoingOffers.Remove(mine);
+            Version++;
+            var p = new LoanOfferPayload { Id = mine.Id, From = mine.From, To = mine.To, Kind = mine.Kind, Principal = mine.Principal, State = "revoke" };
+            if (MPServer.IsRunning) HostRouteOffer(p);
+            else MPClient.SendHub(MessageType.LoanOffer, p);
         }
 
         // ── Loans: offer / answer (any role) ──────────────────────────────────
@@ -94,7 +110,8 @@ namespace BigAmbitionsMP
                 From = MPConfig.PlayerId, To = to,
                 Principal = principal, DailyInterest = dailyInterest, DailyPayment = dailyPayment,
             };
-            MPChat.AddNotice($"loan offered to {to}: ${principal:N0} (${dailyInterest:N0}/day interest, ${dailyPayment:N0}/day payment)");
+            OutgoingOffers.Add(p);
+            Version++;
             if (MPServer.IsRunning) HostRouteOffer(p);
             else MPClient.SendHub(MessageType.LoanOffer, p);
         }
@@ -123,10 +140,26 @@ namespace BigAmbitionsMP
         public static float OfferTotalPct(LoanOfferPayload o)
             => o.Principal > 0 ? o.DailyInterest * OfferTermDays(o) / o.Principal * 100f : 0f;
 
-        /// <summary>An offer arrived for ME (main thread).</summary>
+        /// <summary>An offer-lifecycle message arrived for ME (main thread).</summary>
         public static void ReceiveOffer(LoanOfferPayload p)
         {
-            if (p == null || p.To != MPConfig.PlayerId) return;
+            if (p == null) return;
+            // Result for an offer I sent (host-forwarded).
+            if (p.State == "accepted" || p.State == "declined")
+            {
+                if (p.From != MPConfig.PlayerId) return;
+                OutgoingOffers.RemoveAll(o => o.Id == p.Id);
+                Version++;
+                return;
+            }
+            if (p.To != MPConfig.PlayerId) return;
+            if (p.State == "revoke")
+            {
+                if (IncomingOffers.RemoveAll(o => o.Id == p.Id) > 0)
+                    MPChat.AddNotice($"{p.From} withdrew their ${p.Principal:N0} {p.Kind} offer");
+                Version++;
+                return;
+            }
             IncomingOffers.Add(p);
             if (p.Kind == "gift")
                 MPChat.AddNotice($"{p.From} offers you a ${p.Principal:N0} GIFT — see the Business Hub");
@@ -157,7 +190,8 @@ namespace BigAmbitionsMP
         public static void HostRouteOffer(LoanOfferPayload p)
         {
             if (p == null) return;
-            _hostOffers[p.Id] = p;
+            if (p.State == "revoke") _hostOffers.Remove(p.Id);
+            else _hostOffers[p.Id] = p;
             if (p.To == MPConfig.PlayerId) ReceiveOffer(p);
             else MPServer.SendHubTo(p.To, MessageType.LoanOffer, p);
         }
@@ -167,6 +201,10 @@ namespace BigAmbitionsMP
             if (a == null || !_hostOffers.TryGetValue(a.Id, out var offer)) return;
             _hostOffers.Remove(a.Id);
             string what = offer.Kind == "gift" ? "gift" : "loan";
+            // Tell the offerer the outcome (clears their outgoing list).
+            var result = new LoanOfferPayload { Id = offer.Id, From = offer.From, To = offer.To, Kind = offer.Kind, Principal = offer.Principal, State = a.Accept ? "accepted" : "declined" };
+            if (offer.From == MPConfig.PlayerId) ReceiveOffer(result);
+            else MPServer.SendHubTo(offer.From, MessageType.LoanOffer, result);
             if (!a.Accept)
             {
                 NotifyParty(offer.From, $"{offer.To} declined your ${offer.Principal:N0} {what} offer.");
