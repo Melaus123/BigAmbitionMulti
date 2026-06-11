@@ -12,6 +12,7 @@
 | Gley/NavMesh shields | MPPatches | [Gley]/[NavShield] | PERMANENT | Ghost-contact NRE swallow |
 | Loan ledger diag | MPHub | [Hub] ledger… | ACTIVE | Persistence verification lines — demote after sweep |
 | Nav watchdog | MPRestSync | [Rest] NAV LOCK | PERMANENT (diagnostic-only) | Names activity nav-lock if ever recurs |
+| Lifecycle shadow | MPLifecycle.Tick (MPCanvasUI Update) | [Lifecycle] | ACTIVE | Stage-3 shadow phase tracker: transitions + STUCK-IN-LOADING >60s detector (mid-join acceptance instrumentation) |
+| HubRoster | MPCanvasUI chips rebuild | [HubRoster] | ACTIVE | Host target-list contents (empty-chips bug surveillance) |
 
 Rules: every new probe gets a row + prefix; resolved probes REMOVED from code promptly.
-| Lifecycle shadow | MPLifecycle.Tick (MPCanvasUI Update) | [Lifecycle] | ACTIVE | Stage-3 shadow phase tracker: transitions + STUCK-IN-LOADING >60s detector (mid-join acceptance instrumentation) |
