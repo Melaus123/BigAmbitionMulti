@@ -35,3 +35,8 @@
 - Symptom: client cancels instead of loading in → host keeps "waiting for player" overlay + pause until the 90s startup timeout.
 - Hypothesized fix shape (inferred, unverified): OnPeerDisconnected during the hold window must remove the peer from the waiting roster (_inGamePlayers/_worldReadyPlayers tracking) and re-evaluate release — current cleanup likely only handles in-game departures.
 - Defer until lifecycle stage 4 (the hold is being unified into the load fence anyway — fix it there, not as another pre-consolidation patch).
+
+## BACKLOG (user, 2026-06-11): rest dock wedges open after click-bench-then-walk-away
+- Symptom: clicked bench, walked away before sitting → dock stuck open, X gone (X visibility tied to CancelButtonIndex of a live activity?), dock survived EXIT TO MENU (scene-exit reset missed this state).
+- Notes: approach-cancelled state = activity in MovingTowardsActivity then aborted; Seated/dock visibility logic likely wedged on a stale cached activity. Scene-exit must force-hide the dock unconditionally.
+- Defer until after stage-4/5 consolidation (current plan).
