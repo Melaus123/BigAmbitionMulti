@@ -9,4 +9,4 @@ set BAMP_AUTOROLE=host
 set SteamAppId=1331550
 set SteamGameId=1331550
 set SteamOverlayGameId=1331550
-start "" "C:\Program Files (x86)\Steam\steamapps\common\Big Ambitions\Big Ambitions.exe"
+start "" "C:\Program Files (x86)\Steam\steamapps\common\Big Ambitions\Big Ambitions.exe" -monitor 1

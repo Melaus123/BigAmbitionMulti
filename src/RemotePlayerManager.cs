@@ -793,6 +793,7 @@ namespace BigAmbitionsMP
             try
             {
                 var mats = smr.sharedMaterials;
+                var mpb = new MaterialPropertyBlock();
                 for (int m = 0; m < mats.Length; m++)
                 {
                     var mat = mats[m];
@@ -800,24 +801,28 @@ namespace BigAmbitionsMP
                     var sh = mat.shader;
                     var colors = new List<string>();
                     int n = sh.GetPropertyCount();
+                    // MPB + texture identity: is the tint a property, a property
+                    // block, a swapped material, or a swapped texture?
+                    bool hasMpb = false;
+                    try { smr.GetPropertyBlock(mpb, m); hasMpb = !mpb.isEmpty; } catch { }
+                    string texName = "";
+                    try { texName = mat.mainTexture != null ? mat.mainTexture.name : "(none)"; } catch { }
                     for (int p = 0; p < n; p++)
                     {
                         if (sh.GetPropertyType(p) == UnityEngine.Rendering.ShaderPropertyType.Color)
                         {
                             string pn = sh.GetPropertyName(p);
-                            colors.Add($"{pn}={mat.GetColor(pn)}");
+                            string mpbPart = "";
+                            try { if (hasMpb && mpb.HasColor(pn)) mpbPart = $" MPB={mpb.GetColor(pn)}"; } catch { }
+                            colors.Add($"{pn}={mat.GetColor(pn)}{mpbPart}");
                         }
                     }
                     Plugin.Logger.LogInfo(
-                        $"[Colors]   {label} mat[{m}]='{mat.name}' shader='{sh.name}' :: " +
+                        $"[Colors]   {label} mat[{m}]='{mat.name}' shader='{sh.name}' tex='{texName}' mpb={hasMpb} :: " +
                         (colors.Count > 0 ? string.Join(", ", colors) : "(no colour properties)"));
                 }
 
-                // Per-instance colour overrides live in a MaterialPropertyBlock.
-                var mpb = new MaterialPropertyBlock();
-                smr.GetPropertyBlock(mpb);
-                if (!mpb.isEmpty)
-                    Plugin.Logger.LogInfo($"[Colors]   {label} — non-empty MaterialPropertyBlock present");
+                // (renderer-level MPB covered per-material above)
             }
             catch (Exception ex)
             {

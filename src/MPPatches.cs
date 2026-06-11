@@ -112,6 +112,21 @@ namespace BigAmbitionsMP
                     UnityEngine.Time.timeScale = frozen ? 0f : 1f;
                 }
             }
+
+            // SHIELD (MP only): GameManager.Update threw repeatedly during a
+            // mid-join fresh start (intro loaded from a running world — a
+            // transition the game never does natively) and the exception storm
+            // stuck the loading screen (2026-06-11).  Log + swallow.
+            private static int _swallowed;
+            static Exception? Finalizer(Exception? __exception)
+            {
+                if (__exception == null) return null;
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return __exception;
+                _swallowed++;
+                if (_swallowed <= 5 || _swallowed % 300 == 0)
+                    Plugin.Logger.LogWarning($"[GMShield] swallowed {__exception.GetType().Name} in GameManager.Update (#{_swallowed}): {__exception.Message}");
+                return null;
+            }
         }
 
         // ── Patch: GameSpeedController.TogglePause ────────────────────────────
