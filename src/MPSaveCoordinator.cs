@@ -351,6 +351,7 @@ namespace BigAmbitionsMP
                 return;
             }
             MPClient.MarkLeftLobby();   // loading now — the lobby pane yields
+            MPClient.SendPhaseReport("Loading");   // INTENT: don't excuse me from the fence
             MPClient.BeginJoinQuiesce();   // live stream must not touch the load
             string session = p.SessionName;
             lock (_lock) { _activeSessionName = session; }

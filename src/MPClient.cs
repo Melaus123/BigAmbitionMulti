@@ -129,13 +129,17 @@ namespace BigAmbitionsMP
             {
                 if (info.AdditionalData != null && !info.AdditionalData.EndOfData)
                 {
-                    string tag = info.AdditionalData.GetString(64);
+                    // RAW bytes (server sends UTF8 directly) — GetString expects
+                    // LiteNetLib's length-prefixed format and threw, which ate
+                    // the kick/reject reason (2026-06-11).
+                    string tag = System.Text.Encoding.UTF8.GetString(info.AdditionalData.GetRemainingBytes());
                     if (tag == "BAMP:rejected") why = "Join REJECTED by host";
                     else if (tag == "BAMP:kicked") why = "KICKED by host";
                     else if (tag == "BAMP:banned") why = "Banned until host re-hosts";
+                    Plugin.Logger.LogInfo($"[Client] disconnect reason tag: '{tag}' → \"{why}\"");
                 }
             }
-            catch { }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Client] disconnect-tag read: {ex.Message}"); }
             LastDisconnectReason = why;
             _server  = null;
             // The connection is gone either way — let the poll loop exit so
@@ -401,6 +405,7 @@ namespace BigAmbitionsMP
         public static void StartFreshFromHost(GameVariablesDto? settings)
         {
             IsInLobby = false;
+            SendPhaseReport("Loading");   // INTENT: don't excuse me from the fence
             BeginJoinQuiesce();
             var s = settings ?? MPServer.Preset("Normal");
             Plugin.Logger.LogInfo($"[Client] Mid-join fresh start; cash={s.StartingMoney}.");
@@ -427,6 +432,7 @@ namespace BigAmbitionsMP
         private static void HandleStartGame(MessageEnvelope env, bool isNew)
         {
             IsInLobby = false;
+            SendPhaseReport("Loading");   // INTENT: don't excuse me from the fence
             var  sp              = env.GetPayload<StartGamePayload>();
             var  newGameSettings = sp?.Settings ?? MPServer.Preset("Normal");
             bool enforceCash     = sp?.EnforceStartingCash ?? true;

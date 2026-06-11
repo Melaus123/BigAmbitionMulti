@@ -275,7 +275,7 @@ namespace BigAmbitionsMP
             LobbyPlayers.Clear();
             _peerNames.Clear();
             _clients.Clear();
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = Environment.TickCount64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
         }
 
         /// <summary>Host clicked "Start New Game" in the lobby.</summary>
@@ -291,7 +291,7 @@ namespace BigAmbitionsMP
             IsInLobby = false;
 
             // Re-arm the startup pause hold for this new game.
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = Environment.TickCount64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
 
             // Per-player starting cash: each client gets the host-designated amount
             // (their override, else the difficulty base).  The host now designates
@@ -354,7 +354,7 @@ namespace BigAmbitionsMP
             IsInLobby = false;
 
             // Re-arm the startup pause hold for this new game.
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = Environment.TickCount64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
 
             // Phase 4: if a multiplayer session exists, resume it — the host holds
             // every player's .hsg, so it ships each connected client its own and
@@ -1186,6 +1186,7 @@ namespace BigAmbitionsMP
         // anyone parked in Menu >8s mid-fence is EXCUSED from the wait.
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string phase, long atMs)> _peerPhase = new();
         private static readonly HashSet<string> _fenceExcused = new();
+        private static long _fenceArmedAtMs;   // grace: no excusals in the first 15s
 
         public static void RecordPhaseReport(PhaseReportPayload? p)
         {
@@ -1204,6 +1205,12 @@ namespace BigAmbitionsMP
             {
                 if (_startupReleased) return;
                 long now = Environment.TickCount64;
+                // Grace: the gap between leaving the lobby and the overlay
+                // rising legitimately reports "Menu" — the prune excused a
+                // LOADING client (2026-06-11).  Clients also now declare a
+                // "Loading" intent at load-instruction receipt; this grace is
+                // the belt to that suspender.
+                if (now - _fenceArmedAtMs < 15000) return;
                 foreach (var kv in _peerPhase)
                 {
                     if (_worldReadyPlayers.Contains(kv.Key) || _fenceExcused.Contains(kv.Key)) continue;
