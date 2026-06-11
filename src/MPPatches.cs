@@ -2086,5 +2086,45 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── [SalesProbe] Wave-2 recon (design: .modding/03-systems/
+        // cross-player-shopping.md).  PASSIVE: logs what a register purchase
+        // looks like (items, prices, building) so the RemoteSale hook lands on
+        // confirmed ground.  Fires on the BUYER's machine. ──────────────────
+        [HarmonyPatch]
+        public static class Patch_SalesProbe_OnPlaceOrder
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                try
+                {
+                    foreach (var m in typeof(Controllers.CashRegisterController).GetMethods(
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                        if (m.Name == "OnPlaceOrder") return m;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[SalesProbe] target: {ex.Message}"); }
+                return null;
+            }
+
+            static void Postfix(Controllers.CashRegisterController __instance,
+                                Il2CppSystem.Collections.Generic.List<BigAmbitions.Items.CargoInstance> orderedCargoInstances)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                try
+                {
+                    var sb = new System.Text.StringBuilder("[SalesProbe] OnPlaceOrder: ");
+                    sb.Append($"register='{__instance.gameObject.name}' pos={__instance.transform.position} items=");
+                    if (orderedCargoInstances != null)
+                        for (int i = 0; i < orderedCargoInstances.Count && i < 12; i++)
+                        {
+                            var c = orderedCargoInstances[i];
+                            if (c == null) continue;
+                            sb.Append($"[{c.itemName} x{c.amount}] ");
+                        }
+                    Plugin.Logger.LogInfo(sb.ToString());
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[SalesProbe] {ex.Message}"); }
+            }
+        }
+
     }
 }

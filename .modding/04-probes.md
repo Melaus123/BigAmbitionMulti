@@ -26,3 +26,5 @@ MPCanvasUI ~2455: ProbeAppearance / ProbeAnimatorLive / ProbeTraffic — verify 
 log-only (no cache priming/side effects) before deleting; they are guarded one-shots, harmless meanwhile).
 
 | FullMenu dump v2 | MPFullMenuProbe (MPCanvasUI wiring) | [FullMenu] | ACTIVE (capture pending) | RESTORED 2026-06-11: round-1 dumps lived only in BepInEx''s log (overwritten per run) — data lost. v2 PERSISTS to .modding/ui-dumps/fullmenu.txt and dumps EVERY page opened (round 1 stopped at the first). REMOVE after Hub visual true-up. |
+
+| SalesProbe | MPPatches Patch_SalesProbe_OnPlaceOrder | [SalesProbe] | ACTIVE (recon) | Wave-2: what a register purchase looks like (items, register, position) — confirms the RemoteSale hook point. REMOVE when slice 1 lands. |
