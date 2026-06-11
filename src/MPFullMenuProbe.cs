@@ -181,7 +181,7 @@ namespace BigAmbitionsMP
                     else if (tn != "Image" && tn != "TextMeshProUGUI")
                         sb.Append(' ').Append(tn);
                 }
-                Plugin.Logger.LogInfo(sb.ToString());
+                Out(sb.ToString());   // the call the v2 persist-refactor MISSED — content went to the volatile log again
                 _lines++;
 
                 for (int i = 0; i < t.childCount && _lines < MaxLines; i++)
