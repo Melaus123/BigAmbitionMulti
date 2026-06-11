@@ -19,3 +19,9 @@
 # Refuted / resolved (kept for the record)
 - Mid-join NRE storm = stream applying into half-loaded scene → CONFIRMED, fixed by join quiesce (7985c70) + 4s delayed resume (441c0a6).
 - Clothing color mismatch = MPB tints → REFUTED (probe: mpb=False). Actual: float texture-array dye index → fix ad74c71 (UNVERIFIED by user yet).
+
+## H4 (NEW, prime): the loantest1 SAVE DATA is poisoned — disconnect-autosaves fired during broken sessions and wrote a half-initialized world
+- Evidence FOR: no commits between last-good and first-bad touch the host load path; symptoms = loaded-garbage pattern (money/calendar/portrait/street all wrong); LoadTrace shows values stable-but-wrong from frame 1 (not degrading).
+- Evidence AGAINST: cc=False + frozen clock also fit a missing load-finish step (H2).
+- DISCRIMINATOR (single host-only run): fresh MP session → save → exit → reload THAT session. Clean = H4 confirmed (delete loantest1; add save-guard: refuse HostSaveNow while world not healthy). Broken = code path → git bisect (known-good-loads tag = 18a0a69).
+- H1 (de-stack) REFUTED for the info symptoms: bugged state persisted with de-stack gated.
