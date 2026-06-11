@@ -30,3 +30,7 @@ log-only (no cache priming/side effects) before deleting; they are guarded one-s
 | SalesProbe | MPPatches Patch_SalesProbe_OnPlaceOrder | [SalesProbe] | ACTIVE (recon) | Wave-2: what a register purchase looks like (items, register, position) — confirms the RemoteSale hook point. REMOVE when slice 1 lands. |
 
 | ShopGate | MPPatches Patch_DelayedEnterBuilding | [ShopGate] | ACTIVE (recon) | Wave-2: building classification on entry (open/playerOwned/rented/rival ids) — discriminates why a player-owned shop is not shoppable for visitors. REMOVE with the customer-mode fix. |
+
+| LoadTrace v2 | MPCanvasUI.TickLoadTrace | [LoadTrace] | ACTIVE (localization) | RE-ARMED 2026-06-11 for the client stuck-load (overlay never tears down, clock dead, GM NRE flood): 1 Hz × 30s then 10s × 5 min after every MP scene-load — pos/money/clock/timeScale/LoadingScreen-alpha/pendingFreeze/conn. REMOVE when the stuck-load is localized. |
+
+| FreezeGate telemetry | MPCanvasUI.TickOverlayFreezeGate | [FreezeGate] | ACTIVE (localization) | 15s heartbeat while pending-freeze armed + LOUD warn if the silent IsConnected clear disarms it — answers why the 180s fail-safe never fired in the 2026-06-11 run. REMOVE with the fail-safe fix. |

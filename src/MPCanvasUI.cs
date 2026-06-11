@@ -306,6 +306,7 @@ namespace BigAmbitionsMP
             //  the quiesce now ends on the lifecycle WorldReady EVENT; see
             //  OnLifecyclePhase below.)
             TickOverlayWatchdog();   // stuck loading screen over a live world → force-dismiss
+            TickLoadTrace();         // [LoadTrace] v2 — post-load timeline (stuck-load localization)
             TickJoinDialog();        // Phase 5 — connect-dialog input (when open)
             TickLobbyWindow();       // Phase 5 — lobby window input (when open)
             TickSavePicker();        // Phase 5 — save-picker input (when open)
@@ -1998,10 +1999,17 @@ namespace BigAmbitionsMP
                 // does the BeginStartupHold + world-ready report once the overlay is
                 // gone — so the freeze holds until every player (especially the host,
                 // usually last to finish loading) has TRULY entered the game.
+                // [LoadTrace] arm — 5-min window (the 2026-06-11 client stall
+                // takes minutes to prove; 1 Hz first 30s, then every 10s).
+                _loadTraceArmedAt = Time.unscaledTime;
+                _loadTraceUntil   = Time.unscaledTime + 300f;
+                _loadTraceNext    = 0f;
+
                 if (MPServer.IsRunning || MPClient.IsConnected)
                 {
                     _sceneLoadedPendingFreeze = true;
                     _pendingFreezeElapsed = 0f;
+                    _freezeGateDiagNext = 0f;   // heartbeat restarts with the gate
                     if (MPServer.IsRunning)
                         MPServer.MarkPlayerInGame(MPConfig.PlayerId);   // host serves snapshots now
                     else
@@ -2146,6 +2154,7 @@ namespace BigAmbitionsMP
         // also avoids stalling the overlay's own fade-out under timeScale=0.
         private bool  _sceneLoadedPendingFreeze;
         private float _pendingFreezeElapsed;
+        private float _freezeGateDiagNext;   // [FreezeGate] heartbeat schedule
         // Fail-safe only.  A real staggered load took ~57s, so 20s released far too
         // soon; this just guarantees we can never hang forever if detection breaks.
         private const float PENDING_FREEZE_MAX = 180f;
@@ -2164,11 +2173,30 @@ namespace BigAmbitionsMP
         private void TickOverlayFreezeGate()
         {
             if (!_sceneLoadedPendingFreeze) return;
-            if (!(MPServer.IsRunning || MPClient.IsConnected)) { _sceneLoadedPendingFreeze = false; return; }
+            if (!(MPServer.IsRunning || MPClient.IsConnected))
+            {
+                // LOUD: this is the gate's only silent kill — if it fires, the
+                // 180s fail-safe dies with it (2026-06-11 stuck-load suspect #1).
+                Plugin.Logger.LogWarning(
+                    $"[FreezeGate] pendingFreeze CLEARED by connection check (IsRunning={MPServer.IsRunning} " +
+                    $"IsConnected={MPClient.IsConnected}) at elapsed={_pendingFreezeElapsed:F0}s — fail-safe disarmed.");
+                _sceneLoadedPendingFreeze = false; return;
+            }
 
             _pendingFreezeElapsed += Time.unscaledDeltaTime;
             bool overlayGone = !IsLoadingOverlayUp();
             bool fallback    = _pendingFreezeElapsed >= PENDING_FREEZE_MAX;
+
+            // Heartbeat every 15s while pending — proves the gate is alive and
+            // shows exactly why it hasn't fired (2026-06-11: fail-safe never
+            // fired in 10 min with no evidence of which early-return ate it).
+            if (_pendingFreezeElapsed >= _freezeGateDiagNext)
+            {
+                _freezeGateDiagNext = _pendingFreezeElapsed + 15f;
+                Plugin.Logger.LogInfo(
+                    $"[FreezeGate] pending elapsed={_pendingFreezeElapsed:F0}s overlayGone={overlayGone} " +
+                    $"fallback@{PENDING_FREEZE_MAX:F0}s host={MPServer.IsRunning}");
+            }
 
             if (MPServer.IsRunning)
             {
@@ -2262,6 +2290,53 @@ namespace BigAmbitionsMP
             catch { up = false; }    // never hang the startup on a detection error
             _overlayCheckCached = up;
             return up;
+        }
+
+        // ── [LoadTrace] v2 — wide-net post-load timeline (localization probe,
+        // re-armed for the 2026-06-11 client stuck-load: overlay never tears
+        // down, clock never starts, freeze-gate fail-safe never fires).  1 Hz
+        // for the first 30s after every MP scene-load, then every 10s out to
+        // 5 min — the stall takes minutes to prove.  Registry: .modding/04-probes.md.
+        private float _loadTraceArmedAt;
+        private float _loadTraceUntil;
+        private float _loadTraceNext;
+
+        private void TickLoadTrace()
+        {
+            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            if (_loadTraceUntil == 0f || Time.unscaledTime > _loadTraceUntil) return;
+            if (Time.unscaledTime < _loadTraceNext) return;
+            float age = Time.unscaledTime - _loadTraceArmedAt;
+            _loadTraceNext = Time.unscaledTime + (age < 30f ? 1f : 10f);
+            try
+            {
+                var pc = Helpers.PlayerHelper.PlayerController;
+                var ch = pc?.Character?.transform;
+                string pos = ch != null ? $"({ch.position.x:F1},{ch.position.y:F1},{ch.position.z:F1})" : "(no char)";
+                float money = -1f; int day = -1; float hour = -1f;
+                try { money = SaveGameManager.Current?.Money ?? -1f; } catch { }
+                try { (day, hour) = GameStateReader.GetGameTime(); } catch { }
+                // LoadingScreen detail — richer than the bool: distinguishes
+                // "object gone" / "inactive" / "fade frozen at alpha X".
+                string ls = "null";
+                try
+                {
+                    var lsObj = UnityEngine.Object.FindObjectOfType(Il2CppType.Of<LoadingScreen>());
+                    var go = lsObj?.TryCast<LoadingScreen>()?.gameObject;
+                    if (go == null) ls = "noGO";
+                    else
+                    {
+                        var cg = go.GetComponentInChildren<CanvasGroup>(true);
+                        ls = $"active={go.activeInHierarchy} alpha={(cg != null ? cg.alpha.ToString("F2") : "n/a")}";
+                    }
+                }
+                catch (Exception ex) { ls = $"err:{ex.Message}"; }
+                Plugin.Logger.LogInfo(
+                    $"[LoadTrace] t={age:F0}s phase={MPLifecycle.Phase} pos={pos} money={money:F0} day={day} hr={hour:F1} " +
+                    $"ts={Time.timeScale:F2} ls[{ls}] pendingFreeze={_sceneLoadedPendingFreeze} pfElapsed={_pendingFreezeElapsed:F0} " +
+                    $"conn={MPClient.IsConnected} held={TimeSync.IsStartupHeld}");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[LoadTrace] {ex.Message}"); }
         }
 
         // ── Overlay watchdog: the game's loading screen can survive its own
