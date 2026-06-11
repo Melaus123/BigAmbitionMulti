@@ -486,6 +486,19 @@ namespace BigAmbitionsMP
         public List<ColorEntry> Colors { get; set; } = new();
         /// <summary>Every blendshape weight on each active variant's mesh (body-shape morphs).</summary>
         public List<BlendEntry> Blends { get; set; } = new();
+        /// <summary>Every Float/Range shader property — the CLOTHES DYE lives
+        /// here (texture-array slice index on SH_CharacterClothes*), not in a
+        /// color property (probe-classified 2026-06-11).</summary>
+        public List<FloatEntry> Floats { get; set; } = new();
+    }
+
+    /// <summary>One float shader property: category + material index + name + value.</summary>
+    public class FloatEntry
+    {
+        public string Cat  { get; set; } = "";
+        public int    Mat  { get; set; }
+        public string Prop { get; set; } = "";
+        public float  V    { get; set; }
     }
 
     /// <summary>One blendshape morph: category + shape name + weight (0-100).</summary>

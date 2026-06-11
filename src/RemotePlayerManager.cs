@@ -705,6 +705,8 @@ namespace BigAmbitionsMP
                   .Append((int)(c.B * 255f)).Append(',').Append((int)(c.A * 255f));
             foreach (var b in dto.Blends.OrderBy(b => b.Cat).ThenBy(b => b.Shape))
                 sb.Append('|').Append(b.Cat).Append(b.Shape).Append((int)b.Weight);
+            foreach (var f in dto.Floats.OrderBy(f => f.Cat).ThenBy(f => f.Mat).ThenBy(f => f.Prop))
+                sb.Append('|').Append(f.Cat).Append(f.Mat).Append(f.Prop).Append((int)(f.V * 1000f));
             return sb.ToString();
         }
 
@@ -1131,16 +1133,27 @@ namespace BigAmbitionsMP
                     int n = sh.GetPropertyCount();
                     for (int p = 0; p < n; p++)
                     {
-                        if (sh.GetPropertyType(p) != UnityEngine.Rendering.ShaderPropertyType.Color)
-                            continue;
+                        var pt = sh.GetPropertyType(p);
                         string pn = sh.GetPropertyName(p);
-                        var c = mat.GetColor(pn);
-                        try { if (hasMpb && mpb.HasColor(pn)) c = mpb.GetColor(pn); } catch { }
-                        dto.Colors.Add(new ColorEntry
+                        if (pt == UnityEngine.Rendering.ShaderPropertyType.Color)
                         {
-                            Cat = cat, Mat = m, Prop = pn,
-                            R = c.r, G = c.g, B = c.b, A = c.a,
-                        });
+                            var c = mat.GetColor(pn);
+                            try { if (hasMpb && mpb.HasColor(pn)) c = mpb.GetColor(pn); } catch { }
+                            dto.Colors.Add(new ColorEntry
+                            {
+                                Cat = cat, Mat = m, Prop = pn,
+                                R = c.r, G = c.g, B = c.b, A = c.a,
+                            });
+                        }
+                        else if (pt == UnityEngine.Rendering.ShaderPropertyType.Float
+                              || pt == UnityEngine.Rendering.ShaderPropertyType.Range)
+                        {
+                            // The clothes DYE is a float (texture-array slice
+                            // index on SH_CharacterClothes*), not a color.
+                            float v = mat.GetFloat(pn);
+                            try { if (hasMpb && mpb.HasFloat(pn)) v = mpb.GetFloat(pn); } catch { }
+                            dto.Floats.Add(new FloatEntry { Cat = cat, Mat = m, Prop = pn, V = v });
+                        }
                     }
                 }
             }
@@ -1234,6 +1247,26 @@ namespace BigAmbitionsMP
                         var mat = mats[e.Mat];
                         if (mat == null) continue;
                         mat.SetColor(e.Prop, new Color(e.R, e.G, e.B, e.A));
+                    }
+                }
+
+                // Float properties — the dye index travels here.
+                foreach (var grp in dto.Floats.GroupBy(e => e.Cat))
+                {
+                    if (!dto.Variants.TryGetValue(grp.Key, out var wanted)) continue;
+                    var cat = genderT.Find(grp.Key);
+                    var v = cat != null ? cat.Find(wanted) : null;
+                    if (v == null) continue;
+                    var smrComp = v.gameObject.GetComponent(Il2CppType.Of<SkinnedMeshRenderer>());
+                    var smr = smrComp != null ? smrComp.TryCast<SkinnedMeshRenderer>() : null;
+                    if (smr == null) continue;
+                    var mats = smr.materials;
+                    foreach (var e in grp)
+                    {
+                        if (e.Mat < 0 || e.Mat >= mats.Length) continue;
+                        var mat = mats[e.Mat];
+                        if (mat == null) continue;
+                        try { mat.SetFloat(e.Prop, e.V); } catch { }
                     }
                 }
             }
