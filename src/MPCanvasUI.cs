@@ -4739,7 +4739,7 @@ namespace BigAmbitionsMP
             // clients show the host-side limit as an estimate).
             float remaining = Mathf.Max(0f, STARTUP_HOLD_TIMEOUT - _startupHoldElapsed);
             string countdown = MPServer.IsRunning
-                ? $"\n\n<size=20><color=#FFD24A>Starting in at most {(int)remaining / 60}:{(int)remaining % 60:D2}</color></size>"
+                ? $"\n\n<size=20><color=#FFD24A>Auto-start in {(int)remaining / 60}:{(int)remaining % 60:D2}</color></size>"
                 : "";
 
             _startupScreenTxt.text =
