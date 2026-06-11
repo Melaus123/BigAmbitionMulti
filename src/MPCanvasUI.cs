@@ -77,7 +77,7 @@ namespace BigAmbitionsMP
         // Startup pause hold — host-side watchdog so the game can't freeze forever
         // if a player gets stuck loading and never reports in-game.
         private float _startupHoldElapsed;
-        private const float STARTUP_HOLD_TIMEOUT = 90f;
+        private const float STARTUP_HOLD_TIMEOUT = 180f;   // 3 min (user spec) — countdown shown on the wait screen
 
         // Sends the local player's appearance once, after the character is ready.
 
@@ -4731,9 +4731,17 @@ namespace BigAmbitionsMP
                   string.Join("\n", waiting.Select(n => $"<color=#FFD24A>{n}</color>"))
                 : "Waiting for all players to finish loading…";
 
+            // Countdown to the force-release (host knows the elapsed time;
+            // clients show the host-side limit as an estimate).
+            float remaining = Mathf.Max(0f, STARTUP_HOLD_TIMEOUT - _startupHoldElapsed);
+            string countdown = MPServer.IsRunning
+                ? $"\n\n<size=20><color=#FFD24A>Starting in at most {(int)remaining / 60}:{(int)remaining % 60:D2}</color></size>"
+                : "";
+
             _startupScreenTxt.text =
                 "<size=36><b>Multiplayer</b></size>\n\n" +
                 body +
+                countdown +
                 "\n\n<size=17><color=#AAAAAA>The game starts automatically " +
                 "once everyone is ready.</color></size>";
         }

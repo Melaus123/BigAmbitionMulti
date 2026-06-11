@@ -69,6 +69,11 @@ namespace BigAmbitionsMP
                 {
                     if (inLobby) { Set(MPPhase.Lobby, "lobby roster active"); return; }
                     if (overlayUp) { Set(MPPhase.Loading, "overlay up, no player"); return; }
+                    // CHARACTER CREATION is part of loading, not "Menu": a
+                    // new-game client sits here user-paced for minutes — the
+                    // Menu misclassification got loading clients excused from
+                    // the host's fence (2026-06-11).
+                    if (IntroActive()) { Set(MPPhase.Loading, "intro/character creation"); return; }
                     Set(MPPhase.Menu, "no player, no overlay");
                     return;
                 }
@@ -114,6 +119,23 @@ namespace BigAmbitionsMP
                     Set(MPPhase.Running, "ready 3s stable");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Lifecycle] tick: {ex.Message}"); }
+        }
+
+        private static Type? _introType;
+        private static bool _introTypeMissing;
+
+        /// <summary>True while the intro/character-creation scene is up.</summary>
+        private static bool IntroActive()
+        {
+            try
+            {
+                if (_introTypeMissing) return false;
+                _introType ??= VehicleManager.FindGameType("IntroCharacterCustomizer");
+                if (_introType == null) { _introTypeMissing = true; return false; }
+                var obj = UnityEngine.Object.FindObjectOfType(Il2CppType.From(_introType));
+                return obj != null;
+            }
+            catch { return false; }
         }
 
         private static void Set(MPPhase next, string why)

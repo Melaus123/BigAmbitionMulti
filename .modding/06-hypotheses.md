@@ -40,3 +40,6 @@
 - Symptom: clicked bench, walked away before sitting → dock stuck open, X gone (X visibility tied to CancelButtonIndex of a live activity?), dock survived EXIT TO MENU (scene-exit reset missed this state).
 - Notes: approach-cancelled state = activity in MovingTowardsActivity then aborted; Seated/dock visibility logic likely wedged on a stale cached activity. Scene-exit must force-hide the dock unconditionally.
 - Defer until after stage-4/5 consolidation (current plan).
+
+## BACKLOG (user, 2026-06-11): host rubberbands a few times when first moving after login
+- Suspect (user + matching mechanism): spawn de-stack RE-ASSERT pins the player to _spawnTarget for the probe window (drift 1.2-8m snapped back) — walking immediately = rubberband. Fix lands with SPAWN PRE-PLACEMENT (assign distinct spawn positions at placement time; delete the offset/probe/re-assert machinery entirely).

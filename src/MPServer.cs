@@ -1191,7 +1191,9 @@ namespace BigAmbitionsMP
         public static void RecordPhaseReport(PhaseReportPayload? p)
         {
             if (p == null || string.IsNullOrEmpty(p.PlayerId)) return;
+            bool changed = !_peerPhase.TryGetValue(p.PlayerId, out var prevPh) || prevPh.phase != p.Phase;
             _peerPhase[p.PlayerId] = (p.Phase, Environment.TickCount64);
+            if (changed) Plugin.Logger.LogInfo($"[Server] phase: '{p.PlayerId}' → {p.Phase}");
         }
 
         /// <summary>Host main thread, ~1 Hz while hosting: excuse fence-waited
