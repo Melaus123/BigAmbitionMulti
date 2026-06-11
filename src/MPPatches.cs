@@ -1644,6 +1644,30 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: FullMenu.ShowApp/SelectApp — native app selected → our
+        //    Business page steps aside (it lives as a sibling in the shell). ──
+        [HarmonyPatch]
+        public static class Patch_FullMenu_ShowApp_HideBusiness
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var t = VehicleManager.FindGameType("UI.Smartphone.FullMenu");
+                int n = 0;
+                foreach (var name in new[] { "ShowApp", "SelectApp" })
+                {
+                    var m = t?.GetMethod(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    if (m != null) { n++; yield return m; }
+                }
+                Plugin.Logger.LogInfo($"[HubApp] FullMenu show/select patches: {n}/2");
+            }
+
+            static void Postfix()
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                MPHubNativePage.HidePage();
+            }
+        }
+
         // ── Patch: PlayerActivityUI.HidePanel — native rest panel never shows ──
         // Rest v4 (user-designed): clicking a bench/bed must NOT open the
         // game's rest dialog; our own dock (MPCanvasUI.TickRestUI) replaces it.

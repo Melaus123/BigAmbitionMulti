@@ -23,13 +23,38 @@ namespace BigAmbitionsMP
         private static Type? _menuType;
         private static float _nextFindAt;
         private static bool _dumped;
+        private static bool _pageDumped;
         private static int _lines;
         private const int MaxLines = 320;
 
-        public static void Reset() { _menu = null; _dumped = false; _lines = 0; }
+        public static void Reset() { _menu = null; _dumped = false; _pageDumped = false; _lines = 0; }
 
         public static void Tick()
         {
+            // After the shell dump: catch the FIRST app page the player opens
+            // (the white-box widget inventory the shell dump missed — pages
+            // were all inactive the frame the menu opened).
+            if (_dumped && !_pageDumped)
+            {
+                try
+                {
+                    var ac = _menu != null ? _menu.transform.Find("Canvas/AppsContainer") : null;
+                    if (ac != null)
+                        for (int i = 0; i < ac.childCount; i++)
+                        {
+                            var ch = ac.GetChild(i);
+                            if (!ch.gameObject.activeSelf || ch.name.StartsWith("BAMP_")) continue;
+                            _pageDumped = true;
+                            _lines = 0;
+                            Plugin.Logger.LogInfo($"[FullMenu] ── page interior '{ch.name}' (widget inventory) ──");
+                            Dump(ch, 0, 5, true);
+                            Plugin.Logger.LogInfo("[FullMenu] ── page interior dump complete ──");
+                            break;
+                        }
+                }
+                catch { _pageDumped = true; }
+                return;
+            }
             if (_dumped) return;
             try
             {

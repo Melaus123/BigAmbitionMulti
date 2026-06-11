@@ -668,7 +668,7 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Load any icon PNG from the plugins folder (owned texture).</summary>
-        private static Sprite? LoadIconFile(string file)
+        internal static Sprite? LoadIconFile(string file)
         {
             try
             {
