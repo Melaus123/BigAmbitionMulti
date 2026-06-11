@@ -173,6 +173,7 @@ namespace BigAmbitionsMP
             if (p == null) return;
             Loans.Clear();
             Loans.AddRange(p.Loans);
+            Plugin.Logger.LogInfo($"[Hub] loan state applied: {Loans.Count} active loan(s).");
             Version++;
         }
 
@@ -224,6 +225,7 @@ namespace BigAmbitionsMP
                     Remaining = offer.Principal,
                     DailyInterest = offer.DailyInterest, DailyPayment = offer.DailyPayment,
                 });
+                Plugin.Logger.LogInfo($"[Hub] loan LEDGERED: {offer.From} → {offer.To} ${offer.Principal:N0}; broadcasting ({_hostLoans.Count} active).");
                 HostBroadcastLoans();
                 SaveLedger();
             }
@@ -292,12 +294,22 @@ namespace BigAmbitionsMP
             catch { return null; }
         }
 
+        private static bool _warnedNoSession;
+
         public static void SaveLedger()
         {
             try
             {
                 var path = LedgerPath();
-                if (path == null) return;
+                if (path == null)
+                {
+                    if (!_warnedNoSession)
+                    {
+                        _warnedNoSession = true;
+                        Plugin.Logger.LogWarning("[Hub] ledger NOT saved — no active session name yet (will persist on next change after first save).");
+                    }
+                    return;
+                }
                 var st = new LoanStatePayload();
                 st.Loans.AddRange(_hostLoans);
                 System.IO.File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(st));
@@ -315,6 +327,14 @@ namespace BigAmbitionsMP
             try
             {
                 if (!System.IO.File.Exists(path)) return;
+                // Never overwrite a LIVE ledger: the session name can appear
+                // late (first save), and loading an old file then would wipe
+                // loans created meanwhile.
+                if (_hostLoans.Count > 0)
+                {
+                    Plugin.Logger.LogInfo("[Hub] ledger file skipped — in-memory ledger already live.");
+                    return;
+                }
                 var st = System.Text.Json.JsonSerializer.Deserialize<LoanStatePayload>(System.IO.File.ReadAllText(path));
                 if (st == null) return;
                 _hostLoans.Clear();
