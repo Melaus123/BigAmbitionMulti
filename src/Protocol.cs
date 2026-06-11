@@ -91,6 +91,7 @@ namespace BigAmbitionsMP
         LoanState            = 107, // Host → All: the authoritative active-loan ledger (Business Hub display).
         MoneyAdjust          = 108, // Host → one player: credit/debit your wallet by Amount (transfer delivery, loan principal, daily loan payments).
         PhaseReport          = 110, // Client → Host: my lifecycle phase changed (load-fence visibility; lets the host excuse a client who bailed to the menu instead of loading).
+        RegisterCashier      = 111, // Any → Host → All: player went on/off duty at the cash register near (X,Y,Z); others can F4-buy there (Wave-2 player-staffed registers).
     }
 
     // ── Envelope ───────────────────────────────────────────────────────────────
@@ -771,6 +772,16 @@ namespace BigAmbitionsMP
     {
         public string PlayerId { get; set; } = "";
         public string Phase    { get; set; } = "";
+    }
+
+    /// <summary>Player on/off duty at a cash register (MessageType.RegisterCashier).</summary>
+    public class RegisterCashierPayload
+    {
+        public string PlayerId { get; set; } = "";
+        public float X { get; set; }
+        public float Y { get; set; }
+        public float Z { get; set; }
+        public bool On { get; set; }
     }
 
     public class MoneyAdjustPayload

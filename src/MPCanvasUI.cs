@@ -1119,10 +1119,16 @@ namespace BigAmbitionsMP
         // owned vehicle (driveable/unloadable); reuses the proven ghost-spawn
         // API minus the de-registration.  MP-session only. ───────────────────
         private bool _testRigF3Down;
+        private bool _regF4Down;
         private static int _testRigN;
 
         private void TickTestRig()
         {
+            bool f4 = Input.GetKey(KeyCode.F4);
+            if (f4 && !_regF4Down && (MPServer.IsRunning || MPClient.IsConnected) && IsInGame())
+                MPRegisterSync.OnF4();   // cashier duty toggle / buy at a player-staffed register
+            _regF4Down = f4;
+
             bool f3 = Input.GetKey(KeyCode.F3);
             if (f3 && !_testRigF3Down && (MPServer.IsRunning || MPClient.IsConnected) && IsInGame())
             {
@@ -1981,6 +1987,7 @@ namespace BigAmbitionsMP
                 ResetWorldClock();
                 TrafficSync.Reset();
                 ParkedVehicleSync.Reset();
+                MPRegisterSync.Reset();   // duty posts die with the scene
                 _appearanceSig = ""; _appearanceNextAt = 0f;
                 _introNameFilled = false;       // re-arm intro-name prefill on next char-gen
                 _blackOverlayCanvas = null;     // re-scan on fresh game load (#6)

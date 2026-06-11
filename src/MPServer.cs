@@ -805,6 +805,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.RegisterCashier:
+                {
+                    MPRegisterSync.Apply(env.GetPayload<RegisterCashierPayload>());
+                    Broadcast(env);   // relay duty state to everyone (idempotent at sender)
+                    break;
+                }
+
                 case MessageType.CashSync:
                 {
                     var c = env.GetPayload<CashSyncPayload>();

@@ -372,6 +372,12 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.RegisterCashier:
+                {
+                    MPRegisterSync.Apply(env.GetPayload<RegisterCashierPayload>());
+                    break;
+                }
+
                 default:
                     Plugin.Logger.LogWarning($"[Client] Unknown message type: {env.Type}");
                     break;
@@ -1006,6 +1012,12 @@ namespace BigAmbitionsMP
             var writer = new NetDataWriter();
             writer.Put(bytes);
             _server.Send(writer, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>Reliable send for modules that build their own envelope.</summary>
+        public static void SendEnvelope(MessageEnvelope env)
+        {
+            if (IsConnected) Send(env);
         }
 
         private static void PollLoop()
