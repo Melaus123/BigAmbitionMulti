@@ -298,6 +298,7 @@ namespace BigAmbitionsMP
             MPSaveManager.EnsureVersionCached();
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
+            TickTestRig();           // F3 — flatbed with minimum gift-shop equipment (Wave-2 test rig)
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
             MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion
             // (quiesce-off 4s timer RETIRED 2026-06-11 — stage-4 migration #1:
@@ -1110,6 +1111,54 @@ namespace BigAmbitionsMP
             if (rt == null) return false;
             RectTransformUtility.ScreenPointToLocalPointInRectangle(rt, screenPos, _hubCam, out var local);
             return rt.rect.Contains(local);
+        }
+
+        // ── F3 test rig (user request, Wave-2 shop tests): ONE flatbed beside
+        // the player carrying the minimum GIFT SHOP equipment — checkout
+        // counter, cash register, paper bags, shelves, cheap gifts.  Real
+        // owned vehicle (driveable/unloadable); reuses the proven ghost-spawn
+        // API minus the de-registration.  MP-session only. ───────────────────
+        private bool _testRigF3Down;
+        private static int _testRigN;
+
+        private void TickTestRig()
+        {
+            bool f3 = Input.GetKey(KeyCode.F3);
+            if (f3 && !_testRigF3Down && (MPServer.IsRunning || MPClient.IsConnected) && IsInGame())
+            {
+                try
+                {
+                    var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
+                    if (ch == null) { Plugin.Logger.LogWarning("[TestRig] no player character."); }
+                    else
+                    {
+                        var pos = ch.position + ch.forward * 7f + Vector3.up * 0.5f;
+                        var rot = Quaternion.LookRotation(ch.right, Vector3.up);   // sideways at the curb
+                        var inst = new VehicleInstance();
+                        inst.id = $"BAMP_TESTRIG_{++_testRigN}";
+                        inst.vehicleTypeName = Vehicles.VehicleTypes.VehicleTypeName.Flatbed;
+                        if (inst.cargoInstances == null)
+                            inst.cargoInstances = new Il2CppSystem.Collections.Generic.List<BigAmbitions.Items.CargoInstance>();
+                        // Minimum gift-shop kit (paid stock, $0 cost basis).
+                        (BigAmbitions.Items.ItemName item, int amount)[] kit =
+                        {
+                            (BigAmbitions.Items.ItemName.CheckoutCounterRight, 1),
+                            (BigAmbitions.Items.ItemName.CashRegister,         1),
+                            (BigAmbitions.Items.ItemName.PaperBag,           100),
+                            (BigAmbitions.Items.ItemName.RoundedShelf,         2),
+                            (BigAmbitions.Items.ItemName.CheapGift,           60),
+                        };
+                        foreach (var (item, amount) in kit)
+                            inst.cargoInstances.Add(new BigAmbitions.Items.CargoInstance(item, amount, 0f, true));
+                        var vc = VehicleHelper.CreateAndSpawnVehicle(inst, pos, rot);
+                        Plugin.Logger.LogInfo(vc != null
+                            ? $"[TestRig] flatbed '{inst.id}' spawned at {pos} with gift-shop kit (counter, register, {100} bags, 2 shelves, {60} cheap gifts)."
+                            : "[TestRig] CreateAndSpawnVehicle returned null.");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogError($"[TestRig] {ex.Message}"); }
+            }
+            _testRigF3Down = f3;
         }
 
         // ── Spawn de-stack v2 (stage-4): every player loads on the SAME spawn
