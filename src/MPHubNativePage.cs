@@ -269,12 +269,17 @@ namespace BigAmbitionsMP
                             // Reflection-Invoke needs the DECLARED type's interop
                             // wrapper — a Component cast throws "Object does not
                             // match target type" (typed-wrapper trick, classes only).
-                            var raw = arr != null && arr.Length > 0 ? arr[0].TryCast<Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase>() : null;
+                            var raw = arr != null && arr.Length > 0 ? arr[0] as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase : null;
                             var sui = raw != null ? Activator.CreateInstance(suiType, raw.Pointer) : null;
                             if (sui != null && openApp != null)
                             {
-                                var first = Enum.GetValues(openApp.GetParameters()[0].ParameterType).GetValue(0);
-                                openApp.Invoke(sui, new object[] { first! });
+                                var et = openApp.GetParameters()[0].ParameterType;
+                                object? appVal = null;
+                                foreach (var nm in new[] { "Persona", "Contacts", "Rivals" })
+                                    { try { appVal = Enum.Parse(et, nm); break; } catch { } }
+                                var vals = Enum.GetValues(et);
+                                appVal ??= vals.GetValue(vals.Length > 1 ? 1 : 0);   // [0] is often None
+                                openApp.Invoke(sui, new object[] { appVal! });
                                 opened = true;
                             }
                         }
@@ -300,7 +305,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var raw = _menu != null ? _menu.TryCast<Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase>() : null;
+                var raw = _menu as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase;
                 return raw != null && _menuType != null ? Activator.CreateInstance(_menuType, raw.Pointer) : null;
             }
             catch { return null; }

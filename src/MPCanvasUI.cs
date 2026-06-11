@@ -1092,6 +1092,39 @@ namespace BigAmbitionsMP
             return rt.rect.Contains(local);
         }
 
+        // ── Spawn de-stack: every player loads on the SAME spawn point and the
+        // overlapping capsules shove each other (screen shake).  Offset the
+        // LOCAL player by lobby index once the world runs — deterministic, so
+        // every machine computes the same circle; position sync does the rest.
+        private bool _spawnOffsetDone;
+
+        private void TickSpawnOffset()
+        {
+            if (_spawnOffsetDone || TimeSync.IsStartupHeld) return;
+            try
+            {
+                var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
+                if (ch == null) return;
+                var players = MPRestSync.AllPlayers();
+                if (players.Count < 2) { _spawnOffsetDone = true; return; }
+                var sorted = new List<string>(players);
+                sorted.Sort(StringComparer.Ordinal);
+                int idx = sorted.IndexOf(MPConfig.PlayerId);
+                if (idx < 0) return;              // roster not settled — retry
+                _spawnOffsetDone = true;
+                if (idx == 0) return;             // first player keeps the spot
+                float ang = idx * (Mathf.PI * 2f / sorted.Count);
+                var off = new Vector3(Mathf.Cos(ang), 0f, Mathf.Sin(ang)) * 1.1f;
+                var ccComp = ch.GetComponent(Il2CppType.Of<CharacterController>());
+                var cc = ccComp != null ? ccComp.TryCast<CharacterController>() : null;
+                if (cc != null) cc.enabled = false;
+                ch.position += off;
+                if (cc != null) cc.enabled = true;
+                Plugin.Logger.LogInfo($"[Spawn] de-stack offset: idx={idx}/{sorted.Count} off=({off.x:F2},{off.z:F2}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Spawn] offset: {ex.Message}"); _spawnOffsetDone = true; }
+        }
+
         /// <summary>Open the Business page inside the native full menu (and the
         /// menu itself if closed).  Falls back to the standalone window when
         /// the injection isn't ready.</summary>
@@ -1707,6 +1740,7 @@ namespace BigAmbitionsMP
                 MPHub.Reset(); _hubVisible = false;    // hub ledger is per-session
                 MPFullMenuProbe.Reset();               // re-arm per scene
                 MPHubNativePage.Reset(); _hub = null; _hubNative = false;   // page died with the scene
+                _spawnOffsetDone = false;              // next session de-stacks again
                 // The session-over lock is for the in-game world only — back at
                 // the menu the player is free to host/join again.
                 MPClient.SessionEnded = false;
@@ -2158,6 +2192,7 @@ namespace BigAmbitionsMP
             TickRestBanner();
             TickRestUI();
             MPHubNativePage.Tick();       // "Business" in the native full menu
+            TickSpawnOffset();            // de-stack players at the shared spawn point
             TickHubWindow();
             MPFullMenuProbe.Tick();       // passive recon for the native-app integration
             _pt = MPPerf.Begin(); InteriorSync.Tick();         MPPerf.End("Interior", _pt);   // diff-push to subscribed clients
