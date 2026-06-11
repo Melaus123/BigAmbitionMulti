@@ -25,3 +25,8 @@
 - Evidence AGAINST: cc=False + frozen clock also fit a missing load-finish step (H2).
 - DISCRIMINATOR (single host-only run): fresh MP session → save → exit → reload THAT session. Clean = H4 confirmed (delete loantest1; add save-guard: refuse HostSaveNow while world not healthy). Broken = code path → git bisect (known-good-loads tag = 18a0a69).
 - H1 (de-stack) REFUTED for the info symptoms: bugged state persisted with de-stack gated.
+
+## RESOLVED: host world-entry "sorry state" = OVERLAY WATCHDOG force-killing LoadingScreen mid-load
+- CONFIRMED 2026-06-11: fresh new game broken identically (H4 refuted); watchdog fired-count = 1 in the broken run; signature (cc=False forever, clock frozen, default-spawn position, HUD half-bound) = the LoadingScreen coroutine murdered before load-finish. PlayerController spawns long before the overlay legitimately drops → 12s "stuck" check tripped on EVERY normal host load.
+- Fix: watchdog demoted to diagnostic-only (30s, log line, touches nothing). The stuck-overlay problem it bandaged was already properly fixed by the 4s quiesce delay.
+- Lesson reinforced: the bandaid CREATED the regression spiral the user sensed.

@@ -2335,17 +2335,16 @@ namespace BigAmbitionsMP
                 try { worldUp = Helpers.PlayerHelper.PlayerController != null; } catch { }
                 if (!worldUp || !IsLoadingOverlayUp()) { _overlayStuckSince = 0f; return; }
                 if (_overlayStuckSince == 0f) { _overlayStuckSince = Time.unscaledTime; return; }
-                if (Time.unscaledTime - _overlayStuckSince < 12f) return;
+                if (Time.unscaledTime - _overlayStuckSince < 30f) return;
                 _overlayStuckSince = 0f;
-                var lsObj = UnityEngine.Object.FindObjectOfType(Il2CppType.Of<LoadingScreen>());
-                var go = lsObj != null ? lsObj.TryCast<LoadingScreen>()?.gameObject : null;
-                if (go != null)
-                {
-                    var cg = go.GetComponentInChildren<CanvasGroup>(true);
-                    if (cg != null) { cg.alpha = 0f; cg.blocksRaycasts = false; cg.interactable = false; }
-                    go.SetActive(false);
-                    Plugin.Logger.LogWarning("[UI] OVERLAY WATCHDOG: loading screen stuck >12s over a live world — force-dismissed.");
-                }
+                // DIAGNOSTIC ONLY.  The force-dismiss variant KILLED the game's
+                // load-finish coroutine on EVERY host load (PlayerController
+                // spawns long before the overlay legitimately drops, so the 12s
+                // "stuck" check tripped on normal loads; killing LoadingScreen
+                // killed its coroutine → controller dead, clock frozen, HUD
+                // half-bound — localized via LoadTrace + fired-count,
+                // 2026-06-11).  NEVER touch the LoadingScreen object.
+                Plugin.Logger.LogWarning("[UI] overlay still up 30s after world spawn (diagnostic only — no action taken).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[UI] overlay watchdog: {ex.Message}"); }
         }
