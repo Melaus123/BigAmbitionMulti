@@ -260,6 +260,7 @@ namespace BigAmbitionsMP
 
             if (next != MPLifecycle.MPPhase.WorldReady) return;
             MPClient.EndJoinQuiesce();
+            ApplySpawnSidestep();   // fresh games: one navmesh-validated de-stack, placement final
             // Placement diagnostic: position-restore runs in load-finish —
             // still at the default spawn here = it was skipped.
             try
@@ -1092,107 +1093,58 @@ namespace BigAmbitionsMP
             return rt.rect.Contains(local);
         }
 
-        // ── Spawn de-stack: every player loads on the SAME spawn point and the
-        // overlapping capsules shove each other (screen shake).  Offset the
-        // LOCAL player by lobby index once the world runs — deterministic, so
-        // every machine computes the same circle; position sync does the rest.
-        private bool _spawnOffsetDone;
-        private float _spawnRosterWaitUntil;
-        private float _spawnApplyAt;          // delayed past the game's own placement
-        private float _spawnProbeAt;          // telemetry checkpoints
-        private int _spawnProbeN;
-        private Vector3 _spawnTarget;
+        // ── Spawn de-stack v2 (stage-4): every player loads on the SAME spawn
+        // point and the capsules shove each other.  ONE navmesh-validated
+        // sidestep at the WorldReady EVENT — after the game''s placement is
+        // FINAL, so nothing fights it.  The old offset+re-assert pin machinery
+        // (rubberband on first movement; fought save restores) is DELETED.
+        // The spawn is a SIDEWALK strip between road and buildings (user):
+        // candidates ring outward in small steps and only WALKABLE positions
+        // (NavMesh.SamplePosition) qualify — building interiors and bad
+        // directions fail validation and are skipped.
+        private bool _spawnSidestepDone;
 
-        private void TickSpawnOffset()
+        private void ApplySpawnSidestep()
         {
-            // Wait out the REAL loading overlay too — applying under it let
-            // the game's own placement land afterwards and undo the offset.
-            if (TimeSync.IsStartupHeld || IsLoadingOverlayUp()) { _spawnApplyAt = 0f; return; }
             try
             {
-                // Telemetry: after applying, report where the character ACTUALLY
-                // is at +0.5s/+2s/+5s — the move logged success before but the
-                // user saw no offset, so something resets it silently.
-                if (_spawnOffsetDone)
-                {
-                    if (_spawnProbeAt > 0f && Time.unscaledTime >= _spawnProbeAt)
-                    {
-                        _spawnProbeN++;
-                        _spawnProbeAt = _spawnProbeN >= 3 ? 0f : Time.unscaledTime + (_spawnProbeN == 1 ? 1.5f : 3f);
-                        var c = Helpers.PlayerHelper.PlayerController?.Character?.transform;
-                        if (c != null)
-                        {
-                            float d = Vector3.Distance(c.position, _spawnTarget);
-                            Plugin.Logger.LogInfo($"[Spawn] probe#{_spawnProbeN}: pos=({c.position.x:F2},{c.position.z:F2}) distToTarget={d:F2}");
-                            if (d > 1.2f && d < 8f) { MoveLocalPlayer(c, _spawnTarget); Plugin.Logger.LogInfo("[Spawn] re-asserted."); }
-                        }
-                    }
-                    return;
-                }
-                // FRESH GAMES ONLY: loaded sessions restore saved positions —
-                // the offset + drift re-pin FIGHTS the restore (wrong spot /
-                // stuck player on load, 2026-06-11).  A loaded session has its
-                // name set BEFORE the world loads; a new game doesn't.
-                if (!string.IsNullOrEmpty(MPSaveCoordinator.ActiveSessionName))
-                {
-                    _spawnOffsetDone = true;
-                    return;
-                }
+                if (_spawnSidestepDone) return;
+                _spawnSidestepDone = true;
+                // Fresh games only: loaded sessions restore real positions.
+                if (!string.IsNullOrEmpty(MPSaveCoordinator.ActiveSessionName)) return;
                 var players = MPRestSync.AllPlayers();
-                if (players.Count < 2)
-                {
-                    if (_spawnRosterWaitUntil == 0f) _spawnRosterWaitUntil = Time.unscaledTime + 12f;
-                    if (Time.unscaledTime < _spawnRosterWaitUntil) return;
-                    _spawnOffsetDone = true;
-                    return;
-                }
-                // Delay 2s past hold release: the game's own spawn placement
-                // can land after ours and silently undo it.
-                if (_spawnApplyAt == 0f) { _spawnApplyAt = Time.unscaledTime + 2f; return; }
-                if (Time.unscaledTime < _spawnApplyAt) return;
-
-                var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
-                if (ch == null) return;
+                if (players.Count < 2) return;
                 var sorted = new List<string>(players);
                 sorted.Sort(StringComparer.Ordinal);
                 int idx = sorted.IndexOf(MPConfig.PlayerId);
-                if (idx < 0) return;              // roster not settled — retry
-                _spawnOffsetDone = true;
-                if (idx == 0) { Plugin.Logger.LogInfo("[Spawn] de-stack: idx=0 keeps the spot."); return; }
-                float ang = idx * (Mathf.PI * 2f / sorted.Count);
-                var off = new Vector3(Mathf.Cos(ang), 0f, Mathf.Sin(ang)) * 2.0f;
-                _spawnTarget = ch.position + off;
-                var rootT = Helpers.PlayerHelper.PlayerController?.transform;
-                Plugin.Logger.LogInfo($"[Spawn] applying: idx={idx}/{sorted.Count} from=({ch.position.x:F2},{ch.position.z:F2}) off=({off.x:F2},{off.z:F2}) rootIsCharacter={rootT == ch}");
-                MoveLocalPlayer(ch, _spawnTarget);
-                Plugin.Logger.LogInfo($"[Spawn] applied: now=({ch.position.x:F2},{ch.position.z:F2})");
-                _spawnProbeAt = Time.unscaledTime + 0.5f;
-                _spawnProbeN = 0;
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Spawn] offset: {ex.Message}"); _spawnOffsetDone = true; }
-        }
+                if (idx <= 0) { Plugin.Logger.LogInfo($"[Spawn] sidestep: idx={idx} keeps the spot."); return; }
 
-        private static void MoveLocalPlayer(Transform ch, Vector3 target)
-        {
-            // Move the CONTROLLER ROOT too if it differs — a child "Character"
-            // transform can be overridden by the parent motor every frame.
-            var rootT = Helpers.PlayerHelper.PlayerController?.transform;
-            var ccComp = ch.GetComponent(Il2CppType.Of<CharacterController>());
-            var cc = ccComp != null ? ccComp.TryCast<CharacterController>() : null;
-            if (cc == null && rootT != null && rootT != ch)
-            {
-                var rcc = rootT.GetComponent(Il2CppType.Of<CharacterController>());
-                cc = rcc != null ? rcc.TryCast<CharacterController>() : null;
+                var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
+                if (ch == null) return;
+                var origin = ch.position;
+
+                // Ordered candidates: 8 compass directions × growing rings of
+                // 1.4m; the (idx-1)-th WALKABLE one is this player''s spot.
+                int want = idx - 1, seen = 0;
+                for (int ring = 1; ring <= 3; ring++)
+                {
+                    for (int d = 0; d < 8; d++)
+                    {
+                        float ang = d * Mathf.PI / 4f;
+                        var target = origin + new Vector3(Mathf.Cos(ang), 0f, Mathf.Sin(ang)) * (1.4f * ring);
+                        UnityEngine.AI.NavMeshHit hit;
+                        if (!UnityEngine.AI.NavMesh.SamplePosition(target, out hit, 0.6f, UnityEngine.AI.NavMesh.AllAreas)) continue;
+                        if (Mathf.Abs(hit.position.y - origin.y) > 1f) continue;   // no roofs/basements
+                        if (seen++ < want) continue;
+                        ch.position = hit.position;
+                        try { Physics.SyncTransforms(); } catch { }
+                        Plugin.Logger.LogInfo($"[Spawn] sidestep: idx={idx} → walkable offset ({hit.position.x - origin.x:F1},{hit.position.z - origin.z:F1}) ring={ring}.");
+                        return;
+                    }
+                }
+                Plugin.Logger.LogWarning("[Spawn] sidestep: no walkable candidate found — staying put (stacked spawn).");
             }
-            if (cc != null) cc.enabled = false;
-            if (rootT != null && rootT != ch)
-            {
-                var delta = target - ch.position;
-                rootT.position += delta;
-            }
-            ch.position = target;
-            if (cc != null) cc.enabled = true;
-            try { Physics.SyncTransforms(); } catch { }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Spawn] sidestep: {ex.Message}"); }
         }
 
         // ── Mid-game join approval (HOST): requests park at the door; this
@@ -2009,7 +1961,7 @@ namespace BigAmbitionsMP
                 MPHub.Reset(); _hubVisible = false;    // hub ledger is per-session
                 MPFullMenuProbe.Reset();               // re-arm per scene
                 MPHubNativePage.Reset(); _hub = null; _hubNative = false;   // page died with the scene
-                _spawnOffsetDone = false; _spawnRosterWaitUntil = 0f; _spawnApplyAt = 0f; _spawnProbeAt = 0f; _spawnProbeN = 0;   // next session de-stacks again
+                _spawnSidestepDone = false;   // next session de-stacks again
                 // The session-over lock is for the in-game world only — back at
                 // the menu the player is free to host/join again.
                 MPClient.SessionEnded = false;
@@ -2540,7 +2492,7 @@ namespace BigAmbitionsMP
             TickRestBanner();
             TickRestUI();
             MPHubNativePage.Tick();       // "Business" in the native full menu
-            TickSpawnOffset();            // de-stack players at the shared spawn point
+            // (spawn sidestep moved to the WorldReady event — OnLifecyclePhase)
             TickJoinPopup();              // host approval panel for mid-game joiners
             TickHubWindow();
             MPFullMenuProbe.Tick();       // passive recon for the native-app integration

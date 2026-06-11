@@ -88,6 +88,10 @@
       <HintPath>$(InteropDir)ExternalPlugins.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.AIModule">
+      <HintPath>$(InteropDir)UnityEngine.AIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="UnityEngine.CoreModule">
       <HintPath>$(InteropDir)UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
