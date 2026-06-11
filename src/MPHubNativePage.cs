@@ -22,7 +22,11 @@ namespace BigAmbitionsMP
     public static class MPHubNativePage
     {
         public static bool Ready { get; private set; }
-        public static bool PageActive => _page != null && _page.activeSelf;
+        /// <summary>activeInHierarchy, NOT activeSelf: when ESC closes the
+        /// whole menu our page's own flag stays true — treating that as
+        /// "active" left the hub ticking + input-suppressed after close
+        /// (movement lock, 2026-06-10).</summary>
+        public static bool PageActive => _page != null && _page.activeInHierarchy;
         /// <summary>Content host for MPCanvasUI's hub builder: 1920x875 at
         /// scale 2 → fills the 3840x1750 page area with native-shell margins.</summary>
         public static Transform? ContentRoot { get; private set; }
@@ -262,7 +266,11 @@ namespace BigAmbitionsMP
                                 if (ps.Length == 1 && ps[0].ParameterType.IsEnum) { openApp = m; break; }
                             }
                             var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(suiType), true);
-                            var sui = arr != null && arr.Length > 0 ? arr[0].TryCast<Component>() : null;
+                            // Reflection-Invoke needs the DECLARED type's interop
+                            // wrapper — a Component cast throws "Object does not
+                            // match target type" (typed-wrapper trick, classes only).
+                            var raw = arr != null && arr.Length > 0 ? arr[0].TryCast<Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase>() : null;
+                            var sui = raw != null ? Activator.CreateInstance(suiType, raw.Pointer) : null;
                             if (sui != null && openApp != null)
                             {
                                 var first = Enum.GetValues(openApp.GetParameters()[0].ParameterType).GetValue(0);
@@ -272,12 +280,12 @@ namespace BigAmbitionsMP
                         }
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[HubApp] OpenApp path: {ex.Message}"); }
-                    if (!opened)
+                    if (!opened && _menuType != null)
                     {
-                        // Resolve Toggle from the INSTANCE's runtime type (the
-                        // cached type once mismatched: "Object does not match").
-                        foreach (var m in _menu.GetType().GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
-                            if (m.Name == "Toggle" && m.GetParameters().Length == 0) { m.Invoke(_menu, null); break; }
+                        var typedMenu = TypedMenu();
+                        if (typedMenu != null)
+                            foreach (var m in _menuType.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                                if (m.Name == "Toggle" && m.GetParameters().Length == 0) { m.Invoke(typedMenu, null); break; }
                     }
                     Plugin.Logger.LogInfo($"[HubApp] menu open requested (viaOpenApp={opened}); canvas active={canvasT != null && canvasT.gameObject.activeInHierarchy}.");
                 }
@@ -286,14 +294,27 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[HubApp] OpenMenuToBusiness: {ex.Message}"); }
         }
 
-        /// <summary>Close the whole menu (our page's X).</summary>
+        /// <summary>Typed interop wrapper for the FullMenu instance (reflection
+        /// Invoke rejects base-class wrappers).</summary>
+        private static object? TypedMenu()
+        {
+            try
+            {
+                var raw = _menu != null ? _menu.TryCast<Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase>() : null;
+                return raw != null && _menuType != null ? Activator.CreateInstance(_menuType, raw.Pointer) : null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Close the whole menu (our page's X / fallback).</summary>
         public static void CloseMenu()
         {
             try
             {
                 HidePage();
+                var typedMenu = TypedMenu();
                 var close = _menuType?.GetMethod("CloseFullMenu", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                if (_menu != null && close != null) close.Invoke(_menu, null);
+                if (typedMenu != null && close != null) close.Invoke(typedMenu, null);
             }
             catch { }
         }

@@ -1178,13 +1178,13 @@ namespace BigAmbitionsMP
                         : $"<b>{HubTerm()}</b> days";
                 if (_hubTermsLbl != null)
                 {
-                    // Bank convention (dump-confirmed): rate = TOTAL premium,
-                    // dailies = ceil(P*rate/term) + ceil(P/term).  Bank's own
-                    // fixed deal is 20% over 244 days, for reference.
+                    // Bank convention: rate = TOTAL premium over the term.
+                    // EXACT dailies (no ceiling) — rounding up inflated the
+                    // effective rate: a 20% offer displayed as 22% (2026-06-10).
                     double pct = HubRate();
                     int term = HubTerm();
-                    double di = Math.Max(0, Math.Ceiling(_hubAmount * pct / 100.0 / term));
-                    double dp = Math.Max(1, Math.Ceiling(_hubAmount / term));
+                    double di = Math.Max(0, _hubAmount * pct / 100.0 / term);
+                    double dp = Math.Max(1, _hubAmount / term);
                     string termsCol = _hubNative ? "#6A7280" : "#9AA3B2";
                     _hubTermsLbl.text = $"<color={termsCol}>loan: ${di:N0}/day interest + ${dp:N0}/day payment over {term} days · total interest ${_hubAmount * pct / 100.0:N0} ({pct:F0}%) · bank: 20% / 244d</color>";
                 }
@@ -1259,10 +1259,12 @@ namespace BigAmbitionsMP
                     if (_hubLoans != null) _hubLoans.text = sl.Length > 0 ? sl.ToString() : $"<color={_colMuted}>no active loans</color>";
                 }
 
-                // Hover + clicks.  (Typing focus counts as "interacting" so the
-                // keystrokes never reach the game.)
+                // Hover + clicks.  In the NATIVE page the menu itself already
+                // blocks gameplay input — our suppression flag there only
+                // fought the menu's own shortcuts (ESC took ~6 presses and
+                // movement stayed locked after close, 2026-06-10).
                 var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
-                _hubUiHover = HubHit(_hubRT, mp) || _hubAmountFocus || _hubRateFocus || _hubTermFocus;
+                _hubUiHover = !_hubNative && (HubHit(_hubRT, mp) || _hubAmountFocus || _hubRateFocus || _hubTermFocus);
                 if (!Input.GetMouseButtonDown(0)) return;
                 if (!HubHit(_hubRT, mp)) { CommitHubInputs(); return; }   // click-away commits typing
 
@@ -1288,12 +1290,12 @@ namespace BigAmbitionsMP
                 if (_hubTab == 0 && HubHit(_hubSendRT, mp)) { MPHub.OfferGift(_hubTarget, (float)_hubAmount); return; }
                 if (_hubTab == 1 && HubHit(_hubLoanRT, mp))
                 {
-                    // Same math the bank uses: total premium spread over the
-                    // term, daily amounts rounded UP.
+                    // EXACT dailies (no ceiling) — the typed rate IS the
+                    // effective rate (20% stays 20%, not 22%).
                     double pct = HubRate();
                     int term = HubTerm();
-                    double di = Math.Max(0, Math.Ceiling(_hubAmount * pct / 100.0 / term));
-                    double dp = Math.Max(1, Math.Ceiling(_hubAmount / term));
+                    double di = Math.Max(0, _hubAmount * pct / 100.0 / term);
+                    double dp = Math.Max(1, _hubAmount / term);
                     MPHub.OfferLoan(_hubTarget, (float)_hubAmount, (float)di, (float)dp);
                     return;
                 }
