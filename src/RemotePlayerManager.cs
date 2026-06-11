@@ -691,6 +691,23 @@ namespace BigAmbitionsMP
         public static string Summary(PlayerAppearancePayload dto) =>
             $"{dto.Gender} — " + string.Join(", ", dto.Variants.Select(kv => $"{kv.Key}={kv.Value}"));
 
+        /// <summary>FULL change-detection signature: variants + colors + blends.
+        /// Summary() alone missed color/blend changes — the corrected tints
+        /// after load (and re-colored outfits) never re-sent (2026-06-11).</summary>
+        public static string FullSig(PlayerAppearancePayload dto)
+        {
+            var sb = new System.Text.StringBuilder(dto.Gender);
+            foreach (var kv in dto.Variants.OrderBy(k => k.Key))
+                sb.Append('|').Append(kv.Key).Append('=').Append(kv.Value);
+            foreach (var c in dto.Colors.OrderBy(c => c.Cat).ThenBy(c => c.Mat).ThenBy(c => c.Prop))
+                sb.Append('|').Append(c.Cat).Append(c.Mat).Append(c.Prop)
+                  .Append((int)(c.R * 255f)).Append(',').Append((int)(c.G * 255f)).Append(',')
+                  .Append((int)(c.B * 255f)).Append(',').Append((int)(c.A * 255f));
+            foreach (var b in dto.Blends.OrderBy(b => b.Cat).ThenBy(b => b.Shape))
+                sb.Append('|').Append(b.Cat).Append(b.Shape).Append((int)b.Weight);
+            return sb.ToString();
+        }
+
         private static void ApplyAppearance(GameObject root, PlayerAppearancePayload dto)
         {
             try

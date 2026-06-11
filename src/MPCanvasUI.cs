@@ -2278,11 +2278,13 @@ namespace BigAmbitionsMP
             if (IsLoadingOverlayUp()) return;     // mid-load reads = default outfit
             var dto = RemotePlayerManager.ReadLocalAppearance();
             if (dto == null) return;              // character not ready — retry next poll
-            string sig = RemotePlayerManager.Summary(dto);
+            // FULL signature (variants + colors + blends): Summary() missed
+            // color changes, so post-load tint corrections never re-sent.
+            string sig = RemotePlayerManager.FullSig(dto);
             if (sig == _appearanceSig) return;
             bool resend = _appearanceSig != "";
             _appearanceSig = sig;
-            Plugin.Logger.LogInfo($"[Appearance] Local appearance {(resend ? "RE-sent (changed)" : "sent")}: {sig}");
+            Plugin.Logger.LogInfo($"[Appearance] Local appearance {(resend ? "RE-sent (changed)" : "sent")}: {RemotePlayerManager.Summary(dto)} ({dto.Colors.Count} colors, {dto.Blends.Count} blends)");
             if (MPServer.IsRunning) MPServer.RegisterHostAppearance(dto);
             else                    MPClient.SendAppearance(dto);
         }
@@ -2480,6 +2482,7 @@ namespace BigAmbitionsMP
             TickRestUI();
             MPHubNativePage.Tick();       // "Business" in the native full menu
             TickSpawnOffset();            // de-stack players at the shared spawn point
+            TickJoinPopup();              // host approval panel for mid-game joiners
             TickHubWindow();
             MPFullMenuProbe.Tick();       // passive recon for the native-app integration
             _pt = MPPerf.Begin(); InteriorSync.Tick();         MPPerf.End("Interior", _pt);   // diff-push to subscribed clients
