@@ -1021,33 +1021,52 @@ namespace BigAmbitionsMP
             return (rt, lbl);
         }
 
-        // ── Business Hub window (wave 1: send money + loans) ──────────────────
+        // ── Business Hub — full-page MP app (segregated from native pages by
+        //    design; native style used as TEMPLATE: grey page, blue stripe,
+        //    category tabs, rounded boxes).  Tabs: Transfers | Loans. ─────────
         private bool _hubVisible;
         private bool _hubUiHover;
         private GameObject? _hub;            private RectTransform? _hubRT;
-        private TextMeshProUGUI? _hubBalance, _hubAmountLbl, _hubTermsLbl, _hubOffers, _hubLoans;
+        private TextMeshProUGUI? _hubBalance, _hubAmountLbl, _hubTermsLbl, _hubOffers, _hubLoans, _hubLoanOffers;
         private RectTransform? _hubXRT, _hubSendRT, _hubLoanRT;
         private RectTransform? _hubAm10kM, _hubAm1kM, _hubAm1kP, _hubAm10kP;
         private readonly RectTransform?[] _hubChipRT = new RectTransform?[4];
         private readonly Image?[] _hubChipImg = new Image?[4];
         private readonly TextMeshProUGUI?[] _hubChipLbl = new TextMeshProUGUI?[4];
         private readonly string[] _hubChipWho = new string[4];
+        // Per-page offer slots: gifts on Transfers, loans on Loans.
         private readonly RectTransform?[] _hubAcceptRT = new RectTransform?[2];
         private readonly RectTransform?[] _hubDeclineRT = new RectTransform?[2];
         private readonly string[] _hubOfferIds = new string[2];
+        private readonly RectTransform?[] _hubLoanAcceptRT = new RectTransform?[2];
+        private readonly RectTransform?[] _hubLoanDeclineRT = new RectTransform?[2];
+        private readonly string[] _hubLoanOfferIds = new string[2];
+        // Tabs.
+        private int _hubTab;                                  // 0=Transfers 1=Loans
+        private GameObject? _hubPageTransfers, _hubPageLoans;
+        private readonly RectTransform?[] _hubTabRT = new RectTransform?[2];
+        private readonly Image?[] _hubTabImg = new Image?[2];
+        private readonly TextMeshProUGUI?[] _hubTabLbl = new TextMeshProUGUI?[2];
         private string _hubTarget = "";
         private double _hubAmount = 10000;
         private int _hubSeenVersion = -1;
         private string _hubRosterSig = "";
         // Typed inputs (click value → type digits; Enter/click-away commits).
+        // Defaults MATCH THE BANK's fixed deal: 20% total over 244 days.
         private bool _hubAmountFocus;
         private string _hubAmountStr = "10000";
         private bool _hubRateFocus;
         private string _hubRateStr = "20";
         private bool _hubTermFocus;
-        private string _hubTermStr = "20";
+        private string _hubTermStr = "244";
         private RectTransform? _hubAmountRT, _hubRateRT, _hubTermRT;
         private TextMeshProUGUI? _hubRateLbl, _hubTermLbl;
+        // Native-template palette (tuneable in one place).
+        private static readonly Color HubPageGrey   = new Color(0.145f, 0.155f, 0.175f, 0.99f);
+        private static readonly Color HubStripeBlue = new Color(0.20f, 0.47f, 0.78f, 1f);
+        private static readonly Color HubBoxGrey    = new Color(0.19f, 0.205f, 0.23f, 1f);
+        private static readonly Color HubTabOff     = new Color(0.17f, 0.18f, 0.20f, 1f);
+        private static readonly Color HubTabOn      = new Color(0.20f, 0.42f, 0.68f, 1f);
 
         private void TickHubWindow()
         {
@@ -1116,29 +1135,49 @@ namespace BigAmbitionsMP
                     _hubTermsLbl.text = $"<color=#9AA3B2>loan: ${di:N0}/day interest + ${dp:N0}/day payment over {term} days · total interest ${_hubAmount * pct / 100.0:N0} ({pct:F0}%) · bank: 20% / 244d</color>";
                 }
 
-                // Offers + loans lists (rebuild on Version change).
+                // Tab pages + active-tab styling.
+                if (_hubPageTransfers != null && _hubPageTransfers.activeSelf != (_hubTab == 0)) _hubPageTransfers.SetActive(_hubTab == 0);
+                if (_hubPageLoans != null && _hubPageLoans.activeSelf != (_hubTab == 1)) _hubPageLoans.SetActive(_hubTab == 1);
+                for (int i = 0; i < 2; i++)
+                {
+                    if (_hubTabImg[i] != null) _hubTabImg[i]!.color = _hubTab == i ? HubTabOn : HubTabOff;
+                    if (_hubTabLbl[i] != null) _hubTabLbl[i]!.color = _hubTab == i ? C_WHITE : C_LBLGREY;
+                }
+
+                // Offers + loans lists (rebuild on Version change), split by kind.
                 if (MPHub.Version != _hubSeenVersion)
                 {
                     _hubSeenVersion = MPHub.Version;
+                    var gifts = new List<LoanOfferPayload>();
+                    var loans = new List<LoanOfferPayload>();
+                    foreach (var o in MPHub.IncomingOffers)
+                        (o.Kind == "gift" ? gifts : loans).Add(o);
+
                     var so = new System.Text.StringBuilder();
                     for (int i = 0; i < 2; i++)
                     {
-                        bool has = i < MPHub.IncomingOffers.Count;
+                        bool has = i < gifts.Count;
                         _hubAcceptRT[i]?.gameObject.SetActive(has);
                         _hubDeclineRT[i]?.gameObject.SetActive(has);
-                        _hubOfferIds[i] = "";
-                        if (!has) continue;
-                        var o = MPHub.IncomingOffers[i];
-                        _hubOfferIds[i] = o.Id;
-                        if (o.Kind == "gift")
-                            so.Append($"<color=#8CE08C>{o.From}</color> offers you a <b>${o.Principal:N0}</b> GIFT\n");
-                        else
+                        _hubOfferIds[i] = has ? gifts[i].Id : "";
+                        if (has) so.Append($"<color=#8CE08C>{gifts[i].From}</color> offers you a <b>${gifts[i].Principal:N0}</b> gift\n\n");
+                    }
+                    if (_hubOffers != null) _hubOffers.text = so.Length > 0 ? so.ToString() : "<color=#6B7384>no pending gift offers</color>";
+
+                    var lo = new System.Text.StringBuilder();
+                    for (int i = 0; i < 2; i++)
+                    {
+                        bool has = i < loans.Count;
+                        _hubLoanAcceptRT[i]?.gameObject.SetActive(has && _hubTab == 1);
+                        _hubLoanDeclineRT[i]?.gameObject.SetActive(has && _hubTab == 1);
+                        _hubLoanOfferIds[i] = has ? loans[i].Id : "";
+                        if (has)
                         {
-                            float pct = MPHub.OfferTotalPct(o);
-                            so.Append($"<color=#FFD27A>{o.From}</color> offers a <b>${o.Principal:N0}</b> loan at <b>{pct:F0}% total</b> over {MPHub.OfferTermDays(o)} days (${o.DailyInterest:N0}/day int · ${o.DailyPayment:N0}/day pay)\n");
+                            var o = loans[i];
+                            lo.Append($"<color=#FFD27A>{o.From}</color> offers a <b>${o.Principal:N0}</b> loan at <b>{MPHub.OfferTotalPct(o):F0}% total</b> over {MPHub.OfferTermDays(o)} days (${o.DailyInterest:N0}/day interest · ${o.DailyPayment:N0}/day payment)\n\n");
                         }
                     }
-                    if (_hubOffers != null) _hubOffers.text = so.Length > 0 ? so.ToString() : "<color=#6B7384>no pending offers</color>";
+                    if (_hubLoanOffers != null) _hubLoanOffers.text = lo.Length > 0 ? lo.ToString() : "<color=#6B7384>no pending loan offers</color>";
 
                     var sl = new System.Text.StringBuilder();
                     foreach (var ln in MPHub.Loans)
@@ -1160,11 +1199,14 @@ namespace BigAmbitionsMP
                 if (!Input.GetMouseButtonDown(0)) return;
                 if (!RectHit(_hubRT, mp)) { CommitHubInputs(); return; }   // click-away commits typing
 
-                if (RectHit(_hubAmountRT, mp)) { _hubAmountFocus = true; _hubRateFocus = false; _hubAmountStr = ((long)_hubAmount).ToString(); return; }
-                if (RectHit(_hubRateRT, mp))   { _hubRateFocus = true; _hubAmountFocus = false; _hubRateStr = HubRate().ToString("F1"); return; }
+                if (RectHit(_hubAmountRT, mp)) { _hubAmountFocus = true; _hubRateFocus = false; _hubTermFocus = false; _hubAmountStr = ((long)_hubAmount).ToString(); return; }
+                if (_hubTab == 1 && RectHit(_hubRateRT, mp)) { _hubRateFocus = true; _hubAmountFocus = false; _hubTermFocus = false; _hubRateStr = HubRate().ToString("F0"); return; }
+                if (_hubTab == 1 && RectHit(_hubTermRT, mp)) { _hubTermFocus = true; _hubAmountFocus = false; _hubRateFocus = false; _hubTermStr = HubTerm().ToString(); return; }
                 CommitHubInputs();
 
                 if (RectHit(_hubXRT, mp)) { _hubVisible = false; return; }
+                for (int i = 0; i < 2; i++)
+                    if (RectHit(_hubTabRT[i], mp)) { _hubTab = i; _hubSeenVersion = -1; return; }
                 for (int i = 0; i < 4; i++)
                     if (_hubChipRT[i] != null && _hubChipRT[i]!.gameObject.activeSelf && RectHit(_hubChipRT[i], mp))
                     { _hubTarget = _hubChipWho[i]; _hubRosterSig = ""; return; }
@@ -1176,8 +1218,8 @@ namespace BigAmbitionsMP
                 else if (RectHit(_hubAm10kP, mp)) step = 10000;
                 if (step != 0) { _hubAmount = Math.Max(1000, _hubAmount + step); return; }
 
-                if (RectHit(_hubSendRT, mp)) { MPHub.OfferGift(_hubTarget, (float)_hubAmount); return; }
-                if (RectHit(_hubLoanRT, mp))
+                if (_hubTab == 0 && RectHit(_hubSendRT, mp)) { MPHub.OfferGift(_hubTarget, (float)_hubAmount); return; }
+                if (_hubTab == 1 && RectHit(_hubLoanRT, mp))
                 {
                     // Same math the bank uses: total premium spread over the
                     // term, daily amounts rounded UP.
@@ -1190,9 +1232,16 @@ namespace BigAmbitionsMP
                 }
                 for (int i = 0; i < 2; i++)
                 {
-                    if (_hubOfferIds[i] == "") continue;
-                    if (RectHit(_hubAcceptRT[i], mp))  { MPHub.AnswerOffer(_hubOfferIds[i], true);  return; }
-                    if (RectHit(_hubDeclineRT[i], mp)) { MPHub.AnswerOffer(_hubOfferIds[i], false); return; }
+                    if (_hubTab == 0 && _hubOfferIds[i] != "")
+                    {
+                        if (RectHit(_hubAcceptRT[i], mp))  { MPHub.AnswerOffer(_hubOfferIds[i], true);  return; }
+                        if (RectHit(_hubDeclineRT[i], mp)) { MPHub.AnswerOffer(_hubOfferIds[i], false); return; }
+                    }
+                    if (_hubTab == 1 && _hubLoanOfferIds[i] != "")
+                    {
+                        if (RectHit(_hubLoanAcceptRT[i], mp))  { MPHub.AnswerOffer(_hubLoanOfferIds[i], true);  return; }
+                        if (RectHit(_hubLoanDeclineRT[i], mp)) { MPHub.AnswerOffer(_hubLoanOfferIds[i], false); return; }
+                    }
                 }
             }
             catch { }
@@ -1205,91 +1254,151 @@ namespace BigAmbitionsMP
                 _hub = MakeGO("BAMP_Hub", _canvasGO!.transform);
                 _hubRT = _hub.GetComponent<RectTransform>();
                 _hubRT.anchorMin = _hubRT.anchorMax = _hubRT.pivot = new Vector2(0.5f, 0.5f);
-                _hubRT.anchoredPosition = new Vector2(220f, 0f);
-                _hubRT.sizeDelta = new Vector2(520f, 380f);
+                _hubRT.anchoredPosition = new Vector2(0f, 0f);
+                _hubRT.sizeDelta = new Vector2(980f, 620f);
                 var sprite = IsAlive(_panelSprite) ? _panelSprite : EnsureRoundedSprite();
                 var bg = _hub.AddComponent<Image>();
-                bg.color = new Color(0.07f, 0.08f, 0.11f, 0.97f);
+                bg.color = HubPageGrey;
                 if (sprite != null) { try { bg.sprite = sprite; bg.type = Image.Type.Sliced; } catch { } }
 
+                // Header band + title + balance + X.
                 var hdr = MakeGO("Hdr", _hub.transform);
                 var hrt = hdr.GetComponent<RectTransform>();
-                Stretch(hrt, 0f, 0f, 0f, 28f, top: true);
+                Stretch(hrt, 0f, 0f, 0f, 56f, top: true);
                 var hImg = hdr.AddComponent<Image>();
-                hImg.color = new Color(0.18f, 0.23f, 0.36f, 1f);
+                hImg.color = new Color(0.115f, 0.125f, 0.145f, 1f);
                 if (sprite != null) { try { hImg.sprite = sprite; hImg.type = Image.Type.Sliced; } catch { } }
-                var title = MakeLabel(hdr.transform, "Business Hub", 14, C_WHITE, 12f, 0f, 200f, 28f, TextAlignmentOptions.Left);
+                var title = MakeLabel(hdr.transform, "<b>BUSINESS HUB</b>", 19, C_WHITE, 24f, 0f, 320f, 56f, TextAlignmentOptions.Left);
                 ApplyFont(title);
-                _hubBalance = MakeLabel(hdr.transform, "", 12, C_LBLGREY, 0f, 0f, 220f, 28f, TextAlignmentOptions.Right);
+                _hubBalance = MakeLabel(hdr.transform, "", 14, C_LBLGREY, 0f, 0f, 300f, 56f, TextAlignmentOptions.Right);
                 ApplyFont(_hubBalance);
                 var brt = _hubBalance.rectTransform;
                 brt.anchorMin = brt.anchorMax = brt.pivot = new Vector2(1f, 0.5f);
-                brt.anchoredPosition = new Vector2(-44f, 0f); brt.sizeDelta = new Vector2(220f, 28f);
-                var (xRT, xLbl) = MakeHubButton("X", new Vector2(0f, 0f), 28f, new Color(0.56f, 0.27f, 0.20f, 1f), 20f, sprite);
+                brt.anchoredPosition = new Vector2(-58f, 0f); brt.sizeDelta = new Vector2(300f, 56f);
+                var (xRT, xLbl) = MakeHubButton("X", new Vector2(0f, 0f), 32f, new Color(0.56f, 0.27f, 0.20f, 1f), 32f, sprite);
                 xRT.SetParent(hdr.transform, false);
                 xRT.anchorMin = xRT.anchorMax = xRT.pivot = new Vector2(1f, 0.5f);
-                xRT.anchoredPosition = new Vector2(-7f, 0f);
-                xLbl.fontSize = 12;
+                xRT.anchoredPosition = new Vector2(-14f, 0f);
+                xLbl.fontSize = 14;
                 _hubXRT = xRT;
 
-                var toLbl = MakeLabel(_hub.transform, "to:", 12, C_LBLGREY, 14f, -38f, 30f, 22f, TextAlignmentOptions.Left);
+                // The blue stripe (native page signature).
+                var stripe = MakeGO("Stripe", _hub.transform);
+                var srt = stripe.GetComponent<RectTransform>();
+                srt.anchorMin = new Vector2(0f, 1f); srt.anchorMax = new Vector2(1f, 1f); srt.pivot = new Vector2(0.5f, 1f);
+                srt.anchoredPosition = new Vector2(0f, -56f); srt.sizeDelta = new Vector2(0f, 5f);
+                stripe.AddComponent<Image>().color = HubStripeBlue;
+
+                // Shared band: target chips + amount (used by every tab).
+                var toLbl = MakeLabel(_hub.transform, "to:", 13, C_LBLGREY, 24f, -74f, 34f, 26f, TextAlignmentOptions.Left);
                 ApplyFont(toLbl);
                 for (int i = 0; i < 4; i++)
                 {
-                    var (crt, clbl) = MakeHubButton("", new Vector2(46f + i * 112f, 0f), 106f, new Color(0.18f, 0.20f, 0.27f, 1f), 24f, sprite);
-                    crt.anchorMin = crt.anchorMax = crt.pivot = new Vector2(0f, 1f);
-                    crt.anchoredPosition = new Vector2(46f + i * 112f, -36f);
+                    var (crt, clbl) = MakeHubButton("", new Vector2(0f, 0f), 142f, new Color(0.18f, 0.20f, 0.27f, 1f), 30f, sprite);
+                    SetTopLeft(crt, 64f + i * 152f, -72f);
                     _hubChipRT[i] = crt; _hubChipLbl[i] = clbl;
                     _hubChipImg[i] = crt.GetComponent<Image>();
+                    clbl.fontSize = 13;
                     crt.gameObject.SetActive(false);
                 }
-
-                var amLbl = MakeLabel(_hub.transform, "amount:", 12, C_LBLGREY, 14f, -72f, 64f, 22f, TextAlignmentOptions.Left);
+                var amLbl = MakeLabel(_hub.transform, "amount:", 13, C_LBLGREY, 24f, -114f, 70f, 26f, TextAlignmentOptions.Left);
                 ApplyFont(amLbl);
-                _hubAmountLbl = MakeLabel(_hub.transform, "", 20, C_WHITE, 84f, -68f, 140f, 28f, TextAlignmentOptions.Left);
+                _hubAmountLbl = MakeLabel(_hub.transform, "", 22, C_WHITE, 100f, -110f, 190f, 32f, TextAlignmentOptions.Left);
                 ApplyFont(_hubAmountLbl);
                 _hubAmountRT = _hubAmountLbl.rectTransform;   // click → type the amount
-                (_hubAm10kM, _) = MakeHubButton("-10k", new Vector2(234f, 0f), 52f, new Color(0.18f, 0.20f, 0.27f, 1f), 24f, sprite); SetTopLeft(_hubAm10kM, 234f, -70f);
-                (_hubAm1kM,  _) = MakeHubButton("-1k",  new Vector2(290f, 0f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f), 24f, sprite); SetTopLeft(_hubAm1kM, 290f, -70f);
-                (_hubAm1kP,  _) = MakeHubButton("+1k",  new Vector2(340f, 0f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f), 24f, sprite); SetTopLeft(_hubAm1kP, 340f, -70f);
-                (_hubAm10kP, _) = MakeHubButton("+10k", new Vector2(390f, 0f), 52f, new Color(0.18f, 0.20f, 0.27f, 1f), 24f, sprite); SetTopLeft(_hubAm10kP, 390f, -70f);
+                (_hubAm10kM, _) = MakeHubButton("-10k", new Vector2(0f, 0f), 58f, new Color(0.18f, 0.20f, 0.27f, 1f), 28f, sprite); SetTopLeft(_hubAm10kM, 300f, -112f);
+                (_hubAm1kM,  _) = MakeHubButton("-1k",  new Vector2(0f, 0f), 50f, new Color(0.18f, 0.20f, 0.27f, 1f), 28f, sprite); SetTopLeft(_hubAm1kM, 362f, -112f);
+                (_hubAm1kP,  _) = MakeHubButton("+1k",  new Vector2(0f, 0f), 50f, new Color(0.18f, 0.20f, 0.27f, 1f), 28f, sprite); SetTopLeft(_hubAm1kP, 416f, -112f);
+                (_hubAm10kP, _) = MakeHubButton("+10k", new Vector2(0f, 0f), 58f, new Color(0.18f, 0.20f, 0.27f, 1f), 28f, sprite); SetTopLeft(_hubAm10kP, 470f, -112f);
 
-                var rtLbl = MakeLabel(_hub.transform, "interest:", 12, C_LBLGREY, 14f, -100f, 64f, 22f, TextAlignmentOptions.Left);
-                ApplyFont(rtLbl);
-                _hubRateLbl = MakeLabel(_hub.transform, "", 14, C_WHITE, 80f, -100f, 90f, 22f, TextAlignmentOptions.Left);
-                ApplyFont(_hubRateLbl);
-                _hubRateRT = _hubRateLbl.rectTransform;       // click → type total %
-                var tmLbl = MakeLabel(_hub.transform, "term:", 12, C_LBLGREY, 184f, -100f, 44f, 22f, TextAlignmentOptions.Left);
-                ApplyFont(tmLbl);
-                _hubTermLbl = MakeLabel(_hub.transform, "", 14, C_WHITE, 232f, -100f, 110f, 22f, TextAlignmentOptions.Left);
-                ApplyFont(_hubTermLbl);
-                _hubTermRT = _hubTermLbl.rectTransform;       // click → type term days
+                // Category tab row.
+                string[] tabNames = { "Transfers", "Loans" };
+                for (int i = 0; i < 2; i++)
+                {
+                    var (trt, tlbl) = MakeHubButton(tabNames[i], new Vector2(0f, 0f), 170f, HubTabOff, 38f, sprite);
+                    SetTopLeft(trt, 24f + i * 178f, -156f);
+                    tlbl.fontSize = 14;
+                    _hubTabRT[i] = trt;
+                    _hubTabImg[i] = trt.GetComponent<Image>();
+                    _hubTabLbl[i] = tlbl;
+                }
 
-                (_hubSendRT, _) = MakeHubButton("Offer gift",   new Vector2(14f, 0f), 160f, new Color(0.19f, 0.42f, 0.67f, 1f), 28f, sprite); SetTopLeft(_hubSendRT, 14f, -130f);
-                (_hubLoanRT, _) = MakeHubButton("Offer as loan", new Vector2(182f, 0f), 160f, new Color(0.24f, 0.50f, 0.33f, 1f), 28f, sprite); SetTopLeft(_hubLoanRT, 182f, -130f);
-                _hubTermsLbl = MakeLabel(_hub.transform, "", 11, C_LBLGREY, 14f, -162f, 492f, 18f, TextAlignmentOptions.Left);
-                ApplyFont(_hubTermsLbl);
+                // ── Page: Transfers ───────────────────────────────────────────
+                _hubPageTransfers = MakeGO("PageTransfers", _hub.transform);
+                var ptrt = _hubPageTransfers.GetComponent<RectTransform>();
+                ptrt.anchorMin = new Vector2(0f, 0f); ptrt.anchorMax = new Vector2(1f, 1f);
+                ptrt.offsetMin = new Vector2(0f, 16f); ptrt.offsetMax = new Vector2(0f, -202f);
+                var pt = _hubPageTransfers.transform;
 
-                var offersHdr = MakeLabel(_hub.transform, "incoming offers", 11, C_LBLGREY, 14f, -186f, 200f, 16f, TextAlignmentOptions.Left);
+                MakeHubBox(pt, 16f, -2f, 948f, 56f, sprite);
+                (_hubSendRT, _) = MakeHubButton("Offer gift", new Vector2(0f, 0f), 190f, new Color(0.19f, 0.42f, 0.67f, 1f), 36f, sprite);
+                _hubSendRT.SetParent(pt, false); SetTopLeft(_hubSendRT, 28f, -12f);
+                var giftCap = MakeLabel(pt, "<color=#9AA3B2>gifts require the receiver's accept — no silent handouts</color>", 12, C_LBLGREY, 236f, -20f, 600f, 22f, TextAlignmentOptions.Left);
+                ApplyFont(giftCap);
+
+                MakeHubBox(pt, 16f, -70f, 948f, 118f, sprite);
+                var offersHdr = MakeLabel(pt, "<b>INCOMING GIFT OFFERS</b>", 12, C_LBLGREY, 28f, -78f, 300f, 18f, TextAlignmentOptions.Left);
                 ApplyFont(offersHdr);
-                _hubOffers = MakeLabel(_hub.transform, "", 12, C_WHITE, 14f, -204f, 380f, 56f, TextAlignmentOptions.TopLeft);
+                _hubOffers = MakeLabel(pt, "", 13, C_WHITE, 28f, -100f, 660f, 80f, TextAlignmentOptions.TopLeft);
                 ApplyFont(_hubOffers);
                 for (int i = 0; i < 2; i++)
                 {
-                    var (aRT, _) = MakeHubButton("accept",  new Vector2(0f, 0f), 58f, new Color(0.24f, 0.50f, 0.33f, 1f), 18f, sprite); SetTopLeft(aRT, 400f, -202f - i * 26f);
-                    var (dRT, _) = MakeHubButton("decline", new Vector2(0f, 0f), 58f, new Color(0.45f, 0.24f, 0.22f, 1f), 18f, sprite); SetTopLeft(dRT, 462f, -202f - i * 26f);
+                    var (aRT, _) = MakeHubButton("accept",  new Vector2(0f, 0f), 74f, new Color(0.24f, 0.50f, 0.33f, 1f), 26f, sprite);
+                    aRT.SetParent(pt, false); SetTopLeft(aRT, 740f, -98f - i * 36f);
+                    var (dRT, _) = MakeHubButton("decline", new Vector2(0f, 0f), 74f, new Color(0.45f, 0.24f, 0.22f, 1f), 26f, sprite);
+                    dRT.SetParent(pt, false); SetTopLeft(dRT, 822f, -98f - i * 36f);
                     _hubAcceptRT[i] = aRT; _hubDeclineRT[i] = dRT;
                     aRT.gameObject.SetActive(false); dRT.gameObject.SetActive(false);
                 }
 
-                var loansHdr = MakeLabel(_hub.transform, "active loans", 11, C_LBLGREY, 14f, -266f, 200f, 16f, TextAlignmentOptions.Left);
+                // ── Page: Loans ───────────────────────────────────────────────
+                _hubPageLoans = MakeGO("PageLoans", _hub.transform);
+                var plrt = _hubPageLoans.GetComponent<RectTransform>();
+                plrt.anchorMin = new Vector2(0f, 0f); plrt.anchorMax = new Vector2(1f, 1f);
+                plrt.offsetMin = new Vector2(0f, 16f); plrt.offsetMax = new Vector2(0f, -202f);
+                var pl = _hubPageLoans.transform;
+
+                MakeHubBox(pl, 16f, -2f, 948f, 108f, sprite);
+                var rtLbl = MakeLabel(pl, "interest:", 13, C_LBLGREY, 28f, -14f, 70f, 24f, TextAlignmentOptions.Left);
+                ApplyFont(rtLbl);
+                _hubRateLbl = MakeLabel(pl, "", 16, C_WHITE, 104f, -12f, 100f, 26f, TextAlignmentOptions.Left);
+                ApplyFont(_hubRateLbl);
+                _hubRateRT = _hubRateLbl.rectTransform;       // click → type total %
+                var tmLbl = MakeLabel(pl, "term:", 13, C_LBLGREY, 224f, -14f, 50f, 24f, TextAlignmentOptions.Left);
+                ApplyFont(tmLbl);
+                _hubTermLbl = MakeLabel(pl, "", 16, C_WHITE, 278f, -12f, 130f, 26f, TextAlignmentOptions.Left);
+                ApplyFont(_hubTermLbl);
+                _hubTermRT = _hubTermLbl.rectTransform;       // click → type term days
+                (_hubLoanRT, _) = MakeHubButton("Offer loan", new Vector2(0f, 0f), 190f, new Color(0.24f, 0.50f, 0.33f, 1f), 32f, sprite);
+                _hubLoanRT.SetParent(pl, false); SetTopLeft(_hubLoanRT, 740f, -12f);
+                _hubTermsLbl = MakeLabel(pl, "", 12, C_LBLGREY, 28f, -52f, 920f, 44f, TextAlignmentOptions.TopLeft);
+                ApplyFont(_hubTermsLbl);
+
+                MakeHubBox(pl, 16f, -122f, 948f, 122f, sprite);
+                var loanOffersHdr = MakeLabel(pl, "<b>INCOMING LOAN OFFERS</b>", 12, C_LBLGREY, 28f, -130f, 300f, 18f, TextAlignmentOptions.Left);
+                ApplyFont(loanOffersHdr);
+                _hubLoanOffers = MakeLabel(pl, "", 13, C_WHITE, 28f, -152f, 660f, 84f, TextAlignmentOptions.TopLeft);
+                ApplyFont(_hubLoanOffers);
+                for (int i = 0; i < 2; i++)
+                {
+                    var (aRT, _) = MakeHubButton("accept",  new Vector2(0f, 0f), 74f, new Color(0.24f, 0.50f, 0.33f, 1f), 26f, sprite);
+                    aRT.SetParent(pl, false); SetTopLeft(aRT, 740f, -150f - i * 36f);
+                    var (dRT, _) = MakeHubButton("decline", new Vector2(0f, 0f), 74f, new Color(0.45f, 0.24f, 0.22f, 1f), 26f, sprite);
+                    dRT.SetParent(pl, false); SetTopLeft(dRT, 822f, -150f - i * 36f);
+                    _hubLoanAcceptRT[i] = aRT; _hubLoanDeclineRT[i] = dRT;
+                    aRT.gameObject.SetActive(false); dRT.gameObject.SetActive(false);
+                }
+
+                MakeHubBox(pl, 16f, -256f, 948f, 146f, sprite);
+                var loansHdr = MakeLabel(pl, "<b>ACTIVE LOANS</b>", 12, C_LBLGREY, 28f, -264f, 300f, 18f, TextAlignmentOptions.Left);
                 ApplyFont(loansHdr);
-                _hubLoans = MakeLabel(_hub.transform, "", 12, C_WHITE, 14f, -284f, 492f, 90f, TextAlignmentOptions.TopLeft);
+                _hubLoans = MakeLabel(pl, "", 13, C_WHITE, 28f, -286f, 920f, 110f, TextAlignmentOptions.TopLeft);
                 ApplyFont(_hubLoans);
 
+                _hubPageLoans.SetActive(false);
                 _hubSeenVersion = -1;
                 _hub.SetActive(false);
-                Plugin.Logger.LogInfo("[Hub] window built OK.");
+                Plugin.Logger.LogInfo("[Hub] full-page window built OK.");
             }
             catch (Exception ex)
             {
@@ -1299,13 +1408,25 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>Rounded section box in the native-page style.</summary>
+        private void MakeHubBox(Transform parent, float x, float y, float w, float h, Sprite? sprite)
+        {
+            var go = MakeGO("Box", parent);
+            var rt = go.GetComponent<RectTransform>();
+            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0f, 1f);
+            rt.anchoredPosition = new Vector2(x, y); rt.sizeDelta = new Vector2(w, h);
+            var img = go.AddComponent<Image>();
+            img.color = HubBoxGrey;
+            if (sprite != null) { try { img.sprite = sprite; img.type = Image.Type.Sliced; } catch { } }
+        }
+
         private double HubRate()
             => double.TryParse(_hubRateStr, System.Globalization.NumberStyles.Float,
                                System.Globalization.CultureInfo.InvariantCulture, out var r)
                ? Math.Clamp(r, 0.0, 1000.0) : 20.0;
 
         private int HubTerm()
-            => int.TryParse(_hubTermStr, out var t) ? Math.Clamp(t, 1, 365) : 20;
+            => int.TryParse(_hubTermStr, out var t) ? Math.Clamp(t, 1, 999) : 244;
 
         private void CommitHubInputs()
         {
