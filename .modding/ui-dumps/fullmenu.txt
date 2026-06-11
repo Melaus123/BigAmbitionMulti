@@ -1210,3 +1210,469 @@
 [FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-MarketInsider') LayoutElement
 [FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
 [FullMenu] ===== dump complete =====
+[FullMenu] instance found: 'FullMenu' (active=True) — will dump on first open.
+[FullMenu] ===== OPEN detected — dumping (passive, one-shot) =====
+[FullMenu] + FullMenu Transform FullMenu
+[FullMenu]   - Canvas [3840x2160] Canvas CanvasScaler GraphicRaycaster CanvasGroup Volume
+[FullMenu]     + RaycastBlocker [3843x2160] AspectRatioFitter
+[FullMenu]     + Topbar [3840x173]
+[FullMenu]       + Splitter [3840x3] LayoutElement
+[FullMenu]       + AppName [850x70] TextLocalizationComponent
+[FullMenu]       + AppButtons [1400x220] HorizontalLayoutGroup
+[FullMenu]       + RightData [1350x100] HorizontalLayoutGroup
+[FullMenu]     + AppsContainer [3840x1750] CanvasGroup
+[FullMenu]       - Persona [3840x1750] CanvasGroup AutoDeactivatePrefabOnSave
+[FullMenu]       - Contacts [3840x1750] CanvasGroup ContactsApp AutoDeactivatePrefabOnSave
+[FullMenu]       - Rivals [3840x1750] CanvasGroup RivalsApp AutoDeactivatePrefabOnSave
+[FullMenu]       - MyEmployees [3840x1750] CanvasGroup MyEmployees AutoDeactivatePrefabOnSave
+[FullMenu]       - BizMan [3840x1750] CanvasGroup BizMan AutoDeactivatePrefabOnSave
+[FullMenu]       - EconoView [3840x1750] CanvasGroup EconoView AutoDeactivatePrefabOnSave
+[FullMenu]       - MarketInsider [3840x1750] CanvasGroup MarketInsider AutoDeactivatePrefabOnSave
+[FullMenu]     + BottomBar [3840x150]
+[FullMenu]       + LeftButtons [2000x150] HorizontalLayoutGroup
+[FullMenu]       + RightButtons [1500x150] HorizontalLayoutGroup
+[FullMenu] ── app-button row 'Canvases/FullMenu/Canvas/Topbar/AppButtons' ──
+[FullMenu] + AppButtons [1400x220] HorizontalLayoutGroup
+[FullMenu]   - AppButtonTemplate [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'App Name') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Persona') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Persona [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Persona') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Persona') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Contacts [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Contacts') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Contacts') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Rivals [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Rivals') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Rivals') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + MyEmployees [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'MyEmployees') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-MyEmployees') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + BizMan [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'BizMan') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-BizMan') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + EconoView [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'EconoView') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-EconoView') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + MarketInsider [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'MarketInsider') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-MarketInsider') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu] ===== dump complete =====
+[FullMenu] instance found: 'FullMenu' (active=True) — will dump on first open.
+[FullMenu] ===== OPEN detected — dumping (passive, one-shot) =====
+[FullMenu] + FullMenu Transform FullMenu
+[FullMenu]   - Canvas [3840x2160] Canvas CanvasScaler GraphicRaycaster CanvasGroup Volume
+[FullMenu]     + RaycastBlocker [3843x2160] AspectRatioFitter
+[FullMenu]     + Topbar [3840x173]
+[FullMenu]       + Splitter [3840x3] LayoutElement
+[FullMenu]       + AppName [850x70] TextLocalizationComponent
+[FullMenu]       + AppButtons [1400x220] HorizontalLayoutGroup
+[FullMenu]       + RightData [1350x100] HorizontalLayoutGroup
+[FullMenu]     + AppsContainer [3840x1750] CanvasGroup
+[FullMenu]       - Persona [3840x1750] CanvasGroup AutoDeactivatePrefabOnSave
+[FullMenu]       - Contacts [3840x1750] CanvasGroup ContactsApp AutoDeactivatePrefabOnSave
+[FullMenu]       - Rivals [3840x1750] CanvasGroup RivalsApp AutoDeactivatePrefabOnSave
+[FullMenu]       - MyEmployees [3840x1750] CanvasGroup MyEmployees AutoDeactivatePrefabOnSave
+[FullMenu]       - BizMan [3840x1750] CanvasGroup BizMan AutoDeactivatePrefabOnSave
+[FullMenu]       - EconoView [3840x1750] CanvasGroup EconoView AutoDeactivatePrefabOnSave
+[FullMenu]       - MarketInsider [3840x1750] CanvasGroup MarketInsider AutoDeactivatePrefabOnSave
+[FullMenu]     + BottomBar [3840x150]
+[FullMenu]       + LeftButtons [2000x150] HorizontalLayoutGroup
+[FullMenu]       + RightButtons [1500x150] HorizontalLayoutGroup
+[FullMenu] ── app-button row 'Canvases/FullMenu/Canvas/Topbar/AppButtons' ──
+[FullMenu] + AppButtons [1400x220] HorizontalLayoutGroup
+[FullMenu]   - AppButtonTemplate [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'App Name') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Persona') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Persona [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Persona') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Persona') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Contacts [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Contacts') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Contacts') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Rivals [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Rivals') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Rivals') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + MyEmployees [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'MyEmployees') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-MyEmployees') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + BizMan [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'BizMan') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-BizMan') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + EconoView [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'EconoView') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-EconoView') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + MarketInsider [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'MarketInsider') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-MarketInsider') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu] ===== dump complete =====
+[FullMenu] ── page interior 'Persona' (widget inventory) ──
+[FullMenu] + Persona [3840x1750] CanvasGroup AutoDeactivatePrefabOnSave
+[FullMenu]   + CharacterInfo [1320x360] Image(#FFFFFF@1.00 'white-round-corner-drop') CharacterInfo
+[FullMenu]     + Margin [1170x210]
+[FullMenu]       + CharacterName [1170x80] TMP(38pt #111519 'Client1')
+[FullMenu]       + Splitter [1170x8] Image(#FFFFFF@0.15 'Square-With-Padding-8')
+[FullMenu]       + Age [550x47] TMP(28pt #000000 'Age: <b>18</b>') TextLocalizationComponent
+[FullMenu]       + TotalNetWorth [595x47] TMP(28pt #000000 'Total net worth: <b>$100…') TextLocalizationComponent
+[FullMenu]       + TotalBusinesses [550x47] TMP(28pt #000000 'Total businesses: <b>0</…') TextLocalizationComponent
+[FullMenu]       + WeeklyIncome [595x47] TMP(28pt #000000 'Weekly income: <b>$0</b>') TextLocalizationComponent
+[FullMenu]   + CharacterStats [1320x1075] ScrollRect CharacterStats
+[FullMenu]     + Viewport [1320x1075] Image(#FFFFFF@1.00) Mask
+[FullMenu]       + Content [1320x835] VerticalLayoutGroup ContentSizeFitter
+[FullMenu]         + Notifications [1320x168] VerticalLayoutGroup
+[FullMenu]           - NotificationTemplate [1320x218] Image(#FFFFFF@1.00 'white-round-corner-drop') VerticalLayoutGroup
+[FullMenu]         + Energy [1320x264] Image(#FFFFFF@1.00 'white-round-corner-drop') VerticalLayoutGroup
+[FullMenu]           + HelpIcon [52x52] Image(#FFFFFF@1.00 'box-blue-round-bordered-52') HelpIconButton Button ButtonEffects LayoutElement
+[FullMenu]           + StatInfo [1158x100] LayoutElement
+[FullMenu]           - StatsList [1158x25] VerticalLayoutGroup
+[FullMenu]         + Hunger [1320x264] Image(#FFFFFF@1.00 'white-round-corner-drop') VerticalLayoutGroup
+[FullMenu]           + HelpIcon [52x52] Image(#FFFFFF@1.00 'box-blue-round-bordered-52') HelpIconButton Button ButtonEffects LayoutElement
+[FullMenu]           + StatInfo [1158x100] LayoutElement
+[FullMenu]           - StatsList [0x25] VerticalLayoutGroup
+[FullMenu]         + Happiness [1320x264] Image(#FFFFFF@1.00 'white-round-corner-drop') VerticalLayoutGroup
+[FullMenu]           + HelpIcon [52x52] Image(#FFFFFF@1.00 'box-blue-round-bordered-52') HelpIconButton Button ButtonEffects LayoutElement
+[FullMenu]           + StatInfo [1158x100] LayoutElement
+[FullMenu]           + StatsList [0x25] VerticalLayoutGroup
+[FullMenu]     + Scrollbar Vertical [12x1075] Image(#898E95@1.00 'Scrollbar') Scrollbar
+[FullMenu]       + Sliding Area [12x1075]
+[FullMenu]         + Handle [12x1075] Image(#BEC1C4@1.00 'Scrollbar')
+[FullMenu]   + PersonalGoalsHeader [1376x100] HorizontalLayoutGroup
+[FullMenu]     + PersonalGoalsLabel [537x100] TMP(50pt #FFFFFF 'Personal Goals (1/99)') TextLocalizationComponent
+[FullMenu]     + HelpIcon [52x52] Image(#FFFFFF@1.00 'box-blue-round-bordered-52') HelpIconButton Button ButtonEffects LayoutElement
+[FullMenu]       + Icon [40x40] Image(#FFFFFF@1.00 'Icon-QuestionMark-40')
+[FullMenu]   + PersonalGoals [1300x1410] ScrollRect PersonalGoals
+[FullMenu]     + Viewport [1300x1410] Image(#FFFFFF@1.00) Mask
+[FullMenu]       + Content [1300x225] VerticalLayoutGroup ContentSizeFitter
+[FullMenu]         - GoalTemplate [1300x250] Image(#FFFFFF@1.00 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #111519 'Open a retail business') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@1.00 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #8795A0 '20% happiness boost for …') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@1.00 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Run 1 successful Office …') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Run 1 successful Retail …') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Run 10 successful Office…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Own a vehicle worth $120…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Own a vehicle worth $15,…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Run 30 successful Retail…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Run 5 successful Office …') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Run 5 successful Retail …') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Own a vehicle worth $90,…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Rent a 200 m² apartment') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Rent a 500 m² apartment') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Rent a 90 m² apartment') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Own an apartment with fu…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Own an apartment with fu…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Own an apartment with fu…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Rent at least 10 apartme…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Rent at least 2 apartmen…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Rent at least 20 apartme…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#FFFFFF@1.00 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #000000 'Reach a bank balance of …') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@1.00 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #000000 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@1.00 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Reach a bank balance of …') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Reach a bank balance of …') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Own a boat worth at leas…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Own a boat worth at leas…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Own a boat worth at leas…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Own a total of 10 boats') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Own a total of 2 boats') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Own a total of 5 boats') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Reach a weekly income of…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Reach a weekly income of…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Reach a weekly income of…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Visit the casino at leas…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Visit the casino at leas…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Visit the casino at leas…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Win a total of $50,000 a…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Win a total of $2,500,00…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Win a total of $500,000 …') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Reach at least 100 custo…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Reach at least 250 custo…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Reach at least 800 custo…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Hire and schedule at lea…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Hire and schedule at lea…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Hire and schedule at lea…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Reach level 100% of any …') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Reach level 50% of any s…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Reach level 75% of any s…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Spend at least $10,000.0…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Spend at least $1,000.00…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Spend at least $5,000.00…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Become hospitalized 10 t…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Become hospitalized 20 t…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Become hospitalized 5 ti…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Hire and schedule at lea…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Hire and schedule at lea…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Hire and schedule at lea…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Spent at least $150,000 …') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu]           + CompletedIcon [64x64] Image(#FFFFFF@0.25 'Icon-Checkmark-Green')
+[FullMenu]         + GoalTemplate(Clone) [1300x250] Image(#7F7F7F@0.70 'white-round-corner-drop')
+[FullMenu]           + Name [1000x45] TMP(31pt #FFFFFF 'Spent at least $1,000,00…') TextLocalizationComponent
+[FullMenu]           + Icon [100x100] Image(#FFFFFF@0.50 'icon-star-with-background')
+[FullMenu]           + Description [1000x45] TMP(28pt #FFFFFF 'No rewards') TextLocalizationComponent
+[FullMenu] ── page interior 'Persona' dump complete ──
+[FullMenu] ── page interior 'Rivals' (widget inventory) ──
+[FullMenu] + Rivals [3840x1750] CanvasGroup RivalsApp AutoDeactivatePrefabOnSave
+[FullMenu]   + Layout 30-70 (1) [3840x1750]
+[FullMenu]     + Header [708x100] TMP(50pt #FFFFFF 'Leaderboard') TextLocalizationComponent
+[FullMenu]     + Left [1200x1750]
+[FullMenu]       + LeaderboardList [1015x1550] ScrollRect RivalLeaderboard
+[FullMenu]         + Viewport [1015x1550] Image(#FFFFFF@1.00) Mask
+[FullMenu]           + Content [1015x2240] VerticalLayoutGroup ContentSizeFitter
+[FullMenu]         + Scrollbar Vertical [12x1550] Image(#898E95@1.00 'Scrollbar') Scrollbar
+[FullMenu]           + Sliding Area [12x1550]
+[FullMenu]     + Splitter [8x1750] Image(#FFFFFF@0.15 'Square-With-Padding-8')
+[FullMenu]     + Right [2640x1750]
+[FullMenu]       + SelectedRival [2520x1600] SelectedRivalUI
+[FullMenu]         + RivalInformation [1201x601] Image(#FFFFFF@1.00 'whitebox')
+[FullMenu]           + Name [831x80] TMP(50pt #111519 'Huang Guo')
+[FullMenu]           - OpenInContactsButton [64x64] Button ButtonEffects
+[FullMenu]           + Portrait [280x280] Image(#FFFFFF@1.00 'Huang Guo')
+[FullMenu]           + PortraitBorder [280x280] Image(#FFFFFF@1.00 'PortraitBorder')
+[FullMenu]           + Info [655x280] VerticalLayoutGroup
+[FullMenu]         - Rivalry [1201x307] Image(#FFFFFF@1.00 'whitebox')
+[FullMenu]           + Headline [1001x50] LayoutElement
+[FullMenu]           + RivalryIcons [935x64] HorizontalLayoutGroup
+[FullMenu]         + BusinessDevelopment [1450x800] Image(#FFFFFF@1.00 'whitebox') ChartController
+[FullMenu]           + Icon [64x64] Image(#111519@1.00 'Icon-Trending')
+[FullMenu]           + BusinessDevelopmentTitle [650x64] TMP(32pt #111519 'Business Development') TextLocalizationComponent
+[FullMenu]           + LineChart [1080x430] LineChart
+[FullMenu]           + Filter [1080x50] HorizontalLayoutGroup
+[FullMenu]         + TabMenu [2469x875] TabMenu
+[FullMenu]           + Menu [2436x80] HorizontalLayoutGroup
+[FullMenu]           + SplitterWithIndicator [2436x8] Image(#FFFFFF@0.15 'Square-With-Padding-8') SplitterIndicator
+[FullMenu]           + Containers [2469x685]
+[FullMenu] ── page interior 'Rivals' dump complete ──
