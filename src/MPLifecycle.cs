@@ -15,10 +15,12 @@ namespace BigAmbitionsMP
     ///
     /// Confirmed lifecycle laws this encodes (see findings):
     ///  - PlayerController existence ≠ world ready: load-finish runs LONG
-    ///    after spawn.  WorldReady here = controller spawned AND its
-    ///    CharacterController ENABLED and the game clock ADVANCING and the
-    ///    loading overlay DOWN — the exact signals the watchdog regression
-    ///    proved are the real "load finished" evidence.
+    ///    after spawn.  WorldReady = player exists AND the game clock is
+    ///    ADVANCING (pause-aware) AND the loading overlay is DOWN — the two
+    ///    signals that actually discriminated broken loads from healthy ones.
+    ///    (CharacterController was disproved as evidence by the first shadow
+    ///    run: the player has no such component — movement is NavMeshAgent /
+    ///    ThirdPersonCharacter.)
     ///  - A Loading phase that never reaches WorldReady is a defect: logged
     ///    loudly after 60s (this is the mid-join acceptance instrumentation).
     /// </summary>
@@ -72,16 +74,12 @@ namespace BigAmbitionsMP
                 }
 
                 // Player exists — Loading until the REAL load-finish evidence.
-                bool ccEnabled = false;
-                try
-                {
-                    var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
-                    var ccComp = ch?.GetComponent(Il2CppType.Of<CharacterController>());
-                    var cc = ccComp != null ? ccComp.TryCast<CharacterController>() : null;
-                    ccEnabled = cc != null && cc.enabled;
-                }
-                catch { }
-
+                // (CharacterController was WRONG evidence: the player has no
+                // such component — movement is NavMeshAgent/ThirdPersonCharacter
+                // — so cc=False was a constant, and healthy sessions sat
+                // "stuck" forever.  Shadow-run finding, 2026-06-11.  The
+                // discriminators that actually separated broken loads from
+                // healthy ones: game clock advancing + overlay down.)
                 bool clockAlive = false;
                 try
                 {
@@ -94,21 +92,21 @@ namespace BigAmbitionsMP
                 }
                 catch { }
 
-                bool ready = ccEnabled && clockAlive && !overlayUp;
+                bool ready = clockAlive && !overlayUp;
                 if (!ready)
                 {
-                    Set(MPPhase.Loading, $"cc={ccEnabled} clock={clockAlive} overlay={overlayUp}");
+                    Set(MPPhase.Loading, $"clock={clockAlive} overlay={overlayUp}");
                     if (_loadingSince > 0f && !_stuckWarned && Time.unscaledTime - _loadingSince > 60f)
                     {
                         _stuckWarned = true;
-                        Plugin.Logger.LogWarning($"[Lifecycle] STUCK IN LOADING >60s (cc={ccEnabled} clock={clockAlive} overlay={overlayUp}) — load-finish never completed.");
+                        Plugin.Logger.LogWarning($"[Lifecycle] STUCK IN LOADING >60s (clock={clockAlive} overlay={overlayUp}) — load-finish never completed.");
                     }
                     return;
                 }
 
                 if (Phase != MPPhase.WorldReady && Phase != MPPhase.Running)
                 {
-                    Set(MPPhase.WorldReady, "controller enabled + clock alive + overlay down");
+                    Set(MPPhase.WorldReady, "clock alive + overlay down");
                     _readyStableSince = Time.unscaledTime;
                     return;
                 }
