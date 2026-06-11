@@ -245,6 +245,24 @@ namespace BigAmbitionsMP
             _ip   = MPConfig.HostIP;
             Plugin.Logger.LogInfo(
                 $"[UI] F8 panel pre-fill: name='{_name}' port={_port} ip={_ip}");
+
+            // Stage-4 migration #1: the join quiesce ends on the lifecycle
+            // WorldReady EVENT (replaces the hand-tuned 4s timer).
+            MPLifecycle.PhaseChanged += OnLifecyclePhase;
+        }
+
+        private void OnLifecyclePhase(MPLifecycle.MPPhase prev, MPLifecycle.MPPhase next)
+        {
+            if (next != MPLifecycle.MPPhase.WorldReady) return;
+            MPClient.EndJoinQuiesce();
+            // Placement diagnostic: position-restore runs in load-finish —
+            // still at the default spawn here = it was skipped.
+            try
+            {
+                var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
+                if (ch != null) Plugin.Logger.LogInfo($"[UI] world-ready position: ({ch.position.x:F1}, {ch.position.y:F1}, {ch.position.z:F1})");
+            }
+            catch { }
         }
 
         // ── Update ────────────────────────────────────────────────────────────
@@ -259,23 +277,12 @@ namespace BigAmbitionsMP
             // guarantees the path is ready so NO poll-thread handler ever calls IL2CPP.
             MPSaveManager.EnsureVersionCached();
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
-            MPLifecycle.Tick();      // SHADOW MODE — single-source phase tracker (consolidation stage 3)
+            MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
             MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion
-            if (_quiesceOffAt > 0f && Time.unscaledTime >= _quiesceOffAt)
-            {
-                _quiesceOffAt = 0f;
-                MPClient.EndJoinQuiesce();
-                // Placement diagnostic: the save's position-restore runs in the
-                // load-finish frames — if it was skipped, the player is still
-                // at the scene's DEFAULT spawn (the "wrong area" stick).
-                try
-                {
-                    var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
-                    if (ch != null) Plugin.Logger.LogInfo($"[UI] post-load position: ({ch.position.x:F1}, {ch.position.y:F1}, {ch.position.z:F1})");
-                }
-                catch { }
-            }
+            // (quiesce-off 4s timer RETIRED 2026-06-11 — stage-4 migration #1:
+            //  the quiesce now ends on the lifecycle WorldReady EVENT; see
+            //  OnLifecyclePhase below.)
             TickOverlayWatchdog();   // stuck loading screen over a live world → force-dismiss
             TickLoadTrace();         // [LoadTrace] post-load timeline (localization probe)
             TickJoinDialog();        // Phase 5 — connect-dialog input (when open)
@@ -1935,7 +1942,7 @@ namespace BigAmbitionsMP
                 // Quiesce ends a few seconds LATER: resuming the stream the
                 // same frame killed the game's load-finish fade (2 GM NREs at
                 // exactly quiesce-OFF; loading screen never faded, 2026-06-11).
-                _quiesceOffAt = Time.unscaledTime + 4f;
+                // (4s quiesce timer retired — WorldReady event owns it now)
 
                 // Discovery probe — logs GameInstance time/skip method names so we
                 // can identify what the bench/bed/car rest uses to fast-forward time.
@@ -2262,7 +2269,7 @@ namespace BigAmbitionsMP
         // ── Overlay watchdog: the game's loading screen can survive its own
         // load-finish step (a transient GameManager hiccup kills the fade) and
         // sit forever over a perfectly healthy world.  Force-dismiss. ─────────
-        private float _quiesceOffAt;
+        // (_quiesceOffAt retired — stage-4 migration #1)
         private float _overlayStuckSince;
 
         private void TickOverlayWatchdog()
