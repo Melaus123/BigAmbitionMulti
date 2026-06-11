@@ -337,6 +337,10 @@ namespace BigAmbitionsMP
                             $"[ShopGate] enter: open={__instance.isOpen} playerOwnedBiz={__instance.IsPlayerOwnedBusiness} " +
                             $"rented={(reg != null ? reg.RentedByPlayer.ToString() : "?")} " +
                             $"bizRival='{(reg != null ? reg.businessOwnerRivalId : "?")}' bldgRival='{(reg != null ? reg.buildingOwnerRivalId : "?")}'");
+                        // RemoteSale context: whose shop is the player inside?
+                        MPRegisterSync.SetCurrentShop(
+                            reg != null ? reg.businessOwnerRivalId : "",
+                            reg != null ? GameStateReader.AddressKey(reg) : "");
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[ShopGate] {ex.Message}"); }
@@ -372,6 +376,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+                    MPRegisterSync.SetCurrentShop("", "");   // left the building — RemoteSale context gone
                     if (!MPClient.IsConnected) return;
                     if (__instance == null) return;
                     var reg = __instance.buildingRegistration;
@@ -2129,16 +2134,40 @@ namespace BigAmbitionsMP
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                 try
                 {
+                    float total = 0f;
+                    var desc = new System.Text.StringBuilder();
                     var sb = new System.Text.StringBuilder("[SalesProbe] OnPlaceOrder: ");
                     sb.Append($"register='{__instance.gameObject.name}' pos={__instance.transform.position} items=");
                     if (orderedCargoInstances != null)
-                        for (int i = 0; i < orderedCargoInstances.Count && i < 12; i++)
+                        for (int i = 0; i < orderedCargoInstances.Count; i++)
                         {
                             var c = orderedCargoInstances[i];
                             if (c == null) continue;
-                            sb.Append($"[{c.itemName} x{c.amount}] ");
+                            if (i < 12) sb.Append($"[{c.itemName} x{c.amount} @{c.pricePerUnit:F2}] ");
+                            total += (float)(c.amount * c.pricePerUnit);
+                            if (desc.Length < 160) desc.Append($"{c.itemName} x{c.amount}, ");
                         }
+                    sb.Append($"total={total:F2} shopOwner='{MPRegisterSync.CurrentShopOwner}'");
                     Plugin.Logger.LogInfo(sb.ToString());
+
+                    // RemoteSale slice 1: bought in ANOTHER player's shop →
+                    // route the revenue through the host.  AI-rival ids fall
+                    // out at host validation (not in the lobby roster).
+                    string owner = MPRegisterSync.CurrentShopOwner;
+                    if (!string.IsNullOrEmpty(owner) && owner != MPConfig.PlayerId && total > 0f)
+                    {
+                        var sale = new RemoteSalePayload
+                        {
+                            BuyerId = MPConfig.PlayerId,
+                            OwnerId = owner,
+                            Address = MPRegisterSync.CurrentShopAddress,
+                            Total   = total,
+                            Desc    = desc.ToString().TrimEnd(' ', ','),
+                        };
+                        if (MPServer.IsRunning) MPServer.HandleRemoteSale(sale);   // host bought in a client's shop
+                        else MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.RemoteSale, MPConfig.PlayerId, sale));
+                        Plugin.Logger.LogInfo($"[RemoteSale] sent: ${total:F2} to '{owner}' ({sale.Address}).");
+                    }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[SalesProbe] {ex.Message}"); }
             }

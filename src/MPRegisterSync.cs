@@ -27,7 +27,20 @@ namespace BigAmbitionsMP
         // posKey → cashier playerId
         private static readonly Dictionary<string, (string playerId, Vector3 pos)> _cashiers = new();
 
-        public static void Reset() { _cashiers.Clear(); _onDuty = false; }
+        public static void Reset() { _cashiers.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = ""; }
+
+        // ── Current building context (set by the building entry patch) ────────
+        // After the rival-translation, businessOwnerRivalId holds the OWNING
+        // PLAYER's id for player businesses (a real rival GUID for AI ones —
+        // the host validates against the lobby roster, so AI ids fall out).
+        public static string CurrentShopOwner   { get; private set; } = "";
+        public static string CurrentShopAddress { get; private set; } = "";
+
+        public static void SetCurrentShop(string ownerId, string address)
+        {
+            CurrentShopOwner = ownerId ?? "";
+            CurrentShopAddress = address ?? "";
+        }
 
         private static string Key(Vector3 p)
             => $"{Mathf.RoundToInt(p.x)}:{Mathf.RoundToInt(p.y)}:{Mathf.RoundToInt(p.z)}";

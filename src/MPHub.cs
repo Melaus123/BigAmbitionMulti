@@ -410,5 +410,14 @@ namespace BigAmbitionsMP
             else MPServer.SendHubTo(playerId, MessageType.MoneyAdjust,
                      new MoneyAdjustPayload { To = playerId, Amount = amount, Reason = reason, Silent = silent });
         }
+
+        /// <summary>HOST: a validated cross-player sale — credit the shop
+        /// owner and notify the buyer (RemoteSale slice 1).</summary>
+        public static void DeliverSaleRevenue(string ownerId, string buyerId, float total, string address, string desc)
+        {
+            DeliverMoney(ownerId, total, $"Sale: {desc} (sold to {buyerId})");
+            NotifyParty(buyerId, $"Purchase complete — ${total:F2} went to {ownerId}.");
+            Plugin.Logger.LogInfo($"[RemoteSale] HOST credited '{ownerId}' ${total:F2} (buyer '{buyerId}', {address}).");
+        }
     }
 }

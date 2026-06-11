@@ -812,6 +812,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.RemoteSale:
+                {
+                    var rs = env.GetPayload<RemoteSalePayload>();
+                    if (rs != null) HandleRemoteSale(rs);
+                    break;
+                }
+
                 case MessageType.CashSync:
                 {
                     var c = env.GetPayload<CashSyncPayload>();
@@ -1194,6 +1201,30 @@ namespace BigAmbitionsMP
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string phase, long atMs)> _peerPhase = new();
         private static readonly HashSet<string> _fenceExcused = new();
         private static long _fenceArmedAtMs;   // grace: no excusals in the first 15s
+
+        /// <summary>HOST: validate a cross-player sale and credit the owner.
+        /// AI-rival "owners" fall out here (not in the lobby roster).</summary>
+        public static void HandleRemoteSale(RemoteSalePayload rs)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(rs.OwnerId) || string.IsNullOrEmpty(rs.BuyerId)) return;
+                if (!LobbyPlayers.Contains(rs.OwnerId))
+                {
+                    Plugin.Logger.LogInfo($"[RemoteSale] owner '{rs.OwnerId}' not a lobby player (AI rival?) — ignored.");
+                    return;
+                }
+                if (rs.OwnerId == rs.BuyerId) return;
+                if (rs.Total <= 0f || rs.Total > 100000f)
+                {
+                    Plugin.Logger.LogWarning($"[RemoteSale] rejected: implausible total ${rs.Total:F2} from '{rs.BuyerId}'.");
+                    return;
+                }
+                GameStatePatcher.EnqueueOnMainThread(() =>
+                    MPHub.DeliverSaleRevenue(rs.OwnerId, rs.BuyerId, rs.Total, rs.Address, rs.Desc));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RemoteSale] {ex.Message}"); }
+        }
 
         public static void RecordPhaseReport(PhaseReportPayload? p)
         {

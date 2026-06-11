@@ -92,6 +92,7 @@ namespace BigAmbitionsMP
         MoneyAdjust          = 108, // Host → one player: credit/debit your wallet by Amount (transfer delivery, loan principal, daily loan payments).
         PhaseReport          = 110, // Client → Host: my lifecycle phase changed (load-fence visibility; lets the host excuse a client who bailed to the menu instead of loading).
         RegisterCashier      = 111, // Any → Host → All: player went on/off duty at the cash register near (X,Y,Z); others can F4-buy there (Wave-2 player-staffed registers).
+        RemoteSale           = 112, // Buyer → Host: I bought items in another player's shop (buyer already paid locally); host validates and credits the owner.
     }
 
     // ── Envelope ───────────────────────────────────────────────────────────────
@@ -772,6 +773,18 @@ namespace BigAmbitionsMP
     {
         public string PlayerId { get; set; } = "";
         public string Phase    { get; set; } = "";
+    }
+
+    /// <summary>A purchase by one player inside another player's shop
+    /// (MessageType.RemoteSale).  The buyer already paid locally; the host
+    /// validates and routes the revenue to the owner.</summary>
+    public class RemoteSalePayload
+    {
+        public string BuyerId { get; set; } = "";
+        public string OwnerId { get; set; } = "";
+        public string Address { get; set; } = "";
+        public float  Total   { get; set; }
+        public string Desc    { get; set; } = "";   // "CheapGift x3, ..." for notices/logs
     }
 
     /// <summary>Player on/off duty at a cash register (MessageType.RegisterCashier).</summary>
