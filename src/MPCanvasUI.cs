@@ -302,6 +302,7 @@ namespace BigAmbitionsMP
                 catch { }
             }
             TickOverlayWatchdog();   // stuck loading screen over a live world → force-dismiss
+            TickLoadTrace();         // [LoadTrace] post-load timeline (localization probe)
             TickJoinDialog();        // Phase 5 — connect-dialog input (when open)
             TickLobbyWindow();       // Phase 5 — lobby window input (when open)
             TickSavePicker();        // Phase 5 — save-picker input (when open)
@@ -1991,6 +1992,7 @@ namespace BigAmbitionsMP
             if (inGame && !_wasInGame)
             {
                 Plugin.Logger.LogInfo("[UI] Game scene loaded — player sync active.");
+                _loadTraceUntil = Time.unscaledTime + 25f; _loadTraceNext = 0f;   // [LoadTrace] arm
                 // Quiesce ends a few seconds LATER: resuming the stream the
                 // same frame killed the game's load-finish fade (2 GM NREs at
                 // exactly quiesce-OFF; loading screen never faded, 2026-06-11).
@@ -2281,6 +2283,41 @@ namespace BigAmbitionsMP
             catch { up = false; }    // never hang the startup on a detection error
             _overlayCheckCached = up;
             return up;
+        }
+
+        // ── [LoadTrace] wide-net localization probe (modding-skill workflow):
+        // 1 Hz timeline for 25s after every MP scene-load — position, control
+        // state, money, day, character name, timescale.  One launch shows WHAT
+        // is bugged and WHEN (registry: .modding/04-probes.md). ──────────────
+        private float _loadTraceUntil;
+        private float _loadTraceNext;
+
+        private void TickLoadTrace()
+        {
+            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            if (_loadTraceUntil == 0f || Time.unscaledTime > _loadTraceUntil) return;
+            if (Time.unscaledTime < _loadTraceNext) return;
+            _loadTraceNext = Time.unscaledTime + 1f;
+            try
+            {
+                var pc = Helpers.PlayerHelper.PlayerController;
+                var ch = pc?.Character?.transform;
+                string pos = ch != null ? $"({ch.position.x:F1},{ch.position.y:F1},{ch.position.z:F1})" : "(no char)";
+                bool ccOn = false;
+                try
+                {
+                    var ccComp = ch?.GetComponent(Il2CppType.Of<CharacterController>());
+                    var cc = ccComp != null ? ccComp.TryCast<CharacterController>() : null;
+                    ccOn = cc != null && cc.enabled;
+                }
+                catch { }
+                float money = -1f; int day = -1; float hour = -1f; string cname = "?";
+                try { money = SaveGameManager.Current?.Money ?? -1f; } catch { }
+                try { (day, hour) = GameStateReader.GetGameTime(); } catch { }
+                try { var cd0 = SaveGameManager.Current?.charactersData; if (cd0 != null && cd0.Count > 0) cname = cd0[0]?.name?.ToString() ?? "?"; } catch { }
+                Plugin.Logger.LogInfo($"[LoadTrace] pos={pos} cc={ccOn} money={money:F0} day={day} hr={hour:F1} name='{cname}' ts={Time.timeScale:F2} overlay={IsLoadingOverlayUp()} suppress={MPChat.SuppressGameInput}");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[LoadTrace] {ex.Message}"); }
         }
 
         // ── Overlay watchdog: the game's loading screen can survive its own
