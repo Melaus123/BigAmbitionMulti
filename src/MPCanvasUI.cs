@@ -1045,10 +1045,8 @@ namespace BigAmbitionsMP
         private int _hubFilter;                               // 0=all 1=gifts 2=loans
         private readonly RectTransform?[] _hubFilterRT = new RectTransform?[3];
         private readonly Image?[] _hubFilterImg = new Image?[3];
-        // Active-loans paging (3 per page — large ledgers stay reviewable).
-        private int _hubLoanPage;
-        private RectTransform? _hubLoanPrevRT, _hubLoanNextRT;
-        private TextMeshProUGUI? _hubLoanPageLbl;
+        // Active-loans SCROLL view (native pages scroll; so do we).
+        private RectTransform? _hubLoansContent;
         // Outgoing offers per page, cancellable (X).
         private readonly RectTransform?[] _hubOutGiftXRT = new RectTransform?[2];
         private readonly string[] _hubOutGiftIds = new string[2];
@@ -1289,17 +1287,14 @@ namespace BigAmbitionsMP
                     }
                     if (_hubOutLoans != null) _hubOutLoans.text = slo.Length > 0 ? slo.ToString() : $"<color={_colMuted}>no pending outgoing loans</color>";
 
-                    // ACTIVE LOANS — paged, 3 per page (large ledgers stay
-                    // reviewable via < > controls).
+                    // ACTIVE LOANS — full list, SCROLLED (content grows; the
+                    // viewport masks; wheel/drag reviews any ledger size).
                     var mine = new List<LoanEntry>();
                     foreach (var ln in MPHub.Loans)
                         if (ln.Borrower == MPConfig.PlayerId || ln.Lender == MPConfig.PlayerId) mine.Add(ln);
-                    int pages = Math.Max(1, (mine.Count + 2) / 3);
-                    _hubLoanPage = Math.Clamp(_hubLoanPage, 0, pages - 1);
                     var sl = new System.Text.StringBuilder();
-                    for (int i = _hubLoanPage * 3; i < Math.Min(mine.Count, _hubLoanPage * 3 + 3); i++)
+                    foreach (var ln in mine)
                     {
-                        var ln = mine[i];
                         bool meB = ln.Borrower == MPConfig.PlayerId;
                         sl.Append(meB
                             ? $"you owe <color={_colOwe}>{ln.Lender}</color>: <b>${ln.Remaining:N0}</b> left (${ln.DailyInterest:N0}+${ln.DailyPayment:N0}/day · ~{Math.Ceiling(ln.Remaining / Math.Max(1f, ln.DailyPayment)):F0} days left)\n"
@@ -1307,10 +1302,18 @@ namespace BigAmbitionsMP
                     }
                     if (MPHub.Loans.Count > 0 && mine.Count == 0)
                         Plugin.Logger.LogWarning($"[Hub] {MPHub.Loans.Count} active loan(s) but none match my id '{MPConfig.PlayerId}' (loan0: lender='{MPHub.Loans[0].Lender}' borrower='{MPHub.Loans[0].Borrower}')");
-                    if (_hubLoanPageLbl != null) _hubLoanPageLbl.text = pages > 1 ? $"{_hubLoanPage + 1}/{pages}" : "";
-                    _hubLoanPrevRT?.gameObject.SetActive(pages > 1);
-                    _hubLoanNextRT?.gameObject.SetActive(pages > 1);
-                    if (_hubLoans != null) _hubLoans.text = sl.Length > 0 ? sl.ToString() : $"<color={_colMuted}>no active loans</color>";
+                    if (_hubLoans != null)
+                    {
+                        _hubLoans.text = sl.Length > 0 ? sl.ToString() : $"<color={_colMuted}>no active loans</color>";
+                        try
+                        {
+                            _hubLoans.ForceMeshUpdate();
+                            float h = Mathf.Max(64f, _hubLoans.preferredHeight + 6f);
+                            if (_hubLoansContent != null) _hubLoansContent.sizeDelta = new Vector2(0f, h);
+                            _hubLoans.rectTransform.sizeDelta = new Vector2(900f, h);
+                        }
+                        catch { }
+                    }
                 }
 
                 // Hover + clicks.  In the NATIVE page the menu itself already
@@ -1364,8 +1367,6 @@ namespace BigAmbitionsMP
                     if (_hubTab == 0 && _hubOutGiftIds[i] != "" && HubHit(_hubOutGiftXRT[i], mp)) { MPHub.CancelOffer(_hubOutGiftIds[i]); return; }
                     if (_hubTab == 1 && _hubOutLoanIds[i] != "" && HubHit(_hubOutLoanXRT[i], mp)) { MPHub.CancelOffer(_hubOutLoanIds[i]); return; }
                 }
-                if (_hubTab == 1 && HubHit(_hubLoanPrevRT, mp)) { _hubLoanPage--; _hubSeenVersion = -1; return; }
-                if (_hubTab == 1 && HubHit(_hubLoanNextRT, mp)) { _hubLoanPage++; _hubSeenVersion = -1; return; }
             }
             catch { }
         }
@@ -1527,14 +1528,33 @@ namespace BigAmbitionsMP
                 MakeHubBox(pl, 16f, -152f, 948f, 100f, sprite);
                 var loansHdr = MakeLabel(pl, "<b>ACTIVE LOANS</b>", 12, _inkLo, 28f, -160f, 220f, 18f, TextAlignmentOptions.Left);
                 ApplyFont(loansHdr);
-                (_hubLoanPrevRT, _) = MakeHubButton("<", new Vector2(0f, 0f), 26f, new Color(0.18f, 0.20f, 0.27f, 1f), 22f, sprite);
-                _hubLoanPrevRT.SetParent(pl, false); SetTopLeft(_hubLoanPrevRT, 820f, -158f);
-                _hubLoanPageLbl = MakeLabel(pl, "", 12, _inkLo, 850f, -160f, 46f, 18f, TextAlignmentOptions.Center);
-                ApplyFont(_hubLoanPageLbl);
-                (_hubLoanNextRT, _) = MakeHubButton(">", new Vector2(0f, 0f), 26f, new Color(0.18f, 0.20f, 0.27f, 1f), 22f, sprite);
-                _hubLoanNextRT.SetParent(pl, false); SetTopLeft(_hubLoanNextRT, 900f, -158f);
-                _hubLoans = MakeLabel(pl, "", 13, _inkHi, 28f, -182f, 900f, 66f, TextAlignmentOptions.TopLeft);
+                var scrollHint = MakeLabel(pl, "scroll for more", 10, _inkLo, 820f, -162f, 110f, 16f, TextAlignmentOptions.Right);
+                ApplyFont(scrollHint);
+                // Scroll view (mouse wheel / drag) — matches the native pages.
+                var vpGO = MakeGO("LoansViewport", pl);
+                var vpRT = vpGO.GetComponent<RectTransform>();
+                vpRT.anchorMin = vpRT.anchorMax = vpRT.pivot = new Vector2(0f, 1f);
+                vpRT.anchoredPosition = new Vector2(28f, -182f);
+                vpRT.sizeDelta = new Vector2(900f, 64f);
+                vpGO.AddComponent<RectMask2D>();
+                var vpImg = vpGO.AddComponent<Image>();
+                vpImg.color = new Color(0f, 0f, 0f, 0.004f);   // raycast target for the wheel
+                var contentGO = MakeGO("LoansContent", vpGO.transform);
+                _hubLoansContent = contentGO.GetComponent<RectTransform>();
+                _hubLoansContent.anchorMin = new Vector2(0f, 1f);
+                _hubLoansContent.anchorMax = new Vector2(1f, 1f);
+                _hubLoansContent.pivot = new Vector2(0.5f, 1f);
+                _hubLoansContent.anchoredPosition = Vector2.zero;
+                _hubLoansContent.sizeDelta = new Vector2(0f, 64f);
+                _hubLoans = MakeLabel(contentGO.transform, "", 13, _inkHi, 0f, 0f, 900f, 64f, TextAlignmentOptions.TopLeft);
                 ApplyFont(_hubLoans);
+                var loansScroll = vpGO.AddComponent<ScrollRect>();
+                loansScroll.content = _hubLoansContent;
+                loansScroll.viewport = vpRT;
+                loansScroll.horizontal = false;
+                loansScroll.vertical = true;
+                loansScroll.movementType = ScrollRect.MovementType.Clamped;
+                loansScroll.scrollSensitivity = 18f;
 
                 // ── Shared: INCOMING OFFERS (category-agnostic + filter) ─────
                 MakeHubBox(_hub.transform, 16f, T - 426f, 948f, 222f, sprite);
