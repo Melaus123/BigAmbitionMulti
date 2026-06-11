@@ -2,17 +2,25 @@
 
 | Probe | Location | Prefix | Status | Purpose |
 |---|---|---|---|---|
-| LoadTrace | MPCanvasUI.TickLoadTrace | [LoadTrace] | ACTIVE | Wide-net: 1 Hz timeline for 25s post-scene-load (pos, controller, money, day, name, timescale) — localize host-load "sorry state" |
-| Post-load position | MPCanvasUI quiesce-off | [UI] post-load position | ACTIVE | Did save position-restore run |
-| FullMenu hierarchy dump | MPFullMenuProbe | [FullMenu] | ACTIVE (one-shot done) | Shell + page-interior inventory — REMOVE after Hub visual true-up |
-| Color mechanism dump | RemotePlayerManager.ProbeColors | [Colors] | ACTIVE (one-shot) | Tint mechanism classification — REMOVE after dye sync verified |
-| Spawn telemetry | MPCanvasUI.TickSpawnOffset | [Spawn] probe# | ACTIVE | Verify de-stack placement (now fresh-games-only) |
-| GMShield | MPPatches Patch_GameManager_Update | [GMShield] | ACTIVE (shield) | Swallow GameManager.Update exceptions in MP (mid-join storms) — review for retirement |
+| Post-load position | MPCanvasUI OnLifecyclePhase (WorldReady) | [UI] world-ready position | PERMANENT (diagnostic) | One line per load: did save position-restore run |
+| GMShield | MPPatches Patch_GameManager_Update | [GMShield] | ACTIVE (shield) | Swallow GameManager.Update exceptions in MP — RETIREMENT-GATED: remove after several clean sessions log zero swallows |
 | ActivityUI shield | MPPatches | [ActivityUI] | PERMANENT | Benign UI-tick NRE swallow |
 | Gley/NavMesh shields | MPPatches | [Gley]/[NavShield] | PERMANENT | Ghost-contact NRE swallow |
-| Loan ledger diag | MPHub | [Hub] ledger… | ACTIVE | Persistence verification lines — demote after sweep |
 | Nav watchdog | MPRestSync | [Rest] NAV LOCK | PERMANENT (diagnostic-only) | Names activity nav-lock if ever recurs |
-| Lifecycle shadow | MPLifecycle.Tick (MPCanvasUI Update) | [Lifecycle] | ACTIVE | Stage-3 shadow phase tracker: transitions + STUCK-IN-LOADING >60s detector (mid-join acceptance instrumentation) |
-| HubRoster | MPCanvasUI chips rebuild | [HubRoster] | ACTIVE | Host target-list contents (empty-chips bug surveillance) |
+| Overlay watchdog | MPCanvasUI.TickOverlayWatchdog | [UI] overlay-watchdog | PERMANENT (diagnostic-only) | 30s stuck-overlay log line; NEVER touches LoadingScreen (force-dismiss variant caused the June 2026 regression) |
+| Lifecycle transitions | MPLifecycle | [Lifecycle] | PERMANENT (production) | No longer a probe: THE phase tracker (stage 4); transition lines + STUCK-IN-LOADING >60s are load-bearing diagnostics |
+| Phase reports | MPServer.RecordPhaseReport | [Server] phase: | PERMANENT (diagnostic) | Per-player reported phase transitions — the fence's visibility |
+| HubRoster | MPCanvasUI chips rebuild | [HubRoster] | ACTIVE (surveillance) | Host target-list contents (empty-chips bug never reproduced — remove if quiet through Wave 2) |
+
+Removed 2026-06-11 (probe cleanup sweep): LoadTrace (target bug resolved: overlay-watchdog regression),
+FullMenu hierarchy dump + MPFullMenuProbe.cs (dumps captured in .modding for Hub true-up),
+MPPhoneProbe.cs (dead file, unwired since phone-button fix), ProbeColors + DumpRendererColors
+(dye mechanism found + sync verified), ProbeMorphs + DumpScaledBones (callerless dead code;
+blendshape sync shipped), spawn telemetry (deleted with sidestep migration #3),
+loan ledger diag (demoted: save line only when loans exist).
 
 Rules: every new probe gets a row + prefix; resolved probes REMOVED from code promptly.
+
+NEXT SWEEP CANDIDATES (one-shot discovery probes, missions complete, still wired in
+MPCanvasUI ~2455: ProbeAppearance / ProbeAnimatorLive / ProbeTraffic — verify each is
+log-only (no cache priming/side effects) before deleting; they are guarded one-shots, harmless meanwhile).

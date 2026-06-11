@@ -357,7 +357,7 @@ namespace BigAmbitionsMP
                 var st = new LoanStatePayload();
                 st.Loans.AddRange(_hostLoans);
                 System.IO.File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(st));
-                Plugin.Logger.LogInfo($"[Hub] ledger saved ({_hostLoans.Count} loan(s)).");
+                if (_hostLoans.Count > 0) Plugin.Logger.LogInfo($"[Hub] ledger saved ({_hostLoans.Count} loan(s)).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Hub] SaveLedger: {ex.Message}"); }
         }
