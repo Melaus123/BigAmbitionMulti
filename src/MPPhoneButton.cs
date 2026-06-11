@@ -113,6 +113,9 @@ namespace BigAmbitionsMP
                 {
                     if (_recopyButtons != null && _recopyGo != null) CopyIconMetricsFromSibling(_recopyButtons, _recopyGo, _recopyIcon);
                     if (_recopyButtons != null && _hubRecopyGo != null) CopyIconMetricsFromSibling(_recopyButtons, _hubRecopyGo, _hubRecopyIcon);
+                    // Size diagnostic: both our icons after the late re-fit.
+                    if (_recopyIcon != null && _hubRecopyIcon != null)
+                        Plugin.Logger.LogInfo($"[PhoneBtn] icon metrics post-refit: chat={_recopyIcon.rectTransform.sizeDelta} hub={_hubRecopyIcon.rectTransform.sizeDelta}");
                 }
                 catch { }
             }

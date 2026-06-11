@@ -46,15 +46,17 @@ namespace BigAmbitionsMP
             catch { return 0f; }
         }
 
-        /// <summary>MAIN THREAD: adjust the local wallet + notice.</summary>
-        public static void ApplyMoneyDelta(float delta, string reason)
+        /// <summary>MAIN THREAD: adjust the local wallet.  notice=false keeps the
+        /// chat clean (the receiver of an accepted offer already knows; daily
+        /// loan drafts live in the Hub list, not the chat).</summary>
+        public static void ApplyMoneyDelta(float delta, string reason, bool notice = true)
         {
             try
             {
                 var gi = SaveGameManager.Current;
                 if (gi == null) return;
                 gi.Money += delta;
-                MPChat.AddNotice($"{(delta >= 0 ? "+" : "−")}${Mathf.Abs(delta):N0} — {reason}");
+                if (notice) MPChat.AddNotice($"{(delta >= 0 ? "+" : "−")}${Mathf.Abs(delta):N0} — {reason}");
                 Plugin.Logger.LogInfo($"[Hub] money {(delta >= 0 ? "+" : "")}{delta:N0} ({reason}); balance {gi.Money:N0}.");
                 Version++;
             }
@@ -108,12 +110,16 @@ namespace BigAmbitionsMP
             else MPClient.SendHub(MessageType.LoanAnswer, a);
         }
 
-        /// <summary>Daily-interest %% above this = the receiver gets a clear
-        /// "predatory rate" warning on the offer (still acceptable).</summary>
-        public const float PredatoryDailyPct = 3f;
+        /// <summary>The bank's convention (measured from its own UI): the rate
+        /// is a TOTAL premium on the principal, spread flat over the term.
+        /// Given the game's fast ROI, only triple-digit totals are predatory.</summary>
+        public const float PredatoryTotalPct = 100f;
 
-        public static float OfferDailyPct(LoanOfferPayload o)
-            => o.Principal > 0 ? o.DailyInterest / o.Principal * 100f : 0f;
+        public static int OfferTermDays(LoanOfferPayload o)
+            => o.DailyPayment > 0 ? Mathf.Max(1, Mathf.RoundToInt(o.Principal / o.DailyPayment)) : 1;
+
+        public static float OfferTotalPct(LoanOfferPayload o)
+            => o.Principal > 0 ? o.DailyInterest * OfferTermDays(o) / o.Principal * 100f : 0f;
 
         /// <summary>An offer arrived for ME (main thread).</summary>
         public static void ReceiveOffer(LoanOfferPayload p)
@@ -124,9 +130,9 @@ namespace BigAmbitionsMP
                 MPChat.AddNotice($"{p.From} offers you a ${p.Principal:N0} GIFT — see the Business Hub");
             else
             {
-                float pct = OfferDailyPct(p);
-                MPChat.AddNotice($"{p.From} offers you a ${p.Principal:N0} loan at {pct:F1}%/day — see the Business Hub"
-                                 + (pct > PredatoryDailyPct ? "  (PREDATORY RATE!)" : ""));
+                float pct = OfferTotalPct(p);
+                MPChat.AddNotice($"{p.From} offers you a ${p.Principal:N0} loan at {pct:F0}% total over {OfferTermDays(p)} days — see the Business Hub"
+                                 + (pct > PredatoryTotalPct ? "  (PREDATORY RATE!)" : ""));
             }
             Version++;
         }
@@ -168,9 +174,12 @@ namespace BigAmbitionsMP
                 NotifyParty(offer.From, $"{offer.To} declined your ${offer.Principal:N0} {what} offer.");
                 return;
             }
-            // Principal moves sender → receiver (overdraft allowed, like the bank).
-            DeliverMoney(offer.From, -offer.Principal, $"{what} to {offer.To} (accepted)");
-            DeliverMoney(offer.To, offer.Principal, $"{what} from {offer.From}");
+            // Principal moves sender → receiver (overdraft allowed, like the
+            // bank).  Only the OFFERER gets a chat line — the receiver just
+            // clicked Accept, telling them again is clutter.
+            NotifyParty(offer.From, $"{offer.To} accepted your ${offer.Principal:N0} {what}.");
+            DeliverMoney(offer.From, -offer.Principal, $"{what} to {offer.To}", silent: true);
+            DeliverMoney(offer.To, offer.Principal, $"{what} from {offer.From}", silent: true);
             if (offer.Kind != "gift")
             {
                 _hostLoans.Add(new LoanEntry
@@ -217,8 +226,9 @@ namespace BigAmbitionsMP
                 {
                     float pay = Math.Min(ln.DailyPayment, ln.Remaining);
                     float due = ln.DailyInterest + pay;
-                    DeliverMoney(ln.Borrower, -due, $"loan payment to {ln.Lender}");
-                    DeliverMoney(ln.Lender, due, $"loan payment from {ln.Borrower}");
+                    // Silent: daily drafts live in the Hub's loan list, not chat.
+                    DeliverMoney(ln.Borrower, -due, $"loan payment to {ln.Lender}", silent: true);
+                    DeliverMoney(ln.Lender, due, $"loan payment from {ln.Borrower}", silent: true);
                     ln.Remaining -= pay;
                     changed = true;
                 }
@@ -288,11 +298,11 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>HOST: credit/debit a player's wallet wherever it lives.</summary>
-        private static void DeliverMoney(string playerId, float amount, string reason)
+        private static void DeliverMoney(string playerId, float amount, string reason, bool silent = false)
         {
-            if (playerId == MPConfig.PlayerId) ApplyMoneyDelta(amount, reason);
+            if (playerId == MPConfig.PlayerId) ApplyMoneyDelta(amount, reason, !silent);
             else MPServer.SendHubTo(playerId, MessageType.MoneyAdjust,
-                     new MoneyAdjustPayload { To = playerId, Amount = amount, Reason = reason });
+                     new MoneyAdjustPayload { To = playerId, Amount = amount, Reason = reason, Silent = silent });
         }
     }
 }

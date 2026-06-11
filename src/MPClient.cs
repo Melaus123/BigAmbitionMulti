@@ -322,7 +322,7 @@ namespace BigAmbitionsMP
                 case MessageType.MoneyAdjust:
                 {
                     var ma = env.GetPayload<MoneyAdjustPayload>();
-                    if (ma != null) GameStatePatcher.EnqueueOnMainThread(() => MPHub.ApplyMoneyDelta(ma.Amount, ma.Reason));
+                    if (ma != null) GameStatePatcher.EnqueueOnMainThread(() => MPHub.ApplyMoneyDelta(ma.Amount, ma.Reason, !ma.Silent));
                     break;
                 }
 

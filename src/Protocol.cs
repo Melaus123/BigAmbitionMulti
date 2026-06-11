@@ -753,6 +753,9 @@ namespace BigAmbitionsMP
         public string To     { get; set; } = "";
         public float  Amount { get; set; }
         public string Reason { get; set; } = "";
+        /// <summary>No chat notice on apply (accepted-offer credits, daily
+        /// loan drafts — the Hub list is their home, not the chat).</summary>
+        public bool   Silent { get; set; }
     }
 
     /// <summary>One player's rest-vote (MessageType.RestVote).</summary>

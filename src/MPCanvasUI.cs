@@ -1043,9 +1043,11 @@ namespace BigAmbitionsMP
         private bool _hubAmountFocus;
         private string _hubAmountStr = "10000";
         private bool _hubRateFocus;
-        private string _hubRateStr = "1.0";
-        private RectTransform? _hubAmountRT, _hubRateRT;
-        private TextMeshProUGUI? _hubRateLbl;
+        private string _hubRateStr = "20";
+        private bool _hubTermFocus;
+        private string _hubTermStr = "20";
+        private RectTransform? _hubAmountRT, _hubRateRT, _hubTermRT;
+        private TextMeshProUGUI? _hubRateLbl, _hubTermLbl;
 
         private void TickHubWindow()
         {
@@ -1096,15 +1098,22 @@ namespace BigAmbitionsMP
                         : $"<b>${_hubAmount:N0}</b>";
                 if (_hubRateLbl != null)
                     _hubRateLbl.text = _hubRateFocus
-                        ? $"<b>{_hubRateStr}</b>{(caretOn ? "|" : "")} %/day"
-                        : $"<b>{HubRate():F1}</b> %/day";
+                        ? $"<b>{_hubRateStr}</b>{(caretOn ? "|" : "")} %"
+                        : $"<b>{HubRate():F0}</b> %";
+                if (_hubTermLbl != null)
+                    _hubTermLbl.text = _hubTermFocus
+                        ? $"<b>{_hubTermStr}</b>{(caretOn ? "|" : "")} days"
+                        : $"<b>{HubTerm()}</b> days";
                 if (_hubTermsLbl != null)
                 {
+                    // Bank convention: the rate is a TOTAL premium on the
+                    // principal, spread flat over the term.
                     double pct = HubRate();
-                    double di = Math.Max(0, Math.Round(_hubAmount * pct / 100.0));
-                    double dp = Math.Max(100, Math.Round(_hubAmount / 20 / 100) * 100);
-                    string warn = pct > MPHub.PredatoryDailyPct ? "  <color=#FF6B6B><b>PREDATORY RATE</b></color>" : "";
-                    _hubTermsLbl.text = $"<color=#9AA3B2>loan terms: ${di:N0}/day interest ({pct:F1}%/day) · ${dp:N0}/day payment (~20 days)</color>{warn}";
+                    int term = HubTerm();
+                    double di = Math.Max(0, Math.Round(_hubAmount * pct / 100.0 / term));
+                    double dp = Math.Max(1, Math.Round(_hubAmount / term));
+                    string warn = pct > MPHub.PredatoryTotalPct ? "  <color=#FF6B6B><b>PREDATORY RATE</b></color>" : "";
+                    _hubTermsLbl.text = $"<color=#9AA3B2>loan: ${di:N0}/day interest + ${dp:N0}/day payment over {term} days · total interest ${_hubAmount * pct / 100.0:N0} ({pct:F0}%)</color>{warn}";
                 }
 
                 // Offers + loans lists (rebuild on Version change).
@@ -1125,9 +1134,9 @@ namespace BigAmbitionsMP
                             so.Append($"<color=#8CE08C>{o.From}</color> offers you a <b>${o.Principal:N0}</b> GIFT\n");
                         else
                         {
-                            float pct = MPHub.OfferDailyPct(o);
-                            string warn = pct > MPHub.PredatoryDailyPct ? " <color=#FF6B6B><b>PREDATORY RATE</b></color>" : "";
-                            so.Append($"<color=#FFD27A>{o.From}</color> offers a <b>${o.Principal:N0}</b> loan at <b>{pct:F1}%/day</b> (${o.DailyInterest:N0}/day int · ${o.DailyPayment:N0}/day pay){warn}\n");
+                            float pct = MPHub.OfferTotalPct(o);
+                            string warn = pct > MPHub.PredatoryTotalPct ? " <color=#FF6B6B><b>PREDATORY RATE</b></color>" : "";
+                            so.Append($"<color=#FFD27A>{o.From}</color> offers a <b>${o.Principal:N0}</b> loan at <b>{pct:F0}% total</b> over {MPHub.OfferTermDays(o)} days (${o.DailyInterest:N0}/day int · ${o.DailyPayment:N0}/day pay){warn}\n");
                         }
                     }
                     if (_hubOffers != null) _hubOffers.text = so.Length > 0 ? so.ToString() : "<color=#6B7384>no pending offers</color>";
@@ -1148,7 +1157,7 @@ namespace BigAmbitionsMP
                 // Hover + clicks.  (Typing focus counts as "interacting" so the
                 // keystrokes never reach the game.)
                 var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
-                _hubUiHover = RectHit(_hubRT, mp) || _hubAmountFocus || _hubRateFocus;
+                _hubUiHover = RectHit(_hubRT, mp) || _hubAmountFocus || _hubRateFocus || _hubTermFocus;
                 if (!Input.GetMouseButtonDown(0)) return;
                 if (!RectHit(_hubRT, mp)) { CommitHubInputs(); return; }   // click-away commits typing
 
@@ -1243,11 +1252,16 @@ namespace BigAmbitionsMP
                 (_hubAm1kP,  _) = MakeHubButton("+1k",  new Vector2(340f, 0f), 46f, new Color(0.18f, 0.20f, 0.27f, 1f), 24f, sprite); SetTopLeft(_hubAm1kP, 340f, -70f);
                 (_hubAm10kP, _) = MakeHubButton("+10k", new Vector2(390f, 0f), 52f, new Color(0.18f, 0.20f, 0.27f, 1f), 24f, sprite); SetTopLeft(_hubAm10kP, 390f, -70f);
 
-                var rtLbl = MakeLabel(_hub.transform, "loan rate:", 12, C_LBLGREY, 14f, -100f, 80f, 22f, TextAlignmentOptions.Left);
+                var rtLbl = MakeLabel(_hub.transform, "interest:", 12, C_LBLGREY, 14f, -100f, 64f, 22f, TextAlignmentOptions.Left);
                 ApplyFont(rtLbl);
-                _hubRateLbl = MakeLabel(_hub.transform, "", 14, C_WHITE, 96f, -100f, 160f, 22f, TextAlignmentOptions.Left);
+                _hubRateLbl = MakeLabel(_hub.transform, "", 14, C_WHITE, 80f, -100f, 90f, 22f, TextAlignmentOptions.Left);
                 ApplyFont(_hubRateLbl);
-                _hubRateRT = _hubRateLbl.rectTransform;       // click → type the %/day
+                _hubRateRT = _hubRateLbl.rectTransform;       // click → type total %
+                var tmLbl = MakeLabel(_hub.transform, "term:", 12, C_LBLGREY, 184f, -100f, 44f, 22f, TextAlignmentOptions.Left);
+                ApplyFont(tmLbl);
+                _hubTermLbl = MakeLabel(_hub.transform, "", 14, C_WHITE, 232f, -100f, 110f, 22f, TextAlignmentOptions.Left);
+                ApplyFont(_hubTermLbl);
+                _hubTermRT = _hubTermLbl.rectTransform;       // click → type term days
 
                 (_hubSendRT, _) = MakeHubButton("Offer gift",   new Vector2(14f, 0f), 160f, new Color(0.19f, 0.42f, 0.67f, 1f), 28f, sprite); SetTopLeft(_hubSendRT, 14f, -130f);
                 (_hubLoanRT, _) = MakeHubButton("Offer as loan", new Vector2(182f, 0f), 160f, new Color(0.24f, 0.50f, 0.33f, 1f), 28f, sprite); SetTopLeft(_hubLoanRT, 182f, -130f);
@@ -1286,7 +1300,10 @@ namespace BigAmbitionsMP
         private double HubRate()
             => double.TryParse(_hubRateStr, System.Globalization.NumberStyles.Float,
                                System.Globalization.CultureInfo.InvariantCulture, out var r)
-               ? Math.Clamp(r, 0.0, 50.0) : 1.0;
+               ? Math.Clamp(r, 0.0, 1000.0) : 20.0;
+
+        private int HubTerm()
+            => int.TryParse(_hubTermStr, out var t) ? Math.Clamp(t, 1, 365) : 20;
 
         private void CommitHubInputs()
         {
@@ -1298,13 +1315,18 @@ namespace BigAmbitionsMP
             if (_hubRateFocus)
             {
                 _hubRateFocus = false;
-                _hubRateStr = HubRate().ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+                _hubRateStr = HubRate().ToString("F0", System.Globalization.CultureInfo.InvariantCulture);
+            }
+            if (_hubTermFocus)
+            {
+                _hubTermFocus = false;
+                _hubTermStr = HubTerm().ToString();
             }
         }
 
         private void HandleHubTyping()
         {
-            if (!_hubAmountFocus && !_hubRateFocus) return;
+            if (!_hubAmountFocus && !_hubRateFocus && !_hubTermFocus) return;
             foreach (char c in Input.inputString)
             {
                 if (c == '\b')
@@ -1315,8 +1337,9 @@ namespace BigAmbitionsMP
                 else if (c == '\n' || c == '\r') CommitHubInputs();
                 else if (_hubAmountFocus && char.IsDigit(c) && _hubAmountStr.Length < 9) _hubAmountStr += c;
                 else if (_hubRateFocus && (char.IsDigit(c) || (c == '.' && !_hubRateStr.Contains('.'))) && _hubRateStr.Length < 5) _hubRateStr += c;
+                else if (_hubTermFocus && char.IsDigit(c) && _hubTermStr.Length < 3) _hubTermStr += c;
             }
-            if (Input.GetKeyDown(KeyCode.Escape)) { _hubAmountFocus = false; _hubRateFocus = false; }
+            if (Input.GetKeyDown(KeyCode.Escape)) { _hubAmountFocus = false; _hubRateFocus = false; _hubTermFocus = false; }
         }
 
         private void SetTopLeft(RectTransform? rt, float x, float y)
