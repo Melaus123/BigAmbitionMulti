@@ -157,12 +157,6 @@ namespace BigAmbitionsMP
         private GameObject _canvasGO = null!;
 
         // ── per-state panes ───────────────────────────────────────────────────
-        private GameObject _paneIdle       = null!;
-        private GameObject _paneLobbyHost  = null!;
-        private GameObject _paneLobbyClient= null!;
-        private GameObject _paneHosting    = null!;
-        private GameObject _paneConnected  = null!;
-        private GameObject _paneConnecting = null!;
 
         // ── Idle pane interactive elements ────────────────────────────────────
         private Image           _imgName     = null!;
@@ -183,15 +177,6 @@ namespace BigAmbitionsMP
         private RectTransform   _rtJoinBtn   = null!;
 
         // ── Lobby-host live labels ────────────────────────────────────────────
-        private TextMeshProUGUI _txtLHInfo      = null!;
-        private TextMeshProUGUI[] _txtLHSlots   = new TextMeshProUGUI[4];
-        private TextMeshProUGUI _txtLHDifficulty = null!;
-        private RectTransform   _rtLHDifficulty  = null!;
-        private TextMeshProUGUI _txtLHEnforceCash = null!;
-        private RectTransform   _rtLHEnforceCash  = null!;
-        private Image           _imgClientCash    = null!;
-        private TextMeshProUGUI _txtClientCash    = null!;
-        private RectTransform   _rtClientCash     = null!;
         private string          _clientCash       = "4200";
         private string _selectedDifficulty = "Normal";
         private static readonly string[] _difficulties = { "Easy", "Normal", "Hard" };
@@ -201,7 +186,6 @@ namespace BigAmbitionsMP
         private GameObject?   _settingsPanelGO;
         private Image?        _settingsContentImg;   // content bg — rounded with the menu sprite on first open
         private bool          _settingsHidLobby;      // remembers we hid the lobby behind the settings modal
-        private RectTransform _rtLHSettings    = null!;
         private RectTransform _rtSettingsClose = null!;
         private bool _settingsOpen;
         private readonly List<(RectTransform rt, System.Action act)> _settingsHits = new();
@@ -223,19 +207,10 @@ namespace BigAmbitionsMP
             public float  Min, Max;
             public string Fmt = "0";
         }
-        private RectTransform   _rtLHStartNew   = null!;
-        private RectTransform   _rtLHStartLoad  = null!;
-        private RectTransform   _rtLHStop       = null!;
 
         // ── Lobby-client live labels ──────────────────────────────────────────
-        private TextMeshProUGUI _txtLCInfo      = null!;
-        private TextMeshProUGUI[] _txtLCSlots   = new TextMeshProUGUI[4];
-        private RectTransform   _rtLCDisc       = null!;
 
         // ── In-game host labels ───────────────────────────────────────────────
-        private TextMeshProUGUI _txtHostAs      = null!;
-        private TextMeshProUGUI _txtHostPort    = null!;
-        private TextMeshProUGUI _txtHostPlayers = null!;
         private RectTransform   _rtStopBtn      = null!;
 
         // ── In-game client labels ─────────────────────────────────────────────
@@ -244,7 +219,6 @@ namespace BigAmbitionsMP
         private RectTransform   _rtDiscBtn      = null!;
 
         // ── Connecting labels ─────────────────────────────────────────────────
-        private TextMeshProUGUI _txtConnecting  = null!;
         private RectTransform   _rtCancelBtn    = null!;
 
         // ── Status bar ────────────────────────────────────────────────────────
@@ -3672,42 +3646,7 @@ namespace BigAmbitionsMP
         /// Rebuilds the HUD row text each frame it's visible.
         /// Row 0 = local player, rows 1+ = remote players from RemotePlayerManager.
         /// </summary>
-        private void RefreshHUD()
-        {
-            var st = State();
-            bool connected = st == MPState.Hosting || st == MPState.Connected ||
-                             st == MPState.LobbyHost || st == MPState.LobbyClient;
-
-            if (!connected)
-            {
-                if (_hudGO != null) _hudGO.SetActive(false);
-                _hudVisible = false;
-                return;
-            }
-
-            // Row 0: local player (always present)
-            if (_hudRows[0] != null)
-                _hudRows[0].text = $"● {MPConfig.PlayerId}  (you)";
-
-            // Rows 1+: remote players
-            var remotes = RemotePlayerManager.GetRemotePlayerIds();
-            for (int i = 1; i < _hudRows.Length; i++)
-            {
-                if (_hudRows[i] == null) continue;
-                int ri = i - 1;
-                _hudRows[i].text = ri < remotes.Count ? $"● {remotes[ri]}" : "";
-            }
-
-            // Update header with mode label
-            if (_hudHeader != null)
-            {
-                string mode = st == MPState.Hosting   ? "HOST"
-                            : st == MPState.LobbyHost ? "LOBBY-HOST"
-                            : st == MPState.LobbyClient ? "LOBBY"
-                            : "CLIENT";
-                _hudHeader.text = $"[MP: {mode}]  F9";
-            }
-        }
+        // (RefreshHUD excised 2026-06-11 — dead, no callers.)
 
         // ── Canvas construction ───────────────────────────────────────────────
 
@@ -4786,222 +4725,8 @@ namespace BigAmbitionsMP
                 "once everyone is ready.</color></size>";
         }
 
-        // ── Pane builders ─────────────────────────────────────────────────────
-
-        private void BuildIdlePane(Transform p, ref float y)
-        {
-            MakeLabel(p, "Your name:", SZ_LBL, C_LBLGREY, PAD, y, FW, LH,
-                      TextAlignmentOptions.Left); y -= LADV;
-            (_imgName, _txtName, _rtName) = MakeField(p, _name, PAD, y, FW, FH); y -= FADV;
-
-            y -= SGAP;
-            Sep(p, y, "HOST"); y -= LADV;
-            MakeLabel(p, "Port:", SZ_LBL, C_LBLGREY, PAD, y, 52f, FH, TextAlignmentOptions.Left);
-            (_imgPort, _txtPort, _rtPort) = MakeField(p, _port, PAD + 56f, y, FW - 56f, FH);
-            y -= FADV;
-            (_imgHostBtn, _rtHostBtn) = MakeButton(p, "Host Game", C_BTN, PAD, y, FW, BH);
-            y -= BADV;
-
-            y -= SGAP;
-            Sep(p, y, "JOIN"); y -= LADV;
-            MakeLabel(p, "IP:", SZ_LBL, C_LBLGREY, PAD, y, 32f, FH, TextAlignmentOptions.Left);
-            (_imgIp, _txtIp, _rtIp) = MakeField(p, _ip, PAD + 36f, y, FW - 36f, FH);
-            y -= FADV;
-            MakeLabel(p, "Port:", SZ_LBL, C_LBLGREY, PAD, y, 52f, FH, TextAlignmentOptions.Left);
-            (_imgJoinPort, _txtJoinPort, _rtJoinPort) = MakeField(p, _port, PAD + 56f, y, FW - 56f, FH);
-            y -= FADV;
-            (_imgJoinBtn, _rtJoinBtn) = MakeButton(p, "Join Game", C_BTN, PAD, y, FW, BH);
-            y -= BADV;
-        }
-
-        private void BuildLobbyHostPane(Transform p, ref float y)
-        {
-            _txtLHInfo = MakeLabel(p, "", SZ_LBL, C_WHITE, PAD, y, FW, LH,
-                                   TextAlignmentOptions.Left); y -= LADV;
-
-            y -= SGAP;
-            MakeLabel(p, "Players in lobby:", SZ_LBL, C_LBLGREY, PAD, y, FW, LH,
-                      TextAlignmentOptions.Left); y -= LADV;
-            for (int i = 0; i < 4; i++)
-            {
-                _txtLHSlots[i] = MakeLabel(p, "", SZ_LBL, C_YELLOW, PAD + 12f, y, FW - 12f, LH,
-                                           TextAlignmentOptions.Left); y -= LADV;
-            }
-
-            // Difficulty selector — click to cycle Easy / Normal / Hard.
-            // Applies to "Start New Game"; networked to all clients.
-            y -= SGAP;
-            var diffGO = MakeGO("LHDifficulty", p);
-            SetAnchored(diffGO.GetComponent<RectTransform>(), PAD, y, FW, BH);
-            diffGO.AddComponent<Image>().color = C_BTN;
-            _rtLHDifficulty  = diffGO.GetComponent<RectTransform>();
-            _txtLHDifficulty = MakeLabel(diffGO.transform, "", SZ_BTN, C_WHITE,
-                                         0f, 0f, FW, BH, TextAlignmentOptions.Center);
-            _txtLHDifficulty.text = $"◄   Difficulty:  {_hostSettings.Difficulty}   ►";
-            y -= BADV;
-
-            // Starting-cash enforcement toggle — click to switch enforced vs per-player.
-            var ecGO = MakeGO("LHEnforceCash", p);
-            SetAnchored(ecGO.GetComponent<RectTransform>(), PAD, y, FW, BH);
-            ecGO.AddComponent<Image>().color = C_BTN;
-            _rtLHEnforceCash  = ecGO.GetComponent<RectTransform>();
-            _txtLHEnforceCash = MakeLabel(ecGO.transform, "", SZ_BTN, C_WHITE,
-                                          0f, 0f, FW, BH, TextAlignmentOptions.Center);
-            UpdateEnforceCashLabel();
-            y -= BADV;
-
-            MakeButton(p, "⚙  Game Settings…",          C_BTNBLUE, PAD, y, FW, BH, out _rtLHSettings);
-            y -= BADV;
-
-            y -= SGAP;
-            MakeButton(p, "▶  Start New Game",          C_BTN,     PAD, y, FW, BH, out _rtLHStartNew);
-            y -= BADV;
-            MakeButton(p, "▶  Load Multiplayer Save",   C_BTNBLUE, PAD, y, FW, BH, out _rtLHStartLoad);
-            y -= BADV;
-            y -= SGAP;
-            MakeButton(p, "■  Stop Hosting",            C_STOP,    PAD, y, FW, BH, out _rtLHStop);
-            y -= BADV;
-        }
-
-        private void BuildLobbyClientPane(Transform p, ref float y)
-        {
-            _txtLCInfo = MakeLabel(p, "", SZ_LBL, C_WHITE, PAD, y, FW, LH,
-                                   TextAlignmentOptions.Left); y -= LADV;
-
-            MakeLabel(p, "Waiting for host to start the game...", SZ_LBL, C_LBLGREY,
-                      PAD, y, FW, LH, TextAlignmentOptions.Left); y -= LADV;
-
-            y -= SGAP;
-            MakeLabel(p, "Players in lobby:", SZ_LBL, C_LBLGREY, PAD, y, FW, LH,
-                      TextAlignmentOptions.Left); y -= LADV;
-            for (int i = 0; i < 4; i++)
-            {
-                _txtLCSlots[i] = MakeLabel(p, "", SZ_LBL, C_YELLOW, PAD + 12f, y, FW - 12f, LH,
-                                           TextAlignmentOptions.Left); y -= LADV;
-            }
-
-            // Starting cash — editable when the host has not enforced a fixed amount.
-            y -= SGAP;
-            MakeLabel(p, "Your starting cash:", SZ_LBL, C_LBLGREY, PAD, y, 150f, FH,
-                      TextAlignmentOptions.Left);
-            (_imgClientCash, _txtClientCash, _rtClientCash) =
-                MakeField(p, _clientCash, PAD + 156f, y, FW - 156f, FH);
-            y -= FADV;
-
-            y -= SGAP;
-            MakeButton(p, "Disconnect", C_STOP, PAD, y, FW, BH, out _rtLCDisc);
-            y -= BADV;
-        }
-
-        private void BuildHostingPane(Transform p, ref float y)
-        {
-            _txtHostAs      = InfoLbl(p, y); y -= LADV;
-            _txtHostPort    = InfoLbl(p, y); y -= LADV;
-            _txtHostPlayers = InfoLbl(p, y); y -= LADV;
-            y -= SGAP;
-            MakeButton(p, "■  Stop Hosting", C_STOP, PAD, y, FW, BH, out _rtStopBtn);
-            y -= BADV;
-        }
-
-        private void BuildConnectedPane(Transform p, ref float y)
-        {
-            _txtConnAs   = InfoLbl(p, y); y -= LADV;
-            _txtConnHost = InfoLbl(p, y); y -= LADV;
-            y -= SGAP;
-            MakeButton(p, "Disconnect", C_STOP, PAD, y, FW, BH, out _rtDiscBtn);
-            y -= BADV;
-        }
-
-        private void BuildConnectingPane(Transform p, ref float y)
-        {
-            _txtConnecting = InfoLbl(p, y); y -= LADV;
-            y -= SGAP;
-            MakeButton(p, "Cancel", C_STOP, PAD, y, FW, BH, out _rtCancelBtn);
-            y -= BADV;
-        }
-
-        private TextMeshProUGUI InfoLbl(Transform p, float y) =>
-            MakeLabel(p, "", SZ_LBL, C_WHITE, PAD, y, FW, LH, TextAlignmentOptions.Left);
-
-        private void Sep(Transform p, float y, string section = "HOST") =>
-            MakeLabel(p, $"── {section} {'─'.ToString().PadRight(30, '─')}", SZ_SEP, C_LBLGREY,
-                      PAD, y, FW, LH, TextAlignmentOptions.Left);
-
-        // ── State refresh ─────────────────────────────────────────────────────
-
-        private void RefreshStatePanels()
-        {
-            var st = State();
-            _paneIdle.SetActive(st == MPState.Idle);
-            _paneLobbyHost.SetActive(st == MPState.LobbyHost);
-            _paneLobbyClient.SetActive(st == MPState.LobbyClient);
-            _paneHosting.SetActive(st == MPState.Hosting);
-            _paneConnected.SetActive(st == MPState.Connected);
-            _paneConnecting.SetActive(st == MPState.Connecting);
-
-            switch (st)
-            {
-                case MPState.LobbyHost:
-                    _txtLHInfo.text = $"Hosting as: {MPConfig.PlayerId}   Port: {MPConfig.Port}";
-                    RefreshPlayerSlots(_txtLHSlots, MPServer.LobbyPlayers, 0);
-                    UpdateEnforceCashLabel();
-                    break;
-
-                case MPState.LobbyClient:
-                    _txtLCInfo.text = $"Connected as: {MPConfig.PlayerId}   Host: {MPConfig.HostIP}:{MPConfig.Port}";
-                    RefreshPlayerSlots(_txtLCSlots, MPClient.LobbyPlayers, -1);
-                    break;
-
-                case MPState.Hosting:
-                    _txtHostAs.text      = $"Hosting as: {MPConfig.PlayerId}";
-                    _txtHostPort.text    = $"Port: {MPConfig.Port}";
-                    _txtHostPlayers.text = $"Players connected: {MPServer.ConnectedCount}";
-                    break;
-
-                case MPState.Connected:
-                    _txtConnAs.text   = $"Connected as: {MPConfig.PlayerId}";
-                    _txtConnHost.text = $"Host: {MPConfig.HostIP}:{MPConfig.Port}";
-                    break;
-
-                case MPState.Connecting:
-                    _txtConnecting.text = $"Connecting to {MPConfig.HostIP}:{MPConfig.Port}...";
-                    break;
-            }
-        }
-
-        private static void RefreshPlayerSlots(TextMeshProUGUI[] slots,
-                                               System.Collections.Generic.List<string> players,
-                                               int hostIndex)
-        {
-            for (int i = 0; i < slots.Length; i++)
-            {
-                if (slots[i] == null) continue;
-                if (i < players.Count)
-                    slots[i].text = $"• {players[i]}{(i == 0 && hostIndex == 0 ? "  (host)" : "")}";
-                else
-                    slots[i].text = "";
-            }
-        }
-
-        private void UpdateFields()
-        {
-            SetField(_imgName,     _txtName,     _name, _focus == 1);
-            SetField(_imgPort,     _txtPort,     _port, _focus == 2);
-            SetField(_imgIp,       _txtIp,       _ip,   _focus == 3);
-            SetField(_imgJoinPort, _txtJoinPort, _port, _focus == 4);
-
-            // Client starting-cash field — editable only when the host allows it.
-            string cashDisp = MPClient.EnforceStartingCash ? "(set by host)" : _clientCash;
-            SetField(_imgClientCash, _txtClientCash, cashDisp, _focus == 5);
-            if (int.TryParse(_clientCash, out var cc))
-                MPClient.ChosenStartingCash = cc < 0 ? 0 : (cc > 100000 ? 100000 : cc);
-        }
-
-        private static void SetField(Image img, TextMeshProUGUI lbl, string val, bool focused)
-        {
-            if (img != null) img.color = focused ? C_FIELDFOC : C_FIELD;
-            if (lbl != null) lbl.text  = val + (focused ? "|" : "");
-        }
+        // (Legacy F8 panel pane-builders + state-panel refreshers EXCISED 2026-06-11 —
+        //  the subsystem was unreachable dead code; the native menu/lobby is the real UI.)
 
         // ── Button handlers ───────────────────────────────────────────────────
 
@@ -5049,8 +4774,8 @@ namespace BigAmbitionsMP
 
         private void UpdateDifficultyLabel()
         {
-            if (_txtLHDifficulty != null)
-                _txtLHDifficulty.text = $"◄   Difficulty:  {_hostSettings.Difficulty}   ►";
+            // (legacy F8 difficulty label excised 2026-06-11 — the native
+            //  lobby's HighlightDifficulty owns the live display)
         }
 
         /// <summary>Called when the host hand-edits a setting — difficulty becomes "Custom".</summary>
@@ -5117,16 +4842,9 @@ namespace BigAmbitionsMP
         private void OnToggleEnforceCash()
         {
             MPServer.SetEnforceStartingCash(!MPServer.EnforceStartingCash);
-            UpdateEnforceCashLabel();
+            // (legacy enforce-cash label excised 2026-06-11)
         }
 
-        private void UpdateEnforceCashLabel()
-        {
-            if (_txtLHEnforceCash != null)
-                _txtLHEnforceCash.text = MPServer.EnforceStartingCash
-                    ? "Starting cash:  ENFORCED — same for all players"
-                    : "Starting cash:  per-player — each sets their own";
-        }
 
         // ── State machine ─────────────────────────────────────────────────────
 
@@ -5184,15 +4902,6 @@ namespace BigAmbitionsMP
             rt.sizeDelta        = new Vector2(w, h);
         }
 
-        private static GameObject MakePaneFill(string name, GameObject panelGO)
-        {
-            var go = MakeGO(name, panelGO.transform);
-            var rt = go.GetComponent<RectTransform>();
-            rt.anchorMin = Vector2.zero;
-            rt.anchorMax = Vector2.one;
-            rt.offsetMin = rt.offsetMax = Vector2.zero;
-            return go;
-        }
 
         private static TextMeshProUGUI MakeLabel(Transform parent, string text, int size,
             Color color, float x, float y, float w, float h, TextAlignmentOptions align)

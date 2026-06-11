@@ -26,3 +26,4 @@
 - **Process:** multi-line code edits ONLY via the Edit tool (PS .Replace CRLF no-ops silently
   — cost 4+ rounds); xcopy deploy skips silently while the game runs (verify timestamps);
   Harmony GetMethod on overloaded names throws AmbiguousMatch inside TargetMethods (enumerate).
+- **Dead-code decoy hazard (2026-06-11):** the retired F8 panel's corpse (builders, state panels, slots) survived its migration and decoyed new work (kick-X wired into it). Migrations must delete the superseded UI in the same change.
