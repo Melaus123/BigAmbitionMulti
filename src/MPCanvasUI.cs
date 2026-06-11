@@ -2867,8 +2867,19 @@ namespace BigAmbitionsMP
             // the object table to prove it, twice a second, forever (a measured
             // periodic main-thread hitch = rhythmic car stutter).  Skip the
             // search entirely in-game; reset the injected flag so returning to
-            // the menu re-injects.
-            if (IsInGame()) { _mpMenuInjected = false; return; }
+            // the menu re-injects.  MUST also hide our menu windows here: a
+            // session LOAD jumps straight into the game (no intro scene), so
+            // the mmc-null hide below never ran and the lobby window sat over
+            // the loaded world on BOTH machines (2026-06-11).
+            if (IsInGame())
+            {
+                _mpMenuInjected = false;
+                if (_lobbyWindow != null && _lobbyWindow.activeSelf) { try { _lobbyWindow.SetActive(false); } catch { } }
+                if (_joinDialog != null && _joinDialog.activeSelf)  { try { _joinDialog.SetActive(false);  } catch { } }
+                if (_savePicker != null && _savePicker.activeSelf)  { try { _savePicker.SetActive(false);  } catch { } }
+                _view = MpView.Main;
+                return;
+            }
 
             MainMenuController? mmc = null;
             try { mmc = UnityEngine.Object.FindObjectOfType<MainMenuController>(); }
