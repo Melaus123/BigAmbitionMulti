@@ -1568,6 +1568,7 @@ namespace BigAmbitionsMP
                 MPPriceSync.Reset();                   // price hashes are per-session
                 MPRestSync.Reset();                    // votes/skip die with the session
                 MPHub.Reset(); _hubVisible = false;    // hub ledger is per-session
+                MPFullMenuProbe.Reset();               // re-arm per scene
                 // The session-over lock is for the in-game world only — back at
                 // the menu the player is free to host/join again.
                 MPClient.SessionEnded = false;
@@ -2019,6 +2020,7 @@ namespace BigAmbitionsMP
             TickRestBanner();
             TickRestUI();
             TickHubWindow();
+            MPFullMenuProbe.Tick();       // passive recon for the native-app integration
             _pt = MPPerf.Begin(); InteriorSync.Tick();         MPPerf.End("Interior", _pt);   // diff-push to subscribed clients
             _pt = MPPerf.Begin(); GameStatePatcher.DrainPendingLogoRefreshes(); MPPerf.End("LogoRefresh", _pt);
 
