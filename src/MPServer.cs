@@ -241,7 +241,9 @@ namespace BigAmbitionsMP
 
             _listener.ConnectionRequestEvent += request =>
             {
-                // Accept all connections for now; add password later if desired
+                // Accept all connections (key-gated); LOGGED — a silent handler
+                // made transport-level join failures undiagnosable (2026-06-11).
+                Plugin.Logger.LogInfo($"[Server] connection request from {request.RemoteEndPoint} (peers={_clients.Count}).");
                 request.AcceptIfKey("BAMP");
             };
 
@@ -416,6 +418,7 @@ namespace BigAmbitionsMP
         {
             Plugin.Logger.LogInfo($"[Server] Peer disconnected: {peer.Id} — {info.Reason}");
             _clients.Remove(peer);
+            lock (_pendingJoins) _pendingJoins.Remove(peer.Id);   // abandoned join request
 
             // Clear any interior subscription the peer held so we stop polling
             // a building no client is in anymore.  Marshal — it mutates the same

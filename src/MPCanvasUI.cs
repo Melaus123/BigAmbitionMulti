@@ -80,7 +80,6 @@ namespace BigAmbitionsMP
         private const float STARTUP_HOLD_TIMEOUT = 90f;
 
         // Sends the local player's appearance once, after the character is ready.
-        private bool _localAppearanceSent;
 
         // ── periodic host-side sync timers ────────────────────────────────────
         /// <summary>Counts down to next game-time/speed heartbeat (host, every 3 s).</summary>
@@ -1964,7 +1963,7 @@ namespace BigAmbitionsMP
                 ResetWorldClock();
                 TrafficSync.Reset();
                 ParkedVehicleSync.Reset();
-                _localAppearanceSent = false;
+                _appearanceSig = ""; _appearanceNextAt = 0f;
                 _introNameFilled = false;       // re-arm intro-name prefill on next char-gen
                 _blackOverlayCanvas = null;     // re-scan on fresh game load (#6)
                 _blackOverlayFindTimer = 0f;
@@ -2263,15 +2262,27 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>Reads the local player's appearance once ready and sends it to peers.</summary>
+        /// <summary>Sends the local player's appearance whenever it CHANGES
+        /// (5s hash-gated poll).  The old one-shot captured the model's DEFAULT
+        /// wardrobe before the save dressed the character — both machines
+        /// broadcast identical defaults and ghosts looked like mirror copies
+        /// (2026-06-11); it also never re-sent after a clothing change.</summary>
+        private string _appearanceSig = "";
+        private float _appearanceNextAt;
+
         private void TrySendLocalAppearance()
         {
-            if (_localAppearanceSent) return;
             if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            if (Time.unscaledTime < _appearanceNextAt) return;
+            _appearanceNextAt = Time.unscaledTime + 5f;
+            if (IsLoadingOverlayUp()) return;     // mid-load reads = default outfit
             var dto = RemotePlayerManager.ReadLocalAppearance();
-            if (dto == null) return;              // character not ready — retry next tick
-            _localAppearanceSent = true;
-            Plugin.Logger.LogInfo($"[Appearance] Local appearance: {RemotePlayerManager.Summary(dto)}");
+            if (dto == null) return;              // character not ready — retry next poll
+            string sig = RemotePlayerManager.Summary(dto);
+            if (sig == _appearanceSig) return;
+            bool resend = _appearanceSig != "";
+            _appearanceSig = sig;
+            Plugin.Logger.LogInfo($"[Appearance] Local appearance {(resend ? "RE-sent (changed)" : "sent")}: {sig}");
             if (MPServer.IsRunning) MPServer.RegisterHostAppearance(dto);
             else                    MPClient.SendAppearance(dto);
         }
