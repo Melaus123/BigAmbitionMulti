@@ -1032,26 +1032,21 @@ namespace BigAmbitionsMP
         private bool _hubVisible;
         private bool _hubUiHover;
         private GameObject? _hub;            private RectTransform? _hubRT;
-        private TextMeshProUGUI? _hubAmountLbl, _hubTermsLbl, _hubOffers, _hubLoans, _hubOutGifts, _hubOutLoans;
+        private TextMeshProUGUI? _hubAmountLbl, _hubTermsLbl, _hubLoans;
         private RectTransform? _hubXRT, _hubSendRT, _hubLoanRT;
         private readonly RectTransform?[] _hubChipRT = new RectTransform?[4];
         private readonly Image?[] _hubChipImg = new Image?[4];
         private readonly TextMeshProUGUI?[] _hubChipLbl = new TextMeshProUGUI?[4];
         private readonly string[] _hubChipWho = new string[4];
-        // Incoming offers: SHARED + category-agnostic (4 slots, filterable).
-        private readonly RectTransform?[] _hubAcceptRT = new RectTransform?[4];
-        private readonly RectTransform?[] _hubDeclineRT = new RectTransform?[4];
-        private readonly string[] _hubOfferIds = new string[4];
         private int _hubFilter;                               // 0=all 1=gifts 2=loans
         private readonly RectTransform?[] _hubFilterRT = new RectTransform?[3];
         private readonly Image?[] _hubFilterImg = new Image?[3];
-        // Active-loans SCROLL view (native pages scroll; so do we).
+        // Row-scroll lists (incoming + outgoing offers) + active-loans scroll.
+        // Buttons live INSIDE scrolled rows; clicks resolve via this registry,
+        // gated on each row's viewport so masked-off rows can't be clicked.
+        private readonly List<(RectTransform rt, RectTransform vp, string id, byte act)> _hubRowBtns = new();   // act: 0=accept 1=decline 2=cancel
+        private RectTransform? _hubInVp, _hubInContent, _hubOutVp, _hubOutContent;
         private RectTransform? _hubLoansContent;
-        // Outgoing offers per page, cancellable (X).
-        private readonly RectTransform?[] _hubOutGiftXRT = new RectTransform?[2];
-        private readonly string[] _hubOutGiftIds = new string[2];
-        private readonly RectTransform?[] _hubOutLoanXRT = new RectTransform?[2];
-        private readonly string[] _hubOutLoanIds = new string[2];
         // Tabs.
         private int _hubTab;                                  // 0=Transfers 1=Loans
         private GameObject? _hubPageTransfers, _hubPageLoans;
@@ -1099,32 +1094,67 @@ namespace BigAmbitionsMP
         // LOCAL player by lobby index once the world runs — deterministic, so
         // every machine computes the same circle; position sync does the rest.
         private bool _spawnOffsetDone;
+        private float _spawnRosterWaitUntil;
+        private float _spawnReassertAt;
+        private Vector3 _spawnTarget;
 
         private void TickSpawnOffset()
         {
-            if (_spawnOffsetDone || TimeSync.IsStartupHeld) return;
+            if (TimeSync.IsStartupHeld) return;
             try
             {
+                // Re-assert once: the game may re-place the player right after
+                // load, undoing the first nudge.
+                if (_spawnOffsetDone)
+                {
+                    if (_spawnReassertAt > 0f && Time.unscaledTime >= _spawnReassertAt)
+                    {
+                        _spawnReassertAt = 0f;
+                        var ch2 = Helpers.PlayerHelper.PlayerController?.Character?.transform;
+                        if (ch2 != null && Vector3.Distance(ch2.position, _spawnTarget) > 1.2f
+                                        && Vector3.Distance(ch2.position, _spawnTarget) < 6f)
+                        {
+                            MoveLocalPlayer(ch2, _spawnTarget);
+                            Plugin.Logger.LogInfo("[Spawn] de-stack re-asserted (game re-placed the player).");
+                        }
+                    }
+                    return;
+                }
                 var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
                 if (ch == null) return;
                 var players = MPRestSync.AllPlayers();
-                if (players.Count < 2) { _spawnOffsetDone = true; return; }
+                if (players.Count < 2)
+                {
+                    // Roster can lag the hold release — wait for it (the old
+                    // code gave up instantly: the CLIENT never offset at all).
+                    if (_spawnRosterWaitUntil == 0f) _spawnRosterWaitUntil = Time.unscaledTime + 12f;
+                    if (Time.unscaledTime < _spawnRosterWaitUntil) return;
+                    _spawnOffsetDone = true;
+                    return;
+                }
                 var sorted = new List<string>(players);
                 sorted.Sort(StringComparer.Ordinal);
                 int idx = sorted.IndexOf(MPConfig.PlayerId);
                 if (idx < 0) return;              // roster not settled — retry
                 _spawnOffsetDone = true;
-                if (idx == 0) return;             // first player keeps the spot
+                if (idx == 0) { Plugin.Logger.LogInfo("[Spawn] de-stack: idx=0 keeps the spot."); return; }
                 float ang = idx * (Mathf.PI * 2f / sorted.Count);
-                var off = new Vector3(Mathf.Cos(ang), 0f, Mathf.Sin(ang)) * 1.1f;
-                var ccComp = ch.GetComponent(Il2CppType.Of<CharacterController>());
-                var cc = ccComp != null ? ccComp.TryCast<CharacterController>() : null;
-                if (cc != null) cc.enabled = false;
-                ch.position += off;
-                if (cc != null) cc.enabled = true;
+                var off = new Vector3(Mathf.Cos(ang), 0f, Mathf.Sin(ang)) * 2.0f;
+                _spawnTarget = ch.position + off;
+                MoveLocalPlayer(ch, _spawnTarget);
+                _spawnReassertAt = Time.unscaledTime + 1.5f;
                 Plugin.Logger.LogInfo($"[Spawn] de-stack offset: idx={idx}/{sorted.Count} off=({off.x:F2},{off.z:F2}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Spawn] offset: {ex.Message}"); _spawnOffsetDone = true; }
+        }
+
+        private static void MoveLocalPlayer(Transform ch, Vector3 target)
+        {
+            var ccComp = ch.GetComponent(Il2CppType.Of<CharacterController>());
+            var cc = ccComp != null ? ccComp.TryCast<CharacterController>() : null;
+            if (cc != null) cc.enabled = false;
+            ch.position = target;
+            if (cc != null) cc.enabled = true;
         }
 
         /// <summary>Open the Business page inside the native full menu (and the
@@ -1238,57 +1268,58 @@ namespace BigAmbitionsMP
                 {
                     _hubSeenVersion = MPHub.Version;
 
-                    // INCOMING — shared, category-agnostic, filterable.
+                    // INCOMING — shared, category-agnostic, filtered, SCROLLED
+                    // rows with inline accept/decline.
+                    _hubRowBtns.Clear();
                     var incoming = new List<LoanOfferPayload>();
                     foreach (var o in MPHub.IncomingOffers)
                         if (_hubFilter == 0 || (_hubFilter == 1) == (o.Kind == "gift")) incoming.Add(o);
-                    var so = new System.Text.StringBuilder();
-                    for (int i = 0; i < 4; i++)
+                    ClearScrollContent(_hubInContent);
+                    const float InRowH = 46f;
+                    if (_hubInContent != null && _hubInVp != null)
                     {
-                        bool has = i < incoming.Count;
-                        _hubAcceptRT[i]?.gameObject.SetActive(has);
-                        _hubDeclineRT[i]?.gameObject.SetActive(has);
-                        _hubOfferIds[i] = has ? incoming[i].Id : "";
-                        if (!has) continue;
-                        var o = incoming[i];
-                        so.Append(o.Kind == "gift"
-                            ? $"<color={_colGood}>{o.From}</color> offers you a <b>${o.Principal:N0}</b> gift\n\n"
-                            : $"<color={_colFrom}>{o.From}</color> offers a <b>${o.Principal:N0}</b> loan at <b>{MPHub.OfferTotalPct(o):F0}% total</b> over {MPHub.OfferTermDays(o)} days (${o.DailyInterest:N0}/day int · ${o.DailyPayment:N0}/day pay)\n\n");
-                    }
-                    if (incoming.Count > 4) so.Append($"<color={_colMuted}>… and {incoming.Count - 4} more (filters narrow the list)</color>");
-                    if (_hubOffers != null) _hubOffers.text = so.Length > 0 ? so.ToString() : $"<color={_colMuted}>no pending offers</color>";
-
-                    // OUTGOING per kind (cancellable).
-                    var outG = new List<LoanOfferPayload>();
-                    var outL = new List<LoanOfferPayload>();
-                    foreach (var o in MPHub.OutgoingOffers) (o.Kind == "gift" ? outG : outL).Add(o);
-                    var sg = new System.Text.StringBuilder();
-                    for (int i = 0; i < 2; i++)
-                    {
-                        bool has = i < outG.Count;
-                        _hubOutGiftXRT[i]?.gameObject.SetActive(has);
-                        _hubOutGiftIds[i] = has ? outG[i].Id : "";
-                        if (has) sg.Append($"<b>${outG[i].Principal:N0}</b> gift to <color={_colGood}>{outG[i].To}</color> — awaiting accept\n\n");
-                    }
-                    if (_hubOutGifts != null) _hubOutGifts.text = sg.Length > 0 ? sg.ToString() : $"<color={_colMuted}>no pending outgoing gifts</color>";
-                    // Outgoing loans: one visible row + overflow count (the X
-                    // cancels the shown one; the list cycles as they resolve).
-                    var slo = new System.Text.StringBuilder();
-                    {
-                        bool has = outL.Count > 0;
-                        _hubOutLoanXRT[0]?.gameObject.SetActive(has);
-                        _hubOutLoanIds[0] = has ? outL[0].Id : "";
-                        _hubOutLoanIds[1] = "";
-                        if (has)
+                        for (int i = 0; i < incoming.Count; i++)
                         {
-                            slo.Append($"<b>${outL[0].Principal:N0}</b> loan to <color={_colFrom}>{outL[0].To}</color> at {MPHub.OfferTotalPct(outL[0]):F0}% total over {MPHub.OfferTermDays(outL[0])} days — awaiting accept");
-                            if (outL.Count > 1) slo.Append($"  <color={_colMuted}>(+{outL.Count - 1} more)</color>");
+                            var o = incoming[i];
+                            string txt = o.Kind == "gift"
+                                ? $"<color={_colGood}>{o.From}</color>: <b>${o.Principal:N0}</b> gift"
+                                : $"<color={_colFrom}>{o.From}</color>: <b>${o.Principal:N0}</b> loan · <b>{MPHub.OfferTotalPct(o):F0}%</b> / {MPHub.OfferTermDays(o)}d (${o.DailyInterest:N0}+${o.DailyPayment:N0}/day)";
+                            AddHubRow(_hubInContent, _hubInVp, i, InRowH, txt,
+                                ("accept",  new Color(0.24f, 0.50f, 0.33f, 1f), o.Id, (byte)0),
+                                ("decline", new Color(0.45f, 0.24f, 0.22f, 1f), o.Id, (byte)1));
                         }
+                        if (incoming.Count == 0)
+                        {
+                            var none = MakeLabel(_hubInContent.transform, $"<color={_colMuted}>no pending offers</color>", 12, _inkLo, 6f, -4f, 400f, 20f, TextAlignmentOptions.TopLeft);
+                            ApplyFont(none);
+                        }
+                        _hubInContent.sizeDelta = new Vector2(0f, Mathf.Max(160f, incoming.Count * InRowH + 4f));
                     }
-                    if (_hubOutLoans != null) _hubOutLoans.text = slo.Length > 0 ? slo.ToString() : $"<color={_colMuted}>no pending outgoing loans</color>";
 
-                    // ACTIVE LOANS — full list, SCROLLED (content grows; the
-                    // viewport masks; wheel/drag reviews any ledger size).
+                    // OUTGOING — all kinds together, scrolled, X cancels.
+                    ClearScrollContent(_hubOutContent);
+                    const float OutRowH = 42f;
+                    if (_hubOutContent != null && _hubOutVp != null)
+                    {
+                        var outs = MPHub.OutgoingOffers;
+                        for (int i = 0; i < outs.Count; i++)
+                        {
+                            var o = outs[i];
+                            string txt = o.Kind == "gift"
+                                ? $"<b>${o.Principal:N0}</b> gift → <color={_colGood}>{o.To}</color>"
+                                : $"<b>${o.Principal:N0}</b> loan → <color={_colFrom}>{o.To}</color> · {MPHub.OfferTotalPct(o):F0}% / {MPHub.OfferTermDays(o)}d";
+                            AddHubRow(_hubOutContent, _hubOutVp, i, OutRowH, txt,
+                                ("X", new Color(0.45f, 0.24f, 0.22f, 1f), o.Id, (byte)2));
+                        }
+                        if (outs.Count == 0)
+                        {
+                            var none = MakeLabel(_hubOutContent.transform, $"<color={_colMuted}>none pending</color>", 12, _inkLo, 6f, -4f, 300f, 20f, TextAlignmentOptions.TopLeft);
+                            ApplyFont(none);
+                        }
+                        _hubOutContent.sizeDelta = new Vector2(0f, Mathf.Max(160f, outs.Count * OutRowH + 4f));
+                    }
+
+                    // ACTIVE LOANS — full list, scrolled (with scrollbar).
                     var mine = new List<LoanEntry>();
                     foreach (var ln in MPHub.Loans)
                         if (ln.Borrower == MPConfig.PlayerId || ln.Lender == MPConfig.PlayerId) mine.Add(ln);
@@ -1308,14 +1339,13 @@ namespace BigAmbitionsMP
                         try
                         {
                             _hubLoans.ForceMeshUpdate();
-                            float h = Mathf.Max(64f, _hubLoans.preferredHeight + 6f);
+                            float h = Mathf.Max(116f, _hubLoans.preferredHeight + 6f);
                             if (_hubLoansContent != null) _hubLoansContent.sizeDelta = new Vector2(0f, h);
-                            _hubLoans.rectTransform.sizeDelta = new Vector2(900f, h);
+                            _hubLoans.rectTransform.sizeDelta = new Vector2(880f, h);
                         }
                         catch { }
                     }
                 }
-
                 // Hover + clicks.  In the NATIVE page the menu itself already
                 // blocks gameplay input — our suppression flag there only
                 // fought the menu's own shortcuts (ESC took ~6 presses and
@@ -1356,16 +1386,15 @@ namespace BigAmbitionsMP
                     MPHub.OfferLoan(_hubTarget, (float)_hubAmount, (float)di, (float)dp);
                     return;
                 }
-                for (int i = 0; i < 3; i++)
+                // Scrolled-row buttons: viewport gate keeps masked rows inert.
+                foreach (var (rt, vp, id, act) in _hubRowBtns)
                 {
-                    if (_hubOfferIds[i] == "") continue;
-                    if (HubHit(_hubAcceptRT[i], mp))  { MPHub.AnswerOffer(_hubOfferIds[i], true);  return; }
-                    if (HubHit(_hubDeclineRT[i], mp)) { MPHub.AnswerOffer(_hubOfferIds[i], false); return; }
-                }
-                for (int i = 0; i < 2; i++)
-                {
-                    if (_hubTab == 0 && _hubOutGiftIds[i] != "" && HubHit(_hubOutGiftXRT[i], mp)) { MPHub.CancelOffer(_hubOutGiftIds[i]); return; }
-                    if (_hubTab == 1 && _hubOutLoanIds[i] != "" && HubHit(_hubOutLoanXRT[i], mp)) { MPHub.CancelOffer(_hubOutLoanIds[i]); return; }
+                    if (id == "" || rt == null || !rt.gameObject.activeInHierarchy) continue;
+                    if (!HubHit(vp, mp) || !HubHit(rt, mp)) continue;
+                    if (act == 0) MPHub.AnswerOffer(id, true);
+                    else if (act == 1) MPHub.AnswerOffer(id, false);
+                    else MPHub.CancelOffer(id);
+                    return;
                 }
             }
             catch { }
@@ -1467,7 +1496,7 @@ namespace BigAmbitionsMP
                     _hubTabLbl[i] = tlbl;
                 }
 
-                // ── Page: Transfers (gift sending + outgoing gifts) ──────────
+                // ── Page: Transfers (the gift action — offers live below). ───
                 _hubPageTransfers = MakeGO("PageTransfers", _hub.transform);
                 var ptrt = _hubPageTransfers.GetComponent<RectTransform>();
                 ptrt.anchorMin = new Vector2(0f, 0f); ptrt.anchorMax = new Vector2(1f, 1f);
@@ -1480,20 +1509,7 @@ namespace BigAmbitionsMP
                 var giftCap = MakeLabel(pt, "gifts require the receiver's accept — no silent handouts", 12, _inkLo, 236f, -20f, 600f, 22f, TextAlignmentOptions.Left);
                 ApplyFont(giftCap);
 
-                MakeHubBox(pt, 16f, -66f, 948f, 124f, sprite);
-                var outGiftHdr = MakeLabel(pt, "<b>YOUR PENDING GIFT OFFERS</b>", 12, _inkLo, 28f, -74f, 360f, 18f, TextAlignmentOptions.Left);
-                ApplyFont(outGiftHdr);
-                _hubOutGifts = MakeLabel(pt, "", 13, _inkHi, 28f, -96f, 800f, 84f, TextAlignmentOptions.TopLeft);
-                ApplyFont(_hubOutGifts);
-                for (int i = 0; i < 2; i++)
-                {
-                    var (cxRT, _) = MakeHubButton("X", new Vector2(0f, 0f), 30f, new Color(0.45f, 0.24f, 0.22f, 1f), 24f, sprite);
-                    cxRT.SetParent(pt, false); SetTopLeft(cxRT, 896f, -94f - i * 36f);
-                    _hubOutGiftXRT[i] = cxRT;
-                    cxRT.gameObject.SetActive(false);
-                }
-
-                // ── Page: Loans (terms + outgoing + paged active ledger) ─────
+                // ── Page: Loans (terms + the BIG scrolled active ledger). ────
                 _hubPageLoans = MakeGO("PageLoans", _hub.transform);
                 var plrt = _hubPageLoans.GetComponent<RectTransform>();
                 plrt.anchorMin = new Vector2(0f, 0f); plrt.anchorMax = new Vector2(1f, 1f);
@@ -1512,74 +1528,36 @@ namespace BigAmbitionsMP
                 _hubTermsLbl = MakeLabel(pl, "", 12, _inkLo, 28f, -52f, 920f, 22f, TextAlignmentOptions.Left);
                 ApplyFont(_hubTermsLbl);
 
-                MakeHubBox(pl, 16f, -86f, 948f, 56f, sprite);
-                var outLoanHdr = MakeLabel(pl, "<b>YOUR PENDING LOAN OFFERS</b>", 12, _inkLo, 28f, -94f, 250f, 18f, TextAlignmentOptions.Left);
-                ApplyFont(outLoanHdr);
-                _hubOutLoans = MakeLabel(pl, "", 13, _inkHi, 286f, -94f, 580f, 40f, TextAlignmentOptions.TopLeft);
-                ApplyFont(_hubOutLoans);
-                {
-                    var (cxRT, _) = MakeHubButton("X", new Vector2(0f, 0f), 30f, new Color(0.45f, 0.24f, 0.22f, 1f), 24f, sprite);
-                    cxRT.SetParent(pl, false); SetTopLeft(cxRT, 896f, -94f);
-                    _hubOutLoanXRT[0] = cxRT;
-                    cxRT.gameObject.SetActive(false);
-                    _hubOutLoanXRT[1] = null;
-                }
-
-                MakeHubBox(pl, 16f, -152f, 948f, 100f, sprite);
-                var loansHdr = MakeLabel(pl, "<b>ACTIVE LOANS</b>", 12, _inkLo, 28f, -160f, 220f, 18f, TextAlignmentOptions.Left);
+                MakeHubBox(pl, 16f, -90f, 948f, 162f, sprite);
+                var loansHdr = MakeLabel(pl, "<b>ACTIVE LOANS</b>", 12, _inkLo, 28f, -98f, 220f, 18f, TextAlignmentOptions.Left);
                 ApplyFont(loansHdr);
-                var scrollHint = MakeLabel(pl, "scroll for more", 10, _inkLo, 820f, -162f, 110f, 16f, TextAlignmentOptions.Right);
-                ApplyFont(scrollHint);
-                // Scroll view (mouse wheel / drag) — matches the native pages.
-                var vpGO = MakeGO("LoansViewport", pl);
-                var vpRT = vpGO.GetComponent<RectTransform>();
-                vpRT.anchorMin = vpRT.anchorMax = vpRT.pivot = new Vector2(0f, 1f);
-                vpRT.anchoredPosition = new Vector2(28f, -182f);
-                vpRT.sizeDelta = new Vector2(900f, 64f);
-                vpGO.AddComponent<RectMask2D>();
-                var vpImg = vpGO.AddComponent<Image>();
-                vpImg.color = new Color(0f, 0f, 0f, 0.004f);   // raycast target for the wheel
-                var contentGO = MakeGO("LoansContent", vpGO.transform);
-                _hubLoansContent = contentGO.GetComponent<RectTransform>();
-                _hubLoansContent.anchorMin = new Vector2(0f, 1f);
-                _hubLoansContent.anchorMax = new Vector2(1f, 1f);
-                _hubLoansContent.pivot = new Vector2(0.5f, 1f);
-                _hubLoansContent.anchoredPosition = Vector2.zero;
-                _hubLoansContent.sizeDelta = new Vector2(0f, 64f);
-                _hubLoans = MakeLabel(contentGO.transform, "", 13, _inkHi, 0f, 0f, 900f, 64f, TextAlignmentOptions.TopLeft);
+                var (lvp, lct) = MakeHubScroll(pl, 28f, -122f, 904f, 118f, sprite);
+                _hubLoansContent = lct;
+                _hubLoans = MakeLabel(lct.transform, "", 13, _inkHi, 0f, 0f, 880f, 118f, TextAlignmentOptions.TopLeft);
                 ApplyFont(_hubLoans);
-                var loansScroll = vpGO.AddComponent<ScrollRect>();
-                loansScroll.content = _hubLoansContent;
-                loansScroll.viewport = vpRT;
-                loansScroll.horizontal = false;
-                loansScroll.vertical = true;
-                loansScroll.movementType = ScrollRect.MovementType.Clamped;
-                loansScroll.scrollSensitivity = 18f;
+                var llrt = _hubLoans.rectTransform;
+                llrt.anchorMin = new Vector2(0f, 1f); llrt.anchorMax = new Vector2(0f, 1f);
+                llrt.pivot = new Vector2(0f, 1f); llrt.anchoredPosition = new Vector2(4f, 0f);
 
-                // ── Shared: INCOMING OFFERS (category-agnostic + filter) ─────
-                MakeHubBox(_hub.transform, 16f, T - 426f, 948f, 222f, sprite);
-                var inHdr = MakeLabel(_hub.transform, "<b>INCOMING OFFERS</b>", 12, _inkLo, 28f, T - 434f, 220f, 18f, TextAlignmentOptions.Left);
+                // ── Shared bottom: INCOMING (left) + OUTGOING (right). ───────
+                MakeHubBox(_hub.transform, 16f, T - 426f, 560f, 222f, sprite);
+                var inHdr = MakeLabel(_hub.transform, "<b>INCOMING OFFERS</b>", 12, _inkLo, 28f, T - 434f, 180f, 18f, TextAlignmentOptions.Left);
                 ApplyFont(inHdr);
                 string[] filters = { "all", "gifts", "loans" };
                 for (int i = 0; i < 3; i++)
                 {
-                    var (frt, flbl) = MakeHubButton(filters[i], new Vector2(0f, 0f), 64f, HubTabOff, 22f, sprite);
-                    SetTopLeft(frt, 240f + i * 70f, T - 432f);
+                    var (frt, flbl) = MakeHubButton(filters[i], new Vector2(0f, 0f), 58f, HubTabOff, 22f, sprite);
+                    SetTopLeft(frt, 320f + i * 64f, T - 432f);
                     flbl.fontSize = 11;
                     _hubFilterRT[i] = frt;
                     _hubFilterImg[i] = frt.GetComponent<Image>();
                 }
-                _hubOffers = MakeLabel(_hub.transform, "", 13, _inkHi, 28f, T - 460f, 690f, 180f, TextAlignmentOptions.TopLeft);
-                ApplyFont(_hubOffers);
-                for (int i = 0; i < 4; i++)
-                {
-                    var (aRT, _) = MakeHubButton("accept",  new Vector2(0f, 0f), 74f, new Color(0.24f, 0.50f, 0.33f, 1f), 26f, sprite);
-                    SetTopLeft(aRT, 740f, T - 458f - i * 42f);
-                    var (dRT, _) = MakeHubButton("decline", new Vector2(0f, 0f), 74f, new Color(0.45f, 0.24f, 0.22f, 1f), 26f, sprite);
-                    SetTopLeft(dRT, 822f, T - 458f - i * 42f);
-                    _hubAcceptRT[i] = aRT; _hubDeclineRT[i] = dRT;
-                    aRT.gameObject.SetActive(false); dRT.gameObject.SetActive(false);
-                }
+                (_hubInVp, _hubInContent) = MakeHubScroll(_hub.transform, 28f, T - 460f, 536f, 178f, sprite);
+
+                MakeHubBox(_hub.transform, 584f, T - 426f, 380f, 222f, sprite);
+                var outHdr = MakeLabel(_hub.transform, "<b>YOUR PENDING OFFERS</b>", 12, _inkLo, 596f, T - 434f, 280f, 18f, TextAlignmentOptions.Left);
+                ApplyFont(outHdr);
+                (_hubOutVp, _hubOutContent) = MakeHubScroll(_hub.transform, 596f, T - 460f, 356f, 178f, sprite);
                 RefreshHubFilterChips();
                 _hubPageLoans.SetActive(false);
                 _hubSeenVersion = -1;
@@ -1591,6 +1569,99 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogError($"[Hub] BuildHubWindow FAILED: {ex}");
                 try { if (_hub != null) { UnityEngine.Object.Destroy(_hub); _hub = null; } } catch { }
                 _hubVisible = false;
+            }
+        }
+
+        /// <summary>Vertical scroll view with a REAL scrollbar (track + handle)
+        /// — the "side scroller thingy" that shows where you are in the list.</summary>
+        private (RectTransform vp, RectTransform content) MakeHubScroll(Transform parent, float x, float y, float w, float h, Sprite? sprite)
+        {
+            var vpGO = MakeGO("BAMP_Vp", parent);
+            var vpRT = vpGO.GetComponent<RectTransform>();
+            vpRT.anchorMin = vpRT.anchorMax = vpRT.pivot = new Vector2(0f, 1f);
+            vpRT.anchoredPosition = new Vector2(x, y);
+            vpRT.sizeDelta = new Vector2(w - 14f, h);
+            vpGO.AddComponent<RectMask2D>();
+            var vpImg = vpGO.AddComponent<Image>();
+            vpImg.color = new Color(0f, 0f, 0f, 0.004f);     // raycast target for the wheel
+
+            var contentGO = MakeGO("Content", vpGO.transform);
+            var cRT = contentGO.GetComponent<RectTransform>();
+            cRT.anchorMin = new Vector2(0f, 1f); cRT.anchorMax = new Vector2(1f, 1f);
+            cRT.pivot = new Vector2(0.5f, 1f);
+            cRT.anchoredPosition = Vector2.zero;
+            cRT.sizeDelta = new Vector2(0f, h);
+
+            // Scrollbar: slim track at the right edge, rounded handle.
+            var barGO = MakeGO("Bar", parent);
+            var barRT = barGO.GetComponent<RectTransform>();
+            barRT.anchorMin = barRT.anchorMax = barRT.pivot = new Vector2(0f, 1f);
+            barRT.anchoredPosition = new Vector2(x + w - 10f, y);
+            barRT.sizeDelta = new Vector2(8f, h);
+            var trackImg = barGO.AddComponent<Image>();
+            trackImg.color = _hubNative ? new Color(0.84f, 0.86f, 0.90f, 1f) : new Color(0.10f, 0.11f, 0.14f, 1f);
+            if (sprite != null) { try { trackImg.sprite = sprite; trackImg.type = Image.Type.Sliced; } catch { } }
+            var handleGO = MakeGO("Handle", barGO.transform);
+            var handleRT = handleGO.GetComponent<RectTransform>();
+            handleRT.anchorMin = Vector2.zero; handleRT.anchorMax = Vector2.one;
+            handleRT.offsetMin = new Vector2(1f, 1f); handleRT.offsetMax = new Vector2(-1f, -1f);
+            var handleImg = handleGO.AddComponent<Image>();
+            handleImg.color = _hubNative ? new Color(0.55f, 0.60f, 0.68f, 1f) : new Color(0.34f, 0.38f, 0.46f, 1f);
+            if (sprite != null) { try { handleImg.sprite = sprite; handleImg.type = Image.Type.Sliced; } catch { } }
+            var bar = barGO.AddComponent<Scrollbar>();
+            bar.direction = Scrollbar.Direction.BottomToTop;
+            bar.handleRect = handleRT;
+            bar.targetGraphic = handleImg;
+
+            var sr = vpGO.AddComponent<ScrollRect>();
+            sr.content = cRT;
+            sr.viewport = vpRT;
+            sr.horizontal = false;
+            sr.vertical = true;
+            sr.movementType = ScrollRect.MovementType.Clamped;
+            sr.scrollSensitivity = 18f;
+            sr.verticalScrollbar = bar;
+            return (vpRT, cRT);
+        }
+
+        private static void ClearScrollContent(RectTransform? content)
+        {
+            if (content == null) return;
+            for (int i = content.childCount - 1; i >= 0; i--)
+                UnityEngine.Object.Destroy(content.GetChild(i).gameObject);
+        }
+
+        /// <summary>One scrolled row: rich-text label + inline buttons at the
+        /// right edge.  Buttons register in _hubRowBtns for the click pass.</summary>
+        private void AddHubRow(RectTransform content, RectTransform vp, int idx, float rowH, string text,
+                               params (string label, Color col, string id, byte act)[] btns)
+        {
+            var rowGO = MakeGO("Row", content.transform);
+            var rowRT = rowGO.GetComponent<RectTransform>();
+            rowRT.anchorMin = new Vector2(0f, 1f); rowRT.anchorMax = new Vector2(1f, 1f);
+            rowRT.pivot = new Vector2(0.5f, 1f);
+            rowRT.anchoredPosition = new Vector2(0f, -idx * rowH);
+            rowRT.sizeDelta = new Vector2(0f, rowH - 4f);
+            float btnW = 0f;
+            foreach (var b in btns) btnW += (b.label.Length > 2 ? 64f : 26f) + 6f;
+            var lbl = MakeLabel(rowGO.transform, text, 12, _inkHi, 4f, 0f, 10f, rowH - 4f, TextAlignmentOptions.TopLeft);
+            ApplyFont(lbl);
+            var lrt = lbl.rectTransform;
+            lrt.anchorMin = new Vector2(0f, 0f); lrt.anchorMax = new Vector2(1f, 1f);
+            lrt.offsetMin = new Vector2(4f, 0f); lrt.offsetMax = new Vector2(-(btnW + 6f), 0f);
+            float bx = 0f;
+            var sprite = IsAlive(_panelSprite) ? _panelSprite : null;
+            foreach (var b in btns)
+            {
+                float w = b.label.Length > 2 ? 64f : 26f;
+                bx += w + 6f;
+                var (brt, blbl) = MakeHubButton(b.label, Vector2.zero, w, b.col, 24f, sprite);
+                brt.SetParent(rowGO.transform, false);
+                brt.anchorMin = brt.anchorMax = brt.pivot = new Vector2(1f, 0.5f);
+                brt.anchoredPosition = new Vector2(-(bx - w - 0f) - 2f, 0f);
+                brt.sizeDelta = new Vector2(w, 24f);
+                blbl.fontSize = 11;
+                _hubRowBtns.Add((brt, vp, b.id, b.act));
             }
         }
 
@@ -1787,7 +1858,7 @@ namespace BigAmbitionsMP
                 MPHub.Reset(); _hubVisible = false;    // hub ledger is per-session
                 MPFullMenuProbe.Reset();               // re-arm per scene
                 MPHubNativePage.Reset(); _hub = null; _hubNative = false;   // page died with the scene
-                _spawnOffsetDone = false;              // next session de-stacks again
+                _spawnOffsetDone = false; _spawnRosterWaitUntil = 0f; _spawnReassertAt = 0f;   // next session de-stacks again
                 // The session-over lock is for the in-game world only — back at
                 // the menu the player is free to host/join again.
                 MPClient.SessionEnded = false;

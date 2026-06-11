@@ -66,10 +66,31 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Hub] ApplyMoneyDelta: {ex.Message}"); }
         }
 
+        /// <summary>Money not yet promised to pending outgoing offers.</summary>
+        public static float AvailableMoney()
+        {
+            float pending = 0f;
+            foreach (var o in OutgoingOffers) pending += o.Principal;
+            return MyMoney() - pending;
+        }
+
+        private static bool HasPendingTo(string to, string kind)
+            => OutgoingOffers.Exists(o => o.To == to && o.Kind == kind);
+
         // ── Gifts (accept-required: no silent handouts; acceptance = receipt) ─
         public static bool OfferGift(string to, float amount)
         {
             if (amount <= 0 || string.IsNullOrEmpty(to) || to == MPConfig.PlayerId) return false;
+            if (HasPendingTo(to, "gift"))
+            {
+                MPChat.AddNotice($"you already have a pending gift offer to {to}");
+                return false;
+            }
+            if (AvailableMoney() < amount)
+            {
+                MPChat.AddNotice($"not enough uncommitted money for a ${amount:N0} gift (pending offers count)");
+                return false;
+            }
             var p = new LoanOfferPayload
             {
                 Id = Guid.NewGuid().ToString("N").Substring(0, 8),
@@ -99,9 +120,14 @@ namespace BigAmbitionsMP
         public static void OfferLoan(string to, float principal, float dailyInterest, float dailyPayment)
         {
             if (principal <= 0 || string.IsNullOrEmpty(to) || to == MPConfig.PlayerId) return;
-            if (MyMoney() < principal)
+            if (HasPendingTo(to, "loan"))
             {
-                MPChat.AddNotice($"not enough money to offer a ${principal:N0} loan");
+                MPChat.AddNotice($"you already have a pending loan offer to {to}");
+                return;
+            }
+            if (AvailableMoney() < principal)
+            {
+                MPChat.AddNotice($"not enough uncommitted money to offer a ${principal:N0} loan (pending offers count)");
                 return;
             }
             var p = new LoanOfferPayload
@@ -198,8 +224,28 @@ namespace BigAmbitionsMP
         public static void HostHandleAnswer(LoanAnswerPayload a)
         {
             if (a == null || !_hostOffers.TryGetValue(a.Id, out var offer)) return;
-            _hostOffers.Remove(a.Id);
             string what = offer.Kind == "gift" ? "gift" : "loan";
+
+            // ENFORCEMENT: an offer can't be accepted while the offerer can't
+            // cover it (their wallet may have dropped since offering).  The
+            // offer stays pending — it re-enables when funds recover.
+            if (a.Accept)
+            {
+                float offererCash = offer.From == MPConfig.PlayerId
+                    ? MyMoney()
+                    : MPServer.GetKnownCash(offer.From);
+                if (offererCash >= 0f && offererCash < offer.Principal)
+                {
+                    NotifyParty(offer.To, $"{offer.From}'s ${offer.Principal:N0} {what} offer can't be accepted right now — they can't cover it. It stays pending.");
+                    NotifyParty(offer.From, $"{offer.To} tried to accept your ${offer.Principal:N0} {what} but your balance can't cover it.");
+                    // Put it back in the receiver's incoming list (their accept
+                    // click removed it locally).
+                    if (offer.To == MPConfig.PlayerId) ReceiveOffer(offer);
+                    else MPServer.SendHubTo(offer.To, MessageType.LoanOffer, offer);
+                    return;
+                }
+            }
+            _hostOffers.Remove(a.Id);
             // Tell the offerer the outcome (clears their outgoing list).
             var result = new LoanOfferPayload { Id = offer.Id, From = offer.From, To = offer.To, Kind = offer.Kind, Principal = offer.Principal, State = a.Accept ? "accepted" : "declined" };
             if (offer.From == MPConfig.PlayerId) ReceiveOffer(result);

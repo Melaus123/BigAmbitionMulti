@@ -80,6 +80,15 @@ namespace BigAmbitionsMP
         /// CONCURRENT: written on poll + main threads, read on the main thread.</summary>
         public static readonly ConcurrentDictionary<string, float> CashByStableId = new();
 
+        /// <summary>Last-synced cash for a player, or -1 when unknown (unknown
+        /// must not block — the Hub treats negative as "can't validate").</summary>
+        public static float GetKnownCash(string playerId)
+        {
+            if (string.IsNullOrEmpty(playerId)) return -1f;
+            string stable = StableIdByPlayer.TryGetValue(playerId, out var s) && !string.IsNullOrEmpty(s) ? s : playerId;
+            return CashByStableId.TryGetValue(stable, out var m) ? m : -1f;
+        }
+
         /// <summary>Record a player's latest cash, keyed by their stable id.</summary>
         public static void RecordCash(string playerId, float money)
         {
