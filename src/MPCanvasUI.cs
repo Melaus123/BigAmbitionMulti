@@ -1306,45 +1306,7 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[JoinPop] {ex.Message}"); }
         }
-
-        // ── Lobby kick (HOST): an explicit [X] beside each joined player —
-        //    click-twice-on-the-name was unintuitive (user, 2026-06-11). ─────
-        private readonly RectTransform?[] _kickXRT = new RectTransform?[4];
-
-        private void TickLobbyKick()
-        {
-            try
-            {
-                if (_txtLHSlots == null) return;
-                var players = MPServer.LobbyPlayers;
-                for (int i = 1; i < _txtLHSlots.Length; i++)
-                {
-                    var slot = _txtLHSlots[i];
-                    if (slot == null) continue;
-                    bool occupied = i < players.Count;
-                    if (_kickXRT[i] == null && occupied)
-                    {
-                        var sprite = IsAlive(_panelSprite) ? _panelSprite : EnsureRoundedSprite();
-                        var (xRT, xLbl) = MakeHubButton("X", Vector2.zero, 26f, new Color(0.45f, 0.24f, 0.22f, 1f), 22f, sprite, slot.transform);
-                        xRT.anchorMin = xRT.anchorMax = xRT.pivot = new Vector2(1f, 0.5f);
-                        xRT.anchoredPosition = new Vector2(-6f, 0f);
-                        xLbl.fontSize = 12;
-                        _kickXRT[i] = xRT;
-                    }
-                    if (_kickXRT[i] != null && _kickXRT[i]!.gameObject.activeSelf != occupied)
-                        _kickXRT[i]!.gameObject.SetActive(occupied);
-                }
-                if (!Input.GetMouseButtonDown(0)) return;
-                var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
-                for (int i = 1; i < _txtLHSlots.Length && i < players.Count; i++)
-                    if (_kickXRT[i] != null && _kickXRT[i]!.gameObject.activeSelf && RectHit(_kickXRT[i]!, mp))
-                    {
-                        MPServer.KickFromLobby(players[i]);
-                        return;
-                    }
-            }
-            catch { }
-        }
+        // (Legacy-pane lobby kick removed 2026-06-11 — the real kick [X] lives in the native lobby window roster rows.)
 
         /// <summary>Open the Business page inside the native full menu (and the
         /// menu itself if closed).  Falls back to the standalone window when
@@ -2855,6 +2817,7 @@ namespace BigAmbitionsMP
         private int               _lwRowCashFocus = -1;
         private TextMeshProUGUI[] _lwRowAgeLbl  = new TextMeshProUGUI[6];
         private RectTransform?[]  _rtLwRowAge   = new RectTransform?[6];
+        private RectTransform?[]  _rtLwKick     = new RectTransform?[6];   // host kick [X] per roster row
         private string[]          _lwRowAge     = new string[6];
         private int               _lwRowAgeFocus = -1;
         private TextMeshProUGUI?  _lwRowCashHdr; private TextMeshProUGUI? _lwRowAgeHdr; private TextMeshProUGUI? _lwDiffHdr;
@@ -3547,8 +3510,10 @@ namespace BigAmbitionsMP
                     if (_lwRowCashLbl[i] != null) { try { _lwRowCashLbl[i].text = _lwRowCash[i]; } catch { } }
                 }
 
-                // AGE — shown to all (new-game only); editable ONLY on your own row.
-                bool showAge = occupied && !loadMode;
+                // AGE — new-game only.  HOST sees all (it bakes everyone's
+                // settings); a CLIENT sees ONLY ITS OWN editable age — other
+                // players' ages are irrelevant noise to them (user, 2026-06-11).
+                bool showAge = occupied && !loadMode && (host || isLocal);
                 SetActiveSafe(_rtLwRowAge[i] != null ? _rtLwRowAge[i]!.gameObject : null, showAge);
                 if (showAge && _lwRowAgeFocus != i)
                 {
@@ -3558,6 +3523,20 @@ namespace BigAmbitionsMP
                         try { _lwRowAgeLbl[i].text = _lwRowAge[i]; _lwRowAgeLbl[i].color = isLocal ? C_WHITE : new Color(0.6f,0.6f,0.65f,1f); } catch { }
                     }
                 }
+
+                // KICK [X] — host only, never on its own row (row 0 = host).
+                bool showKick = host && occupied && i > 0;
+                if (showKick && _rtLwKick[i] == null && _lwRoster[i] != null)
+                {
+                    var sprite = IsAlive(_panelSprite) ? _panelSprite : EnsureRoundedSprite();
+                    var (xRT, xLbl) = MakeHubButton("X", Vector2.zero, 24f, new Color(0.45f, 0.24f, 0.22f, 1f), 20f, sprite, _lwRoster[i].transform);
+                    xRT.anchorMin = xRT.anchorMax = xRT.pivot = new Vector2(1f, 0.5f);
+                    xRT.anchoredPosition = new Vector2(-4f, 0f);
+                    xLbl.fontSize = 11;
+                    _rtLwKick[i] = xRT;
+                }
+                if (_rtLwKick[i] != null && _rtLwKick[i]!.gameObject.activeSelf != showKick)
+                    _rtLwKick[i]!.gameObject.SetActive(showKick);
             }
 
             // New-game controls — host only, hidden in load mode.
@@ -3597,6 +3576,17 @@ namespace BigAmbitionsMP
                 if (RectHit(_rtLwLeave, mp)) { OnLobbyLeave(); return; }
                 if (host)
                 {
+                    // KICK [X] on a roster row.
+                    for (int i = 1; i < _rtLwKick.Length; i++)
+                        if (_rtLwKick[i] != null && _rtLwKick[i]!.gameObject.activeSelf && RectHit(_rtLwKick[i]!, mp))
+                        {
+                            if (rosterPlayers != null && i < rosterPlayers.Count)
+                            {
+                                Plugin.Logger.LogInfo($"[MenuUI] kick [X] → '{rosterPlayers[i]}'");
+                                MPServer.KickFromLobby(rosterPlayers[i]);
+                            }
+                            return;
+                        }
                     if (RectHit(_rtShowIp, mp))     { OnToggleShowIp();   return; }
                     if (RectHit(_rtLwStart, mp))    { OnLobbyStart();      return; }
                     if (!_lobbyLoadMode)   // new-game controls are hidden in load mode

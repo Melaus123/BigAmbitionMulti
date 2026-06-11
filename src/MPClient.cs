@@ -130,9 +130,9 @@ namespace BigAmbitionsMP
                 if (info.AdditionalData != null && !info.AdditionalData.EndOfData)
                 {
                     string tag = info.AdditionalData.GetString(64);
-                    if (tag == "BAMP:rejected") why = "Join REJECTED by host (banned until they re-host)";
-                    else if (tag == "BAMP:kicked") why = "KICKED by host (banned until they re-host)";
-                    else if (tag == "BAMP:banned") why = "You are banned until the host re-hosts";
+                    if (tag == "BAMP:rejected") why = "Join REJECTED by host";
+                    else if (tag == "BAMP:kicked") why = "KICKED by host";
+                    else if (tag == "BAMP:banned") why = "Banned until host re-hosts";
                 }
             }
             catch { }
