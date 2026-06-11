@@ -53,6 +53,15 @@ namespace BigAmbitionsMP
 
         // ── Local state ───────────────────────────────────────────────────────
         public static bool   Seated       { get; private set; }
+
+        /// <summary>What the DOCK should follow: after StandUp, the same
+        /// activity instance is suppressed — a half-cancelled approach (click
+        /// bench, walk away) left Seated wedged true and the dock stuck open
+        /// with no X (user, 2026-06-11).  A NEW activity un-suppresses.</summary>
+        public static bool SeatedForUi => Seated && _curActPtr != _suppressedActPtr;
+        private static IntPtr _suppressedActPtr = IntPtr.Zero;
+        private static IntPtr _curActPtr = IntPtr.Zero;
+
         public static string ActivityName { get; private set; } = "";
         public static int    ActivityState { get; private set; } = -1;   // PlayerActivityState; -1 = none
         private static bool   _localVoteActive;
@@ -183,6 +192,9 @@ namespace BigAmbitionsMP
                 // re-engaged the lingering activity ~1.5s after every cancel
                 // (visible stand, then silently busy again = movement lock).
                 _suppressAutoStartUntil = Time.unscaledTime + 4f;
+                // The dock must not re-show for THIS activity instance even if
+                // the game keeps it half-alive (walk-away wedge).
+                _suppressedActPtr = _curActPtr;
 
                 if (CancelButtonIndex >= 0) InvokeDockButton(CancelButtonIndex);
                 else
@@ -397,6 +409,9 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Rest] seated → {seated}{(seated ? $" ({nm})" : "")}");
                 Seated = seated;
                 _curAct = seated ? act : null;
+                _curActPtr = (_curAct as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase)?.Pointer ?? IntPtr.Zero;
+                if (_curActPtr == IntPtr.Zero || _curActPtr != _suppressedActPtr)
+                    if (!seated) _suppressedActPtr = IntPtr.Zero;   // gone — clear the wedge guard
                 ActivityName = seated ? nm : "";
                 ActivityState = -1;
                 DockButtons.Clear();

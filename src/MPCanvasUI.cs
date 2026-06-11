@@ -253,6 +253,20 @@ namespace BigAmbitionsMP
 
         private void OnLifecyclePhase(MPLifecycle.MPPhase prev, MPLifecycle.MPPhase next)
         {
+            // LEFT THE WORLD → force-hide every in-game panel unconditionally
+            // (the rest dock once survived all the way into the main menu).
+            if (next == MPLifecycle.MPPhase.Menu || next == MPLifecycle.MPPhase.None
+                || next == MPLifecycle.MPPhase.Lobby)
+            {
+                try
+                {
+                    if (_dock != null && _dock.activeSelf) { _dock.SetActive(false); Plugin.Logger.LogInfo("[Lifecycle] left world — rest dock force-hidden."); }
+                    if (_hub != null && !_hubNative && _hub.activeSelf) { _hub.SetActive(false); _hubVisible = false; }
+                    if (_joinPop != null && _joinPop.activeSelf) _joinPop.SetActive(false);
+                }
+                catch { }
+            }
+
             // Fence visibility: the host excuses clients parked in Menu
             // (a connected client who cancels a load never disconnects —
             // the old fence waited the full 90s timeout on them).
@@ -746,7 +760,9 @@ namespace BigAmbitionsMP
         {
             try
             {
-                bool show = MPRestSync.Seated;
+                // SeatedForUi (not Seated): a half-cancelled bench approach
+                // wedged the dock open with no X (user, 2026-06-11).
+                bool show = MPRestSync.SeatedForUi;
                 _restUiHover = false;   // recomputed below; EVERY early return must leave it false
 
                 // ESCAPE HATCH — independent of any UI existing: movement keys
