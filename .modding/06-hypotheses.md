@@ -30,3 +30,8 @@
 - CONFIRMED 2026-06-11: fresh new game broken identically (H4 refuted); watchdog fired-count = 1 in the broken run; signature (cc=False forever, clock frozen, default-spawn position, HUD half-bound) = the LoadingScreen coroutine murdered before load-finish. PlayerController spawns long before the overlay legitimately drops → 12s "stuck" check tripped on EVERY normal host load.
 - Fix: watchdog demoted to diagnostic-only (30s, log line, touches nothing). The stuck-overlay problem it bandaged was already properly fixed by the 4s quiesce delay.
 - Lesson reinforced: the bandaid CREATED the regression spiral the user sensed.
+
+## BACKLOG (deferred, user-reported 2026-06-11): host hold survives a client who cancels during load
+- Symptom: client cancels instead of loading in → host keeps "waiting for player" overlay + pause until the 90s startup timeout.
+- Hypothesized fix shape (inferred, unverified): OnPeerDisconnected during the hold window must remove the peer from the waiting roster (_inGamePlayers/_worldReadyPlayers tracking) and re-evaluate release — current cleanup likely only handles in-game departures.
+- Defer until lifecycle stage 4 (the hold is being unified into the load fence anyway — fix it there, not as another pre-consolidation patch).
