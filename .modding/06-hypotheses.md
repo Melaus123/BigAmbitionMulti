@@ -43,3 +43,15 @@
 
 ## BACKLOG (user, 2026-06-11): host rubberbands a few times when first moving after login
 - Suspect (user + matching mechanism): spawn de-stack RE-ASSERT pins the player to _spawnTarget for the probe window (drift 1.2-8m snapped back) — walking immediately = rubberband. Fix lands with SPAWN PRE-PLACEMENT (assign distinct spawn positions at placement time; delete the offset/probe/re-assert machinery entirely).
+
+## BACKLOG (user, 2026-06-11): ghost flatbed/handcart cargo boxes don''t sync
+- Symptom: remote players see the flatbed (and animations) but NOT the cargo boxes on its bed; same expected for handcarts.
+- Mechanism (inferred): VehicleEntry carries type/color only — ghost spawn never populates VehicleInstance.cargoInstances, and the box visuals derive from cargo.
+- Fix shape: add cargo manifest (ItemName+amount list) to VehicleEntry/ParkedVehicleSync; populate before CreateAndSpawnVehicle on the ghost side. Defer to Wave-2 polish.
+
+## OPEN (user test, 2026-06-11): client cannot pick product from the host''s gift-shop shelf (bookstore works)
+- Host built "gifties" (type=4, rented) mid-session at 15 FourthAvenue; BusinessSync sent it; client applied it (Ownership lines present).
+- Client could NOT interact with RoundedShelf to grab product; the NPC bookstore worked fine → customer-mode gating, not interaction breakage.
+- PRIME suspect: the rival-translation (businessOwnerRivalId = other player''s id) is insufficient for an OPERATING shop on the receiving machine: game may require a real rival record (RivalsHelper), an isOpen=true state, or opening hours.
+- [ShopGate] probe shipped: logs open/playerOwnedBiz/rented/bizRival/bldgRival on every building entry. DISCRIMINATOR RUN: client enters gift shop + bookstore once each → compare lines.
+- Do NOT patch until the probe discriminates (two-test cap).

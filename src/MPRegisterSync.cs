@@ -27,7 +27,7 @@ namespace BigAmbitionsMP
         // posKey → cashier playerId
         private static readonly Dictionary<string, (string playerId, Vector3 pos)> _cashiers = new();
 
-        public static void Reset() => _cashiers.Clear();
+        public static void Reset() { _cashiers.Clear(); _onDuty = false; }
 
         private static string Key(Vector3 p)
             => $"{Mathf.RoundToInt(p.x)}:{Mathf.RoundToInt(p.y)}:{Mathf.RoundToInt(p.z)}";
@@ -59,39 +59,77 @@ namespace BigAmbitionsMP
             if (dead.Count > 0) Plugin.Logger.LogInfo($"[Register] cleared {dead.Count} duty post(s) of departed '{playerId}'.");
         }
 
-        /// <summary>F4 pressed in-world: toggle duty or order, by proximity.</summary>
+        private static Controllers.CashRegisterController? FindNearestRegister(Vector3 from, float maxDist)
+        {
+            Controllers.CashRegisterController? best = null;
+            float bestD2 = maxDist * maxDist;
+            var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<Controllers.CashRegisterController>());
+            if (arr != null)
+                foreach (var o in arr)
+                {
+                    var c = o.TryCast<Controllers.CashRegisterController>();
+                    if (c == null) continue;
+                    float d2 = (c.transform.position - from).sqrMagnitude;
+                    if (d2 < bestD2) { bestD2 = d2; best = c; }
+                }
+            return best;
+        }
+
+        // ── Duty: driven by the NATIVE Work mechanic (user spec) — click your
+        // register → "Work" → the game runs a WorkActivity; we mirror that
+        // activity into the duty map.  Stop working (any way the game allows)
+        // → off duty.  No extra keybind for the cashier.
+        private static float _nextDutyAt;
+        private static bool _onDuty;
+        private static Vector3 _dutyPos;
+
+        public static void TickDuty()
+        {
+            if (Time.unscaledTime < _nextDutyAt) return;
+            _nextDutyAt = Time.unscaledTime + 1f;
+            try
+            {
+                bool working = MPRestSync.CurrentActivityName() == "Work";
+                if (working && !_onDuty)
+                {
+                    var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
+                    if (ch == null) return;
+                    var reg = FindNearestRegister(ch.position, 5f);
+                    if (reg == null) return;   // working some other station — not register duty
+                    _onDuty = true;
+                    _dutyPos = reg.transform.position;
+                    SendToggle(_dutyPos, true);
+                }
+                else if (!working && _onDuty)
+                {
+                    _onDuty = false;
+                    SendToggle(_dutyPos, false);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] duty: {ex.Message}"); }
+        }
+
+        /// <summary>F4 = BUY: open the order UI at a register another player
+        /// is working.  (Duty is not a keybind — it mirrors the game's Work.)</summary>
         public static void OnF4()
         {
             try
             {
                 var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
                 if (ch == null) return;
-
-                Controllers.CashRegisterController? best = null;
-                float bestD2 = 4.0f * 4.0f;
-                var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<Controllers.CashRegisterController>());
-                if (arr != null)
-                    foreach (var o in arr)
-                    {
-                        var c = o.TryCast<Controllers.CashRegisterController>();
-                        if (c == null) continue;
-                        float d2 = (c.transform.position - ch.position).sqrMagnitude;
-                        if (d2 < bestD2) { bestD2 = d2; best = c; }
-                    }
+                var best = FindNearestRegister(ch.position, 4f);
                 if (best == null)
                 {
                     Plugin.Logger.LogInfo("[Register] F4: no cash register within 4m.");
                     return;
                 }
-
-                var pos = best.transform.position;
-                string k = Key(pos);
-                if (_cashiers.TryGetValue(k, out var e))
-                {
-                    if (e.playerId == MPConfig.PlayerId) SendToggle(pos, false);     // my post → step off
-                    else OpenOrderUI(best, e.playerId);                              // staffed by them → buy
-                }
-                else SendToggle(pos, true);                                          // free → step on
+                string k = Key(best.transform.position);
+                if (_cashiers.TryGetValue(k, out var e) && e.playerId != MPConfig.PlayerId)
+                    OpenOrderUI(best, e.playerId);
+                else
+                    Plugin.Logger.LogInfo(e.playerId == MPConfig.PlayerId && _cashiers.ContainsKey(k)
+                        ? "[Register] F4: you are the cashier here."
+                        : "[Register] F4: register unstaffed — its owner must click Work at it.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] F4: {ex.Message}"); }
         }

@@ -323,6 +323,24 @@ namespace BigAmbitionsMP
                 try { TrafficSync.OnEnteredBuilding("DelayedEnterBuildingActions"); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] DelayedEnterBuilding prefix: {ex.Message}"); }
 
+                // [ShopGate] Wave-2 probe: why was a player-owned shop not
+                // shoppable for the visiting client (rounded-shelf pickup dead,
+                // bookstore fine)?  Logs the classification the game sees on
+                // every building entry — one entry into the gift shop + one
+                // into a working store gives the discriminator.
+                try
+                {
+                    if (MPServer.IsRunning || MPClient.IsConnected)
+                    {
+                        var reg = __instance.buildingRegistration;
+                        Plugin.Logger.LogInfo(
+                            $"[ShopGate] enter: open={__instance.isOpen} playerOwnedBiz={__instance.IsPlayerOwnedBusiness} " +
+                            $"rented={(reg != null ? reg.RentedByPlayer.ToString() : "?")} " +
+                            $"bizRival='{(reg != null ? reg.businessOwnerRivalId : "?")}' bldgRival='{(reg != null ? reg.buildingOwnerRivalId : "?")}'");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[ShopGate] {ex.Message}"); }
+
                 // Interior sync (Phase 2): tell the host we've entered so we
                 // can subscribe to its authoritative interior state.  Host-side
                 // path is symmetric: the host enters its own buildings without

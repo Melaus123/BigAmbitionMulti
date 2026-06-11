@@ -299,6 +299,7 @@ namespace BigAmbitionsMP
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
             TickTestRig();           // F3 — flatbed with minimum gift-shop equipment (Wave-2 test rig)
+            MPRegisterSync.TickDuty();   // mirror the native Work activity into register duty (1s self-throttle)
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
             MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion
             // (quiesce-off 4s timer RETIRED 2026-06-11 — stage-4 migration #1:
@@ -1146,13 +1147,15 @@ namespace BigAmbitionsMP
                         if (inst.cargoInstances == null)
                             inst.cargoInstances = new Il2CppSystem.Collections.Generic.List<BigAmbitions.Items.CargoInstance>();
                         // Minimum gift-shop kit (paid stock, $0 cost basis).
+                        // (CashRegister dropped — the checkout counter is the
+                        //  full checkout deal; baskets added — both user.)
                         (BigAmbitions.Items.ItemName item, int amount)[] kit =
                         {
-                            (BigAmbitions.Items.ItemName.CheckoutCounterRight, 1),
-                            (BigAmbitions.Items.ItemName.CashRegister,         1),
-                            (BigAmbitions.Items.ItemName.PaperBag,           100),
-                            (BigAmbitions.Items.ItemName.RoundedShelf,         2),
-                            (BigAmbitions.Items.ItemName.CheapGift,           60),
+                            (BigAmbitions.Items.ItemName.CheckoutCounterRight,    1),
+                            (BigAmbitions.Items.ItemName.PaperBag,              100),
+                            (BigAmbitions.Items.ItemName.StackOfShoppingBaskets,  1),
+                            (BigAmbitions.Items.ItemName.RoundedShelf,            2),
+                            (BigAmbitions.Items.ItemName.CheapGift,              60),
                         };
                         foreach (var (item, amount) in kit)
                             inst.cargoInstances.Add(new BigAmbitions.Items.CargoInstance(item, amount, 0f, true));

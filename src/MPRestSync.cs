@@ -582,6 +582,15 @@ namespace BigAmbitionsMP
             catch { return (null, null); }
         }
 
+        /// <summary>Current player activity short name ("" = none).  The game
+        /// strips "Activity": working a station reads as "Work" — drives the
+        /// register-duty broadcast (MPRegisterSync.TickDuty).</summary>
+        public static string CurrentActivityName()
+        {
+            var (_, nm) = GetCurrentActivity();
+            return nm;
+        }
+
         private static (object? act, string name) GetCurrentActivity()
         {
             try

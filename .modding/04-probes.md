@@ -28,3 +28,5 @@ log-only (no cache priming/side effects) before deleting; they are guarded one-s
 | FullMenu dump v2 | MPFullMenuProbe (MPCanvasUI wiring) | [FullMenu] | ACTIVE (capture pending) | RESTORED 2026-06-11: round-1 dumps lived only in BepInEx''s log (overwritten per run) — data lost. v2 PERSISTS to .modding/ui-dumps/fullmenu.txt and dumps EVERY page opened (round 1 stopped at the first). REMOVE after Hub visual true-up. |
 
 | SalesProbe | MPPatches Patch_SalesProbe_OnPlaceOrder | [SalesProbe] | ACTIVE (recon) | Wave-2: what a register purchase looks like (items, register, position) — confirms the RemoteSale hook point. REMOVE when slice 1 lands. |
+
+| ShopGate | MPPatches Patch_DelayedEnterBuilding | [ShopGate] | ACTIVE (recon) | Wave-2: building classification on entry (open/playerOwned/rented/rival ids) — discriminates why a player-owned shop is not shoppable for visitors. REMOVE with the customer-mode fix. |
