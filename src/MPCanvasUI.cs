@@ -1095,7 +1095,9 @@ namespace BigAmbitionsMP
         // every machine computes the same circle; position sync does the rest.
         private bool _spawnOffsetDone;
         private float _spawnRosterWaitUntil;
-        private float _spawnReassertAt;
+        private float _spawnApplyAt;          // delayed past the game's own placement
+        private float _spawnProbeAt;          // telemetry checkpoints
+        private int _spawnProbeN;
         private Vector3 _spawnTarget;
 
         private void TickSpawnOffset()
@@ -1103,35 +1105,40 @@ namespace BigAmbitionsMP
             if (TimeSync.IsStartupHeld) return;
             try
             {
-                // Re-assert once: the game may re-place the player right after
-                // load, undoing the first nudge.
+                // Telemetry: after applying, report where the character ACTUALLY
+                // is at +0.5s/+2s/+5s — the move logged success before but the
+                // user saw no offset, so something resets it silently.
                 if (_spawnOffsetDone)
                 {
-                    if (_spawnReassertAt > 0f && Time.unscaledTime >= _spawnReassertAt)
+                    if (_spawnProbeAt > 0f && Time.unscaledTime >= _spawnProbeAt)
                     {
-                        _spawnReassertAt = 0f;
-                        var ch2 = Helpers.PlayerHelper.PlayerController?.Character?.transform;
-                        if (ch2 != null && Vector3.Distance(ch2.position, _spawnTarget) > 1.2f
-                                        && Vector3.Distance(ch2.position, _spawnTarget) < 6f)
+                        _spawnProbeN++;
+                        _spawnProbeAt = _spawnProbeN >= 3 ? 0f : Time.unscaledTime + (_spawnProbeN == 1 ? 1.5f : 3f);
+                        var c = Helpers.PlayerHelper.PlayerController?.Character?.transform;
+                        if (c != null)
                         {
-                            MoveLocalPlayer(ch2, _spawnTarget);
-                            Plugin.Logger.LogInfo("[Spawn] de-stack re-asserted (game re-placed the player).");
+                            float d = Vector3.Distance(c.position, _spawnTarget);
+                            Plugin.Logger.LogInfo($"[Spawn] probe#{_spawnProbeN}: pos=({c.position.x:F2},{c.position.z:F2}) distToTarget={d:F2}");
+                            if (d > 1.2f && d < 8f) { MoveLocalPlayer(c, _spawnTarget); Plugin.Logger.LogInfo("[Spawn] re-asserted."); }
                         }
                     }
                     return;
                 }
-                var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
-                if (ch == null) return;
                 var players = MPRestSync.AllPlayers();
                 if (players.Count < 2)
                 {
-                    // Roster can lag the hold release — wait for it (the old
-                    // code gave up instantly: the CLIENT never offset at all).
                     if (_spawnRosterWaitUntil == 0f) _spawnRosterWaitUntil = Time.unscaledTime + 12f;
                     if (Time.unscaledTime < _spawnRosterWaitUntil) return;
                     _spawnOffsetDone = true;
                     return;
                 }
+                // Delay 2s past hold release: the game's own spawn placement
+                // can land after ours and silently undo it.
+                if (_spawnApplyAt == 0f) { _spawnApplyAt = Time.unscaledTime + 2f; return; }
+                if (Time.unscaledTime < _spawnApplyAt) return;
+
+                var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
+                if (ch == null) return;
                 var sorted = new List<string>(players);
                 sorted.Sort(StringComparer.Ordinal);
                 int idx = sorted.IndexOf(MPConfig.PlayerId);
@@ -1141,20 +1148,37 @@ namespace BigAmbitionsMP
                 float ang = idx * (Mathf.PI * 2f / sorted.Count);
                 var off = new Vector3(Mathf.Cos(ang), 0f, Mathf.Sin(ang)) * 2.0f;
                 _spawnTarget = ch.position + off;
+                var rootT = Helpers.PlayerHelper.PlayerController?.transform;
+                Plugin.Logger.LogInfo($"[Spawn] applying: idx={idx}/{sorted.Count} from=({ch.position.x:F2},{ch.position.z:F2}) off=({off.x:F2},{off.z:F2}) rootIsCharacter={rootT == ch}");
                 MoveLocalPlayer(ch, _spawnTarget);
-                _spawnReassertAt = Time.unscaledTime + 1.5f;
-                Plugin.Logger.LogInfo($"[Spawn] de-stack offset: idx={idx}/{sorted.Count} off=({off.x:F2},{off.z:F2}).");
+                Plugin.Logger.LogInfo($"[Spawn] applied: now=({ch.position.x:F2},{ch.position.z:F2})");
+                _spawnProbeAt = Time.unscaledTime + 0.5f;
+                _spawnProbeN = 0;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Spawn] offset: {ex.Message}"); _spawnOffsetDone = true; }
         }
 
         private static void MoveLocalPlayer(Transform ch, Vector3 target)
         {
+            // Move the CONTROLLER ROOT too if it differs — a child "Character"
+            // transform can be overridden by the parent motor every frame.
+            var rootT = Helpers.PlayerHelper.PlayerController?.transform;
             var ccComp = ch.GetComponent(Il2CppType.Of<CharacterController>());
             var cc = ccComp != null ? ccComp.TryCast<CharacterController>() : null;
+            if (cc == null && rootT != null && rootT != ch)
+            {
+                var rcc = rootT.GetComponent(Il2CppType.Of<CharacterController>());
+                cc = rcc != null ? rcc.TryCast<CharacterController>() : null;
+            }
             if (cc != null) cc.enabled = false;
+            if (rootT != null && rootT != ch)
+            {
+                var delta = target - ch.position;
+                rootT.position += delta;
+            }
             ch.position = target;
             if (cc != null) cc.enabled = true;
+            try { Physics.SyncTransforms(); } catch { }
         }
 
         /// <summary>Open the Business page inside the native full menu (and the
@@ -1858,7 +1882,7 @@ namespace BigAmbitionsMP
                 MPHub.Reset(); _hubVisible = false;    // hub ledger is per-session
                 MPFullMenuProbe.Reset();               // re-arm per scene
                 MPHubNativePage.Reset(); _hub = null; _hubNative = false;   // page died with the scene
-                _spawnOffsetDone = false; _spawnRosterWaitUntil = 0f; _spawnReassertAt = 0f;   // next session de-stacks again
+                _spawnOffsetDone = false; _spawnRosterWaitUntil = 0f; _spawnApplyAt = 0f; _spawnProbeAt = 0f; _spawnProbeN = 0;   // next session de-stacks again
                 // The session-over lock is for the in-game world only — back at
                 // the menu the player is free to host/join again.
                 MPClient.SessionEnded = false;
