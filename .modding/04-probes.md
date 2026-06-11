@@ -14,3 +14,4 @@
 | Nav watchdog | MPRestSync | [Rest] NAV LOCK | PERMANENT (diagnostic-only) | Names activity nav-lock if ever recurs |
 
 Rules: every new probe gets a row + prefix; resolved probes REMOVED from code promptly.
+| Lifecycle shadow | MPLifecycle.Tick (MPCanvasUI Update) | [Lifecycle] | ACTIVE | Stage-3 shadow phase tracker: transitions + STUCK-IN-LOADING >60s detector (mid-join acceptance instrumentation) |

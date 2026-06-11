@@ -285,6 +285,7 @@ namespace BigAmbitionsMP
             // guarantees the path is ready so NO poll-thread handler ever calls IL2CPP.
             MPSaveManager.EnsureVersionCached();
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
+            MPLifecycle.Tick();      // SHADOW MODE — single-source phase tracker (consolidation stage 3)
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
             MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion
             if (_quiesceOffAt > 0f && Time.unscaledTime >= _quiesceOffAt)
