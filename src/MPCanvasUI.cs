@@ -3360,7 +3360,11 @@ namespace BigAmbitionsMP
 
             var grey = new Color(0.70f, 0.70f, 0.75f, 1f);
             ApplyFont(MakeLabel(_lobbyWindow.transform, "Multiplayer Lobby", 26, C_WHITE, 0f, -16f, 540f, 36f, TextAlignmentOptions.Center));
-            _lwConnInfo = MakeLabel(_lobbyWindow.transform, "", SZ_FLD, C_WHITE, 28f, -56f, 350f, 28f, TextAlignmentOptions.Left); ApplyFont(_lwConnInfo);
+            // Wide + two-line + wrapping: the kick/reject reason was clipped
+            // by the old 350×28 single-line field (user, 2026-06-11).
+            _lwConnInfo = MakeLabel(_lobbyWindow.transform, "", SZ_FLD, C_WHITE, 28f, -50f, 350f, 44f, TextAlignmentOptions.TopLeft); ApplyFont(_lwConnInfo);
+            _lwConnInfo.enableWordWrapping = true;
+            _lwConnInfo.fontSize = SZ_FLD - 2;
             _lwShowIp   = CloneButtonInto(_lobbyWindow.transform, "BAMP_ShowIp", "Show IP", OnToggleShowIp, 390f, -58f, 124f, 30f); _rtShowIp = _lwShowIp?.GetComponent<RectTransform>();
             // Roster header — Players | Starting $ (host-set) | Age (self-set).
             ApplyFont(MakeLabel(_lobbyWindow.transform, "Players", SZ_FLD, grey, 28f, -92f, 200f, 26f, TextAlignmentOptions.Left));

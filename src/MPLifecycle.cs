@@ -1,5 +1,6 @@
 using System;
 using Il2CppInterop.Runtime;
+using Intro;
 using UnityEngine;
 
 namespace BigAmbitionsMP
@@ -121,18 +122,15 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Lifecycle] tick: {ex.Message}"); }
         }
 
-        private static Type? _introType;
-        private static bool _introTypeMissing;
-
-        /// <summary>True while the intro/character-creation scene is up.</summary>
+        /// <summary>True while the intro/character-creation scene is up.
+        /// DIRECT typed lookup — the string FindGameType("IntroCharacter…")
+        /// returned null (namespace) and latched "missing", so intro kept
+        /// classifying as Menu (fence excused a creating client, 2026-06-11).</summary>
         private static bool IntroActive()
         {
             try
             {
-                if (_introTypeMissing) return false;
-                _introType ??= VehicleManager.FindGameType("IntroCharacterCustomizer");
-                if (_introType == null) { _introTypeMissing = true; return false; }
-                var obj = UnityEngine.Object.FindObjectOfType(Il2CppType.From(_introType));
+                var obj = UnityEngine.Object.FindObjectOfType(Il2CppType.Of<IntroCharacterCustomizer>());
                 return obj != null;
             }
             catch { return false; }
