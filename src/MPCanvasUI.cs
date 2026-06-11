@@ -287,7 +287,20 @@ namespace BigAmbitionsMP
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
             MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion
-            if (_quiesceOffAt > 0f && Time.unscaledTime >= _quiesceOffAt) { _quiesceOffAt = 0f; MPClient.EndJoinQuiesce(); }
+            if (_quiesceOffAt > 0f && Time.unscaledTime >= _quiesceOffAt)
+            {
+                _quiesceOffAt = 0f;
+                MPClient.EndJoinQuiesce();
+                // Placement diagnostic: the save's position-restore runs in the
+                // load-finish frames — if it was skipped, the player is still
+                // at the scene's DEFAULT spawn (the "wrong area" stick).
+                try
+                {
+                    var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
+                    if (ch != null) Plugin.Logger.LogInfo($"[UI] post-load position: ({ch.position.x:F1}, {ch.position.y:F1}, {ch.position.z:F1})");
+                }
+                catch { }
+            }
             TickOverlayWatchdog();   // stuck loading screen over a live world → force-dismiss
             TickJoinDialog();        // Phase 5 — connect-dialog input (when open)
             TickLobbyWindow();       // Phase 5 — lobby window input (when open)
