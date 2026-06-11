@@ -24,3 +24,5 @@ Rules: every new probe gets a row + prefix; resolved probes REMOVED from code pr
 NEXT SWEEP CANDIDATES (one-shot discovery probes, missions complete, still wired in
 MPCanvasUI ~2455: ProbeAppearance / ProbeAnimatorLive / ProbeTraffic — verify each is
 log-only (no cache priming/side effects) before deleting; they are guarded one-shots, harmless meanwhile).
+
+| FullMenu dump v2 | MPFullMenuProbe (MPCanvasUI wiring) | [FullMenu] | ACTIVE (capture pending) | RESTORED 2026-06-11: round-1 dumps lived only in BepInEx''s log (overwritten per run) — data lost. v2 PERSISTS to .modding/ui-dumps/fullmenu.txt and dumps EVERY page opened (round 1 stopped at the first). REMOVE after Hub visual true-up. |

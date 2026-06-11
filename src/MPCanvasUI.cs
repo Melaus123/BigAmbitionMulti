@@ -1979,6 +1979,7 @@ namespace BigAmbitionsMP
                 MPHub.Reset(); _hubVisible = false;    // hub ledger is per-session
                 MPHubNativePage.Reset(); _hub = null; _hubNative = false;   // page died with the scene
                 _spawnSidestepDone = false;   // next session de-stacks again
+                MPFullMenuProbe.Reset();               // re-arm dump capture per scene
                 // The session-over lock is for the in-game world only — back at
                 // the menu the player is free to host/join again.
                 MPClient.SessionEnded = false;
@@ -2475,6 +2476,7 @@ namespace BigAmbitionsMP
             MPHubNativePage.Tick();       // "Business" in the native full menu
             // (spawn sidestep moved to the WorldReady event — OnLifecyclePhase)
             TickJoinPopup();              // host approval panel for mid-game joiners
+            MPFullMenuProbe.Tick();       // page-interior dump capture (persists to .modding/ui-dumps)
             TickHubWindow();
             _pt = MPPerf.Begin(); InteriorSync.Tick();         MPPerf.End("Interior", _pt);   // diff-push to subscribed clients
             _pt = MPPerf.Begin(); GameStatePatcher.DrainPendingLogoRefreshes(); MPPerf.End("LogoRefresh", _pt);
