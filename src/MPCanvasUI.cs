@@ -287,6 +287,8 @@ namespace BigAmbitionsMP
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
             MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion
+            if (_quiesceOffAt > 0f && Time.unscaledTime >= _quiesceOffAt) { _quiesceOffAt = 0f; MPClient.EndJoinQuiesce(); }
+            TickOverlayWatchdog();   // stuck loading screen over a live world → force-dismiss
             TickJoinDialog();        // Phase 5 — connect-dialog input (when open)
             TickLobbyWindow();       // Phase 5 — lobby window input (when open)
             TickSavePicker();        // Phase 5 — save-picker input (when open)
@@ -1967,7 +1969,10 @@ namespace BigAmbitionsMP
             if (inGame && !_wasInGame)
             {
                 Plugin.Logger.LogInfo("[UI] Game scene loaded — player sync active.");
-                MPClient.EndJoinQuiesce();   // world is up — streaming may resume
+                // Quiesce ends a few seconds LATER: resuming the stream the
+                // same frame killed the game's load-finish fade (2 GM NREs at
+                // exactly quiesce-OFF; loading screen never faded, 2026-06-11).
+                _quiesceOffAt = Time.unscaledTime + 4f;
 
                 // Discovery probe — logs GameInstance time/skip method names so we
                 // can identify what the bench/bed/car rest uses to fast-forward time.
@@ -2254,6 +2259,36 @@ namespace BigAmbitionsMP
             catch { up = false; }    // never hang the startup on a detection error
             _overlayCheckCached = up;
             return up;
+        }
+
+        // ── Overlay watchdog: the game's loading screen can survive its own
+        // load-finish step (a transient GameManager hiccup kills the fade) and
+        // sit forever over a perfectly healthy world.  Force-dismiss. ─────────
+        private float _quiesceOffAt;
+        private float _overlayStuckSince;
+
+        private void TickOverlayWatchdog()
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) { _overlayStuckSince = 0f; return; }
+                bool worldUp = false;
+                try { worldUp = Helpers.PlayerHelper.PlayerController != null; } catch { }
+                if (!worldUp || !IsLoadingOverlayUp()) { _overlayStuckSince = 0f; return; }
+                if (_overlayStuckSince == 0f) { _overlayStuckSince = Time.unscaledTime; return; }
+                if (Time.unscaledTime - _overlayStuckSince < 12f) return;
+                _overlayStuckSince = 0f;
+                var lsObj = UnityEngine.Object.FindObjectOfType(Il2CppType.Of<LoadingScreen>());
+                var go = lsObj != null ? lsObj.TryCast<LoadingScreen>()?.gameObject : null;
+                if (go != null)
+                {
+                    var cg = go.GetComponentInChildren<CanvasGroup>(true);
+                    if (cg != null) { cg.alpha = 0f; cg.blocksRaycasts = false; cg.interactable = false; }
+                    go.SetActive(false);
+                    Plugin.Logger.LogWarning("[UI] OVERLAY WATCHDOG: loading screen stuck >12s over a live world — force-dismissed.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[UI] overlay watchdog: {ex.Message}"); }
         }
 
         /// <summary>
