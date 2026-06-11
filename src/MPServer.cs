@@ -275,7 +275,7 @@ namespace BigAmbitionsMP
             LobbyPlayers.Clear();
             _peerNames.Clear();
             _clients.Clear();
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
         }
 
         /// <summary>Host clicked "Start New Game" in the lobby.</summary>
@@ -291,7 +291,7 @@ namespace BigAmbitionsMP
             IsInLobby = false;
 
             // Re-arm the startup pause hold for this new game.
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
 
             // Per-player starting cash: each client gets the host-designated amount
             // (their override, else the difficulty base).  The host now designates
@@ -354,7 +354,7 @@ namespace BigAmbitionsMP
             IsInLobby = false;
 
             // Re-arm the startup pause hold for this new game.
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
 
             // Phase 4: if a multiplayer session exists, resume it — the host holds
             // every player's .hsg, so it ships each connected client its own and
@@ -454,7 +454,7 @@ namespace BigAmbitionsMP
                         _worldReadyPlayers.Remove(leftPlayer);
                         // Release if the REMAINING players are all world-ready (the
                         // leaver no longer gates the hold).
-                        waiting = LobbyPlayers.Where(p => !_worldReadyPlayers.Contains(p)).ToList();
+                        waiting = LobbyPlayers.Where(p => !_worldReadyPlayers.Contains(p) && !_fenceExcused.Contains(p)).ToList();
                         if (LobbyPlayers.Count > 0 && waiting.Count == 0)
                         {
                             _startupReleased = true;
@@ -795,6 +795,13 @@ namespace BigAmbitionsMP
                     if (!string.IsNullOrEmpty(sess)) MPSaveCoordinator.ActiveSessionName = sess;
                     Plugin.Logger.LogInfo($"[Server] RequestSave from peer {peer.Id} (reason={reason}, exiting={rq?.Exiting}, name='{rq?.SaveName}') — coordinated save.");
                     MPSaveCoordinator.HostSaveNow(reason);
+                    break;
+                }
+
+                case MessageType.PhaseReport:
+                {
+                    var ph = env.GetPayload<PhaseReportPayload>();
+                    RecordPhaseReport(ph);   // dict write — safe here
                     break;
                 }
 
@@ -1172,6 +1179,51 @@ namespace BigAmbitionsMP
         /// <summary>A player has APPLIED the world sync.  Once everyone is world-ready
         /// the startup hold releases for all — so the game unfreezes onto a fully-synced
         /// world.  hostSelf marks the host (whose world is authoritative).</summary>
+        // ── Load fence: phase visibility + excusals (stage-4 migration #2) ───
+        // A client who bails to the MENU while still CONNECTED never fires a
+        // disconnect — the old fence waited the full 90s timeout on them
+        // (user backlog, 2026-06-11).  Clients report lifecycle transitions;
+        // anyone parked in Menu >8s mid-fence is EXCUSED from the wait.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string phase, long atMs)> _peerPhase = new();
+        private static readonly HashSet<string> _fenceExcused = new();
+
+        public static void RecordPhaseReport(PhaseReportPayload? p)
+        {
+            if (p == null || string.IsNullOrEmpty(p.PlayerId)) return;
+            _peerPhase[p.PlayerId] = (p.Phase, Environment.TickCount64);
+        }
+
+        /// <summary>Host main thread, ~1 Hz while hosting: excuse fence-waited
+        /// players who bailed to the menu; release if nobody real remains.</summary>
+        public static void TickFencePrune()
+        {
+            if (!_running) return;
+            bool release = false;
+            List<string>? waiting = null;
+            lock (_startupLock)
+            {
+                if (_startupReleased) return;
+                long now = Environment.TickCount64;
+                foreach (var kv in _peerPhase)
+                {
+                    if (_worldReadyPlayers.Contains(kv.Key) || _fenceExcused.Contains(kv.Key)) continue;
+                    if (!LobbyPlayers.Contains(kv.Key)) continue;
+                    if (kv.Value.phase == "Menu" && now - kv.Value.atMs > 8000)
+                    {
+                        _fenceExcused.Add(kv.Key);
+                        Plugin.Logger.LogInfo($"[Server] fence: '{kv.Key}' bailed to the menu — excused from the wait.");
+                    }
+                }
+                waiting = LobbyPlayers.Where(p => !_worldReadyPlayers.Contains(p) && !_fenceExcused.Contains(p)).ToList();
+                if (waiting.Count == 0 && _worldReadyPlayers.Count > 0)
+                {
+                    _startupReleased = true;
+                    release = true;
+                }
+            }
+            if (release) ReleaseStartupHold("remaining players ready (menu-bailers excused)");
+        }
+
         public static void MarkWorldReady(string playerId, bool hostSelf = false)
         {
             bool release = false;
@@ -1195,8 +1247,9 @@ namespace BigAmbitionsMP
                 if (string.IsNullOrEmpty(playerId)) return;
                 if (hostSelf && !_hostSnapshotsReady) return;   // host world not loaded yet
                 _worldReadyPlayers.Add(playerId);
-                int total = LobbyPlayers.Count;
-                int ready = LobbyPlayers.Count(p => _worldReadyPlayers.Contains(p));
+                _fenceExcused.Remove(playerId);   // they made it after all
+                int total = LobbyPlayers.Count(p => !_fenceExcused.Contains(p));
+                int ready = LobbyPlayers.Count(p => _worldReadyPlayers.Contains(p) && !_fenceExcused.Contains(p));
                 Plugin.Logger.LogInfo($"[Server] World-ready: '{playerId}' ({ready}/{total})");
                 MPLoadProfiler.Mark($"HOST world-ready '{playerId}' ({ready}/{total})");
                 if (total > 0 && ready >= total)
@@ -1236,7 +1289,7 @@ namespace BigAmbitionsMP
         private static List<string> WorldWaitingList()
         {
             lock (_startupLock)
-                return LobbyPlayers.Where(p => !_worldReadyPlayers.Contains(p)).ToList();
+                return LobbyPlayers.Where(p => !_worldReadyPlayers.Contains(p) && !_fenceExcused.Contains(p)).ToList();
         }
 
         /// <summary>Players not yet world-ready — for the host's own startup screen.</summary>
@@ -1245,7 +1298,7 @@ namespace BigAmbitionsMP
             lock (_startupLock)
             {
                 if (_startupReleased) return new List<string>();
-                return LobbyPlayers.Where(p => !_worldReadyPlayers.Contains(p)).ToList();
+                return LobbyPlayers.Where(p => !_worldReadyPlayers.Contains(p) && !_fenceExcused.Contains(p)).ToList();
             }
         }
 

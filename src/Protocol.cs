@@ -90,6 +90,7 @@ namespace BigAmbitionsMP
         LoanAnswer           = 106, // Target → Host: accept/decline a loan offer.
         LoanState            = 107, // Host → All: the authoritative active-loan ledger (Business Hub display).
         MoneyAdjust          = 108, // Host → one player: credit/debit your wallet by Amount (transfer delivery, loan principal, daily loan payments).
+        PhaseReport          = 110, // Client → Host: my lifecycle phase changed (load-fence visibility; lets the host excuse a client who bailed to the menu instead of loading).
     }
 
     // ── Envelope ───────────────────────────────────────────────────────────────
@@ -763,6 +764,13 @@ namespace BigAmbitionsMP
     public class LoanStatePayload
     {
         public List<LoanEntry> Loans { get; set; } = new();
+    }
+
+    /// <summary>One lifecycle transition on a client (MessageType.PhaseReport).</summary>
+    public class PhaseReportPayload
+    {
+        public string PlayerId { get; set; } = "";
+        public string Phase    { get; set; } = "";
     }
 
     public class MoneyAdjustPayload

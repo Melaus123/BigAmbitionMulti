@@ -791,6 +791,15 @@ namespace BigAmbitionsMP
 
         /// <summary>Tell the host we've APPLIED the world sync, so it can release the
         /// frozen-until-synced startup hold once everyone is ready.  One-shot per load.</summary>
+        /// <summary>Reports a lifecycle transition to the host (load-fence
+        /// visibility — lets the host excuse a menu-bailed client).</summary>
+        public static void SendPhaseReport(string phase)
+        {
+            if (!IsConnected) return;
+            Send(MessageEnvelope.Create(MessageType.PhaseReport, MPConfig.PlayerId,
+                new PhaseReportPayload { PlayerId = MPConfig.PlayerId, Phase = phase }));
+        }
+
         public static void SendWorldReady()
         {
             if (!IsConnected || _worldReadySent) return;

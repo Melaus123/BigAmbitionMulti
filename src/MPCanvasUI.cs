@@ -253,6 +253,11 @@ namespace BigAmbitionsMP
 
         private void OnLifecyclePhase(MPLifecycle.MPPhase prev, MPLifecycle.MPPhase next)
         {
+            // Fence visibility: the host excuses clients parked in Menu
+            // (a connected client who cancels a load never disconnects —
+            // the old fence waited the full 90s timeout on them).
+            if (MPClient.IsConnected) MPClient.SendPhaseReport(next.ToString());
+
             if (next != MPLifecycle.MPPhase.WorldReady) return;
             MPClient.EndJoinQuiesce();
             // Placement diagnostic: position-restore runs in load-finish —
@@ -2531,6 +2536,7 @@ namespace BigAmbitionsMP
             _pt = MPPerf.Begin(); MPRestSync.Tick();           MPPerf.End("Rest",     _pt);   // votes, seated state, watchdog (0.5s)
             MPRestSync.HostSkipFrame();   // host clock executor — every frame for smoothness
             MPHub.HostTick();             // loan ledger: daily interest/payment drafts
+            MPServer.TickFencePrune();    // excuse menu-bailed clients from the load fence
             TickRestBanner();
             TickRestUI();
             MPHubNativePage.Tick();       // "Business" in the native full menu
