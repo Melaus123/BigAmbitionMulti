@@ -751,6 +751,23 @@ namespace BigAmbitionsMP
                         MPRideProbe.Sample(tn, t);
                         if (IsOpenVehicle(tn)) openDriven = t;   // hand-IK sync anchor
                     }
+                    // Cargo manifest → remote bed/handtruck boxes (visual only).
+                    string cargo = "";
+                    try
+                    {
+                        if (inst.cargoInstances != null && inst.cargoInstances.Count > 0)
+                        {
+                            var csb = new System.Text.StringBuilder();
+                            for (int ci = 0; ci < inst.cargoInstances.Count && ci < 24; ci++)
+                            {
+                                var c = inst.cargoInstances[ci];
+                                if (c == null) continue;
+                                csb.Append(c.itemName.ToString()).Append(':').Append(c.amount).Append(';');
+                            }
+                            cargo = csb.ToString();
+                        }
+                    }
+                    catch { }
                     fleet.Vehicles.Add(new VehicleEntry
                     {
                         VehicleId = inst.id,
@@ -759,6 +776,7 @@ namespace BigAmbitionsMP
                         Driving   = vc.controlledByPlayer,
                         X = t.position.x, Y = t.position.y, Z = t.position.z,
                         Qx = t.rotation.x, Qy = t.rotation.y, Qz = t.rotation.z, Qw = t.rotation.w,
+                        Cargo = cargo,
                     });
                 }
                 CurrentOpenDriven = openDriven;
@@ -921,6 +939,28 @@ namespace BigAmbitionsMP
             return rideOn ? Vector3.zero : new Vector3(0f, 0f, -1.0f);
         }
 
+        /// <summary>Fill a (ghost) VehicleInstance's cargo from the manifest
+        /// string "ItemName:amount;…" so the visual boxes appear remotely.
+        /// Unknown item names are skipped (version drift safe).</summary>
+        private static void ApplyCargoManifest(VehicleInstance inst, string? manifest)
+        {
+            if (string.IsNullOrEmpty(manifest)) return;
+            try
+            {
+                if (inst.cargoInstances == null) return;
+                foreach (var part in manifest.Split(';'))
+                {
+                    if (string.IsNullOrEmpty(part)) continue;
+                    var bits = part.Split(':');
+                    if (bits.Length != 2) continue;
+                    if (!Enum.TryParse<BigAmbitions.Items.ItemName>(bits[0], out var item)) continue;
+                    if (!int.TryParse(bits[1], out var amount) || amount <= 0) continue;
+                    inst.cargoInstances.Add(new BigAmbitions.Items.CargoInstance(item, amount, 0f, true));
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] cargo manifest: {ex.Message}"); }
+        }
+
         private static RemoteVehicle? SpawnRemoteVehicle(string ownerId, VehicleEntry e,
                                                          Vector3 pos, Quaternion rot)
         {
@@ -944,6 +984,7 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogWarning($"[Vehicle] VehicleInstance setup ('{e.TypeName}'): {ex.Message}");
             }
+            ApplyCargoManifest(inst, e.Cargo);   // bed/handtruck boxes derive from cargo
 
             int ownedBefore = SafeCount(() => VehicleHelper.AllPlayerVehicles?.Count ?? -1);
 

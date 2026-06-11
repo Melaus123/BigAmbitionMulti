@@ -360,6 +360,9 @@ namespace BigAmbitionsMP
         public float  Qy { get; set; }
         public float  Qz { get; set; }
         public float  Qw { get; set; }
+        /// <summary>Cargo manifest ("ItemName:amount;…") so remote ghosts show
+        /// the bed/handtruck boxes (they derive from cargo) — user bug 2026-06-11.</summary>
+        public string Cargo { get; set; } = "";
     }
 
     /// <summary>
