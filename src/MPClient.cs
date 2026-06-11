@@ -122,7 +122,21 @@ namespace BigAmbitionsMP
         private static void OnDisconnected(NetPeer peer, DisconnectInfo info)
         {
             Plugin.Logger.LogWarning($"[Client] Disconnected from host: {info.Reason}");
-            LastDisconnectReason = info.Reason.ToString();
+            // Host can attach a HUMAN reason (kick/reject/ban) as disconnect
+            // data — "RemoteConnectionClose" told the user nothing (2026-06-11).
+            string why = info.Reason.ToString();
+            try
+            {
+                if (info.AdditionalData != null && !info.AdditionalData.EndOfData)
+                {
+                    string tag = info.AdditionalData.GetString(64);
+                    if (tag == "BAMP:rejected") why = "Join REJECTED by host (banned until they re-host)";
+                    else if (tag == "BAMP:kicked") why = "KICKED by host (banned until they re-host)";
+                    else if (tag == "BAMP:banned") why = "You are banned until the host re-hosts";
+                }
+            }
+            catch { }
+            LastDisconnectReason = why;
             _server  = null;
             // The connection is gone either way — let the poll loop exit so
             // IsConnecting goes false (the UI was stuck showing "Connecting…"

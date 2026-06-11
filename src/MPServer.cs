@@ -856,7 +856,7 @@ namespace BigAmbitionsMP
                 _pendingJoins.Remove(peerId);
             }
             Ban(entry.hello);
-            try { entry.peer.Disconnect(); } catch { }
+            try { entry.peer.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:rejected")); } catch { }
             Plugin.Logger.LogInfo($"[Server] host REJECTED mid-game join: '{entry.hello.PlayerId}' (banned until re-host).");
         }
 
@@ -870,7 +870,7 @@ namespace BigAmbitionsMP
                 if (kv.Value == playerId)
                 {
                     foreach (var p in _clients)
-                        if (p.Id == kv.Key) { try { p.Disconnect(); } catch { } break; }
+                        if (p.Id == kv.Key) { try { p.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:kicked")); } catch { } break; }
                     break;
                 }
             LobbyPlayers.Remove(playerId);
@@ -901,7 +901,7 @@ namespace BigAmbitionsMP
             if (_banned.Contains(hello.PlayerId) || (!string.IsNullOrEmpty(hello.StableId) && _banned.Contains(hello.StableId)))
             {
                 Plugin.Logger.LogInfo($"[Server] Hello from BANNED '{hello.PlayerId}' — disconnected.");
-                try { peer.Disconnect(); } catch { }
+                try { peer.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:banned")); } catch { }
                 return;
             }
 

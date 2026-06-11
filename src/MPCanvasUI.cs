@@ -1306,42 +1306,41 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[JoinPop] {ex.Message}"); }
         }
 
-        // ── Lobby kick (HOST): click a player row, click again to confirm. ──
-        private string _kickArmName = "";
-        private float _kickArmUntil;
+        // ── Lobby kick (HOST): an explicit [X] beside each joined player —
+        //    click-twice-on-the-name was unintuitive (user, 2026-06-11). ─────
+        private readonly RectTransform?[] _kickXRT = new RectTransform?[4];
 
         private void TickLobbyKick()
         {
             try
             {
                 if (_txtLHSlots == null) return;
-                if (_kickArmUntil > 0f && Time.unscaledTime > _kickArmUntil) { _kickArmName = ""; _kickArmUntil = 0f; }
                 var players = MPServer.LobbyPlayers;
-                for (int i = 1; i < _txtLHSlots.Length && i < players.Count; i++)
+                for (int i = 1; i < _txtLHSlots.Length; i++)
                 {
                     var slot = _txtLHSlots[i];
                     if (slot == null) continue;
-                    if (_kickArmName == players[i])
-                        slot.text = $"• {players[i]}  <color=#FF6B6B><b>click again to kick</b></color>";
+                    bool occupied = i < players.Count;
+                    if (_kickXRT[i] == null && occupied)
+                    {
+                        var sprite = IsAlive(_panelSprite) ? _panelSprite : EnsureRoundedSprite();
+                        var (xRT, xLbl) = MakeHubButton("X", Vector2.zero, 26f, new Color(0.45f, 0.24f, 0.22f, 1f), 22f, sprite, slot.transform);
+                        xRT.anchorMin = xRT.anchorMax = xRT.pivot = new Vector2(1f, 0.5f);
+                        xRT.anchoredPosition = new Vector2(-6f, 0f);
+                        xLbl.fontSize = 12;
+                        _kickXRT[i] = xRT;
+                    }
+                    if (_kickXRT[i] != null && _kickXRT[i]!.gameObject.activeSelf != occupied)
+                        _kickXRT[i]!.gameObject.SetActive(occupied);
                 }
                 if (!Input.GetMouseButtonDown(0)) return;
                 var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
                 for (int i = 1; i < _txtLHSlots.Length && i < players.Count; i++)
-                {
-                    var slot = _txtLHSlots[i];
-                    if (slot == null || !RectHit(slot.rectTransform, mp)) continue;
-                    if (_kickArmName == players[i] && Time.unscaledTime <= _kickArmUntil)
+                    if (_kickXRT[i] != null && _kickXRT[i]!.gameObject.activeSelf && RectHit(_kickXRT[i]!, mp))
                     {
                         MPServer.KickFromLobby(players[i]);
-                        _kickArmName = ""; _kickArmUntil = 0f;
+                        return;
                     }
-                    else
-                    {
-                        _kickArmName = players[i];
-                        _kickArmUntil = Time.unscaledTime + 3f;
-                    }
-                    return;
-                }
             }
             catch { }
         }
