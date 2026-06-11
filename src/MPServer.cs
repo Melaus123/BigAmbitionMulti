@@ -1213,6 +1213,9 @@ namespace BigAmbitionsMP
         {
             var payload = env.GetPayload<PlayerInGamePayload>();
             MarkWorldReady(payload?.PlayerId ?? env.SenderId);
+            // A player whose world just loaded missed any earlier loan-state
+            // broadcast (session-load ledger, joins mid-loan) — re-broadcast.
+            GameStatePatcher.EnqueueOnMainThread(MPHub.BroadcastLoansIfAny);
         }
 
         /// <summary>True once the host's own game world has loaded (PlayerController

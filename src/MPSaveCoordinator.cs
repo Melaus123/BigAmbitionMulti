@@ -84,6 +84,10 @@ namespace BigAmbitionsMP
                     SetSessionMetadata(session, slot.Day);   // owners + day + timestamp
                     DiagPhase("host lambda: SetSessionMetadata done → MergeSlot");
                     MergeSlot(session, slot);                 // host's own slot
+                    // Loan ledger rides every session save — loans created
+                    // BEFORE the session's first save (no folder yet) would
+                    // otherwise never persist unless the ledger changed again.
+                    MPHub.SaveLedger();
                     DiagPhase("host lambda: DONE");
                 }
                 catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] Host save: {ex}"); }

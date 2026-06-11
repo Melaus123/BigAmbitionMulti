@@ -389,6 +389,12 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Hub] TryLoadLedger: {ex.Message}"); }
         }
 
+        /// <summary>Re-broadcast the ledger (a late-loading player missed it).</summary>
+        public static void BroadcastLoansIfAny()
+        {
+            if (MPServer.IsRunning && _hostLoans.Count > 0) HostBroadcastLoans();
+        }
+
         private static void HostBroadcastLoans()
         {
             var st = new LoanStatePayload();
