@@ -53,6 +53,17 @@ and the register's building context). MUST verify with a one-run probe:
 - addressKey of the building containing the register.
 Probe first, patch second (two-test cap applies).
 
+## REVISED after first test (2026-06-11)
+- BUYING IS THE NATIVE FLOW, period (user): pick items, click register, walk up,
+  pay.  The F4 buy bypass + direct OpenFullServiceOrderUI invoke were REMOVED.
+- Duty = the native Work mechanic mirrored (WorkActivity polled; no keybinds).
+- The duty map's single consumer: a staffed-gate patch (NOT YET WRITTEN) so the
+  native register-click passes on the customer's machine when a player works
+  the register: MPRegisterSync.IsStaffedByOtherPlayer(registerPos).
+- BLOCKER first: the [ShopGate] classification case — the visiting client could
+  not even pick from the shelf (rival-translation insufficient for an OPERATING
+  shop).  Fix that, retest native pickup, THEN find/patch the staffed gate.
+
 ## Slices
 1. Protocol RemoteSale (111) + buyer-side detect + host validation + MoneyAdjust
    credit + notices. (Stock left local-only — acceptable for the first test run.)

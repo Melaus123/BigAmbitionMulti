@@ -11,16 +11,16 @@ namespace BigAmbitionsMP
     ///
     /// The game's own flows dead-end for us: an owner interacting with their
     /// register gets the WORK/management UI, and on other machines the
-    /// register looks unstaffed, so a visiting player gets nothing.  So:
-    ///  - F4 near a register with NO cashier → I go ON DUTY (synced to all).
-    ///  - F4 again (me on duty)             → off duty.
-    ///  - F4 near a register where ANOTHER player is on duty → the native
-    ///    full-service order UI opens (invoked directly — bypasses the
-    ///    employee-staffed gate) and the purchase runs the game's own
-    ///    self-purchase path; [SalesProbe] logs it, RemoteSale (slice 1)
-    ///    will route the revenue.
-    /// Registers are keyed by rounded world position (stable across peers —
-    /// interiors are host-snapshot replicas at identical coordinates).
+    /// register looks unstaffed, so a visiting player gets nothing.
+    /// Duty mirrors the game's own Work mechanic (user spec): the owner clicks
+    /// their register, picks Work, a WorkActivity runs, we broadcast ON duty;
+    /// stopping work broadcasts OFF.  No keybinds anywhere.  Buying stays the
+    /// NATIVE flow (pick items, click register, walk up, pay); the duty map
+    /// exists solely so the future staffed-gate patch can answer 'is a player
+    /// working this register' on the customer's machine.
+    /// Registers are keyed by rounded world position (stable across peers --
+    /// interiors are host-snapshot replicas at identical coordinates;
+    /// verified cross-machine 2026-06-11: '900:0:-4' matched on both).
     /// </summary>
     public static class MPRegisterSync
     {
@@ -109,30 +109,14 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] duty: {ex.Message}"); }
         }
 
-        /// <summary>F4 = BUY: open the order UI at a register another player
-        /// is working.  (Duty is not a keybind — it mirrors the game's Work.)</summary>
-        public static void OnF4()
-        {
-            try
-            {
-                var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
-                if (ch == null) return;
-                var best = FindNearestRegister(ch.position, 4f);
-                if (best == null)
-                {
-                    Plugin.Logger.LogInfo("[Register] F4: no cash register within 4m.");
-                    return;
-                }
-                string k = Key(best.transform.position);
-                if (_cashiers.TryGetValue(k, out var e) && e.playerId != MPConfig.PlayerId)
-                    OpenOrderUI(best, e.playerId);
-                else
-                    Plugin.Logger.LogInfo(e.playerId == MPConfig.PlayerId && _cashiers.ContainsKey(k)
-                        ? "[Register] F4: you are the cashier here."
-                        : "[Register] F4: register unstaffed — its owner must click Work at it.");
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] F4: {ex.Message}"); }
-        }
+        /// <summary>Is the register at this world position staffed by another
+        /// player?  This is the duty map's ONE consumer-facing question — the
+        /// future staffed-gate patch asks it so the NATIVE customer flow
+        /// (pick items → click register → walk up → pay) passes when a player
+        /// is the cashier.  (The F4 buy bypass was removed — user: buying must
+        /// work the way the game normally does it.)</summary>
+        public static bool IsStaffedByOtherPlayer(Vector3 registerPos)
+            => _cashiers.TryGetValue(Key(registerPos), out var e) && e.playerId != MPConfig.PlayerId;
 
         private static void SendToggle(Vector3 pos, bool on)
         {
@@ -144,18 +128,5 @@ namespace BigAmbitionsMP
             else MPClient.SendEnvelope(env);
         }
 
-        private static void OpenOrderUI(Controllers.CashRegisterController reg, string cashierId)
-        {
-            try
-            {
-                var mi = typeof(Controllers.CashRegisterController).GetMethod(
-                    "OpenFullServiceOrderUI",
-                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                if (mi == null) { Plugin.Logger.LogWarning("[Register] OpenFullServiceOrderUI not found."); return; }
-                mi.Invoke(null, new object[] { reg });
-                Plugin.Logger.LogInfo($"[Register] order UI opened — cashier '{cashierId}'.");
-            }
-            catch (Exception ex) { Plugin.Logger.LogError($"[Register] order UI: {ex.Message} / {ex.InnerException?.Message}"); }
-        }
     }
 }
