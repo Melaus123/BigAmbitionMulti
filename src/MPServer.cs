@@ -276,9 +276,14 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Host clicked "Start New Game" in the lobby.</summary>
+        /// <summary>Settings of the last new-game start — the mid-join fresh-
+        /// character fallback reuses them (null when the host loaded a save).</summary>
+        public static GameVariablesDto? LastStartSettings;
+
         public static void StartNewGame(GameVariablesDto settings)
         {
             if (!_running) return;
+            LastStartSettings = settings;
             MPLoadProfiler.Mark($"HOST StartNewGame ({settings.Difficulty}) — {_clients.Count} client(s)");
             IsInLobby = false;
 
@@ -875,11 +880,42 @@ namespace BigAmbitionsMP
                         }
                         else
                         {
-                            Plugin.Logger.LogInfo($"[Server] Mid-session join by '{hello.PlayerId}': no stored .hsg in '{session}' for stable={stable} — snapshot-only late join.");
+                            // No stored .hsg — still instruct the client: load
+                            // its LOCAL session copy, else fresh character.
+                            float kc = GetKnownCash(hello.PlayerId);
+                            Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
+                            {
+                                SessionName = session,
+                                HsgGzipBase64 = "",
+                                Money = Math.Max(0f, kc),
+                                FallbackSettings = LastStartSettings,
+                            }));
+                            sentLoad = true;
+                            Plugin.Logger.LogInfo($"[Server] Mid-session join by '{hello.PlayerId}': no stored .hsg — sent local-or-fresh fallback instruction.");
                         }
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Mid-session LoadData: {ex.Message}"); }
+
+                // Running game but NO session yet (host never saved): the joiner
+                // would otherwise sit in the lobby forever — fresh-character
+                // instruction (rejoiners keep nothing in this case anyway).
+                if (!sentLoad && string.IsNullOrEmpty(MPSaveCoordinator.ActiveSessionName))
+                {
+                    try
+                    {
+                        Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
+                        {
+                            SessionName = "",
+                            HsgGzipBase64 = "",
+                            Money = Math.Max(0f, GetKnownCash(hello.PlayerId)),
+                            FallbackSettings = LastStartSettings,
+                        }));
+                        sentLoad = true;
+                        Plugin.Logger.LogInfo($"[Server] Mid-game join by '{hello.PlayerId}' (no session yet) — sent fresh-character instruction.");
+                    }
+                    catch (Exception ex2) { Plugin.Logger.LogWarning($"[Server] Mid-game fresh-join: {ex2.Message}"); }
+                }
                 if (sentLoad) return;
 
                 // Late join — game already in progress, send world snapshot immediately

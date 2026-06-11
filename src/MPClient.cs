@@ -349,6 +349,24 @@ namespace BigAmbitionsMP
                                   $"(starting cash {(EnforceStartingCash ? "enforced by host" : "per-player")})");
         }
 
+        /// <summary>Mid-join fresh start: no save for this player anywhere —
+        /// new character with the host''s settings (null → Normal preset).</summary>
+        public static void StartFreshFromHost(GameVariablesDto? settings)
+        {
+            IsInLobby = false;
+            var s = settings ?? MPServer.Preset("Normal");
+            Plugin.Logger.LogInfo($"[Client] Mid-join fresh start; cash={s.StartingMoney}.");
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                try
+                {
+                    SaveGameManager.New(MPServer.BuildGameVariables(s));
+                    LoadScene.LoadIntro(false);
+                }
+                catch (Exception ex) { Plugin.Logger.LogError($"[Client] StartFreshFromHost: {ex}"); }
+            });
+        }
+
         private static void HandleStartGame(MessageEnvelope env, bool isNew)
         {
             IsInLobby = false;

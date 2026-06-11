@@ -1039,6 +1039,10 @@ namespace BigAmbitionsMP
         public string HsgGzipBase64  { get; set; } = "";
         public int    RawLength      { get; set; }
         public float  Money          { get; set; }
+        /// <summary>Mid-join fallback chain: when HsgGzipBase64 is EMPTY the
+        /// client loads its own LOCAL session save if present, else starts a
+        /// fresh character with these host settings (null → Normal preset).</summary>
+        public GameVariablesDto? FallbackSettings { get; set; }
     }
 
     /// <summary>

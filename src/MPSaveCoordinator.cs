@@ -332,7 +332,41 @@ namespace BigAmbitionsMP
         /// load it, then overlay the host's restored cash.</summary>
         public static void ClientHandleLoadData(LoadDataPayload p)
         {
-            if (p == null || string.IsNullOrEmpty(p.HsgGzipBase64)) return;
+            if (p == null) return;
+            // Mid-join FALLBACK (empty .hsg): the host has no stored save for
+            // us — load our own LOCAL copy of this session if we have one,
+            // else start a fresh character with the host''s settings.
+            if (string.IsNullOrEmpty(p.HsgGzipBase64))
+            {
+                string fbSession = p.SessionName;
+                bool hasLocal = false;
+                try
+                {
+                    if (!string.IsNullOrEmpty(fbSession))
+                    {
+                        lock (_lock) { _activeSessionName = fbSession; }
+                        string f = Path.Combine(MPSaveManager.MpCharacterFolder(fbSession, MPConfig.StableId), SaveFileName + ".hsg");
+                        hasLocal = File.Exists(f);
+                    }
+                }
+                catch { }
+                if (hasLocal)
+                {
+                    float fbMoney = p.Money;
+                    Plugin.Logger.LogInfo($"[MPSave] Mid-join: loading LOCAL .hsg for session ''{fbSession}''.");
+                    GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        try { LoadOwnHsg(fbSession, MPConfig.StableId); if (fbMoney > 0f) QueueCashApply(fbMoney); }
+                        catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] Mid-join local load: {ex}"); }
+                    });
+                }
+                else
+                {
+                    Plugin.Logger.LogInfo("[MPSave] Mid-join: no local save either — fresh character with host settings.");
+                    MPClient.StartFreshFromHost(p.FallbackSettings);
+                }
+                return;
+            }
             string session = p.SessionName;
             lock (_lock) { _activeSessionName = session; }
             try
