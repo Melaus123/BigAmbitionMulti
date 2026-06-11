@@ -1651,14 +1651,15 @@ namespace BigAmbitionsMP
         {
             static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
             {
+                // ShowApp/SelectApp have OVERLOADS — GetMethod(name) threw
+                // AmbiguousMatch and the whole patch class failed (2026-06-10).
+                // Enumerate and patch every overload.
                 var t = VehicleManager.FindGameType("UI.Smartphone.FullMenu");
                 int n = 0;
-                foreach (var name in new[] { "ShowApp", "SelectApp" })
-                {
-                    var m = t?.GetMethod(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                    if (m != null) { n++; yield return m; }
-                }
-                Plugin.Logger.LogInfo($"[HubApp] FullMenu show/select patches: {n}/2");
+                if (t != null)
+                    foreach (var m in t.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly))
+                        if (m.Name == "ShowApp" || m.Name == "SelectApp") { n++; yield return m; }
+                Plugin.Logger.LogInfo($"[HubApp] FullMenu show/select patches: {n} target(s)");
             }
 
             static void Postfix()

@@ -1063,6 +1063,7 @@ namespace BigAmbitionsMP
         // Typed inputs (click value → type digits; Enter/click-away commits).
         // Defaults MATCH THE BANK's fixed deal: 20% total over 244 days.
         private bool _hubAmountFocus;
+        private bool _hubFreshFocus;       // first keystroke replaces the value
         private string _hubAmountStr = "10000";
         private bool _hubRateFocus;
         private string _hubRateStr = "20";
@@ -1241,7 +1242,7 @@ namespace BigAmbitionsMP
                         bool has = i < outL.Count;
                         _hubOutLoanXRT[i]?.gameObject.SetActive(has);
                         _hubOutLoanIds[i] = has ? outL[i].Id : "";
-                        if (has) slo.Append($"<b>${outL[i].Principal:N0}</b> loan to <color={_colFrom}>{outL[i].To}</color> at {MPHub.OfferTotalPct(outL[i]):F0}% — awaiting accept\n\n");
+                        if (has) slo.Append($"<b>${outL[i].Principal:N0}</b> loan to <color={_colFrom}>{outL[i].To}</color> at {MPHub.OfferTotalPct(outL[i]):F0}% total over {MPHub.OfferTermDays(outL[i])} days — awaiting accept\n\n");
                     }
                     if (_hubOutLoans != null) _hubOutLoans.text = slo.Length > 0 ? slo.ToString() : $"<color={_colMuted}>no pending outgoing loans</color>";
 
@@ -1252,8 +1253,8 @@ namespace BigAmbitionsMP
                         bool meL = ln.Lender == MPConfig.PlayerId;
                         if (!meB && !meL) continue;
                         sl.Append(meB
-                            ? $"you owe <color={_colOwe}>{ln.Lender}</color>: <b>${ln.Remaining:N0}</b> left (${ln.DailyInterest:N0}+${ln.DailyPayment:N0}/day)\n"
-                            : $"<color={_colGood}>{ln.Borrower}</color> owes you: <b>${ln.Remaining:N0}</b> left (${ln.DailyInterest:N0}+${ln.DailyPayment:N0}/day)\n");
+                            ? $"you owe <color={_colOwe}>{ln.Lender}</color>: <b>${ln.Remaining:N0}</b> left (${ln.DailyInterest:N0}+${ln.DailyPayment:N0}/day · ~{Math.Ceiling(ln.Remaining / Math.Max(1f, ln.DailyPayment)):F0} days left)\n"
+                            : $"<color={_colGood}>{ln.Borrower}</color> owes you: <b>${ln.Remaining:N0}</b> left (${ln.DailyInterest:N0}+${ln.DailyPayment:N0}/day · ~{Math.Ceiling(ln.Remaining / Math.Max(1f, ln.DailyPayment)):F0} days left)\n");
                     }
                     if (_hubLoans != null) _hubLoans.text = sl.Length > 0 ? sl.ToString() : $"<color={_colMuted}>no active loans</color>";
                 }
@@ -1265,9 +1266,9 @@ namespace BigAmbitionsMP
                 if (!Input.GetMouseButtonDown(0)) return;
                 if (!HubHit(_hubRT, mp)) { CommitHubInputs(); return; }   // click-away commits typing
 
-                if (HubHit(_hubAmountRT, mp)) { _hubAmountFocus = true; _hubRateFocus = false; _hubTermFocus = false; _hubAmountStr = ((long)_hubAmount).ToString(); return; }
-                if (_hubTab == 1 && HubHit(_hubRateRT, mp)) { _hubRateFocus = true; _hubAmountFocus = false; _hubTermFocus = false; _hubRateStr = HubRate().ToString("F0"); return; }
-                if (_hubTab == 1 && HubHit(_hubTermRT, mp)) { _hubTermFocus = true; _hubAmountFocus = false; _hubRateFocus = false; _hubTermStr = HubTerm().ToString(); return; }
+                if (HubHit(_hubAmountRT, mp)) { _hubAmountFocus = true; _hubRateFocus = false; _hubTermFocus = false; _hubFreshFocus = true; _hubAmountStr = ((long)_hubAmount).ToString(); return; }
+                if (_hubTab == 1 && HubHit(_hubRateRT, mp)) { _hubRateFocus = true; _hubAmountFocus = false; _hubTermFocus = false; _hubFreshFocus = true; _hubRateStr = HubRate().ToString("F0"); return; }
+                if (_hubTab == 1 && HubHit(_hubTermRT, mp)) { _hubTermFocus = true; _hubAmountFocus = false; _hubRateFocus = false; _hubFreshFocus = true; _hubTermStr = HubTerm().ToString(); return; }
                 CommitHubInputs();
 
                 if (HubHit(_hubXRT, mp))
@@ -1344,22 +1345,28 @@ namespace BigAmbitionsMP
                 bg.color = _hubNative ? new Color(0f, 0f, 0f, 0f) : HubPageGrey;   // native shell IS the background
                 if (sprite != null) { try { bg.sprite = sprite; bg.type = Image.Type.Sliced; } catch { } }
 
-                // Header band + title + balance + X.
-                var hdr = MakeGO("Hdr", _hub.transform);
-                var hrt = hdr.GetComponent<RectTransform>();
-                Stretch(hrt, 0f, 0f, 0f, 56f, top: true);
-                var hImg = hdr.AddComponent<Image>();
-                hImg.color = _hubNative ? new Color(0f, 0f, 0f, 0.18f) : new Color(0.115f, 0.125f, 0.145f, 1f);
-                if (sprite != null) { try { hImg.sprite = sprite; hImg.type = Image.Type.Sliced; } catch { } }
-                var title = MakeLabel(hdr.transform, _hubNative ? "" : "<b>BUSINESS HUB</b>", 19, C_WHITE, 24f, 0f, 320f, 56f, TextAlignmentOptions.Left);
-                ApplyFont(title);
-                // (No balance label — the native top bar already shows money.)
-                var (xRT, xLbl) = MakeHubButton("X", new Vector2(0f, 0f), 32f, new Color(0.56f, 0.27f, 0.20f, 1f), 32f, sprite);
-                xRT.SetParent(hdr.transform, false);
-                xRT.anchorMin = xRT.anchorMax = xRT.pivot = new Vector2(1f, 0.5f);
-                xRT.anchoredPosition = new Vector2(-14f, 0f);
-                xLbl.fontSize = 14;
-                _hubXRT = xRT;
+                // Header band only for the STANDALONE window — in the native
+                // shell the top bar (title, money, close) already exists, so
+                // the band was a dead strip eating screen space.
+                float T = _hubNative ? 48f : 0f;   // vertical reclaim shift
+                _hubXRT = null;
+                if (!_hubNative)
+                {
+                    var hdr = MakeGO("Hdr", _hub.transform);
+                    var hrt = hdr.GetComponent<RectTransform>();
+                    Stretch(hrt, 0f, 0f, 0f, 56f, top: true);
+                    var hImg = hdr.AddComponent<Image>();
+                    hImg.color = new Color(0.115f, 0.125f, 0.145f, 1f);
+                    if (sprite != null) { try { hImg.sprite = sprite; hImg.type = Image.Type.Sliced; } catch { } }
+                    var title = MakeLabel(hdr.transform, "<b>BUSINESS HUB</b>", 19, C_WHITE, 24f, 0f, 320f, 56f, TextAlignmentOptions.Left);
+                    ApplyFont(title);
+                    var (xRT, xLbl) = MakeHubButton("X", new Vector2(0f, 0f), 32f, new Color(0.56f, 0.27f, 0.20f, 1f), 32f, sprite);
+                    xRT.SetParent(hdr.transform, false);
+                    xRT.anchorMin = xRT.anchorMax = xRT.pivot = new Vector2(1f, 0.5f);
+                    xRT.anchoredPosition = new Vector2(-14f, 0f);
+                    xLbl.fontSize = 14;
+                    _hubXRT = xRT;
+                }
 
                 // The blue stripe (native page signature; the native shell
                 // brings its own splitter, so only the standalone draws one).
@@ -1373,29 +1380,29 @@ namespace BigAmbitionsMP
                 }
 
                 // Shared band: target chips + amount (used by every tab).
-                var toLbl = MakeLabel(_hub.transform, "to:", 13, C_LBLGREY, 24f, -74f, 34f, 26f, TextAlignmentOptions.Left);
+                var toLbl = MakeLabel(_hub.transform, "to:", 13, C_LBLGREY, 24f, T - 74f, 34f, 26f, TextAlignmentOptions.Left);
                 ApplyFont(toLbl);
                 for (int i = 0; i < 4; i++)
                 {
                     var (crt, clbl) = MakeHubButton("", new Vector2(0f, 0f), 142f, new Color(0.18f, 0.20f, 0.27f, 1f), 30f, sprite);
-                    SetTopLeft(crt, 64f + i * 152f, -72f);
+                    SetTopLeft(crt, 64f + i * 152f, T - 72f);
                     _hubChipRT[i] = crt; _hubChipLbl[i] = clbl;
                     _hubChipImg[i] = crt.GetComponent<Image>();
                     clbl.fontSize = 13;
                     crt.gameObject.SetActive(false);
                 }
-                var amLbl = MakeLabel(_hub.transform, "amount:", 13, C_LBLGREY, 24f, -114f, 70f, 26f, TextAlignmentOptions.Left);
+                var amLbl = MakeLabel(_hub.transform, "amount:", 13, C_LBLGREY, 24f, T - 114f, 70f, 26f, TextAlignmentOptions.Left);
                 ApplyFont(amLbl);
                 // Shaded rounded INPUT BOX — typing is the only entry method,
                 // so the box must read as a text field.
-                (_hubAmountRT, _hubAmountLbl) = MakeHubInput(_hub.transform, 100f, -108f, 220f, 34f, 20, sprite);
+                (_hubAmountRT, _hubAmountLbl) = MakeHubInput(_hub.transform, 100f, T - 108f, 220f, 34f, 20, sprite);
 
                 // Category tab row.
                 string[] tabNames = { "Transfers", "Loans" };
                 for (int i = 0; i < 2; i++)
                 {
                     var (trt, tlbl) = MakeHubButton(tabNames[i], new Vector2(0f, 0f), 170f, HubTabOff, 38f, sprite);
-                    SetTopLeft(trt, 24f + i * 178f, -156f);
+                    SetTopLeft(trt, 24f + i * 178f, T - 156f);
                     tlbl.fontSize = 14;
                     _hubTabRT[i] = trt;
                     _hubTabImg[i] = trt.GetComponent<Image>();
@@ -1406,7 +1413,7 @@ namespace BigAmbitionsMP
                 _hubPageTransfers = MakeGO("PageTransfers", _hub.transform);
                 var ptrt = _hubPageTransfers.GetComponent<RectTransform>();
                 ptrt.anchorMin = new Vector2(0f, 0f); ptrt.anchorMax = new Vector2(1f, 1f);
-                ptrt.offsetMin = new Vector2(0f, 198f); ptrt.offsetMax = new Vector2(0f, -196f);
+                ptrt.offsetMin = new Vector2(0f, 198f - T); ptrt.offsetMax = new Vector2(0f, T - 196f);
                 var pt = _hubPageTransfers.transform;
 
                 MakeHubBox(pt, 16f, -2f, 948f, 56f, sprite);
@@ -1422,7 +1429,7 @@ namespace BigAmbitionsMP
                 ApplyFont(_hubOutGifts);
                 for (int i = 0; i < 2; i++)
                 {
-                    var (cxRT, _) = MakeHubButton("✕", new Vector2(0f, 0f), 30f, new Color(0.45f, 0.24f, 0.22f, 1f), 24f, sprite);
+                    var (cxRT, _) = MakeHubButton("X", new Vector2(0f, 0f), 30f, new Color(0.45f, 0.24f, 0.22f, 1f), 24f, sprite);
                     cxRT.SetParent(pt, false); SetTopLeft(cxRT, 896f, -98f - i * 36f);
                     _hubOutGiftXRT[i] = cxRT;
                     cxRT.gameObject.SetActive(false);
@@ -1432,7 +1439,7 @@ namespace BigAmbitionsMP
                 _hubPageLoans = MakeGO("PageLoans", _hub.transform);
                 var plrt = _hubPageLoans.GetComponent<RectTransform>();
                 plrt.anchorMin = new Vector2(0f, 0f); plrt.anchorMax = new Vector2(1f, 1f);
-                plrt.offsetMin = new Vector2(0f, 198f); plrt.offsetMax = new Vector2(0f, -196f);
+                plrt.offsetMin = new Vector2(0f, 198f - T); plrt.offsetMax = new Vector2(0f, T - 196f);
                 var pl = _hubPageLoans.transform;
 
                 MakeHubBox(pl, 16f, -2f, 948f, 78f, sprite);
@@ -1454,7 +1461,7 @@ namespace BigAmbitionsMP
                 ApplyFont(_hubOutLoans);
                 for (int i = 0; i < 2; i++)
                 {
-                    var (cxRT, _) = MakeHubButton("✕", new Vector2(0f, 0f), 30f, new Color(0.45f, 0.24f, 0.22f, 1f), 24f, sprite);
+                    var (cxRT, _) = MakeHubButton("X", new Vector2(0f, 0f), 30f, new Color(0.45f, 0.24f, 0.22f, 1f), 24f, sprite);
                     cxRT.SetParent(pl, false); SetTopLeft(cxRT, 896f, -118f - i * 34f);
                     _hubOutLoanXRT[i] = cxRT;
                     cxRT.gameObject.SetActive(false);
@@ -1467,26 +1474,26 @@ namespace BigAmbitionsMP
                 ApplyFont(_hubLoans);
 
                 // ── Shared: INCOMING OFFERS (category-agnostic + filter) ─────
-                MakeHubBox(_hub.transform, 16f, -432f, 948f, 176f, sprite);
-                var inHdr = MakeLabel(_hub.transform, "<b>INCOMING OFFERS</b>", 12, _inkLo, 28f, -440f, 220f, 18f, TextAlignmentOptions.Left);
+                MakeHubBox(_hub.transform, 16f, T - 432f, 948f, 176f + (_hubNative ? 28f : 0f), sprite);
+                var inHdr = MakeLabel(_hub.transform, "<b>INCOMING OFFERS</b>", 12, _inkLo, 28f, T - 440f, 220f, 18f, TextAlignmentOptions.Left);
                 ApplyFont(inHdr);
                 string[] filters = { "all", "gifts", "loans" };
                 for (int i = 0; i < 3; i++)
                 {
                     var (frt, flbl) = MakeHubButton(filters[i], new Vector2(0f, 0f), 64f, HubTabOff, 22f, sprite);
-                    SetTopLeft(frt, 240f + i * 70f, -438f);
+                    SetTopLeft(frt, 240f + i * 70f, T - 438f);
                     flbl.fontSize = 11;
                     _hubFilterRT[i] = frt;
                     _hubFilterImg[i] = frt.GetComponent<Image>();
                 }
-                _hubOffers = MakeLabel(_hub.transform, "", 13, _inkHi, 28f, -466f, 690f, 136f, TextAlignmentOptions.TopLeft);
+                _hubOffers = MakeLabel(_hub.transform, "", 13, _inkHi, 28f, T - 466f, 690f, 136f + (_hubNative ? 28f : 0f), TextAlignmentOptions.TopLeft);
                 ApplyFont(_hubOffers);
                 for (int i = 0; i < 3; i++)
                 {
                     var (aRT, _) = MakeHubButton("accept",  new Vector2(0f, 0f), 74f, new Color(0.24f, 0.50f, 0.33f, 1f), 26f, sprite);
-                    SetTopLeft(aRT, 740f, -464f - i * 44f);
+                    SetTopLeft(aRT, 740f, T - 464f - i * 44f);
                     var (dRT, _) = MakeHubButton("decline", new Vector2(0f, 0f), 74f, new Color(0.45f, 0.24f, 0.22f, 1f), 26f, sprite);
-                    SetTopLeft(dRT, 822f, -464f - i * 44f);
+                    SetTopLeft(dRT, 822f, T - 464f - i * 44f);
                     _hubAcceptRT[i] = aRT; _hubDeclineRT[i] = dRT;
                     aRT.gameObject.SetActive(false); dRT.gameObject.SetActive(false);
                 }
@@ -1568,10 +1575,22 @@ namespace BigAmbitionsMP
             if (!_hubAmountFocus && !_hubRateFocus && !_hubTermFocus) return;
             foreach (char c in Input.inputString)
             {
+                // First keystroke after focusing REPLACES the value — the term
+                // box was effectively uneditable ("244" already filled the cap
+                // and its backspace branch was missing, 2026-06-10).
+                if (_hubFreshFocus && (char.IsDigit(c) || c == '.'))
+                {
+                    if (_hubAmountFocus) _hubAmountStr = "";
+                    else if (_hubRateFocus) _hubRateStr = "";
+                    else if (_hubTermFocus) _hubTermStr = "";
+                }
+                if (c != '\n' && c != '\r') _hubFreshFocus = false;
+
                 if (c == '\b')
                 {
                     if (_hubAmountFocus && _hubAmountStr.Length > 0) _hubAmountStr = _hubAmountStr.Substring(0, _hubAmountStr.Length - 1);
                     else if (_hubRateFocus && _hubRateStr.Length > 0) _hubRateStr = _hubRateStr.Substring(0, _hubRateStr.Length - 1);
+                    else if (_hubTermFocus && _hubTermStr.Length > 0) _hubTermStr = _hubTermStr.Substring(0, _hubTermStr.Length - 1);
                 }
                 else if (c == '\n' || c == '\r') CommitHubInputs();
                 else if (_hubAmountFocus && char.IsDigit(c) && _hubAmountStr.Length < 9) _hubAmountStr += c;

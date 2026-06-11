@@ -49,7 +49,7 @@ namespace BigAmbitionsMP
             _menu = null; _page = null; _appsContainer = null; _button = null;
             _selectedIcon = null; _appNameLbl = null; _appNameLoc = null;
             ContentRoot = null; UiCamera = null;
-            _tries = 0; _nextTryAt = 0f;
+            _tries = 0; _nextTryAt = 0f; _graceUntil = 0f;
             OpenRequested = false;
         }
 
@@ -72,8 +72,18 @@ namespace BigAmbitionsMP
             catch { }
         }
 
+        private static float _graceUntil;
+
         private static void TryInject()
         {
+            // NEVER inject during loading: the client once stuck at 100% when
+            // our clone landed in the button row before FullMenu's own startup
+            // had run over it (2026-06-10).  Wait for the startup hold to
+            // release, then a settle grace.
+            if (TimeSync.IsStartupHeld) { _graceUntil = 0f; return; }
+            if (_graceUntil == 0f) { _graceUntil = Time.unscaledTime + 4f; return; }
+            if (Time.unscaledTime < _graceUntil) return;
+
             if (_tries >= 30 || Time.unscaledTime < _nextTryAt) return;
             _nextTryAt = Time.unscaledTime + 2f;
             _tries++;
@@ -239,16 +249,23 @@ namespace BigAmbitionsMP
                     // ShowPage immediately replaces the page it selected.
                     try
                     {
+                        // OpenApp has OVERLOADS ("Ambiguous match") — pick the
+                        // single-enum-parameter one explicitly.
                         var suiType = VehicleManager.FindGameType("SmartphoneUI");
-                        var openApp = suiType?.GetMethod("OpenApp", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                        if (suiType != null && openApp != null)
+                        if (suiType != null)
                         {
+                            System.Reflection.MethodInfo? openApp = null;
+                            foreach (var m in suiType.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                            {
+                                if (m.Name != "OpenApp") continue;
+                                var ps = m.GetParameters();
+                                if (ps.Length == 1 && ps[0].ParameterType.IsEnum) { openApp = m; break; }
+                            }
                             var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(suiType), true);
                             var sui = arr != null && arr.Length > 0 ? arr[0].TryCast<Component>() : null;
-                            var ps = openApp.GetParameters();
-                            if (sui != null && ps.Length == 1 && ps[0].ParameterType.IsEnum)
+                            if (sui != null && openApp != null)
                             {
-                                var first = Enum.GetValues(ps[0].ParameterType).GetValue(0);
+                                var first = Enum.GetValues(openApp.GetParameters()[0].ParameterType).GetValue(0);
                                 openApp.Invoke(sui, new object[] { first! });
                                 opened = true;
                             }
@@ -257,8 +274,10 @@ namespace BigAmbitionsMP
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[HubApp] OpenApp path: {ex.Message}"); }
                     if (!opened)
                     {
-                        var toggle = _menuType?.GetMethod("Toggle", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                        toggle?.Invoke(_menu, null);
+                        // Resolve Toggle from the INSTANCE's runtime type (the
+                        // cached type once mismatched: "Object does not match").
+                        foreach (var m in _menu.GetType().GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                            if (m.Name == "Toggle" && m.GetParameters().Length == 0) { m.Invoke(_menu, null); break; }
                     }
                     Plugin.Logger.LogInfo($"[HubApp] menu open requested (viaOpenApp={opened}); canvas active={canvasT != null && canvasT.gameObject.activeInHierarchy}.");
                 }
