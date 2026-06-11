@@ -349,8 +349,13 @@ namespace BigAmbitionsMP
                                   $"(starting cash {(EnforceStartingCash ? "enforced by host" : "per-player")})");
         }
 
+        /// <summary>The game is starting/loading — the lobby pane must yield
+        /// (the stored-save mid-join path left IsInLobby true and the MP window
+        /// sat on the lobby pane over a fully loaded world, 2026-06-11).</summary>
+        public static void MarkLeftLobby() => IsInLobby = false;
+
         /// <summary>Mid-join fresh start: no save for this player anywhere —
-        /// new character with the host''s settings (null → Normal preset).</summary>
+       /// new character with the host''s settings (null → Normal preset).</summary>
         public static void StartFreshFromHost(GameVariablesDto? settings)
         {
             IsInLobby = false;

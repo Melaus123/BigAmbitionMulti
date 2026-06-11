@@ -350,6 +350,7 @@ namespace BigAmbitionsMP
                 MPClient.StartFreshFromHost(p.FallbackSettings);
                 return;
             }
+            MPClient.MarkLeftLobby();   // loading now — the lobby pane yields
             string session = p.SessionName;
             lock (_lock) { _activeSessionName = session; }
             try
