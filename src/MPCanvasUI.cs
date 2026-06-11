@@ -1361,7 +1361,7 @@ namespace BigAmbitionsMP
                     int term = HubTerm();
                     double di = Math.Max(0, _hubAmount * pct / 100.0 / term);
                     double dp = Math.Max(1, _hubAmount / term);
-                    string termsCol = _hubNative ? "#6A7280" : "#9AA3B2";
+                    string termsCol = _hubNative ? "#8795A0" : "#9AA3B2";   // native muted (dump-confirmed)
                     _hubTermsLbl.text = $"<color={termsCol}>loan: ${di:N0}/day interest + ${dp:N0}/day payment over {term} days · total interest ${_hubAmount * pct / 100.0:N0} ({pct:F0}%) · bank: 20% / 244d</color>";
                 }
 
@@ -1515,7 +1515,7 @@ namespace BigAmbitionsMP
         {
             for (int i = 0; i < 3; i++)
                 if (_hubFilterImg[i] != null)
-                    _hubFilterImg[i]!.color = _hubFilter == i ? HubTabOn : (_hubNative ? new Color(0.80f, 0.83f, 0.88f, 1f) : new Color(0.18f, 0.20f, 0.27f, 1f));
+                    _hubFilterImg[i]!.color = _hubFilter == i ? HubTabOn : (_hubNative ? new Color(1f, 1f, 1f, 0.12f) : new Color(0.18f, 0.20f, 0.27f, 1f));
         }
 
         private void BuildHubWindow(Transform? host = null)
@@ -1525,13 +1525,18 @@ namespace BigAmbitionsMP
                 // Theme by host: native page = white boxes + dark ink (the
                 // native vocabulary); standalone window = dark theme.
                 _hubNative = host != null;
-                _inkHi   = _hubNative ? new Color(0.12f, 0.14f, 0.17f, 1f) : C_WHITE;
-                _inkLo   = _hubNative ? new Color(0.36f, 0.40f, 0.46f, 1f) : C_LBLGREY;
-                _boxCol  = _hubNative ? new Color(0.965f, 0.965f, 0.975f, 1f) : HubBoxGrey;
-                _colFrom = _hubNative ? "#8A5A00" : "#FFD27A";
-                _colGood = _hubNative ? "#1F7A33" : "#8CE08C";
-                _colOwe  = _hubNative ? "#1F4F8F" : "#CFE3FF";
-                _colMuted= _hubNative ? "#8A92A0" : "#6B7384";
+                // TRUE-UP 2026-06-11 (.modding/03-systems/native-ui-style.md):
+                // the dump showed native pages are NOT white-box + dark ink —
+                // lists sit on TRANSLUCENT DARK NAVY (#262B40@0.43) with white
+                // text; muted = #8795A0, idle labels #CACDCE.  The old white
+                // theme was a guess; these values are renderer-confirmed.
+                _inkHi   = _hubNative ? C_WHITE : C_WHITE;
+                _inkLo   = _hubNative ? new Color(0.792f, 0.804f, 0.808f, 1f) : C_LBLGREY;   // #CACDCE
+                _boxCol  = _hubNative ? new Color(0.149f, 0.169f, 0.251f, 0.43f) : HubBoxGrey; // #262B40@0.43
+                _colFrom = "#FFD27A";
+                _colGood = "#8CE08C";
+                _colOwe  = "#CFE3FF";
+                _colMuted= _hubNative ? "#8795A0" : "#6B7384";
 
                 _hub = MakeGO("BAMP_Hub", host ?? _canvasGO!.transform);
                 _hubRT = _hub.GetComponent<RectTransform>();
@@ -1713,14 +1718,14 @@ namespace BigAmbitionsMP
             barRT.anchoredPosition = new Vector2(x + w - 10f, y);
             barRT.sizeDelta = new Vector2(8f, h);
             var trackImg = barGO.AddComponent<Image>();
-            trackImg.color = _hubNative ? new Color(0.84f, 0.86f, 0.90f, 1f) : new Color(0.10f, 0.11f, 0.14f, 1f);
+            trackImg.color = _hubNative ? new Color(1f, 1f, 1f, 0.08f) : new Color(0.10f, 0.11f, 0.14f, 1f);
             if (sprite != null) { try { trackImg.sprite = sprite; trackImg.type = Image.Type.Sliced; } catch { } }
             var handleGO = MakeGO("Handle", barGO.transform);
             var handleRT = handleGO.GetComponent<RectTransform>();
             handleRT.anchorMin = Vector2.zero; handleRT.anchorMax = Vector2.one;
             handleRT.offsetMin = new Vector2(1f, 1f); handleRT.offsetMax = new Vector2(-1f, -1f);
             var handleImg = handleGO.AddComponent<Image>();
-            handleImg.color = _hubNative ? new Color(0.55f, 0.60f, 0.68f, 1f) : new Color(0.34f, 0.38f, 0.46f, 1f);
+            handleImg.color = _hubNative ? new Color(0.490f, 0.506f, 0.525f, 1f) : new Color(0.34f, 0.38f, 0.46f, 1f);   // native #7D8186
             if (sprite != null) { try { handleImg.sprite = sprite; handleImg.type = Image.Type.Sliced; } catch { } }
             var bar = barGO.AddComponent<Scrollbar>();
             bar.direction = Scrollbar.Direction.BottomToTop;
@@ -1788,7 +1793,7 @@ namespace BigAmbitionsMP
             rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0f, 1f);
             rt.anchoredPosition = new Vector2(x, y); rt.sizeDelta = new Vector2(w, h);
             var img = go.AddComponent<Image>();
-            img.color = _hubNative ? new Color(0.875f, 0.895f, 0.925f, 1f) : new Color(0.10f, 0.11f, 0.145f, 1f);
+            img.color = _hubNative ? new Color(1f, 1f, 1f, 0.10f) : new Color(0.10f, 0.11f, 0.145f, 1f);   // shaded well on the navy box
             if (sprite != null) { try { img.sprite = sprite; img.type = Image.Type.Sliced; } catch { } }
             var lbl = MakeLabel(go.transform, "", fontSize, _inkHi, 10f, 0f, w - 20f, h, TextAlignmentOptions.Left);
             ApplyFont(lbl);
