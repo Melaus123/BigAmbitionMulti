@@ -1884,9 +1884,12 @@ namespace BigAmbitionsMP
             rt.anchoredPosition = new Vector2(x, y);
         }
 
-        private (RectTransform rt, TextMeshProUGUI lbl) MakeHubButton(string label, Vector2 pos, float w, Color bg, float h, Sprite? sprite)
+        private (RectTransform rt, TextMeshProUGUI lbl) MakeHubButton(string label, Vector2 pos, float w, Color bg, float h, Sprite? sprite, Transform? parent = null)
         {
-            var go = MakeGO("BAMP_Hub_" + label + pos.x, _hub!.transform);
+            // Explicit parent for non-hub callers (join popup etc.) — the _hub
+            // default threw when the hub hadn't been built yet (popup no-show).
+            var host = parent ?? _hub?.transform ?? _canvasGO!.transform;
+            var go = MakeGO("BAMP_Hub_" + label + pos.x, host);
             var rt = go.GetComponent<RectTransform>();
             rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0f, 0f);
             rt.anchoredPosition = pos; rt.sizeDelta = new Vector2(w, h);
