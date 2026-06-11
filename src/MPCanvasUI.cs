@@ -1038,13 +1038,17 @@ namespace BigAmbitionsMP
         private readonly Image?[] _hubChipImg = new Image?[4];
         private readonly TextMeshProUGUI?[] _hubChipLbl = new TextMeshProUGUI?[4];
         private readonly string[] _hubChipWho = new string[4];
-        // Incoming offers: SHARED + category-agnostic (3 slots, filterable).
-        private readonly RectTransform?[] _hubAcceptRT = new RectTransform?[3];
-        private readonly RectTransform?[] _hubDeclineRT = new RectTransform?[3];
-        private readonly string[] _hubOfferIds = new string[3];
+        // Incoming offers: SHARED + category-agnostic (4 slots, filterable).
+        private readonly RectTransform?[] _hubAcceptRT = new RectTransform?[4];
+        private readonly RectTransform?[] _hubDeclineRT = new RectTransform?[4];
+        private readonly string[] _hubOfferIds = new string[4];
         private int _hubFilter;                               // 0=all 1=gifts 2=loans
         private readonly RectTransform?[] _hubFilterRT = new RectTransform?[3];
         private readonly Image?[] _hubFilterImg = new Image?[3];
+        // Active-loans paging (3 per page — large ledgers stay reviewable).
+        private int _hubLoanPage;
+        private RectTransform? _hubLoanPrevRT, _hubLoanNextRT;
+        private TextMeshProUGUI? _hubLoanPageLbl;
         // Outgoing offers per page, cancellable (X).
         private readonly RectTransform?[] _hubOutGiftXRT = new RectTransform?[2];
         private readonly string[] _hubOutGiftIds = new string[2];
@@ -1241,7 +1245,7 @@ namespace BigAmbitionsMP
                     foreach (var o in MPHub.IncomingOffers)
                         if (_hubFilter == 0 || (_hubFilter == 1) == (o.Kind == "gift")) incoming.Add(o);
                     var so = new System.Text.StringBuilder();
-                    for (int i = 0; i < 3; i++)
+                    for (int i = 0; i < 4; i++)
                     {
                         bool has = i < incoming.Count;
                         _hubAcceptRT[i]?.gameObject.SetActive(has);
@@ -1253,7 +1257,7 @@ namespace BigAmbitionsMP
                             ? $"<color={_colGood}>{o.From}</color> offers you a <b>${o.Principal:N0}</b> gift\n\n"
                             : $"<color={_colFrom}>{o.From}</color> offers a <b>${o.Principal:N0}</b> loan at <b>{MPHub.OfferTotalPct(o):F0}% total</b> over {MPHub.OfferTermDays(o)} days (${o.DailyInterest:N0}/day int · ${o.DailyPayment:N0}/day pay)\n\n");
                     }
-                    if (incoming.Count > 3) so.Append($"<color={_colMuted}>… and {incoming.Count - 3} more</color>");
+                    if (incoming.Count > 4) so.Append($"<color={_colMuted}>… and {incoming.Count - 4} more (filters narrow the list)</color>");
                     if (_hubOffers != null) _hubOffers.text = so.Length > 0 ? so.ToString() : $"<color={_colMuted}>no pending offers</color>";
 
                     // OUTGOING per kind (cancellable).
@@ -1269,28 +1273,43 @@ namespace BigAmbitionsMP
                         if (has) sg.Append($"<b>${outG[i].Principal:N0}</b> gift to <color={_colGood}>{outG[i].To}</color> — awaiting accept\n\n");
                     }
                     if (_hubOutGifts != null) _hubOutGifts.text = sg.Length > 0 ? sg.ToString() : $"<color={_colMuted}>no pending outgoing gifts</color>";
+                    // Outgoing loans: one visible row + overflow count (the X
+                    // cancels the shown one; the list cycles as they resolve).
                     var slo = new System.Text.StringBuilder();
-                    for (int i = 0; i < 2; i++)
                     {
-                        bool has = i < outL.Count;
-                        _hubOutLoanXRT[i]?.gameObject.SetActive(has);
-                        _hubOutLoanIds[i] = has ? outL[i].Id : "";
-                        if (has) slo.Append($"<b>${outL[i].Principal:N0}</b> loan to <color={_colFrom}>{outL[i].To}</color> at {MPHub.OfferTotalPct(outL[i]):F0}% total over {MPHub.OfferTermDays(outL[i])} days — awaiting accept\n\n");
+                        bool has = outL.Count > 0;
+                        _hubOutLoanXRT[0]?.gameObject.SetActive(has);
+                        _hubOutLoanIds[0] = has ? outL[0].Id : "";
+                        _hubOutLoanIds[1] = "";
+                        if (has)
+                        {
+                            slo.Append($"<b>${outL[0].Principal:N0}</b> loan to <color={_colFrom}>{outL[0].To}</color> at {MPHub.OfferTotalPct(outL[0]):F0}% total over {MPHub.OfferTermDays(outL[0])} days — awaiting accept");
+                            if (outL.Count > 1) slo.Append($"  <color={_colMuted}>(+{outL.Count - 1} more)</color>");
+                        }
                     }
                     if (_hubOutLoans != null) _hubOutLoans.text = slo.Length > 0 ? slo.ToString() : $"<color={_colMuted}>no pending outgoing loans</color>";
 
-                    var sl = new System.Text.StringBuilder();
+                    // ACTIVE LOANS — paged, 3 per page (large ledgers stay
+                    // reviewable via < > controls).
+                    var mine = new List<LoanEntry>();
                     foreach (var ln in MPHub.Loans)
+                        if (ln.Borrower == MPConfig.PlayerId || ln.Lender == MPConfig.PlayerId) mine.Add(ln);
+                    int pages = Math.Max(1, (mine.Count + 2) / 3);
+                    _hubLoanPage = Math.Clamp(_hubLoanPage, 0, pages - 1);
+                    var sl = new System.Text.StringBuilder();
+                    for (int i = _hubLoanPage * 3; i < Math.Min(mine.Count, _hubLoanPage * 3 + 3); i++)
                     {
+                        var ln = mine[i];
                         bool meB = ln.Borrower == MPConfig.PlayerId;
-                        bool meL = ln.Lender == MPConfig.PlayerId;
-                        if (!meB && !meL) continue;
                         sl.Append(meB
                             ? $"you owe <color={_colOwe}>{ln.Lender}</color>: <b>${ln.Remaining:N0}</b> left (${ln.DailyInterest:N0}+${ln.DailyPayment:N0}/day · ~{Math.Ceiling(ln.Remaining / Math.Max(1f, ln.DailyPayment)):F0} days left)\n"
                             : $"<color={_colGood}>{ln.Borrower}</color> owes you: <b>${ln.Remaining:N0}</b> left (${ln.DailyInterest:N0}+${ln.DailyPayment:N0}/day · ~{Math.Ceiling(ln.Remaining / Math.Max(1f, ln.DailyPayment)):F0} days left)\n");
                     }
-                    if (MPHub.Loans.Count > 0 && sl.Length == 0)
+                    if (MPHub.Loans.Count > 0 && mine.Count == 0)
                         Plugin.Logger.LogWarning($"[Hub] {MPHub.Loans.Count} active loan(s) but none match my id '{MPConfig.PlayerId}' (loan0: lender='{MPHub.Loans[0].Lender}' borrower='{MPHub.Loans[0].Borrower}')");
+                    if (_hubLoanPageLbl != null) _hubLoanPageLbl.text = pages > 1 ? $"{_hubLoanPage + 1}/{pages}" : "";
+                    _hubLoanPrevRT?.gameObject.SetActive(pages > 1);
+                    _hubLoanNextRT?.gameObject.SetActive(pages > 1);
                     if (_hubLoans != null) _hubLoans.text = sl.Length > 0 ? sl.ToString() : $"<color={_colMuted}>no active loans</color>";
                 }
 
@@ -1345,6 +1364,8 @@ namespace BigAmbitionsMP
                     if (_hubTab == 0 && _hubOutGiftIds[i] != "" && HubHit(_hubOutGiftXRT[i], mp)) { MPHub.CancelOffer(_hubOutGiftIds[i]); return; }
                     if (_hubTab == 1 && _hubOutLoanIds[i] != "" && HubHit(_hubOutLoanXRT[i], mp)) { MPHub.CancelOffer(_hubOutLoanIds[i]); return; }
                 }
+                if (_hubTab == 1 && HubHit(_hubLoanPrevRT, mp)) { _hubLoanPage--; _hubSeenVersion = -1; return; }
+                if (_hubTab == 1 && HubHit(_hubLoanNextRT, mp)) { _hubLoanPage++; _hubSeenVersion = -1; return; }
             }
             catch { }
         }
@@ -1375,7 +1396,7 @@ namespace BigAmbitionsMP
                 _hubRT = _hub.GetComponent<RectTransform>();
                 _hubRT.anchorMin = _hubRT.anchorMax = _hubRT.pivot = new Vector2(0.5f, 0.5f);
                 _hubRT.anchoredPosition = new Vector2(0f, 0f);
-                _hubRT.sizeDelta = new Vector2(980f, 620f);
+                _hubRT.sizeDelta = new Vector2(980f, _hubNative ? 620f : 668f);   // standalone carries its header
                 if (_hubNative) _hubRT.localScale = new Vector3(1.35f, 1.35f, 1f);   // fills the 1920x875 root
                 var sprite = IsAlive(_panelSprite) ? _panelSprite : EnsureRoundedSprite();
                 var bg = _hub.AddComponent<Image>();
@@ -1417,29 +1438,28 @@ namespace BigAmbitionsMP
                 }
 
                 // Shared band: target chips + amount (used by every tab).
+                // ── Shared band: target + amount on ONE row. ─────────────────
                 var toLbl = MakeLabel(_hub.transform, "to:", 13, C_LBLGREY, 24f, T - 74f, 34f, 26f, TextAlignmentOptions.Left);
                 ApplyFont(toLbl);
                 for (int i = 0; i < 4; i++)
                 {
-                    var (crt, clbl) = MakeHubButton("", new Vector2(0f, 0f), 142f, new Color(0.18f, 0.20f, 0.27f, 1f), 30f, sprite);
-                    SetTopLeft(crt, 64f + i * 152f, T - 72f);
+                    var (crt, clbl) = MakeHubButton("", new Vector2(0f, 0f), 134f, new Color(0.18f, 0.20f, 0.27f, 1f), 30f, sprite);
+                    SetTopLeft(crt, 60f + i * 144f, T - 72f);
                     _hubChipRT[i] = crt; _hubChipLbl[i] = clbl;
                     _hubChipImg[i] = crt.GetComponent<Image>();
                     clbl.fontSize = 13;
                     crt.gameObject.SetActive(false);
                 }
-                var amLbl = MakeLabel(_hub.transform, "amount:", 13, C_LBLGREY, 24f, T - 114f, 70f, 26f, TextAlignmentOptions.Left);
+                var amLbl = MakeLabel(_hub.transform, "amount:", 13, C_LBLGREY, 648f, T - 74f, 70f, 26f, TextAlignmentOptions.Left);
                 ApplyFont(amLbl);
-                // Shaded rounded INPUT BOX — typing is the only entry method,
-                // so the box must read as a text field.
-                (_hubAmountRT, _hubAmountLbl) = MakeHubInput(_hub.transform, 100f, T - 108f, 220f, 34f, 20, sprite);
+                (_hubAmountRT, _hubAmountLbl) = MakeHubInput(_hub.transform, 724f, T - 68f, 232f, 34f, 20, sprite);
 
                 // Category tab row.
                 string[] tabNames = { "Transfers", "Loans" };
                 for (int i = 0; i < 2; i++)
                 {
                     var (trt, tlbl) = MakeHubButton(tabNames[i], new Vector2(0f, 0f), 170f, HubTabOff, 38f, sprite);
-                    SetTopLeft(trt, 24f + i * 178f, T - 156f);
+                    SetTopLeft(trt, 24f + i * 178f, T - 118f);
                     tlbl.fontSize = 14;
                     _hubTabRT[i] = trt;
                     _hubTabImg[i] = trt.GetComponent<Image>();
@@ -1450,7 +1470,7 @@ namespace BigAmbitionsMP
                 _hubPageTransfers = MakeGO("PageTransfers", _hub.transform);
                 var ptrt = _hubPageTransfers.GetComponent<RectTransform>();
                 ptrt.anchorMin = new Vector2(0f, 0f); ptrt.anchorMax = new Vector2(1f, 1f);
-                ptrt.offsetMin = new Vector2(0f, 198f - T); ptrt.offsetMax = new Vector2(0f, T - 196f);
+                ptrt.offsetMin = new Vector2(0f, 248f); ptrt.offsetMax = new Vector2(0f, T - 164f);
                 var pt = _hubPageTransfers.transform;
 
                 MakeHubBox(pt, 16f, -2f, 948f, 56f, sprite);
@@ -1459,24 +1479,24 @@ namespace BigAmbitionsMP
                 var giftCap = MakeLabel(pt, "gifts require the receiver's accept — no silent handouts", 12, _inkLo, 236f, -20f, 600f, 22f, TextAlignmentOptions.Left);
                 ApplyFont(giftCap);
 
-                MakeHubBox(pt, 16f, -70f, 948f, 112f, sprite);
-                var outGiftHdr = MakeLabel(pt, "<b>YOUR PENDING GIFT OFFERS</b>", 12, _inkLo, 28f, -78f, 360f, 18f, TextAlignmentOptions.Left);
+                MakeHubBox(pt, 16f, -66f, 948f, 124f, sprite);
+                var outGiftHdr = MakeLabel(pt, "<b>YOUR PENDING GIFT OFFERS</b>", 12, _inkLo, 28f, -74f, 360f, 18f, TextAlignmentOptions.Left);
                 ApplyFont(outGiftHdr);
-                _hubOutGifts = MakeLabel(pt, "", 13, _inkHi, 28f, -100f, 800f, 76f, TextAlignmentOptions.TopLeft);
+                _hubOutGifts = MakeLabel(pt, "", 13, _inkHi, 28f, -96f, 800f, 84f, TextAlignmentOptions.TopLeft);
                 ApplyFont(_hubOutGifts);
                 for (int i = 0; i < 2; i++)
                 {
                     var (cxRT, _) = MakeHubButton("X", new Vector2(0f, 0f), 30f, new Color(0.45f, 0.24f, 0.22f, 1f), 24f, sprite);
-                    cxRT.SetParent(pt, false); SetTopLeft(cxRT, 896f, -98f - i * 36f);
+                    cxRT.SetParent(pt, false); SetTopLeft(cxRT, 896f, -94f - i * 36f);
                     _hubOutGiftXRT[i] = cxRT;
                     cxRT.gameObject.SetActive(false);
                 }
 
-                // ── Page: Loans (terms + outgoing loans + active ledger) ─────
+                // ── Page: Loans (terms + outgoing + paged active ledger) ─────
                 _hubPageLoans = MakeGO("PageLoans", _hub.transform);
                 var plrt = _hubPageLoans.GetComponent<RectTransform>();
                 plrt.anchorMin = new Vector2(0f, 0f); plrt.anchorMax = new Vector2(1f, 1f);
-                plrt.offsetMin = new Vector2(0f, 198f - T); plrt.offsetMax = new Vector2(0f, T - 196f);
+                plrt.offsetMin = new Vector2(0f, 248f); plrt.offsetMax = new Vector2(0f, T - 164f);
                 var pl = _hubPageLoans.transform;
 
                 MakeHubBox(pl, 16f, -2f, 948f, 78f, sprite);
@@ -1491,51 +1511,56 @@ namespace BigAmbitionsMP
                 _hubTermsLbl = MakeLabel(pl, "", 12, _inkLo, 28f, -52f, 920f, 22f, TextAlignmentOptions.Left);
                 ApplyFont(_hubTermsLbl);
 
-                MakeHubBox(pl, 16f, -90f, 948f, 102f, sprite);
-                var outLoanHdr = MakeLabel(pl, "<b>YOUR PENDING LOAN OFFERS</b>", 12, _inkLo, 28f, -98f, 360f, 18f, TextAlignmentOptions.Left);
+                MakeHubBox(pl, 16f, -86f, 948f, 56f, sprite);
+                var outLoanHdr = MakeLabel(pl, "<b>YOUR PENDING LOAN OFFERS</b>", 12, _inkLo, 28f, -94f, 250f, 18f, TextAlignmentOptions.Left);
                 ApplyFont(outLoanHdr);
-                _hubOutLoans = MakeLabel(pl, "", 13, _inkHi, 28f, -120f, 800f, 66f, TextAlignmentOptions.TopLeft);
+                _hubOutLoans = MakeLabel(pl, "", 13, _inkHi, 286f, -94f, 580f, 40f, TextAlignmentOptions.TopLeft);
                 ApplyFont(_hubOutLoans);
-                for (int i = 0; i < 2; i++)
                 {
                     var (cxRT, _) = MakeHubButton("X", new Vector2(0f, 0f), 30f, new Color(0.45f, 0.24f, 0.22f, 1f), 24f, sprite);
-                    cxRT.SetParent(pl, false); SetTopLeft(cxRT, 896f, -118f - i * 34f);
-                    _hubOutLoanXRT[i] = cxRT;
+                    cxRT.SetParent(pl, false); SetTopLeft(cxRT, 896f, -94f);
+                    _hubOutLoanXRT[0] = cxRT;
                     cxRT.gameObject.SetActive(false);
+                    _hubOutLoanXRT[1] = null;
                 }
 
-                MakeHubBox(pl, 16f, -202f, 948f, 100f, sprite);
-                var loansHdr = MakeLabel(pl, "<b>ACTIVE LOANS</b>", 12, _inkLo, 28f, -210f, 300f, 18f, TextAlignmentOptions.Left);
+                MakeHubBox(pl, 16f, -152f, 948f, 100f, sprite);
+                var loansHdr = MakeLabel(pl, "<b>ACTIVE LOANS</b>", 12, _inkLo, 28f, -160f, 220f, 18f, TextAlignmentOptions.Left);
                 ApplyFont(loansHdr);
-                _hubLoans = MakeLabel(pl, "", 13, _inkHi, 28f, -232f, 900f, 64f, TextAlignmentOptions.TopLeft);
+                (_hubLoanPrevRT, _) = MakeHubButton("<", new Vector2(0f, 0f), 26f, new Color(0.18f, 0.20f, 0.27f, 1f), 22f, sprite);
+                _hubLoanPrevRT.SetParent(pl, false); SetTopLeft(_hubLoanPrevRT, 820f, -158f);
+                _hubLoanPageLbl = MakeLabel(pl, "", 12, _inkLo, 850f, -160f, 46f, 18f, TextAlignmentOptions.Center);
+                ApplyFont(_hubLoanPageLbl);
+                (_hubLoanNextRT, _) = MakeHubButton(">", new Vector2(0f, 0f), 26f, new Color(0.18f, 0.20f, 0.27f, 1f), 22f, sprite);
+                _hubLoanNextRT.SetParent(pl, false); SetTopLeft(_hubLoanNextRT, 900f, -158f);
+                _hubLoans = MakeLabel(pl, "", 13, _inkHi, 28f, -182f, 900f, 66f, TextAlignmentOptions.TopLeft);
                 ApplyFont(_hubLoans);
 
                 // ── Shared: INCOMING OFFERS (category-agnostic + filter) ─────
-                MakeHubBox(_hub.transform, 16f, T - 432f, 948f, 176f + (_hubNative ? 28f : 0f), sprite);
-                var inHdr = MakeLabel(_hub.transform, "<b>INCOMING OFFERS</b>", 12, _inkLo, 28f, T - 440f, 220f, 18f, TextAlignmentOptions.Left);
+                MakeHubBox(_hub.transform, 16f, T - 426f, 948f, 222f, sprite);
+                var inHdr = MakeLabel(_hub.transform, "<b>INCOMING OFFERS</b>", 12, _inkLo, 28f, T - 434f, 220f, 18f, TextAlignmentOptions.Left);
                 ApplyFont(inHdr);
                 string[] filters = { "all", "gifts", "loans" };
                 for (int i = 0; i < 3; i++)
                 {
                     var (frt, flbl) = MakeHubButton(filters[i], new Vector2(0f, 0f), 64f, HubTabOff, 22f, sprite);
-                    SetTopLeft(frt, 240f + i * 70f, T - 438f);
+                    SetTopLeft(frt, 240f + i * 70f, T - 432f);
                     flbl.fontSize = 11;
                     _hubFilterRT[i] = frt;
                     _hubFilterImg[i] = frt.GetComponent<Image>();
                 }
-                _hubOffers = MakeLabel(_hub.transform, "", 13, _inkHi, 28f, T - 466f, 690f, 136f + (_hubNative ? 28f : 0f), TextAlignmentOptions.TopLeft);
+                _hubOffers = MakeLabel(_hub.transform, "", 13, _inkHi, 28f, T - 460f, 690f, 180f, TextAlignmentOptions.TopLeft);
                 ApplyFont(_hubOffers);
-                for (int i = 0; i < 3; i++)
+                for (int i = 0; i < 4; i++)
                 {
                     var (aRT, _) = MakeHubButton("accept",  new Vector2(0f, 0f), 74f, new Color(0.24f, 0.50f, 0.33f, 1f), 26f, sprite);
-                    SetTopLeft(aRT, 740f, T - 464f - i * 44f);
+                    SetTopLeft(aRT, 740f, T - 458f - i * 42f);
                     var (dRT, _) = MakeHubButton("decline", new Vector2(0f, 0f), 74f, new Color(0.45f, 0.24f, 0.22f, 1f), 26f, sprite);
-                    SetTopLeft(dRT, 822f, T - 464f - i * 44f);
+                    SetTopLeft(dRT, 822f, T - 458f - i * 42f);
                     _hubAcceptRT[i] = aRT; _hubDeclineRT[i] = dRT;
                     aRT.gameObject.SetActive(false); dRT.gameObject.SetActive(false);
                 }
                 RefreshHubFilterChips();
-
                 _hubPageLoans.SetActive(false);
                 _hubSeenVersion = -1;
                 _hub.SetActive(false);

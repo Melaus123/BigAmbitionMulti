@@ -160,11 +160,9 @@ namespace BigAmbitionsMP
                 Version++;
                 return;
             }
+            // No chat notice — the pulsing Business badge is the signal
+            // (user call, 2026-06-10).
             IncomingOffers.Add(p);
-            if (p.Kind == "gift")
-                MPChat.AddNotice($"{p.From} offers you a ${p.Principal:N0} GIFT — see the Business Hub");
-            else
-                MPChat.AddNotice($"{p.From} offers you a ${p.Principal:N0} loan at {OfferTotalPct(p):F0}% total over {OfferTermDays(p)} days — see the Business Hub");
             Version++;
         }
 
