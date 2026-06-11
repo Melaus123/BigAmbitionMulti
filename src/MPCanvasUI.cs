@@ -1253,8 +1253,17 @@ namespace BigAmbitionsMP
                     _joinPopRT!.sizeDelta = new Vector2(380f, 40f + shown * 40f + (pending.Count > shown ? 24f : 0f));
                 }
                 if (!_joinPop!.activeSelf) _joinPop.SetActive(true);
-                float s = Time.unscaledTime < _joinPopPulseUntil ? 1f + 0.04f * (1f + Mathf.Sin(Time.unscaledTime * 7f)) : 1f;
-                _joinPop.transform.localScale = new Vector3(s, s, 1f);
+                // Attention = COLOR glow, not scale: a scale pulse moved the
+                // buttons under the cursor (user feedback, 2026-06-11).
+                var bgImg = _joinPop.GetComponent<Image>();
+                if (bgImg != null)
+                {
+                    float k = Time.unscaledTime < _joinPopPulseUntil
+                        ? (0.5f + 0.5f * Mathf.Sin(Time.unscaledTime * 7f)) * 0.8f : 0f;
+                    bgImg.color = Color.Lerp(new Color(0.10f, 0.11f, 0.15f, 0.97f),
+                                             new Color(0.17f, 0.32f, 0.55f, 0.99f), k);
+                }
+                _joinPop.transform.localScale = Vector3.one;
 
                 var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
                 _joinPopHover = RectHit(_joinPopRT, mp);

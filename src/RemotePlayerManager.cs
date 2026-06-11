@@ -1111,10 +1111,17 @@ namespace BigAmbitionsMP
                 var smr = smrComp != null ? smrComp.TryCast<SkinnedMeshRenderer>() : null;
                 if (smr == null) return;
                 var mats = smr.sharedMaterials;
+                var mpb = new MaterialPropertyBlock();
                 for (int m = 0; m < mats.Length; m++)
                 {
                     var mat = mats[m];
                     if (mat == null) continue;
+                    // The VISIBLE tint may live in a MaterialPropertyBlock —
+                    // mat.GetColor alone returns the base/default color, which
+                    // is why ghost outfits had the right garments but wrong
+                    // colors (2026-06-11).
+                    bool hasMpb = false;
+                    try { smr.GetPropertyBlock(mpb, m); hasMpb = !mpb.isEmpty; } catch { }
                     var sh = mat.shader;
                     int n = sh.GetPropertyCount();
                     for (int p = 0; p < n; p++)
@@ -1123,6 +1130,7 @@ namespace BigAmbitionsMP
                             continue;
                         string pn = sh.GetPropertyName(p);
                         var c = mat.GetColor(pn);
+                        try { if (hasMpb && mpb.HasColor(pn)) c = mpb.GetColor(pn); } catch { }
                         dto.Colors.Add(new ColorEntry
                         {
                             Cat = cat, Mat = m, Prop = pn,
