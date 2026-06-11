@@ -80,11 +80,12 @@ namespace BigAmbitionsMP
 
         private static void TryInject()
         {
-            // NEVER inject during loading: the client once stuck at 100% when
+            // NEVER inject during loading: the client stuck at 100% twice when
             // our clone landed in the button row before FullMenu's own startup
-            // had run over it (2026-06-10).  Wait for the startup hold to
-            // release, then a settle grace.
-            if (TimeSync.IsStartupHeld) { _graceUntil = 0f; return; }
+            // had run over it.  The startup hold ALONE wasn't enough (one
+            // session never engaged it) — gate on the ACTUAL loading overlay,
+            // then a settle grace.
+            if (TimeSync.IsStartupHeld || MPCanvasUI.IsLoadingOverlayUp()) { _graceUntil = 0f; return; }
             if (_graceUntil == 0f) { _graceUntil = Time.unscaledTime + 4f; return; }
             if (Time.unscaledTime < _graceUntil) return;
 

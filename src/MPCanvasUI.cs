@@ -1102,7 +1102,9 @@ namespace BigAmbitionsMP
 
         private void TickSpawnOffset()
         {
-            if (TimeSync.IsStartupHeld) return;
+            // Wait out the REAL loading overlay too — applying under it let
+            // the game's own placement land afterwards and undo the offset.
+            if (TimeSync.IsStartupHeld || IsLoadingOverlayUp()) { _spawnApplyAt = 0f; return; }
             try
             {
                 // Telemetry: after applying, report where the character ACTUALLY
@@ -2081,7 +2083,7 @@ namespace BigAmbitionsMP
         /// never reports "gone".  Throttled (FindObjectOfType isn't free).</summary>
         private static float _overlayCheckNext;
         private static bool  _overlayCheckCached = true;
-        private static bool IsLoadingOverlayUp()
+        internal static bool IsLoadingOverlayUp()
         {
             float now = Time.unscaledTime;
             if (now < _overlayCheckNext) return _overlayCheckCached;
