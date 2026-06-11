@@ -351,6 +351,7 @@ namespace BigAmbitionsMP
                 return;
             }
             MPClient.MarkLeftLobby();   // loading now — the lobby pane yields
+            MPClient.BeginJoinQuiesce();   // live stream must not touch the load
             string session = p.SessionName;
             lock (_lock) { _activeSessionName = session; }
             try

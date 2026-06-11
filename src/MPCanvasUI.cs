@@ -1592,7 +1592,10 @@ namespace BigAmbitionsMP
                 _hubRT.anchoredPosition = new Vector2(0f, 0f);
                 _hubRT.sizeDelta = new Vector2(980f, _hubNative ? 620f : 668f);   // standalone carries its header
                 if (_hubNative) _hubRT.localScale = new Vector3(1.35f, 1.35f, 1f);   // fills the 1920x875 root
-                var sprite = IsAlive(_panelSprite) ? _panelSprite : EnsureRoundedSprite();
+                // ALWAYS the owned pure-white rounded sprite: tint colors are
+                // designed against white; the captured native sprite has a grey
+                // cast that turned the white boxes dirty (2026-06-11).
+                var sprite = EnsureRoundedSprite();
                 var bg = _hub.AddComponent<Image>();
                 bg.color = _hubNative ? new Color(0f, 0f, 0f, 0f) : HubPageGrey;   // native shell IS the background
                 if (sprite != null) { try { bg.sprite = sprite; bg.type = Image.Type.Sliced; } catch { } }
@@ -1964,6 +1967,7 @@ namespace BigAmbitionsMP
             if (inGame && !_wasInGame)
             {
                 Plugin.Logger.LogInfo("[UI] Game scene loaded — player sync active.");
+                MPClient.EndJoinQuiesce();   // world is up — streaming may resume
 
                 // Discovery probe — logs GameInstance time/skip method names so we
                 // can identify what the bench/bed/car rest uses to fast-forward time.

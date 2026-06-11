@@ -154,11 +154,39 @@ namespace BigAmbitionsMP
             });
         }
 
+        // ── Join quiesce: while a mid-join load is in flight, the HOST's live
+        // stream must not touch our half-loaded world — a remote player
+        // spawned and the clock hard-snapped MID-LOAD, leaving GameManager
+        // permanently broken (NRE every frame, 2026-06-11).  The lobby flow is
+        // protected by the startup hold; this is the mid-join equivalent.
+        private static volatile bool _joinQuiesce;
+        public static void BeginJoinQuiesce() { _joinQuiesce = true;  Plugin.Logger.LogInfo("[Client] join quiesce ON — world stream deferred until loaded."); }
+        public static void EndJoinQuiesce()   { if (_joinQuiesce) { _joinQuiesce = false; Plugin.Logger.LogInfo("[Client] join quiesce OFF — world stream live."); } }
+
         private static void OnReceive(NetPeer peer, NetPacketReader reader, byte channel, DeliveryMethod delivery)
         {
             var bytes = reader.GetRemainingBytes();
             var env   = MessageEnvelope.Deserialize(bytes);
             if (env == null) return;
+
+            // Streaming world traffic is DROPPED during a join load (snapshots
+            // re-arrive via the world-ready flow; streams resume on their own).
+            if (_joinQuiesce)
+                switch (env.Type)
+                {
+                    case MessageType.PlayerMove:
+                    case MessageType.GameTimeSync:
+                    case MessageType.VehicleSync:
+                    case MessageType.PlayerAnimTrigger:
+                    case MessageType.AppearanceSync:
+                    case MessageType.RestSkipState:
+                        return;
+                    default:
+                        if (env.Type.ToString().Contains("Parked") || env.Type.ToString().Contains("Traffic")
+                            || env.Type.ToString().Contains("Market") || env.Type.ToString().Contains("Interior"))
+                            return;
+                        break;
+                }
 
             switch (env.Type)
             {
@@ -359,6 +387,7 @@ namespace BigAmbitionsMP
         public static void StartFreshFromHost(GameVariablesDto? settings)
         {
             IsInLobby = false;
+            BeginJoinQuiesce();
             var s = settings ?? MPServer.Preset("Normal");
             Plugin.Logger.LogInfo($"[Client] Mid-join fresh start; cash={s.StartingMoney}.");
             GameStatePatcher.EnqueueOnMainThread(() =>
