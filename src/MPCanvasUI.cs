@@ -1141,6 +1141,15 @@ namespace BigAmbitionsMP
                     }
                     return;
                 }
+                // FRESH GAMES ONLY: loaded sessions restore saved positions —
+                // the offset + drift re-pin FIGHTS the restore (wrong spot /
+                // stuck player on load, 2026-06-11).  A loaded session has its
+                // name set BEFORE the world loads; a new game doesn't.
+                if (!string.IsNullOrEmpty(MPSaveCoordinator.ActiveSessionName))
+                {
+                    _spawnOffsetDone = true;
+                    return;
+                }
                 var players = MPRestSync.AllPlayers();
                 if (players.Count < 2)
                 {
