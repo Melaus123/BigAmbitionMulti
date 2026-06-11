@@ -791,9 +791,13 @@ namespace BigAmbitionsMP
                 if (_dockTitle != null)
                     _dockTitle.text = NiceActivity(MPRestSync.ActivityName);
 
-                bool hasX = MPRestSync.CancelButtonIndex >= 0;
-                if (_dockXRT != null && _dockXRT.gameObject.activeSelf != hasX)
-                    _dockXRT.gameObject.SetActive(hasX);
+                // The X is UNCONDITIONAL: it used to mirror the game's
+                // per-state cancel-button list, which blinks during activity
+                // transitions and vanished entirely in the wedge (user,
+                // 2026-06-11).  StandUp() already handles the no-cancel-button
+                // case, so the dependency never bought anything.
+                if (_dockXRT != null && !_dockXRT.gameObject.activeSelf)
+                    _dockXRT.gameObject.SetActive(true);
 
                 // Destination time: default is a SHORT wait (now + 1h) — the
                 // old next-morning default silently meant "until tomorrow".
@@ -870,8 +874,8 @@ namespace BigAmbitionsMP
 
                 if (!Input.GetMouseButtonDown(0) || !_restUiHover) return;
 
-                if (hasX && _dockXRT != null && RectHit(_dockXRT, mp))
-                { MPRestSync.InvokeDockButton(MPRestSync.CancelButtonIndex); return; }
+                if (_dockXRT != null && RectHit(_dockXRT, mp))
+                { MPRestSync.StandUp(); return; }   // StandUp prefers the game's cancel button, falls back otherwise
 
                 if (RectHit(_dockHdrRT, mp))
                 { _dockDragging = true; _dockDragLast = mp; return; }
