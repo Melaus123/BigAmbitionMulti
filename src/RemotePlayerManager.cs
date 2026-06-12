@@ -847,7 +847,14 @@ namespace BigAmbitionsMP
                             p.AnimI[i] = anim.GetInteger(ps[i].name);
                             break;
                         case AnimatorControllerParameterType.Bool:
-                            if (anim.GetBool(ps[i].name)) p.AnimB.Add(i);
+                            bool bv = anim.GetBool(ps[i].name);
+                            if (bv) p.AnimB.Add(i);
+                            // [CarryProbe] 2026-06-12: box-carry pose/prop never
+                            // shows remotely — log every Holding* transition +
+                            // scan for the held prop so one carry run names the
+                            // mechanism (bool vs layer vs IK vs prop-attach).
+                            if (ps[i].name.IndexOf("olding", StringComparison.Ordinal) >= 0)
+                                ProbeHoldingChange(anim, ps[i].name, bv);
                             break;
                     }
                 }
@@ -862,6 +869,44 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogWarning($"[AnimSync] ReadLocalAnimState: {ex.Message}");
             }
+        }
+
+        // ── [CarryProbe] held-prop investigation (2026-06-12) ─────────────────
+        private static readonly HashSet<string> _holdingOn = new();
+
+        private static void ProbeHoldingChange(Animator anim, string name, bool on)
+        {
+            bool was = _holdingOn.Contains(name);
+            if (on == was) return;
+            if (on) _holdingOn.Add(name); else _holdingOn.Remove(name);
+            Plugin.Logger.LogInfo($"[CarryProbe] local '{name}' → {on}");
+            if (!on) return;
+            try
+            {
+                // Name the held prop: anything box/crate/holding-ish under the
+                // character root, with its full path + active layer weights.
+                var root = anim.transform.root;
+                var sb = new System.Text.StringBuilder("[CarryProbe] prop scan:");
+                int found = 0;
+                foreach (var tr in root.GetComponentsInChildren<Transform>(true))
+                {
+                    var n = tr.name;
+                    if (n.IndexOf("box", StringComparison.OrdinalIgnoreCase) < 0
+                        && n.IndexOf("crate", StringComparison.OrdinalIgnoreCase) < 0
+                        && n.IndexOf("hold", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    string path = n;
+                    var pT = tr.parent;
+                    int depth = 0;
+                    while (pT != null && pT != root && depth++ < 8) { path = pT.name + "/" + path; pT = pT.parent; }
+                    sb.Append($" '{path}'(active={tr.gameObject.activeInHierarchy})");
+                    if (++found >= 10) break;
+                }
+                if (found == 0) sb.Append(" (none matched)");
+                var lw = new System.Text.StringBuilder(" layers:");
+                for (int l = 0; l < anim.layerCount && l < 8; l++) lw.Append($" {l}={anim.GetLayerWeight(l):F2}");
+                Plugin.Logger.LogInfo(sb.ToString() + lw);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CarryProbe] {ex.Message}"); }
         }
 
         /// <summary>Resolves an Animator.SetTrigger(int hash) argument to a parameter index, or -1.</summary>
