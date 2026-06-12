@@ -707,6 +707,7 @@ namespace BigAmbitionsMP
             public Vector3     Velocity;
             public float       TargetAt;   // receiver clock at arrival (extrapolation base)
             public float       SenderT;    // sender's sample clock (velocity measurement)
+            public string      AppliedCargo = "";   // manifest|carried sig the ghost was built with
         }
         private const float MaxVehicleExtrapolateSeconds = 0.3f;
         private const float VehicleSnapDistance          = 15f;
@@ -741,6 +742,16 @@ namespace BigAmbitionsMP
                     if (vc == null) continue;
                     var inst = vc.vehicleInstance;
                     if (inst == null || string.IsNullOrEmpty(inst.id)) continue;
+                    // Ghost-leak guard: 'BAMP_BAMP_…' ids in a REAL fleet are
+                    // ghosts that slipped into someone's VehicleInstances across
+                    // a save/load (run-16 evidence: triple-prefixed rig id).
+                    // Never re-broadcast them — that snowballs prefix-per-cycle.
+                    if (inst.id.Contains("BAMP_BAMP"))
+                    {
+                        if (_lastManifestLogged.TryAdd(inst.id, "LEAKED"))
+                            Plugin.Logger.LogWarning($"[Vehicle] leaked ghost in local fleet skipped: '{inst.id}' (save-cycle leak — root cause backlogged).");
+                        continue;
+                    }
                     var t = vc.transform;
                     string tn = inst.vehicleTypeName.ToString();
                     // Ground-truth capture: while WE drive/push, record the exact
@@ -768,14 +779,17 @@ namespace BigAmbitionsMP
                         }
                     }
                     catch { }
-                    // Handcart-boxes evidence (user, 2026-06-12): flatbed boxes
-                    // sync, cart boxes don't — log each vehicle's manifest when
-                    // it changes so the next run shows whether the cart manifest
-                    // is empty (cargo lives elsewhere) or full (visual builder).
-                    if (!_lastManifestLogged.TryGetValue(inst.id, out var prevCargo) || prevCargo != cargo)
+                    // Carts transport ITEM INSTANCES (cargoIds), not loose cargo
+                    // — run-16 evidence: HandTruck manifest "(empty)" with a box
+                    // on it.  Ship the count; ghosts render generic boxes.
+                    int carried = 0;
+                    try { carried = inst.cargoIds?.Count ?? 0; } catch { }
+
+                    string manifestSig = $"{cargo}|{carried}";
+                    if (!_lastManifestLogged.TryGetValue(inst.id, out var prevCargo) || prevCargo != manifestSig)
                     {
-                        _lastManifestLogged[inst.id] = cargo;
-                        Plugin.Logger.LogInfo($"[Vehicle] manifest {tn} '{inst.id}': {(cargo.Length > 0 ? cargo : "(empty)")}");
+                        _lastManifestLogged[inst.id] = manifestSig;
+                        Plugin.Logger.LogInfo($"[Vehicle] manifest {tn} '{inst.id}': {(cargo.Length > 0 ? cargo : "(empty)")} carried={carried}");
                     }
 
                     // Cross-interior tag (v2 — replaces the owner-proximity
@@ -801,6 +815,7 @@ namespace BigAmbitionsMP
                         X = t.position.x, Y = t.position.y, Z = t.position.z,
                         Qx = t.rotation.x, Qy = t.rotation.y, Qz = t.rotation.z, Qw = t.rotation.w,
                         Cargo = cargo,
+                        CarriedItems = carried,
                         Bldg  = bldg,
                     });
                 }
@@ -860,13 +875,29 @@ namespace BigAmbitionsMP
                     var pos = new Vector3(e.X, e.Y, e.Z);
                     var rot = new Quaternion(e.Qx, e.Qy, e.Qz, e.Qw);
 
+                    string cargoSig = $"{e.Cargo}|{e.CarriedItems}";
                     if (!_remoteVehicles.TryGetValue(e.VehicleId, out var rv) || rv.Go == null)
                     {
                         var spawned = SpawnRemoteVehicle(p.OwnerId, e, pos, rot);
                         if (spawned == null) continue;
                         rv = spawned;
                         rv.TargetAt = Time.unscaledTime;
+                        rv.AppliedCargo = cargoSig;
                         _remoteVehicles[e.VehicleId] = rv;
+                    }
+                    else if (rv.AppliedCargo != cargoSig)
+                    {
+                        // Owner loaded/unloaded — ghost cargo visuals are baked
+                        // at spawn, so rebuild the ghost (cheap; cargo changes
+                        // are infrequent).  Fixes stale bed boxes (run-16).
+                        DespawnByVehicleId(e.VehicleId);
+                        var fresh = SpawnRemoteVehicle(p.OwnerId, e, pos, rot);
+                        if (fresh == null) continue;
+                        rv = fresh;
+                        rv.TargetAt = Time.unscaledTime;
+                        rv.AppliedCargo = cargoSig;
+                        _remoteVehicles[e.VehicleId] = rv;
+                        Plugin.Logger.LogInfo($"[Vehicle] ghost '{e.TypeName}' ({e.VehicleId}) rebuilt — cargo changed ({cargoSig}).");
                     }
                     if (rv.Go != null && Vector3.Distance(rv.Go.transform.position, pos) > VehicleSnapDistance)
                     {
@@ -1031,6 +1062,16 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning($"[Vehicle] VehicleInstance setup ('{e.TypeName}'): {ex.Message}");
             }
             ApplyCargoManifest(inst, e.Cargo);   // bed/handtruck boxes derive from cargo
+            // Carried ITEM instances (hand-truck channel): we can't replicate
+            // another machine's loose items, so render generic stand-in cargo —
+            // one unit per carried item (ghost-only; flatbed-proven renderer).
+            try
+            {
+                for (int ci = 0; ci < e.CarriedItems && ci < 12; ci++)
+                    inst.cargoInstances?.Add(new BigAmbitions.Items.CargoInstance(
+                        BigAmbitions.Items.ItemName.CheapGift, 1, 0f, true));
+            }
+            catch { }
 
             int ownedBefore = SafeCount(() => VehicleHelper.AllPlayerVehicles?.Count ?? -1);
 

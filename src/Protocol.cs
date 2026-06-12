@@ -368,6 +368,10 @@ namespace BigAmbitionsMP
         /// <summary>Cargo manifest ("ItemName:amount;…") so remote ghosts show
         /// the bed/handtruck boxes (they derive from cargo) — user bug 2026-06-11.</summary>
         public string Cargo { get; set; } = "";
+        /// <summary>Count of ITEM INSTANCES being transported (VehicleInstance
+        /// .cargoIds — the channel hand trucks use; separate from loose-cargo
+        /// amounts).  Receivers render that many generic boxes.</summary>
+        public int CarriedItems { get; set; }
         /// <summary>Address key of the building this vehicle is inside ("" =
         /// outdoors).  Cross-interior mask v2: tagged sender-side (near the
         /// owner while they're inside → that building; near them outside → "";
