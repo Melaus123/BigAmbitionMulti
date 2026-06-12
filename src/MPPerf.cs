@@ -13,7 +13,9 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class MPPerf
     {
-        public static bool Enabled = false;   // perf investigation done 2026-06-10 (host ≡ client baseline) — re-enable to re-measure
+        // 2026-06-12: ON for the post-port performance pass (per-system table
+        // every 10s in both logs).  Costs a Stopwatch read per bracket.
+        public static bool Enabled = true;
         private const float ReportSeconds = 10f;
 
         private sealed class Slot { public double Total; public double Max; public int Calls; }
