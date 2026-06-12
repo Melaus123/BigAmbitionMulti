@@ -2259,10 +2259,76 @@ namespace BigAmbitionsMP
             }
         }
 
-        // (AssignProbe + StaffEval gate-override/shift-probe + EmpSpawn probe
-        //  all REMOVED 2026-06-12 — the synthetic-staffing approach they served
-        //  was superseded by the MP order finalizer + self-checkout routing;
-        //  history in .modding/03-systems/cross-player-shopping.md.)
+        // ── [StaffEval] gate override (RESURRECTED 2026-06-12 for VISIBLE
+        // STAFF NPCs at employee-duty stations — user ruling: invisible-NPC-as-
+        // owner was wrong, visible-NPC-as-staff is right).  The staffing
+        // evaluator's first gate refuses rival-translated shops (run-10
+        // evidence); force it TRUE only for unstaffed EMPLOYEE-duty stations.
+        // Everything downstream is native game code (shift lookup → spawn). ──
+        [HarmonyPatch]
+        public static class Patch_StaffEval_GateOverride
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                try
+                {
+                    foreach (var m in typeof(EmployeeStationController).GetMethods(
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                        if (m.Name == "ShouldUpdateEmployee" && m.DeclaringType == typeof(EmployeeStationController))
+                            return m;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] gate target: {ex.Message}"); }
+                return null;
+            }
+
+            static void Postfix(EmployeeStationController __instance, ref bool __result)
+            {
+                if (__result) return;
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                try
+                {
+                    if (!MPRegisterSync.IsEmployeeDutyStation(__instance.transform.position)) return;
+                    bool unstaffed = false;
+                    try { unstaffed = __instance.employeeInstance == null; } catch { }
+                    if (!unstaffed) return;
+                    __result = true;
+                    Plugin.Logger.LogInfo("[StaffEval] ShouldUpdateEmployee FORCED TRUE (employee-duty station, unstaffed).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] gate: {ex.Message}"); }
+            }
+        }
+
+        // ── [StaffEval] shift-lookup probe (resurrected instrumentation: names
+        // the next gate if the spawn chain still refuses). ────────────────────
+        [HarmonyPatch]
+        public static class Patch_StaffEval_ShiftProbe
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                try
+                {
+                    foreach (var m in typeof(EmployeeStationController).GetMethods(
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                        if (m.Name == "GetEmployeeWorkShift" && m.DeclaringType == typeof(EmployeeStationController))
+                            return m;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] shift target: {ex.Message}"); }
+                return null;
+            }
+
+            static void Postfix(EmployeeStationController __instance, WorkShift? __result)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                try
+                {
+                    if (!MPRegisterSync.IsEmployeeDutyStation(__instance.transform.position)) return;
+                    Plugin.Logger.LogInfo(__result == null
+                        ? "[StaffEval] GetEmployeeWorkShift → null"
+                        : $"[StaffEval] GetEmployeeWorkShift → shift(emp='{__result.employeeId}' station='{__result.itemInstanceId}' {__result.startingHour}-{__result.endingHour})");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] shift probe: {ex.Message}"); }
+            }
+        }
 
         // ── [MPSale] MP order finalizer (2026-06-12, user-approved design).
         // The native OnPlaceOrder decrements LOCAL replica stock and books

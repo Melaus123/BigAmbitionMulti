@@ -828,6 +828,13 @@ namespace BigAmbitionsMP
         /// WorkShift.itemInstanceId.  Interior replication preserves instance
         /// ids, so the id matches on every machine.</summary>
         public string StationId { get; set; } = "";
+        /// <summary>True when this duty is EMPLOYEE staffing (owner's hired
+        /// staff per the schedule), not the owner personally working.  The
+        /// distinction matters on receivers (user ruling 2026-06-12): personal
+        /// duty = the owner's avatar is the visual, no NPC; employee duty =
+        /// spawn a VISIBLE synthetic staff NPC for immersion.  Commerce runs
+        /// the same self-checkout + RemoteSale path either way.</summary>
+        public bool Employee { get; set; }
     }
 
     public class MoneyAdjustPayload

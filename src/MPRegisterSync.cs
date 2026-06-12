@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using BigAmbitions.Characters.Skills;   // SkillName
+using Entities;                          // EmployeeInstance
 using Il2CppInterop.Runtime;
 using UnityEngine;
 
@@ -19,10 +21,16 @@ namespace BigAmbitionsMP
     /// (Patch_MPOrderFinalizer) — charge from the synced store table, revenue
     /// + authoritative stock decrement on the owner side via RemoteSale.
     ///
-    /// (The synthetic-employee staffing approach was DELETED 2026-06-12 after
-    /// the self-checkout pivot verified — history and rationale in the design
-    /// doc.  The native staffing evaluator refuses rival-translated shops at
-    /// its first gate; no roster/WorkShift injection can reach it.)
+    /// TWO duty kinds (user ruling 2026-06-12):
+    ///  * PERSONAL — the owner works the register; their avatar is the visual,
+    ///    nothing is spawned.
+    ///  * EMPLOYEE — the owner's hired staff covers the station (data-driven
+    ///    scan on the owner's machine).  Receivers spawn a VISIBLE synthetic
+    ///    staff NPC for immersion (roster + WorkShift injection + forced
+    ///    staffing gate — resurrected from the deleted owner-mime experiment,
+    ///    where invisible-NPC-as-owner was the wrong idea; visible-NPC-as-staff
+    ///    is the right one).  Commerce never depends on the NPC: the buyer
+    ///    "never knows if it's a system auto ringing them up or the employee."
     ///
     /// Registers are keyed by rounded world position (stable across peers --
     /// interiors are host-snapshot replicas at identical coordinates;
@@ -30,10 +38,10 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class MPRegisterSync
     {
-        // posKey → cashier playerId
-        private static readonly Dictionary<string, (string playerId, Vector3 pos)> _cashiers = new();
+        // posKey → cashier
+        private static readonly Dictionary<string, (string playerId, Vector3 pos, bool employee)> _cashiers = new();
 
-        public static void Reset() { _cashiers.Clear(); _empDuty.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = ""; }
+        public static void Reset() { _cashiers.Clear(); _empDuty.Clear(); _synthetics.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = ""; }
 
         // ── Current building context (set by the building entry patch) ────────
         // After the rival-translation, businessOwnerRivalId holds the OWNING
@@ -59,13 +67,24 @@ namespace BigAmbitionsMP
             string k = Key(pos);
             if (p.On)
             {
-                _cashiers[k] = (p.PlayerId, pos);
-                Plugin.Logger.LogInfo($"[Register] '{p.PlayerId}' ON duty at {k}.");
+                _cashiers[k] = (p.PlayerId, pos, p.Employee);
+                Plugin.Logger.LogInfo($"[Register] '{p.PlayerId}' ON duty at {k}{(p.Employee ? " (employee)" : "")}.");
+                // EMPLOYEE duty on another machine → spawn the visible staff
+                // NPC (immersion; commerce works without it).  Main-thread:
+                // Apply can run on the network poll thread.
+                if (p.Employee && p.PlayerId != MPConfig.PlayerId && !string.IsNullOrEmpty(p.Address))
+                {
+                    string addr = p.Address; string pid = p.PlayerId; string st = p.StationId;
+                    var dutyPos = pos;
+                    GameStatePatcher.EnqueueOnMainThread(() => TryStaffSynthetic(addr, pid, st, dutyPos));
+                }
             }
             else if (_cashiers.TryGetValue(k, out var e) && e.playerId == p.PlayerId)
             {
                 _cashiers.Remove(k);
                 Plugin.Logger.LogInfo($"[Register] '{p.PlayerId}' OFF duty at {k}.");
+                if (e.employee && p.PlayerId != MPConfig.PlayerId)
+                    GameStatePatcher.EnqueueOnMainThread(() => RemoveSyntheticAtStation(k));
             }
         }
 
@@ -74,7 +93,16 @@ namespace BigAmbitionsMP
         {
             var dead = new List<string>();
             foreach (var kv in _cashiers) if (kv.Value.playerId == playerId) dead.Add(kv.Key);
-            foreach (var k in dead) _cashiers.Remove(k);
+            foreach (var k in dead)
+            {
+                bool wasEmployee = _cashiers[k].employee;
+                _cashiers.Remove(k);
+                if (wasEmployee && playerId != MPConfig.PlayerId)
+                {
+                    var key = k;
+                    GameStatePatcher.EnqueueOnMainThread(() => RemoveSyntheticAtStation(key));
+                }
+            }
             if (dead.Count > 0) Plugin.Logger.LogInfo($"[Register] cleared {dead.Count} duty post(s) of departed '{playerId}'.");
         }
 
@@ -137,6 +165,7 @@ namespace BigAmbitionsMP
                 }
 
                 TickEmployeeDuty();                               // employee-staffed stations (data-driven, 5s)
+                TickStaffEvaluator();                             // spawn the visible staff NPC (5s)
                 MPPatches.Patch_MPOrderFinalizer.TickPending();   // service-moment completion
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] duty: {ex.Message}"); }
@@ -148,12 +177,15 @@ namespace BigAmbitionsMP
         public static bool IsStaffedByOtherPlayer(Vector3 registerPos)
             => _cashiers.TryGetValue(Key(registerPos), out var e) && e.playerId != MPConfig.PlayerId;
 
-        private static void SendToggle(Vector3 pos, bool on, string? address = null)
+        private static void SendToggle(Vector3 pos, bool on, string? address = null,
+                                       bool employee = false, string stationId = "")
         {
             var p = new RegisterCashierPayload
             {
                 PlayerId = MPConfig.PlayerId, X = pos.x, Y = pos.y, Z = pos.z, On = on,
-                Address = address ?? CurrentShopAddress   // personal duty: worker is inside the shop
+                Address = address ?? CurrentShopAddress,   // personal duty: worker is inside the shop
+                Employee = employee,
+                StationId = stationId
             };
             Apply(p);   // local echo first — instant feedback
             var env = MessageEnvelope.Create(MessageType.RegisterCashier, MPConfig.PlayerId, p);
@@ -181,7 +213,7 @@ namespace BigAmbitionsMP
             {
                 var gi = SaveGameManager.Current;
                 if (gi == null) return;
-                var live = new Dictionary<string, (Vector3 pos, string addr)>();
+                var live = new Dictionary<string, (Vector3 pos, string addr, string stationId)>();
                 foreach (var reg in gi.BuildingRegistrations)
                 {
                     if (reg == null) continue;
@@ -197,11 +229,12 @@ namespace BigAmbitionsMP
                             && iname != BigAmbitions.Items.ItemName.CheckoutCounterLeft
                             && iname != BigAmbitions.Items.ItemName.CashRegister) continue;
                         bool staffed = false;
-                        try { staffed = Helpers.EmployeeHelper.IsEmployeeStationEmployedAtHour(reg, ii.id?.ToString() ?? "", -1); }
+                        string stationId = ii.id?.ToString() ?? "";
+                        try { staffed = Helpers.EmployeeHelper.IsEmployeeStationEmployedAtHour(reg, stationId, -1); }
                         catch { }
                         if (!staffed) continue;
                         var pos = new Vector3(ii.position.x, ii.position.y, ii.position.z);
-                        live[Key(pos)] = (pos, addr);
+                        live[Key(pos)] = (pos, addr, stationId);
                     }
                 }
                 // Newly staffed stations → ON; no-longer-staffed → OFF.
@@ -209,7 +242,7 @@ namespace BigAmbitionsMP
                     if (!_empDuty.ContainsKey(kv.Key))
                     {
                         _empDuty[kv.Key] = kv.Value.pos;
-                        SendToggle(kv.Value.pos, true, kv.Value.addr);
+                        SendToggle(kv.Value.pos, true, kv.Value.addr, employee: true, stationId: kv.Value.stationId);
                         Plugin.Logger.LogInfo($"[Register] employee-staffed station ON at {kv.Key} ({kv.Value.addr}).");
                     }
                 var stale = new List<string>();
@@ -254,6 +287,144 @@ namespace BigAmbitionsMP
             }
             catch { }
             return -1f;
+        }
+
+        // ── Visible staff NPC (employee duty only; user ruling 2026-06-12) ────
+        // Receivers inject a real EmployeeInstance (game's own factory) into
+        // the roster + a blanket WorkShift on the station, force the staffing
+        // gate (the evaluator refuses rival-translated shops), and invoke the
+        // evaluator until the game spawns the serving NPC.  The NPC stays
+        // VISIBLE — it represents the owner's staff.  One synthetic per
+        // ADDRESS (v1; multi-station shops get one body).  Commerce never
+        // depends on this: self-checkout + RemoteSale run regardless.
+        private static readonly Dictionary<string, (string playerId, EmployeeInstance inst, Vector3 pos)> _synthetics = new();
+        private static float _nextEvalAt;
+
+        /// <summary>Is this station under EMPLOYEE duty (used by the staffing
+        /// gate override — personal duty must never force the gate).</summary>
+        public static bool IsEmployeeDutyStation(Vector3 pos)
+            => _cashiers.TryGetValue(Key(pos), out var e) && e.employee;
+
+        private static void TryStaffSynthetic(string addressKey, string playerId, string stationId, Vector3 dutyPos)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey) || _synthetics.ContainsKey(addressKey)) return;
+                var gi = SaveGameManager.Current;
+                if (gi == null) return;
+
+                BuildingRegistration? reg = null;
+                foreach (var r in gi.BuildingRegistrations)
+                    if (r != null && GameStateReader.AddressKey(r) == addressKey) { reg = r; break; }
+                if (reg == null)
+                {
+                    Plugin.Logger.LogWarning($"[SynthStaff] no registration found for '{addressKey}' — cannot staff.");
+                    return;
+                }
+
+                var inst = Helpers.EmployeeHelper.CreateAIEmployeeInstance(SkillName.CustomerService);
+                if (inst == null) { Plugin.Logger.LogWarning("[SynthStaff] factory returned null."); return; }
+                inst.id = $"BAMP_DUTY_{playerId}_{addressKey.Replace(' ', '_')}";
+                inst.hourlyWage = 0f;
+                inst.satisfaction = 100f;
+                inst.assignedAddress = new Address(reg.StreetName, reg.StreetNumber);
+
+                gi.EmployeeInstances.Add(inst);
+                try { Helpers.EmployeeHelper.EmployeeInstancesDictionary[inst.id] = inst; } catch { }
+                _synthetics[addressKey] = (playerId, inst, dutyPos);
+
+                int shifts = 0;
+                if (!string.IsNullOrEmpty(stationId) && reg.scheduleDays != null)
+                    for (int i = 0; i < reg.scheduleDays.Count; i++)
+                    {
+                        var day = reg.scheduleDays[i];
+                        if (day == null) continue;
+                        day.AddWorkShift(new WorkShift
+                        {
+                            startingHour   = 0,
+                            endingHour     = 24,
+                            employeeId     = inst.id,
+                            itemInstanceId = stationId,
+                            type           = WorkShiftType.Default,
+                        });
+                        shifts++;
+                    }
+                Plugin.Logger.LogInfo(
+                    $"[SynthStaff] staff NPC injected for '{playerId}' at '{addressKey}' " +
+                    $"({shifts} shift(s), station '{stationId}').");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] staff '{addressKey}': {ex}"); }
+        }
+
+        /// <summary>Duty went OFF at a station — remove the synthetic whose
+        /// duty position matches.</summary>
+        private static void RemoveSyntheticAtStation(string posKey)
+        {
+            string? addr = null;
+            foreach (var kv in _synthetics)
+                if (Key(kv.Value.pos) == posKey) { addr = kv.Key; break; }
+            if (addr != null) RemoveSynthetic(addr);
+        }
+
+        private static void RemoveSynthetic(string addressKey)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey) || !_synthetics.TryGetValue(addressKey, out var s)) return;
+                _synthetics.Remove(addressKey);
+                try { Helpers.EmployeeHelper.UnassignEmployeeFromAllWorkshifts(s.inst); }
+                catch (Exception ux) { Plugin.Logger.LogWarning($"[SynthStaff] unassign: {ux.Message}"); }
+                var gi = SaveGameManager.Current;
+                try
+                {
+                    if (gi?.BuildingRegistrations != null)
+                        foreach (var r in gi.BuildingRegistrations)
+                        {
+                            if (r == null || GameStateReader.AddressKey(r) != addressKey) continue;
+                            if (r.scheduleDays != null)
+                                for (int i = 0; i < r.scheduleDays.Count; i++)
+                                {
+                                    var day = r.scheduleDays[i];
+                                    if (day?.workShifts == null) continue;
+                                    var dead = new List<WorkShift>();
+                                    for (int j = 0; j < day.workShifts.Count; j++)
+                                    {
+                                        var w = day.workShifts[j];
+                                        if (w != null && w.employeeId == s.inst.id) dead.Add(w);
+                                    }
+                                    foreach (var w in dead) day.RemoveWorkShift(w);
+                                }
+                            break;
+                        }
+                }
+                catch (Exception sx) { Plugin.Logger.LogWarning($"[SynthStaff] shift strip: {sx.Message}"); }
+                if (gi?.EmployeeInstances != null) gi.EmployeeInstances.Remove(s.inst);
+                try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(s.inst.id); } catch { }
+                Plugin.Logger.LogInfo($"[SynthStaff] staff NPC removed at '{addressKey}'.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] remove '{addressKey}': {ex.Message}"); }
+        }
+
+        /// <summary>Invoke the game's staffing evaluator (UpdateEmployee — the
+        /// disasm-mapped spawner) on unstaffed synthetic stations every 5s;
+        /// nothing calls it for rival-translated shops natively.</summary>
+        private static void TickStaffEvaluator()
+        {
+            if (_synthetics.Count == 0) return;
+            if (Time.unscaledTime < _nextEvalAt) return;
+            _nextEvalAt = Time.unscaledTime + 5f;
+            foreach (var kv in _synthetics)
+            {
+                try
+                {
+                    var reg = FindNearestRegister(kv.Value.pos, 2f);
+                    if (reg == null) continue;                    // interior not loaded here
+                    if (reg.employeeInstance != null) continue;   // already staffed
+                    Plugin.Logger.LogInfo($"[SynthStaff] invoking UpdateEmployee(false) on register at '{kv.Key}'.");
+                    reg.UpdateEmployee(false);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] evaluator: {ex.Message}"); }
+            }
         }
 
         /// <summary>Dump the shop's SET price table (the only price source that

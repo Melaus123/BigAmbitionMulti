@@ -455,12 +455,17 @@ namespace BigAmbitionsMP
                 tmp.color     = new Color(0.549f, 0.878f, 0.549f);   // 8CE08C accent
                 _salePopups.Add((go, Time.unscaledTime));
 
-                // Ring the sale up on the worker's own screen too.
+                // Ring the sale up on the worker's own screen too — but only
+                // when they're actually working a register (employee-staffed
+                // sales land while the owner may be across town; no miming).
                 try
                 {
-                    var ch = Helpers.PlayerHelper.PlayerController?.Character;
-                    var anim = ch?.GetComponentInChildren<Animator>();
-                    if (anim != null) anim.SetTrigger("UsingCashRegister");
+                    if (MPRestSync.CurrentActivityName() == "Work")
+                    {
+                        var ch = Helpers.PlayerHelper.PlayerController?.Character;
+                        var anim = ch?.GetComponentInChildren<Animator>();
+                        if (anim != null) anim.SetTrigger("UsingCashRegister");
+                    }
                 }
                 catch { }
             }
