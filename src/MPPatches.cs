@@ -2329,46 +2329,73 @@ namespace BigAmbitionsMP
         //  lesson again).  The re-entry experiment needs no probe: AssignProbe
         //  below already logs any register assignment.) ───────────────────────
 
-        // ── [StaffEval] gate probes (2026-06-12, disasm-mapped chain).  Logs
-        // the two decision points of UpdateEmployee for DUTY registers only:
-        // does ShouldUpdateEmployee pass, and does GetEmployeeWorkShift find
-        // our synthetic's shift.  Game-logic methods only (no Unity lifecycle
-        // — the EmpSpawn lesson).  Throttled by the 5s evaluator cadence. ─────
+        // ── [StaffEval] gate override + probe (2026-06-12, disasm-mapped).
+        // Run 10 named the failing gate: ShouldUpdateEmployee → False on every
+        // invocation for the rival-translated shop (the "is this my business"
+        // class of check).  The gate is a pure predicate — flip it to TRUE for
+        // exactly one case: an UNSTAFFED register a lobby player is actively
+        // working.  Everything downstream stays native game code; the
+        // GetEmployeeWorkShift probe keeps watching the next gate. ────────────
         [HarmonyPatch]
-        public static class Patch_StaffEval_Probes
+        public static class Patch_StaffEval_GateOverride
         {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            static System.Reflection.MethodBase? TargetMethod()
             {
-                var list = new System.Collections.Generic.List<System.Reflection.MethodBase>();
                 try
                 {
                     foreach (var m in typeof(EmployeeStationController).GetMethods(
                         System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
-                        if ((m.Name == "ShouldUpdateEmployee" || m.Name == "GetEmployeeWorkShift")
-                            && m.DeclaringType == typeof(EmployeeStationController))
-                            list.Add(m);
+                        if (m.Name == "ShouldUpdateEmployee" && m.DeclaringType == typeof(EmployeeStationController))
+                            return m;
                 }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] targets: {ex.Message}"); }
-                return list;
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] gate target: {ex.Message}"); }
+                return null;
             }
 
-            static void Postfix(EmployeeStationController __instance, System.Reflection.MethodBase __originalMethod, object __result)
+            static void Postfix(EmployeeStationController __instance, ref bool __result)
+            {
+                if (__result) return;
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                try
+                {
+                    if (!MPRegisterSync.IsDutyStation(__instance.transform.position)) return;
+                    bool unstaffed = false;
+                    try { unstaffed = __instance.employeeInstance == null; } catch { }
+                    if (!unstaffed) return;
+                    __result = true;
+                    Plugin.Logger.LogInfo("[StaffEval] ShouldUpdateEmployee FORCED TRUE (duty register, unstaffed).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] gate: {ex.Message}"); }
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_StaffEval_ShiftProbe
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                try
+                {
+                    foreach (var m in typeof(EmployeeStationController).GetMethods(
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                        if (m.Name == "GetEmployeeWorkShift" && m.DeclaringType == typeof(EmployeeStationController))
+                            return m;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] shift target: {ex.Message}"); }
+                return null;
+            }
+
+            static void Postfix(EmployeeStationController __instance, WorkShift? __result)
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                 try
                 {
                     if (!MPRegisterSync.IsDutyStation(__instance.transform.position)) return;
-                    string verdict;
-                    if (__result == null) verdict = "null";
-                    else if (__result is bool b) verdict = b.ToString();
-                    else
-                    {
-                        var ws = (__result as Il2CppSystem.Object)?.TryCast<WorkShift>();
-                        verdict = ws != null ? $"shift(emp='{ws.employeeId}' station='{ws.itemInstanceId}' {ws.startingHour}-{ws.endingHour})" : __result.ToString();
-                    }
-                    Plugin.Logger.LogInfo($"[StaffEval] {__originalMethod.Name} → {verdict}");
+                    Plugin.Logger.LogInfo(__result == null
+                        ? "[StaffEval] GetEmployeeWorkShift → null"
+                        : $"[StaffEval] GetEmployeeWorkShift → shift(emp='{__result.employeeId}' station='{__result.itemInstanceId}' {__result.startingHour}-{__result.endingHour})");
                 }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] {ex.Message}"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] shift probe: {ex.Message}"); }
             }
         }
 
