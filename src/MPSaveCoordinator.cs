@@ -630,8 +630,23 @@ namespace BigAmbitionsMP
 
             bool ok = false;
             DiagWrite($"about to call SaveGameManager.Save  SavingInProgress={SafeSavingInProgress()}");
-            try { ok = SaveGameManager.Save(SaveGameManager.SaveType.Default, SaveFileName, folder); }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] SaveGameManager.Save: {ex.Message}"); }
+            // RETRY: the game serializes through a FIXED temp file
+            // (%TEMP%\Hovgaard Games\Big Ambitions\tempUncompressedSave) shared
+            // by BOTH local instances — coordinated saves fire on host+client
+            // simultaneously and collide ("being used by another process",
+            // client slot then missing from the manifest → session load never
+            // reached that client).  The launch bat now gives instance 2 its
+            // own %TEMP%; this retry covers any remaining collision.
+            for (int attempt = 0; attempt < 3 && !ok; attempt++)
+            {
+                if (attempt > 0)
+                {
+                    Plugin.Logger.LogWarning($"[MPSave] save attempt {attempt} failed — retrying in 1.2s.");
+                    try { System.Threading.Thread.Sleep(1200); } catch { }
+                }
+                try { ok = SaveGameManager.Save(SaveGameManager.SaveType.Default, SaveFileName, folder); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] SaveGameManager.Save: {ex.Message}"); }
+            }
             DiagWrite($"returned from Save ok={ok}");
 
             // CRITICAL: the game serializes the GameInstance on a BACKGROUND thread.

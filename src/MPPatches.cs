@@ -2699,5 +2699,34 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Replicated-shop shelf fill (2026-06-12) ───────────────────────────
+        // Our buyer-side purchaser enable gives shelves native hover/take, but
+        // PlayerItemPurchaser.UpdatePriceInfo then pins NON-rented shelves to
+        // the AI fill model (GetShelfFillState = 1f for non-AI businesses) —
+        // the user saw a FULL shelf while the owner's was half stocked.  In
+        // session-player shops the cargo is REAL, so restore the cargo-driven
+        // fill (ShowcaseShelfController.UpdateVisuals: amount / capacity)
+        // after every UpdatePriceInfo.  ShowItemVisuals early-returns for an
+        // unchanged item name, so this never re-rolls the stock-look shuffle.
+        [HarmonyPatch(typeof(Controllers.PlayerItemPurchaser), "UpdatePriceInfo")]
+        public static class Patch_ReplicatedShelfFill
+        {
+            static void Postfix(Controllers.PlayerItemPurchaser __instance)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                try
+                {
+                    var ic = __instance.itemController;
+                    var ssc = ic as Items.SpecialItems.ShowcaseShelfController;
+                    if (ssc == null) return;
+                    var reg = ItemHelper.GetBuildingRegistration(ic.ItemInstance);   // global-ns helper
+                    if (reg == null) return;
+                    if (!GameStatePatcher.IsReplicatedInterior(GameStateReader.AddressKey(reg))) return;
+                    ssc.UpdateVisuals();
+                }
+                catch { }
+            }
+        }
+
     }
 }

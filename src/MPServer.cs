@@ -133,7 +133,24 @@ namespace BigAmbitionsMP
                 if (!_peerNames.TryGetValue(peer.Id, out var pid)) continue;
                 if (!StableIdByPlayer.TryGetValue(pid, out var stable) || string.IsNullOrEmpty(stable)) continue;
                 var data = MPSaveCoordinator.ReadSaveBytesGzip(session, stable);
-                if (data == null) { Plugin.Logger.LogWarning($"[Server] No stored .hsg for '{pid}' (stable={stable})."); continue; }
+                if (data == null)
+                {
+                    // No stored slot for this peer (their coordinated save may
+                    // have failed — temp-file collision) — STILL instruct them:
+                    // empty payload = fresh character with the host's settings.
+                    // The old silent `continue` left the client sitting in the
+                    // lobby while everyone else loaded (user bug 2026-06-12).
+                    float kc = GetKnownCash(pid);
+                    Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
+                    {
+                        SessionName      = session,
+                        HsgGzipBase64    = "",
+                        Money            = Math.Max(0f, kc),
+                        FallbackSettings = LastStartSettings,
+                    }));
+                    Plugin.Logger.LogWarning($"[Server] No stored .hsg for '{pid}' (stable={stable}) — sent fresh-character fallback.");
+                    continue;
+                }
                 float cash = MPSaveCoordinator.BestCashFor(m, stable);
                 var payload = new LoadDataPayload
                 {

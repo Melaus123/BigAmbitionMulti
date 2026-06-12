@@ -907,7 +907,10 @@ namespace BigAmbitionsMP
                         for (int c = 0; c < _localHandContent.childCount; c++)
                         {
                             var ch = _localHandContent.GetChild(c);
-                            if (ch == null || !ch.gameObject.activeSelf) continue;
+                            // activeInHierarchy, NOT activeSelf: 0.11 parks a prop
+                            // under an inactive parent — activeSelf stayed true and
+                            // we broadcast a box the player wasn't holding.
+                            if (ch == null || !ch.gameObject.activeInHierarchy) continue;
                             p.Held = CleanPropName(ch.name);
                             // Exact local placement — baskets hang off-axis.
                             var lp = ch.localPosition; var le = ch.localEulerAngles;

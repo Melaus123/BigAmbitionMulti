@@ -642,11 +642,17 @@ namespace BigAmbitionsMP
                     if (!string.IsNullOrEmpty(payload.Layout))
                         reg.Layout = payload.Layout;
 
-                    // Interior designs (wall/floor/ceiling material+color)
+                    // Interior designs (wall/floor/ceiling material+color).
+                    // Diffed like items: only elements whose serialized form
+                    // changed get re-Deserialized in the refresh below.
+                    var changedDesignUuids = new HashSet<string>();
                     try
                     {
                         if (reg.interiorDesigns != null)
                         {
+                            if (!_lastDesignSer.TryGetValue(payload.AddressKey, out var lastDSer))
+                                lastDSer = new Dictionary<string, string>();
+                            var newDSer = new Dictionary<string, string>();
                             reg.interiorDesigns.Clear();
                             foreach (var d in payload.InteriorDesigns)
                             {
@@ -667,7 +673,15 @@ namespace BigAmbitionsMP
                                     sd.materials = arr;
                                 }
                                 reg.interiorDesigns.Add(sd);
+
+                                string uuid = d.UUID ?? "";
+                                if (string.IsNullOrEmpty(uuid)) continue;
+                                string ser = Newtonsoft.Json.JsonConvert.SerializeObject(d);
+                                newDSer[uuid] = ser;
+                                if (!lastDSer.TryGetValue(uuid, out var prev) || prev != ser)
+                                    changedDesignUuids.Add(uuid);
                             }
+                            _lastDesignSer[payload.AddressKey] = newDSer;
                         }
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] interiorDesigns apply: {ex.Message}"); }
@@ -784,7 +798,7 @@ namespace BigAmbitionsMP
                     // when LoadBuilding ran on entry.  Calling LoadBuilding
                     // again re-runs the full pipeline (layout, designs, items)
                     // against the now-fresh fields.
-                    TryRefreshActiveInteriorIfMatches(payload.AddressKey, changedIds, removedIds);
+                    TryRefreshActiveInteriorIfMatches(payload.AddressKey, changedIds, removedIds, changedDesignUuids);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorSnapshot: {ex.Message}"); }
             });
@@ -814,8 +828,21 @@ namespace BigAmbitionsMP
         /// the diff baseline that keeps unchanged shelf visuals alive.</summary>
         private static readonly Dictionary<string, Dictionary<string, string>> _lastItemSer = new();
 
+        /// <summary>Same baseline for interior-design elements (walls/doors):
+        /// UUID → serialized form, per address.  Re-Deserializing all ~120
+        /// elements on every snapshot made the door (+ its light shaft)
+        /// visibly flicker (user, 2026-06-12).</summary>
+        private static readonly Dictionary<string, Dictionary<string, string>> _lastDesignSer = new();
+
+        /// <summary>True if this address has had an interior snapshot applied —
+        /// i.e. it's ANOTHER session player's building replicated here.  Used by
+        /// the shelf-fill patch to tell player shops from AI shops.</summary>
+        public static bool IsReplicatedInterior(string addressKey)
+            => !string.IsNullOrEmpty(addressKey) && _lastItemSer.ContainsKey(addressKey);
+
         private static void TryRefreshActiveInteriorIfMatches(string addressKey,
-            HashSet<string>? changedIds = null, HashSet<string>? removedIds = null)
+            HashSet<string>? changedIds = null, HashSet<string>? removedIds = null,
+            HashSet<string>? changedDesignUuids = null)
         {
             try
             {
@@ -860,6 +887,7 @@ namespace BigAmbitionsMP
 
                 int deserialized = 0;
                 int matchedUuids = 0;
+                int skippedUnchanged = 0;
                 var elementsObj = UnityEngine.Object.FindObjectsOfType(typeof(InteriorElement));
                 if (elementsObj != null)
                 {
@@ -871,11 +899,16 @@ namespace BigAmbitionsMP
                         if (string.IsNullOrEmpty(uuid)) continue;
                         if (!dict.TryGetValue(uuid, out var design)) continue;
                         matchedUuids++;
+                        // Diff: re-Deserializing an UNCHANGED element makes
+                        // doors + their light visibly flicker on every snapshot
+                        // (user, 2026-06-12).  null set = no diff info → all.
+                        if (changedDesignUuids != null && !changedDesignUuids.Contains(uuid))
+                        { skippedUnchanged++; continue; }
                         try { el.Deserialize(design); deserialized++; }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] InteriorElement.Deserialize for UUID '{uuid}': {ex.Message}"); }
                     }
                 }
-                Plugin.Logger.LogInfo($"[Patcher] Interior refresh for '{addressKey}': deserialized {deserialized}/{matchedUuids} elements (of {dict.Count} designs).");
+                Plugin.Logger.LogInfo($"[Patcher] Interior refresh for '{addressKey}': deserialized {deserialized}/{matchedUuids} elements (skipped {skippedUnchanged} unchanged, of {dict.Count} designs).");
 
                 // ── Item refresh (Phase 2b) ─────────────────────────────────
                 // Per-item diff: only touch the ItemControllers whose data
