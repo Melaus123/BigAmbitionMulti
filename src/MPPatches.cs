@@ -2699,6 +2699,64 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Replicated shops are NOT rival businesses (2026-06-12) ────────────
+        // The game auto-adopts every non-player-owned business: entering one
+        // spawns AI cashiers at every station (SetupAiEmployeeStations — the
+        // "employee at the counter though no one was hired" user bug) and the
+        // daily rival sim re-prices it (CompetitionHelper — caught by the
+        // auditor as persistent biz divergence).  Neither path validates the
+        // owner id, so SESSION-PLAYER shops fall through.  Gate both.
+
+        [HarmonyPatch(typeof(BuildingManager), "SetupAiEmployeeStations")]
+        public static class Patch_NoAiStaffInPlayerShops
+        {
+            static bool Prefix(BuildingManager __instance)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                try
+                {
+                    var reg = __instance.buildingRegistration;
+                    if (!GameStatePatcher.IsSessionPlayerBusiness(reg)) return true;
+                    Plugin.Logger.LogInfo($"[Patcher] AI-staff spawn suppressed in session player's shop '{GameStateReader.AddressKey(reg)}' (owner='{reg.businessOwnerRivalId}').");
+                    return false;   // skip native AI staffing — MPRegisterSync owns staffing visuals
+                }
+                catch { return true; }
+            }
+        }
+
+        [HarmonyPatch(typeof(Helpers.CompetitionHelper), "ShouldRecalculateRetailPrices")]
+        public static class Patch_NoRivalRepriceOnPlayerShops
+        {
+            static void Postfix(BuildingRegistration buildingRegistration, ref bool __result)
+            {
+                if (!__result || (!MPServer.IsRunning && !MPClient.IsConnected)) return;
+                try
+                {
+                    if (GameStatePatcher.IsSessionPlayerBusiness(buildingRegistration))
+                    {
+                        __result = false;   // owner's synced price table is the only truth
+                        Plugin.Logger.LogInfo($"[Patcher] rival re-price suppressed for session player's shop '{GameStateReader.AddressKey(buildingRegistration)}'.");
+                    }
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(Helpers.CompetitionHelper), "ShouldUpdateDailyValuation")]
+        public static class Patch_NoRivalValuationOnPlayerShops
+        {
+            static void Postfix(BuildingRegistration buildingRegistration, ref bool __result)
+            {
+                if (!__result || (!MPServer.IsRunning && !MPClient.IsConnected)) return;
+                try
+                {
+                    if (GameStatePatcher.IsSessionPlayerBusiness(buildingRegistration))
+                        __result = false;
+                }
+                catch { }
+            }
+        }
+
         // ── Replicated-shop shelf fill (2026-06-12) ───────────────────────────
         // Our buyer-side purchaser enable gives shelves native hover/take, but
         // PlayerItemPurchaser.UpdatePriceInfo then pins NON-rented shelves to

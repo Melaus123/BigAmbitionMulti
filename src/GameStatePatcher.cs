@@ -845,6 +845,26 @@ namespace BigAmbitionsMP
         public static List<string> ReplicatedInteriorAddresses()
             => new List<string>(_lastItemSer.Keys);
 
+        /// <summary>True when this registration's business belongs to a SESSION
+        /// PLAYER (after the rival-translation, businessOwnerRivalId carries the
+        /// owning player's id).  The game has NO such concept — to it a replica
+        /// is just "not rented by me" and its AI systems adopt it: cashiers
+        /// auto-spawn on entry (SetupAiEmployeeStations) and the daily rival
+        /// sim re-prices it (CompetitionHelper) — both decompile-confirmed to
+        /// validate NOTHING beyond RentedByPlayer/non-empty owner id.</summary>
+        public static bool IsSessionPlayerBusiness(BuildingRegistration? reg)
+        {
+            try
+            {
+                var owner = reg?.businessOwnerRivalId;
+                if (string.IsNullOrEmpty(owner)) return false;
+                if (owner == MPConfig.PlayerId) return true;
+                if (ClientPlayerRoster.ContainsKey(owner!)) return true;
+                return MPRestSync.AllPlayers().Contains(owner);
+            }
+            catch { return false; }
+        }
+
         private static void TryRefreshActiveInteriorIfMatches(string addressKey,
             HashSet<string>? changedIds = null, HashSet<string>? removedIds = null,
             HashSet<string>? changedDesignUuids = null)
