@@ -952,10 +952,22 @@ namespace BigAmbitionsMP
                     ii.cargoInstances.Clear();
                     foreach (var c in i.CargoInstances)
                     {
+                        // Display correctness (user, 2026-06-12): the CHARGE comes
+                        // from the store table; the replica cargo must show the
+                        // same number (basket said $18 while the charge was $22).
+                        // Stamp from the table when it has an entry.
+                        float price = c.PricePerUnit;
+                        try
+                        {
+                            float t = MPRegisterSync.GetShopPriceAt(
+                                $"{i.StreetNumber} {(StreetName)i.StreetName}", c.ItemName);
+                            if (t >= 0f) price = t;
+                        }
+                        catch { }
                         var ci = new BigAmbitions.Items.CargoInstance(
                             (BigAmbitions.Items.ItemName)c.ItemName,
                             c.Amount,
-                            c.PricePerUnit,
+                            price,
                             c.Paid);
                         if (ci.customColors != null && c.CustomColors != null)
                         {

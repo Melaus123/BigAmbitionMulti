@@ -2410,6 +2410,20 @@ namespace BigAmbitionsMP
                 return null;
             }
 
+            // ── Service moment (user, 2026-06-12): native purchases have a
+            // beat — you wait at the register, the cashier rings you up, THEN
+            // it's yours.  The order is taken in the prefix; completion runs
+            // ~2s later from MPRegisterSync's 1 Hz tick.  If the buyer cancels
+            // the UI during the wait, NOTHING is charged.
+            private const float SERVICE_SECONDS = 2.0f;
+            private static bool   _pending;
+            private static float  _pendingAt;
+            private static float  _pendingTotal;
+            private static string _pendingDesc = "";
+            private static string _pendingOwner = "";
+            private static string _pendingAddress = "";
+            private static string _pendingAct0 = "none";
+
             static bool Prefix(Controllers.CashRegisterController __instance,
                                Il2CppSystem.Collections.Generic.List<BigAmbitions.Items.CargoInstance> orderedCargoInstances)
             {
@@ -2435,15 +2449,44 @@ namespace BigAmbitionsMP
                             if (desc.Length < 160) desc.Append($"{c.itemName} x{c.amount}, ");
                         }
 
-                    MPHub.ApplyMoneyDelta(-total, $"Purchase at {MPRegisterSync.CurrentShopAddress}");
+                    _pendingTotal   = total;
+                    _pendingDesc    = desc.ToString().TrimEnd(' ', ',');
+                    _pendingOwner   = owner;
+                    _pendingAddress = MPRegisterSync.CurrentShopAddress;
+                    _pendingAct0    = act0;
+                    _pendingAt      = UnityEngine.Time.unscaledTime + SERVICE_SECONDS;
+                    _pending        = true;
+                    Plugin.Logger.LogInfo($"[MPSale] order taken (${total:F2}) — ringing up...");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSale] order intake: {ex}"); }
+                return false;   // the native finalizer NEVER runs in player shops
+            }
+
+            /// <summary>Completes (or aborts) the pending sale.  Called ~1 Hz
+            /// from MPRegisterSync.TickDuty — main thread.</summary>
+            public static void TickPending()
+            {
+                if (!_pending || UnityEngine.Time.unscaledTime < _pendingAt) return;
+                _pending = false;
+                try
+                {
+                    bool open = false;
+                    try { open = UI.Purchase.PurchaseUI.IsPanelOpen; } catch { }
+                    if (!open)
+                    {
+                        Plugin.Logger.LogInfo("[MPSale] buyer cancelled during the service moment — nothing charged.");
+                        return;
+                    }
+
+                    MPHub.ApplyMoneyDelta(-_pendingTotal, $"Purchase at {_pendingAddress}");
 
                     var sale = new RemoteSalePayload
                     {
                         BuyerId = MPConfig.PlayerId,
-                        OwnerId = owner,
-                        Address = MPRegisterSync.CurrentShopAddress,
-                        Total   = total,
-                        Desc    = desc.ToString().TrimEnd(' ', ','),
+                        OwnerId = _pendingOwner,
+                        Address = _pendingAddress,
+                        Total   = _pendingTotal,
+                        Desc    = _pendingDesc,
                     };
                     if (MPServer.IsRunning) MPServer.HandleRemoteSale(sale);
                     else MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.RemoteSale, MPConfig.PlayerId, sale));
@@ -2466,19 +2509,15 @@ namespace BigAmbitionsMP
                     string act1 = "none";
                     try { act1 = MPRestSync.CurrentActivityName() ?? "none"; } catch { }
                     Plugin.Logger.LogInfo(
-                        $"[MPSale] finalized: total=${total:F2} owner='{owner}' items='{sale.Desc}' activity '{act0}'→'{act1}'.");
+                        $"[MPSale] finalized: total=${_pendingTotal:F2} owner='{_pendingOwner}' items='{_pendingDesc}' activity '{_pendingAct0}'→'{act1}'.");
 
-                    // If the purchase activity survived the success close, the
-                    // callback chain didn't release us — use the generic
-                    // activity-finish fallback (the rest-dock X path).
-                    if (act1 != "none" && act1 == act0)
+                    if (act1 != "none" && act1 == _pendingAct0)
                     {
                         Plugin.Logger.LogWarning($"[MPSale] activity '{act1}' persisted after close — invoking StandUp fallback.");
                         try { MPRestSync.StandUp(); } catch (Exception sx) { Plugin.Logger.LogWarning($"[MPSale] StandUp: {sx.Message}"); }
                     }
                 }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSale] finalizer: {ex}"); }
-                return false;   // the native finalizer NEVER runs in player shops
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSale] completion: {ex}"); }
             }
         }
 

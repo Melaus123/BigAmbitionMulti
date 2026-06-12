@@ -156,6 +156,8 @@ namespace BigAmbitionsMP
                     TickHideSyntheticBodies();   // v2 polish — same 1s cadence
                     TickStaffEvaluator();        // invoke the mapped evaluator directly
                 }
+
+                MPPatches.Patch_MPOrderFinalizer.TickPending();   // service-moment completion
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] duty: {ex.Message}"); }
         }
@@ -276,14 +278,18 @@ namespace BigAmbitionsMP
         /// table — the only charge source that matters per user), or -1 when
         /// the table has no entry.</summary>
         public static float GetShopPrice(int itemNameValue)
+            => GetShopPriceAt(CurrentShopAddress, itemNameValue);
+
+        /// <summary>Same lookup for an arbitrary shop address key.</summary>
+        public static float GetShopPriceAt(string addressKey, int itemNameValue)
         {
             try
             {
                 var gi = SaveGameManager.Current;
-                if (gi == null || string.IsNullOrEmpty(CurrentShopAddress)) return -1f;
+                if (gi == null || string.IsNullOrEmpty(addressKey)) return -1f;
                 foreach (var r in gi.BuildingRegistrations)
                 {
-                    if (r == null || GameStateReader.AddressKey(r) != CurrentShopAddress) continue;
+                    if (r == null || GameStateReader.AddressKey(r) != addressKey) continue;
                     var prices = r.retailPrices;
                     if (prices != null)
                         for (int i = 0; i < prices.Count; i++)

@@ -5390,3 +5390,337 @@
 [FullMenu]           + WorkstationsList [850x1215] ScrollRect BizManFactoryMachineList
 [FullMenu]           + WorkstationInfo [1460x1350]
 [FullMenu] ── page interior 'BizMan' dump complete ──
+[FullMenu] instance found: 'FullMenu' (active=True) — will dump on first open.
+[FullMenu] instance found: 'FullMenu' (active=True) — will dump on first open.
+[FullMenu] ===== OPEN detected — dumping (passive, one-shot) =====
+[FullMenu] + FullMenu Transform FullMenu
+[FullMenu]   - Canvas [3840x2160] Canvas CanvasScaler GraphicRaycaster CanvasGroup Volume
+[FullMenu]     + RaycastBlocker [3843x2160] AspectRatioFitter
+[FullMenu]     + Topbar [3840x173]
+[FullMenu]       + Splitter [3840x3] LayoutElement
+[FullMenu]       + AppName [850x70] TextLocalizationComponent
+[FullMenu]       + AppButtons [1400x220] HorizontalLayoutGroup
+[FullMenu]       + RightData [1350x100] HorizontalLayoutGroup
+[FullMenu]     + AppsContainer [3840x1750] CanvasGroup
+[FullMenu]       - Persona [3840x1750] CanvasGroup AutoDeactivatePrefabOnSave
+[FullMenu]       - Contacts [3840x1750] CanvasGroup ContactsApp AutoDeactivatePrefabOnSave
+[FullMenu]       - Rivals [3840x1750] CanvasGroup RivalsApp AutoDeactivatePrefabOnSave
+[FullMenu]       - MyEmployees [3840x1750] CanvasGroup MyEmployees AutoDeactivatePrefabOnSave
+[FullMenu]       - BizMan [3840x1750] CanvasGroup BizMan AutoDeactivatePrefabOnSave
+[FullMenu]       - EconoView [3840x1750] CanvasGroup EconoView AutoDeactivatePrefabOnSave
+[FullMenu]       - MarketInsider [3840x1750] CanvasGroup MarketInsider AutoDeactivatePrefabOnSave
+[FullMenu]     + BottomBar [3840x150]
+[FullMenu]       + LeftButtons [2000x150] HorizontalLayoutGroup
+[FullMenu]       + RightButtons [1500x150] HorizontalLayoutGroup
+[FullMenu] ── app-button row 'Canvases/FullMenu/Canvas/Topbar/AppButtons' ──
+[FullMenu] + AppButtons [1400x220] HorizontalLayoutGroup
+[FullMenu]   - AppButtonTemplate [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'App Name') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Persona') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Persona [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Persona') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Persona') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Contacts [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Contacts') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Contacts') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Rivals [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Rivals') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Rivals') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + MyEmployees [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'MyEmployees') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-MyEmployees') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + BizMan [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'BizMan') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-BizMan') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + EconoView [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'EconoView') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-EconoView') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + MarketInsider [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'MarketInsider') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-MarketInsider') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu] ===== dump complete =====
+[FullMenu] ===== OPEN detected — dumping (passive, one-shot) =====
+[FullMenu] + FullMenu Transform FullMenu
+[FullMenu]   - Canvas [3840x2160] Canvas CanvasScaler GraphicRaycaster CanvasGroup Volume
+[FullMenu]     + RaycastBlocker [3843x2160] AspectRatioFitter
+[FullMenu]     + Topbar [3840x173]
+[FullMenu]       + Splitter [3840x3] LayoutElement
+[FullMenu]       + AppName [850x70] TextLocalizationComponent
+[FullMenu]       + AppButtons [1400x220] HorizontalLayoutGroup
+[FullMenu]       + RightData [1350x100] HorizontalLayoutGroup
+[FullMenu]     + AppsContainer [3840x1750] CanvasGroup
+[FullMenu]       - Persona [3840x1750] CanvasGroup AutoDeactivatePrefabOnSave
+[FullMenu]       - Contacts [3840x1750] CanvasGroup ContactsApp AutoDeactivatePrefabOnSave
+[FullMenu]       - Rivals [3840x1750] CanvasGroup RivalsApp AutoDeactivatePrefabOnSave
+[FullMenu]       - MyEmployees [3840x1750] CanvasGroup MyEmployees AutoDeactivatePrefabOnSave
+[FullMenu]       - BizMan [3840x1750] CanvasGroup BizMan AutoDeactivatePrefabOnSave
+[FullMenu]       - EconoView [3840x1750] CanvasGroup EconoView AutoDeactivatePrefabOnSave
+[FullMenu]       - MarketInsider [3840x1750] CanvasGroup MarketInsider AutoDeactivatePrefabOnSave
+[FullMenu]     + BottomBar [3840x150]
+[FullMenu]       + LeftButtons [2000x150] HorizontalLayoutGroup
+[FullMenu]       + RightButtons [1500x150] HorizontalLayoutGroup
+[FullMenu] ── app-button row 'Canvases/FullMenu/Canvas/Topbar/AppButtons' ──
+[FullMenu] + AppButtons [1400x220] HorizontalLayoutGroup
+[FullMenu]   - AppButtonTemplate [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'App Name') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Persona') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Persona [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Persona') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Persona') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Contacts [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Contacts') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Contacts') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Rivals [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Rivals') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Rivals') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + MyEmployees [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'MyEmployees') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-MyEmployees') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + BizMan [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'BizMan') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-BizMan') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + EconoView [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'EconoView') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-EconoView') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + MarketInsider [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'MarketInsider') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-MarketInsider') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu] ===== dump complete =====
+[FullMenu] ── page interior 'BizMan' (widget inventory) ──
+[FullMenu] + BizMan [3840x1750] CanvasGroup BizMan AutoDeactivatePrefabOnSave
+[FullMenu]   + List [3840x1750] BizManList AutoDeactivatePrefabOnSave
+[FullMenu]     + Layout 50-25-25 [3840x1750]
+[FullMenu]       + Row 1 [1930x1750]
+[FullMenu]         + Header [1860x100] TMP(50pt #FFFFFF 'Businesses & Real Estate') TextLocalizationComponent
+[FullMenu]           + Icon [40x40] Image(#FFFFFF@1.00 'Icon-Shop-40')
+[FullMenu]         + BaTable (Businesses) [1860x1510] BusinessScrollerController
+[FullMenu]           + Headers [1830x120] HorizontalLayoutGroup
+[FullMenu]           - ListBackground [1860x1337] Image(#262B40@0.43 'white-rounded-box')
+[FullMenu]           + EnhancedScroller [1870x1337] ScrollRect EnhancedScroller Image(#FFFFFF@0.00) Mask
+[FullMenu]       + Splitter [4x1570] Image(#FFFFFF@0.15)
+[FullMenu]       + Row 2 [860x1750]
+[FullMenu]         + Header [700x100] TMP(50pt #FFFFFF 'Warehouses') TextLocalizationComponent
+[FullMenu]           + Icon [40x40] Image(#FFFFFF@1.00 'BuildingIcon-Warehouse')
+[FullMenu]         + ScrollRect (Warehouses) [860x1520] ScrollRect WarehouseList
+[FullMenu]           + Viewport [830x1520] Image(#FFFFFF@1.00 'UIMask') Mask WarehouseList
+[FullMenu]           + Scrollbar Vertical [12x1520] Image(#7D8186@1.00 'Circle-12') Scrollbar ScrollBarDraggingComponent
+[FullMenu]       + Splitter [4x1570] Image(#FFFFFF@0.15)
+[FullMenu]       + Row 3 [860x1750]
+[FullMenu]         + Header [700x100] TMP(50pt #FFFFFF 'Headquarters') TextLocalizationComponent
+[FullMenu]           + Icon [40x40] Image(#FFFFFF@1.00 'BusinessIcon-Headquarters')
+[FullMenu]         + ScrollRect (Headquarters) [810x820] ScrollRect HeadquartersList
+[FullMenu]           + Viewport [780x820] Image(#FFFFFF@1.00 'UIMask') Mask
+[FullMenu]           + ScrollbarVertical [12x820] Image(#898E95@1.00 'Scrollbar') Scrollbar
+[FullMenu]         + Splitter [800x4] Image(#FFFFFF@0.15)
+[FullMenu]         + Header (1) [700x100] TMP(50pt #FFFFFF 'Private Residences') TextLocalizationComponent
+[FullMenu]           + Icon [50x50] Image(#FFFFFF@1.00 'BusinessIcon-Headquarters')
+[FullMenu]         + PrivateResidences [860x450] ScrollRect
+[FullMenu]           + BaTable (PrivateResidences) [860x450] PrivateResidenceScrollerController
+[FullMenu]   - Business [3840x1750] BizManBusiness AutoDeactivatePrefabOnSave
+[FullMenu]     + Menu [3740x100] HorizontalLayoutGroup
+[FullMenu]       + Presentation [122x100] TMP(50pt #CACDCE '551 7th Avenue') Button TextLocalizationComponent ButtonEffects
+[FullMenu]       + Insight [177x100] TMP(50pt #CACDCE 'bizman_menu_insight') Button TextLocalizationComponent ButtonEffects
+[FullMenu]       + InventoryPricing [263x100] TMP(50pt #CACDCE 'bizman_menu_inventory_pr…') Button TextLocalizationComponent ButtonEffects
+[FullMenu]       + Schedule [189x100] TMP(50pt #CACDCE 'bizman_menu_schedule') Button TextLocalizationComponent ButtonEffects
+[FullMenu]       + Deliveries [198x100] TMP(50pt #CACDCE 'bizman_menu_deliveries') Button TextLocalizationComponent ButtonEffects
+[FullMenu]       + Marketing [202x100] TMP(50pt #CACDCE 'bizman_menu_marketing') Button TextLocalizationComponent ButtonEffects
+[FullMenu]       + LogisticsManagers [277x100] TMP(50pt #CACDCE 'bizman_menu_logistics_ma…') Button TextLocalizationComponent ButtonEffects
+[FullMenu]       + PurchasingAgents [276x100] TMP(50pt #CACDCE 'bizman_menu_purchasing_a…') Button TextLocalizationComponent ButtonEffects
+[FullMenu]       + HRManagers [229x100] TMP(50pt #CACDCE 'bizman_menu_hr_managers') Button TextLocalizationComponent ButtonEffects
+[FullMenu]       + Headhunters [223x100] TMP(50pt #CACDCE 'bizman_menu_headhunters') Button TextLocalizationComponent ButtonEffects
+[FullMenu]       + Factory [180x100] TMP(50pt #CACDCE 'bizman_menu_factory') Button TextLocalizationComponent ButtonEffects
+[FullMenu]       + Drivers [177x100] TMP(50pt #CACDCE 'bizman_menu_drivers') Button TextLocalizationComponent ButtonEffects
+[FullMenu]       + Inventory [198x100] TMP(50pt #CACDCE 'bizman_menu_inventory') Button TextLocalizationComponent ButtonEffects
+[FullMenu]       + Settings [187x100] TMP(50pt #CACDCE 'bizman_menu_settings') Button TextLocalizationComponent ButtonEffects
+[FullMenu]       + RealEstate [202x100] TMP(50pt #CACDCE 'bizman_menu_realestate') Button TextLocalizationComponent ButtonEffects
+[FullMenu]     + SplitterWithIndicator [3740x8] Image(#FFFFFF@0.15 'Square-With-Padding-8') SplitterIndicator
+[FullMenu]       + Indicator [600x8] Image(#FFFFFF@1.00 'Square-With-Padding-8')
+[FullMenu]     + Layout 30-70 [3840x1750]
+[FullMenu]       - Header [708x100] TMP(50pt #FFFFFF 'Missing Header') TextLocalizationComponent
+[FullMenu]       + Left [950x1350]
+[FullMenu]         - BusinessInfo [950x1350] AutoDeactivatePrefabOnSave
+[FullMenu]           + WhiteBox [950x1350] ScrollRect
+[FullMenu]         - BuildingInfo [950x1350] BizManBuildingInfo AutoDeactivatePrefabOnSave
+[FullMenu]           + WhiteBox [950x1200]
+[FullMenu]       + Splitter [8x1350] Image(#FFFFFF@0.15 'Square-With-Padding-8')
+[FullMenu]       + Right [2640x1750]
+[FullMenu]         - Presentation [3840x1750] BizManPresentation AutoDeactivatePrefabOnSave
+[FullMenu]           + Layout 30-70 [3840x1750]
+[FullMenu]         - Insight [2390x1350] BizManInsight AutoDeactivatePrefabOnSave
+[FullMenu]           - Image [2390x1350] Image(#FF0000@1.00)
+[FullMenu]           + Layout 30-70 [2390x1350]
+[FullMenu]         - Schedule [2390x1350] AutoDeactivatePrefabOnSave BizManSchedule
+[FullMenu]           + Planning [2025x1350] VerticalLayoutGroup LayoutElement
+[FullMenu]           + DaySelector [345x1350] VerticalLayoutGroup ScheduleDaySelectionController
+[FullMenu]           - AutoSchedulerProgress [2430x1390] Image(#FFFFFF@1.00 'Box-WhiteTransparent-Rounded') AutoDeactivatePrefabOnSave ScheduleAutoFillerUI
+[FullMenu]           - HudConfirm [2390x1350] ScheduleConfirm AutoDeactivatePrefabOnSave
+[FullMenu]         - Deliveries [2390x1350] BizManDeliveries AutoDeactivatePrefabOnSave
+[FullMenu]           + NoContractsWarningText [2390x1200] TMP(32pt #FFFFFF 'bizman_deliveries_no_con…') TextLocalizationComponent
+[FullMenu]           + Label [850x100] TMP(50pt #FFFFFF 'bizman_deliveries_wholes…') TextLocalizationComponent
+[FullMenu]           + ContractsList [850x1215] ScrollRect
+[FullMenu]           + ContractSettings [1490x1350] CanvasGroup BizManContractSettings
+[FullMenu]           - PurchasingAgents [2175x1272] PurchasingAgentsPlanList AutoDeactivatePrefabOnSave
+[FullMenu]         - Inventory [2390x1350] Inventory AutoDeactivatePrefabOnSave
+[FullMenu]           + Header [2390x150]
+[FullMenu]           + Products [2390x1200]
+[FullMenu]         - Drivers [2390x1350] Drivers AutoDeactivatePrefabOnSave
+[FullMenu]           + Title [863x100] TMP(60pt #FFFFFF 'bizman_drivers') TextLocalizationComponent
+[FullMenu]           + Employees [2240x200]
+[FullMenu]           + Slots [2405x1084]
+[FullMenu]         - InventoryPricing [2390x1350] BizManInventoryPricing AutoDeactivatePrefabOnSave
+[FullMenu]           + ProductsInventory [774x1462]
+[FullMenu]           + Products (BaTable) [1613x1251] InventoryProductsScrollerController
+[FullMenu]         - Settings [2390x1350] BizManSettings AutoDeactivatePrefabOnSave
+[FullMenu]           + Label [863x100] TMP(60pt #FFFFFF 'bizman_settings_manage_b…') TextLocalizationComponent
+[FullMenu]           + LeftPanels [1075x1450] VerticalLayoutGroup
+[FullMenu]           + LogoCustomizer [1375x1500] LogoCustomizer Image(#FFFFFF@1.00 'whitebox')
+[FullMenu]         - Marketing [2390x1350] BizManMarketing AutoDeactivatePrefabOnSave
+[FullMenu]           + MarketingEfficiency [1500x550]
+[FullMenu]           + Campaigns [1500x750]
+[FullMenu]           + Splitter [8x1350] Image(#FFFFFF@0.15 'Square-With-Padding-8')
+[FullMenu]           + Contacts [790x1350]
+[FullMenu]         - LogisticsManagers [2390x1350] AutoDeactivatePrefabOnSave
+[FullMenu]           + Label [850x100] TMP(60pt #FFFFFF 'bizman_menu_logistics_ma…') TextLocalizationComponent
+[FullMenu]           + List [850x1115] LogisticsManagersPlanList
+[FullMenu]           + Right Side [1480x1350]
+[FullMenu]         - PurchasingAgents [2390x1350] PurchasingAgentsPlanList AutoDeactivatePrefabOnSave
+[FullMenu]           + Label [850x100] TMP(60pt #FFFFFF 'bizman_menu_purchasing_a…') TextLocalizationComponent
+[FullMenu]           + List [850x1115] ScrollRect
+[FullMenu]           + Hint [850x100] TMP(30pt #FFFFFF 'bizman_purchasingagents_…') TextLocalizationComponent
+[FullMenu]           + NoPartnershipsWarningText [2390x80] Image(#FFFFFF@0.72 'Gradient-Yellow-Round')
+[FullMenu]           + ContractSettings [1460x1350] PurchasingAgentPlanUI PurchasingAgentProductsMassActionsUI CanvasGroup
+[FullMenu]           - NoManagerAssignedPopUp [1460x1350] NoManagerAssignedPopUp
+[FullMenu]         - HRManagers [2390x1350] HrManagersPlanList AutoDeactivatePrefabOnSave
+[FullMenu]           + Label [850x100] TMP(60pt #FFFFFF 'bizman_menu_hr_managers') TextLocalizationComponent
+[FullMenu]           + List [850x1115] ScrollRect
+[FullMenu]           + Hint [850x100] TMP(30pt #FFFFFF 'bizman_hrmanagers_hint_s…') TextLocalizationComponent
+[FullMenu]           + RightSide [1480x1350]
+[FullMenu]           - AssignEmployeesList [2390x1350]
+[FullMenu]         - RealEstate [2390x1350] RealEstateSettings AutoDeactivatePrefabOnSave
+[FullMenu]           + RentManagement [1300x773] Image(#FFFFFF@1.00 'whitebox') VerticalLayoutGroup ContentSizeFitter
+[FullMenu]           + SelfOccupiedUnit [1300x484] Image(#FFFFFF@1.00 'whitebox') VerticalLayoutGroup ContentSizeFitter
+[FullMenu]           + SetForSale [1300x831] Image(#FFFFFF@1.00 'whitebox') VerticalLayoutGroup ContentSizeFitter
+[FullMenu]         - Headhunters [2390x1350] HeadhuntersPlanList AutoDeactivatePrefabOnSave
+[FullMenu]           + Label [850x100] TMP(60pt #FFFFFF 'bizman_menu_headhunters') TextLocalizationComponent
+[FullMenu]           + List [850x1115] ScrollRect
+[FullMenu]           + Hint [850x100] TMP(30pt #FFFFFF 'bizman_headhunters_hint_…') TextLocalizationComponent
+[FullMenu]           + RightSide [1480x1350]
+[FullMenu]         - Factory [2390x1350] AutoDeactivatePrefabOnSave BizManFactory
+[FullMenu]           + MachinesLabel [850x100] TMP(60pt #FFFFFF 'bizman_factory_productio…') TextLocalizationComponent
+[FullMenu]           + WorkstationsList [850x1215] ScrollRect BizManFactoryMachineList
+[FullMenu]           + WorkstationInfo [1460x1350]
+[FullMenu] ── page interior 'BizMan' dump complete ──
+[FullMenu] ── page interior 'MyEmployees' (widget inventory) ──
+[FullMenu] + MyEmployees [3840x1750] CanvasGroup MyEmployees AutoDeactivatePrefabOnSave
+[FullMenu]   + Layout 30-70 [3840x1750]
+[FullMenu]     + Header [708x100] TMP(50pt #FFFFFF 'MyEmployees') TextLocalizationComponent
+[FullMenu]     + Left [1200x1750]
+[FullMenu]       - WhiteBox [949x1515] VerticalLayoutGroup
+[FullMenu]         + Background [1045x1623] Image(#FFFFFF@1.00 'white-round-corner-drop') LayoutElement
+[FullMenu]         + EmployeePersonalData [789x210] VerticalLayoutGroup
+[FullMenu]           + EmployeeName [789x90] TMP(50pt #111519 'John Doe') LayoutElement
+[FullMenu]           + EmployeeInfoRow1 [789x60] LayoutElement
+[FullMenu]           + EmployeeInfoRow2 [789x60] LayoutElement
+[FullMenu]         + CalledInSickWarning [789x60] TMP(29pt #ED4057 'John called in sick toda…') TextLocalizationComponent LayoutElement
+[FullMenu]         + SatisfactionPanel [789x165] VerticalLayoutGroup
+[FullMenu]           + SatisfactionHeadline [789x65] LayoutElement
+[FullMenu]           + SatisfactionProgressBar [789x100] Mask ProgressBar
+[FullMenu]         + PayBonus [789x110] VerticalLayoutGroup
+[FullMenu]           + PayBonusButton [630x80] Button ButtonEffects
+[FullMenu]           + CooldownText [700x30] TMP(28pt #596975 'Cooldown: {days} days') TextLocalizationComponent
+[FullMenu]         + SkillsHeadline [789x39] LayoutElement
+[FullMenu]           + SplitterGray [789x8] Image(#BDC7CF@1.00 'Square-With-Padding-8')
+[FullMenu]           + Container [428x65] Image(#FFFFFF@1.00) ContentSizeFitter HorizontalLayoutGroup
+[FullMenu]         + Skills [789x100] VerticalLayoutGroup
+[FullMenu]           + SkillTemplate [786x60] HorizontalLayoutGroup
+[FullMenu]         + DemandsHeadline [789x39] LayoutElement
+[FullMenu]           + SplitterGray [789x8] Image(#BDC7CF@1.00 'Square-With-Padding-8')
+[FullMenu]           + Container [620x65] Image(#FFFFFF@1.00) ContentSizeFitter HorizontalLayoutGroup
+[FullMenu]         + Demands [789x71] ScrollRect VerticalLayoutGroup
+[FullMenu]           + DemandTemplate [752x31] HorizontalLayoutGroup
+[FullMenu]         + CurrentBusinessHeadline [789x39] LayoutElement
+[FullMenu]           + SplitterGray [789x8] Image(#BDC7CF@1.00 'Square-With-Padding-8')
+[FullMenu]           + Container [560x65] Image(#FFFFFF@1.00) ContentSizeFitter HorizontalLayoutGroup
+[FullMenu]         + AssignedAddress [789x80] Dropdown CanvasGroup LayoutElement LayoutElement
+[FullMenu]           + Header [789x80]
+[FullMenu]           - OptionsPanel [800x427] Canvas GraphicRaycaster CanvasGroup
+[FullMenu]         - TrainingOverlay [789x106] Image(#FFFFFF@0.76) LayoutElement
+[FullMenu]           + Text [789x45] TMP(28pt #ED4057 'Employee is currently tr…') TextLocalizationComponent
+[FullMenu]           + SkillName [789x45] TMP(28pt #ED4057 'Customer Service') TextLocalizationComponent
+[FullMenu]           + HoursLeft [789x45] TMP(28pt #ED4057 'common_hours_left') TextLocalizationComponent
+[FullMenu]         + Buttons [789x104] HorizontalLayoutGroup LayoutElement
+[FullMenu]           + PositiveActionButton [250x80] Button ButtonEffects HorizontalLayoutGroup
+[FullMenu]           + NegativeActionButton [250x80] Button ButtonEffects HorizontalLayoutGroup
+[FullMenu]           + AdditionalActionButton [250x80] Button ButtonEffects HorizontalLayoutGroup
+[FullMenu]     + Splitter [8x1750] Image(#FFFFFF@0.15 'Square-With-Padding-8')
+[FullMenu]     + Right [2640x1750]
+[FullMenu]       + MassActionDropdown [582x80] Dropdown CanvasGroup LayoutElement
+[FullMenu]         + Header [582x80]
+[FullMenu]           - LeftButton [80x80] Button Image(#FFFFFF@0.00) ButtonEffects
+[FullMenu]           + MiddleBox [582x80] Button HoverEffect
+[FullMenu]           - RightButton [80x80] Button Image(#FFFFFF@0.00) ButtonEffects
+[FullMenu]         - OptionsPanel [0x427] Canvas GraphicRaycaster CanvasGroup
+[FullMenu]           + Background [100x527] Image(#DBDFE5@1.00 'white-round') LayoutElement
+[FullMenu]           + Options [0x427] DropdownOptionScrollerController
+[FullMenu]       + TableTabs [2445x100] HorizontalLayoutGroup
+[FullMenu]         + EmployeesTab [545x100] Image(#FFFFFF@1.00 'white-box-top-left-corner') Button HorizontalLayoutGroup
+[FullMenu]           + Label [470x100] TMP(28pt #111519 'Employees') TextLocalizationComponent
+[FullMenu]         + CandidatesTab [557x100] Image(#FFFFFF@1.00 'white-box-top-right-corner') Button HorizontalLayoutGroup
+[FullMenu]           + Label [482x100] TMP(28pt #878787 'Candidates') TextLocalizationComponent
+[FullMenu]           - CandidatesBadge [64x64] Image(#FFFFFF@1.00 'Icon-AppNotificationBadge') LayoutElement Badge
+[FullMenu]       + EmployeesList [2445x1422] EmployeeScrollerController
+[FullMenu]         + Headers [2415x120] HorizontalLayoutGroup
+[FullMenu]           + Background [2511x228] Image(#FFFFFF@1.00 'white-round-corner-drop') LayoutElement
+[FullMenu]           + EmployeeName [279x120] HorizontalLayoutGroup Button Image(#FFFFFF@0.00) ButtonEffects LayoutElement
+[FullMenu]           + AgeInDays [276x120] HorizontalLayoutGroup Button Image(#FFFFFF@0.00) ButtonEffects LayoutElement
+[FullMenu]           + HourlyWage [279x120] HorizontalLayoutGroup Button Image(#FFFFFF@0.00) ButtonEffects LayoutElement
+[FullMenu]           + Task [279x120] HorizontalLayoutGroup Button Image(#FFFFFF@0.00) ButtonEffects LayoutElement
+[FullMenu]           + PrimarySkill [281x120] HorizontalLayoutGroup Button Image(#FFFFFF@0.00) ButtonEffects LayoutElement
+[FullMenu]           + CurrentBusinessName [279x120] HorizontalLayoutGroup Button Image(#FFFFFF@0.00) ButtonEffects LayoutElement
+[FullMenu]           + HoursPerWeek [279x120] HorizontalLayoutGroup Button Image(#FFFFFF@0.00) ButtonEffects LayoutElement
+[FullMenu]           + Satisfaction [279x120] HorizontalLayoutGroup Button Image(#FFFFFF@0.00) ButtonEffects LayoutElement
+[FullMenu]         - ListBackground [2445x1249] Image(#262B40@0.43 'white-rounded-box')
+[FullMenu]         + EnhancedScroller [2455x1249] ScrollRect EnhancedScroller Image(#FFFFFF@0.00) Mask
+[FullMenu]           + Scrollbar Vertical [12x1249] Image(#7D8186@1.00 'Circle-12') Scrollbar ScrollBarDraggingComponent
+[FullMenu]           + Container [2455x0] VerticalLayoutGroup
+[FullMenu]           - Recycled Cells [100x100]
+[FullMenu]       - CandidatesList [2445x1422] CandidateScrollerController
+[FullMenu]         + Headers [2415x120] HorizontalLayoutGroup
+[FullMenu]           + Background [2511x228] Image(#FFFFFF@1.00 'white-round-corner-drop') LayoutElement
+[FullMenu]           + EmployeeName [355x120] HorizontalLayoutGroup Button Image(#FFFFFF@0.00) ButtonEffects LayoutElement
+[FullMenu]           + HourlyWage [355x120] HorizontalLayoutGroup Button Image(#FFFFFF@0.00) ButtonEffects LayoutElement
+[FullMenu]           + PrimarySkill [355x120] HorizontalLayoutGroup Button Image(#FFFFFF@0.00) ButtonEffects LayoutElement
+[FullMenu]           + Schedule [355x120] HorizontalLayoutGroup Button Image(#FFFFFF@0.00) ButtonEffects LayoutElement
+[FullMenu]           + RecruitmentSource [355x120] HorizontalLayoutGroup Button Image(#FFFFFF@0.00) ButtonEffects LayoutElement
+[FullMenu]           + ExpiresIn [355x120] HorizontalLayoutGroup Button Image(#FFFFFF@0.00) ButtonEffects LayoutElement
+[FullMenu]           + AssignBusiness [355x120] HorizontalLayoutGroup Button Image(#FFFFFF@0.00) ButtonEffects LayoutElement
+[FullMenu]           + Hire [355x120] HorizontalLayoutGroup Button Image(#FFFFFF@0.00) ButtonEffects LayoutElement
+[FullMenu]         - ListBackground [2445x1249] Image(#262B40@0.43 'white-rounded-box')
+[FullMenu]         + EnhancedScroller [2455x1249] ScrollRect EnhancedScroller Image(#FFFFFF@0.00) Mask
+[FullMenu]           + Container [2455x100]
+[FullMenu]           + Scrollbar Vertical [12x1249] Image(#7D8186@1.00 'Circle-12') Scrollbar ScrollBarDraggingComponent
+[FullMenu]       + MassActionAllToggle [52x52] Toggle ToggleClickSound
+[FullMenu]         + Background [52x52] Image(#FFFFFF@1.00 'checkbox@2x')
+[FullMenu]           + Checkmark [52x52] Image(#FFFFFF@1.00 'checkbox-on@2x')
+[FullMenu]       - MassActionsUI [3896x1750] Image(#FFFFFF@0.00) Button MyEmployeesMassActionsUI
+[FullMenu]         + MassActionPanel [900x450] Image(#FFFFFF@1.00 'white-rounded-box') VerticalLayoutGroup
+[FullMenu]           + Title [800x38] TMP(32pt #000000 'Mass action title') TextLocalizationComponent
+[FullMenu]           + OptionsDropdown [800x80] Dropdown CanvasGroup LayoutElement LayoutElement
+[FullMenu]           + Buttons [800x130] HorizontalLayoutGroup
+[FullMenu] ── page interior 'MyEmployees' dump complete ──

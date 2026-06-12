@@ -115,8 +115,45 @@ namespace BigAmbitionsMP
                 foreach (var rp in p.Prices)
                     reg.retailPrices.Add(new RetailPrice { itemName = (BigAmbitions.Items.ItemName)rp.ItemName, price = rp.Price });
                 Plugin.Logger.LogInfo($"[PriceSync] applied {p.Prices.Count} price(s) for '{p.AddressKey}' (from {p.OwnerId}).");
+
+                // Live display correctness: if we're standing IN that shop, the
+                // loaded shelf cargo must show the new table prices (the charge
+                // already reads the table; the shelves displayed the old stamp
+                // until re-entry — user, 2026-06-12).
+                if (MPRegisterSync.CurrentShopAddress == p.AddressKey)
+                    RestampLoadedCargo(p);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[PriceSync] Apply: {ex.Message}"); }
+        }
+
+        /// <summary>Stamp the currently-loaded interior's shelf cargo from a
+        /// fresh price list.  Rare (price changes), so the scene scan is fine.</summary>
+        private static void RestampLoadedCargo(RetailPricesPayload p)
+        {
+            try
+            {
+                int stamped = 0;
+                var arr = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<ItemController>());
+                if (arr == null) return;
+                foreach (var o in arr)
+                {
+                    var ic = o.TryCast<ItemController>();
+                    var inst = ic?._itemInstance;
+                    var cargo = inst?.cargoInstances;
+                    if (cargo == null) continue;
+                    for (int i = 0; i < cargo.Count; i++)
+                    {
+                        var c = cargo[i];
+                        if (c == null) continue;
+                        foreach (var rp in p.Prices)
+                            if (rp.ItemName == (int)c.itemName && c.pricePerUnit != rp.Price)
+                            { c.pricePerUnit = rp.Price; stamped++; break; }
+                    }
+                }
+                if (stamped > 0)
+                    Plugin.Logger.LogInfo($"[PriceSync] re-stamped {stamped} loaded cargo price(s) for '{p.AddressKey}'.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[PriceSync] restamp: {ex.Message}"); }
         }
     }
 }
