@@ -857,6 +857,29 @@ namespace BigAmbitionsMP
                     rv.TargetRot = rot;
                     rv.TargetAt  = Time.unscaledTime;
                     rv.SenderT   = p.T;
+
+                    // Cross-interior mask: a cart pushed inside a building otherwise
+                    // shows up in OTHER same-type interiors (shared coordinate
+                    // space).  Hide this owner's ghosts sitting next to their masked
+                    // avatar; street vehicles are far from the avatar and unaffected.
+                    // LIMIT: a vehicle LEFT inside while the owner walks out stays
+                    // visible (no per-vehicle building tag yet — v1).
+                    if (rv.Go != null)
+                    {
+                        bool maskVeh = false;
+                        if (RemotePlayerManager.IsMasked(p.OwnerId))
+                        {
+                            var op = RemotePlayerManager.GetPlayerPosition(p.OwnerId);
+                            if (op.HasValue && Vector3.Distance(pos, op.Value) < 30f) maskVeh = true;
+                        }
+                        if (rv.Go.activeSelf == maskVeh)
+                        {
+                            rv.Go.SetActive(!maskVeh);
+                            Plugin.Logger.LogInfo(
+                                $"[InteriorMask] ghost '{e.TypeName}' ({e.VehicleId}) " +
+                                $"{(maskVeh ? "hidden with" : "shown — no longer beside")} masked owner '{p.OwnerId}'.");
+                        }
+                    }
                 }
 
                 // Vehicles this owner no longer lists have been sold — despawn them.

@@ -70,3 +70,23 @@ Probe first, patch second (two-test cap applies).
 2. Host-side authoritative stock decrement + InteriorSync carry.
 3. Polish: self-service path, vehicle orders (skip v1), BizMan-books variant if
    the user prefers native financials over cash credit.
+
+## 2026-06-11 — ShopGate verdict + fix attempt #1 (ShelfGate)
+
+LOG-PROVEN cause of the shelf no-interact: working shops carry a REAL rival GUID in
+businessOwnerRivalId (e.g. ''jTnQhoNwhkuGDTnL6K0Sxw=='' AI gift shop — interactable);
+the player-owned shop carries the PLAYER id (''Host''), which has NO RivalData record —
+players are deliberately segregated out of the rivals cache (Wave-5 rollback guard:
+ClientPlayerRoster + synthetic leaderboard rows only).  All other entry flags were
+IDENTICAL between working and broken shops (open=True playerOwnedBiz=False rented=False).
+
+FIX ATTEMPT #1 (shipped): Patch_ShelfGate_ShouldShow postfix — forces the shelf CTA ON
+when CurrentShopOwner is another lobby player.  Instrumented ([ShelfGate] log).  Open
+question it answers next run: does the downstream pickup/basket/pay path resolve the
+rival record AGAIN (→ next gate to patch) or run purely on interior cargo data (→ done).
+Register staffed-gate patch (IsStaffedByOtherPlayer) remains the step after.
+
+Rejected alternatives: real RivalData records for players (rival AI simulation would
+act on them — buy buildings etc.); mapping player shops onto existing AI rivals (wrong
+ownership semantics); owner-mode translation (rented=true would give visitors free
+restock pickup, not customer purchase).

@@ -325,7 +325,37 @@ namespace BigAmbitionsMP
                 go.transform.position = new Vector3(p.X, p.Y, p.Z);
                 go.transform.rotation = Quaternion.Euler(0f, p.RotY, 0f);
             }
+
+            // ── Cross-interior mask (2026-06-11): interiors of the same building
+            // TYPE share one detached coordinate space (~x900), so a player inside
+            // building A otherwise renders inside building B for anyone standing
+            // there.  Show the avatar only when sender and local player are in the
+            // SAME building (or both outdoors).  Root-level SetActive — SetDriving
+            // toggles the Model/Capsule CHILDREN, so the two never fight.  Local
+            // building changes re-evaluate within one packet (~100 ms).
+            _remoteBuildings[p.PlayerId] = p.Bldg ?? "";
+            bool sameRoom = (p.Bldg ?? "") == (MPRegisterSync.CurrentShopAddress ?? "");
+            if (go.activeSelf != sameRoom)
+            {
+                go.SetActive(sameRoom);
+                Plugin.Logger.LogInfo(
+                    $"[InteriorMask] '{p.PlayerId}' {(sameRoom ? "shown" : "hidden")} — " +
+                    $"their bldg='{p.Bldg}' mine='{MPRegisterSync.CurrentShopAddress}'.");
+            }
         }
+
+        // ── Cross-interior mask state (see SpawnOrUpdate) ─────────────────────
+        private static readonly Dictionary<string, string> _remoteBuildings = new();
+
+        /// <summary>True when a remote player's avatar is hidden by the
+        /// cross-interior mask (used to hide their nearby vehicle ghosts too).</summary>
+        public static bool IsMasked(string playerId) =>
+            _players.TryGetValue(playerId, out var go) && go != null && !go.activeSelf;
+
+        /// <summary>Remote avatar's current world position (valid even while masked).</summary>
+        public static Vector3? GetPlayerPosition(string playerId) =>
+            _players.TryGetValue(playerId, out var go) && go != null
+                ? go.transform.position : (Vector3?)null;
 
         /// <summary>Applies a networked one-off trigger to a remote player's model.</summary>
         public static void ApplyTrigger(string playerId, int paramIndex)
@@ -407,6 +437,7 @@ namespace BigAmbitionsMP
                 if (kv.Value != null) UnityEngine.Object.Destroy(kv.Value);
             _players.Clear();
             _appearances.Clear();
+            _remoteBuildings.Clear();   // interior-mask state dies with the avatars
             _localAnim = null;          // re-fetched (with fresh trigger maps) next game
             _triggerHashToIndex = null;
             _triggerNameToIndex = null;

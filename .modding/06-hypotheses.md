@@ -55,3 +55,14 @@
 - PRIME suspect: the rival-translation (businessOwnerRivalId = other player''s id) is insufficient for an OPERATING shop on the receiving machine: game may require a real rival record (RivalsHelper), an isOpen=true state, or opening hours.
 - [ShopGate] probe shipped: logs open/playerOwnedBiz/rented/bizRival/bldgRival on every building entry. DISCRIMINATOR RUN: client enters gift shop + bookstore once each → compare lines.
 - Do NOT patch until the probe discriminates (two-test cap).
+
+## 2026-06-11 — cross-interior visibility (CONFIRMED finding + v1 fix)
+Same-TYPE building interiors share ONE detached coordinate space (~x900): user saw the
+host + his cart inside a DIFFERENT gift shop than the host was actually in (furniture
+differed = different building, avatars overlapped = same coords).  v1 fix shipped:
+PlayerPositionPayload.Bldg (address key, "" outdoors) + RemotePlayerManager root
+SetActive mask (show only when sender.Bldg == my CurrentShopAddress) + vehicle ghosts
+hidden when within 30m of a masked owner.  KNOWN LIMITS [?]: (a) vehicle LEFT inside a
+building while owner walks out stays visible in other same-type interiors (no
+per-vehicle building tag); (b) mask re-evaluates on position packets (~100ms lag on
+building transitions).

@@ -34,3 +34,7 @@ log-only (no cache priming/side effects) before deleting; they are guarded one-s
 | LoadTrace v2 | MPCanvasUI.TickLoadTrace | [LoadTrace] | ACTIVE (localization) | RE-ARMED 2026-06-11 for the client stuck-load (overlay never tears down, clock dead, GM NRE flood): 1 Hz × 30s then 10s × 5 min after every MP scene-load — pos/money/clock/timeScale/LoadingScreen-alpha/pendingFreeze/conn. REMOVE when the stuck-load is localized. |
 
 | FreezeGate telemetry | MPCanvasUI.TickOverlayFreezeGate | [FreezeGate] | ACTIVE (localization) | 15s heartbeat while pending-freeze armed + LOUD warn if the silent IsConnected clear disarms it — answers why the 180s fail-safe never fired in the 2026-06-11 run. REMOVE with the fail-safe fix. |
+
+| ShelfGate override | MPPatches Patch_ShelfGate_ShouldShow | [ShelfGate] | ACTIVE (fix attempt #1, instrumented) | Forces shelf CTA ON inside another LOBBY player's shop (ShopGate proved the cause: player id in businessOwnerRivalId has no RivalData record). Throttled log on every forced frame window. If pickup works end-to-end → keep + replicate pattern for the register gate; if downstream breaks → log localizes the next gate. |
+
+| InteriorMask | RemotePlayerManager.SpawnOrUpdate + VehicleManager.ApplyVehicleFleet | [InteriorMask] | PERMANENT (production diagnostic) | Logs every avatar/ghost hide-show from the cross-interior mask (same-type interiors share one coordinate space). Lines are load-bearing evidence if masking ever misfires. |

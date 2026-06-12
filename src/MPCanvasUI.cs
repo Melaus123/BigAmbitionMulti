@@ -2649,7 +2649,8 @@ namespace BigAmbitionsMP
                     PlayerId = MPConfig.PlayerId,
                     X = pos.x, Y = pos.y, Z = pos.z,
                     RotY = rotY,
-                    T = Time.unscaledTime
+                    T = Time.unscaledTime,
+                    Bldg = MPRegisterSync.CurrentShopAddress   // "" outdoors; cross-interior mask
                 };
                 RemotePlayerManager.ReadLocalAnimState(payload);
                 MPHandIk.FillPayload(payload);   // hand-IK mirror while pushing

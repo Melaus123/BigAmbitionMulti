@@ -306,6 +306,11 @@ namespace BigAmbitionsMP
         public float RotY { get; set; }
         /// <summary>Sender's unscaled clock at sample time (see VehicleFleetPayload.T).</summary>
         public float T    { get; set; }
+        /// <summary>Address key of the building the sender is inside ("" = outdoors).
+        /// Drives the cross-interior mask: same-type interiors share one detached
+        /// coordinate space, so without this a player inside building A renders
+        /// inside building B for anyone standing there (2026-06-11).</summary>
+        public string Bldg { get; set; } = "";
 
         // ── Animator state (generic full-mirror) ──────────────────────────────
         // Parameter indices are positions in Animator.parameters; the controller

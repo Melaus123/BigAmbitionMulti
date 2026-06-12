@@ -2173,5 +2173,51 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── [ShelfGate] Wave-2 fix attempt #1 (evidence: ShopGate 2026-06-11).
+        // Working shops carry a REAL rival GUID in businessOwnerRivalId; a
+        // player-owned shop carries the PLAYER id, which has no RivalData
+        // record (players are deliberately kept out of the rivals cache —
+        // Wave-5 rollback guard), so the game's customer CTA never shows.
+        // Narrow override: inside another LOBBY PLAYER's shop, force the shelf
+        // CTA visible.  Instrumented: if the downstream pickup/basket path
+        // ALSO resolves the rival record, the next run's log + user report
+        // localize it — evidence either way in one run. ──────────────────────
+        [HarmonyPatch]
+        public static class Patch_ShelfGate_ShouldShow
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                try
+                {
+                    foreach (var m in typeof(Player.HUD.ItemInfoOverlays.ShelfCtaBehavior).GetMethods(
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                        if (m.Name == "ShouldShow") return m;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[ShelfGate] target: {ex.Message}"); }
+                return null;
+            }
+
+            private static float _nextLog;
+
+            static void Postfix(ref bool __result)
+            {
+                if (__result) return;                                     // native already allows
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                try
+                {
+                    string owner = MPRegisterSync.CurrentShopOwner;
+                    if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return;
+                    if (!MPRestSync.AllPlayers().Contains(owner)) return; // AI shops keep native gates
+                    __result = true;
+                    if (UnityEngine.Time.unscaledTime >= _nextLog)
+                    {
+                        _nextLog = UnityEngine.Time.unscaledTime + 5f;
+                        Plugin.Logger.LogInfo($"[ShelfGate] shelf CTA forced ON in '{owner}' shop (native gate said no).");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[ShelfGate] {ex.Message}"); }
+            }
+        }
+
     }
 }
