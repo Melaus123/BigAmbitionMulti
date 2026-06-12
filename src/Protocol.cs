@@ -1090,6 +1090,11 @@ namespace BigAmbitionsMP
     /// on host's own leaderboard.  Self-stats are computed locally from the
     /// client's gi.realEstate / RentedByPlayer state.
     /// </summary>
+    /// <summary>One point of a per-day history series (float).</summary>
+    public class HistoryPointF { public int Day { get; set; } public float Value { get; set; } }
+    /// <summary>One point of a per-day history series (int).</summary>
+    public class HistoryPointI { public int Day { get; set; } public int   Value { get; set; } }
+
     public class RivalsStatsRequestPayload
     {
         public string PlayerId { get; set; } = "";
@@ -1100,6 +1105,11 @@ namespace BigAmbitionsMP
         /// the host's fair-rival patches: the host's replicas have no order
         /// history, so "is this player business succeeding" reads this.</summary>
         public List<RivalBusinessInfo> Businesses { get; set; } = new();
+        /// <summary>The game's own per-day series for this player
+        /// (gi.playerWeeklyIncomeHistory / playerNumberOfBusinessesHistory) —
+        /// drives the REAL detail-view graphs on other machines.</summary>
+        public List<HistoryPointF> IncomeHistory   { get; set; } = new();
+        public List<HistoryPointI> BizCountHistory { get; set; } = new();
     }
 
     /// <summary>
@@ -1238,6 +1248,11 @@ namespace BigAmbitionsMP
         /// business).  Drives both the detail-view breakdown income override and
         /// the leaderboard business-count reconciliation on the client.</summary>
         public List<RivalBusinessInfo> Businesses { get; set; } = new();
+        /// <summary>Real per-day series (players only) — installed as the
+        /// synthetic row's RivalState so the detail-view graphs plot truth
+        /// instead of the flat/random backfill.</summary>
+        public List<HistoryPointF> IncomeHistory   { get; set; } = new();
+        public List<HistoryPointI> BizCountHistory { get; set; } = new();
     }
 
     /// <summary>

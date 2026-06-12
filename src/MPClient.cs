@@ -809,6 +809,16 @@ namespace BigAmbitionsMP
                             WeeklyIncome = wk,
                         });
                     }
+                // The game's own per-day series → real detail-view graphs on
+                // other machines (last 10 points is plenty; the UI plots 7).
+                if (gi?.playerWeeklyIncomeHistory != null)
+                    foreach (var t in gi.playerWeeklyIncomeHistory)
+                        if (t != null) p.IncomeHistory.Add(new HistoryPointF { Day = t.Item1, Value = t.Item2 });
+                if (p.IncomeHistory.Count > 10) p.IncomeHistory.RemoveRange(0, p.IncomeHistory.Count - 10);
+                if (gi?.playerNumberOfBusinessesHistory != null)
+                    foreach (var t in gi.playerNumberOfBusinessesHistory)
+                        if (t != null) p.BizCountHistory.Add(new HistoryPointI { Day = t.Item1, Value = t.Item2 });
+                if (p.BizCountHistory.Count > 10) p.BizCountHistory.RemoveRange(0, p.BizCountHistory.Count - 10);
             }
             catch { }
             Send(MessageEnvelope.Create(MessageType.RivalsStatsRequest, MPConfig.PlayerId, p));

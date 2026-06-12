@@ -2107,6 +2107,11 @@ namespace BigAmbitionsMP
                     entry.OwnedBuildingsCount  = req.SelfOwnedBuildingsCount;
                     entry.OwnedBusinessesCount = req.SelfOwnedBusinessesCount;
                     entry.WeeklyIncome         = req.SelfWeeklyIncome;
+                    // Per-business rows + real per-day series ride through to
+                    // every machine (detail breakdown, dailyIncomes feed, graphs).
+                    if (req.Businesses      != null && req.Businesses.Count      > 0) entry.Businesses      = req.Businesses;
+                    if (req.IncomeHistory   != null && req.IncomeHistory.Count   > 0) entry.IncomeHistory   = req.IncomeHistory;
+                    if (req.BizCountHistory != null && req.BizCountHistory.Count > 0) entry.BizCountHistory = req.BizCountHistory;
                 }
 
                 // Host's OWN player stats from gi.  AI rival counts now come
@@ -2129,10 +2134,34 @@ namespace BigAmbitionsMP
                             {
                                 hostStat.OwnedBusinessesCount++;
                                 try { hostStat.WeeklyIncome += reg.RentPerDay * 7f; } catch { }
+                                // Per-business row (real GetAvgWeeklyIncome — this
+                                // IS the owning machine) for client-side breakdown
+                                // + dailyIncomes feed of the host's shops.
+                                float hwk = 0f; try { hwk = reg.GetAvgWeeklyIncome(); } catch { }
+                                hostStat.Businesses.Add(new RivalBusinessInfo
+                                {
+                                    AddressKey   = GameStateReader.AddressKey(reg),
+                                    BusinessName = reg.BusinessName?.ToString() ?? "",
+                                    BusinessType = reg.businessTypeName ?? "",
+                                    WeeklyIncome = hwk,
+                                });
                             }
                         }
                         catch { }
                     }
+                    // Host's own real per-day series (same source clients send).
+                    try
+                    {
+                        if (gi.playerWeeklyIncomeHistory != null)
+                            foreach (var t in gi.playerWeeklyIncomeHistory)
+                                if (t != null) hostStat.IncomeHistory.Add(new HistoryPointF { Day = t.Item1, Value = t.Item2 });
+                        if (hostStat.IncomeHistory.Count > 10) hostStat.IncomeHistory.RemoveRange(0, hostStat.IncomeHistory.Count - 10);
+                        if (gi.playerNumberOfBusinessesHistory != null)
+                            foreach (var t in gi.playerNumberOfBusinessesHistory)
+                                if (t != null) hostStat.BizCountHistory.Add(new HistoryPointI { Day = t.Item1, Value = t.Item2 });
+                        if (hostStat.BizCountHistory.Count > 10) hostStat.BizCountHistory.RemoveRange(0, hostStat.BizCountHistory.Count - 10);
+                    }
+                    catch { }
                 }
 
                 snap.Stats.AddRange(byId.Values);

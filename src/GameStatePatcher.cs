@@ -645,6 +645,10 @@ namespace BigAmbitionsMP
                     }
                     catch { }
                 }
+
+                // Real graphs: install the synced per-day series as this
+                // player's RivalState (runtime-only; stripped at save).
+                InstallPlayerRivalStateHistory(id);
             }
             catch { }
         }
@@ -1089,6 +1093,49 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Patcher] Items refresh: destroyed={destroyed} spawned={spawned} kept={liveById.Count} failed={failed} (dict size {dictCount}{(fullRebuild ? ", FULL rebuild" : "")}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] RefreshItemsForActiveBuilding: {ex.Message}"); }
+        }
+
+        /// <summary>Install a session player's REAL per-day series as the
+        /// RivalState behind their synthetic row: SelectedRivalUI plots
+        /// RivalState.weeklyIncomeHistory / numberOfBusinessesHistory, and
+        /// FillRivalState only backfills MISSING days (with random noise — the
+        /// game faking AI graphs) — pre-installed truth plots verbatim.
+        /// Runtime-only: StripSyntheticRivalStates removes these at the save
+        /// boundary.</summary>
+        public static void InstallPlayerRivalStateHistory(string id)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(id)) return;
+                if (!ClientRivalStats.TryGetValue(id, out var stat)) return;
+                bool hasInc = stat.IncomeHistory   != null && stat.IncomeHistory.Count   > 0;
+                bool hasBiz = stat.BizCountHistory != null && stat.BizCountHistory.Count > 0;
+                if (!hasInc && !hasBiz) return;
+                var states = SaveGameManager.Current?.rivalStates;
+                if (states == null) return;
+
+                BigAmbitions.Rivals.RivalState? st = null;
+                foreach (var s in states)
+                    if (s != null && s.rivalId == id) { st = s; break; }
+                if (st == null)
+                {
+                    st = new BigAmbitions.Rivals.RivalState { rivalId = id };
+                    states.Add(st);
+                }
+                if (hasInc)
+                {
+                    st.weeklyIncomeHistory = new List<Tuple<int, float>>();
+                    foreach (var pnt in stat.IncomeHistory!)
+                        if (pnt != null) st.weeklyIncomeHistory.Add(new Tuple<int, float>(pnt.Day, pnt.Value));
+                }
+                if (hasBiz)
+                {
+                    st.numberOfBusinessesHistory = new List<Tuple<int, int>>();
+                    foreach (var pnt in stat.BizCountHistory!)
+                        if (pnt != null) st.numberOfBusinessesHistory.Add(new Tuple<int, int>(pnt.Day, pnt.Value));
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] InstallPlayerRivalStateHistory '{id}': {ex.Message}"); }
         }
 
         /// <summary>Remove RivalState entries the rivals UI auto-created for
