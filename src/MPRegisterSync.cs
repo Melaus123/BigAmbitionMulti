@@ -128,6 +128,17 @@ namespace BigAmbitionsMP
                     _onDuty = true;
                     _dutyPos = reg.transform.position;
                     SendToggle(_dutyPos, true);
+                    // Worker-side price-table snapshot — pairs with the buyer-side
+                    // [SynthStaff/prices] line for cross-machine comparison.
+                    try
+                    {
+                        var gi = SaveGameManager.Current;
+                        if (gi != null)
+                            foreach (var r in gi.BuildingRegistrations)
+                                if (r != null && GameStateReader.AddressKey(r) == CurrentShopAddress)
+                                { LogShopPrices(r, "[Register/prices]"); break; }
+                    }
+                    catch { }
                 }
                 else if (!working && _onDuty)
                 {
@@ -264,8 +275,42 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo(
                     $"[SynthStaff] injected '{inst.id}' for '{playerId}' at '{addressKey}' " +
                     $"(roster {before}→{gi.EmployeeInstances.Count}; days=7 hours=168 wage=0).");
+
+                // Spawn-reliability (run 4: NPC never arrived in ~10 game-hours;
+                // run 3 it came in seconds) — kick the game's own scheduler tick
+                // so shift evaluation can't depend on tick-boundary luck.
+                try { var (d, h) = GameStateReader.GetGameTime();
+                      Plugin.Logger.LogInfo($"[SynthStaff] game time day={d} hr={h:F1}; kicking EmployeeHelper.RunHourly()."); }
+                catch { }
+                try { Helpers.EmployeeHelper.RunHourly(); }
+                catch (Exception kx) { Plugin.Logger.LogWarning($"[SynthStaff] RunHourly kick: {kx.Message}"); }
+
+                LogShopPrices(reg, "[SynthStaff/prices]");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] staff '{addressKey}': {ex}"); }
+        }
+
+        /// <summary>Dump the shop's SET price table (the only price source that
+        /// matters at checkout per user — cargo pricePerUnit is NOT it).</summary>
+        internal static void LogShopPrices(BuildingRegistration reg, string tag)
+        {
+            try
+            {
+                var prices = reg.retailPrices;
+                if (prices == null || prices.Count == 0)
+                {
+                    Plugin.Logger.LogInfo($"{tag} '{GameStateReader.AddressKey(reg)}' retailPrices EMPTY (defaults not materialized).");
+                    return;
+                }
+                var sb = new System.Text.StringBuilder($"{tag} '{GameStateReader.AddressKey(reg)}' retailPrices: ");
+                for (int i = 0; i < prices.Count && i < 8; i++)
+                {
+                    var rp = prices[i];
+                    if (rp != null) sb.Append($"{rp.itemName}=${rp.price:F2} ");
+                }
+                Plugin.Logger.LogInfo(sb.ToString());
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{tag} read: {ex.Message}"); }
         }
 
         private static void RemoveSynthetic(string addressKey)

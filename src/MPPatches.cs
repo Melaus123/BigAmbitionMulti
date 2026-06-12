@@ -2288,6 +2288,40 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── [AssignProbe] passive: WHO assigns an employee to a register and
+        // WHEN (2026-06-11 run 4: synthetic NPC never spawned in ~10 game-hours
+        // while run 3 took seconds — the spawn/assign trigger is the unknown).
+        // Fires rarely (assignments only); logs station, instance id, body. ───
+        [HarmonyPatch]
+        public static class Patch_AssignEmployee_Probe
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                try
+                {
+                    foreach (var m in typeof(Controllers.CashRegisterController).GetMethods(
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                        if (m.Name == "AssignEmployee") return m;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[AssignProbe] target: {ex.Message}"); }
+                return null;
+            }
+
+            static void Postfix(Controllers.CashRegisterController __instance)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                try
+                {
+                    string id = "?";
+                    try { id = __instance.employeeInstance?.id ?? "null"; } catch { }
+                    Plugin.Logger.LogInfo(
+                        $"[AssignProbe] AssignEmployee on '{__instance.gameObject.name}' at {__instance.transform.position} " +
+                        $"instanceId='{id}' employeeSet={__instance.employee != null}");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[AssignProbe] {ex.Message}"); }
+            }
+        }
+
         // ── [RegGuard] queue-entry guard (2026-06-11).  In another player's
         // shop the native queue happily accepts a customer even when NO serving
         // entity exists locally → OnPlaceOrder NREs → hard lock (two runs).
