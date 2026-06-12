@@ -113,20 +113,9 @@ namespace BigAmbitionsMP
                 }
             }
 
-            // SHIELD (MP only): GameManager.Update threw repeatedly during a
-            // mid-join fresh start (intro loaded from a running world — a
-            // transition the game never does natively) and the exception storm
-            // stuck the loading screen (2026-06-11).  Log + swallow.
-            private static int _swallowed;
-            static Exception? Finalizer(Exception? __exception)
-            {
-                if (__exception == null) return null;
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return __exception;
-                _swallowed++;
-                if (_swallowed <= 5 || _swallowed % 300 == 0)
-                    Plugin.Logger.LogWarning($"[GMShield] swallowed {__exception.GetType().Name} in GameManager.Update (#{_swallowed}): {__exception.Message}");
-                return null;
-            }
+            // (GMShield Finalizer RETIRED 2026-06-12 dead-code sweep: zero
+            //  swallows post-port — the mid-join NRE storm it bandaged was
+            //  properly fixed by the fresh-start menu detour.)
         }
 
         // ── Patch: GameSpeedController.TogglePause ────────────────────────────
@@ -323,27 +312,20 @@ namespace BigAmbitionsMP
                 try { TrafficSync.OnEnteredBuilding("DelayedEnterBuildingActions"); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] DelayedEnterBuilding prefix: {ex.Message}"); }
 
-                // [ShopGate] Wave-2 probe: why was a player-owned shop not
-                // shoppable for the visiting client (rounded-shelf pickup dead,
-                // bookstore fine)?  Logs the classification the game sees on
-                // every building entry — one entry into the gift shop + one
-                // into a working store gives the discriminator.
+                // Shop context for RemoteSale: whose shop is the player inside?
+                // ([ShopGate] classification probe retired 2026-06-12 sweep —
+                //  its discriminator shipped as the purchaser-enable fix.)
                 try
                 {
                     if (MPServer.IsRunning || MPClient.IsConnected)
                     {
                         var reg = __instance.buildingRegistration;
-                        Plugin.Logger.LogInfo(
-                            $"[ShopGate] enter: open={__instance.isOpen} playerOwnedBiz={__instance.IsPlayerOwnedBusiness} " +
-                            $"rented={(reg != null ? reg.RentedByPlayer.ToString() : "?")} " +
-                            $"bizRival='{(reg != null ? reg.businessOwnerRivalId : "?")}' bldgRival='{(reg != null ? reg.buildingOwnerRivalId : "?")}'");
-                        // RemoteSale context: whose shop is the player inside?
                         MPRegisterSync.SetCurrentShop(
                             reg != null ? reg.businessOwnerRivalId : "",
                             reg != null ? GameStateReader.AddressKey(reg) : "");
                     }
                 }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[ShopGate] {ex.Message}"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] shop context: {ex.Message}"); }
 
                 // Interior sync (Phase 2): tell the host we've entered so we
                 // can subscribe to its authoritative interior state.  Host-side
@@ -2127,54 +2109,6 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── [SalesProbe] Wave-2 recon (design: .modding/03-systems/
-        // cross-player-shopping.md).  PASSIVE: logs what a register purchase
-        // looks like (items, prices, building) so the RemoteSale hook lands on
-        // confirmed ground.  Fires on the BUYER's machine. ──────────────────
-        [HarmonyPatch]
-        public static class Patch_SalesProbe_OnPlaceOrder
-        {
-            static System.Reflection.MethodBase? TargetMethod()
-            {
-                try
-                {
-                    foreach (var m in typeof(Controllers.CashRegisterController).GetMethods(
-                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
-                        if (m.Name == "OnPlaceOrder") return m;
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[SalesProbe] target: {ex.Message}"); }
-                return null;
-            }
-
-            static void Postfix(Controllers.CashRegisterController __instance,
-                                System.Collections.Generic.List<BigAmbitions.Items.CargoInstance> orderedCargoInstances)
-            {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                try
-                {
-                    float total = 0f;
-                    var desc = new System.Text.StringBuilder();
-                    var sb = new System.Text.StringBuilder("[SalesProbe] OnPlaceOrder: ");
-                    sb.Append($"register='{__instance.gameObject.name}' pos={__instance.transform.position} items=");
-                    if (orderedCargoInstances != null)
-                        for (int i = 0; i < orderedCargoInstances.Count; i++)
-                        {
-                            var c = orderedCargoInstances[i];
-                            if (c == null) continue;
-                            if (i < 12) sb.Append($"[{c.itemName} x{c.amount} @{c.pricePerUnit:F2}] ");
-                            total += (float)(c.amount * c.pricePerUnit);
-                            if (desc.Length < 160) desc.Append($"{c.itemName} x{c.amount}, ");
-                        }
-                    sb.Append($"total={total:F2} shopOwner='{MPRegisterSync.CurrentShopOwner}'");
-                    Plugin.Logger.LogInfo(sb.ToString());
-
-                    // (RemoteSale send MOVED to Patch_MPOrderFinalizer 2026-06-12 —
-                    //  single source of truth, charged from the synced store table.
-                    //  This probe keeps logging order composition only.)
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[SalesProbe] {ex.Message}"); }
-            }
-        }
 
         // ── [ShelfGate] Wave-2 fix attempt #1 (evidence: ShopGate 2026-06-11).
         // Working shops carry a REAL rival GUID in businessOwnerRivalId; a

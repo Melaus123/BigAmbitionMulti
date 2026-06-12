@@ -50,3 +50,24 @@ log-only (no cache priming/side effects) before deleting; they are guarded one-s
 | RegGuard | MPPatches Patch_RegisterQueue_Guard (CanOrder) | [RegGuard] | ACTIVE (production guard) | Blocks queue-join in player shops while the register has no LOCAL employeeInstance — the doomed-queue hard lock becomes impossible. Allows through once synthetic staffing lands. |
 
 | SynthStaff | (DELETED 2026-06-12) | [SynthStaff] | REMOVED | Synthetic-employee staffing machinery deleted after the self-checkout pivot verified: the native staffing evaluator's first gate (ShouldUpdateEmployee) refuses rival-translated shops; no roster/WorkShift injection can reach it. Also removed: StaffEval gate-override + shift probe, AssignProbe, RegGuard's synthetic allowance, RegShield's probe prefix (shield finalizer kept). |
+
+## Sweep 2026-06-12 (dead-code cleanup, user-requested)
+REMOVED (missions complete, all verified log-only before deletion):
+- MPFullMenuProbe.cs + wiring (dumps archived in .modding/ui-dumps/fullmenu.txt)
+- MPRideProbe.cs + Sample call + ProbeOwnFleetSolo (ride sync user-verified perfect)
+- VehicleManager discovery complex: ProbeVehicles/ProbeVehicleSystem/ProbeDrivenVehicle/
+  ProbePlayerMembers/ProbeParentChanges/ProbeParkedVehicles(+helpers)/ProbeTrafficExtras/
+  ProbeCarColor/ProbeTaxi/ProbeTraffic/ScanGleyInternals/ScanGleyApi/ScanSceneTraffic/
+  CountObjectsOfType + Dump*/DescribeValue helpers + _systemTypes
+- RemotePlayerManager: ProbeLocalCharacter/ProbeAppearance/ProbeAnimatorLive
+- GameStateReader: ProbeGameVariables/ProbeGameInstance (+ MPServer call site)
+- LoadTrace v2 (stuck-load localized + fixed: watchdog demoted, fence fallback)
+- SalesProbe (RemoteSale hook landed + verified)
+- ShopGate classification log (discriminator shipped as purchaser-enable; the
+  functional SetCurrentShop call in the same block KEPT)
+- GMShield Finalizer (zero swallows post-port; Patch_GameManager_Update Postfix
+  KEPT - DrainQueue + timescale enforcement are load-bearing)
+- HubRoster surveillance log (quiet through Wave 2; sig-rebuild logic KEPT)
+KEPT deliberately: FreezeGate telemetry (system still under verification),
+RegShield swallow (last-line shield), autopilot + F3 test rig (testing aids),
+MPLoadProfiler (load forensics), all PERMANENT rows above.

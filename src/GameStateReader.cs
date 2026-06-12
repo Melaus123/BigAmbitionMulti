@@ -355,86 +355,6 @@ namespace BigAmbitionsMP
         public static string AddressKey(Address address)
             => $"{address.streetNumber} {address.streetName}";
 
-        // ── GameVariables probe ───────────────────────────────────────────────
-        // One-time discovery probe: logs the structure of GameVariables so we can
-        // identify which member controls Story Mode vs Custom/Sandbox and the
-        // difficulty — needed to force multiplayer new games into Custom mode.
-
-        private static bool _gameVarsProbed;
-
-        public static void ProbeGameVariables()
-        {
-            if (_gameVarsProbed) return;
-            _gameVarsProbed = true;
-            try
-            {
-                var t = typeof(GameVariables);
-                var flags = BindingFlags.Public | BindingFlags.NonPublic |
-                            BindingFlags.Instance | BindingFlags.Static;
-
-                var instFlags = BindingFlags.Public | BindingFlags.Instance;
-
-                var fields = t.GetFields(flags)
-                    .Select(f => $"F:{f.Name}({f.FieldType.Name}){(f.IsStatic ? "[S]" : "")}");
-                var props  = t.GetProperties(flags)
-                    .Select(p => $"P:{p.Name}({p.PropertyType.Name})");
-                var methods = t.GetMethods(flags)
-                    .Where(m => !m.IsSpecialName)
-                    .Select(m => $"M:{m.Name}({string.Join(",", m.GetParameters().Select(p => p.ParameterType.Name))})");
-
-                Plugin.Logger.LogInfo(
-                    $"[GameStateReader] GameVariables fields:  {string.Join(" | ", fields)}");
-                Plugin.Logger.LogInfo(
-                    $"[GameStateReader] GameVariables props:   {string.Join(" | ", props)}");
-                Plugin.Logger.LogInfo(
-                    $"[GameStateReader] GameVariables methods: {string.Join(" | ", methods)}");
-
-                // Dump every public instance property — for a default instance, then
-                // for an instance at each difficulty value.  If the dumps differ,
-                // setting `difficulty` auto-populates the ~20 settings (a preset);
-                // if identical, the preset is applied elsewhere (the new-game menu).
-                var dumpProps = t.GetProperties(instFlags);
-                void DumpInstance(string label, GameVariables gv)
-                {
-                    var parts = new List<string>();
-                    foreach (var p in dumpProps)
-                    {
-                        try { parts.Add($"{p.Name}={p.GetValue(gv)}"); } catch { }
-                    }
-                    Plugin.Logger.LogInfo($"[GameStateReader] GV[{label}]: {string.Join(", ", parts)}");
-                }
-
-                DumpInstance("default", new GameVariables());
-
-                var diffProp = t.GetProperty("difficulty", instFlags);
-                if (diffProp != null && diffProp.PropertyType.IsEnum && diffProp.CanWrite)
-                {
-                    foreach (var dv in Enum.GetValues(diffProp.PropertyType))
-                    {
-                        try
-                        {
-                            var gv = new GameVariables();
-                            diffProp.SetValue(gv, dv);
-                            DumpInstance($"difficulty={dv}", gv);
-                        }
-                        catch (Exception ex)
-                        {
-                            Plugin.Logger.LogWarning($"[GameStateReader] difficulty {dv}: {ex.Message}");
-                        }
-                    }
-                }
-                else
-                {
-                    Plugin.Logger.LogWarning(
-                        "[GameStateReader] 'difficulty' not an enum/writable property — preset probe skipped.");
-                }
-            }
-            catch (Exception ex)
-            {
-                Plugin.Logger.LogError($"[GameStateReader] ProbeGameVariables: {ex.Message}");
-            }
-        }
-
         // ── GameInstance time-skip probe ──────────────────────────────────────
         // Discovery probe to find the method the bench/bed/car rest uses to skip
         // time.  The skip advances GameInstance's Day/Hour/Minute directly (not via
@@ -452,35 +372,6 @@ namespace BigAmbitionsMP
                    n.Contains("skip")   || n.Contains("rest")    || n.Contains("sleep") ||
                    n.Contains("fast")   || n.Contains("forward") || n.Contains("advance") ||
                    n.Contains("wait")   || n.Contains("clock")   || n.Contains("tick");
-        }
-
-        public static void ProbeGameInstance()
-        {
-            if (_giProbed) return;
-            var gi = SaveGameManager.Current;
-            if (gi == null) return;          // not in-game yet — retry on next call
-            _giProbed = true;
-            try
-            {
-                var t = gi.GetType();
-                var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
-
-                var methods = t.GetMethods(flags)
-                    .Where(m => !m.IsSpecialName && RelevantTimeName(m.Name))
-                    .Select(m => $"M:{m.Name}({string.Join(",", m.GetParameters().Select(p => p.ParameterType.Name))})");
-                var props = t.GetProperties(flags)
-                    .Where(p => RelevantTimeName(p.Name))
-                    .Select(p => $"P:{p.Name}({p.PropertyType.Name})");
-
-                Plugin.Logger.LogInfo(
-                    $"[GameStateReader] GameInstance time/skip methods: {string.Join(" | ", methods)}");
-                Plugin.Logger.LogInfo(
-                    $"[GameStateReader] GameInstance time/skip props:   {string.Join(" | ", props)}");
-            }
-            catch (Exception ex)
-            {
-                Plugin.Logger.LogError($"[GameStateReader] ProbeGameInstance: {ex.Message}");
-            }
         }
 
         /// <summary>

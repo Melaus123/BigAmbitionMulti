@@ -305,7 +305,6 @@ namespace BigAmbitionsMP
             //  the quiesce now ends on the lifecycle WorldReady EVENT; see
             //  OnLifecyclePhase below.)
             TickOverlayWatchdog();   // stuck loading screen over a live world → force-dismiss
-            TickLoadTrace();         // [LoadTrace] v2 — post-load timeline (stuck-load localization)
             TickJoinDialog();        // Phase 5 — connect-dialog input (when open)
             TickLobbyWindow();       // Phase 5 — lobby window input (when open)
             TickSavePicker();        // Phase 5 — save-picker input (when open)
@@ -1509,9 +1508,6 @@ namespace BigAmbitionsMP
                 if (sig != _hubRosterSig)
                 {
                     _hubRosterSig = sig;
-                    // [HubRoster] probe: host couldn't see the client in the
-                    // target list (2026-06-11) — log what this machine sees.
-                    Plugin.Logger.LogInfo($"[HubRoster] players=[{string.Join(",", players)}] self='{MPConfig.PlayerId}'");
                     int slot = 0;
                     bool targetOk = false;
                     foreach (var pl in players)
@@ -2118,10 +2114,6 @@ namespace BigAmbitionsMP
                 // exactly quiesce-OFF; loading screen never faded, 2026-06-11).
                 // (4s quiesce timer retired — WorldReady event owns it now)
 
-                // Discovery probe — logs GameInstance time/skip method names so we
-                // can identify what the bench/bed/car rest uses to fast-forward time.
-                GameStateReader.ProbeGameInstance();
-
                 // Fresh world-clock skip detector + appearance state for this session.
                 ResetWorldClock();
                 TrafficSync.Reset();
@@ -2140,11 +2132,6 @@ namespace BigAmbitionsMP
                 // does the BeginStartupHold + world-ready report once the overlay is
                 // gone — so the freeze holds until every player (especially the host,
                 // usually last to finish loading) has TRULY entered the game.
-                // [LoadTrace] arm — 5-min window (the 2026-06-11 client stall
-                // takes minutes to prove; 1 Hz first 30s, then every 10s).
-                _loadTraceArmedAt = Time.unscaledTime;
-                _loadTraceUntil   = Time.unscaledTime + 300f;
-                _loadTraceNext    = 0f;
 
                 if (MPServer.IsRunning || MPClient.IsConnected)
                 {
@@ -2186,7 +2173,6 @@ namespace BigAmbitionsMP
                 MPHub.Reset(); _hubVisible = false;    // hub ledger is per-session
                 MPHubNativePage.Reset(); _hub = null; _hubNative = false;   // page died with the scene
                 _spawnSidestepDone = false;   // next session de-stacks again
-                MPFullMenuProbe.Reset();               // re-arm dump capture per scene
                 // The session-over lock is for the in-game world only — back at
                 // the menu the player is free to host/join again.
                 MPClient.SessionEnded = false;
@@ -2433,52 +2419,8 @@ namespace BigAmbitionsMP
             return up;
         }
 
-        // ── [LoadTrace] v2 — wide-net post-load timeline (localization probe,
-        // re-armed for the 2026-06-11 client stuck-load: overlay never tears
-        // down, clock never starts, freeze-gate fail-safe never fires).  1 Hz
-        // for the first 30s after every MP scene-load, then every 10s out to
-        // 5 min — the stall takes minutes to prove.  Registry: .modding/04-probes.md.
-        private float _loadTraceArmedAt;
-        private float _loadTraceUntil;
-        private float _loadTraceNext;
-
-        private void TickLoadTrace()
-        {
-            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-            if (_loadTraceUntil == 0f || Time.unscaledTime > _loadTraceUntil) return;
-            if (Time.unscaledTime < _loadTraceNext) return;
-            float age = Time.unscaledTime - _loadTraceArmedAt;
-            _loadTraceNext = Time.unscaledTime + (age < 30f ? 1f : 10f);
-            try
-            {
-                var pc = Helpers.PlayerHelper.PlayerController;
-                var ch = pc?.Character?.transform;
-                string pos = ch != null ? $"({ch.position.x:F1},{ch.position.y:F1},{ch.position.z:F1})" : "(no char)";
-                float money = -1f; int day = -1; float hour = -1f;
-                try { money = SaveGameManager.Current?.Money ?? -1f; } catch { }
-                try { (day, hour) = GameStateReader.GetGameTime(); } catch { }
-                // LoadingScreen detail — richer than the bool: distinguishes
-                // "object gone" / "inactive" / "fade frozen at alpha X".
-                string ls = "null";
-                try
-                {
-                    var lsObj = UnityEngine.Object.FindObjectOfType(typeof(LoadingScreen));
-                    var go = (lsObj as LoadingScreen)?.gameObject;
-                    if (go == null) ls = "noGO";
-                    else
-                    {
-                        var cg = go.GetComponentInChildren<CanvasGroup>(true);
-                        ls = $"active={go.activeInHierarchy} alpha={(cg != null ? cg.alpha.ToString("F2") : "n/a")}";
-                    }
-                }
-                catch (Exception ex) { ls = $"err:{ex.Message}"; }
-                Plugin.Logger.LogInfo(
-                    $"[LoadTrace] t={age:F0}s phase={MPLifecycle.Phase} pos={pos} money={money:F0} day={day} hr={hour:F1} " +
-                    $"ts={Time.timeScale:F2} ls[{ls}] pendingFreeze={_sceneLoadedPendingFreeze} pfElapsed={_pendingFreezeElapsed:F0} " +
-                    $"conn={MPClient.IsConnected} held={TimeSync.IsStartupHeld}");
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[LoadTrace] {ex.Message}"); }
-        }
+        // (LoadTrace v2 removed 2026-06-12 dead-code sweep — stuck-load was
+        //  localized + fixed: overlay watchdog demoted, fence fallback added.)
 
         // ── Overlay watchdog: the game's loading screen can survive its own
         // load-finish step (a transient GameManager hiccup kills the fade) and
@@ -2725,19 +2667,9 @@ namespace BigAmbitionsMP
         {
             if (!IsInGame()) return;
 
-            // One-time discovery probes of the local character (self-guard once done).
-            long _pt = MPPerf.Begin();
-            RemotePlayerManager.ProbeLocalCharacter();
-            RemotePlayerManager.ProbeAppearance();
-            // (ProbeColors removed 2026-06-11 — dye mechanism classified, sync user-verified.)
-            RemotePlayerManager.ProbeAnimatorLive();
-            VehicleManager.ProbeTraffic();
-            VehicleManager.ProbeTaxi();
-            VehicleManager.ProbeTrafficExtras();
-            VehicleManager.ProbeCarColor();
-            VehicleManager.ProbeParkedVehicles();    // backlog #3 discovery (round 2 — kept for re-runs)
-            MPPerf.End("Probes", _pt);
-            _pt = MPPerf.Begin(); ParkedVehicleSync.Tick();    MPPerf.End("Parked",   _pt);   // backlog #3 phase 3a — host capture
+            // (Discovery-probe block removed 2026-06-12 dead-code sweep: all
+            //  verified log-only with missions complete — see .modding/04-probes.md.)
+            long _pt = MPPerf.Begin(); ParkedVehicleSync.Tick();    MPPerf.End("Parked",   _pt);   // backlog #3 phase 3a — host capture
             _pt = MPPerf.Begin(); BusinessSync.Tick();         MPPerf.End("BizHost",  _pt);   // host change detection (time-boxed sweep)
             _pt = MPPerf.Begin(); BusinessSync.TickClient();   MPPerf.End("BizClient",_pt);   // client pushes own businesses up
             _pt = MPPerf.Begin(); MPPriceSync.Tick();          MPPerf.End("Price",    _pt);   // live retail prices of own businesses (both roles)
@@ -2752,7 +2684,6 @@ namespace BigAmbitionsMP
             // (spawn sidestep moved to the WorldReady event — OnLifecyclePhase)
             TickJoinPopup();              // host approval panel for mid-game joiners
             TickTrainingPopup();          // honorary-degree confirm dialog (school doors)
-            MPFullMenuProbe.Tick();       // page-interior dump capture (persists to .modding/ui-dumps)
             TickHubWindow();
             _pt = MPPerf.Begin(); InteriorSync.Tick();         MPPerf.End("Interior", _pt);   // diff-push to subscribed clients
             _pt = MPPerf.Begin(); GameStatePatcher.DrainPendingLogoRefreshes(); MPPerf.End("LogoRefresh", _pt);
@@ -2763,7 +2694,6 @@ namespace BigAmbitionsMP
             if (!MPServer.IsRunning && !MPClient.IsConnected)
             {
                 // RideProbe ground-truth capture works in single-player too.
-                VehicleManager.ProbeOwnFleetSolo();
                 return;
             }
 

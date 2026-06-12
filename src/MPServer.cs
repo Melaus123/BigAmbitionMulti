@@ -378,7 +378,6 @@ namespace BigAmbitionsMP
                     // null and returns silently, making the Start button appear to do nothing.
                     // Discovery probe — logs GameVariables structure so we can
                     // later force multiplayer new games into Custom (non-story) mode.
-                    GameStateReader.ProbeGameVariables();
                     SaveGameManager.New(BuildGameVariables(hostSettings));
                     LoadScene.LoadIntro(false);
                     Plugin.Logger.LogInfo("[Server] New game init + intro scene loaded.");
