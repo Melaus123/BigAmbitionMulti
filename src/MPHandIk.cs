@@ -28,13 +28,19 @@ namespace BigAmbitionsMP
 
         public static void Reset() { _localAnim = null; _searched = false; _loggedFill = false; }
 
-        /// <summary>Sender: append vehicle-local hand-bone positions to the
-        /// outgoing position payload (only while driving an open vehicle).</summary>
+        /// <summary>Sender: append anchor-local hand-bone positions to the
+        /// outgoing position payload.  Anchor space = the driven open vehicle
+        /// (cart pushing), else the HandContent bone while a prop is held
+        /// (box/basket carry — 2026-06-12).  Either way the observer's manual
+        /// solve reproduces the holder's REAL arm pose, whatever mechanism
+        /// produced it locally.</summary>
         public static void FillPayload(PlayerPositionPayload p)
         {
             try
             {
-                var veh = VehicleManager.CurrentOpenDriven;
+                Transform? veh = VehicleManager.CurrentOpenDriven;
+                if (veh == null && !string.IsNullOrEmpty(p.Held))
+                    veh = RemotePlayerManager.LocalHandContent;   // held-item anchor space
                 if (veh == null) return;
                 if (!_searched)
                 {

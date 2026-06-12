@@ -316,6 +316,11 @@ namespace BigAmbitionsMP
         /// baskets, …) are prefab clones parented there; receivers clone a
         /// scene template into their avatar's HandContent.</summary>
         public string Held { get; set; } = "";
+        /// <summary>The held prop's LOCAL transform under HandContent —
+        /// [px,py,pz, ex,ey,ez] (position + euler).  Mirrored from the
+        /// holder's machine so the remote prop sits exactly where theirs does
+        /// (baskets hang off-axis; identity placement looked wrong).</summary>
+        public List<float> HeldT { get; set; } = new();
 
         // ── Animator state (generic full-mirror) ──────────────────────────────
         // Parameter indices are positions in Animator.parameters; the controller

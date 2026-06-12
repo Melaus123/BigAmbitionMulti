@@ -126,9 +126,32 @@ namespace BigAmbitionsMP
         private bool _ikSmoothInit;
         private Vector3 _ikL, _ikR;   // smoothed vehicle-local hand anchors
 
+        /// <summary>The clone's HandContent bone — the anchor space for
+        /// held-item hand mirroring (cart pushing uses the vehicle instead).</summary>
+        private Transform? _handContent;
+        private bool _handContentSearched;
+
         private void LateUpdate()
         {
-            if (RideAttach == null || _ikT == null || Anim == null) return;
+            if (_ikT == null || Anim == null) return;
+            // Anchor space: the pushed vehicle, else the HandContent bone while
+            // a held prop's anchors are streaming (held-item carry grip).
+            Transform? space = RideAttach;
+            if (space == null)
+            {
+                if (!_handContentSearched)
+                {
+                    _handContentSearched = true;
+                    try
+                    {
+                        foreach (var t in GetComponentsInChildren<Transform>(true))
+                            if (t != null && t.name == "HandContent") { _handContent = t; break; }
+                    }
+                    catch { }
+                }
+                space = _handContent;
+            }
+            if (space == null) return;
             try
             {
                 if (!_ikHumanChecked) { _ikHumanChecked = true; _ikHuman = Anim.isHuman; }
@@ -146,8 +169,8 @@ namespace BigAmbitionsMP
                 // Pole = world down: elbow solution stays stable however the
                 // avatar/cart rotate (an avatar-relative pole flipped the
                 // elbows on turns — the "arms coming off" wobble).
-                MPHandIk.SolveArm(Anim, true,  RideAttach.TransformPoint(_ikL), Vector3.down);
-                MPHandIk.SolveArm(Anim, false, RideAttach.TransformPoint(_ikR), Vector3.down);
+                MPHandIk.SolveArm(Anim, true,  space.TransformPoint(_ikL), Vector3.down);
+                MPHandIk.SolveArm(Anim, false, space.TransformPoint(_ikR), Vector3.down);
             }
             catch { }
         }
@@ -334,6 +357,13 @@ namespace BigAmbitionsMP
             // toggles the Model/Capsule CHILDREN, so the two never fight.  Local
             // building changes re-evaluate within one packet (~100 ms).
             ApplyHeldProp(go, p.PlayerId, p.Held ?? "");
+            // Mirror the holder's exact prop placement (baskets hang off-axis).
+            if (p.HeldT != null && p.HeldT.Count >= 6
+                && _heldProps.TryGetValue(p.PlayerId, out var heldGo) && heldGo != null)
+            {
+                heldGo.transform.localPosition    = new Vector3(p.HeldT[0], p.HeldT[1], p.HeldT[2]);
+                heldGo.transform.localEulerAngles = new Vector3(p.HeldT[3], p.HeldT[4], p.HeldT[5]);
+            }
 
             _remoteBuildings[p.PlayerId] = p.Bldg ?? "";
             bool sameRoom = (p.Bldg ?? "") == (MPRegisterSync.CurrentShopAddress ?? "");
@@ -450,6 +480,7 @@ namespace BigAmbitionsMP
             _appearances.Clear();
             _remoteBuildings.Clear();   // interior-mask state dies with the avatars
             _heldApplied.Clear();       // held-prop state too
+            _heldProps.Clear();
             _heldTemplates.Clear();     // scene templates died with the scene
             _localHandContent = null;
             _localAnim = null;          // re-fetched (with fresh trigger maps) next game
@@ -878,13 +909,17 @@ namespace BigAmbitionsMP
                         _localHandContent = FindDeep(anim.transform.root, "HandContent");
                     if (_localHandContent != null)
                     {
-                        string held = "";
                         for (int c = 0; c < _localHandContent.childCount; c++)
                         {
                             var ch = _localHandContent.GetChild(c);
-                            if (ch != null && ch.gameObject.activeSelf) { held = CleanPropName(ch.name); break; }
+                            if (ch == null || !ch.gameObject.activeSelf) continue;
+                            p.Held = CleanPropName(ch.name);
+                            // Exact local placement — baskets hang off-axis.
+                            var lp = ch.localPosition; var le = ch.localEulerAngles;
+                            p.HeldT.Add(lp.x); p.HeldT.Add(lp.y); p.HeldT.Add(lp.z);
+                            p.HeldT.Add(le.x); p.HeldT.Add(le.y); p.HeldT.Add(le.z);
+                            break;
                         }
-                        p.Held = held;
                     }
                 }
                 catch { _localHandContent = null; }
@@ -897,8 +932,13 @@ namespace BigAmbitionsMP
 
         // ── Held-prop sync (CarryProbe verdict 2026-06-12) ────────────────────
         private static Transform? _localHandContent;
+
+        /// <summary>The LOCAL player's HandContent bone (hand-IK anchor space
+        /// for held items — see MPHandIk.FillPayload).</summary>
+        internal static Transform? LocalHandContent => _localHandContent;
         private static readonly Dictionary<string, GameObject> _heldTemplates = new();
         private static readonly Dictionary<string, string> _heldApplied = new();   // playerId → prop name
+        private static readonly Dictionary<string, GameObject> _heldProps = new(); // playerId → live prop clone
 
         private static string CleanPropName(string n)
         {
@@ -938,6 +978,7 @@ namespace BigAmbitionsMP
                     if (c != null && c.name.StartsWith("BAMP_Held_"))
                         UnityEngine.Object.Destroy(c.gameObject);
                 }
+                _heldProps.Remove(playerId);
                 if (held.Length == 0)
                 {
                     Plugin.Logger.LogInfo($"[Carry] '{playerId}' hands empty.");
@@ -956,6 +997,7 @@ namespace BigAmbitionsMP
                 prop.transform.localPosition = Vector3.zero;
                 prop.transform.localRotation = Quaternion.identity;
                 prop.SetActive(true);
+                _heldProps[playerId] = prop;   // local transform mirrored per packet
                 Plugin.Logger.LogInfo($"[Carry] '{playerId}' holding '{held}' — prop attached.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Carry] {ex.Message}"); }
