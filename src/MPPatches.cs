@@ -2219,5 +2219,74 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── [RegShield] register-order probe + hard-lock shield (2026-06-11).
+        // Run evidence: in another player's shop the native queue ACCEPTED the
+        // customer, then CashRegisterController.OnPlaceOrder threw an Il2Cpp
+        // NRE mid-placement → "Waiting in queue" forever, cancel dead,
+        // movement locked.  Probe half: log instance state on entry (which
+        // reference is null — missing serving employee vs unresolvable player
+        // rival record).  Shield half: FINALIZER swallows the NRE in
+        // lobby-player shops ONLY and runs native OnOrderCancel so the buyer
+        // dequeues cleanly instead of hard-locking.  AI shops untouched. ─────
+        [HarmonyPatch]
+        public static class Patch_RegisterOrder_Shield
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                try
+                {
+                    foreach (var m in typeof(Controllers.CashRegisterController).GetMethods(
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                        if (m.Name == "OnPlaceOrder") return m;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[RegShield] target: {ex.Message}"); }
+                return null;
+            }
+
+            static bool InPlayerShop()
+            {
+                string owner = MPRegisterSync.CurrentShopOwner;
+                return !string.IsNullOrEmpty(owner) && owner != MPConfig.PlayerId
+                       && MPRestSync.AllPlayers().Contains(owner);
+            }
+
+            static void Prefix(Controllers.CashRegisterController __instance)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                try
+                {
+                    if (!InPlayerShop()) return;
+                    string emp = "?", inst = "?", cust = "?";
+                    try { emp  = (__instance.employee == null)         ? "null" : "set"; } catch { }
+                    try { inst = (__instance.employeeInstance == null) ? "null" : "set"; } catch { }
+                    try { cust = (__instance.playerCustomer == null)   ? "null" : "set"; } catch { }
+                    Plugin.Logger.LogInfo(
+                        $"[RegShield] OnPlaceOrder entry in '{MPRegisterSync.CurrentShopOwner}' shop: " +
+                        $"employee={emp} employeeInstance={inst} playerCustomer={cust} " +
+                        $"dutyStaffed={MPRegisterSync.IsStaffedByOtherPlayer(__instance.transform.position)}");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[RegShield] probe: {ex.Message}"); }
+            }
+
+            static Exception? Finalizer(Exception __exception, Controllers.CashRegisterController __instance)
+            {
+                if (__exception == null) return null;
+                try
+                {
+                    if ((MPServer.IsRunning || MPClient.IsConnected) && InPlayerShop())
+                    {
+                        Plugin.Logger.LogWarning(
+                            $"[RegShield] OnPlaceOrder threw in '{MPRegisterSync.CurrentShopOwner}' shop — " +
+                            $"swallowed + cancelling the order to avoid the queue hard-lock: {__exception.Message}");
+                        try { __instance.OnOrderCancel(); }
+                        catch (Exception cx) { Plugin.Logger.LogWarning($"[RegShield] OnOrderCancel also failed: {cx.Message}"); }
+                        return null;   // suppress — buyer dequeues instead of wedging
+                    }
+                }
+                catch { }
+                return __exception;    // anywhere else: native behavior untouched
+            }
+        }
+
     }
 }
