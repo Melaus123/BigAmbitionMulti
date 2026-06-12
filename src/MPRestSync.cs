@@ -394,6 +394,37 @@ namespace BigAmbitionsMP
             if (MPServer.IsRunning) HostTick();
         }
 
+        // ── Instant training ──────────────────────────────────────────────────
+        private static object? _instantStudyDone;   // activity instance already completed
+
+        /// <summary>Completes a RUNNING StudyActivity in one step: a single
+        /// Perform(remaining) drives _minutesStudied to the goal and the
+        /// activity's own internal check calls Finish() — diploma grants
+        /// through the game's natural completion path.  Once per instance.</summary>
+        private static void TryInstantStudy(object act)
+        {
+            try
+            {
+                if (ReferenceEquals(act, _instantStudyDone)) return;
+                // Wait until the activity is actually RUNNING (walk-up and the
+                // purchase confirm happen first — money must already be paid).
+                var sm = act.GetType().GetMethod("GetState");
+                if (sm == null || sm.Invoke(act, null)?.ToString() != "Running") return;
+
+                int rem = 0;
+                var rm = act.GetType().GetMethod("GetRemainingMinutesForTimeMachine");
+                if (rm != null) rem = Convert.ToInt32(rm.Invoke(act, null));
+                if (rem <= 0) { _instantStudyDone = act; return; }
+
+                var pm = act.GetType().GetMethod("Perform", new[] { typeof(int) });
+                if (pm == null) { Plugin.Logger.LogWarning("[Rest] instant study: Perform(int) not found."); return; }
+                pm.Invoke(act, new object[] { rem });
+                _instantStudyDone = act;
+                Plugin.Logger.LogInfo($"[Rest] instant training: completed {rem} study minute(s) in one step (course was paid in full up front).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] instant study: {ex.Message}"); }
+        }
+
         private static void UpdateSeated()
         {
             try
@@ -416,6 +447,13 @@ namespace BigAmbitionsMP
                 ActivityState = -1;
                 DockButtons.Clear();
                 if (!seated) return;
+
+                // Instant training (user ruling 2026-06-12): courses charge the
+                // FULL price up front, so in MP nobody stares at a desk — the
+                // study completes the moment it's running (taxi-instant-arrival
+                // precedent: real cost stays, time cost dies; clock untouched).
+                if (nm == "Study" && (MPServer.IsRunning || MPClient.IsConnected))
+                    TryInstantStudy(act!);
 
                 // State + button passthrough for the dock.
                 try
