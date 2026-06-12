@@ -54,12 +54,37 @@ namespace BigAmbitionsMP
         /// lookups (icons) read from here; replaces BepInEx.Paths.PluginPath.</summary>
         public static string ModRootPath { get; private set; } = ".";
 
+        /// <summary>The GAME install root this process runs from (e.g.
+        /// "C:\BigAmbitions2").  ModsLocal is SHARED by every install
+        /// (persistentDataPath), so identity must key off this instead.</summary>
+        public static string GameRootPath { get; private set; } = "";
+
+        /// <summary>Filename-safe key for this game install ("Big_Ambitions",
+        /// "BigAmbitions2", …) — suffixes the cfg file so each install keeps its
+        /// OWN identity inside the shared ModsLocal folder.  Without this, host
+        /// and client instances read one cfg = same PlayerId + same StableId
+        /// (name and save-slot collisions; 0.10 had per-install BepInEx cfgs).</summary>
+        private static string InstallKey()
+        {
+            try
+            {
+                var name = Path.GetFileName(GameRootPath.TrimEnd('\\', '/'));
+                if (string.IsNullOrEmpty(name)) return "default";
+                foreach (var c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
+                return name.Replace(' ', '_');
+            }
+            catch { return "default"; }
+        }
+
         public static void Init(string modRootPath)
         {
             try
             {
-                ModRootPath = modRootPath ?? ".";
-                _cfgPath = Path.Combine(modRootPath ?? ".", "BigAmbitionsMP.cfg.json");
+                ModRootPath  = modRootPath ?? ".";
+                // dataPath = "<gameRoot>/Big Ambitions_Data"
+                GameRootPath = Path.GetDirectoryName(UnityEngine.Application.dataPath) ?? "";
+                _cfgPath = Path.Combine(ModRootPath, $"BigAmbitionsMP.cfg.{InstallKey()}.json");
+                Plugin.Logger.LogInfo($"[Config] install '{InstallKey()}' (root '{GameRootPath}') → cfg '{Path.GetFileName(_cfgPath)}'.");
                 if (File.Exists(_cfgPath))
                     _cfg = JsonConvert.DeserializeObject<Dictionary<string, string>>(File.ReadAllText(_cfgPath))
                            ?? new Dictionary<string, string>();
@@ -76,12 +101,23 @@ namespace BigAmbitionsMP
             StableId = ResolveStableId();
             Plugin.Logger.LogInfo($"[Config] Stable id: {StableId}");
 
-            // Resolve the player ID: config override → Steam name → generated fallback
+            // Resolve the player ID: config override → old BepInEx cfg ("Host"/
+            // "Client1" — keeps lobby identity continuity) → Steam name → fallback
             var stored = Get("PlayerId").Trim();
             if (string.IsNullOrEmpty(stored) || stored == "Player1")
             {
-                PlayerId = DetectPlayerName();
-                Plugin.Logger.LogInfo($"[Config] Auto-detected player name: {PlayerId}");
+                TryMigrateFromBepInEx(out _, out var oldName);
+                if (!string.IsNullOrEmpty(oldName))
+                {
+                    PlayerId = oldName!;
+                    Set("PlayerId", PlayerId);
+                    Plugin.Logger.LogInfo($"[Config] Player name migrated from BepInEx cfg: {PlayerId}");
+                }
+                else
+                {
+                    PlayerId = DetectPlayerName();
+                    Plugin.Logger.LogInfo($"[Config] Auto-detected player name: {PlayerId}");
+                }
             }
             else
             {
@@ -164,10 +200,10 @@ namespace BigAmbitionsMP
             if (!string.IsNullOrEmpty(stored))
                 return stored;
 
-            // 1b. Migration shim: lift the id out of the old BepInEx config so
-            //     0.10 progress (saves/ownership keyed by stable id) carries
-            //     over.  Checked once; the value is then persisted HERE forever.
-            var migrated = TryMigrateStableIdFromBepInEx();
+            // 1b. Migration shim: lift the id out of THIS INSTALL's old BepInEx
+            //     config so 0.10 progress (saves/ownership keyed by stable id)
+            //     carries over.  Checked once; then persisted HERE forever.
+            TryMigrateFromBepInEx(out var migrated, out _);
             if (!string.IsNullOrEmpty(migrated))
             {
                 Set("StableId", migrated!);
@@ -183,34 +219,47 @@ namespace BigAmbitionsMP
             return gen;
         }
 
-        private static string? TryMigrateStableIdFromBepInEx()
+        /// <summary>Read StableId + PlayerId out of THIS install's old BepInEx
+        /// config (com.bigambitions.multiplayer.cfg — the plugin GUID name, NOT
+        /// "BigAmbitionsMP.cfg"; the first migration shim looked for the wrong
+        /// filename and silently minted a fresh id).  For the second install the
+        /// 0.11 robocopy mirror overwrote its BepInEx folder with the HOST's
+        /// copy, so the 0.10 archive holds the true client identity and is
+        /// checked FIRST.</summary>
+        private static void TryMigrateFromBepInEx(out string? stableId, out string? playerId)
         {
+            stableId = null; playerId = null;
             try
             {
-                // Old location: <game>\BepInEx\config\BigAmbitionsMP.cfg — check
-                // both known install roots (StableId = key in [Network]).
-                string[] candidates =
-                {
-                    @"C:\Program Files (x86)\Steam\steamapps\common\Big Ambitions\BepInEx\config\BigAmbitionsMP.cfg",
-                    @"C:\BigAmbitions2\BepInEx\config\BigAmbitionsMP.cfg",
-                    @"C:\BigAmbitions2-0.10-archive\BepInEx\config\BigAmbitionsMP.cfg",
-                };
+                var candidates = new List<string>();
+                if (GameRootPath.TrimEnd('\\', '/').EndsWith("BigAmbitions2", StringComparison.OrdinalIgnoreCase))
+                    candidates.Add(@"C:\BigAmbitions2-0.10-archive\BepInEx\config\com.bigambitions.multiplayer.cfg");
+                if (!string.IsNullOrEmpty(GameRootPath))
+                    candidates.Add(Path.Combine(GameRootPath, @"BepInEx\config\com.bigambitions.multiplayer.cfg"));
+
                 foreach (var path in candidates)
                 {
                     if (!File.Exists(path)) continue;
                     foreach (var line in File.ReadAllLines(path))
                     {
                         var t = line.Trim();
-                        if (!t.StartsWith("StableId", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (t.StartsWith("#") || t.StartsWith("[")) continue;
                         int eq = t.IndexOf('=');
                         if (eq < 0) continue;
+                        var k = t.Substring(0, eq).Trim();
                         var v = t.Substring(eq + 1).Trim();
-                        if (!string.IsNullOrEmpty(v)) return v;
+                        if (string.IsNullOrEmpty(v)) continue;
+                        if (k.Equals("StableId", StringComparison.OrdinalIgnoreCase)) stableId ??= v;
+                        if (k.Equals("PlayerId", StringComparison.OrdinalIgnoreCase)) playerId ??= v;
+                    }
+                    if (stableId != null || playerId != null)
+                    {
+                        Plugin.Logger.LogInfo($"[Config] BepInEx migration source: {path}");
+                        return;   // one source only — never mix installs
                     }
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] BepInEx migration: {ex.Message}"); }
-            return null;
         }
 
         private static string? TryGetSteamId64()
