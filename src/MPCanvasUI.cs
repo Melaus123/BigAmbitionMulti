@@ -2,8 +2,6 @@ using System;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
-using Il2CppInterop.Runtime;
-using Il2CppInterop.Runtime.Injection;
 using Helpers;
 using Intro;
 using UI.Load;
@@ -18,8 +16,6 @@ namespace BigAmbitionsMP
     /// </summary>
     public class MPCanvasUI : MonoBehaviour
     {
-        public MPCanvasUI(IntPtr ptr) : base(ptr) { }
-
         // ── colours ──────────────────────────────────────────────────────────
         private static readonly Color C_BG       = new Color(0.12f, 0.12f, 0.14f, 0.97f);
         private static readonly Color C_HDR      = new Color(0.20f, 0.40f, 0.70f, 1.00f);
@@ -454,7 +450,7 @@ namespace BigAmbitionsMP
             {
                 foreach (char c in Input.inputString)
                 {
-                    if (c == '\b') { if (_editBuffer.Length > 0) _editBuffer = _editBuffer[..^1]; }
+                    if (c == '\b') { if (_editBuffer.Length > 0) _editBuffer = _editBuffer.Substring(0, _editBuffer.Length - 1); }
                     else if (c == '\n' || c == '\r') { CommitSettingsEdit(); break; }
                     else if ((c >= '0' && c <= '9') || c == '.' || c == '-') { if (_editBuffer.Length < 12) _editBuffer += c; }
                 }
@@ -1138,24 +1134,23 @@ namespace BigAmbitionsMP
                     {
                         var pos = ch.position + ch.forward * 7f + Vector3.up * 0.5f;
                         var rot = Quaternion.LookRotation(ch.right, Vector3.up);   // sideways at the curb
-                        var inst = new VehicleInstance();
+                        var inst = new VehicleInstance("ba:vehicletype_flatbed");
                         inst.id = $"BAMP_TESTRIG_{++_testRigN}";
-                        inst.vehicleTypeName = Vehicles.VehicleTypes.VehicleTypeName.Flatbed;
                         if (inst.cargoInstances == null)
-                            inst.cargoInstances = new Il2CppSystem.Collections.Generic.List<BigAmbitions.Items.CargoInstance>();
+                            inst.cargoInstances = new System.Collections.Generic.List<BigAmbitions.Items.CargoInstance>();
                         // Minimum gift-shop kit (paid stock, $0 cost basis).
                         // (CashRegister dropped — the checkout counter is the
                         //  full checkout deal; baskets added — both user.)
                         // price: rig-made cargo previously carried 0f — suspected
                         // source of the $0 checkout (AI-shop stock arrives
                         // pre-priced; CheapGift's default retail is $18 per user).
-                        (BigAmbitions.Items.ItemName item, int amount, float price)[] kit =
+                        (string item, int amount, float price)[] kit =
                         {
-                            (BigAmbitions.Items.ItemName.CheckoutCounterRight,    1,  0f),
-                            (BigAmbitions.Items.ItemName.PaperBag,              100,  0f),
-                            (BigAmbitions.Items.ItemName.StackOfShoppingBaskets,  1,  0f),
-                            (BigAmbitions.Items.ItemName.RoundedShelf,            2,  0f),
-                            (BigAmbitions.Items.ItemName.CheapGift,              60, 18f),
+                            ("ba:itemname_checkoutcounterright",    1,  0f),
+                            ("ba:itemname_paperbag",              100,  0f),
+                            ("ba:itemname_stackofshoppingbaskets",  1,  0f),
+                            ("ba:itemname_roundedshelf",            2,  0f),
+                            ("ba:itemname_cheapgift",              60, 18f),
                         };
                         foreach (var (item, amount, price) in kit)
                             inst.cargoInstances.Add(new BigAmbitions.Items.CargoInstance(item, amount, price, true));
@@ -1876,10 +1871,10 @@ namespace BigAmbitionsMP
         private double HubRate()
             => double.TryParse(_hubRateStr, System.Globalization.NumberStyles.Float,
                                System.Globalization.CultureInfo.InvariantCulture, out var r)
-               ? Math.Clamp(r, 0.0, 1000.0) : 20.0;
+               ? Math.Min(Math.Max(r, 0.0), 1000.0) : 20.0;
 
         private int HubTerm()
-            => int.TryParse(_hubTermStr, out var t) ? Math.Clamp(t, 1, 999) : 244;
+            => int.TryParse(_hubTermStr, out var t) ? Math.Min(Math.Max(t, 1), 999) : 244;
 
         private void CommitHubInputs()
         {
@@ -2278,11 +2273,11 @@ namespace BigAmbitionsMP
             bool up;
             try
             {
-                var lsObj = UnityEngine.Object.FindObjectOfType(Il2CppType.Of<LoadingScreen>());
+                var lsObj = UnityEngine.Object.FindObjectOfType(typeof(LoadingScreen));
                 if (lsObj == null) up = false;                  // no active LoadingScreen → gone
                 else
                 {
-                    var go = lsObj.TryCast<LoadingScreen>()?.gameObject;
+                    var go = (lsObj as LoadingScreen)?.gameObject;
                     if (go == null || !go.activeInHierarchy) up = false;
                     else
                     {
@@ -2326,8 +2321,8 @@ namespace BigAmbitionsMP
                 string ls = "null";
                 try
                 {
-                    var lsObj = UnityEngine.Object.FindObjectOfType(Il2CppType.Of<LoadingScreen>());
-                    var go = lsObj?.TryCast<LoadingScreen>()?.gameObject;
+                    var lsObj = UnityEngine.Object.FindObjectOfType(typeof(LoadingScreen));
+                    var go = (lsObj as LoadingScreen)?.gameObject;
                     if (go == null) ls = "noGO";
                     else
                     {
@@ -2443,19 +2438,19 @@ namespace BigAmbitionsMP
             if (_introNameFilled) return;
             try
             {
-                var found = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<IntroCharacterCustomizer>());
+                var found = UnityEngine.Object.FindObjectsOfType(typeof(IntroCharacterCustomizer));
                 if (found == null || found.Length == 0) return;
-                var customizer = found[0].TryCast<IntroCharacterCustomizer>();
+                var customizer = found[0] as IntroCharacterCustomizer;
                 if (customizer == null) return;
 
-                var fields = customizer.GetComponentsInChildren(Il2CppType.Of<TMP_InputField>(), true);
+                var fields = customizer.GetComponentsInChildren(typeof(TMP_InputField), true);
                 if (fields == null || fields.Length == 0) return;
 
                 Plugin.Logger.LogInfo(
                     $"[IntroName] IntroCharacterCustomizer detected — {fields.Length} TMP_InputField(s):");
                 for (int i = 0; i < fields.Length; i++)
                 {
-                    var f = fields[i].TryCast<TMP_InputField>();
+                    var f = fields[i] as TMP_InputField;
                     if (f == null) continue;
                     Plugin.Logger.LogInfo($"[IntroName]   [{i}] '{f.gameObject.name}' text='{f.text}'");
                 }
@@ -2471,7 +2466,7 @@ namespace BigAmbitionsMP
                 int filled = 0;
                 for (int i = 0; i < fields.Length && filled < 2; i++)
                 {
-                    var f = fields[i].TryCast<TMP_InputField>();
+                    var f = fields[i] as TMP_InputField;
                     if (f == null) continue;
                     // Only fill if the field is currently empty / placeholder — never clobber typed text.
                     var cur = f.text;
@@ -2551,11 +2546,11 @@ namespace BigAmbitionsMP
 
                 try
                 {
-                    var canvases = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<Canvas>());
+                    var canvases = UnityEngine.Object.FindObjectsOfType(typeof(Canvas));
                     if (canvases == null) return;
                     for (int i = 0; i < canvases.Length; i++)
                     {
-                        var c = canvases[i].TryCast<Canvas>();
+                        var c = canvases[i] as Canvas;
                         if (c == null) continue;
                         if (c.gameObject.name == "BlackOverlay")
                         {
@@ -3104,7 +3099,7 @@ namespace BigAmbitionsMP
                 for (int i = 0; i < mbs.Length; i++)
                 {
                     var c = mbs[i];
-                    try { if (c != null && c.GetIl2CppType().Name.Contains("Localization")) c.enabled = false; } catch { }
+                    try { if (c != null && c.GetType().Name.Contains("Localization")) c.enabled = false; } catch { }
                 }
                 var tmp = clone.GetComponentInChildren<TMP_Text>(true);
                 if (tmp != null) tmp.text = label;
@@ -3122,7 +3117,7 @@ namespace BigAmbitionsMP
             // listeners (e.g. open Load Game) don't also fire.
             var btn = clone.GetComponent<Button>();
             btn.onClick = new Button.ButtonClickedEvent();
-            btn.onClick.AddListener((UnityEngine.Events.UnityAction)(onClick));
+            btn.onClick.AddListener(new UnityEngine.Events.UnityAction(onClick.Invoke));
             return clone;
         }
 
@@ -3148,7 +3143,7 @@ namespace BigAmbitionsMP
             try
             {
                 var mbs = clone.GetComponentsInChildren<MonoBehaviour>(true);
-                for (int i = 0; i < mbs.Length; i++) { var c = mbs[i]; try { if (c != null && c.GetIl2CppType().Name.Contains("Localization")) c.enabled = false; } catch { } }
+                for (int i = 0; i < mbs.Length; i++) { var c = mbs[i]; try { if (c != null && c.GetType().Name.Contains("Localization")) c.enabled = false; } catch { } }
                 var tmp = clone.GetComponentInChildren<TMP_Text>(true);
                 if (tmp != null)
                 {
@@ -3170,7 +3165,7 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] CloneButtonInto '{label}': {ex.Message}"); }
-            try { var btn = clone.GetComponent<Button>(); if (btn != null) { btn.onClick = new Button.ButtonClickedEvent(); btn.onClick.AddListener((UnityEngine.Events.UnityAction)(onClick)); } } catch { }
+            try { var btn = clone.GetComponent<Button>(); if (btn != null) { btn.onClick = new Button.ButtonClickedEvent(); btn.onClick.AddListener(new UnityEngine.Events.UnityAction(onClick.Invoke)); } } catch { }
             return clone;
         }
 
@@ -3380,7 +3375,7 @@ namespace BigAmbitionsMP
                 string s = _joinFocus == 1 ? _joinIp : _joinPort;
                 foreach (char c in Input.inputString)
                 {
-                    if (c == '\b') { if (s.Length > 0) s = s[..^1]; }
+                    if (c == '\b') { if (s.Length > 0) s = s.Substring(0, s.Length - 1); }
                     else if (c == '\n' || c == '\r') { OnJoinConnect(); return; }
                     else if (!char.IsControl(c)) s += c;
                 }
@@ -3712,7 +3707,7 @@ namespace BigAmbitionsMP
         {
             foreach (char c in Input.inputString)
             {
-                if (c == '\b') { if (s.Length > 0) s = s[..^1]; }
+                if (c == '\b') { if (s.Length > 0) s = s.Substring(0, s.Length - 1); }
                 else if (char.IsDigit(c) && s.Length < maxLen) s += c;
             }
             return s;
@@ -4242,7 +4237,7 @@ namespace BigAmbitionsMP
                 string s = _mpChatInput;
                 foreach (char c in Input.inputString)
                 {
-                    if (c == '\b') { if (s.Length > 0) s = s[..^1]; }
+                    if (c == '\b') { if (s.Length > 0) s = s.Substring(0, s.Length - 1); }
                     else if (c == '\n' || c == '\r') { /* submit handled by Return key */ }
                     else if (!char.IsControl(c) && s.Length < 120) s += c;
                 }

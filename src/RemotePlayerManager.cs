@@ -3,8 +3,6 @@ using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
 using Helpers;
-using Il2CppInterop.Runtime;
-using Il2CppInterop.Runtime.Injection;
 
 namespace BigAmbitionsMP
 {
@@ -13,12 +11,9 @@ namespace BigAmbitionsMP
     /// <summary>
     /// Attached to each remote-player capsule.  Lerps toward the latest received
     /// position/rotation every frame so movement looks smooth rather than teleporting.
-    /// Must be registered with ClassInjector before use.
     /// </summary>
     public class RemotePlayerMover : MonoBehaviour
     {
-        public RemotePlayerMover(IntPtr ptr) : base(ptr) { }
-
         public Vector3    TargetPosition;
         public Quaternion TargetRotation = Quaternion.identity;
         // Dead reckoning: measured velocity between packets + the time of the
@@ -519,8 +514,8 @@ namespace BigAmbitionsMP
                 DumpHierarchy(root, 0);
 
                 // ── Animator ─────────────────────────────────────────────────
-                var animComp = root.GetComponentInChildren(Il2CppType.Of<Animator>());
-                var animator = animComp != null ? animComp.TryCast<Animator>() : null;
+                var animComp = root.GetComponentInChildren(typeof(Animator));
+                var animator = animComp != null ? animComp as Animator : null;
                 if (animator == null)
                 {
                     Plugin.Logger.LogWarning("[RemotePlayer] No Animator found under the character.");
@@ -542,11 +537,11 @@ namespace BigAmbitionsMP
                 }
 
                 // ── SkinnedMeshRenderers ─────────────────────────────────────
-                var smrs = root.GetComponentsInChildren(Il2CppType.Of<SkinnedMeshRenderer>(), true);
+                var smrs = root.GetComponentsInChildren(typeof(SkinnedMeshRenderer), true);
                 Plugin.Logger.LogInfo($"[RemotePlayer] SkinnedMeshRenderers ({smrs.Length}):");
                 for (int i = 0; i < smrs.Length; i++)
                 {
-                    var smr = smrs[i].TryCast<SkinnedMeshRenderer>();
+                    var smr = smrs[i] as SkinnedMeshRenderer;
                     if (smr != null)
                         Plugin.Logger.LogInfo(
                             $"[RemotePlayer]   '{smr.gameObject.name}' mesh='" +
@@ -565,10 +560,10 @@ namespace BigAmbitionsMP
             string comps;
             try
             {
-                var cs = t.gameObject.GetComponents(Il2CppType.Of<Component>());
+                var cs = t.gameObject.GetComponents(typeof(Component));
                 var names = new List<string>();
                 for (int i = 0; i < cs.Length; i++)
-                    if (cs[i] != null) names.Add(cs[i].GetIl2CppType().Name);
+                    if (cs[i] != null) names.Add(cs[i].GetType().Name);
                 comps = string.Join(", ", names);
             }
             catch { comps = "(components unavailable)"; }
@@ -666,11 +661,11 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var comps = go.GetComponents(Il2CppType.Of<Component>());
+                var comps = go.GetComponents(typeof(Component));
                 for (int i = 0; i < comps.Length; i++)
                 {
                     var c = comps[i];
-                    if (c != null && c.GetIl2CppType().Name == typeName) return c;
+                    if (c != null && c.GetType().Name == typeName) return c;
                 }
             }
             catch { }
@@ -841,8 +836,8 @@ namespace BigAmbitionsMP
             {
                 var model = PlayerHelper.PlayerController?.Character?.transform.Find("Model");
                 if (model == null) return null;
-                var animComp = model.GetComponent(Il2CppType.Of<Animator>());
-                _localAnim = animComp != null ? animComp.TryCast<Animator>() : null;
+                var animComp = model.GetComponent(typeof(Animator));
+                _localAnim = animComp != null ? animComp as Animator : null;
                 if (_localAnim != null) BuildTriggerMaps(_localAnim);
             }
             catch { }
@@ -1010,11 +1005,11 @@ namespace BigAmbitionsMP
             {
                 // Inactive instances included — the scene keeps placeholder
                 // copies (e.g. vehicle-bed boxes) of the same prefabs.
-                var all = Resources.FindObjectsOfTypeAll(Il2CppInterop.Runtime.Il2CppType.Of<Transform>());
+                var all = Resources.FindObjectsOfTypeAll(typeof(Transform));
                 if (all != null)
                     foreach (var o in all)
                     {
-                        var tr = o.TryCast<Transform>();
+                        var tr = o as Transform;
                         if (tr == null) continue;
                         if (CleanPropName(tr.name) != name) continue;
                         if (tr.name.StartsWith("BAMP_Held_")) continue;   // never template off our own clones
@@ -1036,7 +1031,7 @@ namespace BigAmbitionsMP
                 {
                     if (c == null) continue;
                     string tn = "";
-                    try { tn = c.GetIl2CppType().Name; } catch { continue; }
+                    try { tn = c.GetType().Name; } catch { continue; }
                     if (tn == "Transform" || tn == "RectTransform"
                         || tn.Contains("MeshFilter") || tn.Contains("MeshRenderer")
                         || tn.Contains("SkinnedMeshRenderer")) continue;
@@ -1131,8 +1126,8 @@ namespace BigAmbitionsMP
                 {
                     var model = PlayerHelper.PlayerController?.Character?.transform.Find("Model");
                     if (model == null) return;
-                    var animComp = model.GetComponent(Il2CppType.Of<Animator>());
-                    _animProbeAnim = animComp != null ? animComp.TryCast<Animator>() : null;
+                    var animComp = model.GetComponent(typeof(Animator));
+                    _animProbeAnim = animComp != null ? animComp as Animator : null;
                     if (_animProbeAnim == null)
                     {
                         if (!_animProbeMissing)
@@ -1197,8 +1192,8 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var smrComp = variant.GetComponent(Il2CppType.Of<SkinnedMeshRenderer>());
-                var smr = smrComp != null ? smrComp.TryCast<SkinnedMeshRenderer>() : null;
+                var smrComp = variant.GetComponent(typeof(SkinnedMeshRenderer));
+                var smr = smrComp != null ? smrComp as SkinnedMeshRenderer : null;
                 if (smr == null) return;
                 var mats = smr.sharedMaterials;
                 var mpb = new MaterialPropertyBlock();
@@ -1250,8 +1245,8 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var smrComp = variant.GetComponent(Il2CppType.Of<SkinnedMeshRenderer>());
-                var smr = smrComp != null ? smrComp.TryCast<SkinnedMeshRenderer>() : null;
+                var smrComp = variant.GetComponent(typeof(SkinnedMeshRenderer));
+                var smr = smrComp != null ? smrComp as SkinnedMeshRenderer : null;
                 if (smr == null || smr.sharedMesh == null) return;
                 var mesh = smr.sharedMesh;
                 int bc = mesh.blendShapeCount;
@@ -1285,8 +1280,8 @@ namespace BigAmbitionsMP
                     var v = cat.Find(wanted);
                     if (v == null) continue;
 
-                    var smrComp = v.gameObject.GetComponent(Il2CppType.Of<SkinnedMeshRenderer>());
-                    var smr = smrComp != null ? smrComp.TryCast<SkinnedMeshRenderer>() : null;
+                    var smrComp = v.gameObject.GetComponent(typeof(SkinnedMeshRenderer));
+                    var smr = smrComp != null ? smrComp as SkinnedMeshRenderer : null;
                     if (smr == null || smr.sharedMesh == null) continue;
                     var mesh = smr.sharedMesh;
                     foreach (var e in grp)
@@ -1317,8 +1312,8 @@ namespace BigAmbitionsMP
                     var v = cat.Find(wanted);
                     if (v == null) continue;
 
-                    var smrComp = v.gameObject.GetComponent(Il2CppType.Of<SkinnedMeshRenderer>());
-                    var smr = smrComp != null ? smrComp.TryCast<SkinnedMeshRenderer>() : null;
+                    var smrComp = v.gameObject.GetComponent(typeof(SkinnedMeshRenderer));
+                    var smr = smrComp != null ? smrComp as SkinnedMeshRenderer : null;
                     if (smr == null) continue;
 
                     // .materials forces per-renderer instanced copies so we don't
@@ -1340,8 +1335,8 @@ namespace BigAmbitionsMP
                     var cat = genderT.Find(grp.Key);
                     var v = cat != null ? cat.Find(wanted) : null;
                     if (v == null) continue;
-                    var smrComp = v.gameObject.GetComponent(Il2CppType.Of<SkinnedMeshRenderer>());
-                    var smr = smrComp != null ? smrComp.TryCast<SkinnedMeshRenderer>() : null;
+                    var smrComp = v.gameObject.GetComponent(typeof(SkinnedMeshRenderer));
+                    var smr = smrComp != null ? smrComp as SkinnedMeshRenderer : null;
                     if (smr == null) continue;
                     var mats = smr.materials;
                     foreach (var e in grp)
@@ -1464,8 +1459,8 @@ namespace BigAmbitionsMP
             var mover = root.AddComponent<RemotePlayerMover>();
             if (model != null)
             {
-                var animComp = model.GetComponent(Il2CppType.Of<Animator>());
-                mover.Anim = animComp != null ? animComp.TryCast<Animator>() : null;
+                var animComp = model.GetComponent(typeof(Animator));
+                mover.Anim = animComp != null ? animComp as Animator : null;
 
                 // Dress the model if we already received this player's appearance.
                 if (_appearances.TryGetValue(playerId, out var ap))
@@ -1509,12 +1504,12 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var comps = model.GetComponents(Il2CppType.Of<Component>());
+                var comps = model.GetComponents(typeof(Component));
                 for (int i = 0; i < comps.Length; i++)
                 {
                     var c = comps[i];
                     if (c == null) continue;
-                    if (System.Array.IndexOf(_killScripts, c.GetIl2CppType().Name) >= 0)
+                    if (System.Array.IndexOf(_killScripts, c.GetType().Name) >= 0)
                         UnityEngine.Object.Destroy(c);
                 }
             }

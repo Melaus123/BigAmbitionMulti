@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Text.Json;
 
 namespace BigAmbitionsMP
 {
@@ -136,7 +135,7 @@ namespace BigAmbitionsMP
             try
             {
                 Directory.CreateDirectory(MpSessionFolder(sessionName));
-                var json = JsonSerializer.Serialize(m, new JsonSerializerOptions { WriteIndented = true });
+                var json = Newtonsoft.Json.JsonConvert.SerializeObject(m, Newtonsoft.Json.Formatting.Indented);
                 File.WriteAllText(ManifestPath(sessionName), json);
                 Plugin.Logger.LogInfo($"[MPSave] Wrote manifest '{sessionName}' ({m.Slots.Count} slot(s), {m.BuildingOwners.Count} owned).");
             }
@@ -149,7 +148,7 @@ namespace BigAmbitionsMP
             {
                 string p = ManifestPath(sessionName);
                 if (!File.Exists(p)) return null;
-                return JsonSerializer.Deserialize<MpManifest>(File.ReadAllText(p));
+                return Newtonsoft.Json.JsonConvert.DeserializeObject<MpManifest>(File.ReadAllText(p));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ReadManifest '{sessionName}': {ex.Message}"); return null; }
         }

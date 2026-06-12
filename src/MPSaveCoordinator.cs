@@ -384,7 +384,7 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogInfo("[MPSave] Mid-join while IN-GAME — detouring via main menu before loading.");
                         _pendingLoadSession = session;
                         _pendingLoadCash    = money;
-                        UI.Load.LoadScene.LoadMainMenu();
+                        UI.Load.LoadScene.LoadMainMenu(BAModAPI.ModActivationScope.City);
                         return;
                     }
                     LoadOwnHsg(session, MPConfig.StableId);
@@ -537,7 +537,7 @@ namespace BigAmbitionsMP
         // any managed exception — with its full stack — right before a crash.
         // Per-process file (PID in the name) so the host's and client's traces don't
         // interleave in one file when both run on the same machine.
-        private static readonly string DiagFile = $@"C:\dumps\savediag.{Environment.ProcessId}.txt";
+        private static readonly string DiagFile = $@"C:\dumps\savediag.{System.Diagnostics.Process.GetCurrentProcess().Id}.txt";
         private static bool          _diagInstalled;
         private static volatile bool _diagActive;
         private static int           _diagFramesLeft;

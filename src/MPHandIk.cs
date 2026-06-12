@@ -1,5 +1,4 @@
 using System;
-using Il2CppInterop.Runtime;
 using UnityEngine;
 
 namespace BigAmbitionsMP
@@ -47,8 +46,8 @@ namespace BigAmbitionsMP
                     _searched = true;
                     var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
                     var model = ch != null ? ch.Find("Model") : null;
-                    var ac = model != null ? model.GetComponent(Il2CppType.Of<Animator>()) : null;
-                    _localAnim = ac != null ? ac.TryCast<Animator>() : null;
+                    var ac = model != null ? model.GetComponent(typeof(Animator)) : null;
+                    _localAnim = ac != null ? ac as Animator : null;
                     Plugin.Logger.LogInfo($"[HandIK] local animator: {(_localAnim != null ? $"ok, human={_localAnim.isHuman}" : "MISS")}");
                 }
                 var anim = _localAnim;

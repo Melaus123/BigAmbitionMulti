@@ -356,7 +356,7 @@ namespace BigAmbitionsMP
                 }
                 var st = new LoanStatePayload();
                 st.Loans.AddRange(_hostLoans);
-                System.IO.File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(st));
+                System.IO.File.WriteAllText(path, Newtonsoft.Json.JsonConvert.SerializeObject(st));
                 if (_hostLoans.Count > 0) Plugin.Logger.LogInfo($"[Hub] ledger saved ({_hostLoans.Count} loan(s)).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Hub] SaveLedger: {ex.Message}"); }
@@ -379,7 +379,7 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo("[Hub] ledger file skipped — in-memory ledger already live.");
                     return;
                 }
-                var st = System.Text.Json.JsonSerializer.Deserialize<LoanStatePayload>(System.IO.File.ReadAllText(path));
+                var st = Newtonsoft.Json.JsonConvert.DeserializeObject<LoanStatePayload>(System.IO.File.ReadAllText(path));
                 if (st == null) return;
                 _hostLoans.Clear();
                 _hostLoans.AddRange(st.Loans);

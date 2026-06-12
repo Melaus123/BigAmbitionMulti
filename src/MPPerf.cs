@@ -69,7 +69,7 @@ namespace BigAmbitionsMP
                 _gc0 = g0; _gc1 = g1; _gc2 = g2;
                 try
                 {
-                    int gi = Il2CppSystem.GC.CollectionCount(0);
+                    int gi = System.GC.CollectionCount(0);
                     gc += $" il2cpp {gi - _gcIl}";
                     _gcIl = gi;
                 }

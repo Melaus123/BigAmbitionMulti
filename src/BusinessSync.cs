@@ -169,7 +169,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var all = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<CityBuildingController>());
+                var all = UnityEngine.Object.FindObjectsOfType(typeof(CityBuildingController));
                 if (all == null) { Plugin.Logger.LogInfo($"[BusinessSync] {label} CBC scan: (null)"); return; }
                 int total = all.Length;
                 int[] byType = new int[7];
@@ -178,14 +178,14 @@ namespace BigAmbitionsMP
                 int unknownType = 0;
                 for (int i = 0; i < all.Length; i++)
                 {
-                    var cbc = all[i].TryCast<CityBuildingController>();
+                    var cbc = all[i] as CityBuildingController;
                     if (cbc == null) continue;
                     var reg = cbc.buildingRegistration;
                     if (reg == null) { noReg++; continue; }
                     int idx = TryGetBuildingTypeIndex(reg);
                     if (idx < 0 || idx >= 7) { unknownType++; continue; }
                     byType[idx]++;
-                    try { if ((int)reg.businessTypeName == 0) forRentByType[idx]++; } catch { }
+                    try { if (reg.businessTypeName == "ba:businesstype_empty") forRentByType[idx]++; } catch { }
                 }
                 string[] names = { "Residential", "Retail", "Office", "Warehouse", "Special", "Cinema", "Theater" };
                 var sb = new System.Text.StringBuilder();
@@ -224,7 +224,7 @@ namespace BigAmbitionsMP
                                 var b = lst[i]?.Building;
                                 if (b != null)
                                 {
-                                    int idx = (int)b.BuildingType;
+                                    int idx = BuildingTypeIndex(b.BuildingType);
                                     if (idx >= 0 && idx < 7) forSaleByType[idx]++;
                                 }
                             }
@@ -245,7 +245,7 @@ namespace BigAmbitionsMP
                                 var b = lst[i]?.Building;
                                 if (b != null)
                                 {
-                                    int idx = (int)b.BuildingType;
+                                    int idx = BuildingTypeIndex(b.BuildingType);
                                     if (idx >= 0 && idx < 7) realEstByType[idx]++;
                                 }
                             }
@@ -265,10 +265,23 @@ namespace BigAmbitionsMP
 
         // ── Diagnostic helpers (Phase 1b residential/warehouse discrepancy) ─────
 
+        /// <summary>EA 0.11 building-type ids → our 7 histogram buckets
+        /// (Residential=0..Theater=6, matching the legacy enum order).</summary>
+        public static int BuildingTypeIndex(string? buildingType) => buildingType switch
+        {
+            "ba:buildingtype_residential" => 0,
+            "ba:buildingtype_retail"      => 1,
+            "ba:buildingtype_office"      => 2,
+            "ba:buildingtype_warehouse"   => 3,
+            "ba:buildingtype_special"     => 4,
+            "ba:buildingtype_cinema"      => 5,
+            "ba:buildingtype_theater"     => 6,
+            _ => -1,
+        };
+
         /// <summary>
         /// Returns the BuildingType ordinal (0..6) for a registration via its
-        /// cached Building reference, or -1 if unavailable.  IL2CPP-Interop:
-        /// reg.BuildingCached lazy-resolves through BuildingHelper.
+        /// cached Building reference, or -1 if unavailable.
         /// </summary>
         public static int TryGetBuildingTypeIndex(BuildingRegistration reg)
         {
@@ -276,7 +289,7 @@ namespace BigAmbitionsMP
             {
                 var b = reg.BuildingCached;
                 if (b == null) return -1;
-                return (int)b.BuildingType;
+                return BuildingTypeIndex(b.BuildingType);
             }
             catch { return -1; }
         }
@@ -305,7 +318,7 @@ namespace BigAmbitionsMP
                 Total[idx]++;
                 if (info.AvailableForRent)                                Total[idx] = Total[idx];   // no-op; kept clear
                 if (info.AvailableForRent)                                AvailForRent[idx]++;
-                if (info.BusinessTypeName == 0)                           EmptyBizType[idx]++;
+                if (info.BusinessTypeName == "ba:businesstype_empty")     EmptyBizType[idx]++;
                 try { if (reg.RentedByPlayer)                              PlayerRented[idx]++; } catch { }
                 try { if (!string.IsNullOrEmpty(reg.buildingOwnerRivalId)) RivalOwns[idx]++;    } catch { }
                 try { if (!string.IsNullOrEmpty(reg.businessOwnerRivalId)) RivalBiz[idx]++;     } catch { }
@@ -321,7 +334,7 @@ namespace BigAmbitionsMP
                 if (idx < 0 || idx >= 7) { UnknownType++; return; }
                 Total[idx]++;
                 try { if (reg.AvailableForRent)                            AvailForRent[idx]++;  } catch { }
-                try { if ((int)reg.businessTypeName == 0)                  EmptyBizType[idx]++;  } catch { }
+                try { if (reg.businessTypeName == "ba:businesstype_empty")                  EmptyBizType[idx]++;  } catch { }
                 try { if (reg.RentedByPlayer)                              PlayerRented[idx]++;  } catch { }
                 try { if (!string.IsNullOrEmpty(reg.buildingOwnerRivalId)) RivalOwns[idx]++;     } catch { }
                 try { if (!string.IsNullOrEmpty(reg.businessOwnerRivalId)) RivalBiz[idx]++;      } catch { }
@@ -411,7 +424,7 @@ namespace BigAmbitionsMP
                             _cycleChanges++;
                             // Log only non-trivial changes (something that has a name or
                             // isn't BusinessTypeName.Empty) so we don't spam at startup.
-                            if (!string.IsNullOrEmpty(info.BusinessName) || info.BusinessTypeName != 0
+                            if (!string.IsNullOrEmpty(info.BusinessName) || info.BusinessTypeName != "ba:businesstype_empty"
                                 || !string.IsNullOrEmpty(info.BuildingOwnerRivalId)
                                 || !string.IsNullOrEmpty(info.BusinessOwnerRivalId)
                                 || info.RentedByPlayer)
@@ -509,7 +522,7 @@ namespace BigAmbitionsMP
                 {
                     AddressKey         = addr,
                     BusinessName       = SafeStr(reg.BusinessName),
-                    BusinessTypeName   = (int)reg.businessTypeName,
+                    BusinessTypeName   = reg.businessTypeName ?? "",
                     TemporarilyClosed  = reg.temporarilyClosed,
                     AvailableForRent   = reg.AvailableForRent,
                     RentPerDay         = reg.RentPerDay,
@@ -553,7 +566,6 @@ namespace BigAmbitionsMP
                 // also skips default schedule population.
                 try
                 {
-                    info.SharedSchedule = reg.sharedSchedule;
                     if (reg.scheduleDays != null)
                     {
                         for (int i = 0; i < reg.scheduleDays.Count; i++)
@@ -657,7 +669,6 @@ namespace BigAmbitionsMP
                 && a.FontColorPacked          == b.FontColorPacked
                 && a.BackgroundColorPacked    == b.BackgroundColorPacked
                 && LogoFilesEqual(a.LogoFiles, b.LogoFiles)
-                && a.SharedSchedule           == b.SharedSchedule
                 && ScheduleEqual(a.Schedule, b.Schedule)
                 && a.BuildingOwnerRivalId     == b.BuildingOwnerRivalId
                 && a.BusinessOwnerRivalId     == b.BusinessOwnerRivalId

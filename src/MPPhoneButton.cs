@@ -1,5 +1,4 @@
 using System;
-using Il2CppInterop.Runtime;
 using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.UI;
@@ -158,9 +157,9 @@ namespace BigAmbitionsMP
         {
             var t = VehicleManager.FindGameType("SmartphoneUI");
             if (t == null) return;
-            var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(t), true);
+            var arr = UnityEngine.Object.FindObjectsOfType(t, true);
             if (arr == null || arr.Length == 0) return;
-            var ui = arr[0].TryCast<Component>();
+            var ui = arr[0] as Component;
             if (ui == null) return;
 
             var buttons = ui.transform.Find("Container/Phone/AppButtons");
@@ -176,20 +175,20 @@ namespace BigAmbitionsMP
             // Strip the game's app-button logic (AppName-driven; the enum is
             // full) and any localization that would overwrite our label.
             int stripped = 0;
-            var comps = go.GetComponents(Il2CppType.Of<Component>());
+            var comps = go.GetComponents(typeof(Component));
             for (int i = 0; i < comps.Length; i++)
             {
                 var c = comps[i];
                 if (c == null) continue;
-                string cn = c.GetIl2CppType().Name;
+                string cn = c.GetType().Name;
                 if (cn == "SmartphoneAppButton") { UnityEngine.Object.Destroy(c); stripped++; }
             }
-            foreach (var c in go.GetComponentsInChildren(Il2CppType.Of<Component>(), true))
+            foreach (var c in go.GetComponentsInChildren(typeof(Component), true))
             {
-                var cc = c.TryCast<Component>();
+                var cc = c as Component;
                 if (cc == null) continue;
-                if (cc.GetIl2CppType().Name.Contains("Localization"))
-                { var b = cc.TryCast<Behaviour>(); if (b != null) b.enabled = false; }
+                if (cc.GetType().Name.Contains("Localization"))
+                { var b = cc as Behaviour; if (b != null) b.enabled = false; }
             }
 
             // Label → "Chat"; log the child structure once for refinement.
@@ -226,9 +225,9 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[PhoneBtn] structure: imgs={images.Length} texts={texts.Length} stripped={stripped} icon={(icon != null ? "loaded" : "MISSING (label only)")} target='{target?.gameObject.name}'");
 
             // Click → MP window.  Plain uGUI Button (the grid is a real canvas).
-            var btnComp = go.GetComponent(Il2CppType.Of<Button>());
-            var btn = btnComp != null ? btnComp.TryCast<Button>() : null;
-            if (btn == null) btn = go.AddComponent(Il2CppType.Of<Button>())!.TryCast<Button>();
+            var btnComp = go.GetComponent(typeof(Button));
+            var btn = btnComp != null ? btnComp as Button : null;
+            if (btn == null) btn = go.AddComponent(typeof(Button))! as Button;
             if (btn != null)
             {
                 btn.onClick = new Button.ButtonClickedEvent();   // clear template listeners
@@ -253,8 +252,8 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    var gridComp = buttons.GetComponent(Il2CppType.Of<GridLayoutGroup>());
-                    var grid = gridComp != null ? gridComp.TryCast<GridLayoutGroup>() : null;
+                    var gridComp = buttons.GetComponent(typeof(GridLayoutGroup));
+                    var grid = gridComp != null ? gridComp as GridLayoutGroup : null;
                     if (grid != null)
                     {
                         var old = grid.cellSize;
@@ -275,10 +274,10 @@ namespace BigAmbitionsMP
                     _badgeGO = badge.gameObject;
                     // The game's Badge script binds to its own data — disable it
                     // and drive the visuals ourselves.
-                    foreach (var c in badge.GetComponents(Il2CppType.Of<Component>()))
+                    foreach (var c in badge.GetComponents(typeof(Component)))
                     {
-                        var cc = c.TryCast<Behaviour>();
-                        if (cc != null && cc.GetIl2CppType().Name == "Badge") cc.enabled = false;
+                        var cc = c as Behaviour;
+                        if (cc != null && cc.GetType().Name == "Badge") cc.enabled = false;
                     }
                     var btx = badge.Find("BadgeText");
                     _badgeText = btx != null ? btx.GetComponent<TMPro.TextMeshProUGUI>() : null;
@@ -292,7 +291,7 @@ namespace BigAmbitionsMP
             // a forced layout pass (the natives' own button script re-fits their
             // icons to the new cell; ours has no script, so we mirror theirs).
             // A delayed re-copy catches any late native adjustment.
-            try { LayoutRebuilder.ForceRebuildLayoutImmediate(buttons.TryCast<RectTransform>()); } catch { }
+            try { LayoutRebuilder.ForceRebuildLayoutImmediate(buttons as RectTransform); } catch { }
             CopyIconMetricsFromSibling(buttons, go, target);
             _recopyButtons = buttons; _recopyGo = go; _recopyIcon = target;
             _recopyAt = Time.unscaledTime + 0.75f;
@@ -322,17 +321,17 @@ namespace BigAmbitionsMP
             var go = UnityEngine.Object.Instantiate(src, buttons);
             go.name = HubName;
 
-            foreach (var c in go.GetComponents(Il2CppType.Of<Component>()))
+            foreach (var c in go.GetComponents(typeof(Component)))
             {
                 if (c == null) continue;
-                if (c.GetIl2CppType().Name == "SmartphoneAppButton") UnityEngine.Object.Destroy(c);
+                if (c.GetType().Name == "SmartphoneAppButton") UnityEngine.Object.Destroy(c);
             }
-            foreach (var c in go.GetComponentsInChildren(Il2CppType.Of<Component>(), true))
+            foreach (var c in go.GetComponentsInChildren(typeof(Component), true))
             {
-                var cc = c.TryCast<Component>();
+                var cc = c as Component;
                 if (cc == null) continue;
-                if (cc.GetIl2CppType().Name.Contains("Localization"))
-                { var b = cc.TryCast<Behaviour>(); if (b != null) b.enabled = false; }
+                if (cc.GetType().Name.Contains("Localization"))
+                { var b = cc as Behaviour; if (b != null) b.enabled = false; }
             }
             foreach (var txt in go.GetComponentsInChildren<TMPro.TMP_Text>(true))
                 if (txt != null) txt.text = "Business";
@@ -360,9 +359,9 @@ namespace BigAmbitionsMP
             }
             _hubIconRT = target != null ? target.rectTransform : null;
 
-            var btnComp = go.GetComponent(Il2CppType.Of<Button>());
-            var btn = btnComp != null ? btnComp.TryCast<Button>() : null;
-            if (btn == null) btn = go.AddComponent(Il2CppType.Of<Button>())!.TryCast<Button>();
+            var btnComp = go.GetComponent(typeof(Button));
+            var btn = btnComp != null ? btnComp as Button : null;
+            if (btn == null) btn = go.AddComponent(typeof(Button))! as Button;
             if (btn != null)
             {
                 btn.onClick = new Button.ButtonClickedEvent();
@@ -377,10 +376,10 @@ namespace BigAmbitionsMP
                 if (badge != null)
                 {
                     _hubBadgeGO = badge.gameObject;
-                    foreach (var c in badge.GetComponents(Il2CppType.Of<Component>()))
+                    foreach (var c in badge.GetComponents(typeof(Component)))
                     {
-                        var cc = c.TryCast<Behaviour>();
-                        if (cc != null && cc.GetIl2CppType().Name == "Badge") cc.enabled = false;
+                        var cc = c as Behaviour;
+                        if (cc != null && cc.GetType().Name == "Badge") cc.enabled = false;
                     }
                     var btx = badge.Find("BadgeText");
                     _hubBadgeText = btx != null ? btx.GetComponent<TMPro.TextMeshProUGUI>() : null;
@@ -389,7 +388,7 @@ namespace BigAmbitionsMP
             }
             catch { }
 
-            try { LayoutRebuilder.ForceRebuildLayoutImmediate(buttons.TryCast<RectTransform>()); } catch { }
+            try { LayoutRebuilder.ForceRebuildLayoutImmediate(buttons as RectTransform); } catch { }
             CopyIconMetricsFromSibling(buttons, go, target);
             _hubRecopyGo = go; _hubRecopyIcon = target;   // late re-fit with the chat one
             _seenHubVersion = MPHub.Version;
@@ -436,7 +435,7 @@ namespace BigAmbitionsMP
             try
             {
                 var container = smartphoneRoot.Find("Container");
-                var crt = container != null ? container.TryCast<RectTransform>() : null;
+                var crt = container != null ? container as RectTransform : null;
                 if (crt == null) return false;
                 float liveH = crt.rect.height;
 
@@ -444,14 +443,14 @@ namespace BigAmbitionsMP
                 // collapse = slide the window down).  Fix its collapsed slide
                 // target for the taller body — diagnosed lookup (the first
                 // attempt failed SILENTLY: log every property if it's missing).
-                foreach (var c in container!.GetComponents(Il2CppType.Of<Component>()))
+                foreach (var c in container!.GetComponents(typeof(Component)))
                 {
                     if (c == null) continue;
-                    var it = c.GetIl2CppType();
+                    var it = c.GetType();
                     if (it.Name != "CollapsibleWindow") continue;
                     var cwType = VehicleManager.FindGameType(it.FullName ?? it.Name);
                     if (cwType == null) { Plugin.Logger.LogWarning("[PhoneBtn] CollapsibleWindow type unresolved."); break; }
-                    var cw = Activator.CreateInstance(cwType, c.Pointer);
+                    object cw = c;   // Mono: the component IS the typed instance
 
                     System.Reflection.PropertyInfo? pColl = null;
                     foreach (var p in cwType.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
@@ -533,7 +532,7 @@ namespace BigAmbitionsMP
                         if (img != null && img.gameObject.name.IndexOf("icon", StringComparison.OrdinalIgnoreCase) >= 0)
                         { sibIconTr = img.transform; break; }
                     if (sibIconTr == null) continue;
-                    var srt = sibIconTr.TryCast<RectTransform>();
+                    var srt = sibIconTr as RectTransform;
                     var ort = ourIcon.rectTransform;
                     if (srt == null || ort == null) continue;
                     ort.anchorMin        = srt.anchorMin;
@@ -564,18 +563,18 @@ namespace BigAmbitionsMP
                 DumpGraphicsTree(smartphoneRoot, 0, 6);
 
                 var container = smartphoneRoot.Find("Container");
-                var crt = container != null ? container.TryCast<RectTransform>() : null;
+                var crt = container != null ? container as RectTransform : null;
                 if (crt == null) return;
                 GetWorldBounds(crt, out float cL, out float cB, out float cW, out float cH);
                 float cR = cL + cW, cT = cB + cH, cArea = cW * cH;
                 Plugin.Logger.LogInfo($"[PhoneDump] container world: L={cL:F0} B={cB:F0} {cW:F0}x{cH:F0}");
 
                 // EVERY Graphic in the scene that covers ≥40% of the phone region.
-                var graphics = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<Graphic>(), true);
+                var graphics = UnityEngine.Object.FindObjectsOfType(typeof(Graphic), true);
                 int logged = 0;
                 for (int i = 0; i < graphics.Length && logged < 25; i++)
                 {
-                    var gr = graphics[i].TryCast<Graphic>();
+                    var gr = graphics[i] as Graphic;
                     if (gr == null) continue;
                     var rt = gr.rectTransform;
                     if (rt == null || IsDescendantOf(rt, smartphoneRoot)) continue;
@@ -583,10 +582,10 @@ namespace BigAmbitionsMP
                     float ix = Mathf.Min(cR, l + w) - Mathf.Max(cL, l);
                     float iy = Mathf.Min(cT, b + h) - Mathf.Max(cB, b);
                     if (ix <= 0f || iy <= 0f || ix * iy < cArea * 0.4f) continue;
-                    string detail = gr.GetIl2CppType().Name;
-                    var img = gr.TryCast<Image>();
+                    string detail = gr.GetType().Name;
+                    var img = gr as Image;
                     if (img != null) detail += $" sprite='{img.sprite?.name}' type={img.type}";
-                    var raw = gr.TryCast<RawImage>();
+                    var raw = gr as RawImage;
                     if (raw != null) detail += $" texture='{raw.texture?.name}'";
                     Plugin.Logger.LogInfo($"[PhoneDump] overlap: '{PathOf(rt)}' {detail} world={w:F0}x{h:F0} bottom={b:F0} active={gr.gameObject.activeInHierarchy}");
                     logged++;
@@ -602,20 +601,20 @@ namespace BigAmbitionsMP
             try
             {
                 var sb = new System.Text.StringBuilder();
-                var comps = tr.GetComponents(Il2CppType.Of<Component>());
+                var comps = tr.GetComponents(typeof(Component));
                 for (int i = 0; i < comps.Length; i++)
                 {
                     var c = comps[i];
                     if (c == null) continue;
-                    string cn = c.GetIl2CppType().Name;
+                    string cn = c.GetType().Name;
                     if (cn is "Transform" or "RectTransform" or "CanvasRenderer") continue;
-                    var img = c.TryCast<Image>();
+                    var img = c as Image;
                     if (img != null) { sb.Append($"Image(sprite='{img.sprite?.name}',{img.type}) "); continue; }
-                    var raw = c.TryCast<RawImage>();
+                    var raw = c as RawImage;
                     if (raw != null) { sb.Append($"RawImage(tex='{raw.texture?.name}') "); continue; }
                     sb.Append(cn).Append(' ');
                 }
-                var rt = tr.TryCast<RectTransform>();
+                var rt = tr as RectTransform;
                 string size = rt != null ? $"[{rt.rect.width:F0}x{rt.rect.height:F0}]" : "";
                 Plugin.Logger.LogInfo($"[PhoneDump] {new string(' ', depth * 2)}{tr.name}{size} ({(tr.gameObject.activeSelf ? "on" : "OFF")}) {sb}");
                 for (int i = 0; i < tr.childCount && i < 16; i++)
@@ -646,7 +645,7 @@ namespace BigAmbitionsMP
             if (tr == null) return;
             try
             {
-                var rt = tr.TryCast<RectTransform>();
+                var rt = tr as RectTransform;
                 if (rt == null) return;
                 Plugin.Logger.LogInfo($"[PhoneBtn] grow '{tr.name}' +{extra:F0}: size={rt.rect.width:F0}x{rt.rect.height:F0} sizeDelta=({rt.sizeDelta.x:F0},{rt.sizeDelta.y:F0}) pivot=({rt.pivot.x:F2},{rt.pivot.y:F2}) anchorsY=[{rt.anchorMin.y:F2},{rt.anchorMax.y:F2}]");
                 rt.sizeDelta        = new Vector2(rt.sizeDelta.x, rt.sizeDelta.y + extra);
@@ -672,7 +671,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                string path = System.IO.Path.Combine(BepInEx.Paths.PluginPath, file);
+                string path = System.IO.Path.Combine(MPConfig.ModRootPath, file);
                 if (!System.IO.File.Exists(path))
                 {
                     Plugin.Logger.LogWarning($"[PhoneBtn] icon not found: {path}");
@@ -681,7 +680,7 @@ namespace BigAmbitionsMP
                 var bytes = System.IO.File.ReadAllBytes(path);
                 var tex = new Texture2D(2, 2);
                 tex.hideFlags = HideFlags.HideAndDontSave;
-                if (!ImageConversion.LoadImage(tex, (Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<byte>)bytes))
+                if (!ImageConversion.LoadImage(tex, bytes))
                 { Plugin.Logger.LogWarning($"[PhoneBtn] icon decode failed: {file}"); return null; }
                 var sp = Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f));
                 sp.hideFlags = HideFlags.HideAndDontSave;
@@ -695,7 +694,7 @@ namespace BigAmbitionsMP
             if (_iconSprite != null) return _iconSprite;
             try
             {
-                string path = System.IO.Path.Combine(BepInEx.Paths.PluginPath, IconFile);
+                string path = System.IO.Path.Combine(MPConfig.ModRootPath, IconFile);
                 if (!System.IO.File.Exists(path))
                 {
                     Plugin.Logger.LogWarning($"[PhoneBtn] icon not found: {path}");
@@ -704,7 +703,7 @@ namespace BigAmbitionsMP
                 var bytes = System.IO.File.ReadAllBytes(path);
                 var tex = new Texture2D(2, 2);
                 tex.hideFlags = HideFlags.HideAndDontSave;
-                if (!ImageConversion.LoadImage(tex, (Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<byte>)bytes))
+                if (!ImageConversion.LoadImage(tex, bytes))
                 { Plugin.Logger.LogWarning("[PhoneBtn] icon decode failed."); return null; }
                 _iconSprite = Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f));
                 _iconSprite.hideFlags = HideFlags.HideAndDontSave;

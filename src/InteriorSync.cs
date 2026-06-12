@@ -212,7 +212,7 @@ namespace BigAmbitionsMP
                         if (rp == null) continue;
                         snap.RetailPrices.Add(new RetailPriceInfo
                         {
-                            ItemName = (int)rp.itemName,
+                            ItemName = rp.itemName ?? "",
                             Price    = rp.price,
                         });
                     }
@@ -262,14 +262,14 @@ namespace BigAmbitionsMP
             var info = new ItemInstanceInfo
             {
                 Id                  = ii.id?.ToString() ?? "",
-                ItemName            = (int)ii.itemName,
+                ItemName            = ii.itemName ?? "",
                 Px = ii.position.x,  Py = ii.position.y,  Pz = ii.position.z,
                 Qx = ii.rotation.x,  Qy = ii.rotation.y,  Qz = ii.rotation.z,  Qw = ii.rotation.w,
                 YRotation           = ii.yRotation,
                 ParentId            = ii.parentId?.ToString() ?? "",
-                StreetName          = (int)ii.streetName,
+                StreetName          = ii.streetName ?? "",
                 StreetNumber        = ii.streetNumber,
-                LinkedItemName      = (int)ii.linkedItemName,
+                LinkedItemName      = ii.linkedItemName ?? "",
                 IsSecured           = ii.isSecured,
                 WorldSpaceTextValue = ii.worldSpaceTextValue?.ToString() ?? "",
                 StateIndex          = ii.stateIndex,
@@ -288,7 +288,7 @@ namespace BigAmbitionsMP
                     info.StackedItems.Add(new AttachableChildInfo
                     {
                         ChildId         = s.childId?.ToString() ?? "",
-                        ChildItemName   = (int)s.childItemName,
+                        ChildItemName   = s.childItemName ?? "",
                         AttachmentIndex = s.attachmentIndex,
                     });
                 }
@@ -303,7 +303,7 @@ namespace BigAmbitionsMP
                     if (c == null) continue;
                     var cdto = new CargoInstanceInfo
                     {
-                        ItemName     = (int)c.itemName,
+                        ItemName     = c.itemName ?? "",
                         Amount       = c.amount,
                         PricePerUnit = c.pricePerUnit,
                         Paid         = c.paid,
@@ -325,7 +325,7 @@ namespace BigAmbitionsMP
                             if (n == null) continue;
                             var ndto = new NestedCargoInstanceInfo
                             {
-                                ItemName     = (int)n.itemName,
+                                ItemName     = n.itemName ?? "",
                                 Amount       = n.amount,
                                 PricePerUnit = n.pricePerUnit,
                             };
@@ -381,7 +381,7 @@ namespace BigAmbitionsMP
                 {
                     Name         = p.name?.ToString() ?? "",
                     Enabled      = p.enabled,
-                    ItemName     = (int)p.itemName,
+                    ItemName     = p.itemName ?? "",
                     ItemQuantity = p.itemQuantity,
                 };
             }
@@ -411,7 +411,7 @@ namespace BigAmbitionsMP
                 }
                 foreach (var rp in snap.RetailPrices)
                 {
-                    h = h * 31 + rp.ItemName;
+                    h = h * 31 + (rp.ItemName?.GetHashCode() ?? 0);
                     h = h * 31 + rp.Price.GetHashCode();
                 }
                 foreach (var ds in snap.DirtSpots)
@@ -429,7 +429,7 @@ namespace BigAmbitionsMP
                 foreach (var it in snap.ItemInstances)
                 {
                     h = h * 31 + (it.Id?.GetHashCode() ?? 0);
-                    h = h * 31 + it.ItemName;
+                    h = h * 31 + (it.ItemName?.GetHashCode() ?? 0);
                     // Round positions to nearest cm so 0.001f jitter doesn't trigger.
                     h = h * 31 + ((int)System.Math.Round(it.Px * 100f)).GetHashCode();
                     h = h * 31 + ((int)System.Math.Round(it.Py * 100f)).GetHashCode();
@@ -439,7 +439,7 @@ namespace BigAmbitionsMP
                     h = h * 31 + (it.Alias?.GetHashCode() ?? 0);
                     foreach (var c in it.CargoInstances)
                     {
-                        h = h * 31 + c.ItemName;
+                        h = h * 31 + (c.ItemName?.GetHashCode() ?? 0);
                         h = h * 31 + c.Amount;
                         h = h * 31 + ((int)System.Math.Round(c.PricePerUnit * 100f)).GetHashCode();
                     }

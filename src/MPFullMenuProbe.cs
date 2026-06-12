@@ -1,5 +1,4 @@
 using System;
-using Il2CppInterop.Runtime;
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
@@ -78,9 +77,9 @@ namespace BigAmbitionsMP
                     _menuType ??= VehicleManager.FindGameType("UI.Smartphone.FullMenu")
                                ?? VehicleManager.FindGameType("FullMenu");
                     if (_menuType == null) return;
-                    var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(_menuType), true);
+                    var arr = UnityEngine.Object.FindObjectsOfType(_menuType, true);
                     if (arr == null || arr.Length == 0) return;
-                    _menu = arr[0].TryCast<Component>();
+                    _menu = arr[0] as Component;
                     if (_menu != null)
                         Out($"[FullMenu] instance found: '{_menu.gameObject.name}' (active={_menu.gameObject.activeInHierarchy}) — will dump on first open.");
                     return;
@@ -121,16 +120,16 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var comps = root.GetComponentsInChildren(Il2CppType.Of<Component>(), true);
+                var comps = root.GetComponentsInChildren(typeof(Component), true);
                 foreach (var c in comps)
                 {
-                    var cc = c.TryCast<Component>();
+                    var cc = c as Component;
                     if (cc == null) continue;
-                    string tn = cc.GetIl2CppType().Name;
+                    string tn = cc.GetType().Name;
                     if (tn == "FullMenuAppButton" && buttonRow == null)
                         buttonRow = cc.transform.parent;
                     // App pages: each app is a class under UI.Smartphone.Apps.*
-                    string full = cc.GetIl2CppType().FullName ?? "";
+                    string full = cc.GetType().FullName ?? "";
                     if (full.StartsWith("UI.Smartphone.Apps.") && cc.gameObject.activeInHierarchy && activePage == null)
                         activePage = cc.transform;
                 }
@@ -146,19 +145,19 @@ namespace BigAmbitionsMP
                 var sb = new System.Text.StringBuilder();
                 sb.Append("[FullMenu] ").Append(new string(' ', depth * 2)).Append(t.gameObject.activeSelf ? "+" : "-").Append(' ').Append(t.name);
 
-                var rt = t.TryCast<RectTransform>();
+                var rt = t as RectTransform;
                 if (rt != null) sb.Append($" [{rt.rect.width:F0}x{rt.rect.height:F0}]");
 
                 // Components of interest.
-                foreach (var c in t.GetComponents(Il2CppType.Of<Component>()))
+                foreach (var c in t.GetComponents(typeof(Component)))
                 {
-                    var cc = c.TryCast<Component>();
+                    var cc = c as Component;
                     if (cc == null) continue;
-                    string tn = cc.GetIl2CppType().Name;
+                    string tn = cc.GetType().Name;
                     if (tn is "RectTransform" or "CanvasRenderer") continue;
                     if (tn == "Image" && detail)
                     {
-                        var img = cc.TryCast<Image>();
+                        var img = cc as Image;
                         if (img != null)
                         {
                             var col = img.color;
@@ -169,7 +168,7 @@ namespace BigAmbitionsMP
                     }
                     else if (tn == "TextMeshProUGUI" && detail)
                     {
-                        var txt = cc.TryCast<TextMeshProUGUI>();
+                        var txt = cc as TextMeshProUGUI;
                         if (txt != null)
                         {
                             var col = txt.color;

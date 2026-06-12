@@ -75,7 +75,7 @@ namespace BigAmbitionsMP
                         {
                             var rp = prices[i];
                             if (rp == null) continue;
-                            h = h * 31 + (int)rp.itemName;
+                            h = h * 31 + (rp.itemName?.GetHashCode() ?? 0);
                             h = h * 31 + rp.price.GetHashCode();
                         }
                     }
@@ -87,7 +87,7 @@ namespace BigAmbitionsMP
                     {
                         var rp = prices[i];
                         if (rp == null) continue;
-                        p.Prices.Add(new RetailPriceInfo { ItemName = (int)rp.itemName, Price = rp.price });
+                        p.Prices.Add(new RetailPriceInfo { ItemName = rp.itemName ?? "", Price = rp.price });
                     }
 
                     if (MPServer.IsRunning)        MPServer.BroadcastRetailPrices(p);
@@ -113,7 +113,7 @@ namespace BigAmbitionsMP
                 if (reg == null || reg.retailPrices == null) return;   // building unknown here (yet)
                 reg.retailPrices.Clear();
                 foreach (var rp in p.Prices)
-                    reg.retailPrices.Add(new RetailPrice { itemName = (BigAmbitions.Items.ItemName)rp.ItemName, price = rp.Price });
+                    reg.retailPrices.Add(new RetailPrice { itemName = rp.ItemName, price = rp.Price });
                 Plugin.Logger.LogInfo($"[PriceSync] applied {p.Prices.Count} price(s) for '{p.AddressKey}' (from {p.OwnerId}).");
 
                 // Live display correctness: if we're standing IN that shop, the
@@ -133,11 +133,11 @@ namespace BigAmbitionsMP
             try
             {
                 int stamped = 0;
-                var arr = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<ItemController>());
+                var arr = UnityEngine.Object.FindObjectsOfType(typeof(ItemController));
                 if (arr == null) return;
                 foreach (var o in arr)
                 {
-                    var ic = o.TryCast<ItemController>();
+                    var ic = o as ItemController;
                     var inst = ic?._itemInstance;
                     var cargo = inst?.cargoInstances;
                     if (cargo == null) continue;
@@ -146,7 +146,7 @@ namespace BigAmbitionsMP
                         var c = cargo[i];
                         if (c == null) continue;
                         foreach (var rp in p.Prices)
-                            if (rp.ItemName == (int)c.itemName && c.pricePerUnit != rp.Price)
+                            if (rp.ItemName == c.itemName && c.pricePerUnit != rp.Price)
                             { c.pricePerUnit = rp.Price; stamped++; break; }
                     }
                 }

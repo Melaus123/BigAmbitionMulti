@@ -1086,8 +1086,8 @@ namespace BigAmbitionsMP
                     var rs = new BigAmbitions.Rivals.RivalState
                     {
                         rivalId = __0,
-                        weeklyIncomeHistory      = new Il2CppSystem.Collections.Generic.List<Il2CppSystem.Tuple<int, float>>(),
-                        numberOfBusinessesHistory = new Il2CppSystem.Collections.Generic.List<Il2CppSystem.Tuple<int, int>>(),
+                        weeklyIncomeHistory      = new System.Collections.Generic.List<System.Tuple<int, float>>(),
+                        numberOfBusinessesHistory = new System.Collections.Generic.List<System.Tuple<int, int>>(),
                     };
                     __result = rs;
                 }
@@ -1169,7 +1169,7 @@ namespace BigAmbitionsMP
                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
                   | System.Reflection.BindingFlags.Static  | System.Reflection.BindingFlags.DeclaredOnly);
 
-            static void Postfix(Il2CppSystem.Collections.Generic.IEnumerable<BigAmbitions.Rivals.RivalData> __result)
+            static void Postfix(System.Collections.Generic.IEnumerable<BigAmbitions.Rivals.RivalData> __result)
             {
                 try
                 {
@@ -1183,7 +1183,7 @@ namespace BigAmbitionsMP
                     // can append our synthetic remote-player entries directly to
                     // that per-call list without polluting the cache or other
                     // callers.  (Gated to the Load context by the flag above.)
-                    var list = __result.TryCast<Il2CppSystem.Collections.Generic.List<BigAmbitions.Rivals.RivalData>>();
+                    var list = __result as System.Collections.Generic.List<BigAmbitions.Rivals.RivalData>;
                     if (list == null)
                     {
                         Plugin.Logger.LogWarning("[Patch_GetAllRivalData] result not a List<RivalData>; skipping player injection.");
@@ -1274,7 +1274,7 @@ namespace BigAmbitionsMP
                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
                   | System.Reflection.BindingFlags.Static  | System.Reflection.BindingFlags.DeclaredOnly);
 
-            static bool Prefix(BigAmbitions.Rivals.RivalData __0, int __1, Il2CppSystem.Action<UnityEngine.Sprite> __2)
+            static bool Prefix(BigAmbitions.Rivals.RivalData __0, int __1, System.Action<UnityEngine.Sprite> __2)
             {
                 try
                 {
@@ -2129,7 +2129,7 @@ namespace BigAmbitionsMP
             }
 
             static void Postfix(Controllers.CashRegisterController __instance,
-                                Il2CppSystem.Collections.Generic.List<BigAmbitions.Items.CargoInstance> orderedCargoInstances)
+                                System.Collections.Generic.List<BigAmbitions.Items.CargoInstance> orderedCargoInstances)
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                 try
@@ -2383,7 +2383,7 @@ namespace BigAmbitionsMP
             private static readonly System.Collections.Generic.List<SaleItem> _pendingItems = new();
 
             static bool Prefix(Controllers.CashRegisterController __instance,
-                               Il2CppSystem.Collections.Generic.List<BigAmbitions.Items.CargoInstance> orderedCargoInstances)
+                               System.Collections.Generic.List<BigAmbitions.Items.CargoInstance> orderedCargoInstances)
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
                 string owner = MPRegisterSync.CurrentShopOwner;
@@ -2402,11 +2402,11 @@ namespace BigAmbitionsMP
                         {
                             var c = orderedCargoInstances[i];
                             if (c == null) continue;
-                            float price = MPRegisterSync.GetShopPrice((int)c.itemName);
+                            float price = MPRegisterSync.GetShopPrice(c.itemName);
                             if (price < 0f) price = (float)c.pricePerUnit;   // table miss → cargo stamp
                             total += c.amount * price;
                             if (desc.Length < 160) desc.Append($"{c.itemName} x{c.amount}, ");
-                            _pendingItems.Add(new SaleItem { ItemName = (int)c.itemName, Amount = c.amount });
+                            _pendingItems.Add(new SaleItem { ItemName = c.itemName ?? "", Amount = c.amount });
                         }
 
                     _pendingTotal   = total;
@@ -2567,12 +2567,12 @@ namespace BigAmbitionsMP
                     // opener's completion callbacks (the state release).
                     try
                     {
-                        var uiObj = UnityEngine.Object.FindObjectOfType(Il2CppInterop.Runtime.Il2CppType.Of<UI.Purchase.PurchaseUI>());
-                        var ui = uiObj?.TryCast<UI.Purchase.PurchaseUI>();
+                        var uiObj = UnityEngine.Object.FindObjectOfType(typeof(UI.Purchase.PurchaseUI));
+                        var ui = (uiObj as UI.Purchase.PurchaseUI);
                         if (ui != null)
                         {
                             ui.SetCargoInstancesToPaid();
-                            ui.Close(new Il2CppSystem.Nullable<bool>(true));
+                            ui.Close((bool?)true);
                         }
                         else Plugin.Logger.LogWarning("[MPSale] PurchaseUI not found — paid, but UI not closed.");
                     }

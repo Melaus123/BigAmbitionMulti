@@ -438,7 +438,7 @@ namespace BigAmbitionsMP
                     {
                         Plugin.Logger.LogInfo("[Client] Fresh start while IN-GAME — detouring via main menu.");
                         MPSaveCoordinator.DeferFreshStart(settings);
-                        LoadScene.LoadMainMenu();
+                        LoadScene.LoadMainMenu(BAModAPI.ModActivationScope.City);
                         return;
                     }
                     SaveGameManager.New(MPServer.BuildGameVariables(s));
@@ -749,7 +749,7 @@ namespace BigAmbitionsMP
                             // Don't count residential rentals as businesses —
                             // they're player HOMES, not revenue operations.
                             bool isResidential = false;
-                            try { isResidential = reg.BuildingCached != null && reg.BuildingCached.BuildingType == Buildings.BuildingType.Residential; } catch { }
+                            try { isResidential = reg.BuildingCached != null && reg.BuildingCached.BuildingType == "ba:buildingtype_residential"; } catch { }
                             if (reg.RentedByPlayer && !isResidential)
                             {
                                 bizCount++;

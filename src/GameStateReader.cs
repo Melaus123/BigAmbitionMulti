@@ -1,4 +1,3 @@
-using System.Text.Json;
 using System.Reflection;
 using Buildings;
 using Entities;
@@ -11,21 +10,12 @@ namespace BigAmbitionsMP
     public static class GameStateReader
     {
         // ── Game time ─────────────────────────────────────────────────────────
-
-        // Cached reflected members for GameInstance time fields.
-        // Populated on first call while in-game; null = field not yet found or unavailable.
-        // Log confirms: P:Day(Int32), P:Hour(Int32), P:Minute(Single) all exist as properties.
-        private static bool       _timeProbed;
-        private static FieldInfo?    _fDay;
-        private static FieldInfo?    _fHour;
-        private static PropertyInfo? _pDay;
-        private static PropertyInfo? _pHour;
-        private static PropertyInfo? _pMinute;   // fractional part — must add Minute/60 to hour
+        // EA 0.11 (Mono): GameInstance.Day (int), .Hour (int), .Minute (float)
+        // are public FIELDS — read/written directly (the 0.10 reflection probe
+        // looked for properties and would miss them entirely).
 
         /// <summary>
         /// Returns the current in-game day and fractional hour (0–24) from the host's GameInstance.
-        /// Uses a one-time reflection probe to locate field/property names and caches the result.
-        /// Logs all time-related members the first time it runs so we can identify the correct names.
         /// </summary>
         public static (int day, float hourOfDay) GetGameTime()
         {
@@ -33,71 +23,7 @@ namespace BigAmbitionsMP
             {
                 var gi = SaveGameManager.Current;
                 if (gi == null) return (0, 0f);
-
-                // ── One-time discovery probe ───────────────────────────────
-                if (!_timeProbed)
-                {
-                    _timeProbed = true;
-                    var t = gi.GetType();
-
-                    // Log ALL public instance fields and properties that look time-related
-                    var relevant = t
-                        .GetFields(BindingFlags.Public | BindingFlags.Instance)
-                        .Select(f => $"F:{f.Name}({f.FieldType.Name})")
-                        .Concat(t
-                            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                            .Select(p => $"P:{p.Name}({p.PropertyType.Name})"))
-                        .Where(s =>
-                        {
-                            var n = s.ToLower();
-                            return n.Contains("day") || n.Contains("time") ||
-                                   n.Contains("hour") || n.Contains("minute") ||
-                                   n.Contains("clock") || n.Contains("tick");
-                        })
-                        .ToArray();
-
-                    Plugin.Logger.LogInfo(
-                        $"[GameStateReader] GameInstance time-related members: " +
-                        (relevant.Length > 0 ? string.Join(", ", relevant) : "(none found)"));
-
-                    // Try to cache specific known candidates
-                    _fDay  = t.GetField("day",  BindingFlags.Public | BindingFlags.Instance);
-                    _fHour = t.GetField("hour", BindingFlags.Public | BindingFlags.Instance)
-                          ?? t.GetField("currentHour", BindingFlags.Public | BindingFlags.Instance)
-                          ?? t.GetField("timeOfDay",   BindingFlags.Public | BindingFlags.Instance);
-                    _pDay  = t.GetProperty("Day",  BindingFlags.Public | BindingFlags.Instance);
-                    _pHour = t.GetProperty("Hour", BindingFlags.Public | BindingFlags.Instance)
-                          ?? t.GetProperty("CurrentHour", BindingFlags.Public | BindingFlags.Instance)
-                          ?? t.GetProperty("TimeOfDay",   BindingFlags.Public | BindingFlags.Instance);
-                    _pMinute = t.GetProperty("Minute", BindingFlags.Public | BindingFlags.Instance);
-
-                    // Log writability — needed to know if clock-revert suppression
-                    // can actually put time back, or only partially.
-                    Plugin.Logger.LogInfo(
-                        $"[GameStateReader] Time member writability: " +
-                        $"Day={(_pDay?.CanWrite.ToString() ?? "n/a")} " +
-                        $"Hour={(_pHour?.CanWrite.ToString() ?? "n/a")} " +
-                        $"Minute={(_pMinute?.CanWrite.ToString() ?? "n/a")}");
-                }
-
-                // ── Read day ──────────────────────────────────────────────
-                int day = 0;
-                if      (_fDay != null) day = (int)(_fDay.GetValue(gi) ?? 0);
-                else if (_pDay != null) day = (int)(_pDay.GetValue(gi) ?? 0);
-
-                // ── Read hour (integer 0-23) + minute (float 0-60) ───────
-                float hour = 0f;
-                if      (_fHour != null) hour = Convert.ToSingle(_fHour.GetValue(gi));
-                else if (_pHour != null) hour = Convert.ToSingle(_pHour.GetValue(gi));
-
-                // Add fractional minutes so the clock-rate monitor can see sub-hour advances
-                if (_pMinute != null)
-                {
-                    float minute = Convert.ToSingle(_pMinute.GetValue(gi));
-                    hour += minute / 60f;
-                }
-
-                return (day, hour);
+                return (gi.Day, gi.Hour + gi.Minute / 60f);
             }
             catch (Exception ex)
             {
@@ -108,7 +34,6 @@ namespace BigAmbitionsMP
 
         /// <summary>
         /// Attempts to apply a day/time value to the local GameInstance.
-        /// Only writes values that differ by more than a small threshold to avoid jitter.
         /// </summary>
         public static void SetGameTime(int day, float hourOfDay)
         {
@@ -117,45 +42,17 @@ namespace BigAmbitionsMP
                 var gi = SaveGameManager.Current;
                 if (gi == null) return;
 
-                // Ensure probe has run
-                if (!_timeProbed) GetGameTime();
-
-                // hourOfDay is fractional (Hour + Minute/60).  The game stores Hour as
-                // an Int32 property and Minute as a Single property — writing the raw
-                // float into the Int32 Hour setter throws.  Split before writing.
+                // hourOfDay is fractional (Hour + Minute/60).  Hour is an int
+                // field, Minute a float field — split before writing.
                 int   hourInt = (int)hourOfDay;
                 float minute  = (hourOfDay - hourInt) * 60f;
                 if (hourInt < 0)  hourInt = 0;
                 if (hourInt > 23) hourInt = 23;
                 if (minute  < 0f) minute  = 0f;
 
-                // ── Day (Int32) ──────────────────────────────────────────
-                if (_fDay != null)
-                {
-                    var cur = Convert.ToInt32(_fDay.GetValue(gi) ?? 0);
-                    if (cur != day) _fDay.SetValue(gi, day);
-                }
-                else if (_pDay != null && _pDay.CanWrite)
-                {
-                    var cur = Convert.ToInt32(_pDay.GetValue(gi) ?? 0);
-                    if (cur != day) _pDay.SetValue(gi, day);
-                }
-
-                // ── Hour (Int32) ─────────────────────────────────────────
-                if (_fHour != null)
-                {
-                    var cur = Convert.ToInt32(_fHour.GetValue(gi) ?? 0);
-                    if (cur != hourInt) _fHour.SetValue(gi, hourInt);
-                }
-                else if (_pHour != null && _pHour.CanWrite)
-                {
-                    var cur = Convert.ToInt32(_pHour.GetValue(gi) ?? 0);
-                    if (cur != hourInt) _pHour.SetValue(gi, hourInt);
-                }
-
-                // ── Minute (Single) ──────────────────────────────────────
-                if (_pMinute != null && _pMinute.CanWrite)
-                    _pMinute.SetValue(gi, minute);
+                if (gi.Day  != day)     gi.Day  = day;
+                if (gi.Hour != hourInt) gi.Hour = hourInt;
+                gi.Minute = minute;
             }
             catch (Exception ex)
             {
@@ -170,19 +67,19 @@ namespace BigAmbitionsMP
         // the namespace at compile time.  Instance is populated via a Harmony Postfix
         // on TogglePause (see MPPatches.Patch_GSC_TogglePause).
         //
-        // In IL2CPP interop the game state is exposed as PROPERTIES (not fields).
-        // Confirmed from log: P:Paused(Boolean), P:isFastForwarding(Boolean),
-        //   P:playerGameSpeed(GameSpeed), P:currentGameSpeed(GameSpeed).
-        // The raw IL2CPP field slots are NativeFieldInfoPtr_* IntPtrs — unusable.
+        // EA 0.11 (Mono): Paused is a real PROPERTY; isFastForwarding,
+        // playerGameSpeed and isTimeControlDisabled are public FIELDS and
+        // currentGameSpeed is a private field — resolved property-or-field
+        // via MPReflect (the 0.10 interop layer exposed them all as properties).
 
         private static bool _gscProbed;
         private static Type? _gscType;
         private static object? _gscInstance;       // captured by Harmony postfix
-        private static PropertyInfo? _gscPPaused;        // "Paused" property (bool)
-        private static PropertyInfo? _gscPIsFastFwd;     // "isFastForwarding" property (bool)
-        private static PropertyInfo? _gscPPlayerSpd;     // "playerGameSpeed" property (GameSpeed enum)
-        private static PropertyInfo? _gscPCurrentSpd;    // "currentGameSpeed" property (GameSpeed enum)
-        private static PropertyInfo? _gscPTimeCtrl;      // "isTimeControlDisabled" property (bool)
+        private static MemberInfo? _gscPPaused;        // "Paused" (bool property)
+        private static MemberInfo? _gscPIsFastFwd;     // "isFastForwarding" (bool field)
+        private static MemberInfo? _gscPPlayerSpd;     // "playerGameSpeed" (GameSpeed field)
+        private static MemberInfo? _gscPCurrentSpd;    // "currentGameSpeed" (GameSpeed field, private)
+        private static MemberInfo? _gscPTimeCtrl;      // "isTimeControlDisabled" (bool field)
 
         /// <summary>
         /// Called by the Harmony postfix on GameSpeedController.TogglePause to cache
@@ -219,11 +116,11 @@ namespace BigAmbitionsMP
                 if (_gscInstance == null) return "(GSC instance not yet cached — press pause in-game first)";
 
                 var parts = new List<string>();
-                if (_gscPPaused    != null) parts.Add($"Paused={_gscPPaused.GetValue(_gscInstance)}");
-                if (_gscPIsFastFwd != null) parts.Add($"isFastFwd={_gscPIsFastFwd.GetValue(_gscInstance)}");
-                if (_gscPPlayerSpd != null) parts.Add($"playerSpd={_gscPPlayerSpd.GetValue(_gscInstance)}");
-                if (_gscPCurrentSpd!= null) parts.Add($"currentSpd={_gscPCurrentSpd.GetValue(_gscInstance)}");
-                if (_gscPTimeCtrl  != null) parts.Add($"timeCtrlDisabled={_gscPTimeCtrl.GetValue(_gscInstance)}");
+                if (_gscPPaused    != null) parts.Add($"Paused={MPReflect.Get(_gscPPaused, _gscInstance)}");
+                if (_gscPIsFastFwd != null) parts.Add($"isFastFwd={MPReflect.Get(_gscPIsFastFwd, _gscInstance)}");
+                if (_gscPPlayerSpd != null) parts.Add($"playerSpd={MPReflect.Get(_gscPPlayerSpd, _gscInstance)}");
+                if (_gscPCurrentSpd!= null) parts.Add($"currentSpd={MPReflect.Get(_gscPCurrentSpd, _gscInstance)}");
+                if (_gscPTimeCtrl  != null) parts.Add($"timeCtrlDisabled={MPReflect.Get(_gscPTimeCtrl, _gscInstance)}");
                 parts.Add($"timeScale={UnityEngine.Time.timeScale:F3}");
                 return string.Join(", ", parts);
             }
@@ -241,7 +138,7 @@ namespace BigAmbitionsMP
         public static bool GetGSCPaused()
         {
             if (_gscInstance == null || _gscPPaused == null) return false;
-            try { return (bool)(_gscPPaused.GetValue(_gscInstance) ?? false); }
+            try { return (bool)(MPReflect.Get(_gscPPaused, _gscInstance) ?? false); }
             catch { return false; }
         }
 
@@ -267,9 +164,9 @@ namespace BigAmbitionsMP
                 try { var uo = _gscInstance as UnityEngine.Object; dead = _gscInstance != null && uo != null && uo == null; } catch { }
                 if (_gscInstance == null || dead)
                 {
-                    var arr = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.From(_gscType), true);
+                    var arr = UnityEngine.Object.FindObjectsOfType(_gscType, true);
                     if (arr != null && arr.Length > 0)
-                        _gscInstance = Activator.CreateInstance(_gscType, arr[0].Pointer);   // typed wrapper for reflection
+                        _gscInstance = arr[0];   // Mono: the found object IS the typed instance
                 }
                 if (_gscInstance == null) return;
                 if (GetGSCPaused() == paused) return;   // already in the wanted state
@@ -328,7 +225,7 @@ namespace BigAmbitionsMP
         public static bool GetGSCIsFastForwarding()
         {
             if (_gscInstance == null || _gscPIsFastFwd == null) return false;
-            try { return (bool)(_gscPIsFastFwd.GetValue(_gscInstance) ?? false); }
+            try { return (bool)(MPReflect.Get(_gscPIsFastFwd, _gscInstance) ?? false); }
             catch { return false; }
         }
 
@@ -342,7 +239,7 @@ namespace BigAmbitionsMP
         public static bool GetGSCTimeControlDisabled()
         {
             if (_gscInstance == null || _gscPTimeCtrl == null) return false;
-            try { return (bool)(_gscPTimeCtrl.GetValue(_gscInstance) ?? false); }
+            try { return (bool)(MPReflect.Get(_gscPTimeCtrl, _gscInstance) ?? false); }
             catch { return false; }
         }
 
@@ -399,11 +296,11 @@ namespace BigAmbitionsMP
             // NativeFieldInfoPtr_* entries in the field list are just native pointers.
             // Property names are case-sensitive; "Paused" has a capital P.
             var instFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
-            _gscPPaused     = _gscType.GetProperty("Paused",           instFlags);
-            _gscPIsFastFwd  = _gscType.GetProperty("isFastForwarding", instFlags);
-            _gscPPlayerSpd  = _gscType.GetProperty("playerGameSpeed",  instFlags);
-            _gscPCurrentSpd = _gscType.GetProperty("currentGameSpeed", instFlags);
-            _gscPTimeCtrl   = _gscType.GetProperty("isTimeControlDisabled", instFlags);
+            _gscPPaused     = MPReflect.PropertyOrField(_gscType, "Paused",           instFlags);
+            _gscPIsFastFwd  = MPReflect.PropertyOrField(_gscType, "isFastForwarding", instFlags);
+            _gscPPlayerSpd  = MPReflect.PropertyOrField(_gscType, "playerGameSpeed",  instFlags);
+            _gscPCurrentSpd = MPReflect.PropertyOrField(_gscType, "currentGameSpeed", instFlags);
+            _gscPTimeCtrl   = MPReflect.PropertyOrField(_gscType, "isTimeControlDisabled", instFlags);
 
             Plugin.Logger.LogInfo(
                 $"[GameStateReader] GSC cache: Paused={_gscPPaused?.Name ?? "null"} " +
@@ -435,7 +332,7 @@ namespace BigAmbitionsMP
                     });
                 }
 
-                return JsonSerializer.Serialize(entries);
+                return Newtonsoft.Json.JsonConvert.SerializeObject(entries);
             }
             catch (Exception ex)
             {

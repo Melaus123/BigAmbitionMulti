@@ -1,12 +1,16 @@
-using BepInEx.Configuration;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using Newtonsoft.Json;
 using Steamworks;
 
 namespace BigAmbitionsMP
 {
     /// <summary>
     /// Holds runtime connection settings.
-    /// PlayerId is auto-detected from Steam on first run; all other settings
-    /// are read from the BepInEx config file and surfaced in the in-game UI.
+    /// PlayerId is auto-detected from Steam on first run; settings persist in
+    /// a JSON file inside the mod's own folder (official loader's
+    /// ModRootPath) — the BepInEx config system is gone with the Mono port.
     /// </summary>
     public static class MPConfig
     {
@@ -23,51 +27,57 @@ namespace BigAmbitionsMP
         /// </summary>
         public static string StableId { get; private set; } = "";
 
-        private static ConfigEntry<string>? _playerIdEntry;
-        private static ConfigEntry<string>? _stableIdEntry;
-        private static ConfigEntry<int>?    _autosaveMinutesEntry;
+        // ── Tiny persisted key-value store (JSON in the mod folder) ───────────
+        private static string _cfgPath = "";
+        private static Dictionary<string, string> _cfg = new();
+
+        private static string Get(string key, string def = "")
+            => _cfg.TryGetValue(key, out var v) ? v : def;
+
+        private static void Set(string key, string value)
+        {
+            _cfg[key] = value;
+            try { File.WriteAllText(_cfgPath, JsonConvert.SerializeObject(_cfg, Formatting.Indented)); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] save: {ex.Message}"); }
+        }
 
         /// <summary>Host-controlled minutes between coordinated MP autosaves.
         /// Read LIVE (so the host can retune mid-session without a restart).
-        /// 0 = mirror the single-player autosave setting.  Each save causes a
-        /// brief stutter, so the host raises this if saves feel too frequent.</summary>
+        /// 0 = mirror the single-player autosave setting.</summary>
         public static int AutosaveMinutesLive()
         {
-            try { return _autosaveMinutesEntry?.Value ?? 0; }
+            try { return int.TryParse(Get("AutosaveMinutes", "0"), out var m) ? m : 0; }
             catch { return 0; }
         }
 
-        public static void Init(ConfigFile config)
+        /// <summary>The mod's install folder (ModsLocal\BigAmbitionsMP) — asset
+        /// lookups (icons) read from here; replaces BepInEx.Paths.PluginPath.</summary>
+        public static string ModRootPath { get; private set; } = ".";
+
+        public static void Init(string modRootPath)
         {
-            // Empty default signals "auto-detect from Steam".
-            // Old installs that still have "Player1" are also treated as unset.
-            _playerIdEntry = config.Bind(
-                "Network", "PlayerId", "",
-                "Your display name in multiplayer.\n" +
-                "Leave blank to use your Steam username (recommended).\n" +
-                "Set a custom value here only if you want to override it.");
+            try
+            {
+                ModRootPath = modRootPath ?? ".";
+                _cfgPath = Path.Combine(modRootPath ?? ".", "BigAmbitionsMP.cfg.json");
+                if (File.Exists(_cfgPath))
+                    _cfg = JsonConvert.DeserializeObject<Dictionary<string, string>>(File.ReadAllText(_cfgPath))
+                           ?? new Dictionary<string, string>();
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[Config] load: {ex.Message}");
+                _cfg = new Dictionary<string, string>();
+            }
 
-            HostIP = config.Bind("Network", "HostIP", "127.0.0.1",
-                "Default host IP shown in the join panel.").Value;
+            HostIP = Get("HostIP", "127.0.0.1");
+            Port   = int.TryParse(Get("Port", "7777"), out var p) ? p : 7777;
 
-            Port = config.Bind("Network", "Port", 7777,
-                "Default port shown in the host/join panels.").Value;
-
-            _autosaveMinutesEntry = config.Bind(
-                "Multiplayer", "AutosaveMinutes", 0,
-                "Minutes between host-driven multiplayer autosaves (host only).\n" +
-                "0 = mirror your single-player autosave setting.\n" +
-                "Each coordinated save causes a brief stutter, so raise this if\n" +
-                "saves feel too frequent.  Takes effect immediately (no restart).");
-
-            _stableIdEntry = config.Bind(
-                "Network", "StableId", "",
-                "Internal stable identity for save/ownership matching (auto-managed — do not edit).");
             StableId = ResolveStableId();
             Plugin.Logger.LogInfo($"[Config] Stable id: {StableId}");
 
             // Resolve the player ID: config override → Steam name → generated fallback
-            var stored = _playerIdEntry.Value?.Trim();
+            var stored = Get("PlayerId").Trim();
             if (string.IsNullOrEmpty(stored) || stored == "Player1")
             {
                 PlayerId = DetectPlayerName();
@@ -81,8 +91,7 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Called by the UI when the user clicks Host or Join.
-        /// Persists the player name to the BepInEx config so subsequent launches
-        /// pre-fill the F8 panel with the last-used name.</summary>
+        /// Persists the player name so subsequent launches pre-fill the panel.</summary>
         public static void SetRuntime(string playerId, string? hostIp, int port)
         {
             PlayerId = playerId;
@@ -91,19 +100,17 @@ namespace BigAmbitionsMP
                 HostIP = hostIp;
 
             // Re-resolve the stable id now that we're connecting — Steam is
-            // reliably valid by this point (the game launched through it), so we
-            // upgrade from any early GUID fallback to the permanent SteamID64.
+            // reliably valid by this point, so an early GUID fallback upgrades
+            // to the permanent SteamID64 (only if nothing was persisted yet).
             StableId = ResolveStableId();
 
-            // Persist the name across sessions (#1).  Explicit ConfigFile.Save()
-            // because BepInEx 6 BE doesn't always flush the auto-save before a
-            // hard process exit (e.g. user clicks the window X).
             try
             {
-                if (_playerIdEntry != null && !string.IsNullOrWhiteSpace(playerId))
+                if (!string.IsNullOrWhiteSpace(playerId))
                 {
-                    _playerIdEntry.Value = playerId;
-                    _playerIdEntry.ConfigFile?.Save();
+                    Set("PlayerId", playerId);
+                    if (hostIp != null) Set("HostIP", hostIp);
+                    Set("Port", port.ToString());
                     Plugin.Logger.LogInfo($"[Config] Persisted PlayerId='{playerId}' to disk.");
                 }
             }
@@ -120,10 +127,6 @@ namespace BigAmbitionsMP
             var steamName = TryGetSteamName();
             if (steamName != null)
                 return steamName;
-
-            // Steam not ready yet — generate a stable random name.
-            // We intentionally do NOT write it back to config so the next launch
-            // will try Steam again; if Steam still fails, a new random name is used.
             return GenerateFallbackName();
         }
 
@@ -136,7 +139,6 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogWarning("[Config] Steam client not valid yet — cannot read username.");
                     return null;
                 }
-
                 var name = SteamClient.Name;
                 if (!string.IsNullOrWhiteSpace(name))
                     return name;
@@ -150,37 +152,65 @@ namespace BigAmbitionsMP
 
         // ── Stable identity resolution ────────────────────────────────────────
 
-        /// <summary>Resolve the immutable identity key — the key for ALL persistent
-        /// progress (saves + ownership).  PERMANENCE IS THE WHOLE POINT: once an id
-        /// is established + persisted, it is reused forever and NEVER re-derived.
-        ///
-        /// The earlier logic always preferred "steam-"+SteamID64 over any persisted
-        /// value, so the id flipped guid↔steam depending on whether Steam happened
-        /// to be ready that run (Steam is flaky in the 2nd same-machine instance).
-        /// That orphaned saved progress: saved as guid-…, looked up next run as
-        /// steam-…, no match.  So: persisted id ALWAYS wins.</summary>
+        /// <summary>Resolve the immutable identity key — persisted id ALWAYS
+        /// wins (see main-branch history: re-deriving flipped guid↔steam and
+        /// orphaned progress).  IMPORTANT for the 0.10→0.11 migration: the old
+        /// BepInEx cfg held the id; this fresh store mints a NEW one unless the
+        /// migration shim below finds the old value.</summary>
         private static string ResolveStableId()
         {
-            // 1. Already established → reuse it verbatim, regardless of Steam state.
-            var stored = _stableIdEntry?.Value?.Trim();
+            // 1. Already established here → reuse verbatim.
+            var stored = Get("StableId").Trim();
             if (!string.IsNullOrEmpty(stored))
                 return stored;
 
-            // 2. First time only — mint one (prefer the permanent, machine-portable
-            //    SteamID64; else a per-machine GUID) and persist it for good.
+            // 1b. Migration shim: lift the id out of the old BepInEx config so
+            //     0.10 progress (saves/ownership keyed by stable id) carries
+            //     over.  Checked once; the value is then persisted HERE forever.
+            var migrated = TryMigrateStableIdFromBepInEx();
+            if (!string.IsNullOrEmpty(migrated))
+            {
+                Set("StableId", migrated!);
+                Plugin.Logger.LogInfo($"[Config] Stable id migrated from BepInEx config: {migrated}");
+                return migrated!;
+            }
+
+            // 2. First time only — mint one and persist for good.
             var steam = TryGetSteamId64();
             string gen = steam != null ? "steam-" + steam : "guid-" + Guid.NewGuid().ToString("N");
+            Set("StableId", gen);
+            Plugin.Logger.LogInfo($"[Config] Established stable id (persisted, permanent): {gen}");
+            return gen;
+        }
+
+        private static string? TryMigrateStableIdFromBepInEx()
+        {
             try
             {
-                if (_stableIdEntry != null)
+                // Old location: <game>\BepInEx\config\BigAmbitionsMP.cfg — check
+                // both known install roots (StableId = key in [Network]).
+                string[] candidates =
                 {
-                    _stableIdEntry.Value = gen;
-                    _stableIdEntry.ConfigFile?.Save();
-                    Plugin.Logger.LogInfo($"[Config] Established stable id (persisted, permanent): {gen}");
+                    @"C:\Program Files (x86)\Steam\steamapps\common\Big Ambitions\BepInEx\config\BigAmbitionsMP.cfg",
+                    @"C:\BigAmbitions2\BepInEx\config\BigAmbitionsMP.cfg",
+                    @"C:\BigAmbitions2-0.10-archive\BepInEx\config\BigAmbitionsMP.cfg",
+                };
+                foreach (var path in candidates)
+                {
+                    if (!File.Exists(path)) continue;
+                    foreach (var line in File.ReadAllLines(path))
+                    {
+                        var t = line.Trim();
+                        if (!t.StartsWith("StableId", StringComparison.OrdinalIgnoreCase)) continue;
+                        int eq = t.IndexOf('=');
+                        if (eq < 0) continue;
+                        var v = t.Substring(eq + 1).Trim();
+                        if (!string.IsNullOrEmpty(v)) return v;
+                    }
                 }
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] Could not persist stable id: {ex.Message}"); }
-            return gen;
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] BepInEx migration: {ex.Message}"); }
+            return null;
         }
 
         private static string? TryGetSteamId64()
@@ -197,9 +227,7 @@ namespace BigAmbitionsMP
 
         private static string GenerateFallbackName()
         {
-            // Short random suffix so two people who both fail Steam lookup
-            // don't collide with each other.
-            var suffix = Guid.NewGuid().ToString("N")[..6].ToUpper();
+            var suffix = Guid.NewGuid().ToString("N").Substring(0, 6).ToUpper();
             return $"Player-{suffix}";
         }
     }

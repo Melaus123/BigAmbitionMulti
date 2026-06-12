@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using Il2CppInterop.Runtime;
 using UnityEngine;
 
 namespace BigAmbitionsMP
@@ -58,9 +57,9 @@ namespace BigAmbitionsMP
         /// activity instance is suppressed — a half-cancelled approach (click
         /// bench, walk away) left Seated wedged true and the dock stuck open
         /// with no X (user, 2026-06-11).  A NEW activity un-suppresses.</summary>
-        public static bool SeatedForUi => Seated && _curActPtr != _suppressedActPtr;
-        private static IntPtr _suppressedActPtr = IntPtr.Zero;
-        private static IntPtr _curActPtr = IntPtr.Zero;
+        public static bool SeatedForUi => Seated && !ReferenceEquals(_curActRef, _suppressedActRef);
+        private static object? _suppressedActRef;
+        private static object? _curActRef;
 
         public static string ActivityName { get; private set; } = "";
         public static int    ActivityState { get; private set; } = -1;   // PlayerActivityState; -1 = none
@@ -194,19 +193,16 @@ namespace BigAmbitionsMP
                 _suppressAutoStartUntil = Time.unscaledTime + 4f;
                 // The dock must not re-show for THIS activity instance even if
                 // the game keeps it half-alive (walk-away wedge).
-                _suppressedActPtr = _curActPtr;
+                _suppressedActRef = _curActRef;
 
                 if (CancelButtonIndex >= 0) InvokeDockButton(CancelButtonIndex);
                 else
                 {
                     var act = _curAct;
-                    var b = act as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase;
-                    string? full = b?.TryCast<Il2CppSystem.Object>()?.GetIl2CppType()?.FullName;
-                    var ct = full != null ? VehicleManager.FindGameType(full) : null;
-                    if (ct != null && b != null)
+                    // Mono: the object IS its concrete type — call Finish directly.
+                    if (act != null)
                     {
-                        var target = Activator.CreateInstance(ct, b.Pointer);
-                        ct.GetMethod("Finish")?.Invoke(target, null);
+                        act.GetType().GetMethod("Finish")?.Invoke(act, null);
                         Plugin.Logger.LogInfo("[Rest] StandUp via Finish() fallback.");
                     }
                 }
@@ -265,18 +261,10 @@ namespace BigAmbitionsMP
                 int rem = RemainingActivityMinutes();
                 if (need <= rem + 1) return;
 
-                // The cached wrapper is INTERFACE-typed (IPlayerActivity exposes
-                // no fields) — cast down to the concrete activity class first.
+                // Mono: GetType() already yields the concrete activity class
+                // (the IL2CPP interface-wrapper downcast is gone).
                 object target = act;
                 var t = act.GetType();
-                try
-                {
-                    var b = act as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase;
-                    string? full = b?.TryCast<Il2CppSystem.Object>()?.GetIl2CppType()?.FullName;
-                    var ct = full != null ? VehicleManager.FindGameType(full) : null;
-                    if (ct != null && b != null) { target = Activator.CreateInstance(ct, b.Pointer); t = ct; }
-                }
-                catch { }
 
                 if (!_durProps.TryGetValue(t, out var prop))
                 {
@@ -409,9 +397,8 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Rest] seated → {seated}{(seated ? $" ({nm})" : "")}");
                 Seated = seated;
                 _curAct = seated ? act : null;
-                _curActPtr = (_curAct as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase)?.Pointer ?? IntPtr.Zero;
-                if (_curActPtr == IntPtr.Zero || _curActPtr != _suppressedActPtr)
-                    if (!seated) _suppressedActPtr = IntPtr.Zero;   // gone — clear the wedge guard
+                _curActRef = _curAct;   // Mono: object identity replaces pointer identity
+                if (!seated) _suppressedActRef = null;   // gone — clear the wedge guard
                 ActivityName = seated ? nm : "";
                 ActivityState = -1;
                 DockButtons.Clear();
@@ -434,17 +421,17 @@ namespace BigAmbitionsMP
                             if (b == null || DockButtons.Count >= 4) continue;
                             var bt = b.GetType();
                             bool inter = true;
-                            try { inter = (bool)(bt.GetProperty("interactable")?.GetValue(b) ?? true); } catch { }
+                            try { inter = (bool)(MPReflect.Get(bt, b, "interactable") ?? true); } catch { }
                             if (!inter) continue;
                             string label = "";
-                            try { label = bt.GetProperty("name")?.GetValue(b) as string ?? ""; } catch { }
+                            try { label = MPReflect.Get(bt, b, "name") as string ?? ""; } catch { }
                             if (string.IsNullOrEmpty(label))
                             {
-                                try { label = bt.GetProperty("key")?.GetValue(b) as string ?? ""; } catch { }
+                                try { label = MPReflect.Get(bt, b, "key") as string ?? ""; } catch { }
                                 if (label.Contains('.')) label = label.Substring(label.LastIndexOf('.') + 1);
                             }
                             object? oc = null;
-                            try { oc = bt.GetProperty("onClick")?.GetValue(b); } catch { }
+                            try { oc = MPReflect.Get(bt, b, "onClick"); } catch { }
                             DockButtons.Add(new DockButton { Label = string.IsNullOrEmpty(label) ? "Action" : label, OnClick = oc });
                         }
                     }
@@ -574,9 +561,9 @@ namespace BigAmbitionsMP
                 _uiType ??= VehicleManager.FindGameType("PlayerActivity.PlayerActivityUI")
                          ?? VehicleManager.FindGameType("PlayerActivityUI");
                 if (_uiType == null) return (null, null);
-                var objs = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(_uiType));
+                var objs = UnityEngine.Object.FindObjectsOfType(_uiType);
                 if (objs == null || objs.Length == 0) return (null, null);
-                _uiWrap = Activator.CreateInstance(_uiType, objs[0].Pointer);
+                _uiWrap = objs[0];   // Mono: the found object IS the typed instance
                 return (_uiWrap, _uiType);
             }
             catch { return (null, null); }
@@ -602,8 +589,8 @@ namespace BigAmbitionsMP
                 string nm;
                 try
                 {
-                    var io = (act as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase)?.TryCast<Il2CppSystem.Object>();
-                    nm = io?.GetIl2CppType()?.Name?.Replace("Activity", "") ?? "Rest";
+                    var io = act;
+                    nm = io?.GetType()?.Name?.Replace("Activity", "") ?? "Rest";
                 }
                 catch { nm = "Rest"; }
                 return (act, nm);
@@ -624,9 +611,9 @@ namespace BigAmbitionsMP
                 if (_machineType == null) return null;
                 if (_machine == null)
                 {
-                    var objs = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(_machineType), true);
+                    var objs = UnityEngine.Object.FindObjectsOfType(_machineType, true);
                     if (objs == null || objs.Length == 0) return null;
-                    _machine = Activator.CreateInstance(_machineType, objs[0].Pointer);
+                    _machine = objs[0];   // Mono: the found object IS the typed instance
                 }
                 return _machine;
             }
@@ -651,8 +638,7 @@ namespace BigAmbitionsMP
             try
             {
                 var m = GetMachine();
-                var p = _machineType?.GetProperty("canvas");
-                var canvas = p?.GetValue(m) as Canvas;
+                var canvas = MPReflect.Get(_machineType, m, "canvas") as Canvas;
                 if (canvas != null) canvas.enabled = visible;
             }
             catch { }

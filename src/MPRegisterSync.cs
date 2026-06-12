@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using BigAmbitions.Characters.Skills;   // SkillName
 using Entities;                          // EmployeeInstance
-using Il2CppInterop.Runtime;
 using UnityEngine;
 
 namespace BigAmbitionsMP
@@ -110,11 +109,11 @@ namespace BigAmbitionsMP
         {
             Controllers.CashRegisterController? best = null;
             float bestD2 = maxDist * maxDist;
-            var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<Controllers.CashRegisterController>());
+            var arr = UnityEngine.Object.FindObjectsOfType(typeof(Controllers.CashRegisterController));
             if (arr != null)
                 foreach (var o in arr)
                 {
-                    var c = o.TryCast<Controllers.CashRegisterController>();
+                    var c = o as Controllers.CashRegisterController;
                     if (c == null) continue;
                     float d2 = (c.transform.position - from).sqrMagnitude;
                     if (d2 < bestD2) { bestD2 = d2; best = c; }
@@ -234,9 +233,9 @@ namespace BigAmbitionsMP
                         var ii = kv.Value;
                         if (ii == null) continue;
                         var iname = ii.itemName;
-                        if (iname != BigAmbitions.Items.ItemName.CheckoutCounterRight
-                            && iname != BigAmbitions.Items.ItemName.CheckoutCounterLeft
-                            && iname != BigAmbitions.Items.ItemName.CashRegister) continue;
+                        if (iname != "ba:itemname_checkoutcounterright"
+                            && iname != "ba:itemname_checkoutcounterleft"
+                            && iname != "ba:itemname_cashregister") continue;
                         bool staffed = false;
                         string stationId = ii.id?.ToString() ?? "";
                         try { staffed = Helpers.EmployeeHelper.IsEmployeeStationEmployedAtHour(reg, stationId, -1); }
@@ -275,11 +274,11 @@ namespace BigAmbitionsMP
         /// <summary>The CURRENT shop's set price for an item (synced store
         /// table — the only charge source that matters per user), or -1 when
         /// the table has no entry.</summary>
-        public static float GetShopPrice(int itemNameValue)
-            => GetShopPriceAt(CurrentShopAddress, itemNameValue);
+        public static float GetShopPrice(string itemName)
+            => GetShopPriceAt(CurrentShopAddress, itemName);
 
         /// <summary>Same lookup for an arbitrary shop address key.</summary>
-        public static float GetShopPriceAt(string addressKey, int itemNameValue)
+        public static float GetShopPriceAt(string addressKey, string itemName)
         {
             try
             {
@@ -293,7 +292,7 @@ namespace BigAmbitionsMP
                         for (int i = 0; i < prices.Count; i++)
                         {
                             var rp = prices[i];
-                            if (rp != null && (int)rp.itemName == itemNameValue) return rp.price;
+                            if (rp != null && rp.itemName == itemName) return rp.price;
                         }
                     return -1f;
                 }
@@ -335,7 +334,7 @@ namespace BigAmbitionsMP
                     return;
                 }
 
-                var inst = Helpers.EmployeeHelper.CreateAIEmployeeInstance(SkillName.CustomerService);
+                var inst = Helpers.EmployeeHelper.CreateAIEmployeeInstance("ba:skill_customerservice");
                 if (inst == null) { Plugin.Logger.LogWarning("[SynthStaff] factory returned null."); return; }
                 inst.id = $"BAMP_DUTY_{playerId}_{addressKey.Replace(' ', '_')}";
                 inst.hourlyWage = 0f;

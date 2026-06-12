@@ -2,8 +2,6 @@ using System.Reflection;
 using UnityEngine;
 using Helpers;
 using GleyTrafficSystem;
-using Il2CppInterop.Runtime;
-using Il2CppInterop.Runtime.InteropTypes.Arrays;
 
 namespace BigAmbitionsMP
 {
@@ -178,19 +176,19 @@ namespace BigAmbitionsMP
         // choppiness).  Gley pre-instantiates its vehicle pool, so the
         // VehicleComponent set is stable: enumerate ONCE including inactive
         // pool members, refresh rarely, and filter activeInHierarchy per use.
-        private static Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<UnityEngine.Object>? _vcPool;
+        private static UnityEngine.Object[]? _vcPool;
         private static float _vcPoolAt = -999f;
         // 10s: one scene scan per 10s is ~free (vs 10/sec before) and picks up
         // any pool growth (UpdateMaxCars raises the budget per player) quickly.
         private const float VcPoolRefreshSeconds = 10f;
 
-        private static Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<UnityEngine.Object>? GetVehiclePool()
+        private static UnityEngine.Object[]? GetVehiclePool()
         {
             float now = Time.unscaledTime;
             if (_vcPool != null && now - _vcPoolAt < VcPoolRefreshSeconds) return _vcPool;
             try
             {
-                _vcPool   = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<VehicleComponent>(), true);
+                _vcPool   = UnityEngine.Object.FindObjectsOfType(typeof(VehicleComponent), true);
                 _vcPoolAt = now;
             }
             catch { _vcPool = null; }
@@ -211,7 +209,7 @@ namespace BigAmbitionsMP
                 int n = 0;
                 for (int i = 0; i < arr.Length; i++)
                 {
-                    var vc = arr[i].TryCast<VehicleComponent>();
+                    var vc = arr[i] as VehicleComponent;
                     if (vc == null) continue;
                     var go = vc.gameObject;
                     if (go != null && go.activeInHierarchy) n++;
@@ -239,7 +237,7 @@ namespace BigAmbitionsMP
                 if (arr == null) return snap;
                 for (int i = 0; i < arr.Length; i++)
                 {
-                    var vc = arr[i].TryCast<VehicleComponent>();
+                    var vc = arr[i] as VehicleComponent;
                     if (vc == null) continue;
                     var go = vc.gameObject;
                     if (go == null || !go.activeInHierarchy) continue;
@@ -314,19 +312,19 @@ namespace BigAmbitionsMP
             {
                 var rootT = car.transform;
                 var mpb = new MaterialPropertyBlock();
-                var rends = car.GetComponentsInChildren(Il2CppType.Of<Renderer>(), true);
+                var rends = car.GetComponentsInChildren(typeof(Renderer), true);
                 int dumped = 0;
                 Plugin.Logger.LogInfo(
                     $"[ColorDump] === {side} idx={index} model='{model}' renderers={rends.Length} ===");
 
                 for (int i = 0; i < rends.Length; i++)
                 {
-                    var r = rends[i].TryCast<Renderer>();
+                    var r = rends[i] as Renderer;
                     if (r == null) continue;
                     if (r.gameObject.name.Contains("Wheel")) continue;   // noise
 
                     string path = BuildHierarchyPath(r.transform, rootT);
-                    string rType = r.GetIl2CppType().Name;
+                    string rType = r.GetType().Name;
 
                     // sharedMaterials = all sub-mesh slots (cab vs box can be
                     // separate slots on the same MeshRenderer).
@@ -464,10 +462,10 @@ namespace BigAmbitionsMP
             var list = new List<Renderer>();
             try
             {
-                var rends = car.GetComponentsInChildren(Il2CppType.Of<Renderer>(), true);
+                var rends = car.GetComponentsInChildren(typeof(Renderer), true);
                 for (int i = 0; i < rends.Length; i++)
                 {
-                    var r = rends[i].TryCast<Renderer>();
+                    var r = rends[i] as Renderer;
                     if (r == null) continue;
                     if (FindShVehicleMaterial(r) != null)       // any sub-mesh slot
                         list.Add(r);
@@ -554,11 +552,11 @@ namespace BigAmbitionsMP
                 int groups = colors.Count / 6;
                 if (groups < 1) return;
 
-                var rends = ghost.GetComponentsInChildren(Il2CppType.Of<Renderer>(), true);
+                var rends = ghost.GetComponentsInChildren(typeof(Renderer), true);
                 int ri = 0, applied = 0;
                 for (int i = 0; i < rends.Length; i++)
                 {
-                    var r = rends[i].TryCast<Renderer>();
+                    var r = rends[i] as Renderer;
                     if (r == null) continue;
                     var mat = FindShVehicleMaterial(r);             // scan ALL slots, not just [0]
                     if (mat == null || mat.shader == null) continue;
@@ -611,7 +609,7 @@ namespace BigAmbitionsMP
                 for (int i = 0; i < all.Length; i++)
                 {
                     var el = all[i];
-                    var ti = el != null ? el.TryCast<TrafficLightsIntersection>() : null;
+                    var ti = el != null ? el as TrafficLightsIntersection : null;
                     if (ti == null) continue;          // PriorityIntersection — no lights
                     payload.Lights.Add(new LightStateDto
                     {
@@ -644,7 +642,7 @@ namespace BigAmbitionsMP
                 {
                     if (s.Index < 0 || s.Index >= all.Length) continue;
                     var el = all[s.Index];
-                    var ti = el != null ? el.TryCast<TrafficLightsIntersection>() : null;
+                    var ti = el != null ? el as TrafficLightsIntersection : null;
                     if (ti == null) continue;
                     ti.ChangeAllRoadsExceptSelectd(s.Road, TrafficLightsColor.Red);
                     ti.ChangeCurrentRoadColors(s.Road,
@@ -902,18 +900,18 @@ namespace BigAmbitionsMP
             bool isTaxi = model.Equals("Taxi", StringComparison.OrdinalIgnoreCase);
             try
             {
-                var comps = go.GetComponents(Il2CppType.Of<Component>());
+                var comps = go.GetComponents(typeof(Component));
                 for (int i = 0; i < comps.Length; i++)
                 {
                     var c = comps[i];
                     if (c == null) continue;
-                    string cn = c.GetIl2CppType().Name;
+                    string cn = c.GetType().Name;
 
                     if (isTaxi && cn == "TaxiController")
                         continue;                              // keep — the interaction
                     if (isTaxi && cn == "VehicleComponent")
                     {
-                        var beh = c.TryCast<Behaviour>();       // keep ref, kill its logic
+                        var beh = c as Behaviour;       // keep ref, kill its logic
                         if (beh != null) beh.enabled = false;
                         continue;
                     }
@@ -932,10 +930,10 @@ namespace BigAmbitionsMP
                 // prefabs carry rbs on children (carHolder/wheels), and a dynamic
                 // one lets the local player physically shove the ghost around.
                 // Kinematic = transform-driven immovable obstacle, like a wall.
-                var rbs = go.GetComponentsInChildren(Il2CppType.Of<Rigidbody>(), true);
+                var rbs = go.GetComponentsInChildren(typeof(Rigidbody), true);
                 for (int i = 0; i < rbs.Length; i++)
                 {
-                    var rb = rbs[i].TryCast<Rigidbody>();
+                    var rb = rbs[i] as Rigidbody;
                     if (rb == null) continue;
                     rb.isKinematic = true;
                     rb.useGravity  = false;
@@ -1038,7 +1036,7 @@ namespace BigAmbitionsMP
                     if (t != null) anchors.Add(t);
                 if (anchors.Count == 0) return;
 
-                var arr = new Il2CppReferenceArray<Transform>(anchors.Count);
+                var arr = new Transform[anchors.Count];
                 for (int i = 0; i < anchors.Count; i++) arr[i] = anchors[i];
 
                 // Feed every player to both anchor APIs — UpdateCamera drives the
@@ -1167,7 +1165,7 @@ namespace BigAmbitionsMP
                 if (kv.Value.Go == go) return kv.Key;
             // Host: a real traffic taxi — read its Gley pool index.
             var vcComp = VehicleManager.FindComponentByName(go, "VehicleComponent");
-            var vc = vcComp != null ? vcComp.TryCast<VehicleComponent>() : null;
+            var vc = vcComp != null ? vcComp as VehicleComponent : null;
             return vc != null ? vc.GetIndex() : -1;
         }
 
@@ -1178,10 +1176,10 @@ namespace BigAmbitionsMP
             if (arr == null) return null;
             for (int i = 0; i < arr.Length; i++)
             {
-                var vc = arr[i].TryCast<VehicleComponent>();
+                var vc = arr[i] as VehicleComponent;
                 if (vc == null || vc.GetIndex() != index) continue;
                 var tcComp = VehicleManager.FindComponentByName(vc.gameObject, "TaxiController");
-                return tcComp != null ? tcComp.TryCast<TaxiController>() : null;
+                return tcComp != null ? tcComp as TaxiController : null;
             }
             return null;
         }
@@ -1254,8 +1252,8 @@ namespace BigAmbitionsMP
 
                 const BindingFlags f = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
                 var tt = typeof(TaxiController);
-                var lastAct = tt.GetProperty("_lastDriveAction",  f)?.GetValue(taxi);
-                var lastVal = tt.GetProperty("_lastActionValue",  f)?.GetValue(taxi);
+                var lastAct = MPReflect.Get(tt, taxi, "_lastDriveAction");
+                var lastVal = MPReflect.Get(tt, taxi, "_lastActionValue");
                 if (lastAct == null || lastVal == null)
                 {
                     Plugin.Logger.LogWarning(

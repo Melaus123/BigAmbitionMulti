@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Buildings;
 using Helpers;
 using Entities;
@@ -269,7 +268,7 @@ namespace BigAmbitionsMP
                 var managed = Convert.FromBase64String(base64);
                 if (managed == null || managed.Length == 0) return;
                 var tex = new UnityEngine.Texture2D(2, 2);
-                bool loaded = UnityEngine.ImageConversion.LoadImage(tex, (Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<byte>)managed);
+                bool loaded = UnityEngine.ImageConversion.LoadImage(tex, managed);
                 if (!loaded) { Plugin.Logger.LogWarning($"[Patcher] Portrait decode failed for '{playerId}'."); return; }
                 var sprite = UnityEngine.Sprite.Create(
                     tex,
@@ -410,7 +409,7 @@ namespace BigAmbitionsMP
                     if (fi != null)
                     {
                         var dictObj = fi.GetValue(null);
-                        if (dictObj is Il2CppSystem.Collections.Generic.Dictionary<string, BigAmbitions.Rivals.RivalData> dict)
+                        if (dictObj is System.Collections.Generic.Dictionary<string, BigAmbitions.Rivals.RivalData> dict)
                         {
                             foreach (var r in payload.Rivals)
                             {
@@ -503,12 +502,12 @@ namespace BigAmbitionsMP
                     // null serialized fields and crash the process natively.
                     try
                     {
-                        var lbs = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<UI.Smartphone.Apps.Rivals.RivalLeaderboard>());
+                        var lbs = UnityEngine.Object.FindObjectsOfType(typeof(UI.Smartphone.Apps.Rivals.RivalLeaderboard));
                         if (lbs != null && lbs.Length > 0)
                         {
                             for (int i = 0; i < lbs.Length; i++)
                             {
-                                var lb = lbs[i].TryCast<UI.Smartphone.Apps.Rivals.RivalLeaderboard>();
+                                var lb = lbs[i] as UI.Smartphone.Apps.Rivals.RivalLeaderboard;
                                 if (lb == null) continue;
                                 bool active = false;
                                 try { active = lb.gameObject != null && lb.gameObject.activeInHierarchy; } catch { }
@@ -548,9 +547,9 @@ namespace BigAmbitionsMP
                 id        = playerId,
                 rivalName = name,
                 startingAgeInYears = age,
-                ownedBuildings              = new Il2CppSystem.Collections.Generic.List<BuildingRegistration>(),
-                ownedBusinesses             = new Il2CppSystem.Collections.Generic.List<BuildingRegistration>(),
-                ownedRetailOfficeBusinesses = new Il2CppSystem.Collections.Generic.List<BuildingRegistration>(),
+                ownedBuildings              = new System.Collections.Generic.List<BuildingRegistration>(),
+                ownedBusinesses             = new System.Collections.Generic.List<BuildingRegistration>(),
+                ownedRetailOfficeBusinesses = new System.Collections.Generic.List<BuildingRegistration>(),
             };
             PopulateRivalOwnedFromSync(rd, playerId);
             return rd;
@@ -602,7 +601,7 @@ namespace BigAmbitionsMP
                         else
                         {
                             // Fallback before stats arrive: owner match minus factory.
-                            bool isFactory = false; try { isFactory = (int)reg.businessTypeName == 38; } catch { }
+                            bool isFactory = false; try { isFactory = reg.businessTypeName == "ba:businesstype_factory"; } catch { }
                             isBiz = (biz == id) && !isFactory;
                         }
                         if (isBiz)
@@ -680,7 +679,7 @@ namespace BigAmbitionsMP
                         {
                             reg.retailPrices.Clear();
                             foreach (var rp in payload.RetailPrices)
-                                reg.retailPrices.Add(new RetailPrice { itemName = (BigAmbitions.Items.ItemName)rp.ItemName, price = rp.Price });
+                                reg.retailPrices.Add(new RetailPrice { itemName = rp.ItemName, price = rp.Price });
                         }
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] retailPrices apply: {ex.Message}"); }
@@ -753,12 +752,12 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var bms = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<BuildingManager>());
+                var bms = UnityEngine.Object.FindObjectsOfType(typeof(BuildingManager));
                 if (bms == null || bms.Length == 0) return;
                 BuildingManager? matched = null;
                 for (int i = 0; i < bms.Length; i++)
                 {
-                    var bm = bms[i].TryCast<BuildingManager>();
+                    var bm = bms[i] as BuildingManager;
                     if (bm == null) continue;
                     var activeReg = bm.buildingRegistration;
                     if (activeReg == null) continue;
@@ -794,12 +793,12 @@ namespace BigAmbitionsMP
 
                 int deserialized = 0;
                 int matchedUuids = 0;
-                var elementsObj = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<InteriorElement>());
+                var elementsObj = UnityEngine.Object.FindObjectsOfType(typeof(InteriorElement));
                 if (elementsObj != null)
                 {
                     for (int i = 0; i < elementsObj.Length; i++)
                     {
-                        var el = elementsObj[i].TryCast<InteriorElement>();
+                        var el = elementsObj[i] as InteriorElement;
                         if (el == null) continue;
                         string uuid = el.UUID?.ToString() ?? "";
                         if (string.IsNullOrEmpty(uuid)) continue;
@@ -856,12 +855,12 @@ namespace BigAmbitionsMP
                 int destroyed = 0;
                 try
                 {
-                    var existing = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<ItemController>());
+                    var existing = UnityEngine.Object.FindObjectsOfType(typeof(ItemController));
                     if (existing != null)
                     {
                         for (int i = 0; i < existing.Length; i++)
                         {
-                            var ic = existing[i].TryCast<ItemController>();
+                            var ic = existing[i] as ItemController;
                             if (ic == null) continue;
                             // Be conservative: only destroy ItemControllers whose registration
                             // matches the current building (avoid wiping inventory items etc.).
@@ -965,7 +964,7 @@ namespace BigAmbitionsMP
                         for (int i = cargo.Count - 1; i >= 0 && remaining > 0; i--)
                         {
                             var c = cargo[i];
-                            if (c == null || (int)c.itemName != s.ItemName) continue;
+                            if (c == null || c.itemName != s.ItemName) continue;
                             int dec = System.Math.Min(c.amount, remaining);
                             c.amount -= dec;
                             remaining -= dec;
@@ -975,10 +974,10 @@ namespace BigAmbitionsMP
                     }
                     int sold = s.Amount - remaining;
                     Plugin.Logger.LogInfo(
-                        $"[Stock] '{addressKey}': -{sold} {(BigAmbitions.Items.ItemName)s.ItemName} (sold to {buyerId})" +
+                        $"[Stock] '{addressKey}': -{sold} {s.ItemName} (sold to {buyerId})" +
                         (remaining > 0 ? $" — SHORT by {remaining} (stock didn't cover the sale)." : "."));
                     if (remaining > 0)
-                        shortfall.Append($"{(BigAmbitions.Items.ItemName)s.ItemName} x{remaining}, ");
+                        shortfall.Append($"{s.ItemName} x{remaining}, ");
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] decrement '{addressKey}': {ex.Message}"); }
@@ -994,17 +993,17 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var ii = new BigAmbitions.Items.ItemInstance((BigAmbitions.Items.ItemName)i.ItemName)
+                var ii = new BigAmbitions.Items.ItemInstance(i.ItemName)
                 {
                     id                  = i.Id,
-                    itemName            = (BigAmbitions.Items.ItemName)i.ItemName,
+                    itemName            = i.ItemName,
                     position            = new SerializableVector3 { x = i.Px, y = i.Py, z = i.Pz },
                     rotation            = new SerializableQuaternion { x = i.Qx, y = i.Qy, z = i.Qz, w = i.Qw },
                     yRotation           = i.YRotation,
                     parentId            = i.ParentId,
-                    streetName          = (StreetName)i.StreetName,
+                    streetName          = i.StreetName,
                     streetNumber        = i.StreetNumber,
-                    linkedItemName      = (BigAmbitions.Items.ItemName)i.LinkedItemName,
+                    linkedItemName      = i.LinkedItemName,
                     isSecured           = i.IsSecured,
                     worldSpaceTextValue = i.WorldSpaceTextValue,
                     stateIndex          = i.StateIndex,
@@ -1022,7 +1021,7 @@ namespace BigAmbitionsMP
                         ii.stackedItems.Add(new AttachableChild
                         {
                             childId         = s.ChildId,
-                            childItemName   = (BigAmbitions.Items.ItemName)s.ChildItemName,
+                            childItemName   = s.ChildItemName,
                             attachmentIndex = s.AttachmentIndex,
                         });
                     }
@@ -1042,12 +1041,12 @@ namespace BigAmbitionsMP
                         try
                         {
                             float t = MPRegisterSync.GetShopPriceAt(
-                                $"{i.StreetNumber} {(StreetName)i.StreetName}", c.ItemName);
+                                $"{i.StreetNumber} {i.StreetName}", c.ItemName);
                             if (t >= 0f) price = t;
                         }
                         catch { }
                         var ci = new BigAmbitions.Items.CargoInstance(
-                            (BigAmbitions.Items.ItemName)c.ItemName,
+                            c.ItemName,
                             c.Amount,
                             price,
                             c.Paid);
@@ -1064,7 +1063,7 @@ namespace BigAmbitionsMP
                             {
                                 var nci = new BigAmbitions.Items.NestedCargoInstance
                                 {
-                                    itemName     = (BigAmbitions.Items.ItemName)n.ItemName,
+                                    itemName     = n.ItemName,
                                     amount       = n.Amount,
                                     pricePerUnit = n.PricePerUnit,
                                 };
@@ -1111,7 +1110,7 @@ namespace BigAmbitionsMP
                     {
                         name         = i.PurchaserSettings.Name,
                         enabled      = i.PurchaserSettings.Enabled,
-                        itemName     = (BigAmbitions.Items.ItemName)i.PurchaserSettings.ItemName,
+                        itemName     = i.PurchaserSettings.ItemName,
                         itemQuantity = i.PurchaserSettings.ItemQuantity,
                     };
                 }
@@ -1198,11 +1197,11 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var all = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<CityMapFilters>());
+                var all = UnityEngine.Object.FindObjectsOfType(typeof(CityMapFilters));
                 if (all == null || all.Length == 0) return;
                 for (int i = 0; i < all.Length; i++)
                 {
-                    var f = all[i].TryCast<CityMapFilters>();
+                    var f = all[i] as CityMapFilters;
                     if (f == null) continue;
                     try { f.ApplyFilters(); }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] CityMapFilters.ApplyFilters: {ex.Message}"); }
@@ -1287,7 +1286,7 @@ namespace BigAmbitionsMP
                     if (reg == null) continue;
                     total++;
                     bool dirty = false;
-                    try { if ((int)reg.businessTypeName != 0)                    { withBiz++;      dirty = true; } } catch { }
+                    try { if (reg.businessTypeName != "ba:businesstype_empty")                    { withBiz++;      dirty = true; } } catch { }
                     try { if (!string.IsNullOrEmpty(reg.buildingOwnerRivalId))   { withRivalOwn++; dirty = true; } } catch { }
                     try { if (!string.IsNullOrEmpty(reg.businessOwnerRivalId))   { withRivalBiz++; dirty = true; } } catch { }
                     try { if (reg.RentedByPlayer)                                { playerRented++; dirty = true; } } catch { }
@@ -1335,7 +1334,7 @@ namespace BigAmbitionsMP
                     string addr = GameStateReader.AddressKey(reg);
                     if (string.IsNullOrEmpty(addr)) continue;
                     if (!hostByAddr.TryGetValue(addr, out var info)) { missingOnClient++; continue; }
-                    int clientBiz; try { clientBiz = (int)reg.businessTypeName; } catch { clientBiz = -1; }
+                    string clientBiz; try { clientBiz = reg.businessTypeName ?? ""; } catch { clientBiz = "?"; }
                     if (clientBiz == info.BusinessTypeName) matched++;
                     else
                     {
@@ -1420,7 +1419,7 @@ namespace BigAmbitionsMP
 
                 // Tier A — name, type, closed.
                 reg.BusinessName        = info.BusinessName;
-                reg.businessTypeName    = (BusinessTypeName)info.BusinessTypeName;
+                reg.businessTypeName    = info.BusinessTypeName;
                 reg.temporarilyClosed   = info.TemporarilyClosed;
 
                 // Rental marketplace state (Phase 1b).  Overrides client's
@@ -1454,7 +1453,6 @@ namespace BigAmbitionsMP
                 // closed.  Replace verbatim from host.
                 try
                 {
-                    reg.sharedSchedule = info.SharedSchedule;
                     if (reg.scheduleDays != null)
                     {
                         reg.scheduleDays.Clear();
@@ -1569,12 +1567,12 @@ namespace BigAmbitionsMP
                     int refreshed = 0;
                     try
                     {
-                        var signCtrls = cbc.GetComponentsInChildren(Il2CppInterop.Runtime.Il2CppType.Of<BuildingSignController>(), true);
+                        var signCtrls = cbc.GetComponentsInChildren(typeof(BuildingSignController), true);
                         if (signCtrls != null)
                         {
                             for (int i = 0; i < signCtrls.Length; i++)
                             {
-                                var sc = signCtrls[i].TryCast<BuildingSignController>();
+                                var sc = signCtrls[i] as BuildingSignController;
                                 if (sc == null) continue;
                                 try { sc.ConfigureSign(reg); refreshed++; }
                                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] BuildingSignController.ConfigureSign: {ex.Message}"); }
@@ -1585,12 +1583,12 @@ namespace BigAmbitionsMP
 
                     try
                     {
-                        var logoCtrls = cbc.GetComponentsInChildren(Il2CppInterop.Runtime.Il2CppType.Of<BuildingLogoSignController>(), true);
+                        var logoCtrls = cbc.GetComponentsInChildren(typeof(BuildingLogoSignController), true);
                         if (logoCtrls != null)
                         {
                             for (int i = 0; i < logoCtrls.Length; i++)
                             {
-                                var lc = logoCtrls[i].TryCast<BuildingLogoSignController>();
+                                var lc = logoCtrls[i] as BuildingLogoSignController;
                                 if (lc == null) continue;
                                 try { lc.UpdateSign(reg); refreshed++; }
                                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] BuildingLogoSignController.UpdateSign: {ex.Message}"); }
@@ -1601,10 +1599,10 @@ namespace BigAmbitionsMP
 
                     // Verbose log only for non-trivial businesses (matches the
                     // host-side filter so we get host/client side-by-side).
-                    bool nonTrivial = !string.IsNullOrEmpty(info.BusinessName) || info.BusinessTypeName != 0;
+                    bool nonTrivial = !string.IsNullOrEmpty(info.BusinessName) || info.BusinessTypeName != "ba:businesstype_empty";
                     if (nonTrivial)
                     {
-                        Plugin.Logger.LogInfo($"[Patcher] Refresh {info.AddressKey}: name='{info.BusinessName}' type={(BusinessTypeName)info.BusinessTypeName} signType={info.SignType} sign=0x{info.SignLightPacked:X8}/0x{info.LampPacked:X8} logoShape='{info.LogoShape}' logoFont={info.LogoFont} refreshed={refreshed}");
+                        Plugin.Logger.LogInfo($"[Patcher] Refresh {info.AddressKey}: name='{info.BusinessName}' type={info.BusinessTypeName} signType={info.SignType} sign=0x{info.SignLightPacked:X8}/0x{info.LampPacked:X8} logoShape='{info.LogoShape}' logoFont={info.LogoFont} refreshed={refreshed}");
                     }
 
                     // Player-customized sign logos are stored as multiple JPG
@@ -1778,18 +1776,18 @@ namespace BigAmbitionsMP
                         // Re-walk children and refresh directly too.
                         try
                         {
-                            var logoCtrls = cbc.GetComponentsInChildren(Il2CppInterop.Runtime.Il2CppType.Of<BuildingLogoSignController>(), true);
+                            var logoCtrls = cbc.GetComponentsInChildren(typeof(BuildingLogoSignController), true);
                             if (logoCtrls != null)
                                 for (int j = 0; j < logoCtrls.Length; j++)
                                 {
-                                    var lc = logoCtrls[j].TryCast<BuildingLogoSignController>();
+                                    var lc = logoCtrls[j] as BuildingLogoSignController;
                                     if (lc != null) { try { lc.UpdateSign(reg); } catch { } }
                                 }
-                            var signCtrls = cbc.GetComponentsInChildren(Il2CppInterop.Runtime.Il2CppType.Of<BuildingSignController>(), true);
+                            var signCtrls = cbc.GetComponentsInChildren(typeof(BuildingSignController), true);
                             if (signCtrls != null)
                                 for (int j = 0; j < signCtrls.Length; j++)
                                 {
-                                    var sc = signCtrls[j].TryCast<BuildingSignController>();
+                                    var sc = signCtrls[j] as BuildingSignController;
                                     if (sc != null) { try { sc.ConfigureSign(reg); } catch { } }
                                 }
                         }
@@ -1807,12 +1805,12 @@ namespace BigAmbitionsMP
 
             try
             {
-                var all = UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<CityBuildingController>());
+                var all = UnityEngine.Object.FindObjectsOfType(typeof(CityBuildingController));
                 if (all != null)
                 {
                     for (int i = 0; i < all.Length; i++)
                     {
-                        var cbc = all[i].TryCast<CityBuildingController>();
+                        var cbc = all[i] as CityBuildingController;
                         if (cbc == null) continue;
                         var reg = cbc.buildingRegistration;
                         if (reg == null) continue;
@@ -1834,7 +1832,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    var dtos = JsonSerializer.Deserialize<List<MarketEntryDto>>(marketJson);
+                    var dtos = Newtonsoft.Json.JsonConvert.DeserializeObject<List<MarketEntryDto>>(marketJson);
                     if (dtos == null) return;
 
                     var gi = SaveGameManager.Current;
@@ -1845,7 +1843,7 @@ namespace BigAmbitionsMP
                         // Find matching entry and update prices
                         foreach (var entry in gi.productMarketEntries)
                         {
-                            if (entry.itemName.ToString() == dto.ItemName)
+                            if (entry.itemName == dto.ItemName)
                             {
                                 entry.importPriceIndex = dto.ImportPriceIndex;
                                 break;

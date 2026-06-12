@@ -1,6 +1,5 @@
 using System;
 using UnityEngine;
-using Il2CppInterop.Runtime;
 using Intro;          // IntroCharacterCustomizer namespace
 
 namespace BigAmbitionsMP
@@ -290,9 +289,9 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var found = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<IntroCharacterCustomizer>());
+                var found = UnityEngine.Object.FindObjectsOfType(typeof(IntroCharacterCustomizer));
                 if (found == null || found.Length == 0) return null;
-                return found[0].TryCast<IntroCharacterCustomizer>();
+                return found[0] as IntroCharacterCustomizer;
             }
             catch { return null; }
         }

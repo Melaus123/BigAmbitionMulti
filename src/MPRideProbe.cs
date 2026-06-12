@@ -1,5 +1,4 @@
 using System;
-using Il2CppInterop.Runtime;
 using Helpers;
 using Vehicles.VehicleTypes;
 using UnityEngine;
@@ -71,19 +70,19 @@ namespace BigAmbitionsMP
                 {
                     _rigDumped = true;
                     var sb = new System.Text.StringBuilder("[RideProbe] rig inventory:");
-                    var comps = ch.GetComponentsInChildren(Il2CppType.Of<Component>(), true);
+                    var comps = ch.GetComponentsInChildren(typeof(Component), true);
                     int rigN = 0, animN = 0;
                     foreach (var c in comps)
                     {
                         if (c == null) continue;
-                        string tn = c.GetIl2CppType().FullName ?? "";
+                        string tn = c.GetType().FullName ?? "";
                         if (tn.EndsWith(".Animator")) animN++;
                         if ((tn.Contains("Rig") && !tn.Contains("Rigid")) || tn.Contains("Constraint") || tn.Contains("IK"))
                         {
                             rigN++;
                             if (rigN <= 14)
                             {
-                                var cc = c.TryCast<Component>();
+                                var cc = c as Component;
                                 sb.Append($" {tn.Substring(tn.LastIndexOf('.') + 1)}@'{(cc != null ? cc.gameObject.name : "?")}'");
                             }
                         }
@@ -100,14 +99,14 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var rs = root.GetComponentsInChildren(Il2CppType.Of<Renderer>(), false);
+                var rs = root.GetComponentsInChildren(typeof(Renderer), false);
                 bool any = false;
                 var min = Vector3.positiveInfinity; var max = Vector3.negativeInfinity;
                 foreach (var r in rs)
                 {
-                    var rr = r.TryCast<Renderer>();
+                    var rr = r as Renderer;
                     if (rr == null || !rr.enabled) continue;
-                    if (skinnedOnly && rr.TryCast<SkinnedMeshRenderer>() == null) continue;
+                    if (skinnedOnly && rr as SkinnedMeshRenderer == null) continue;
                     var b = rr.bounds;
                     min = Vector3.Min(min, b.min); max = Vector3.Max(max, b.max);
                     any = true;
@@ -122,8 +121,8 @@ namespace BigAmbitionsMP
             try
             {
                 var model = ch.Find("Model");
-                var animComp = model != null ? model.GetComponent(Il2CppType.Of<Animator>()) : null;
-                var anim = animComp != null ? animComp.TryCast<Animator>() : null;
+                var animComp = model != null ? model.GetComponent(typeof(Animator)) : null;
+                var anim = animComp != null ? animComp as Animator : null;
                 if (anim == null) return;
 
                 var sb = new System.Text.StringBuilder();

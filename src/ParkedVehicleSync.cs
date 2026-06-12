@@ -4,7 +4,6 @@ using System.Linq;
 using System.Reflection;
 using UnityEngine;
 using Helpers;
-using Il2CppInterop.Runtime;
 
 namespace BigAmbitionsMP
 {
@@ -541,10 +540,10 @@ namespace BigAmbitionsMP
             var groups = new List<(Color, Color)>();
             try
             {
-                var rends = car.GetComponentsInChildren(Il2CppType.Of<Renderer>(), true);
+                var rends = car.GetComponentsInChildren(typeof(Renderer), true);
                 for (int i = 0; i < rends.Length; i++)
                 {
-                    var r = rends[i].TryCast<Renderer>();
+                    var r = rends[i] as Renderer;
                     if (r == null) continue;
                     var mat = FindShVehicleMaterial(r);
                     if (mat == null) continue;
@@ -608,11 +607,11 @@ namespace BigAmbitionsMP
                 int groups = colors.Count / 6;
                 if (groups < 1) return;
 
-                var rends = ghost.GetComponentsInChildren(Il2CppType.Of<Renderer>(), true);
+                var rends = ghost.GetComponentsInChildren(typeof(Renderer), true);
                 int ri = 0;
                 for (int i = 0; i < rends.Length; i++)
                 {
-                    var r = rends[i].TryCast<Renderer>();
+                    var r = rends[i] as Renderer;
                     if (r == null) continue;
                     var mat = FindShVehicleMaterial(r);
                     if (mat == null) continue;

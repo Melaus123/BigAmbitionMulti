@@ -1,5 +1,3 @@
-using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace BigAmbitionsMP
 {
@@ -103,24 +101,24 @@ namespace BigAmbitionsMP
     /// </summary>
     public class MessageEnvelope
     {
-        [JsonPropertyName("t")]
+        [Newtonsoft.Json.JsonProperty("t")]
         public MessageType Type { get; set; }
 
-        [JsonPropertyName("from")]
+        [Newtonsoft.Json.JsonProperty("from")]
         public string SenderId { get; set; } = "";
 
         /// <summary>JSON payload — type depends on MessageType.</summary>
-        [JsonPropertyName("d")]
+        [Newtonsoft.Json.JsonProperty("d")]
         public string Data { get; set; } = "";
 
         public byte[] Serialize()
         {
-            return JsonSerializer.SerializeToUtf8Bytes(this);
+            return System.Text.Encoding.UTF8.GetBytes(Newtonsoft.Json.JsonConvert.SerializeObject(this));
         }
 
         public static MessageEnvelope? Deserialize(byte[] bytes)
         {
-            return JsonSerializer.Deserialize<MessageEnvelope>(bytes);
+            return Newtonsoft.Json.JsonConvert.DeserializeObject<MessageEnvelope>(System.Text.Encoding.UTF8.GetString(bytes));
         }
 
         public static MessageEnvelope Create<T>(MessageType type, string senderId, T payload)
@@ -129,11 +127,11 @@ namespace BigAmbitionsMP
             {
                 Type = type,
                 SenderId = senderId,
-                Data = JsonSerializer.Serialize(payload)
+                Data = Newtonsoft.Json.JsonConvert.SerializeObject(payload)
             };
         }
 
-        public T? GetPayload<T>() => JsonSerializer.Deserialize<T>(Data);
+        public T? GetPayload<T>() => Newtonsoft.Json.JsonConvert.DeserializeObject<T>(Data);
     }
 
     // ── Payload types ─────────────────────────────────────────────────────────
@@ -591,8 +589,8 @@ namespace BigAmbitionsMP
 
         // ── Tier A (always sync'd, always all clients) ────────────────────────
         public string BusinessName       { get; set; } = "";
-        /// <summary>BusinessTypeName enum value (cast to int for transport).</summary>
-        public int    BusinessTypeName   { get; set; }
+        /// <summary>Business type id string (EA 0.11, e.g. "ba:businesstype_giftshop").</summary>
+        public string BusinessTypeName   { get; set; } = "";
         public bool   TemporarilyClosed  { get; set; }
 
         // Rental marketplace state (Phase 1b).  Without these the client's
@@ -630,8 +628,8 @@ namespace BigAmbitionsMP
         // ── Operating hours (Phase 1c) ────────────────────────────────────────
         // Without these the client sees every business as "closed" because
         // CityGenerator suppression also skips default schedule population.
-        // We mirror host's schedule verbatim.
-        public bool SharedSchedule { get; set; }
+        // We mirror host's schedule verbatim.  (SharedSchedule was removed by
+        // EA 0.11 — BuildingRegistration no longer has the field.)
         public List<ScheduleDayInfo> Schedule { get; set; } = new();
 
         // ── Ownership (Phase 1d) ──────────────────────────────────────────────
@@ -821,8 +819,8 @@ namespace BigAmbitionsMP
     /// <summary>One sold line item in a RemoteSale.</summary>
     public class SaleItem
     {
-        public int ItemName { get; set; }   // BigAmbitions.Items.ItemName enum
-        public int Amount   { get; set; }
+        public string ItemName { get; set; } = "";   // item name string (EA 0.11 moddable-item ids)
+        public int    Amount   { get; set; }
     }
 
     /// <summary>Player on/off duty at a cash register (MessageType.RegisterCashier).</summary>
@@ -900,9 +898,9 @@ namespace BigAmbitionsMP
 
     public class RetailPriceInfo
     {
-        /// <summary>ItemName enum value (as int for cross-version safety).</summary>
-        public int   ItemName { get; set; }
-        public float Price    { get; set; }
+        /// <summary>Item name string (EA 0.11 replaced the ItemName enum with strings).</summary>
+        public string ItemName { get; set; } = "";
+        public float  Price    { get; set; }
     }
 
     /// <summary>A single dirt spot on the floor.</summary>
@@ -931,20 +929,21 @@ namespace BigAmbitionsMP
     // ── Item instance DTOs (Phase 2b) ────────────────────────────────────────
     // Mirror of BigAmbitions.Items.ItemInstance and its nested types.  Active
     // fields only; the 11 [Obsolete] fields on ItemInstance are skipped.
-    // Enums are transmitted as int; SerializableVector3/Quaternion are inlined
-    // as flat floats; SerializableColor uses the packed-int pattern from Phase 1.
+    // Item/street names are strings (EA 0.11 replaced those enums with strings);
+    // SerializableVector3/Quaternion are inlined as flat floats; SerializableColor
+    // uses the packed-int pattern from Phase 1.
 
     public class ItemInstanceInfo
     {
         public string Id                { get; set; } = "";
-        public int    ItemName          { get; set; }   // BigAmbitions.Items.ItemName enum
+        public string ItemName          { get; set; } = "";
         public float  Px { get; set; }  public float Py { get; set; }  public float Pz { get; set; }
         public float  Qx { get; set; }  public float Qy { get; set; }  public float Qz { get; set; }  public float Qw { get; set; }
         public float  YRotation         { get; set; }
         public string ParentId          { get; set; } = "";
-        public int    StreetName        { get; set; }
+        public string StreetName        { get; set; } = "";
         public int    StreetNumber      { get; set; }
-        public int    LinkedItemName    { get; set; }
+        public string LinkedItemName    { get; set; } = "";
         public bool   IsSecured         { get; set; }
         public string WorldSpaceTextValue { get; set; } = "";
         public int    StateIndex        { get; set; }
@@ -962,13 +961,13 @@ namespace BigAmbitionsMP
     public class AttachableChildInfo
     {
         public string ChildId          { get; set; } = "";
-        public int    ChildItemName    { get; set; }
+        public string ChildItemName    { get; set; } = "";
         public int    AttachmentIndex  { get; set; }
     }
 
     public class CargoInstanceInfo
     {
-        public int    ItemName     { get; set; }
+        public string ItemName     { get; set; } = "";
         public int    Amount       { get; set; }
         public float  PricePerUnit { get; set; }
         public bool   Paid         { get; set; }
@@ -978,7 +977,7 @@ namespace BigAmbitionsMP
 
     public class NestedCargoInstanceInfo
     {
-        public int    ItemName     { get; set; }
+        public string ItemName     { get; set; } = "";
         public int    Amount       { get; set; }
         public float  PricePerUnit { get; set; }
         public List<CustomColorInfo> CustomColors { get; set; } = new();
@@ -994,7 +993,7 @@ namespace BigAmbitionsMP
     {
         public string Name         { get; set; } = "";
         public bool   Enabled      { get; set; }
-        public int    ItemName     { get; set; }
+        public string ItemName     { get; set; } = "";
         public int    ItemQuantity { get; set; }
     }
 
@@ -1154,7 +1153,7 @@ namespace BigAmbitionsMP
     {
         public string AddressKey   { get; set; } = "";   // "{streetNumber} {streetName}" — matches GameStateReader.AddressKey
         public string BusinessName { get; set; } = "";
-        public int    BusinessType { get; set; }          // BusinessTypeName enum index
+        public string BusinessType { get; set; } = "";    // business type id string (EA 0.11)
         public float  WeeklyIncome { get; set; }
     }
 
@@ -1167,7 +1166,7 @@ namespace BigAmbitionsMP
         public float  WeeklyIncome           { get; set; }
         public int    OwnedBuildingsCount    { get; set; }
         public int    OwnedBusinessesCount   { get; set; }
-        public int    MostActiveNeighborhood { get; set; }   // enum index
+        public string MostActiveNeighborhood { get; set; } = "";   // neighborhood id string (EA 0.11)
         public bool   IsDefeated             { get; set; }
         /// <summary>Per-business breakdown (host-authoritative income per owned
         /// business).  Drives both the detail-view breakdown income override and

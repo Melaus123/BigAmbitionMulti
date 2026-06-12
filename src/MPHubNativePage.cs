@@ -1,5 +1,4 @@
 using System;
-using Il2CppInterop.Runtime;
 using TMPro;
 using UnityEngine;
 using UnityEngine.Events;
@@ -99,9 +98,9 @@ namespace BigAmbitionsMP
                 if (_menuType == null) return;
                 if (_menu == null)
                 {
-                    var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(_menuType), true);
+                    var arr = UnityEngine.Object.FindObjectsOfType(_menuType, true);
                     if (arr == null || arr.Length == 0) return;
-                    _menu = arr[0].TryCast<Component>();
+                    _menu = arr[0] as Component;
                     if (_menu == null) return;
                 }
 
@@ -123,24 +122,24 @@ namespace BigAmbitionsMP
                 var appName = canvasT.Find("Topbar/AppName");
                 _appNameLbl = appName != null ? appName.GetComponent<TextMeshProUGUI>() : null;
                 if (appName != null)
-                    foreach (var c in appName.GetComponents(Il2CppType.Of<Component>()))
+                    foreach (var c in appName.GetComponents(typeof(Component)))
                     {
-                        var cc = c.TryCast<Behaviour>();
-                        if (cc != null && cc.GetIl2CppType().Name.Contains("Localization")) { _appNameLoc = cc; break; }
+                        var cc = c as Behaviour;
+                        if (cc != null && cc.GetType().Name.Contains("Localization")) { _appNameLoc = cc; break; }
                     }
 
                 // ── Top-row button: clone the game's own template. ────────────
                 _button = UnityEngine.Object.Instantiate(template.gameObject, row);
                 _button.name = "BAMP_Business";
-                foreach (var c in _button.GetComponents(Il2CppType.Of<Component>()))
+                foreach (var c in _button.GetComponents(typeof(Component)))
                 {
                     if (c == null) continue;
-                    if (c.GetIl2CppType().Name == "FullMenuAppButton") UnityEngine.Object.Destroy(c);
+                    if (c.GetType().Name == "FullMenuAppButton") UnityEngine.Object.Destroy(c);
                 }
-                foreach (var c in _button.GetComponentsInChildren(Il2CppType.Of<Component>(), true))
+                foreach (var c in _button.GetComponentsInChildren(typeof(Component), true))
                 {
-                    var cc = c.TryCast<Behaviour>();
-                    if (cc != null && cc.GetIl2CppType().Name.Contains("Localization")) cc.enabled = false;
+                    var cc = c as Behaviour;
+                    if (cc != null && cc.GetType().Name.Contains("Localization")) cc.enabled = false;
                 }
                 var titleT = _button.transform.Find("Title");
                 var titleLbl = titleT != null ? titleT.GetComponent<TextMeshProUGUI>() : null;
@@ -157,8 +156,8 @@ namespace BigAmbitionsMP
                 _selectedIcon = _button.transform.Find("SelectedIcon")?.gameObject;
                 _selectedIcon?.SetActive(false);
 
-                var btnComp = _button.GetComponent(Il2CppType.Of<Button>());
-                var btn = btnComp != null ? btnComp.TryCast<Button>() : null;
+                var btnComp = _button.GetComponent(typeof(Button));
+                var btn = btnComp != null ? btnComp as Button : null;
                 if (btn != null)
                 {
                     btn.onClick = new Button.ButtonClickedEvent();
@@ -266,12 +265,9 @@ namespace BigAmbitionsMP
                                 var ps = m.GetParameters();
                                 if (ps.Length == 1 && ps[0].ParameterType.IsEnum) { openApp = m; break; }
                             }
-                            var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(suiType), true);
-                            // Reflection-Invoke needs the DECLARED type's interop
-                            // wrapper — a Component cast throws "Object does not
-                            // match target type" (typed-wrapper trick, classes only).
-                            var raw = arr != null && arr.Length > 0 ? arr[0] as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase : null;
-                            var sui = raw != null ? Activator.CreateInstance(suiType, raw.Pointer) : null;
+                            var arr = UnityEngine.Object.FindObjectsOfType(suiType, true);
+                            // Mono: the found object IS the typed instance.
+                            object? sui = arr != null && arr.Length > 0 ? arr[0] : null;
                             if (sui != null && openApp != null)
                             {
                                 var et = openApp.GetParameters()[0].ParameterType;
@@ -300,17 +296,9 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[HubApp] OpenMenuToBusiness: {ex.Message}"); }
         }
 
-        /// <summary>Typed interop wrapper for the FullMenu instance (reflection
-        /// Invoke rejects base-class wrappers).</summary>
-        private static object? TypedMenu()
-        {
-            try
-            {
-                var raw = _menu as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase;
-                return raw != null && _menuType != null ? Activator.CreateInstance(_menuType, raw.Pointer) : null;
-            }
-            catch { return null; }
-        }
+        /// <summary>The FullMenu instance for reflection-Invoke.  (On Mono the
+        /// found object IS the declared type — no interop wrapper needed.)</summary>
+        private static object? TypedMenu() => _menu;
 
         /// <summary>Close the whole menu (our page's X / fallback).</summary>
         public static void CloseMenu()

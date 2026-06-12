@@ -7,7 +7,6 @@ using TMPro;
 using Helpers;
 using Vehicles.VehicleTypes;
 using GleyTrafficSystem;
-using Il2CppInterop.Runtime;
 
 namespace BigAmbitionsMP
 {
@@ -181,11 +180,11 @@ namespace BigAmbitionsMP
             // Renderers + materials (model + colour identity)
             try
             {
-                var rends = parent.GetComponentsInChildren(Il2CppType.Of<Renderer>(), true);
+                var rends = parent.GetComponentsInChildren(typeof(Renderer), true);
                 Plugin.Logger.LogInfo($"[Vehicle]   renderers ({rends.Length}):");
                 for (int i = 0; i < rends.Length && i < 40; i++)
                 {
-                    var r = rends[i].TryCast<Renderer>();
+                    var r = rends[i] as Renderer;
                     if (r == null) continue;
                     var mats = r.sharedMaterials;
                     var ms = new List<string>();
@@ -206,9 +205,9 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var comps = go.GetComponents(Il2CppType.Of<Component>());
+                var comps = go.GetComponents(typeof(Component));
                 for (int i = 0; i < comps.Length; i++)
-                    if (comps[i] != null && comps[i].GetIl2CppType().Name == typeName)
+                    if (comps[i] != null && comps[i].GetType().Name == typeName)
                         return comps[i];
             }
             catch { }
@@ -336,10 +335,10 @@ namespace BigAmbitionsMP
             string comps;
             try
             {
-                var cs = t.gameObject.GetComponents(Il2CppType.Of<Component>());
+                var cs = t.gameObject.GetComponents(typeof(Component));
                 var names = new List<string>();
                 for (int i = 0; i < cs.Length; i++)
-                    if (cs[i] != null) names.Add(cs[i].GetIl2CppType().Name);
+                    if (cs[i] != null) names.Add(cs[i].GetType().Name);
                 comps = string.Join(", ", names);
             }
             catch { comps = "(components unavailable)"; }
@@ -419,11 +418,10 @@ namespace BigAmbitionsMP
 
                 // ── C. Find live ParkingLaneGenerator instances + sample ─────
                 Plugin.Logger.LogInfo("[Parked] === live ParkingLaneGenerator instances ===");
-                Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<UnityEngine.Object>? lanes = null;
+                UnityEngine.Object[]? lanes = null;
                 try
                 {
-                    var il2 = Il2CppType.From(laneT);
-                    lanes = UnityEngine.Object.FindObjectsOfType(il2);
+                    lanes = UnityEngine.Object.FindObjectsOfType(laneT);
                 }
                 catch (System.Exception ex)
                 {
@@ -573,7 +571,7 @@ namespace BigAmbitionsMP
             if (Time.timeSinceLevelLoad < 25f) return;
             try
             {
-                var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<VehicleComponent>());
+                var arr = UnityEngine.Object.FindObjectsOfType(typeof(VehicleComponent));
                 if (arr == null || arr.Length == 0) return;
 
                 // Skip fixed-livery vehicles (truck/taxi/emergency) — sample
@@ -582,7 +580,7 @@ namespace BigAmbitionsMP
                 var samples = new List<GameObject>();
                 for (int i = 0; i < arr.Length && samples.Count < 3; i++)
                 {
-                    var c = arr[i].TryCast<Component>();
+                    var c = arr[i] as Component;
                     if (c == null || !c.gameObject.activeInHierarchy) continue;
                     string nm = c.gameObject.name;
                     bool fixedLivery = false;
@@ -597,10 +595,10 @@ namespace BigAmbitionsMP
                 foreach (var car in samples)
                 {
                     Plugin.Logger.LogInfo($"[CarColor] === Probe: traffic car '{car.name}' ===");
-                    var rends = car.GetComponentsInChildren(Il2CppType.Of<Renderer>(), true);
+                    var rends = car.GetComponentsInChildren(typeof(Renderer), true);
                     for (int i = 0; i < rends.Length && i < 24; i++)
                     {
-                        var r = rends[i].TryCast<Renderer>();
+                        var r = rends[i] as Renderer;
                         if (r == null) continue;
                         // SH_Vehicle body renderers are what carry the car colour.
                         var s0 = r.sharedMaterial;
@@ -658,14 +656,14 @@ namespace BigAmbitionsMP
                     _taxiProbed = true;
                     return;
                 }
-                var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(tcType));
+                var arr = UnityEngine.Object.FindObjectsOfType(tcType);
                 if (arr == null || arr.Length == 0) return;   // no taxi yet — retry
                 _taxiProbed = true;
 
                 Plugin.Logger.LogInfo($"[Taxi] === Taxi probe ({arr.Length} taxi(s) in scene) ===");
                 DumpTypeMembers("TaxiController");
 
-                var comp = arr[0].TryCast<Component>();
+                var comp = arr[0] as Component;
                 if (comp != null)
                 {
                     var root = comp.transform.root;
@@ -748,8 +746,11 @@ namespace BigAmbitionsMP
                     // Never re-broadcast them — that snowballs prefix-per-cycle.
                     if (inst.id.Contains("BAMP_BAMP"))
                     {
-                        if (_lastManifestLogged.TryAdd(inst.id, "LEAKED"))
+                        if (!_lastManifestLogged.ContainsKey(inst.id))
+                        {
+                            _lastManifestLogged[inst.id] = "LEAKED";
                             Plugin.Logger.LogWarning($"[Vehicle] leaked ghost in local fleet skipped: '{inst.id}' (save-cycle leak — root cause backlogged).");
+                        }
                         continue;
                     }
                     var t = vc.transform;
@@ -1030,9 +1031,9 @@ namespace BigAmbitionsMP
                     if (string.IsNullOrEmpty(part)) continue;
                     var bits = part.Split(':');
                     if (bits.Length != 2) continue;
-                    if (!Enum.TryParse<BigAmbitions.Items.ItemName>(bits[0], out var item)) continue;
+                    if (string.IsNullOrEmpty(bits[0])) continue;
                     if (!int.TryParse(bits[1], out var amount) || amount <= 0) continue;
-                    inst.cargoInstances.Add(new BigAmbitions.Items.CargoInstance(item, amount, 0f, true));
+                    inst.cargoInstances.Add(new BigAmbitions.Items.CargoInstance(bits[0], amount, 0f, true));
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] cargo manifest: {ex.Message}"); }
@@ -1044,18 +1045,17 @@ namespace BigAmbitionsMP
             VehicleInstance inst;
             try
             {
-                inst = new VehicleInstance();
+                inst = new VehicleInstance(e.TypeName);   // EA 0.11: string type id, ctor-required
             }
             catch (Exception ex)
             {
-                Plugin.Logger.LogError($"[Vehicle] new VehicleInstance failed: {ex.Message}");
+                Plugin.Logger.LogError($"[Vehicle] new VehicleInstance('{e.TypeName}') failed: {ex.Message}");
                 return null;
             }
             try
             {
                 inst.id               = "BAMP_" + e.VehicleId;
                 inst.vehicleColorName = e.ColorName;
-                inst.vehicleTypeName  = (VehicleTypeName)Enum.Parse(typeof(VehicleTypeName), e.TypeName);
             }
             catch (Exception ex)
             {
@@ -1069,7 +1069,7 @@ namespace BigAmbitionsMP
             {
                 for (int ci = 0; ci < e.CarriedItems && ci < 12; ci++)
                     inst.cargoInstances?.Add(new BigAmbitions.Items.CargoInstance(
-                        BigAmbitions.Items.ItemName.CheapGift, 1, 0f, true));
+                        "ba:itemname_cheapgift", 1, 0f, true));
             }
             catch { }
 
@@ -1138,22 +1138,19 @@ namespace BigAmbitionsMP
         /// </summary>
         public static GameObject? SpawnVisualGhost(string typeName, Vector3 pos, Quaternion rot)
         {
+            // EA 0.11: vehicleTypeName is a ctor-required string; validate via the
+            // game's own lookup so unknown names (e.g. Taxi) fall back cleanly.
+            bool known = false;
+            try { known = Vehicles.VehicleTypes.VehicleTypeHelper.GetVehicleType(typeName) != null; }
+            catch { }
             VehicleInstance inst;
-            try { inst = new VehicleInstance(); }
+            try { inst = new VehicleInstance(known ? typeName : "ba:vehicletype_vordv150"); }
             catch (Exception ex)
             {
                 Plugin.Logger.LogError($"[Vehicle] ghost VehicleInstance failed: {ex.Message}");
                 return null;
             }
-            try
-            {
-                inst.id = "BAMP_ghost";
-                if (Enum.TryParse<VehicleTypeName>(typeName, out var vtn))
-                    inst.vehicleTypeName = vtn;
-                else
-                    inst.vehicleTypeName = VehicleTypeName.VordV150;   // fallback (e.g. Taxi)
-            }
-            catch { }
+            try { inst.id = "BAMP_ghost"; } catch { }
 
             VehicleController? vc;
             try { vc = VehicleHelper.CreateAndSpawnVehicle(inst, pos, rot); }
@@ -1172,10 +1169,10 @@ namespace BigAmbitionsMP
             {
                 // EVERY rigidbody in the hierarchy, not just the root — a dynamic
                 // child rb lets the local player physically shove the ghost.
-                var rbs = go.GetComponentsInChildren(Il2CppType.Of<Rigidbody>(), true);
+                var rbs = go.GetComponentsInChildren(typeof(Rigidbody), true);
                 for (int i = 0; i < rbs.Length; i++)
                 {
-                    var rb = rbs[i].TryCast<Rigidbody>();
+                    var rb = rbs[i] as Rigidbody;
                     if (rb == null) continue;
                     rb.isKinematic = true;
                     rb.useGravity  = false;
@@ -1194,10 +1191,10 @@ namespace BigAmbitionsMP
             int n = 0;
             try
             {
-                var cams = go.GetComponentsInChildren(Il2CppType.Of<Camera>(), true);
+                var cams = go.GetComponentsInChildren(typeof(Camera), true);
                 for (int i = 0; i < cams.Length; i++)
                 {
-                    var c = cams[i].TryCast<Camera>();
+                    var c = cams[i] as Camera;
                     if (c == null) continue;
                     UnityEngine.Object.Destroy(c);
                     n++;
@@ -1216,12 +1213,12 @@ namespace BigAmbitionsMP
             StripCameras(go);
             try
             {
-                var comps = go.GetComponents(Il2CppType.Of<Component>());
+                var comps = go.GetComponents(typeof(Component));
                 for (int i = 0; i < comps.Length; i++)
                 {
                     var c = comps[i];
                     if (c == null) continue;
-                    if (System.Array.IndexOf(_killVehicleComponents, c.GetIl2CppType().Name) >= 0)
+                    if (System.Array.IndexOf(_killVehicleComponents, c.GetType().Name) >= 0)
                     {
                         UnityEngine.Object.Destroy(c);
                         n++;
@@ -1407,10 +1404,10 @@ namespace BigAmbitionsMP
                 var hornT = FindGameType("AiCarHorn");
                 if (hornT != null)
                 {
-                    var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(hornT));
+                    var arr = UnityEngine.Object.FindObjectsOfType(hornT);
                     if (arr != null && arr.Length > 0)
                     {
-                        var comp = arr[0].TryCast<Component>();
+                        var comp = arr[0] as Component;
                         if (comp != null)
                         {
                             var root = comp.transform.root;
@@ -1480,13 +1477,13 @@ namespace BigAmbitionsMP
             VehicleController? sample = null;
             try
             {
-                var all = UnityEngine.Object.FindObjectsOfType(Il2CppType.Of<VehicleController>());
+                var all = UnityEngine.Object.FindObjectsOfType(typeof(VehicleController));
                 int player = 0, ai = 0;
                 if (all != null)
                 {
                     for (int i = 0; i < all.Length; i++)
                     {
-                        var vc = all[i].TryCast<VehicleController>();
+                        var vc = all[i] as VehicleController;
                         if (vc == null) continue;
                         if (ownedIds.Contains(vc.GetInstanceID())) { player++; }
                         else { ai++; if (sample == null) sample = vc; }
@@ -1512,12 +1509,12 @@ namespace BigAmbitionsMP
                 DumpNode(sample.transform, 0);
                 try
                 {
-                    var comps = sample.gameObject.GetComponents(Il2CppType.Of<Component>());
+                    var comps = sample.gameObject.GetComponents(typeof(Component));
                     var dumped = new HashSet<string>();
                     for (int i = 0; i < comps.Length; i++)
                     {
                         if (comps[i] == null) continue;
-                        string cn = comps[i].GetIl2CppType().Name;
+                        string cn = comps[i].GetType().Name;
                         string lo = cn.ToLowerInvariant();
                         if ((lo.Contains("ai") || lo.Contains("driver") ||
                              lo.Contains("traffic") || lo.Contains("nav")) && dumped.Add(cn))
@@ -1542,7 +1539,7 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Traffic]   {typeName}: type not found");
                     return;
                 }
-                var arr = UnityEngine.Object.FindObjectsOfType(Il2CppType.From(t));
+                var arr = UnityEngine.Object.FindObjectsOfType(t);
                 Plugin.Logger.LogInfo($"[Traffic]   {typeName}: {(arr != null ? arr.Length : 0)} in scene");
             }
             catch (Exception ex)

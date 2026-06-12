@@ -1,7 +1,6 @@
 using LiteNetLib;
 using LiteNetLib.Utils;
 using System.Collections.Concurrent;
-using System.Text.Json;
 using UI.Load;
 
 namespace BigAmbitionsMP
@@ -177,6 +176,8 @@ namespace BigAmbitionsMP
         private static readonly HashSet<string> _worldReadyPlayers = new();
         private static bool _hostSnapshotsReady;   // host's own world loaded → can serve snapshots
         private static readonly object _startupLock = new();
+        /// <summary>Monotonic milliseconds (net48 has no Environment.TickCount64).</summary>
+        private static long TickMs64 => System.Diagnostics.Stopwatch.GetTimestamp() / (System.Diagnostics.Stopwatch.Frequency / 1000L);
         private static bool _startupReleased;
         // True while the session is paused because a player DROPPED (set in
         // OnPeerDisconnected, cleared when they reconnect) — distinguishes the
@@ -275,7 +276,7 @@ namespace BigAmbitionsMP
             LobbyPlayers.Clear();
             _peerNames.Clear();
             _clients.Clear();
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = Environment.TickCount64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
         }
 
         /// <summary>Host clicked "Start New Game" in the lobby.</summary>
@@ -291,7 +292,7 @@ namespace BigAmbitionsMP
             IsInLobby = false;
 
             // Re-arm the startup pause hold for this new game.
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = Environment.TickCount64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
 
             // Per-player starting cash: each client gets the host-designated amount
             // (their override, else the difficulty base).  The host now designates
@@ -354,7 +355,7 @@ namespace BigAmbitionsMP
             IsInLobby = false;
 
             // Re-arm the startup pause hold for this new game.
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = Environment.TickCount64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
 
             // Phase 4: if a multiplayer session exists, resume it — the host holds
             // every player's .hsg, so it ships each connected client its own and
@@ -1248,7 +1249,7 @@ namespace BigAmbitionsMP
         {
             if (p == null || string.IsNullOrEmpty(p.PlayerId)) return;
             bool changed = !_peerPhase.TryGetValue(p.PlayerId, out var prevPh) || prevPh.phase != p.Phase;
-            _peerPhase[p.PlayerId] = (p.Phase, Environment.TickCount64);
+            _peerPhase[p.PlayerId] = (p.Phase, TickMs64);
             if (changed) Plugin.Logger.LogInfo($"[Server] phase: '{p.PlayerId}' → {p.Phase}");
         }
 
@@ -1262,7 +1263,7 @@ namespace BigAmbitionsMP
             lock (_startupLock)
             {
                 if (_startupReleased) return;
-                long now = Environment.TickCount64;
+                long now = TickMs64;
                 // Grace: the gap between leaving the lobby and the overlay
                 // rising legitimately reports "Menu" — the prune excused a
                 // LOADING client (2026-06-11).  Clients also now declare a
@@ -1479,8 +1480,8 @@ namespace BigAmbitionsMP
             GameVariablesDto copy;
             try
             {
-                var json = System.Text.Json.JsonSerializer.Serialize(src);
-                copy = System.Text.Json.JsonSerializer.Deserialize<GameVariablesDto>(json) ?? new GameVariablesDto();
+                var json = Newtonsoft.Json.JsonConvert.SerializeObject(src);
+                copy = Newtonsoft.Json.JsonConvert.DeserializeObject<GameVariablesDto>(json) ?? new GameVariablesDto();
             }
             catch { copy = new GameVariablesDto(); }
             copy.StartingMoney = cash;
@@ -1518,11 +1519,12 @@ namespace BigAmbitionsMP
                 gv.allProductsAvailableFromImporters = dto.AllProductsAvailableFromImporters;
                 gv.exportMultiplier                  = dto.ExportMultiplier;
 
-                // difficulty is an enum — set via reflection to avoid a compile-time
-                // dependency on the game's Difficulty type name.
-                var diffProp = typeof(GameVariables).GetProperty("difficulty");
-                if (diffProp != null && !string.IsNullOrEmpty(dto.Difficulty))
-                    diffProp.SetValue(gv, Enum.Parse(diffProp.PropertyType, dto.Difficulty));
+                // difficulty is an enum FIELD on EA 0.11 (was property-shaped under
+                // interop) — property-or-field reflection keeps the type-name independence.
+                var diffMember = MPReflect.PropertyOrField(typeof(GameVariables), "difficulty");
+                var diffType   = MPReflect.TypeOf(diffMember);
+                if (diffMember != null && diffType != null && !string.IsNullOrEmpty(dto.Difficulty))
+                    MPReflect.Set(diffMember, gv, Enum.Parse(diffType, dto.Difficulty));
             }
             catch (Exception ex)
             {
@@ -1952,7 +1954,7 @@ namespace BigAmbitionsMP
                                 // THAT so the client's row matches.
                                 info.OwnedBusinessesCount = rd.ownedRetailOfficeBusinesses?.Count ?? 0;
                                 info.OwnedBuildingsCount  = rd.ownedBuildings?.Count  ?? 0;
-                                try { info.MostActiveNeighborhood = (int)rd.MostActiveNeighborhood; } catch { }
+                                try { info.MostActiveNeighborhood = rd.MostActiveNeighborhood ?? ""; } catch { }
                                 try { info.AgeInYears = BigAmbitions.Rivals.RivalsHelper.GetRivalAgeInYears(rd); } catch { }
                                 try { info.IsDefeated = BigAmbitions.Rivals.RivalsHelper.IsRivalDefeated(id); } catch { }
                                 aiWithData++;
@@ -1989,7 +1991,7 @@ namespace BigAmbitionsMP
                                             {
                                                 AddressKey   = addr,
                                                 BusinessName = reg.BusinessName?.ToString() ?? "",
-                                                BusinessType = (int)reg.businessTypeName,
+                                                BusinessType = reg.businessTypeName ?? "",
                                                 WeeklyIncome = wkInc,
                                             });
                                         }
@@ -2046,7 +2048,7 @@ namespace BigAmbitionsMP
                             if (reg.BuildingOwnedByPlayer) hostStat.OwnedBuildingsCount++;
                             // Residential rentals are HOMES, not businesses.
                             bool isResidential = false;
-                            try { isResidential = reg.BuildingCached != null && reg.BuildingCached.BuildingType == Buildings.BuildingType.Residential; } catch { }
+                            try { isResidential = reg.BuildingCached != null && reg.BuildingCached.BuildingType == "ba:buildingtype_residential"; } catch { }
                             if (reg.RentedByPlayer && !isResidential)
                             {
                                 hostStat.OwnedBusinessesCount++;

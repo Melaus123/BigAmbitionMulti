@@ -24,7 +24,7 @@ namespace BigAmbitionsMP
         public static bool Enabled = false;   // load-timing investigation done — re-enable when profiling
 
         private static readonly Stopwatch _sw = Stopwatch.StartNew();
-        private static readonly string    _file = $@"C:\dumps\loadprof.{Environment.ProcessId}.txt";
+        private static readonly string    _file = $@"C:\dumps\loadprof.{System.Diagnostics.Process.GetCurrentProcess().Id}.txt";
         private static readonly object    _lock = new();
         private static StreamWriter?      _w;
 
@@ -57,7 +57,7 @@ namespace BigAmbitionsMP
                     {
                         try { Directory.CreateDirectory(Path.GetDirectoryName(_file)!); } catch { }
                         _w = new StreamWriter(new FileStream(_file, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };
-                        _w.WriteLine($"==== loadprof session start {DateTime.Now:yyyy-MM-dd HH:mm:ss} pid={Environment.ProcessId} ====");
+                        _w.WriteLine($"==== loadprof session start {DateTime.Now:yyyy-MM-dd HH:mm:ss} pid={System.Diagnostics.Process.GetCurrentProcess().Id} ====");
                     }
                     _w.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {line}");
                 }
