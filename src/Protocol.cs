@@ -807,6 +807,11 @@ namespace BigAmbitionsMP
         /// to find the BuildingRegistration for synthetic staffing (the duty
         /// position alone can't name the building from outside the interior).</summary>
         public string Address { get; set; } = "";
+        /// <summary>ItemInstance id of the register being worked — read on the
+        /// WORKER's machine (interior loaded there) and used by receivers as
+        /// WorkShift.itemInstanceId.  Interior replication preserves instance
+        /// ids, so the id matches on every machine.</summary>
+        public string StationId { get; set; } = "";
     }
 
     public class MoneyAdjustPayload

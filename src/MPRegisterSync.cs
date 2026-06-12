@@ -62,8 +62,8 @@ namespace BigAmbitionsMP
                 // can run on the network poll thread; staffing touches IL2CPP.
                 if (p.PlayerId != MPConfig.PlayerId && !string.IsNullOrEmpty(p.Address))
                 {
-                    string addr = p.Address; string pid = p.PlayerId;
-                    GameStatePatcher.EnqueueOnMainThread(() => TryStaffSynthetic(addr, pid));
+                    string addr = p.Address; string pid = p.PlayerId; string st = p.StationId;
+                    GameStatePatcher.EnqueueOnMainThread(() => TryStaffSynthetic(addr, pid, st));
                 }
             }
             else if (_cashiers.TryGetValue(k, out var e) && e.playerId == p.PlayerId)
@@ -127,7 +127,11 @@ namespace BigAmbitionsMP
                     if (reg == null) return;   // working some other station — not register duty
                     _onDuty = true;
                     _dutyPos = reg.transform.position;
-                    SendToggle(_dutyPos, true);
+                    // Register's ItemInstance id — receivers bind the synthetic's
+                    // WorkShift to it (the station's staffing query keys on it).
+                    string stationId = "";
+                    try { stationId = reg._itemInstance?.id ?? ""; } catch { }
+                    SendToggle(_dutyPos, true, stationId);
                     // Worker-side price-table snapshot — pairs with the buyer-side
                     // [SynthStaff/prices] line for cross-machine comparison.
                     try
@@ -197,12 +201,13 @@ namespace BigAmbitionsMP
         public static bool IsStaffedByOtherPlayer(Vector3 registerPos)
             => _cashiers.TryGetValue(Key(registerPos), out var e) && e.playerId != MPConfig.PlayerId;
 
-        private static void SendToggle(Vector3 pos, bool on)
+        private static void SendToggle(Vector3 pos, bool on, string stationId = "")
         {
             var p = new RegisterCashierPayload
             {
                 PlayerId = MPConfig.PlayerId, X = pos.x, Y = pos.y, Z = pos.z, On = on,
-                Address = CurrentShopAddress   // worker is inside the shop when toggling
+                Address = CurrentShopAddress,   // worker is inside the shop when toggling
+                StationId = stationId
             };
             Apply(p);   // local echo first — instant feedback
             var env = MessageEnvelope.Create(MessageType.RegisterCashier, MPConfig.PlayerId, p);
@@ -223,7 +228,7 @@ namespace BigAmbitionsMP
         // is involved — synthetic ids are prefixed for a later save-strip.
         private static readonly Dictionary<string, (string playerId, EmployeeInstance inst)> _synthetics = new();
 
-        private static void TryStaffSynthetic(string addressKey, string playerId)
+        private static void TryStaffSynthetic(string addressKey, string playerId, string stationId = "")
         {
             try
             {
@@ -270,6 +275,37 @@ namespace BigAmbitionsMP
                     $"[SynthStaff] injected '{inst.id}' for '{playerId}' at '{addressKey}' " +
                     $"(roster {before}→{gi.EmployeeInstances.Count}; days=7 hours=168 wage=0).");
 
+                // THE missing link (fresh-dump recon 2026-06-12): staffing is
+                // driven by WorkShift entries inside the registration's
+                // scheduleDays — the station asks GetEmployeeAtStationAndHour
+                // (reg, itemInstanceId, hour); the employee-side summary fields
+                // are never consulted.  One blanket shift per day, keyed to the
+                // worker-reported register instance id.
+                int shifts = 0;
+                if (string.IsNullOrEmpty(stationId))
+                    Plugin.Logger.LogWarning("[SynthStaff] no stationId in duty payload — cannot create work shifts.");
+                else if (reg.scheduleDays == null)
+                    Plugin.Logger.LogWarning("[SynthStaff] registration has no scheduleDays — cannot create work shifts.");
+                else
+                {
+                    for (int i = 0; i < reg.scheduleDays.Count; i++)
+                    {
+                        var day = reg.scheduleDays[i];
+                        if (day == null) continue;
+                        var ws = new WorkShift
+                        {
+                            startingHour   = 0,
+                            endingHour     = 24,
+                            employeeId     = inst.id,
+                            itemInstanceId = stationId,
+                            type           = WorkShiftType.Default,
+                        };
+                        day.AddWorkShift(ws);
+                        shifts++;
+                    }
+                    Plugin.Logger.LogInfo($"[SynthStaff] {shifts} work shift(s) added for station '{stationId}'.");
+                }
+
                 // (RunHourly kick REMOVED 2026-06-12: didn't help in runs 5/7 and
                 //  an off-cycle scheduler tick has unknown side effects — part of
                 //  the revert-to-run-3 bisect.  Time log + price dump are pure
@@ -314,6 +350,32 @@ namespace BigAmbitionsMP
                 try { Helpers.EmployeeHelper.UnassignEmployeeFromAllWorkshifts(s.inst); }
                 catch (Exception ux) { Plugin.Logger.LogWarning($"[SynthStaff] unassign: {ux.Message}"); }
                 var gi = SaveGameManager.Current;
+                // Strip our work shifts from the registration's schedule (the
+                // game-helper unassign above may already do it — belt+braces;
+                // duplicates are harmless to remove).
+                try
+                {
+                    if (gi?.BuildingRegistrations != null)
+                        foreach (var r in gi.BuildingRegistrations)
+                        {
+                            if (r == null || GameStateReader.AddressKey(r) != addressKey) continue;
+                            if (r.scheduleDays != null)
+                                for (int i = 0; i < r.scheduleDays.Count; i++)
+                                {
+                                    var day = r.scheduleDays[i];
+                                    if (day?.workShifts == null) continue;
+                                    var dead = new List<WorkShift>();
+                                    for (int j = 0; j < day.workShifts.Count; j++)
+                                    {
+                                        var w = day.workShifts[j];
+                                        if (w != null && w.employeeId == s.inst.id) dead.Add(w);
+                                    }
+                                    foreach (var w in dead) day.RemoveWorkShift(w);
+                                }
+                            break;
+                        }
+                }
+                catch (Exception sx) { Plugin.Logger.LogWarning($"[SynthStaff] shift strip: {sx.Message}"); }
                 if (gi?.EmployeeInstances != null) gi.EmployeeInstances.Remove(s.inst);
                 try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(s.inst.id); } catch { }
                 Plugin.Logger.LogInfo($"[SynthStaff] removed synthetic at '{addressKey}'.");
