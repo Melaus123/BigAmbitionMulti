@@ -311,6 +311,11 @@ namespace BigAmbitionsMP
         /// coordinate space, so without this a player inside building A renders
         /// inside building B for anyone standing there (2026-06-11).</summary>
         public string Bldg { get; set; } = "";
+        /// <summary>Name of the prop in the character's HandContent skeleton node
+        /// ("" = empty hands).  CarryProbe 2026-06-12: ALL held items (boxes,
+        /// baskets, …) are prefab clones parented there; receivers clone a
+        /// scene template into their avatar's HandContent.</summary>
+        public string Held { get; set; } = "";
 
         // ── Animator state (generic full-mirror) ──────────────────────────────
         // Parameter indices are positions in Animator.parameters; the controller

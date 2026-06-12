@@ -333,6 +333,8 @@ namespace BigAmbitionsMP
             // SAME building (or both outdoors).  Root-level SetActive — SetDriving
             // toggles the Model/Capsule CHILDREN, so the two never fight.  Local
             // building changes re-evaluate within one packet (~100 ms).
+            ApplyHeldProp(go, p.PlayerId, p.Held ?? "");
+
             _remoteBuildings[p.PlayerId] = p.Bldg ?? "";
             bool sameRoom = (p.Bldg ?? "") == (MPRegisterSync.CurrentShopAddress ?? "");
             if (go.activeSelf != sameRoom)
@@ -447,6 +449,9 @@ namespace BigAmbitionsMP
             _players.Clear();
             _appearances.Clear();
             _remoteBuildings.Clear();   // interior-mask state dies with the avatars
+            _heldApplied.Clear();       // held-prop state too
+            _heldTemplates.Clear();     // scene templates died with the scene
+            _localHandContent = null;
             _localAnim = null;          // re-fetched (with fresh trigger maps) next game
             _triggerHashToIndex = null;
             _triggerNameToIndex = null;
@@ -864,11 +869,139 @@ namespace BigAmbitionsMP
                 int lc = anim.layerCount;
                 for (int l = 0; l < lc && l < 8; l++)
                     p.LayerW.Add(anim.GetLayerWeight(l));
+
+                // Held prop (HandContent skeleton node) — first active child's
+                // cleaned name rides the payload; "" = empty hands.
+                try
+                {
+                    if (_localHandContent == null)
+                        _localHandContent = FindDeep(anim.transform.root, "HandContent");
+                    if (_localHandContent != null)
+                    {
+                        string held = "";
+                        for (int c = 0; c < _localHandContent.childCount; c++)
+                        {
+                            var ch = _localHandContent.GetChild(c);
+                            if (ch != null && ch.gameObject.activeSelf) { held = CleanPropName(ch.name); break; }
+                        }
+                        p.Held = held;
+                    }
+                }
+                catch { _localHandContent = null; }
             }
             catch (Exception ex)
             {
                 Plugin.Logger.LogWarning($"[AnimSync] ReadLocalAnimState: {ex.Message}");
             }
+        }
+
+        // ── Held-prop sync (CarryProbe verdict 2026-06-12) ────────────────────
+        private static Transform? _localHandContent;
+        private static readonly Dictionary<string, GameObject> _heldTemplates = new();
+        private static readonly Dictionary<string, string> _heldApplied = new();   // playerId → prop name
+
+        private static string CleanPropName(string n)
+        {
+            int i = n.IndexOf("(Clone)", StringComparison.Ordinal);
+            if (i >= 0) n = n.Substring(0, i);
+            return n.Trim();
+        }
+
+        private static Transform? FindDeep(Transform root, string name)
+        {
+            try
+            {
+                foreach (var t in root.GetComponentsInChildren<Transform>(true))
+                    if (t != null && t.name == name) return t;
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>Mirror the sender's held prop into the remote avatar's
+        /// HandContent node.  Templates are inactive scene instances of the
+        /// same prefab (e.g. flatbed placeholder boxes), cloned + stripped to
+        /// visuals.  Keyed on the prop NAME, not animator flags — covers boxes,
+        /// baskets and anything else the game ever puts in hands.</summary>
+        private static void ApplyHeldProp(GameObject avatar, string playerId, string held)
+        {
+            held ??= "";
+            if (_heldApplied.TryGetValue(playerId, out var cur) && cur == held) return;
+            _heldApplied[playerId] = held;
+            try
+            {
+                var hand = FindDeep(avatar.transform, "HandContent");
+                if (hand == null) return;                       // capsule-fallback clone
+                for (int i = hand.childCount - 1; i >= 0; i--)
+                {
+                    var c = hand.GetChild(i);
+                    if (c != null && c.name.StartsWith("BAMP_Held_"))
+                        UnityEngine.Object.Destroy(c.gameObject);
+                }
+                if (held.Length == 0)
+                {
+                    Plugin.Logger.LogInfo($"[Carry] '{playerId}' hands empty.");
+                    return;
+                }
+                var template = FindHeldTemplate(held);
+                if (template == null)
+                {
+                    Plugin.Logger.LogWarning($"[Carry] no scene template for held prop '{held}' — prop not shown.");
+                    return;
+                }
+                var prop = UnityEngine.Object.Instantiate(template);
+                prop.name = "BAMP_Held_" + held;
+                StripToVisual(prop);
+                prop.transform.SetParent(hand, false);
+                prop.transform.localPosition = Vector3.zero;
+                prop.transform.localRotation = Quaternion.identity;
+                prop.SetActive(true);
+                Plugin.Logger.LogInfo($"[Carry] '{playerId}' holding '{held}' — prop attached.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Carry] {ex.Message}"); }
+        }
+
+        private static GameObject? FindHeldTemplate(string name)
+        {
+            if (_heldTemplates.TryGetValue(name, out var t) && t != null) return t;
+            try
+            {
+                // Inactive instances included — the scene keeps placeholder
+                // copies (e.g. vehicle-bed boxes) of the same prefabs.
+                var all = Resources.FindObjectsOfTypeAll(Il2CppInterop.Runtime.Il2CppType.Of<Transform>());
+                if (all != null)
+                    foreach (var o in all)
+                    {
+                        var tr = o.TryCast<Transform>();
+                        if (tr == null) continue;
+                        if (CleanPropName(tr.name) != name) continue;
+                        if (tr.name.StartsWith("BAMP_Held_")) continue;   // never template off our own clones
+                        _heldTemplates[name] = tr.gameObject;
+                        return tr.gameObject;
+                    }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Carry] template scan: {ex.Message}"); }
+            return null;
+        }
+
+        /// <summary>Strip a cloned prop to pure visuals (no behaviours,
+        /// colliders or physics — same principle as ghost vehicles).</summary>
+        private static void StripToVisual(GameObject go)
+        {
+            try
+            {
+                foreach (var c in go.GetComponentsInChildren<Component>(true))
+                {
+                    if (c == null) continue;
+                    string tn = "";
+                    try { tn = c.GetIl2CppType().Name; } catch { continue; }
+                    if (tn == "Transform" || tn == "RectTransform"
+                        || tn.Contains("MeshFilter") || tn.Contains("MeshRenderer")
+                        || tn.Contains("SkinnedMeshRenderer")) continue;
+                    try { UnityEngine.Object.Destroy(c); } catch { }
+                }
+            }
+            catch { }
         }
 
         // ── [CarryProbe] held-prop investigation (2026-06-12) ─────────────────
