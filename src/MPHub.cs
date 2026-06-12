@@ -417,7 +417,79 @@ namespace BigAmbitionsMP
         {
             DeliverMoney(ownerId, total, $"Sale: {desc} (sold to {buyerId})");
             NotifyParty(buyerId, $"Purchase complete — ${total:F2} went to {ownerId}.");
+            if (ownerId == MPConfig.PlayerId) ShowSalePopup(buyerId, total);   // host-as-owner feedback
             Plugin.Logger.LogInfo($"[RemoteSale] HOST credited '{ownerId}' ${total:F2} (buyer '{buyerId}', {address}).");
+        }
+
+        // ── Sale popup (user, 2026-06-12): the WORKER needs feedback — a
+        // rising "+$X" over the buyer's head for a moment (classic floating-
+        // number style) and the ring-up animation on their own character (the
+        // buyer's screen already plays it on the worker's avatar). ────────────
+        private static readonly List<(GameObject go, float bornAt)> _salePopups = new();
+        private const float POPUP_SECONDS = 2.0f;
+
+        /// <summary>Runs on the OWNER's machine when a sale lands.</summary>
+        public static void ShowSalePopup(string buyerId, float amount)
+        {
+            try
+            {
+                Vector3? buyerPos = null;
+                try { buyerPos = RemotePlayerManager.GetPlayerPosition(buyerId); } catch { }
+                var at = buyerPos
+                         ?? Helpers.PlayerHelper.PlayerController?.Character?.transform.position
+                         ?? Vector3.zero;
+
+                var go = new GameObject("BAMP_SalePopup");
+                go.transform.position = at + new Vector3(0f, 2.3f, 0f);
+                var canvas = go.AddComponent<Canvas>();
+                canvas.renderMode   = RenderMode.WorldSpace;
+                canvas.sortingOrder = 11;
+                var rt = go.GetComponent<RectTransform>();
+                rt.sizeDelta  = new Vector2(300f, 60f);
+                rt.localScale = new Vector3(0.012f, 0.012f, 0.012f);
+                var tmp = go.AddComponent<TMPro.TextMeshProUGUI>();
+                tmp.text      = $"+${amount:F0}";
+                tmp.fontSize  = 60f;
+                tmp.fontStyle = TMPro.FontStyles.Bold;
+                tmp.alignment = TMPro.TextAlignmentOptions.Center;
+                tmp.color     = new Color(0.549f, 0.878f, 0.549f);   // 8CE08C accent
+                _salePopups.Add((go, Time.unscaledTime));
+
+                // Ring the sale up on the worker's own screen too.
+                try
+                {
+                    var ch = Helpers.PlayerHelper.PlayerController?.Character;
+                    var anim = ch?.GetComponentInChildren<Animator>();
+                    if (anim != null) anim.SetTrigger("UsingCashRegister");
+                }
+                catch { }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Hub] sale popup: {ex.Message}"); }
+        }
+
+        /// <summary>Per-frame: rise + fade + face the camera; destroy when
+        /// done.  Called from MPCanvasUI.Update.</summary>
+        public static void TickSalePopups()
+        {
+            if (_salePopups.Count == 0) return;
+            var cam = Camera.main;
+            for (int i = _salePopups.Count - 1; i >= 0; i--)
+            {
+                var (go, born) = _salePopups[i];
+                if (go == null) { _salePopups.RemoveAt(i); continue; }
+                float t = (Time.unscaledTime - born) / POPUP_SECONDS;
+                if (t >= 1f)
+                {
+                    try { UnityEngine.Object.Destroy(go); } catch { }
+                    _salePopups.RemoveAt(i);
+                    continue;
+                }
+                go.transform.position += new Vector3(0f, Time.unscaledDeltaTime * 0.6f, 0f);
+                if (cam != null)
+                    go.transform.rotation = Quaternion.LookRotation(go.transform.position - cam.transform.position);
+                var tmp = go.GetComponent<TMPro.TextMeshProUGUI>();
+                if (tmp != null) { var c = tmp.color; c.a = 1f - t * t; tmp.color = c; }
+            }
         }
     }
 }

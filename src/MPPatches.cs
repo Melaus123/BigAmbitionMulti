@@ -2291,18 +2291,29 @@ namespace BigAmbitionsMP
             }
 
             // ── Service moment (user, 2026-06-12): native purchases have a
-            // beat — you wait at the register, the cashier rings you up, THEN
-            // it's yours.  The order is taken in the prefix; completion runs
-            // ~2s later from MPRegisterSync's 1 Hz tick.  If the buyer cancels
-            // the UI during the wait, NOTHING is charged.
+            // beat — you WALK UP to the register, the cashier rings you up,
+            // THEN it's yours.  Order taken in the prefix; then WalkUp phase
+            // (native first-customer spot, driven by the same NavMeshAgent the
+            // activity system's MovingTowardsActivity uses — the genuine
+            // full-service walk is welded to the employee queue we can't run),
+            // then the ~2s Beat, then completion.  Cancelling the UI at any
+            // point charges NOTHING.
             private const float SERVICE_SECONDS = 2.0f;
-            private static bool   _pending;
-            private static float  _pendingAt;
+            private const float WALKUP_TIMEOUT  = 8.0f;
+            private const float ARRIVE_DIST     = 1.1f;
+            private enum Phase { None, WalkUp, Beat }
+            private static Phase  _phase = Phase.None;
+            private static float  _pendingAt;        // beat completion time
+            private static float  _walkDeadline;
             private static float  _pendingTotal;
             private static string _pendingDesc = "";
             private static string _pendingOwner = "";
             private static string _pendingAddress = "";
             private static string _pendingAct0 = "none";
+            private static UnityEngine.Vector3 _walkSpot;
+            private static UnityEngine.Vector3 _registerPos;
+            private static UnityEngine.AI.NavMeshAgent? _walkAgent;
+            private static bool _agentWasEnabled;
             private static readonly System.Collections.Generic.List<SaleItem> _pendingItems = new();
 
             static bool Prefix(Controllers.CashRegisterController __instance,
@@ -2337,30 +2348,131 @@ namespace BigAmbitionsMP
                     _pendingOwner   = owner;
                     _pendingAddress = MPRegisterSync.CurrentShopAddress;
                     _pendingAct0    = act0;
-                    _pendingAt      = UnityEngine.Time.unscaledTime + SERVICE_SECONDS;
-                    _pending        = true;
+                    _registerPos    = __instance.transform.position;
 
-                    // The worker rings you up — play the native register
-                    // animation on THEIR avatar locally for the service beat.
+                    // Walk-up: the station's own first-customer spot, reached
+                    // with the player's NavMeshAgent (the activity system's own
+                    // mover).  Falls straight to the Beat on any failure.
+                    _walkSpot = _registerPos;
+                    bool haveSpot = false;
                     try
                     {
-                        int idx = RemotePlayerManager.ResolveTriggerIndex("UsingCashRegister");
-                        if (idx >= 0) RemotePlayerManager.ApplyTrigger(owner, idx);
+                        var spotT = __instance.GetFirstCustomerSpot();
+                        if (spotT != null) { _walkSpot = spotT.position; haveSpot = true; }
                     }
                     catch { }
+                    _walkAgent = null;
+                    var ch = Helpers.PlayerHelper.PlayerController?.Character;
+                    if (haveSpot && ch != null
+                        && UnityEngine.Vector3.Distance(ch.transform.position, _walkSpot) > ARRIVE_DIST + 0.2f)
+                    {
+                        try
+                        {
+                            var agent = ch.GetComponent<UnityEngine.AI.NavMeshAgent>();
+                            if (agent != null)
+                            {
+                                _agentWasEnabled = agent.enabled;
+                                agent.enabled = true;
+                                if (agent.isOnNavMesh && agent.SetDestination(_walkSpot)) _walkAgent = agent;
+                                else agent.enabled = _agentWasEnabled;
+                            }
+                        }
+                        catch (Exception wx) { Plugin.Logger.LogWarning($"[MPSale] walk-up agent: {wx.Message}"); }
+                    }
 
-                    Plugin.Logger.LogInfo($"[MPSale] order taken (${total:F2}) — ringing up...");
+                    if (_walkAgent != null)
+                    {
+                        _phase = Phase.WalkUp;
+                        _walkDeadline = UnityEngine.Time.unscaledTime + WALKUP_TIMEOUT;
+                        Plugin.Logger.LogInfo($"[MPSale] order taken (${total:F2}) — walking up to the register...");
+                    }
+                    else
+                    {
+                        BeginBeat();
+                        Plugin.Logger.LogInfo($"[MPSale] order taken (${total:F2}) — ringing up...");
+                    }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSale] order intake: {ex}"); }
                 return false;   // the native finalizer NEVER runs in player shops
             }
 
-            /// <summary>Completes (or aborts) the pending sale.  Called ~1 Hz
-            /// from MPRegisterSync.TickDuty — main thread.</summary>
+            /// <summary>Walk-up arrived (or skipped) — face the counter, play
+            /// the worker's ring-up on their avatar, start the beat clock.</summary>
+            private static void BeginBeat()
+            {
+                _phase = Phase.Beat;
+                _pendingAt = UnityEngine.Time.unscaledTime + SERVICE_SECONDS;
+                try
+                {
+                    var ch = Helpers.PlayerHelper.PlayerController?.Character;
+                    if (ch != null)
+                    {
+                        var look = _registerPos - ch.transform.position; look.y = 0f;
+                        if (look.sqrMagnitude > 0.01f)
+                            ch.transform.rotation = UnityEngine.Quaternion.LookRotation(look, UnityEngine.Vector3.up);
+                    }
+                }
+                catch { }
+                try
+                {
+                    int idx = RemotePlayerManager.ResolveTriggerIndex("UsingCashRegister");
+                    if (idx >= 0) RemotePlayerManager.ApplyTrigger(_pendingOwner, idx);
+                }
+                catch { }
+            }
+
+            private static void ReleaseWalkAgent()
+            {
+                try
+                {
+                    if (_walkAgent != null)
+                    {
+                        if (_walkAgent.enabled && _walkAgent.isOnNavMesh) _walkAgent.ResetPath();
+                        _walkAgent.enabled = _agentWasEnabled;
+                    }
+                }
+                catch { }
+                _walkAgent = null;
+            }
+
+            private static bool PanelStillOpen()
+            {
+                try { return UI.Purchase.PurchaseUI.IsPanelOpen; } catch { return false; }
+            }
+
+            /// <summary>Advances the pending sale (walk-up → beat → completion
+            /// or abort).  Called ~1 Hz from MPRegisterSync.TickDuty — main
+            /// thread.</summary>
             public static void TickPending()
             {
-                if (!_pending || UnityEngine.Time.unscaledTime < _pendingAt) return;
-                _pending = false;
+                if (_phase == Phase.None) return;
+
+                if (_phase == Phase.WalkUp)
+                {
+                    if (!PanelStillOpen())
+                    {
+                        ReleaseWalkAgent();
+                        _phase = Phase.None;
+                        Plugin.Logger.LogInfo("[MPSale] buyer cancelled during the walk-up — nothing charged.");
+                        return;
+                    }
+                    var ch = Helpers.PlayerHelper.PlayerController?.Character;
+                    bool arrived = ch != null
+                        && UnityEngine.Vector3.Distance(ch.transform.position, _walkSpot) <= ARRIVE_DIST;
+                    if (arrived || UnityEngine.Time.unscaledTime >= _walkDeadline)
+                    {
+                        ReleaseWalkAgent();
+                        BeginBeat();
+                        Plugin.Logger.LogInfo(arrived
+                            ? "[MPSale] at the counter — ringing up..."
+                            : "[MPSale] walk-up timed out — ringing up anyway.");
+                    }
+                    return;
+                }
+
+                // Phase.Beat
+                if (UnityEngine.Time.unscaledTime < _pendingAt) return;
+                _phase = Phase.None;
                 try
                 {
                     bool open = false;

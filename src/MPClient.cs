@@ -368,7 +368,20 @@ namespace BigAmbitionsMP
                 case MessageType.MoneyAdjust:
                 {
                     var ma = env.GetPayload<MoneyAdjustPayload>();
-                    if (ma != null) GameStatePatcher.EnqueueOnMainThread(() => MPHub.ApplyMoneyDelta(ma.Amount, ma.Reason, !ma.Silent));
+                    if (ma != null) GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        MPHub.ApplyMoneyDelta(ma.Amount, ma.Reason, !ma.Silent);
+                        // Client-as-shop-owner: sale credits arrive as MoneyAdjust
+                        // with a "Sale: ... (sold to X)" reason — show the worker
+                        // feedback (rising +$ over the buyer + own ring-up anim).
+                        if (ma.Reason != null && ma.Reason.StartsWith("Sale: "))
+                        {
+                            string buyer = "";
+                            int k = ma.Reason.LastIndexOf("(sold to ", StringComparison.Ordinal);
+                            if (k >= 0) buyer = ma.Reason.Substring(k + 9).TrimEnd(')');
+                            MPHub.ShowSalePopup(buyer, ma.Amount);
+                        }
+                    });
                     break;
                 }
 
