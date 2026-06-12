@@ -109,3 +109,25 @@ OPEN after first run: does the sim spawn the NPC (schedule semantics)?  Does
 OnPlaceOrder then succeed or hit the missing-rival-record null next?  v2 items:
 hide the NPC body under the worker''s avatar; strip BAMP_DUTY_* from saves
 (client-owned-shop case); price display timing (host must price BEFORE visitors).
+
+## Why synthetic employee ≠ bandaid (user challenge, 2026-06-11 — rationale)
+
+The hard lock WAS "the game has no code path for a customer at an unstaffed
+operating shop" — that state is unreachable in SP by construction (own shop →
+owner UI; AI shops → always staffed), so checkout simply dereferences the
+serving employee and crashes (OnPlaceOrder, then OnOrderCancel; proven 2 runs).
+
+Why the remote player can''t BE the staff: MP here = N parallel single-player
+simulations exchanging messages.  On the worker''s own machine the player IS
+the staff natively (real Work mechanic, serves AI customers).  On every other
+machine that player is OUR script-stripped visual clone — animated scenery the
+game''s simulation cannot interrogate (no skill/wage/identity/queue role).
+Options: (1) second real player entity = engine rewrite (one-player assumption
+everywhere); (2) patch every null in the serving chain = the actual bandaid,
+imitating a worker piecemeal against stale-RVA internals; (3) hand the game a
+worker via its OWN factory+roster → everything downstream is unmodified game
+code (worked first try).  Hybrid "use the avatar as the employee body"
+rejected: the game would AI-drive the body while network puppeteering drives
+it too — two steerers, one body.  Boundary: visuals=ours, mechanics=game''s.
+Honest residue: save-strip hygiene pending, spawn delay, invisible entity.
+Swap-out is contained behind the duty system if a better hook ever appears.
