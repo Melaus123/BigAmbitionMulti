@@ -186,6 +186,23 @@ namespace BigAmbitionsMP
         {
             float now = Time.unscaledTime;
             if (_vcPool != null && now - _vcPoolAt < VcPoolRefreshSeconds) return _vcPool;
+            // Gley's own registry first (perf pass 2026-06-12): the old
+            // FindObjectsOfType(includeInactive) walk cost 60-80ms per refresh
+            // — a visible rhythmic hitch on the host.  TrafficVehicles holds
+            // the complete pool; the walk remains only as fallback.
+            try
+            {
+                var list = TrafficManager.Instance?.trafficVehicles?.GetVehicleList();
+                if (list != null && list.Count > 0)
+                {
+                    var arr = new UnityEngine.Object[list.Count];
+                    for (int i = 0; i < list.Count; i++) arr[i] = list[i];
+                    _vcPool   = arr;
+                    _vcPoolAt = now;
+                    return _vcPool;
+                }
+            }
+            catch { }
             try
             {
                 _vcPool   = UnityEngine.Object.FindObjectsOfType(typeof(VehicleComponent), true);

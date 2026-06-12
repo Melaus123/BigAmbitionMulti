@@ -164,9 +164,15 @@ namespace BigAmbitionsMP
                 try { var uo = _gscInstance as UnityEngine.Object; dead = _gscInstance != null && uo != null && uo == null; } catch { }
                 if (_gscInstance == null || dead)
                 {
-                    var arr = UnityEngine.Object.FindObjectsOfType(_gscType, true);
-                    if (arr != null && arr.Length > 0)
-                        _gscInstance = arr[0];   // Mono: the found object IS the typed instance
+                    // Direct singleton first (perf pass 2026-06-12): UIs.gameSpeed
+                    // IS the GameSpeedController — no object-table walk needed.
+                    try { _gscInstance = UI.UIs.Instance?.gameSpeed; } catch { }
+                    if (_gscInstance == null)
+                    {
+                        var arr = UnityEngine.Object.FindObjectsOfType(_gscType, true);
+                        if (arr != null && arr.Length > 0)
+                            _gscInstance = arr[0];   // Mono: the found object IS the typed instance
+                    }
                 }
                 if (_gscInstance == null) return;
                 if (GetGSCPaused() == paused) return;   // already in the wanted state

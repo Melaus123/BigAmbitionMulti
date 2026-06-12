@@ -581,12 +581,16 @@ namespace BigAmbitionsMP
                     try { _uiType.GetProperty("GetCurrentActivity")?.GetValue(_uiWrap); return (_uiWrap, _uiType); }
                     catch { _uiWrap = null; }   // died with its scene — re-find
                 }
-                _uiType ??= VehicleManager.FindGameType("PlayerActivity.PlayerActivityUI")
-                         ?? VehicleManager.FindGameType("PlayerActivityUI");
-                if (_uiType == null) return (null, null);
-                var objs = UnityEngine.Object.FindObjectsOfType(_uiType);
-                if (objs == null || objs.Length == 0) return (null, null);
-                _uiWrap = objs[0];   // Mono: the found object IS the typed instance
+                // Direct singleton (perf pass 2026-06-12): the FindObjectsOfType
+                // scan here was the single biggest mod frame cost on BOTH
+                // machines (~50-100ms per call) — the panel object is INACTIVE
+                // while not seated, the find misses inactive objects, so the
+                // cache never primed and every 0.5s poll walked the whole
+                // object table.  UIs.playerActivityUI is a plain field.
+                var ui = UI.UIs.Instance?.playerActivityUI;
+                if (ui == null) return (null, null);
+                _uiWrap = ui;
+                _uiType = ui.GetType();
                 return (_uiWrap, _uiType);
             }
             catch { return (null, null); }
