@@ -5,6 +5,11 @@ using BAModAPI;
 using HarmonyLib;
 using UnityEngine;
 
+// The loader discovers mod classes ONLY through this assembly attribute —
+// extending ModBigAmbitionsBase alone logs "[ModDiscovery] No
+// RegisterModClassAttribute attributes were found" and nothing runs.
+[assembly: RegisterModClass(typeof(BigAmbitionsMP.ModEntry))]
+
 namespace BigAmbitionsMP
 {
     /// <summary>
@@ -12,7 +17,14 @@ namespace BigAmbitionsMP
     /// (BigAmbitions.ModsInternal): ModsLocal\BigAmbitionsMP\BigAmbitionsMP.dll
     /// with Harmony + LiteNetLib in the Dependencies\ subfolder.
     /// (The BepInEx/IL2CPP entry for EA 0.10 lives on the 'main' branch.)
+    ///
+    /// Scope: Initialization is the loader's PERSISTENT scope (ModLifecycleLoader.
+    /// LifetimeScope) — loaded once at boot and NOT unloaded on menu↔city scene
+    /// transitions, matching the old BepInEx chainloader lifetime.  MainMenu/City
+    /// scopes get unloaded on every transition, which would tear down our
+    /// patches, net stack and DontDestroyOnLoad UI mid-session.
     /// </summary>
+    [ModEntryOnInitializationLoad]
     public class ModEntry : ModBigAmbitionsBase
     {
         public static ModEntry Instance { get; private set; } = null!;
