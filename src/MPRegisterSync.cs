@@ -60,7 +60,7 @@ namespace BigAmbitionsMP
                 // Synthetic staffing on every machine EXCEPT the worker's own
                 // (there the real player works natively).  Main-thread: Apply
                 // can run on the network poll thread; staffing touches IL2CPP.
-                if (p.PlayerId != MPConfig.PlayerId && !string.IsNullOrEmpty(p.Address))
+                if (SYNTHETIC_STAFFING && p.PlayerId != MPConfig.PlayerId && !string.IsNullOrEmpty(p.Address))
                 {
                     string addr = p.Address; string pid = p.PlayerId; string st = p.StationId;
                     var dutyPos = pos;
@@ -151,8 +151,11 @@ namespace BigAmbitionsMP
                     SendToggle(_dutyPos, false);
                 }
 
-                TickHideSyntheticBodies();   // v2 polish — same 1s cadence
-                TickStaffEvaluator();        // invoke the mapped evaluator directly
+                if (SYNTHETIC_STAFFING)
+                {
+                    TickHideSyntheticBodies();   // v2 polish — same 1s cadence
+                    TickStaffEvaluator();        // invoke the mapped evaluator directly
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] duty: {ex.Message}"); }
         }
@@ -256,6 +259,13 @@ namespace BigAmbitionsMP
         // never injects (the real player works there natively), so the
         // authoritative host save can only pick one up if a CLIENT-owned shop
         // is involved — synthetic ids are prefixed for a later save-strip.
+        /// <summary>BENCHED 2026-06-12 (user pivot to native self-checkout):
+        /// the roster/WorkShift/evaluator machinery stays in code but OFF —
+        /// the staffing evaluator's gates fight rival-translated shops at
+        /// every level, while self-checkout is a native no-staff flow.
+        /// Delete at cleanup once self-checkout is verified.</summary>
+        private const bool SYNTHETIC_STAFFING = false;
+
         private static readonly Dictionary<string, (string playerId, EmployeeInstance inst, Vector3 pos)> _synthetics = new();
 
         /// <summary>True when this world position is a register some player is

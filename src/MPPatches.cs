@@ -2399,6 +2399,62 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── [SelfCheckout] (2026-06-12, user direction: "do the act identical
+        // to the normal buying process and ring it up").  In another lobby
+        // player's shop, clicking a register THAT PLAYER IS WORKING routes to
+        // the game's own SELF-CHECKOUT flow (InteractAsSelfService →
+        // MakeFullServiceSelfPurchase) instead of the employee-service queue
+        // that cannot be served locally.  Native UI, native payment, native
+        // bagging — the worker's avatar stands at the counter throughout. ─────
+        [HarmonyPatch]
+        public static class Patch_RegisterInteract_SelfCheckout
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                try
+                {
+                    foreach (var m in typeof(Controllers.CashRegisterController).GetMethods(
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                        if (m.Name == "Interact" && m.DeclaringType == typeof(Controllers.CashRegisterController))
+                            return m;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[SelfCheckout] target: {ex.Message}"); }
+                return null;
+            }
+
+            private static System.Reflection.MethodInfo? _selfService;
+
+            static bool Prefix(Controllers.CashRegisterController __instance, ref bool __result)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                try
+                {
+                    string owner = MPRegisterSync.CurrentShopOwner;
+                    if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return true;
+                    if (!MPRestSync.AllPlayers().Contains(owner)) return true;          // AI shops native
+                    if (!MPRegisterSync.IsStaffedByOtherPlayer(__instance.transform.position)) return true;  // nobody working it
+
+                    _selfService ??= typeof(Controllers.CashRegisterController).GetMethod(
+                        "InteractAsSelfService",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    if (_selfService == null)
+                    {
+                        Plugin.Logger.LogWarning("[SelfCheckout] InteractAsSelfService not found — falling through native.");
+                        return true;
+                    }
+                    object? r = _selfService.Invoke(__instance, null);
+                    __result = r is bool rb && rb;
+                    Plugin.Logger.LogInfo($"[SelfCheckout] routed register click to self-checkout in '{owner}' shop → {__result}.");
+                    return false;   // skip the native employee-service path entirely
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogWarning($"[SelfCheckout] {ex.Message} — falling through native.");
+                    return true;
+                }
+            }
+        }
+
         // ── [RegGuard] queue-entry guard (2026-06-11).  In another player's
         // shop the native queue happily accepts a customer even when NO serving
         // entity exists locally → OnPlaceOrder NREs → hard lock (two runs).
