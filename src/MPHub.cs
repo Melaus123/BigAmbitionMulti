@@ -206,17 +206,24 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<string, LoanOfferPayload> _hostOffers = new();
         private static int _lastDay = -1;
 
-        public static void HostRouteTransfer(MoneyTransferPayload p)
-        {
-            if (p == null || p.Amount <= 0) return;
-            DeliverMoney(p.To, p.Amount, $"from {p.From}");
-        }
-
         public static void HostRouteOffer(LoanOfferPayload p)
         {
             if (p == null) return;
-            if (p.State == "revoke") _hostOffers.Remove(p.Id);
-            else _hostOffers[p.Id] = p;
+            if (p.State == "revoke") { _hostOffers.Remove(p.Id); }
+            else
+            {
+                // Host-side spam cap: the per-recipient dup guard lives on the
+                // sender's machine and a hostile client could skip it — bound
+                // how many offers one player may have pending at once.
+                int pendingFrom = 0;
+                foreach (var o in _hostOffers.Values) if (o.From == p.From) pendingFrom++;
+                if (!_hostOffers.ContainsKey(p.Id) && pendingFrom >= 16)
+                {
+                    Plugin.Logger.LogWarning($"[Hub] offer from '{p.From}' refused — too many pending offers.");
+                    return;
+                }
+                _hostOffers[p.Id] = p;
+            }
             if (p.To == MPConfig.PlayerId) ReceiveOffer(p);
             else MPServer.SendHubTo(p.To, MessageType.LoanOffer, p);
         }
@@ -224,6 +231,12 @@ namespace BigAmbitionsMP
         public static void HostHandleAnswer(LoanAnswerPayload a)
         {
             if (a == null || !_hostOffers.TryGetValue(a.Id, out var offer)) return;
+            // Only the player the offer was MADE TO may answer it.
+            if (a.From != offer.To)
+            {
+                Plugin.Logger.LogWarning($"[Hub] answer for offer '{a.Id}' from '{a.From}' but it was made to '{offer.To}' — dropped.");
+                return;
+            }
             string what = offer.Kind == "gift" ? "gift" : "loan";
 
             // ENFORCEMENT: an offer can't be accepted while the offerer can't

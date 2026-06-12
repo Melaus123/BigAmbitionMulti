@@ -567,6 +567,19 @@ namespace BigAmbitionsMP
             var env   = MessageEnvelope.Deserialize(bytes);
             if (env == null) return;
 
+            // ── Identity gate ─────────────────────────────────────────────────
+            // _peerNames (bound once at Hello) is the only trusted source of WHO
+            // sent a message.  Everything inside the envelope — env.SenderId and
+            // any payload identity field — is client-authored and forgeable, so
+            // handlers key on senderPid and payload identity claims are verified
+            // against it (SenderIs) before the host acts on them.
+            if (!_peerNames.TryGetValue(peer.Id, out var senderPid)) senderPid = "";
+            if (env.Type != MessageType.Hello && string.IsNullOrEmpty(senderPid))
+            {
+                Plugin.Logger.LogWarning($"[Server] {env.Type} from unregistered peer {peer.Id} — dropped.");
+                return;
+            }
+
             switch (env.Type)
             {
                 case MessageType.Hello:
@@ -574,31 +587,31 @@ namespace BigAmbitionsMP
                     break;
 
                 case MessageType.PlayerInGame:
-                    HandleClientPlayerInGame(env);
+                    HandleClientPlayerInGame(senderPid, env);
                     break;
 
                 case MessageType.WorldReady:
-                    HandleWorldReady(env);
+                    HandleWorldReady(senderPid, env);
                     break;
 
                 case MessageType.ManualPause:
-                    HandleClientManualPause(peer, env);
+                    HandleClientManualPause(peer, senderPid, env);
                     break;
 
                 case MessageType.RentRequest:
-                    HandleRentRequest(peer, env);
+                    HandleRentRequest(peer, senderPid, env);
                     break;
 
                 case MessageType.PlayerMove:
-                    HandlePlayerMove(peer, env);
+                    HandlePlayerMove(peer, senderPid, env);
                     break;
 
                 case MessageType.PlayerAnimTrigger:
-                    HandleAnimTrigger(peer, env);
+                    HandleAnimTrigger(peer, senderPid, env);
                     break;
 
                 case MessageType.VehicleSync:
-                    HandleVehicleSync(peer, env);
+                    HandleVehicleSync(peer, senderPid, env);
                     break;
 
                 case MessageType.TaxiHail:
@@ -606,7 +619,7 @@ namespace BigAmbitionsMP
                     break;
 
                 case MessageType.PlayerAppearance:
-                    HandleClientAppearance(env);
+                    HandleClientAppearance(senderPid, env);
                     break;
 
                 case MessageType.InteriorRequest:
@@ -617,7 +630,7 @@ namespace BigAmbitionsMP
                     // the main thread — so run it ON the main thread (off-thread
                     // IL2CPP read + concurrent-dictionary race otherwise).
                     var p = env.GetPayload<InteriorRequestPayload>();
-                    if (p != null)
+                    if (p != null && SenderIs(p.PlayerId, senderPid, env.Type))
                     {
                         var pc = peer;
                         GameStatePatcher.EnqueueOnMainThread(() => InteriorSync.HandleRequest(pc, p.PlayerId, p.AddressKey));
@@ -630,7 +643,7 @@ namespace BigAmbitionsMP
                     // Mutates the same subscriber dictionaries as Tick (main thread)
                     // — marshal to avoid the concurrent-dictionary race.
                     var p = env.GetPayload<PlayerExitedBuildingPayload>();
-                    if (p != null)
+                    if (p != null && SenderIs(p.PlayerId, senderPid, env.Type))
                     {
                         var pc = peer;
                         GameStatePatcher.EnqueueOnMainThread(() => InteriorSync.HandleExit(pc, p.PlayerId, p.AddressKey));
@@ -648,7 +661,8 @@ namespace BigAmbitionsMP
                     // onto Unity's main thread via EnqueueOnMainThread.
                     // Self-stats capture (pure C# dict writes) is safe inline.
                     var req = env.GetPayload<RivalsStatsRequestPayload>();
-                    if (req != null && !string.IsNullOrEmpty(req.PlayerId))
+                    if (req != null && !string.IsNullOrEmpty(req.PlayerId)
+                        && SenderIs(req.PlayerId, senderPid, env.Type))
                     {
                         _clientSelfStats[req.PlayerId] = req;
                         string nameForClient = _characterNamesByPlayerId.TryGetValue(req.PlayerId, out var nm) && !string.IsNullOrWhiteSpace(nm) ? nm : req.PlayerId;
@@ -674,7 +688,8 @@ namespace BigAmbitionsMP
                 case MessageType.PlayerProfile:
                 {
                     var p = env.GetPayload<PlayerProfilePayload>();
-                    if (p != null && !string.IsNullOrEmpty(p.PlayerId))
+                    if (p != null && !string.IsNullOrEmpty(p.PlayerId)
+                        && SenderIs(p.PlayerId, senderPid, env.Type))
                     {
                         _characterNamesByPlayerId[p.PlayerId] = p.CharacterName ?? "";
                         if (p.AgeInYears > 0) GameStatePatcher.ClientPlayerAges[p.PlayerId] = p.AgeInYears;
@@ -739,54 +754,110 @@ namespace BigAmbitionsMP
                 }
 
                 case MessageType.SaveData:
+                {
                     // Pure C# decompress + file write + manifest merge (no IL2CPP)
-                    // — safe on the poll thread.
-                    MPSaveCoordinator.HostHandleSaveData(env.GetPayload<SaveDataPayload>());
+                    // — safe on the poll thread.  The slot's StableId names the
+                    // on-disk character folder — it must be the SENDER's stable
+                    // id, or one client could overwrite another player's save.
+                    var sd = env.GetPayload<SaveDataPayload>();
+                    if (sd?.Slot == null) break;
+                    if (!StableIdByPlayer.TryGetValue(senderPid, out var expectStable)
+                        || string.IsNullOrEmpty(expectStable) || sd.Slot.StableId != expectStable)
+                    {
+                        Plugin.Logger.LogWarning($"[Server] SaveData from '{senderPid}' claims stableId '{sd.Slot.StableId}' (expected '{expectStable}') — dropped.");
+                        break;
+                    }
+                    MPSaveCoordinator.HostHandleSaveData(sd);
                     break;
+                }
 
                 case MessageType.BusinessChange:
                 {
                     // A client built/changed a business in a building it owns.  Apply it
                     // to the host's world so the host sees it; the host's BusinessSync.Tick
-                    // then relays it to the other clients.
+                    // then relays it to the other clients.  Ownership rule: a building
+                    // owned by SOMEONE ELSE can't be changed by this sender; an address
+                    // with no recorded owner passes (rent registration may still be in
+                    // flight for a building the sender just took).
                     var bc = env.GetPayload<BusinessChangePayload>();
-                    if (bc?.Info != null) GameStatePatcher.ApplyClientBusinessChange(bc.Info);
+                    if (bc?.Info == null) break;
+                    if (!SenderIs(bc.Info.OwnerPlayerId, senderPid, env.Type, allowEmpty: true)) break;
+                    if (BuildingOwners.TryGetValue(bc.Info.AddressKey ?? "", out var bcOwner)
+                        && !string.IsNullOrEmpty(bcOwner) && bcOwner != senderPid)
+                    {
+                        Plugin.Logger.LogWarning($"[Server] BusinessChange for '{bc.Info.AddressKey}' from '{senderPid}' but it's owned by '{bcOwner}' — dropped.");
+                        break;
+                    }
+                    GameStatePatcher.ApplyClientBusinessChange(bc.Info);
                     break;
                 }
 
                 case MessageType.LobbyPref:
                 {
                     var lp = env.GetPayload<LobbyPrefPayload>();
-                    if (lp != null && !string.IsNullOrEmpty(lp.PlayerId) && lp.Age > 0)
-                        SetStartingAge(lp.PlayerId, lp.Age);   // stores + re-broadcasts lobby
-                    break;
-                }
-
-                case MessageType.MoneyTransfer:
-                {
-                    var mt = env.GetPayload<MoneyTransferPayload>();
-                    if (mt != null) GameStatePatcher.EnqueueOnMainThread(() => MPHub.HostRouteTransfer(mt));
+                    if (lp == null || !SenderIs(lp.PlayerId, senderPid, env.Type)) break;
+                    if (lp.Age < 16 || lp.Age > 99)   // mirrors the lobby UI's own clamp
+                    {
+                        Plugin.Logger.LogWarning($"[Server] LobbyPref from '{senderPid}': age {lp.Age} out of range — dropped.");
+                        break;
+                    }
+                    SetStartingAge(senderPid, lp.Age);   // stores + re-broadcasts lobby
                     break;
                 }
 
                 case MessageType.LoanOffer:
                 {
+                    // Hub offers (gift/loan): only the sender's OWN offers and
+                    // revokes are accepted ("accepted"/"declined" are host-authored
+                    // result states — a client must never inject them), the target
+                    // must be a real other player, and the figures must be sane.
                     var lo = env.GetPayload<LoanOfferPayload>();
-                    if (lo != null) GameStatePatcher.EnqueueOnMainThread(() => MPHub.HostRouteOffer(lo));
+                    if (lo == null || !SenderIs(lo.From, senderPid, env.Type)) break;
+                    if (lo.State != "offer" && lo.State != "revoke")
+                    {
+                        Plugin.Logger.LogWarning($"[Server] LoanOffer from '{senderPid}' with host-only state '{lo.State}' — dropped.");
+                        break;
+                    }
+                    if (lo.State == "offer")
+                    {
+                        if (!IsSaneMoney(lo.Principal) || lo.Principal <= 0f
+                            || !IsSaneMoney(lo.DailyInterest) || lo.DailyInterest < 0f
+                            || !IsSaneMoney(lo.DailyPayment) || lo.DailyPayment < 0f)
+                        {
+                            Plugin.Logger.LogWarning($"[Server] LoanOffer from '{senderPid}': implausible figures (P={lo.Principal}, i={lo.DailyInterest}, pay={lo.DailyPayment}) — dropped.");
+                            break;
+                        }
+                        if (lo.To == senderPid || !LobbyPlayers.Contains(lo.To))
+                        {
+                            Plugin.Logger.LogWarning($"[Server] LoanOffer from '{senderPid}' to invalid target '{lo.To}' — dropped.");
+                            break;
+                        }
+                    }
+                    GameStatePatcher.EnqueueOnMainThread(() => MPHub.HostRouteOffer(lo));
                     break;
                 }
 
                 case MessageType.LoanAnswer:
                 {
                     var la = env.GetPayload<LoanAnswerPayload>();
-                    if (la != null) GameStatePatcher.EnqueueOnMainThread(() => MPHub.HostHandleAnswer(la));
+                    if (la == null || !SenderIs(la.From, senderPid, env.Type)) break;
+                    GameStatePatcher.EnqueueOnMainThread(() => MPHub.HostHandleAnswer(la));
                     break;
                 }
 
                 case MessageType.RestVote:
                 {
                     var rv = env.GetPayload<RestVotePayload>();
-                    if (rv != null) GameStatePatcher.EnqueueOnMainThread(() => MPRestSync.HostHandleVote(rv));
+                    if (rv == null || !SenderIs(rv.PlayerId, senderPid, env.Type)) break;
+                    // A poisoned goal (NaN/absurd) would corrupt the consensus
+                    // minimum every other player skips to.
+                    if (double.IsNaN(rv.GoalMinutes) || double.IsInfinity(rv.GoalMinutes)
+                        || rv.GoalMinutes < 0 || rv.GoalMinutes > 10_000_000)
+                    {
+                        Plugin.Logger.LogWarning($"[Server] RestVote from '{senderPid}': implausible goal {rv.GoalMinutes} — dropped.");
+                        break;
+                    }
+                    GameStatePatcher.EnqueueOnMainThread(() => MPRestSync.HostHandleVote(rv));
                     break;
                 }
 
@@ -795,12 +866,25 @@ namespace BigAmbitionsMP
                     // A client's business changed its retail prices: apply to the
                     // host's local registration copy (main thread) + relay to all
                     // (the sender's own echo is dropped by the OwnerId guard).
+                    // Same ownership rule as BusinessChange: another player's
+                    // building can't be repriced; unowned addresses pass.
                     var rp = env.GetPayload<RetailPricesPayload>();
-                    if (rp != null && !string.IsNullOrEmpty(rp.AddressKey))
+                    if (rp == null || string.IsNullOrEmpty(rp.AddressKey)) break;
+                    if (!SenderIs(rp.OwnerId, senderPid, env.Type)) break;
+                    if (BuildingOwners.TryGetValue(rp.AddressKey, out var rpOwner)
+                        && !string.IsNullOrEmpty(rpOwner) && rpOwner != senderPid)
                     {
-                        GameStatePatcher.EnqueueOnMainThread(() => MPPriceSync.Apply(rp));
-                        Broadcast(MessageEnvelope.Create(MessageType.RetailPrices, "host", rp));
+                        Plugin.Logger.LogWarning($"[Server] RetailPrices for '{rp.AddressKey}' from '{senderPid}' but it's owned by '{rpOwner}' — dropped.");
+                        break;
                     }
+                    if (rp.Prices.Count > 500
+                        || rp.Prices.Exists(x => !IsSaneMoney(x.Price, 1_000_000f) || x.Price < 0f))
+                    {
+                        Plugin.Logger.LogWarning($"[Server] RetailPrices for '{rp.AddressKey}' from '{senderPid}': implausible price table ({rp.Prices.Count} entries) — dropped.");
+                        break;
+                    }
+                    GameStatePatcher.EnqueueOnMainThread(() => MPPriceSync.Apply(rp));
+                    Broadcast(MessageEnvelope.Create(MessageType.RetailPrices, "host", rp));
                     break;
                 }
 
@@ -809,7 +893,8 @@ namespace BigAmbitionsMP
                     // Client's periodic state-hash audit — compare to OUR state
                     // on the main thread (BuildReport walks game objects).
                     var ar = env.GetPayload<AuditReportPayload>();
-                    if (ar != null) GameStatePatcher.EnqueueOnMainThread(() => MPAudit.HostHandle(ar));
+                    if (ar != null && SenderIs(ar.PlayerId, senderPid, env.Type))
+                        GameStatePatcher.EnqueueOnMainThread(() => MPAudit.HostHandle(ar));
                     break;
                 }
 
@@ -820,8 +905,10 @@ namespace BigAmbitionsMP
                     // the recipient ONLY (the sender already echoed locally).
                     // Pure C# — safe on the poll thread.
                     var cp = env.GetPayload<ChatPayload>();
-                    if (cp != null && !string.IsNullOrWhiteSpace(cp.Text))
+                    if (cp != null && !string.IsNullOrWhiteSpace(cp.Text)
+                        && SenderIs(cp.PlayerId, senderPid, env.Type))
                     {
+                        if (cp.Text.Length > 1000) cp.Text = cp.Text.Substring(0, 1000);
                         if (string.IsNullOrEmpty(cp.To))
                         {
                             MPChat.AddMessage(cp.PlayerId, "", cp.Text);
@@ -858,13 +945,16 @@ namespace BigAmbitionsMP
                 case MessageType.PhaseReport:
                 {
                     var ph = env.GetPayload<PhaseReportPayload>();
-                    RecordPhaseReport(ph);   // dict write — safe here
+                    if (ph != null && SenderIs(ph.PlayerId, senderPid, env.Type))
+                        RecordPhaseReport(ph);   // dict write — safe here
                     break;
                 }
 
                 case MessageType.RegisterCashier:
                 {
-                    MPRegisterSync.Apply(env.GetPayload<RegisterCashierPayload>());
+                    var rc = env.GetPayload<RegisterCashierPayload>();
+                    if (rc == null || !SenderIs(rc.PlayerId, senderPid, env.Type)) break;
+                    MPRegisterSync.Apply(rc);
                     Broadcast(env);   // relay duty state to everyone (idempotent at sender)
                     break;
                 }
@@ -872,15 +962,23 @@ namespace BigAmbitionsMP
                 case MessageType.RemoteSale:
                 {
                     var rs = env.GetPayload<RemoteSalePayload>();
-                    if (rs != null) HandleRemoteSale(rs);
+                    if (rs != null) HandleRemoteSale(rs, senderPid);
                     break;
                 }
 
                 case MessageType.CashSync:
                 {
                     var c = env.GetPayload<CashSyncPayload>();
-                    if (c != null && !string.IsNullOrEmpty(c.PlayerId))
-                        RecordCash(c.PlayerId, c.Money);   // pure C# dict write — safe here
+                    if (c == null || !SenderIs(c.PlayerId, senderPid, env.Type)) break;
+                    // A poisoned figure (NaN) would corrupt the manifest cash this
+                    // player gets back on reconnect; negatives are legitimate
+                    // (overdraft, like the bank).
+                    if (!IsSaneMoney(c.Money, 10_000_000_000f))
+                    {
+                        Plugin.Logger.LogWarning($"[Server] CashSync from '{senderPid}': implausible money {c.Money} — dropped.");
+                        break;
+                    }
+                    RecordCash(senderPid, c.Money);   // pure C# dict write — safe here
                     break;
                 }
 
@@ -891,6 +989,24 @@ namespace BigAmbitionsMP
         }
 
         // ── Message handlers ──────────────────────────────────────────────────
+
+        /// <summary>Identity check: a payload field naming the SENDING player must
+        /// match the connection's verified identity (bound at Hello).  Mismatches
+        /// are spoofs — logged and dropped by the caller.  allowEmpty admits an
+        /// unset field for payloads where the host derives the sender itself.</summary>
+        private static bool SenderIs(string claimed, string verified, MessageType type, bool allowEmpty = false)
+        {
+            if (claimed == verified) return true;
+            if (allowEmpty && string.IsNullOrEmpty(claimed)) return true;
+            Plugin.Logger.LogWarning($"[Server] {type}: payload identity '{claimed}' does not match connection '{verified}' — dropped.");
+            return false;
+        }
+
+        /// <summary>Finite and within a sanity cap — NaN/Infinity poison every
+        /// comparison and aggregate they touch, so no money figure from the
+        /// network gets past this.</summary>
+        private static bool IsSaneMoney(float v, float cap = 1_000_000_000f)
+            => !float.IsNaN(v) && !float.IsInfinity(v) && Math.Abs(v) <= cap;
 
         // ── Join control: bans (kick/reject — stand until the host re-hosts)
         //    and mid-game join requests awaiting the host's approval. ────────
@@ -970,10 +1086,47 @@ namespace BigAmbitionsMP
             lock (_pendingJoins) _pendingJoins.Clear();
         }
 
+        /// <summary>The Hello binds this connection's identity for the whole
+        /// session — refuse empty ids, host impersonation, identity switches on
+        /// a live connection, and ids already bound to another live connection.
+        /// Everything downstream (money, saves, ownership) keys on this binding.</summary>
+        private static bool ValidateHelloIdentity(NetPeer peer, HelloPayload hello)
+        {
+            string refuse = "";
+            if (string.IsNullOrWhiteSpace(hello.PlayerId))
+                refuse = "empty PlayerId";
+            else if (hello.PlayerId == MPConfig.PlayerId
+                || (!string.IsNullOrEmpty(hello.StableId) && hello.StableId == MPConfig.StableId))
+                refuse = "claims the HOST's identity";
+            else if (_peerNames.TryGetValue(peer.Id, out var bound) && bound != hello.PlayerId)
+            {
+                // Keep the original binding; don't disconnect a live player.
+                Plugin.Logger.LogWarning($"[Server] peer {peer.Id} ('{bound}') re-Hello'd as '{hello.PlayerId}' — identity switch refused.");
+                return false;
+            }
+            else
+                foreach (var kv in _peerNames)
+                {
+                    if (kv.Key == peer.Id) continue;
+                    if (kv.Value == hello.PlayerId
+                        || (!string.IsNullOrEmpty(hello.StableId)
+                            && StableIdByPlayer.TryGetValue(kv.Value, out var st) && st == hello.StableId))
+                    {
+                        refuse = $"identity already connected (peer {kv.Key})";
+                        break;
+                    }
+                }
+            if (refuse == "") return true;
+            Plugin.Logger.LogWarning($"[Server] Hello from '{hello.PlayerId}' (peer {peer.Id}): {refuse} — disconnected.");
+            try { peer.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:identity")); } catch { }
+            return false;
+        }
+
         private static void HandleHello(NetPeer peer, MessageEnvelope env)
         {
             var hello = env.GetPayload<HelloPayload>();
             if (hello == null) return;
+            if (!ValidateHelloIdentity(peer, hello)) return;
 
             // Banned (kicked or rejected) — out until the host re-hosts.
             if (_banned.Contains(hello.PlayerId) || (!string.IsNullOrEmpty(hello.StableId) && _banned.Contains(hello.StableId)))
@@ -1010,6 +1163,9 @@ namespace BigAmbitionsMP
         /// load chain (host-stored save → fresh character).</summary>
         private static void RegisterAndProcessJoin(NetPeer peer, HelloPayload hello)
         {
+            // Re-check at approval time: another connection may have taken this
+            // identity while the request sat in the queue.
+            if (!ValidateHelloIdentity(peer, hello)) return;
             {
                 _clients.Add(peer);
                 _peerNames[peer.Id] = hello.PlayerId;
@@ -1137,10 +1293,11 @@ namespace BigAmbitionsMP
 
         // ── Startup pause hold ────────────────────────────────────────────────
 
-        private static void HandleClientPlayerInGame(MessageEnvelope env)
+        private static void HandleClientPlayerInGame(string senderPid, MessageEnvelope env)
         {
             var payload = env.GetPayload<PlayerInGamePayload>();
-            MarkPlayerInGame(payload?.PlayerId ?? env.SenderId);
+            if (payload != null && !SenderIs(payload.PlayerId, senderPid, MessageType.PlayerInGame, allowEmpty: true)) return;
+            MarkPlayerInGame(senderPid);
         }
 
         /// <summary>Send a peer the full world state (owners+market, host profile,
@@ -1261,20 +1418,28 @@ namespace BigAmbitionsMP
 
         /// <summary>HOST: validate a cross-player sale and credit the owner.
         /// AI-rival "owners" fall out here (not in the lobby roster).</summary>
-        public static void HandleRemoteSale(RemoteSalePayload rs)
+        public static void HandleRemoteSale(RemoteSalePayload rs, string senderPid)
         {
             try
             {
                 if (string.IsNullOrEmpty(rs.OwnerId) || string.IsNullOrEmpty(rs.BuyerId)) return;
+                if (!SenderIs(rs.BuyerId, senderPid, MessageType.RemoteSale)) return;   // the buyer reports its OWN purchase
                 if (!LobbyPlayers.Contains(rs.OwnerId))
                 {
                     Plugin.Logger.LogInfo($"[RemoteSale] owner '{rs.OwnerId}' not a lobby player (AI rival?) — ignored.");
                     return;
                 }
                 if (rs.OwnerId == rs.BuyerId) return;
-                if (rs.Total <= 0f || rs.Total > 100000f)
+                if (rs.Total <= 0f || rs.Total > 100000f || float.IsNaN(rs.Total))
                 {
                     Plugin.Logger.LogWarning($"[RemoteSale] rejected: implausible total ${rs.Total:F2} from '{rs.BuyerId}'.");
+                    return;
+                }
+                // Order lines drive the authoritative stock decrement — a
+                // negative Amount would CREDIT shelf stock.
+                if (rs.Items.Count > 200 || rs.Items.Exists(it => it.Amount <= 0 || it.Amount > 10000 || string.IsNullOrEmpty(it.ItemName)))
+                {
+                    Plugin.Logger.LogWarning($"[RemoteSale] rejected: implausible order lines ({rs.Items.Count} items) from '{rs.BuyerId}'.");
                     return;
                 }
                 GameStatePatcher.EnqueueOnMainThread(() =>
@@ -1380,10 +1545,11 @@ namespace BigAmbitionsMP
             else         BroadcastStartupStatus(WorldWaitingList());
         }
 
-        private static void HandleWorldReady(MessageEnvelope env)
+        private static void HandleWorldReady(string senderPid, MessageEnvelope env)
         {
             var payload = env.GetPayload<PlayerInGamePayload>();
-            MarkWorldReady(payload?.PlayerId ?? env.SenderId);
+            if (payload != null && !SenderIs(payload.PlayerId, senderPid, MessageType.WorldReady, allowEmpty: true)) return;
+            MarkWorldReady(senderPid);
             // A player whose world just loaded missed any earlier loan-state
             // broadcast (session-load ledger, joins mid-loan) — re-broadcast.
             GameStatePatcher.EnqueueOnMainThread(MPHub.BroadcastLoansIfAny);
@@ -1477,7 +1643,7 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Server] ManualPause broadcast: {paused}");
         }
 
-        private static void HandleClientManualPause(NetPeer sender, MessageEnvelope env)
+        private static void HandleClientManualPause(NetPeer sender, string senderPid, MessageEnvelope env)
         {
             var payload = env.GetPayload<ManualPausePayload>();
             if (payload == null) return;
@@ -1488,7 +1654,7 @@ namespace BigAmbitionsMP
                 if (peer.Id != sender.Id)
                     Send(peer, MessageEnvelope.Create(
                         MessageType.ManualPause, "host", payload));
-            Plugin.Logger.LogInfo($"[Server] ManualPause from {env.SenderId}: {payload.Paused} — relayed.");
+            Plugin.Logger.LogInfo($"[Server] ManualPause from {senderPid}: {payload.Paused} — relayed.");
         }
 
         // ── Multiplayer game settings ─────────────────────────────────────────
@@ -1596,12 +1762,13 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Server] Enforce starting cash = {enforce}");
         }
 
-        private static void HandleRentRequest(NetPeer peer, MessageEnvelope env)
+        private static void HandleRentRequest(NetPeer peer, string senderPid, MessageEnvelope env)
         {
             var req = env.GetPayload<BuildingOwnershipPayload>();
             if (req == null) return;
+            if (!SenderIs(req.OwnerPlayerId, senderPid, MessageType.RentRequest, allowEmpty: true)) return;
 
-            Plugin.Logger.LogInfo($"[Server] RentRequest: {req.AddressKey} by {env.SenderId}");
+            Plugin.Logger.LogInfo($"[Server] RentRequest: {req.AddressKey} by {senderPid}");
 
             // Check availability
             if (BuildingOwners.TryGetValue(req.AddressKey, out var currentOwner) && currentOwner != "")
@@ -1612,22 +1779,22 @@ namespace BigAmbitionsMP
                 return;
             }
 
-            // Grant it
-            BuildingOwners[req.AddressKey] = env.SenderId;
-            req.OwnerPlayerId = env.SenderId;
+            // Grant it — to the CONNECTION's verified player, never a payload claim.
+            BuildingOwners[req.AddressKey] = senderPid;
+            req.OwnerPlayerId = senderPid;
 
             // Confirm to the OTHER clients (not the requester — it already rented
             // locally, so re-applying would double-charge it).  They mark it taken.
             var confirm = MessageEnvelope.Create(MessageType.RentConfirm, "host", req);
             foreach (var p in _clients)
                 if (p != peer) Send(p, confirm);
-            Plugin.Logger.LogInfo($"[Server] Rent confirmed: {req.AddressKey} → {env.SenderId} (relayed to {_clients.Count - 1} other client(s)).");
+            Plugin.Logger.LogInfo($"[Server] Rent confirmed: {req.AddressKey} → {senderPid} (relayed to {_clients.Count - 1} other client(s)).");
 
             // Reflect it in the HOST's own game (main thread — IL2CPP): take the
             // building off the for-rent pool + mark it owned by that player, so the
             // host sees it occupied as the client's business (was missing — the host
             // only updated its dict, never its game state).
-            string addr = req.AddressKey, owner = env.SenderId;
+            string addr = req.AddressKey, owner = senderPid;
             GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostReflectPlayerRent(addr, owner));
             // (No event-driven save here: ownership is already tracked live on the
             //  host, and cash is live-streamed — so a crash right after a purchase
@@ -1638,10 +1805,10 @@ namespace BigAmbitionsMP
 
         // ── Appearance sync ───────────────────────────────────────────────────
 
-        private static void HandleClientAppearance(MessageEnvelope env)
+        private static void HandleClientAppearance(string senderPid, MessageEnvelope env)
         {
             var dto = env.GetPayload<PlayerAppearancePayload>();
-            if (dto == null) return;
+            if (dto == null || !SenderIs(dto.PlayerId, senderPid, MessageType.PlayerAppearance)) return;
             // Apply + re-broadcast on the main thread (touches Unity objects).
             GameStatePatcher.EnqueueOnMainThread(() =>
             {
@@ -1666,10 +1833,10 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Server] AppearanceSync broadcast ({payload.Players.Count} players).");
         }
 
-        private static void HandlePlayerMove(NetPeer sender, MessageEnvelope env)
+        private static void HandlePlayerMove(NetPeer sender, string senderPid, MessageEnvelope env)
         {
             var payload = env.GetPayload<PlayerPositionPayload>();
-            if (payload == null) return;
+            if (payload == null || !SenderIs(payload.PlayerId, senderPid, MessageType.PlayerMove)) return;
 
             // Show this player on the host's own screen
             GameStatePatcher.EnqueueOnMainThread(() =>
@@ -1684,10 +1851,11 @@ namespace BigAmbitionsMP
                     peer.Send(writer, DeliveryMethod.Unreliable);
         }
 
-        private static void HandleAnimTrigger(NetPeer sender, MessageEnvelope env)
+        private static void HandleAnimTrigger(NetPeer sender, string senderPid, MessageEnvelope env)
         {
             var payload = env.GetPayload<AnimTriggerPayload>();
-            if (payload == null) return;
+            if (payload == null || !SenderIs(payload.PlayerId, senderPid, MessageType.PlayerAnimTrigger)) return;
+            if (payload.ParamIndex < 0 || payload.ParamIndex > 255) return;   // animator params number in the dozens
 
             // Play on the host's own screen
             GameStatePatcher.EnqueueOnMainThread(() =>
@@ -1732,10 +1900,15 @@ namespace BigAmbitionsMP
                 new AnimTriggerPayload { PlayerId = MPConfig.PlayerId, ParamIndex = paramIndex }));
         }
 
-        private static void HandleVehicleSync(NetPeer sender, MessageEnvelope env)
+        private static void HandleVehicleSync(NetPeer sender, string senderPid, MessageEnvelope env)
         {
             var payload = env.GetPayload<VehicleFleetPayload>();
-            if (payload == null) return;
+            if (payload == null || !SenderIs(payload.OwnerId, senderPid, MessageType.VehicleSync)) return;
+            if (payload.Vehicles.Count > 200)
+            {
+                Plugin.Logger.LogWarning($"[Server] VehicleSync from '{senderPid}': implausible fleet size {payload.Vehicles.Count} — dropped.");
+                return;
+            }
 
             // Apply on the host's own screen
             GameStatePatcher.EnqueueOnMainThread(() => VehicleManager.ApplyVehicleFleet(payload));
@@ -1759,7 +1932,7 @@ namespace BigAmbitionsMP
         private static void HandleTaxiHail(MessageEnvelope env)
         {
             var payload = env.GetPayload<TaxiHailPayload>();
-            if (payload == null) return;
+            if (payload == null || payload.TaxiIndex < 0) return;
             GameStatePatcher.EnqueueOnMainThread(() => TrafficSync.HostStopTaxi(payload.TaxiIndex));
         }
 

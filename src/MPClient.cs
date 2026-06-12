@@ -139,6 +139,7 @@ namespace BigAmbitionsMP
                     if (tag == "BAMP:rejected") why = "Join REJECTED by host";
                     else if (tag == "BAMP:kicked") why = "KICKED by host";
                     else if (tag == "BAMP:banned") why = "Banned until host re-hosts";
+                    else if (tag == "BAMP:identity") why = "Join refused — player identity invalid or already connected";
                     Plugin.Logger.LogInfo($"[Client] disconnect reason tag: '{tag}' → \"{why}\"");
                 }
             }

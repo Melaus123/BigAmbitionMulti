@@ -302,7 +302,9 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogWarning($"[MPSave] SaveData length mismatch: got {raw.Length}, expected {data.RawLength}.");
 
                 string dir  = MPSaveManager.MpCharacterFolder(data.SessionName, data.Slot.StableId);
-                string name = string.IsNullOrEmpty(data.Slot.SaveName) ? SaveFileName : data.Slot.SaveName;
+                // Slot.SaveName is client-supplied — sanitize it like every other
+                // path component or it can step outside the session folder.
+                string name = MPSaveManager.Sanitize(string.IsNullOrEmpty(data.Slot.SaveName) ? SaveFileName : data.Slot.SaveName);
                 File.WriteAllBytes(Path.Combine(dir, name + ".hsg"), raw);
                 Plugin.Logger.LogInfo($"[MPSave] Stored '{data.Slot.DisplayName}' .hsg ({raw.Length}B) → {dir}");
                 DiagWrite($"HostHandleSaveData wrote .hsg ({raw.Length}B), merging slot");

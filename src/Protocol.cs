@@ -83,7 +83,7 @@ namespace BigAmbitionsMP
         RetailPrices         = 101, // Any → Host → Others: live retail prices of a business the SENDER runs — keeps per-neighbourhood price competition fed with current numbers on every machine.
         RestVote             = 102, // Client → Host: this player started/ended a rest-class activity (consensus time-skip voting).
         RestSkipState        = 103, // Host → All: current votes + whether the consensus skip is running (banner + skip-detector stand-down).
-        MoneyTransfer        = 104, // Client → Host: "I sent $X to player Y" (sender already debited locally; host routes the credit).
+        MoneyTransfer        = 104, // RETIRED (2026-06-12): direct transfers were replaced by accept-required gift offers (LoanOffer Kind="gift"); the host no longer handles this type.  Number stays reserved.
         LoanOffer            = 105, // Any → Host → target: a player offers another a loan (principal, daily interest, daily payment).
         LoanAnswer           = 106, // Target → Host: accept/decline a loan offer.
         LoanState            = 107, // Host → All: the authoritative active-loan ledger (Business Hub display).
@@ -758,15 +758,7 @@ namespace BigAmbitionsMP
         public int    ColorIndex    { get; set; }
     }
 
-    /// <summary>A single retail-shelf price tag.</summary>
-    /// <summary>Business Hub payloads (MessageTypes 104-108).</summary>
-    public class MoneyTransferPayload
-    {
-        public string From   { get; set; } = "";
-        public string To     { get; set; } = "";
-        public float  Amount { get; set; }
-    }
-
+    /// <summary>Business Hub payloads (MessageTypes 105-108).</summary>
     public class LoanOfferPayload
     {
         public string Id            { get; set; } = "";

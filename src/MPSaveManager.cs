@@ -176,12 +176,17 @@ namespace BigAmbitionsMP
 
         // ── Helpers ───────────────────────────────────────────────────────────
 
-        private static string Sanitize(string s)
+        /// <summary>Make a network- or user-supplied string safe as a single
+        /// path COMPONENT: invalid filename chars replaced, and dot-only names
+        /// ("." / "..") neutralized — those are directory steps, not names, and
+        /// they survive the invalid-char filter.</summary>
+        internal static string Sanitize(string s)
         {
             if (string.IsNullOrEmpty(s)) return "_";
             foreach (var c in Path.GetInvalidFileNameChars())
                 s = s.Replace(c, '_');
-            return s;
+            s = s.Trim();
+            return (s.Length == 0 || s.Trim('.').Length == 0) ? "_" : s;
         }
     }
 }

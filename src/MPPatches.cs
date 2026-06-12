@@ -2512,7 +2512,7 @@ namespace BigAmbitionsMP
                         Desc    = _pendingDesc,
                     };
                     sale.Items.AddRange(_pendingItems);
-                    if (MPServer.IsRunning) MPServer.HandleRemoteSale(sale);
+                    if (MPServer.IsRunning) MPServer.HandleRemoteSale(sale, MPConfig.PlayerId);
                     else MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.RemoteSale, MPConfig.PlayerId, sale));
 
                     // Native paid-marking + native SUCCESS close — fires the
