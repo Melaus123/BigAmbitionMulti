@@ -1190,6 +1190,24 @@ namespace BigAmbitionsMP
                         return;
                     }
 
+                    // Defensive dedupe: ANY pre-existing entry with a player id
+                    // is a stub from some other population path (the resurrected
+                    // RivalDataCache leak grew one per player) — remove before
+                    // appending our full synthetic rows so each player renders
+                    // exactly once.
+                    int purged = list.RemoveAll(rd =>
+                    {
+                        try
+                        {
+                            string rid = rd?.id ?? "";
+                            return !string.IsNullOrEmpty(rid)
+                                && (rid == MPConfig.PlayerId || GameStatePatcher.ClientPlayerRoster.ContainsKey(rid));
+                        }
+                        catch { return false; }
+                    });
+                    if (purged > 0)
+                        Plugin.Logger.LogInfo($"[Patch_GetAllRivalData] purged {purged} stale player stub row(s).");
+
                     int appended = 0;
                     foreach (var kv in GameStatePatcher.ClientPlayerRoster)
                     {
@@ -2702,6 +2720,33 @@ namespace BigAmbitionsMP
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[RegGuard] {ex.Message}"); }
+            }
+        }
+
+        // ── Honorary-degree training (user spec 2026-06-12) ───────────────────
+        // In MP nobody sits at a desk for tens of game-hours: the school door
+        // opens OUR confirm dialog (course + FULL cost); Accept charges the
+        // whole remaining course through the game's own tuition transaction
+        // and credits completion via the native diploma fields + event.  The
+        // StudyActivity never starts — this Prefix swallows it at the single
+        // funnel every activity passes through.
+        [HarmonyPatch(typeof(PlayerActivity.PlayerActivityUI), "Show",
+            new Type[] { typeof(PlayerActivity.IPlayerActivity), typeof(EntityController) })]
+        public static class Patch_TrainingDoor_HonoraryDegree
+        {
+            static bool Prefix(PlayerActivity.IPlayerActivity playerActivity)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                try
+                {
+                    if (playerActivity is PlayerActivity.StudyActivity)
+                    {
+                        MPCanvasUI.RequestTrainingDialog(playerActivity);
+                        return false;
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Train] door intercept: {ex.Message}"); }
+                return true;
             }
         }
 

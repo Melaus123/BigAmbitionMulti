@@ -1357,6 +1357,108 @@ namespace BigAmbitionsMP
         }
         // (Legacy-pane lobby kick removed 2026-06-11 — the real kick [X] lives in the native lobby window roster rows.)
 
+        // ── Honorary-degree training dialog (user spec 2026-06-12) ────────────
+        // School door → confirm GUI with course + FULL cost; Accept charges the
+        // whole remaining course (native tuition transaction, tax deductible)
+        // and credits completion through the same fields + event the game's own
+        // StudyActivity.Finish uses.  Cancel walks away free.
+        private static object? _trainPending;            // intercepted StudyActivity
+        public  static void RequestTrainingDialog(object studyActivity) => _trainPending = studyActivity;
+        private GameObject?    _trainPop;
+        private RectTransform? _trainPopRT, _trainAcceptRT, _trainCancelRT;
+        private object?        _trainShownFor;
+
+        private void TickTrainingPopup()
+        {
+            try
+            {
+                if (_trainPending == null)
+                {
+                    if (_trainPop != null && _trainPop.activeSelf) _trainPop.SetActive(false);
+                    _trainShownFor = null;
+                    return;
+                }
+                var act = _trainPending;
+                var settings = MPReflect.Get(act.GetType(), act, "_diplomaSettings") as DiplomaSettings;
+                var diploma  = MPReflect.Get(act.GetType(), act, "_diploma") as Diploma;
+                if (settings == null || diploma == null) { _trainPending = null; return; }
+                int remaining = settings.RequiredHours * 60 - diploma.minutesStudied;
+                if (remaining <= 0)
+                {
+                    try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Info, "Course already completed."); } catch { }
+                    _trainPending = null; return;
+                }
+                int cost = Mathf.CeilToInt(remaining / 60f * settings.PricePerHour);
+                string course = diploma.name.ToString();
+
+                if (!ReferenceEquals(_trainShownFor, act))
+                {
+                    _trainShownFor = act;
+                    var sprite = IsAlive(_panelSprite) ? _panelSprite : EnsureRoundedSprite();
+                    if (_trainPop == null)
+                    {
+                        _trainPop = MakeGO("BAMP_TrainPop", _canvasGO.transform);
+                        _trainPopRT = _trainPop.GetComponent<RectTransform>();
+                        _trainPopRT.anchorMin = _trainPopRT.anchorMax = new Vector2(0.5f, 0.55f);
+                        _trainPopRT.pivot = new Vector2(0.5f, 0.5f);
+                        _trainPopRT.anchoredPosition = Vector2.zero;
+                        _trainPopRT.sizeDelta = new Vector2(430f, 150f);
+                        var bg = _trainPop.AddComponent<Image>();
+                        bg.color = new Color(0.10f, 0.11f, 0.15f, 0.97f);
+                        if (sprite != null) { try { bg.sprite = sprite; bg.type = Image.Type.Sliced; } catch { } }
+                    }
+                    for (int i = _trainPop.transform.childCount - 1; i >= 0; i--)
+                        UnityEngine.Object.Destroy(_trainPop.transform.GetChild(i).gameObject);
+                    var hdr = MakeLabel(_trainPop.transform, $"<b>TRAINING — {course}</b>", 14, C_WHITE, 16f, -10f, 398f, 22f, TextAlignmentOptions.Left);
+                    ApplyFont(hdr);
+                    var body = MakeLabel(_trainPop.transform,
+                        $"Full course: {remaining / 60}h {remaining % 60:D2}m studied instantly\nTotal cost: <b>${cost:N0}</b> (honorary degree)",
+                        13, C_LBLGREY, 16f, -36f, 398f, 44f, TextAlignmentOptions.Left);
+                    ApplyFont(body);
+                    var (aRT, aLbl) = MakeHubButton("accept", Vector2.zero, 120f, new Color(0.24f, 0.50f, 0.33f, 1f), 32f, sprite, _trainPop.transform);
+                    SetTopLeft(aRT, 85f, -102f); aLbl.fontSize = 13;
+                    var (cRT, cLbl) = MakeHubButton("cancel", Vector2.zero, 120f, new Color(0.45f, 0.24f, 0.22f, 1f), 32f, sprite, _trainPop.transform);
+                    SetTopLeft(cRT, 225f, -102f); cLbl.fontSize = 13;
+                    _trainAcceptRT = aRT; _trainCancelRT = cRT;
+                }
+                if (!_trainPop!.activeSelf) _trainPop.SetActive(true);
+                _trainPop.transform.localScale = Vector3.one;
+
+                if (!Input.GetMouseButtonDown(0)) return;
+                var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+                if (_trainCancelRT != null && RectHit(_trainCancelRT, mp)) { _trainPending = null; return; }
+                if (_trainAcceptRT == null || !RectHit(_trainAcceptRT, mp)) return;
+
+                // Mirror StudyActivity.Finish()'s bookkeeping for the FULL course.
+                var data = new System.Collections.Generic.Dictionary<string, string>
+                {
+                    { "diplomaName", course },
+                    { "hours",   (remaining / 60).ToString() },
+                    { "minutes", (remaining % 60).ToString() },
+                    { "taxDeductibleName", "businesstype_school" },
+                };
+                bool paid = false;
+                try
+                {
+                    paid = GameManager.ChangeMoneySafe(-cost,
+                        new TransactionInfo("ba:transaction_tuitionfee", data, isTaxDeductible: true),
+                        null, null, force: false);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Train] charge: {ex.Message}"); }
+                if (paid)
+                {
+                    diploma.minutesStudied = settings.RequiredHours * 60;
+                    diploma.completed = true;
+                    try { GameEvent.Invoke("ba:gameevent_diplomagranted"); } catch { }
+                    try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Success, $"Honorary degree purchased — {course}"); } catch { }
+                    Plugin.Logger.LogInfo($"[Train] honorary degree '{course}' purchased: ${cost} for {remaining} course-minute(s).");
+                }
+                else Plugin.Logger.LogInfo($"[Train] purchase declined (insufficient funds for ${cost}).");
+                _trainPending = null;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Train] {ex.Message}"); _trainPending = null; }
+        }
+
         /// <summary>Open the Business page inside the native full menu (and the
         /// menu itself if closed).  Falls back to the standalone window when
         /// the injection isn't ready.</summary>
@@ -2649,6 +2751,7 @@ namespace BigAmbitionsMP
             MPHubNativePage.Tick();       // "Business" in the native full menu
             // (spawn sidestep moved to the WorldReady event — OnLifecyclePhase)
             TickJoinPopup();              // host approval panel for mid-game joiners
+            TickTrainingPopup();          // honorary-degree confirm dialog (school doors)
             MPFullMenuProbe.Tick();       // page-interior dump capture (persists to .modding/ui-dumps)
             TickHubWindow();
             _pt = MPPerf.Begin(); InteriorSync.Tick();         MPPerf.End("Interior", _pt);   // diff-push to subscribed clients

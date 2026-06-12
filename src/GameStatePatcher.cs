@@ -414,9 +414,18 @@ namespace BigAmbitionsMP
                         var dictObj = fi.GetValue(null);
                         if (dictObj is System.Collections.Generic.Dictionary<string, BigAmbitions.Rivals.RivalData> dict)
                         {
+                            int playerPurged = 0;
                             foreach (var r in payload.Rivals)
                             {
                                 if (string.IsNullOrEmpty(r.Id)) continue;
+                                // PLAYERS never enter the cache (same rule as the
+                                // rivalStates half above).  On 0.10 this whole
+                                // AccessTools path silently failed, so the missing
+                                // filter never fired; Mono resurrected it and the
+                                // leaderboard grew a bare unselectable "defeated"
+                                // stub per player NEXT TO our synthetic row
+                                // (user, 2026-06-12).
+                                if (r.IsPlayer) { if (dict.Remove(r.Id)) playerPurged++; continue; }
                                 if (dict.ContainsKey(r.Id)) continue;
                                 dict[r.Id] = new BigAmbitions.Rivals.RivalData
                                 {
@@ -425,7 +434,7 @@ namespace BigAmbitionsMP
                                 };
                                 cacheAdded++;
                             }
-                            Plugin.Logger.LogInfo($"[Patcher] RivalDataCache populated via AccessTools: +{cacheAdded} entries.");
+                            Plugin.Logger.LogInfo($"[Patcher] RivalDataCache populated via AccessTools: +{cacheAdded} entries{(playerPurged > 0 ? $", purged {playerPurged} player stub(s)" : "")}.");
                         }
                         else
                         {
