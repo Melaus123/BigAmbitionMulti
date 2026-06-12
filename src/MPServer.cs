@@ -568,11 +568,11 @@ namespace BigAmbitionsMP
             if (env == null) return;
 
             // ── Identity gate ─────────────────────────────────────────────────
-            // _peerNames (bound once at Hello) is the only trusted source of WHO
+            // _peerNames (bound once at Hello) is the only reliable source of WHO
             // sent a message.  Everything inside the envelope — env.SenderId and
-            // any payload identity field — is client-authored and forgeable, so
-            // handlers key on senderPid and payload identity claims are verified
-            // against it (SenderIs) before the host acts on them.
+            // any payload identity field — is client-authored and cannot be
+            // relied on, so handlers key on senderPid and payload identity
+            // claims are verified against it (SenderIs) before the host acts.
             if (!_peerNames.TryGetValue(peer.Id, out var senderPid)) senderPid = "";
             if (env.Type != MessageType.Hello && string.IsNullOrEmpty(senderPid))
             {
@@ -809,8 +809,8 @@ namespace BigAmbitionsMP
                 {
                     // Hub offers (gift/loan): only the sender's OWN offers and
                     // revokes are accepted ("accepted"/"declined" are host-authored
-                    // result states — a client must never inject them), the target
-                    // must be a real other player, and the figures must be sane.
+                    // result states — a client never legitimately sends them), the
+                    // target must be a real other player, and the figures must be sane.
                     var lo = env.GetPayload<LoanOfferPayload>();
                     if (lo == null || !SenderIs(lo.From, senderPid, env.Type)) break;
                     if (lo.State != "offer" && lo.State != "revoke")
@@ -849,7 +849,7 @@ namespace BigAmbitionsMP
                 {
                     var rv = env.GetPayload<RestVotePayload>();
                     if (rv == null || !SenderIs(rv.PlayerId, senderPid, env.Type)) break;
-                    // A poisoned goal (NaN/absurd) would corrupt the consensus
+                    // An invalid goal (NaN/out-of-range) would skew the consensus
                     // minimum every other player skips to.
                     if (double.IsNaN(rv.GoalMinutes) || double.IsInfinity(rv.GoalMinutes)
                         || rv.GoalMinutes < 0 || rv.GoalMinutes > 10_000_000)
@@ -992,8 +992,8 @@ namespace BigAmbitionsMP
 
         /// <summary>Identity check: a payload field naming the SENDING player must
         /// match the connection's verified identity (bound at Hello).  Mismatches
-        /// are spoofs — logged and dropped by the caller.  allowEmpty admits an
-        /// unset field for payloads where the host derives the sender itself.</summary>
+        /// are invalid input — logged and dropped by the caller.  allowEmpty admits
+        /// an unset field for payloads where the host derives the sender itself.</summary>
         private static bool SenderIs(string claimed, string verified, MessageType type, bool allowEmpty = false)
         {
             if (claimed == verified) return true;
@@ -1002,7 +1002,7 @@ namespace BigAmbitionsMP
             return false;
         }
 
-        /// <summary>Finite and within a sanity cap — NaN/Infinity poison every
+        /// <summary>Finite and within a sanity cap — NaN/Infinity break every
         /// comparison and aggregate they touch, so no money figure from the
         /// network gets past this.</summary>
         private static bool IsSaneMoney(float v, float cap = 1_000_000_000f)
@@ -1087,9 +1087,10 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>The Hello binds this connection's identity for the whole
-        /// session — refuse empty ids, host impersonation, identity switches on
-        /// a live connection, and ids already bound to another live connection.
-        /// Everything downstream (money, saves, ownership) keys on this binding.</summary>
+        /// session — refuse empty ids, ids duplicating the host's own, identity
+        /// switches on a live connection, and ids already bound to another live
+        /// connection.  Everything downstream (money, saves, ownership) keys on
+        /// this binding.</summary>
         private static bool ValidateHelloIdentity(NetPeer peer, HelloPayload hello)
         {
             string refuse = "";

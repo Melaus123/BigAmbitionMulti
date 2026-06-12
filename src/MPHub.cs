@@ -212,8 +212,8 @@ namespace BigAmbitionsMP
             if (p.State == "revoke") { _hostOffers.Remove(p.Id); }
             else
             {
-                // Host-side spam cap: the per-recipient dup guard lives on the
-                // sender's machine and a hostile client could skip it — bound
+                // Host-side cap: the per-recipient dup guard lives on the
+                // sender's machine and a modified client could skip it — bound
                 // how many offers one player may have pending at once.
                 int pendingFrom = 0;
                 foreach (var o in _hostOffers.Values) if (o.From == p.From) pendingFrom++;
