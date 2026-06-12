@@ -126,6 +126,25 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Employee poaching: OFF in MP (user ruling 2026-06-12) ────────────
+        // The poach mutates the TARGET player's staff, and a client's
+        // employees only exist on the client's machine — so this mechanic
+        // could only ever hit the HOST: a host-only penalty is worse than no
+        // mechanic.  Disabled entirely in MP until/unless a routed-command
+        // version ships; the timeline treats it as a failed activation and
+        // moves on (the method already returns false for "couldn't act").
+        [HarmonyPatch(typeof(RivalDefenseHelper), "ActivateHireEmployees")]
+        public static class Patch_NoPoachingInMP
+        {
+            static bool Prefix(ref bool __result)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                __result = false;
+                Plugin.Logger.LogInfo("[RivalFair] rival employee-poach suppressed (MP fairness — host-only mechanic).");
+                return false;
+            }
+        }
+
         // ── Competing-store targeting: rank session shops by bridged income ──
         [HarmonyPatch(typeof(RivalDefenseHelper), "GetTopIncomeBusinesses")]
         public static class Patch_CompetitionSeesAllPlayers
