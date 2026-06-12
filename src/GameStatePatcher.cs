@@ -903,6 +903,36 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] RefreshItemsForActiveBuilding: {ex.Message}"); }
         }
 
+        /// <summary>Remove leaked ghost vehicles from the save data.  Ghost ids
+        /// are 'BAMP_' + original (the test rig's own REAL vehicles are
+        /// 'BAMP_TESTRIG_*'; ghost-of-ghost is 'BAMP_BAMP…').  Ghosts enter
+        /// gi.VehicleInstances via CreateAndSpawnVehicle registration and
+        /// snowball one duplicate per save/load cycle (run-17 evidence: extra
+        /// carts/flatbeds frozen at stale cargo states).  Called at every save
+        /// (PerformLocalSave) and at world-ready.</summary>
+        public static int StripGhostVehicles(string when)
+        {
+            int removed = 0;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                var list = gi?.VehicleInstances;
+                if (list == null) return 0;
+                for (int i = list.Count - 1; i >= 0; i--)
+                {
+                    string id = list[i]?.id ?? "";
+                    bool ghost = id.Contains("BAMP_BAMP")
+                                 || (id.StartsWith("BAMP_") && !id.StartsWith("BAMP_TESTRIG"));
+                    if (!ghost) continue;
+                    list.RemoveAt(i);
+                    removed++;
+                    Plugin.Logger.LogInfo($"[Vehicle] ghost stripped from save data ({when}): '{id}'.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] ghost strip: {ex.Message}"); }
+            return removed;
+        }
+
         /// <summary>
         /// Slice 2 (2026-06-12): a cross-player sale consumes REAL stock.  Runs
         /// on the HOST (interior authority) on the main thread: walks the shop's

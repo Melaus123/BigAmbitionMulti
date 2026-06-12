@@ -274,6 +274,7 @@ namespace BigAmbitionsMP
 
             if (next != MPLifecycle.MPPhase.WorldReady) return;
             MPClient.EndJoinQuiesce();
+            GameStatePatcher.StripGhostVehicles("world-ready");   // leaked-ghost hygiene (data only)
             ApplySpawnSidestep();   // fresh games: one navmesh-validated de-stack, placement final
             // Placement diagnostic: position-restore runs in load-finish —
             // still at the default spawn here = it was skipped.

@@ -6642,3 +6642,115 @@
 [FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-MarketInsider') LayoutElement
 [FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
 [FullMenu] ===== dump complete =====
+[FullMenu] instance found: 'FullMenu' (active=True) — will dump on first open.
+[FullMenu] instance found: 'FullMenu' (active=True) — will dump on first open.
+[FullMenu] ===== OPEN detected — dumping (passive, one-shot) =====
+[FullMenu] + FullMenu Transform FullMenu
+[FullMenu]   - Canvas [3840x2160] Canvas CanvasScaler GraphicRaycaster CanvasGroup Volume
+[FullMenu]     + RaycastBlocker [3843x2160] AspectRatioFitter
+[FullMenu]     + Topbar [3840x173]
+[FullMenu]       + Splitter [3840x3] LayoutElement
+[FullMenu]       + AppName [850x70] TextLocalizationComponent
+[FullMenu]       + AppButtons [1400x220] HorizontalLayoutGroup
+[FullMenu]       + RightData [1350x100] HorizontalLayoutGroup
+[FullMenu]     + AppsContainer [3840x1750] CanvasGroup
+[FullMenu]       - Persona [3840x1750] CanvasGroup AutoDeactivatePrefabOnSave
+[FullMenu]       - Contacts [3840x1750] CanvasGroup ContactsApp AutoDeactivatePrefabOnSave
+[FullMenu]       - Rivals [3840x1750] CanvasGroup RivalsApp AutoDeactivatePrefabOnSave
+[FullMenu]       - MyEmployees [3840x1750] CanvasGroup MyEmployees AutoDeactivatePrefabOnSave
+[FullMenu]       - BizMan [3840x1750] CanvasGroup BizMan AutoDeactivatePrefabOnSave
+[FullMenu]       - EconoView [3840x1750] CanvasGroup EconoView AutoDeactivatePrefabOnSave
+[FullMenu]       - MarketInsider [3840x1750] CanvasGroup MarketInsider AutoDeactivatePrefabOnSave
+[FullMenu]     + BottomBar [3840x150]
+[FullMenu]       + LeftButtons [2000x150] HorizontalLayoutGroup
+[FullMenu]       + RightButtons [1500x150] HorizontalLayoutGroup
+[FullMenu] ── app-button row 'Canvases/FullMenu/Canvas/Topbar/AppButtons' ──
+[FullMenu] + AppButtons [1400x220] HorizontalLayoutGroup
+[FullMenu]   - AppButtonTemplate [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'App Name') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Persona') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Persona [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Persona') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Persona') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Contacts [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Contacts') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Contacts') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Rivals [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Rivals') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Rivals') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + MyEmployees [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'MyEmployees') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-MyEmployees') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + BizMan [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'BizMan') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-BizMan') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + EconoView [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'EconoView') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-EconoView') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + MarketInsider [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'MarketInsider') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-MarketInsider') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu] ===== dump complete =====
+[FullMenu] ===== OPEN detected — dumping (passive, one-shot) =====
+[FullMenu] + FullMenu Transform FullMenu
+[FullMenu]   - Canvas [3840x2160] Canvas CanvasScaler GraphicRaycaster CanvasGroup Volume
+[FullMenu]     + RaycastBlocker [3843x2160] AspectRatioFitter
+[FullMenu]     + Topbar [3840x173]
+[FullMenu]       + Splitter [3840x3] LayoutElement
+[FullMenu]       + AppName [850x70] TextLocalizationComponent
+[FullMenu]       + AppButtons [1400x220] HorizontalLayoutGroup
+[FullMenu]       + RightData [1350x100] HorizontalLayoutGroup
+[FullMenu]     + AppsContainer [3840x1750] CanvasGroup
+[FullMenu]       - Persona [3840x1750] CanvasGroup AutoDeactivatePrefabOnSave
+[FullMenu]       - Contacts [3840x1750] CanvasGroup ContactsApp AutoDeactivatePrefabOnSave
+[FullMenu]       - Rivals [3840x1750] CanvasGroup RivalsApp AutoDeactivatePrefabOnSave
+[FullMenu]       - MyEmployees [3840x1750] CanvasGroup MyEmployees AutoDeactivatePrefabOnSave
+[FullMenu]       - BizMan [3840x1750] CanvasGroup BizMan AutoDeactivatePrefabOnSave
+[FullMenu]       - EconoView [3840x1750] CanvasGroup EconoView AutoDeactivatePrefabOnSave
+[FullMenu]       - MarketInsider [3840x1750] CanvasGroup MarketInsider AutoDeactivatePrefabOnSave
+[FullMenu]     + BottomBar [3840x150]
+[FullMenu]       + LeftButtons [2000x150] HorizontalLayoutGroup
+[FullMenu]       + RightButtons [1500x150] HorizontalLayoutGroup
+[FullMenu] ── app-button row 'Canvases/FullMenu/Canvas/Topbar/AppButtons' ──
+[FullMenu] + AppButtons [1400x220] HorizontalLayoutGroup
+[FullMenu]   - AppButtonTemplate [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'App Name') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Persona') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Persona [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Persona') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Persona') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Contacts [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Contacts') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Contacts') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + Rivals [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'Rivals') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-Rivals') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + MyEmployees [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'MyEmployees') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-MyEmployees') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + BizMan [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'BizMan') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-BizMan') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + EconoView [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'EconoView') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-EconoView') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu]   + MarketInsider [220x245] FullMenuAppButton Button ButtonEffects
+[FullMenu]     + Title [220x62] TMP(27pt #FFFFFF 'MarketInsider') TextLocalizationComponent
+[FullMenu]     + Logo [160x160] Image(#FFFFFF@1.00 'AppIcon-MarketInsider') LayoutElement
+[FullMenu]     - SelectedIcon [12x12] Image(#FFFFFF@1.00 'circle')
+[FullMenu] ===== dump complete =====

@@ -63,6 +63,12 @@ namespace BigAmbitionsMP
                 session = _activeSessionName;
             }
 
+            // Autosaves write a SIBLING session ('<name>-auto') so they never
+            // overwrite the manual save (user, 2026-06-12).  _activeSessionName
+            // keeps the manual base; '-auto' never stacks ('-auto-auto').
+            if (reason == "autosave" && !session.EndsWith("-auto"))
+                session += "-auto";
+
             Plugin.Logger.LogInfo($"[MPSave] HostSaveNow session='{session}' reason={reason} — broadcasting SaveNow.");
 
             try
@@ -601,6 +607,12 @@ namespace BigAmbitionsMP
         {
             DiagArm();
             DiagWrite($"PerformLocalSave START session='{sessionName}' host={MPServer.IsRunning}");
+            // Ghost vehicles leak into gi.VehicleInstances via the ghost-spawn
+            // registration and snowball one duplicate per save/load cycle
+            // (run-17: extra carts/flatbeds frozen at old cargo states).  The
+            // save boundary is the reliable choke point — strip them here for
+            // EVERY save path (host, client, sync menu variant).
+            GameStatePatcher.StripGhostVehicles("save");
             string charName = "";
             int    day      = 0;
             try
