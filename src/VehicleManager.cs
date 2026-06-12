@@ -774,7 +774,10 @@ namespace BigAmbitionsMP
                             {
                                 var c = inst.cargoInstances[ci];
                                 if (c == null) continue;
-                                csb.Append(c.itemName.ToString()).Append(':').Append(c.amount).Append(';');
+                                // '=' separator: EA 0.11 item ids CONTAIN colons
+                                // ("ba:itemname_cheapgift") — ':' made the parser
+                                // skip every entry (no boxes on remote beds).
+                                csb.Append(c.itemName).Append('=').Append(c.amount).Append(';');
                             }
                             cargo = csb.ToString();
                         }
@@ -1018,7 +1021,8 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Fill a (ghost) VehicleInstance's cargo from the manifest
-        /// string "ItemName:amount;…" so the visual boxes appear remotely.
+        /// string "itemId=amount;…" so the visual boxes appear remotely.
+        /// ('=' separator — EA 0.11 item ids contain colons.)
         /// Unknown item names are skipped (version drift safe).</summary>
         private static void ApplyCargoManifest(VehicleInstance inst, string? manifest)
         {
@@ -1029,7 +1033,7 @@ namespace BigAmbitionsMP
                 foreach (var part in manifest.Split(';'))
                 {
                     if (string.IsNullOrEmpty(part)) continue;
-                    var bits = part.Split(':');
+                    var bits = part.Split('=');
                     if (bits.Length != 2) continue;
                     if (string.IsNullOrEmpty(bits[0])) continue;
                     if (!int.TryParse(bits[1], out var amount) || amount <= 0) continue;

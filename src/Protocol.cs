@@ -373,8 +373,9 @@ namespace BigAmbitionsMP
         public float  Qy { get; set; }
         public float  Qz { get; set; }
         public float  Qw { get; set; }
-        /// <summary>Cargo manifest ("ItemName:amount;…") so remote ghosts show
-        /// the bed/handtruck boxes (they derive from cargo) — user bug 2026-06-11.</summary>
+        /// <summary>Cargo manifest ("itemId=amount;…" — '=' because EA 0.11 item
+        /// ids contain colons) so remote ghosts show the bed/handtruck boxes
+        /// (they derive from cargo) — user bug 2026-06-11.</summary>
         public string Cargo { get; set; } = "";
         /// <summary>Count of ITEM INSTANCES being transported (VehicleInstance
         /// .cargoIds — the channel hand trucks use; separate from loose-cargo

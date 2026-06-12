@@ -696,24 +696,86 @@ namespace BigAmbitionsMP
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] dirtSpots apply: {ex.Message}"); }
 
-                    // ItemInstances (Phase 2b).  Wipe-and-rebuild: clear the
-                    // dict, repopulate from payload.  Visual GameObjects will
-                    // be destroyed and re-spawned in TryRefreshActiveInteriorIfMatches.
+                    // ItemInstances (Phase 2b).  PER-ITEM DIFF apply (2026-06-12):
+                    // a full wipe-and-rebuild re-rolled every shelf's visual
+                    // shuffle on every snapshot (ShelfController.CollectVisualItems
+                    // uses global UnityEngine.Random at spawn; flicker every few
+                    // seconds — user bug).  Items whose serialized form is
+                    // UNCHANGED keep their live ItemInstance object so their
+                    // ItemController (and its shuffled look) survives untouched.
+                    var changedIds = new HashSet<string>();
+                    var removedIds = new HashSet<string>();
                     try
                     {
                         if (reg.itemInstances != null)
                         {
-                            reg.itemInstances.Clear();
+                            if (!_lastItemSer.TryGetValue(payload.AddressKey, out var lastSer))
+                                lastSer = new Dictionary<string, string>();
+                            var newSer  = new Dictionary<string, string>();
+                            var newDict = new Dictionary<string, BigAmbitions.Items.ItemInstance>();
                             foreach (var i in payload.ItemInstances)
                             {
+                                if (string.IsNullOrEmpty(i.Id)) continue;
+                                string ser = Newtonsoft.Json.JsonConvert.SerializeObject(i);
+                                newSer[i.Id] = ser;
+                                if (lastSer.TryGetValue(i.Id, out var prev) && prev == ser
+                                    && reg.itemInstances.TryGetValue(i.Id, out var live) && live != null)
+                                {
+                                    newDict[i.Id] = live;   // unchanged → keep the live object
+                                    continue;
+                                }
                                 var ii = DeserializeItemInstance(i);
-                                if (ii != null) reg.itemInstances[i.Id] = ii;
+                                if (ii != null) { newDict[i.Id] = ii; changedIds.Add(i.Id); }
                             }
+                            foreach (var k in reg.itemInstances.Keys)
+                                if (!newDict.ContainsKey(k)) removedIds.Add(k);
+
+                            // Buyer-side purchasability (2026-06-12): hover highlight
+                            // + take-product in a shop come from playerItemPurchaserSettings
+                            // (that's what AI shops set; ItemController.Start builds the
+                            // PlayerItemPurchaser from it).  Owners replicate their items
+                            // with it DISABLED (owners manage, not buy) — enable it here
+                            // on cargo shelves so this machine can shop natively.  Price
+                            // display reads reg.retailPrices = the synced store table.
+                            int purchasable = 0;
+                            foreach (var kv in newDict)
+                            {
+                                var ii = kv.Value;
+                                try
+                                {
+                                    var cargo = ii?.cargoInstances;
+                                    if (ii == null || cargo == null || cargo.Count == 0) continue;
+                                    if (ii.playerItemPurchaserSettings != null && ii.playerItemPurchaserSettings.enabled) continue;
+                                    string? product = null;
+                                    foreach (var c in cargo)
+                                    {
+                                        if (c == null || string.IsNullOrEmpty(c.itemName)) continue;
+                                        var it = BigAmbitions.Items.ItemsGetter.GetByName(c.itemName);
+                                        if (it != null && (it.type & BigAmbitions.Items.ItemType.RetailProduct) != 0)
+                                        { product = c.itemName; break; }
+                                    }
+                                    if (product == null) continue;
+                                    ii.playerItemPurchaserSettings = new BigAmbitions.Items.PlayerItemPurchaserSettings
+                                    {
+                                        enabled      = true,
+                                        itemName     = product,
+                                        itemQuantity = 1,
+                                    };
+                                    purchasable++;
+                                }
+                                catch { }
+                            }
+                            if (purchasable > 0)
+                                Plugin.Logger.LogInfo($"[Patcher] enabled buyer purchasing on {purchasable} cargo shelf/shelves for '{payload.AddressKey}'.");
+
+                            reg.itemInstances.Clear();
+                            foreach (var kv in newDict) reg.itemInstances[kv.Key] = kv.Value;
+                            _lastItemSer[payload.AddressKey] = newSer;
                         }
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] itemInstances apply: {ex.Message}"); }
 
-                    Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' designs={payload.InteriorDesigns.Count} prices={payload.RetailPrices.Count} dirt={payload.DirtSpots.Count} items={payload.ItemInstances.Count}.");
+                    Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' designs={payload.InteriorDesigns.Count} prices={payload.RetailPrices.Count} dirt={payload.DirtSpots.Count} items={payload.ItemInstances.Count} (changed={changedIds.Count} removed={removedIds.Count}).");
 
                     // Trigger a visual refresh of the interior IF the local
                     // player is currently inside THIS building.  Writing to
@@ -722,7 +784,7 @@ namespace BigAmbitionsMP
                     // when LoadBuilding ran on entry.  Calling LoadBuilding
                     // again re-runs the full pipeline (layout, designs, items)
                     // against the now-fresh fields.
-                    TryRefreshActiveInteriorIfMatches(payload.AddressKey);
+                    TryRefreshActiveInteriorIfMatches(payload.AddressKey, changedIds, removedIds);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorSnapshot: {ex.Message}"); }
             });
@@ -748,7 +810,12 @@ namespace BigAmbitionsMP
         /// element.Deserialize works because it operates directly on the scene
         /// element using the design object we pass in.
         /// </summary>
-        private static void TryRefreshActiveInteriorIfMatches(string addressKey)
+        /// <summary>Last-applied serialized form per item id, per address —
+        /// the diff baseline that keeps unchanged shelf visuals alive.</summary>
+        private static readonly Dictionary<string, Dictionary<string, string>> _lastItemSer = new();
+
+        private static void TryRefreshActiveInteriorIfMatches(string addressKey,
+            HashSet<string>? changedIds = null, HashSet<string>? removedIds = null)
         {
             try
             {
@@ -811,23 +878,22 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Patcher] Interior refresh for '{addressKey}': deserialized {deserialized}/{matchedUuids} elements (of {dict.Count} designs).");
 
                 // ── Item refresh (Phase 2b) ─────────────────────────────────
-                // Wipe existing ItemController GameObjects and re-spawn from
-                // the freshly-applied reg.itemInstances dict.  Uses the
-                // per-item primitive InstantiateSingleInstance(ii, onlyVisual)
-                // — the items analog of InteriorElement.Deserialize.  We pass
-                // onlyVisual=false initially so items participate in normal
-                // gameplay (employee stations, customer attractors).  If that
-                // proves disruptive, we can flip to onlyVisual=true later.
-                RefreshItemsForActiveBuilding(matched, reg);
+                // Per-item diff: only touch the ItemControllers whose data
+                // actually changed (or vanished); unchanged shelves keep their
+                // GameObjects — and with them the game's random stock-visual
+                // shuffle (full rebuilds re-rolled it = flicker, 2026-06-12).
+                RefreshItemsForActiveBuilding(matched, reg, changedIds, removedIds);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] TryRefreshActiveInteriorIfMatches: {ex.Message}"); }
         }
 
         /// <summary>
-        /// Wipes existing ItemController GameObjects in the active building
-        /// and re-spawns from reg.itemInstances using BuildingManager's
-        /// InstantiateSingleInstance.  This is the per-item analog of the
-        /// InteriorElement.Deserialize trick for designs.
+        /// Reconciles ItemController GameObjects in the active building with
+        /// reg.itemInstances — PER-ITEM: destroy controllers for changed/removed
+        /// ids, spawn for changed ids and ids with no live controller (self-heal),
+        /// leave everything else alone so shelf stock visuals keep their shuffle.
+        /// changedIds/removedIds == null means no diff info → full rebuild
+        /// (first apply / legacy callers).
         ///
         /// IMPORTANT: skipped when reg.itemInstances is empty.  AI businesses
         /// (CoffeeShop, FastFoodRestaurant, etc.) spawn their items from the
@@ -837,7 +903,8 @@ namespace BigAmbitionsMP
         /// host's snapshot reports zero items we trust the layout-driven
         /// spawn and don't touch the scene.
         /// </summary>
-        private static void RefreshItemsForActiveBuilding(BuildingManager bm, BuildingRegistration reg)
+        private static void RefreshItemsForActiveBuilding(BuildingManager bm, BuildingRegistration reg,
+            HashSet<string>? changedIds = null, HashSet<string>? removedIds = null)
         {
             try
             {
@@ -849,9 +916,10 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Patcher] Items refresh skipped (empty itemInstances; layout-spawned items left intact).");
                     return;
                 }
+                bool fullRebuild = changedIds == null;
 
-                // Find and destroy existing item GameObjects.  ItemController
-                // is the scene-side component for each spawned ItemInstance.
+                // Live controllers of THIS building, by instance id.
+                var liveById = new Dictionary<string, ItemController>();
                 int destroyed = 0;
                 try
                 {
@@ -862,24 +930,35 @@ namespace BigAmbitionsMP
                         {
                             var ic = existing[i] as ItemController;
                             if (ic == null) continue;
-                            // Be conservative: only destroy ItemControllers whose registration
+                            // Be conservative: only touch ItemControllers whose registration
                             // matches the current building (avoid wiping inventory items etc.).
                             try
                             {
                                 var icReg = ItemHelper.GetBuildingRegistration(ic.ItemInstance);
                                 if (icReg != reg) continue;
                             }
-                            catch { /* if lookup fails, skip rather than destroy */ continue; }
-                            UnityEngine.Object.Destroy(ic.gameObject);
-                            destroyed++;
+                            catch { continue; }
+                            string id = "";
+                            try { id = ic.ItemInstance?.id ?? ""; } catch { }
+                            bool kill = fullRebuild
+                                        || string.IsNullOrEmpty(id)
+                                        || (changedIds != null && changedIds.Contains(id))
+                                        || (removedIds != null && removedIds.Contains(id));
+                            if (kill)
+                            {
+                                UnityEngine.Object.Destroy(ic.gameObject);
+                                destroyed++;
+                            }
+                            else if (!string.IsNullOrEmpty(id) && !liveById.ContainsKey(id))
+                            {
+                                liveById[id] = ic;
+                            }
                         }
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] item destroy pass: {ex.Message}"); }
 
-                // Re-spawn from the updated dict.  Build a List<ItemInstance>
-                // first (InstantiateInstances takes IEnumerable, but per-item
-                // InstantiateSingleInstance lets us catch failures one at a time).
+                // Spawn: changed ids + any id with no surviving controller.
                 int spawned = 0;
                 int failed = 0;
                 try
@@ -890,6 +969,7 @@ namespace BigAmbitionsMP
                         {
                             var ii = kv.Value;
                             if (ii == null) continue;
+                            if (!fullRebuild && liveById.ContainsKey(kv.Key)) continue;   // untouched
                             try { bm.InstantiateSingleInstance(ii, false); spawned++; }
                             catch (Exception ex) { failed++; if (failed <= 3) Plugin.Logger.LogWarning($"[Patcher] InstantiateSingleInstance id={ii.id}: {ex.Message}"); }
                         }
@@ -897,7 +977,7 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] item spawn pass: {ex.Message}"); }
 
-                Plugin.Logger.LogInfo($"[Patcher] Items refresh: destroyed={destroyed} spawned={spawned} failed={failed} (dict size {(reg.itemInstances?.Count ?? -1)}).");
+                Plugin.Logger.LogInfo($"[Patcher] Items refresh: destroyed={destroyed} spawned={spawned} kept={liveById.Count} failed={failed} (dict size {dictCount}{(fullRebuild ? ", FULL rebuild" : "")}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] RefreshItemsForActiveBuilding: {ex.Message}"); }
         }
