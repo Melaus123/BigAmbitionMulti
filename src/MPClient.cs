@@ -439,11 +439,21 @@ namespace BigAmbitionsMP
         /// sat on the lobby pane over a fully loaded world, 2026-06-11).</summary>
         public static void MarkLeftLobby() => IsInLobby = false;
 
+        /// <summary>Set for a fresh-character join: at WorldReady the player is
+        /// warped to the DESIGNATED new-player start.  The native placement
+        /// reads gi.LastPlayerPosition (default 215,0,0 = the designated spot),
+        /// but the game continuously overwrites that field from the live
+        /// transform — during our long fenced load it gets stomped with the
+        /// player prefab's parking position, so placement no-ops and fresh
+        /// joiners woke up in the wrong part of town (user, 2026-06-12).</summary>
+        public static volatile bool PendingFreshSpawn;
+
         /// <summary>Mid-join fresh start: no save for this player anywhere —
        /// new character with the host''s settings (null → Normal preset).</summary>
         public static void StartFreshFromHost(GameVariablesDto? settings)
         {
             IsInLobby = false;
+            PendingFreshSpawn = true;
             SendPhaseReport("Loading");   // INTENT: don't excuse me from the fence
             BeginJoinQuiesce();
             var s = settings ?? MPServer.Preset("Normal");

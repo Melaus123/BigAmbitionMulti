@@ -271,6 +271,7 @@ namespace BigAmbitionsMP
             if (next != MPLifecycle.MPPhase.WorldReady) return;
             MPClient.EndJoinQuiesce();
             GameStatePatcher.StripGhostVehicles("world-ready");   // leaked-ghost hygiene (data only)
+            ApplyFreshSpawnWarp();  // fresh-character joins: designated start, not the prefab spot
             ApplySpawnSidestep();   // fresh games: one navmesh-validated de-stack, placement final
             // Placement diagnostic: position-restore runs in load-finish —
             // still at the default spawn here = it was skipped.
@@ -1187,6 +1188,32 @@ namespace BigAmbitionsMP
         // (NavMesh.SamplePosition) qualify — building interiors and bad
         // directions fail validation and are skipped.
         private bool _spawnSidestepDone;
+
+        /// <summary>Fresh-character join: warp to the DESIGNATED new-player
+        /// start (gi.LastPlayerPosition's default 215,0,0 — what a normal new
+        /// game uses).  The native placement no-ops on these joins because the
+        /// game's continuous position writer stomps the default during our long
+        /// fenced load (see MPClient.PendingFreshSpawn).</summary>
+        private void ApplyFreshSpawnWarp()
+        {
+            try
+            {
+                if (!MPClient.PendingFreshSpawn) return;
+                MPClient.PendingFreshSpawn = false;
+                var ch = Helpers.PlayerHelper.PlayerController?.Character;
+                if (ch == null) return;
+                var start = new Vector3(215f, 0f, 0f);   // GameInstance.LastPlayerPosition default = designated start
+                if (UnityEngine.AI.NavMesh.SamplePosition(start, out var hit, 25f, -1))
+                {
+                    try { ch.navmeshAgent.Warp(hit.position); }
+                    catch { ch.transform.position = hit.position; }
+                    try { var gi = SaveGameManager.Current; if (gi != null) gi.LastPlayerPosition = hit.position; } catch { }
+                    Plugin.Logger.LogInfo($"[Spawn] fresh join → designated start ({hit.position.x:F1}, {hit.position.y:F1}, {hit.position.z:F1}).");
+                }
+                else Plugin.Logger.LogWarning("[Spawn] fresh join: designated start not on navmesh — left at native placement.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Spawn] fresh-join warp: {ex.Message}"); }
+        }
 
         private void ApplySpawnSidestep()
         {
