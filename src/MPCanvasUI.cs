@@ -577,6 +577,18 @@ namespace BigAmbitionsMP
             double nowHours = d * 24.0 + h;
             float  realNow  = Time.unscaledTime;
 
+            // TimeSync just wrote the clock (snap or drift drip) — that jump is
+            // AUTHORIZED.  Re-base the sampling window at the new time instead
+            // of treating it as a skip; without this the watchdog reverted every
+            // sync write and the client's clock flickered night↔day forever
+            // (user, 2026-06-12).
+            if (TimeSync.ConsumeClockWrite())
+            {
+                _wcWindowStartHours = -1;             // fresh window from next tick
+                _wcRejecting        = false;
+                return;
+            }
+
             // Backlog #5 — exempt taxi travel.  The game's TaxiTravel coroutine
             // genuinely needs to fast-forward the clock to complete the ride;
             // pinning the clock would lock the player in the cab.  While the

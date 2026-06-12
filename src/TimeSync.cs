@@ -115,6 +115,16 @@ namespace BigAmbitionsMP
         private static float _correctionElapsed;
         private const  float CORRECTION_REAL_SECS = 3f;  // spread over 3 real seconds
 
+        // ── Authorized-write handshake with the anti-skip watchdog ───────────
+        // TickWorldClock (MPCanvasUI) reverts any fast clock advance — which is
+        // exactly what a TimeSync snap/drip looks like.  Without this flag the
+        // two fight: sync writes host time, watchdog reverts it, repeat (the
+        // client's world flickered night↔day every packet — user, 2026-06-12).
+        // The watchdog consumes the flag and re-bases its sampling window
+        // instead of rejecting.  Its OWN revert writes don't set the flag.
+        private static volatile bool _wroteClock;
+        public static bool ConsumeClockWrite() { var v = _wroteClock; _wroteClock = false; return v; }
+
         /// <summary>
         /// Called when a clock-sync packet arrives.  Calculates drift and schedules correction.
         /// </summary>
@@ -136,6 +146,7 @@ namespace BigAmbitionsMP
                 // Large drift — hard snap (only happens if there was a real desync)
                 Plugin.Logger.LogWarning($"[TimeSync] Large drift ({drift:+0.##;-0.##} h) — hard snap.");
                 GameStateReader.SetGameTime(hostDay, hostHour);
+                _wroteClock        = true;   // tell the watchdog this jump is OURS
                 _correctionHours   = 0f;
                 _correctionElapsed = 0f;
                 return;
@@ -171,6 +182,7 @@ namespace BigAmbitionsMP
             if (newHour < 0f) { newDay--; newHour += 24f; }
 
             GameStateReader.SetGameTime(newDay, newHour);
+            _wroteClock = true;   // authorized drip — watchdog re-bases, not rejects
             _correctionHours -= applyHours;
 
             if (Mathf.Abs(_correctionHours) < 0.001f)
