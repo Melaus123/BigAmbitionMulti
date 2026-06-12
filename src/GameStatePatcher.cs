@@ -904,6 +904,54 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>
+        /// Slice 2 (2026-06-12): a cross-player sale consumes REAL stock.  Runs
+        /// on the HOST (interior authority) on the main thread: walks the shop's
+        /// item instances and decrements the sold amounts; empty cargo entries
+        /// are removed.  The interior diff hash covers cargo Amount, so the
+        /// change re-broadcasts to every machine automatically.  NOTE: the
+        /// owner's local shelf VISUAL (box models) may lag until the next
+        /// interior refresh — data and sync are correct immediately.
+        /// </summary>
+        public static void ApplySaleStockDecrement(string addressKey, System.Collections.Generic.List<SaleItem>? items, string buyerId)
+        {
+            try
+            {
+                if (items == null || items.Count == 0 || string.IsNullOrEmpty(addressKey)) return;
+                var reg = FindRegistration(addressKey);
+                if (reg?.itemInstances == null)
+                {
+                    Plugin.Logger.LogWarning($"[Stock] no registration/items for '{addressKey}' — sale not decremented.");
+                    return;
+                }
+                foreach (var s in items)
+                {
+                    if (s == null || s.Amount <= 0) continue;
+                    int remaining = s.Amount;
+                    foreach (var kv in reg.itemInstances)
+                    {
+                        var cargo = kv.Value?.cargoInstances;
+                        if (cargo == null) continue;
+                        for (int i = cargo.Count - 1; i >= 0 && remaining > 0; i--)
+                        {
+                            var c = cargo[i];
+                            if (c == null || (int)c.itemName != s.ItemName) continue;
+                            int dec = System.Math.Min(c.amount, remaining);
+                            c.amount -= dec;
+                            remaining -= dec;
+                            if (c.amount <= 0) cargo.RemoveAt(i);
+                        }
+                        if (remaining <= 0) break;
+                    }
+                    int sold = s.Amount - remaining;
+                    Plugin.Logger.LogInfo(
+                        $"[Stock] '{addressKey}': -{sold} {(BigAmbitions.Items.ItemName)s.ItemName} (sold to {buyerId})" +
+                        (remaining > 0 ? $" — SHORT by {remaining} (stock didn't cover the sale)." : "."));
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] decrement '{addressKey}': {ex.Message}"); }
+        }
+
+        /// <summary>
         /// Constructs a new IL2CPP ItemInstance from a network-side DTO and
         /// populates all the fields we serialize.  Cargo + stacked + colors +
         /// purchaser-settings are rebuilt as fresh IL2CPP objects.

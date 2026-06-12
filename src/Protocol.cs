@@ -793,6 +793,16 @@ namespace BigAmbitionsMP
         public string Address { get; set; } = "";
         public float  Total   { get; set; }
         public string Desc    { get; set; } = "";   // "CheapGift x3, ..." for notices/logs
+        /// <summary>Structured order lines — drives the owner-side authoritative
+        /// stock decrement (slice 2).  Desc stays for notices only.</summary>
+        public List<SaleItem> Items { get; set; } = new();
+    }
+
+    /// <summary>One sold line item in a RemoteSale.</summary>
+    public class SaleItem
+    {
+        public int ItemName { get; set; }   // BigAmbitions.Items.ItemName enum
+        public int Amount   { get; set; }
     }
 
     /// <summary>Player on/off duty at a cash register (MessageType.RegisterCashier).</summary>

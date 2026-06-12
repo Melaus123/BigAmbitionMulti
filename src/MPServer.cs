@@ -1221,7 +1221,13 @@ namespace BigAmbitionsMP
                     return;
                 }
                 GameStatePatcher.EnqueueOnMainThread(() =>
-                    MPHub.DeliverSaleRevenue(rs.OwnerId, rs.BuyerId, rs.Total, rs.Address, rs.Desc));
+                {
+                    MPHub.DeliverSaleRevenue(rs.OwnerId, rs.BuyerId, rs.Total, rs.Address, rs.Desc);
+                    // Slice 2: the sale consumes REAL stock.  The host is the
+                    // interior authority — decrement here; the interior diff
+                    // (hash covers cargo Amount) carries it to every machine.
+                    GameStatePatcher.ApplySaleStockDecrement(rs.Address, rs.Items, rs.BuyerId);
+                });
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[RemoteSale] {ex.Message}"); }
         }

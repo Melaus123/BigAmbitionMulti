@@ -2423,6 +2423,7 @@ namespace BigAmbitionsMP
             private static string _pendingOwner = "";
             private static string _pendingAddress = "";
             private static string _pendingAct0 = "none";
+            private static readonly System.Collections.Generic.List<SaleItem> _pendingItems = new();
 
             static bool Prefix(Controllers.CashRegisterController __instance,
                                Il2CppSystem.Collections.Generic.List<BigAmbitions.Items.CargoInstance> orderedCargoInstances)
@@ -2438,6 +2439,7 @@ namespace BigAmbitionsMP
 
                     float total = 0f;
                     var desc = new System.Text.StringBuilder();
+                    _pendingItems.Clear();
                     if (orderedCargoInstances != null)
                         for (int i = 0; i < orderedCargoInstances.Count; i++)
                         {
@@ -2447,6 +2449,7 @@ namespace BigAmbitionsMP
                             if (price < 0f) price = (float)c.pricePerUnit;   // table miss → cargo stamp
                             total += c.amount * price;
                             if (desc.Length < 160) desc.Append($"{c.itemName} x{c.amount}, ");
+                            _pendingItems.Add(new SaleItem { ItemName = (int)c.itemName, Amount = c.amount });
                         }
 
                     _pendingTotal   = total;
@@ -2488,6 +2491,7 @@ namespace BigAmbitionsMP
                         Total   = _pendingTotal,
                         Desc    = _pendingDesc,
                     };
+                    sale.Items.AddRange(_pendingItems);
                     if (MPServer.IsRunning) MPServer.HandleRemoteSale(sale);
                     else MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.RemoteSale, MPConfig.PlayerId, sale));
 
