@@ -1568,6 +1568,21 @@ namespace BigAmbitionsMP
                 reg.RentPerDay          = info.RentPerDay;
                 reg.lastDeposit         = info.LastDeposit;
 
+                // AI-business retail prices (host-authoritative; the client's
+                // rival sim is suppressed so its tables stay empty otherwise).
+                // Player shops never carry Prices here — MPPriceSync owns them.
+                try
+                {
+                    if (info.Prices != null && info.Prices.Count > 0 && reg.retailPrices != null
+                        && !IsSessionPlayerBusiness(reg))
+                    {
+                        reg.retailPrices.Clear();
+                        foreach (var rp in info.Prices)
+                            reg.retailPrices.Add(new RetailPrice { itemName = rp.ItemName, price = rp.Price });
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] AI prices apply '{info.AddressKey}': {ex.Message}"); }
+
                 // Tier B — description + sign + logo.
                 reg.BusinessDescription = info.BusinessDescription;
 

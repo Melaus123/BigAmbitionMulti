@@ -543,6 +543,26 @@ namespace BigAmbitionsMP
                     BusinessOwnerPlayerId = reg.RentedByPlayer           ? MPConfig.PlayerId : "",
                 };
 
+                // AI-business retail prices (host-authoritative; audit catch
+                // 2026-06-12: clients suppress the rival sim so their AI shops
+                // had EMPTY tables → default prices instead of the host's
+                // competition-adjusted ones).  Player shops stay with the live
+                // MPPriceSync channel — never carried here.
+                try
+                {
+                    if (!reg.RentedByPlayer && !GameStatePatcher.IsSessionPlayerBusiness(reg)
+                        && reg.retailPrices != null && reg.retailPrices.Count > 0)
+                    {
+                        for (int i = 0; i < reg.retailPrices.Count; i++)
+                        {
+                            var rp = reg.retailPrices[i];
+                            if (rp == null) continue;
+                            info.Prices.Add(new RetailPriceInfo { ItemName = rp.itemName ?? "", Price = rp.price });
+                        }
+                    }
+                }
+                catch { }
+
                 var sign = reg.signAppearanceSettings;
                 if (sign != null)
                 {
@@ -651,9 +671,18 @@ namespace BigAmbitionsMP
             return SafeBuildingOwnedByPlayer(reg) ? MPConfig.PlayerId : "";
         }
 
+        private static bool PricesEqual(System.Collections.Generic.List<RetailPriceInfo> a, System.Collections.Generic.List<RetailPriceInfo> b)
+        {
+            if (a.Count != b.Count) return false;
+            for (int i = 0; i < a.Count; i++)
+                if (a[i].ItemName != b[i].ItemName || a[i].Price != b[i].Price) return false;
+            return true;
+        }
+
         private static bool EqualInfo(BusinessInfo a, BusinessInfo b)
         {
             return a.BusinessName             == b.BusinessName
+                && PricesEqual(a.Prices, b.Prices)
                 && a.BusinessTypeName         == b.BusinessTypeName
                 && a.TemporarilyClosed        == b.TemporarilyClosed
                 && a.AvailableForRent         == b.AvailableForRent

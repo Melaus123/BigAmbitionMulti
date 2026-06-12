@@ -999,7 +999,15 @@ namespace BigAmbitionsMP
                 var hostChar = PlayerHelper.PlayerController?.Character;
                 if (hostChar != null)
                 {
-                    if (!LocalInBuilding)
+                    // Inside/outside from the GAME's authoritative static, not
+                    // just our enter/exit event flag — a session LOAD skips the
+                    // exit event, leaving the flag stuck TRUE while the player
+                    // stands outside with no outside-pos memory → zero anchors
+                    // → no traffic at all (user, 2026-06-12).
+                    bool inside = LocalInBuilding;
+                    try { inside = BuildingManager.IsInsideBuilding; } catch { }
+                    LocalInBuilding = inside;   // resync the event flag
+                    if (!inside)
                     {
                         // Outside — use the live transform AND remember it so
                         // we can pin the ghost anchor here if we go inside.
@@ -1015,6 +1023,13 @@ namespace BigAmbitionsMP
                         var ga = GetOrCreateGhostAnchor();
                         ga.position = _lastOutsidePos;
                         anchors.Add(ga);
+                    }
+                    else
+                    {
+                        // Inside with NO outside memory (fresh load straight
+                        // into a building) — feed the player transform anyway;
+                        // traffic around the building beats a dead feed.
+                        anchors.Add(hostChar.transform);
                     }
                 }
                 foreach (var t in RemotePlayerManager.GetRemotePlayerTransforms())

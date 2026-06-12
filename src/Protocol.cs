@@ -651,6 +651,14 @@ namespace BigAmbitionsMP
         public bool   RentedByPlayer       { get; set; }
         public string OwnerPlayerId        { get; set; } = "";
         public string BusinessOwnerPlayerId{ get; set; } = "";
+
+        /// <summary>AI-business retail prices (host-authoritative).  Clients
+        /// suppress the daily rival sim, so without this their AI shops keep
+        /// EMPTY price tables and buy at default market prices while the host's
+        /// world runs competition-adjusted ones (first audit drill-down catch,
+        /// 2026-06-12).  Session-player shops are NOT carried here — the live
+        /// MPPriceSync channel owns those.</summary>
+        public List<RetailPriceInfo> Prices { get; set; } = new();
     }
 
     /// <summary>One day of the week's opening schedule for one building.</summary>
