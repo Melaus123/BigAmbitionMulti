@@ -2434,9 +2434,10 @@ namespace BigAmbitionsMP
                     if (!MPRestSync.AllPlayers().Contains(owner)) return true;          // AI shops native
                     if (!MPRegisterSync.IsStaffedByOtherPlayer(__instance.transform.position)) return true;  // nobody working it
 
-                    _selfService ??= typeof(Controllers.CashRegisterController).GetMethod(
-                        "InteractAsSelfService",
-                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    if (_selfService == null)
+                        foreach (var m in typeof(Controllers.CashRegisterController).GetMethods(
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                            if (m.Name == "InteractAsSelfService") { _selfService = m; break; }
                     if (_selfService == null)
                     {
                         Plugin.Logger.LogWarning("[SelfCheckout] InteractAsSelfService not found — falling through native.");
@@ -2487,9 +2488,12 @@ namespace BigAmbitionsMP
                     string owner = MPRegisterSync.CurrentShopOwner;
                     if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return;
                     if (!MPRestSync.AllPlayers().Contains(owner)) return;   // AI shops native
+                    // Duty-staffed → the Interact prefix routes to self-checkout;
+                    // CanOrder must stay native so the customer path engages.
+                    if (MPRegisterSync.IsStaffedByOtherPlayer(__instance.transform.position)) return;
                     bool staffed = false;
                     try { staffed = __instance.employeeInstance != null; } catch { }
-                    if (staffed) return;                                    // synthetic NPC manning it — allow
+                    if (staffed) return;                                    // a real employee mans it — allow
                     __result = false;
                     if (UnityEngine.Time.unscaledTime >= _nextLog)
                     {
