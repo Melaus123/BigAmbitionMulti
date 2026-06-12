@@ -63,7 +63,8 @@ namespace BigAmbitionsMP
                 if (p.PlayerId != MPConfig.PlayerId && !string.IsNullOrEmpty(p.Address))
                 {
                     string addr = p.Address; string pid = p.PlayerId; string st = p.StationId;
-                    GameStatePatcher.EnqueueOnMainThread(() => TryStaffSynthetic(addr, pid, st));
+                    var dutyPos = pos;
+                    GameStatePatcher.EnqueueOnMainThread(() => TryStaffSynthetic(addr, pid, st, dutyPos));
                 }
             }
             else if (_cashiers.TryGetValue(k, out var e) && e.playerId == p.PlayerId)
@@ -151,8 +152,37 @@ namespace BigAmbitionsMP
                 }
 
                 TickHideSyntheticBodies();   // v2 polish — same 1s cadence
+                TickStaffEvaluator();        // invoke the mapped evaluator directly
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] duty: {ex.Message}"); }
+        }
+
+        // ── Direct evaluator invocation (disasm-mapped 2026-06-12) ────────────
+        // UpdateEmployee(bool) IS the staffing evaluator+spawner (gates:
+        // ShouldUpdateEmployee → ItemHelper.HasAnyMissingRequirements →
+        // GetEmployeeWorkShift → GetEmployeeById → availability → CreatePrefab).
+        // Nothing calls it for rival-translated shops on this machine, so we
+        // call it ourselves on unstaffed duty registers every 5s; the gate
+        // probes ([StaffEval]) log exactly where it passes or bails.
+        private static float _nextEvalAt;
+
+        private static void TickStaffEvaluator()
+        {
+            if (_synthetics.Count == 0) return;
+            if (Time.unscaledTime < _nextEvalAt) return;
+            _nextEvalAt = Time.unscaledTime + 5f;
+            foreach (var kv in _synthetics)
+            {
+                try
+                {
+                    var reg = FindNearestRegister(kv.Value.pos, 2f);
+                    if (reg == null) continue;            // interior not loaded here
+                    if (reg.employeeInstance != null) continue;   // already staffed
+                    Plugin.Logger.LogInfo($"[SynthStaff] invoking UpdateEmployee(false) on register at '{kv.Key}'.");
+                    reg.UpdateEmployee(false);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] evaluator: {ex.Message}"); }
+            }
         }
 
         // ── v2 polish: the synthetic employee's NPC body is plumbing — the
@@ -226,9 +256,13 @@ namespace BigAmbitionsMP
         // never injects (the real player works there natively), so the
         // authoritative host save can only pick one up if a CLIENT-owned shop
         // is involved — synthetic ids are prefixed for a later save-strip.
-        private static readonly Dictionary<string, (string playerId, EmployeeInstance inst)> _synthetics = new();
+        private static readonly Dictionary<string, (string playerId, EmployeeInstance inst, Vector3 pos)> _synthetics = new();
 
-        private static void TryStaffSynthetic(string addressKey, string playerId, string stationId = "")
+        /// <summary>True when this world position is a register some player is
+        /// working (probe filter — keeps station-evaluator logging on-topic).</summary>
+        public static bool IsDutyStation(Vector3 pos) => _cashiers.ContainsKey(Key(pos));
+
+        private static void TryStaffSynthetic(string addressKey, string playerId, string stationId, Vector3 dutyPos)
         {
             try
             {
@@ -270,7 +304,7 @@ namespace BigAmbitionsMP
 
                 gi.EmployeeInstances.Add(inst);
                 try { Helpers.EmployeeHelper.EmployeeInstancesDictionary[inst.id] = inst; } catch { }
-                _synthetics[addressKey] = (playerId, inst);
+                _synthetics[addressKey] = (playerId, inst, dutyPos);
                 Plugin.Logger.LogInfo(
                     $"[SynthStaff] injected '{inst.id}' for '{playerId}' at '{addressKey}' " +
                     $"(roster {before}→{gi.EmployeeInstances.Count}; days=7 hours=168 wage=0).");

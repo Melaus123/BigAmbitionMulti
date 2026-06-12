@@ -2329,6 +2329,49 @@ namespace BigAmbitionsMP
         //  lesson again).  The re-entry experiment needs no probe: AssignProbe
         //  below already logs any register assignment.) ───────────────────────
 
+        // ── [StaffEval] gate probes (2026-06-12, disasm-mapped chain).  Logs
+        // the two decision points of UpdateEmployee for DUTY registers only:
+        // does ShouldUpdateEmployee pass, and does GetEmployeeWorkShift find
+        // our synthetic's shift.  Game-logic methods only (no Unity lifecycle
+        // — the EmpSpawn lesson).  Throttled by the 5s evaluator cadence. ─────
+        [HarmonyPatch]
+        public static class Patch_StaffEval_Probes
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var list = new System.Collections.Generic.List<System.Reflection.MethodBase>();
+                try
+                {
+                    foreach (var m in typeof(EmployeeStationController).GetMethods(
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                        if ((m.Name == "ShouldUpdateEmployee" || m.Name == "GetEmployeeWorkShift")
+                            && m.DeclaringType == typeof(EmployeeStationController))
+                            list.Add(m);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] targets: {ex.Message}"); }
+                return list;
+            }
+
+            static void Postfix(EmployeeStationController __instance, System.Reflection.MethodBase __originalMethod, object __result)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                try
+                {
+                    if (!MPRegisterSync.IsDutyStation(__instance.transform.position)) return;
+                    string verdict;
+                    if (__result == null) verdict = "null";
+                    else if (__result is bool b) verdict = b.ToString();
+                    else
+                    {
+                        var ws = (__result as Il2CppSystem.Object)?.TryCast<WorkShift>();
+                        verdict = ws != null ? $"shift(emp='{ws.employeeId}' station='{ws.itemInstanceId}' {ws.startingHour}-{ws.endingHour})" : __result.ToString();
+                    }
+                    Plugin.Logger.LogInfo($"[StaffEval] {__originalMethod.Name} → {verdict}");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] {ex.Message}"); }
+            }
+        }
+
         // ── [RegGuard] queue-entry guard (2026-06-11).  In another player's
         // shop the native queue happily accepts a customer even when NO serving
         // entity exists locally → OnPlaceOrder NREs → hard lock (two runs).
