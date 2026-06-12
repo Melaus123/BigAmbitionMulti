@@ -778,6 +778,15 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.AuditReport:
+                {
+                    // Client's periodic state-hash audit — compare to OUR state
+                    // on the main thread (BuildReport walks game objects).
+                    var ar = env.GetPayload<AuditReportPayload>();
+                    if (ar != null) GameStatePatcher.EnqueueOnMainThread(() => MPAudit.HostHandle(ar));
+                    break;
+                }
+
                 case MessageType.Chat:
                 {
                     // A client chatted.  PUBLIC → append + relay to everyone (the

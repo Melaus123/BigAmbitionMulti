@@ -91,6 +91,7 @@ namespace BigAmbitionsMP
         PhaseReport          = 110, // Client → Host: my lifecycle phase changed (load-fence visibility; lets the host excuse a client who bailed to the menu instead of loading).
         RegisterCashier      = 111, // Any → Host → All: player went on/off duty at the cash register near (X,Y,Z); others can F4-buy there (Wave-2 player-staffed registers).
         RemoteSale           = 112, // Buyer → Host: I bought items in another player's shop (buyer already paid locally); host validates and credits the owner.
+        AuditReport          = 113, // Client → Host: periodic state-hash audit (clock, business table, roster, interior replicas) — host compares against its own state and logs [Audit] MISMATCH on divergence.
     }
 
     // ── Envelope ───────────────────────────────────────────────────────────────
@@ -822,6 +823,29 @@ namespace BigAmbitionsMP
     {
         public string ItemName { get; set; } = "";   // item name string (EA 0.11 moddable-item ids)
         public int    Amount   { get; set; }
+    }
+
+    /// <summary>Periodic cross-machine state audit (MessageType.AuditReport).
+    /// Hashes are FNV-1a (stable across processes).  Fields that legitimately
+    /// differ per machine (Money, VehicleCount) are REPORT-ONLY; the rest are
+    /// compared by the host against its own state.</summary>
+    public class AuditReportPayload
+    {
+        public string PlayerId  { get; set; } = "";
+        public int    Day       { get; set; }
+        public float  Hour      { get; set; }
+        public float  Money     { get; set; }            // report-only
+        public int    BizHash   { get; set; }            // business table (names/types/owners/prices)
+        public int    BizCount  { get; set; }
+        public int    RosterHash    { get; set; }
+        public int    VehicleCount  { get; set; }        // report-only (fleets are per-player)
+        public List<AddressHashInfo> Interiors { get; set; } = new();
+    }
+
+    public class AddressHashInfo
+    {
+        public string AddressKey { get; set; } = "";
+        public int    Hash       { get; set; }
     }
 
     /// <summary>Player on/off duty at a cash register (MessageType.RegisterCashier).</summary>

@@ -930,6 +930,13 @@ namespace BigAmbitionsMP
             Send(MessageEnvelope.Create(MessageType.RetailPrices, MPConfig.PlayerId, p));
         }
 
+        /// <summary>Periodic state-hash audit → host (silent-divergence detector).</summary>
+        public static void SendAuditReport(AuditReportPayload p)
+        {
+            if (!IsConnected || p == null) return;
+            Send(MessageEnvelope.Create(MessageType.AuditReport, MPConfig.PlayerId, p));
+        }
+
         public static void SendChat(string text, string to = "")
         {
             if (!IsConnected || string.IsNullOrWhiteSpace(text)) return;

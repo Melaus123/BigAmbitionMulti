@@ -393,25 +393,25 @@ namespace BigAmbitionsMP
         /// Order-sensitive hash over the snapshot's contents.  Collisions just
         /// mean one missed broadcast, recoverable on the next change.
         /// </summary>
-        private static int ComputeHash(InteriorSnapshotPayload snap)
+        internal static int ComputeHash(InteriorSnapshotPayload snap)
         {
             unchecked
             {
                 int h = 17;
-                h = h * 31 + (snap.Layout?.GetHashCode() ?? 0);
+                h = h * 31 + MPAudit.StableHash(snap.Layout);
                 foreach (var d in snap.InteriorDesigns)
                 {
-                    h = h * 31 + (d.UUID?.GetHashCode() ?? 0);
+                    h = h * 31 + MPAudit.StableHash(d.UUID);
                     foreach (var m in d.Materials)
                     {
-                        h = h * 31 + (m.MaterialID?.GetHashCode() ?? 0);
+                        h = h * 31 + MPAudit.StableHash(m.MaterialID);
                         h = h * 31 + m.MaterialIndex;
                         h = h * 31 + m.ColorIndex;
                     }
                 }
                 foreach (var rp in snap.RetailPrices)
                 {
-                    h = h * 31 + (rp.ItemName?.GetHashCode() ?? 0);
+                    h = h * 31 + MPAudit.StableHash(rp.ItemName);
                     h = h * 31 + rp.Price.GetHashCode();
                 }
                 foreach (var ds in snap.DirtSpots)
@@ -428,18 +428,18 @@ namespace BigAmbitionsMP
                 // visible state and worth hashing too.
                 foreach (var it in snap.ItemInstances)
                 {
-                    h = h * 31 + (it.Id?.GetHashCode() ?? 0);
-                    h = h * 31 + (it.ItemName?.GetHashCode() ?? 0);
+                    h = h * 31 + MPAudit.StableHash(it.Id);
+                    h = h * 31 + MPAudit.StableHash(it.ItemName);
                     // Round positions to nearest cm so 0.001f jitter doesn't trigger.
                     h = h * 31 + ((int)System.Math.Round(it.Px * 100f)).GetHashCode();
                     h = h * 31 + ((int)System.Math.Round(it.Py * 100f)).GetHashCode();
                     h = h * 31 + ((int)System.Math.Round(it.Pz * 100f)).GetHashCode();
                     h = h * 31 + ((int)System.Math.Round(it.YRotation * 10f)).GetHashCode();
                     h = h * 31 + it.StateIndex;
-                    h = h * 31 + (it.Alias?.GetHashCode() ?? 0);
+                    h = h * 31 + MPAudit.StableHash(it.Alias);
                     foreach (var c in it.CargoInstances)
                     {
-                        h = h * 31 + (c.ItemName?.GetHashCode() ?? 0);
+                        h = h * 31 + MPAudit.StableHash(c.ItemName);
                         h = h * 31 + c.Amount;
                         h = h * 31 + ((int)System.Math.Round(c.PricePerUnit * 100f)).GetHashCode();
                     }

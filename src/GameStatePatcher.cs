@@ -840,6 +840,11 @@ namespace BigAmbitionsMP
         public static bool IsReplicatedInterior(string addressKey)
             => !string.IsNullOrEmpty(addressKey) && _lastItemSer.ContainsKey(addressKey);
 
+        /// <summary>Addresses whose interiors are replicas here (audit scope —
+        /// the source machine's copy is the reference to compare against).</summary>
+        public static List<string> ReplicatedInteriorAddresses()
+            => new List<string>(_lastItemSer.Keys);
+
         private static void TryRefreshActiveInteriorIfMatches(string addressKey,
             HashSet<string>? changedIds = null, HashSet<string>? removedIds = null,
             HashSet<string>? changedDesignUuids = null)
