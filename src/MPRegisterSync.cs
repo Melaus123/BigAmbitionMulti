@@ -29,7 +29,7 @@ namespace BigAmbitionsMP
         // posKey → cashier playerId
         private static readonly Dictionary<string, (string playerId, Vector3 pos)> _cashiers = new();
 
-        public static void Reset() { _cashiers.Clear(); _synthetics.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = ""; }
+        public static void Reset() { _cashiers.Clear(); _synthetics.Clear(); _hiddenNpcs.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = ""; }
 
         // ── Current building context (set by the building entry patch) ────────
         // After the rival-translation, businessOwnerRivalId holds the OWNING
@@ -134,8 +134,47 @@ namespace BigAmbitionsMP
                     _onDuty = false;
                     SendToggle(_dutyPos, false);
                 }
+
+                TickHideSyntheticBodies();   // v2 polish — same 1s cadence
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] duty: {ex.Message}"); }
+        }
+
+        // ── v2 polish: the synthetic employee's NPC body is plumbing — the
+        // working PLAYER's avatar is the visual (user spec: no second body at
+        // the register).  Once the NPC mans a duty register, strip its
+        // renderers; it keeps serving invisibly.  NPC despawns with removal,
+        // so no un-hide path is needed.
+        private static readonly HashSet<IntPtr> _hiddenNpcs = new();
+
+        private static void TickHideSyntheticBodies()
+        {
+            if (_cashiers.Count == 0) return;
+            foreach (var kv in _cashiers)
+            {
+                if (kv.Value.playerId == MPConfig.PlayerId) continue;
+                Controllers.CashRegisterController? reg = null;
+                try { reg = FindNearestRegister(kv.Value.pos, 2f); } catch { }
+                if (reg == null) continue;
+                try
+                {
+                    var inst = reg.employeeInstance;
+                    if (inst == null || inst.id == null || !inst.id.StartsWith("BAMP_DUTY_")) continue;
+                    var emp = reg.employee;
+                    if (emp == null) continue;
+                    var ptr = emp.Pointer;
+                    if (_hiddenNpcs.Contains(ptr)) continue;
+                    int n = 0;
+                    var rends = emp.GetComponentsInChildren<Renderer>(true);
+                    if (rends != null)
+                        foreach (var r in rends)
+                            if (r != null && r.enabled) { r.enabled = false; n++; }
+                    _hiddenNpcs.Add(ptr);
+                    Plugin.Logger.LogInfo(
+                        $"[SynthStaff] NPC body hidden at {kv.Key} ({n} renderer(s)) — the worker's avatar is the visual.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] hide: {ex.Message}"); }
+            }
         }
 
         /// <summary>Is the register at this world position staffed by another

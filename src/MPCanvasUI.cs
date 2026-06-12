@@ -1144,19 +1144,22 @@ namespace BigAmbitionsMP
                         // Minimum gift-shop kit (paid stock, $0 cost basis).
                         // (CashRegister dropped — the checkout counter is the
                         //  full checkout deal; baskets added — both user.)
-                        (BigAmbitions.Items.ItemName item, int amount)[] kit =
+                        // price: rig-made cargo previously carried 0f — suspected
+                        // source of the $0 checkout (AI-shop stock arrives
+                        // pre-priced; CheapGift's default retail is $18 per user).
+                        (BigAmbitions.Items.ItemName item, int amount, float price)[] kit =
                         {
-                            (BigAmbitions.Items.ItemName.CheckoutCounterRight,    1),
-                            (BigAmbitions.Items.ItemName.PaperBag,              100),
-                            (BigAmbitions.Items.ItemName.StackOfShoppingBaskets,  1),
-                            (BigAmbitions.Items.ItemName.RoundedShelf,            2),
-                            (BigAmbitions.Items.ItemName.CheapGift,              60),
+                            (BigAmbitions.Items.ItemName.CheckoutCounterRight,    1,  0f),
+                            (BigAmbitions.Items.ItemName.PaperBag,              100,  0f),
+                            (BigAmbitions.Items.ItemName.StackOfShoppingBaskets,  1,  0f),
+                            (BigAmbitions.Items.ItemName.RoundedShelf,            2,  0f),
+                            (BigAmbitions.Items.ItemName.CheapGift,              60, 18f),
                         };
-                        foreach (var (item, amount) in kit)
-                            inst.cargoInstances.Add(new BigAmbitions.Items.CargoInstance(item, amount, 0f, true));
+                        foreach (var (item, amount, price) in kit)
+                            inst.cargoInstances.Add(new BigAmbitions.Items.CargoInstance(item, amount, price, true));
                         var vc = VehicleHelper.CreateAndSpawnVehicle(inst, pos, rot);
                         Plugin.Logger.LogInfo(vc != null
-                            ? $"[TestRig] flatbed '{inst.id}' spawned at {pos} with gift-shop kit (counter, register, {100} bags, 2 shelves, {60} cheap gifts)."
+                            ? $"[TestRig] flatbed '{inst.id}' spawned at {pos} with gift-shop kit (gifts pre-priced $18)."
                             : "[TestRig] CreateAndSpawnVehicle returned null.");
                     }
                 }
