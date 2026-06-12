@@ -452,22 +452,18 @@ namespace BigAmbitionsMP
                     if (cwType == null) { Plugin.Logger.LogWarning("[PhoneBtn] CollapsibleWindow type unresolved."); break; }
                     object cw = c;   // Mono: the component IS the typed instance
 
-                    System.Reflection.PropertyInfo? pColl = null;
-                    foreach (var p in cwType.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
-                        if (string.Equals(p.Name, "collapsedPosition", StringComparison.OrdinalIgnoreCase)) { pColl = p; break; }
-
-                    if (pColl == null || !pColl.CanWrite)
+                    // EA 0.11: collapsedPosition/hoverFunction are FIELDS (the
+                    // property-only scan silently failed) — property-or-field.
+                    var mColl = MPReflect.PropertyOrField(cwType, "collapsedPosition");
+                    if (mColl == null)
                     {
-                        var names = new System.Text.StringBuilder();
-                        foreach (var p in cwType.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
-                            names.Append(p.Name).Append(' ');
-                        Plugin.Logger.LogWarning($"[PhoneBtn] collapsedPosition NOT settable; available props: {names}");
+                        Plugin.Logger.LogWarning("[PhoneBtn] collapsedPosition not found on CollapsibleWindow.");
                     }
                     else
                     {
-                        var v = (Vector3)(pColl.GetValue(cw) ?? Vector3.zero);
-                        pColl.SetValue(cw, new Vector3(v.x, v.y - RowGrowth, v.z));
-                        var rb = (Vector3)(pColl.GetValue(cw) ?? Vector3.zero);
+                        var v = (Vector3)(MPReflect.Get(mColl, cw) ?? Vector3.zero);
+                        MPReflect.Set(mColl, cw, new Vector3(v.x, v.y - RowGrowth, v.z));
+                        var rb = (Vector3)(MPReflect.Get(mColl, cw) ?? Vector3.zero);
                         Plugin.Logger.LogInfo($"[PhoneBtn] collapsedPosition.y {v.y:F0} → {rb.y:F0} (readback; taller body slides further down).");
                     }
 
@@ -475,21 +471,19 @@ namespace BigAmbitionsMP
                     // position the native peek-on-hover travels much further,
                     // turning the uncollapse button into a moving target.
                     // Click-to-toggle is unaffected.
-                    foreach (var p in cwType.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                    var mHover = MPReflect.PropertyOrField(cwType, "hoverFunction");
+                    if (mHover != null)
                     {
-                        if (!string.Equals(p.Name, "hoverFunction", StringComparison.OrdinalIgnoreCase)) continue;
                         try
                         {
-                            var cur = p.GetValue(cw);
-                            if (p.CanWrite && p.PropertyType.IsEnum)
-                            {
-                                p.SetValue(cw, Enum.ToObject(p.PropertyType, 0));
-                                Plugin.Logger.LogInfo($"[PhoneBtn] hoverFunction {cur} → {p.GetValue(cw)} (peek-on-hover disabled).");
-                            }
-                            else Plugin.Logger.LogWarning($"[PhoneBtn] hoverFunction not writable/enum (type={p.PropertyType.Name}, value={cur}).");
+                            var ht  = MPReflect.TypeOf(mHover);
+                            var cur = MPReflect.Get(mHover, cw);
+                            if (ht != null && ht.IsEnum && MPReflect.Set(mHover, cw, Enum.ToObject(ht, 0)))
+                                Plugin.Logger.LogInfo($"[PhoneBtn] hoverFunction {cur} → {MPReflect.Get(mHover, cw)} (peek-on-hover disabled).");
+                            else
+                                Plugin.Logger.LogWarning($"[PhoneBtn] hoverFunction not writable/enum (type={ht?.Name}, value={cur}).");
                         }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[PhoneBtn] hoverFunction: {ex.Message}"); }
-                        break;
                     }
                     break;
                 }

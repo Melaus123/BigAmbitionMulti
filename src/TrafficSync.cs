@@ -845,28 +845,13 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>Pulls the prefab GameObject out of a Gley CarType wrapper by reflection.</summary>
+        /// <summary>The prefab GameObject of a Gley CarType.  EA 0.11 (Mono):
+        /// vehiclePrefab is a plain public FIELD — the old property-reflection
+        /// scan found nothing and the prefab map silently went empty (every
+        /// traffic ghost fell back to the generic spawn).</summary>
         private static GameObject? ExtractPrefab(CarType el)
         {
-            try
-            {
-                const BindingFlags f = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
-                GameObject? first = null;
-                foreach (var p in el.GetType().GetProperties(f))
-                {
-                    if (!p.CanRead || p.GetIndexParameters().Length > 0) continue;
-                    object? v;
-                    try { v = p.GetValue(el); } catch { continue; }
-                    GameObject? go = v as GameObject;
-                    if (go == null && v is Component c) go = c.gameObject;
-                    if (go == null) continue;
-                    string nm = p.Name.ToLowerInvariant();
-                    if (nm.Contains("prefab") || nm.Contains("vehicle") || nm.Contains("car"))
-                        return go;                          // preferred match
-                    first ??= go;
-                }
-                return first;
-            }
+            try { return el.vehiclePrefab; }
             catch { return null; }
         }
 

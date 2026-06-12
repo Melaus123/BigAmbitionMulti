@@ -266,24 +266,37 @@ namespace BigAmbitionsMP
                 object target = act;
                 var t = act.GetType();
 
-                if (!_durProps.TryGetValue(t, out var prop))
+                if (!_durProps.TryGetValue(t, out var member))
                 {
-                    prop = null;
-                    foreach (var p in t.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                    member = null;
+                    const System.Reflection.BindingFlags bf =
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                    foreach (var p in t.GetProperties(bf))
                         if (p.PropertyType == typeof(int) && p.CanRead && p.CanWrite
                             && p.Name.IndexOf("minutesTo", StringComparison.OrdinalIgnoreCase) >= 0)
-                        { prop = p; break; }
-                    _durProps[t] = prop;
-                    Plugin.Logger.LogInfo($"[Rest] duration field for {t.Name}: {(prop != null ? prop.Name : "NOT FOUND")}");
+                        { member = p; break; }
+                    // EA 0.11 (Mono): the durations are private int FIELDS
+                    // (_minutesToRest/_minutesToWork/_minutesToSleep) — the
+                    // property-only scan logged "NOT FOUND" and silently
+                    // no-opped, so the native duration expired the moment the
+                    // skip raced the clock: auto-stand → vote drop → skip
+                    // cancelled (the recurring bench bug, user 2026-06-12).
+                    if (member == null)
+                        foreach (var f in t.GetFields(bf))
+                            if (f.FieldType == typeof(int)
+                                && f.Name.IndexOf("minutesTo", StringComparison.OrdinalIgnoreCase) >= 0)
+                            { member = f; break; }
+                    _durProps[t] = member;
+                    Plugin.Logger.LogInfo($"[Rest] duration field for {t.Name}: {(member != null ? member.Name : "NOT FOUND")}");
                 }
-                if (prop == null) return;
-                int total = Convert.ToInt32(prop.GetValue(target) ?? 0);
+                if (member == null) return;
+                int total = Convert.ToInt32(MPReflect.Get(member, target) ?? 0);
                 int delta = (int)Math.Ceiling(need - rem);
-                prop.SetValue(target, total + delta);
+                MPReflect.Set(member, target, total + delta);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] EnsureActivityCovers: {ex.Message}"); }
         }
-        private static readonly Dictionary<Type, System.Reflection.PropertyInfo?> _durProps = new();
+        private static readonly Dictionary<Type, System.Reflection.MemberInfo?> _durProps = new();
 
         /// <summary>All session player names (for the who-voted checklist).</summary>
         public static List<string> AllPlayers()

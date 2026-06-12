@@ -2277,3 +2277,8 @@ PHASE 4 — SAVE PERSISTENCE (design locked 2026-05-31, in progress)
 - Door+light flicker on snapshots = re-Deserialize of ALL InteriorElements each apply; now per-UUID diff (_lastDesignSer) like the item diff. (rule)
 - Held-prop sender must use activeInHierarchy not activeSelf: 0.11 parks a prop under an inactive parent → phantom box broadcast. (rule)
 - ItemHelper (and ShelfController) live in the GLOBAL namespace in 0.11; GetBuildingRegistration is an extension on ItemInstance. (rule)
+
+## CLOCK-FIGHT FIX (2026-06-12, commit f74011f)
+- Client night↔day flicker root cause: TimeSync snap/drip vs the anti-skip watchdog (TickWorldClock) — watchdog reverted every sync write as a rogue skip. LATENT since 2026-06-10 (sessions always started clock-aligned; fresh-character mid-join with big offset finally triggered it). Fix: TimeSync sets volatile _wroteClock on its writes; watchdog consumes it and re-bases its window instead of rejecting. Watchdog's own revert writes don't set the flag (skip rejection unchanged). (rule)
+- gi.Day/Hour/Minute ARE the live clock in 0.11 (GameManager advances them; TimeHelper reads them) — SetGameTime target was correct; the revert was our own watchdog, not the game. (rule)
+- Character-creation on session load = CORRECT fallback for sessions whose manifest lacks the client slot (pre-TEMP-fix saves). New sessions saved after the fix should carry both slots ("2 slot(s)" in manifest log). (situational: legacy sessions from 2026-06-12 morning)
