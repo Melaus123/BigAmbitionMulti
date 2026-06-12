@@ -56,7 +56,7 @@ namespace BigAmbitionsMP
             try { p.Money = SaveGameManager.Current?.Money ?? 0f; } catch { }
             try { p.VehicleCount = SaveGameManager.Current?.VehicleInstances?.Count ?? 0; } catch { }
             try { p.RosterHash = RosterHash(); } catch { }
-            try { (p.BizHash, p.BizCount) = BizTableHash(); } catch { }
+            try { (p.BizHash, p.BizCount, p.BizBuckets) = BizTableHash(); } catch { }
             try
             {
                 foreach (var addr in GameStatePatcher.ReplicatedInteriorAddresses())
@@ -79,50 +79,130 @@ namespace BigAmbitionsMP
             return h;
         }
 
-        /// <summary>Order-independent hash of the whole business table — the
-        /// state BusinessSync keeps mirrored (names, types, owners, closed
-        /// flags, retail prices).  XOR-combined per registration so iteration
-        /// order can't cause false mismatches.</summary>
-        private static (int hash, int count) BizTableHash()
+        /// <summary>Hash of ONE registration's mirrored business state (names,
+        /// types, owners, closed flag, retail prices).</summary>
+        private static int RegHash(BuildingRegistration reg)
+        {
+            int h = 17;
+            h = Combine(h, StableHash(GameStateReader.AddressKey(reg)));
+            h = Combine(h, StableHash(reg.BusinessName?.ToString()));
+            h = Combine(h, StableHash(reg.businessTypeName));
+            h = Combine(h, reg.temporarilyClosed ? 1 : 0);
+            h = Combine(h, StableHash(reg.buildingOwnerRivalId));
+            h = Combine(h, StableHash(reg.businessOwnerRivalId));
+            var prices = reg.retailPrices;
+            if (prices != null)
+                for (int i = 0; i < prices.Count; i++)
+                {
+                    var rp = prices[i];
+                    if (rp == null) continue;
+                    h = Combine(h, StableHash(rp.itemName));
+                    h = Combine(h, (int)System.Math.Round(rp.price * 100f));
+                }
+            return h;
+        }
+
+        private static int BucketOf(BuildingRegistration reg)
+            => StableHash(GameStateReader.AddressKey(reg)) & 15;
+
+        /// <summary>Order-independent hash of the whole business table, plus 16
+        /// per-bucket sub-hashes (bucket = address hash & 15) so a divergence
+        /// can be localized to ~1/16th of the city — and from there to the
+        /// exact registration via the drill log.</summary>
+        private static (int hash, int count, List<int> buckets) BizTableHash()
         {
             int acc = 0, count = 0;
+            var buckets = new int[16];
             var gi = SaveGameManager.Current;
-            if (gi?.BuildingRegistrations == null) return (0, 0);
+            if (gi?.BuildingRegistrations == null) return (0, 0, new List<int>(new int[16]));
             foreach (var reg in gi.BuildingRegistrations)
             {
                 if (reg == null) continue;
-                int h = 17;
-                try
-                {
-                    h = Combine(h, StableHash(GameStateReader.AddressKey(reg)));
-                    h = Combine(h, StableHash(reg.BusinessName?.ToString()));
-                    h = Combine(h, StableHash(reg.businessTypeName));
-                    h = Combine(h, reg.temporarilyClosed ? 1 : 0);
-                    h = Combine(h, StableHash(reg.buildingOwnerRivalId));
-                    h = Combine(h, StableHash(reg.businessOwnerRivalId));
-                    var prices = reg.retailPrices;
-                    if (prices != null)
-                        for (int i = 0; i < prices.Count; i++)
-                        {
-                            var rp = prices[i];
-                            if (rp == null) continue;
-                            h = Combine(h, StableHash(rp.itemName));
-                            h = Combine(h, (int)System.Math.Round(rp.price * 100f));
-                        }
-                }
+                int h;
+                int b;
+                try { h = RegHash(reg); b = BucketOf(reg); }
                 catch { continue; }
                 acc ^= h;          // order-independent fold
+                buckets[b] ^= h;
                 count++;
             }
-            return (acc, count);
+            return (acc, count, new List<int>(buckets));
         }
 
+        /// <summary>Log every registration hash in the given buckets — run on
+        /// BOTH machines, the two logs diff to the exact diverging address.</summary>
+        public static void LogBizDrill(List<int>? bucketIds)
+        {
+            try
+            {
+                if (bucketIds == null || bucketIds.Count == 0) return;
+                var want = new HashSet<int>(bucketIds);
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return;
+                int logged = 0;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null) continue;
+                    try
+                    {
+                        int b = BucketOf(reg);
+                        if (!want.Contains(b)) continue;
+                        Plugin.Logger.LogInfo($"[Audit] drill b{b}: '{GameStateReader.AddressKey(reg)}' = 0x{RegHash(reg):X8} (biz='{reg.BusinessName}' type={reg.businessTypeName} prices={reg.retailPrices?.Count ?? 0} bizOwner='{reg.businessOwnerRivalId}')");
+                        logged++;
+                    }
+                    catch { }
+                }
+                Plugin.Logger.LogInfo($"[Audit] drill complete: {logged} reg(s) in bucket(s) {string.Join(",", bucketIds)}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Audit] drill: {ex.Message}"); }
+        }
+
+        /// <summary>Audit-stable interior hash: layout + designs + price table +
+        /// item structure/stock.  EXCLUDES dirt (evolves continuously on the
+        /// source; a replica is always one broadcast behind → permanent false
+        /// positive) and cargo PricePerUnit (the receiver deliberately re-stamps
+        /// it from the synced store table — by-design divergence).</summary>
         private static int? InteriorHash(string addressKey)
         {
             try
             {
                 var snap = InteriorSync.BuildSnapshot(addressKey);
-                return snap != null ? InteriorSync.ComputeHash(snap) : (int?)null;
+                if (snap == null) return null;
+                unchecked
+                {
+                    int h = 17;
+                    h = Combine(h, StableHash(snap.Layout));
+                    foreach (var d in snap.InteriorDesigns)
+                    {
+                        h = Combine(h, StableHash(d.UUID));
+                        foreach (var m in d.Materials)
+                        {
+                            h = Combine(h, StableHash(m.MaterialID));
+                            h = Combine(h, m.MaterialIndex);
+                            h = Combine(h, m.ColorIndex);
+                        }
+                    }
+                    foreach (var rp in snap.RetailPrices)
+                    {
+                        h = Combine(h, StableHash(rp.ItemName));
+                        h = Combine(h, (int)System.Math.Round(rp.Price * 100f));
+                    }
+                    foreach (var it in snap.ItemInstances)
+                    {
+                        h = Combine(h, StableHash(it.Id));
+                        h = Combine(h, StableHash(it.ItemName));
+                        h = Combine(h, (int)System.Math.Round(it.Px * 100f));
+                        h = Combine(h, (int)System.Math.Round(it.Py * 100f));
+                        h = Combine(h, (int)System.Math.Round(it.Pz * 100f));
+                        h = Combine(h, it.StateIndex);
+                        foreach (var c in it.CargoInstances)
+                        {
+                            h = Combine(h, StableHash(c.ItemName));
+                            h = Combine(h, c.Amount);
+                        }
+                    }
+                    return h;
+                }
             }
             catch { return null; }
         }
@@ -177,8 +257,20 @@ namespace BigAmbitionsMP
                     $"client day {p.Day} {p.Hour:F2}h vs host day {mine.Day} {mine.Hour:F2}h");
 
                 bool bizOk = p.BizHash == mine.BizHash && p.BizCount == mine.BizCount;
-                Check(p.PlayerId, "biz", bizOk,
-                    $"client 0x{p.BizHash:X8}/{p.BizCount} regs vs host 0x{mine.BizHash:X8}/{mine.BizCount} regs");
+                bool bizAlarmed = !Check(p.PlayerId, "biz", bizOk,
+                    $"client 0x{p.BizHash:X8}/{p.BizCount} regs vs host 0x{mine.BizHash:X8}/{mine.BizCount} regs")
+                    && _streaks.TryGetValue(p.PlayerId + "/biz", out var bizStreak) && bizStreak == StreakToReport;
+                if (bizAlarmed && p.BizBuckets != null && p.BizBuckets.Count == 16 && mine.BizBuckets.Count == 16)
+                {
+                    // Localize: which 16th(s) of the table diverged → drill logs
+                    // on BOTH machines (diff the two logs to the exact address).
+                    var diverged = new List<int>();
+                    for (int b = 0; b < 16; b++)
+                        if (p.BizBuckets[b] != mine.BizBuckets[b]) diverged.Add(b);
+                    Plugin.Logger.LogWarning($"[Audit] biz divergence localized to bucket(s): {string.Join(",", diverged)} — drilling both sides.");
+                    LogBizDrill(diverged);                       // host side
+                    MPServer.SendAuditDrill(p.PlayerId, diverged); // client side
+                }
 
                 bool rosterOk = p.RosterHash == mine.RosterHash;
                 Check(p.PlayerId, "roster", rosterOk, $"client 0x{p.RosterHash:X8} vs host 0x{mine.RosterHash:X8}");

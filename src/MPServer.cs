@@ -286,6 +286,11 @@ namespace BigAmbitionsMP
 
         public static void Stop()
         {
+            // Initiator forensics: clients see our Stop as RemoteConnectionClose
+            // with no clue who pulled the plug — name the caller here so the
+            // load-start kick (2026-06-12, cause unresolved) is attributable.
+            if (_running)
+                Plugin.Logger.LogWarning($"[Server] STOP called ({_clients.Count} client(s) will see RemoteConnectionClose) from: {Environment.StackTrace}");
             _running = false;
             _server?.Stop();
             _pollThread?.Join(1000);
@@ -1674,6 +1679,20 @@ namespace BigAmbitionsMP
             foreach (var peer in _clients)
                 if (peer.Id != sender.Id)
                     peer.Send(writer, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>Tell one client to log its per-registration audit hashes for
+        /// the diverged buckets (the host logs its own side; diff offline).</summary>
+        public static void SendAuditDrill(string playerId, List<int> buckets)
+        {
+            if (!_running || buckets == null || buckets.Count == 0) return;
+            foreach (var peer in _clients)
+            {
+                if (!_peerNames.TryGetValue(peer.Id, out var pid) || pid != playerId) continue;
+                Send(peer, MessageEnvelope.Create(MessageType.AuditDrill, "host",
+                    new AuditDrillPayload { Buckets = buckets }));
+                break;
+            }
         }
 
         /// <summary>Broadcasts the host's own animator trigger to all clients.</summary>

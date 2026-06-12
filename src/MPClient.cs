@@ -90,6 +90,9 @@ namespace BigAmbitionsMP
 
         public static void Disconnect()
         {
+            // Initiator forensics (see MPServer.Stop note).
+            if (_running)
+                Plugin.Logger.LogWarning($"[Client] DISCONNECT called from: {Environment.StackTrace}");
             _voluntaryDisconnect = true;   // deliberate — never the session-over lock
             _running = false;
             _client?.Stop();
@@ -348,6 +351,15 @@ namespace BigAmbitionsMP
                 {
                     var rs = env.GetPayload<RestSkipStatePayload>();
                     if (rs != null) GameStatePatcher.EnqueueOnMainThread(() => MPRestSync.ApplyState(rs));
+                    break;
+                }
+
+                case MessageType.AuditDrill:
+                {
+                    // Host localized a biz divergence to bucket(s) — log our
+                    // per-registration hashes so the two logs diff offline.
+                    var ad = env.GetPayload<AuditDrillPayload>();
+                    if (ad != null) GameStatePatcher.EnqueueOnMainThread(() => MPAudit.LogBizDrill(ad.Buckets));
                     break;
                 }
 

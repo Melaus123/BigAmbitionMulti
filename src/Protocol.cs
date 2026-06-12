@@ -92,6 +92,7 @@ namespace BigAmbitionsMP
         RegisterCashier      = 111, // Any → Host → All: player went on/off duty at the cash register near (X,Y,Z); others can F4-buy there (Wave-2 player-staffed registers).
         RemoteSale           = 112, // Buyer → Host: I bought items in another player's shop (buyer already paid locally); host validates and credits the owner.
         AuditReport          = 113, // Client → Host: periodic state-hash audit (clock, business table, roster, interior replicas) — host compares against its own state and logs [Audit] MISMATCH on divergence.
+        AuditDrill           = 114, // Host → Client: a biz bucket diverged persistently — log your per-registration hashes for these buckets so the two logs can be diffed offline.
     }
 
     // ── Envelope ───────────────────────────────────────────────────────────────
@@ -837,6 +838,10 @@ namespace BigAmbitionsMP
         public float  Money     { get; set; }            // report-only
         public int    BizHash   { get; set; }            // business table (names/types/owners/prices)
         public int    BizCount  { get; set; }
+        /// <summary>16 bucket sub-hashes of the business table (bucket =
+        /// StableHash(addressKey) & 15) — lets the host localize WHICH
+        /// registrations diverged instead of just "the table differs".</summary>
+        public List<int> BizBuckets { get; set; } = new();
         public int    RosterHash    { get; set; }
         public int    VehicleCount  { get; set; }        // report-only (fleets are per-player)
         public List<AddressHashInfo> Interiors { get; set; } = new();
@@ -846,6 +851,13 @@ namespace BigAmbitionsMP
     {
         public string AddressKey { get; set; } = "";
         public int    Hash       { get; set; }
+    }
+
+    /// <summary>Host → client: log your per-registration audit hashes for
+    /// these biz buckets (offline log diff finds the diverging registration).</summary>
+    public class AuditDrillPayload
+    {
+        public List<int> Buckets { get; set; } = new();
     }
 
     /// <summary>Player on/off duty at a cash register (MessageType.RegisterCashier).</summary>
