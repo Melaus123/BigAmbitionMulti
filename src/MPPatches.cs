@@ -2288,5 +2288,51 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── [RegGuard] queue-entry guard (2026-06-11).  In another player's
+        // shop the native queue happily accepts a customer even when NO serving
+        // entity exists locally → OnPlaceOrder NREs → hard lock (two runs).
+        // Block CanOrder until the register actually has an employeeInstance
+        // (the synthetic-staffing NPC once it spawns and assigns itself).
+        // Safe failure mode: buyer simply can't queue yet — no lock. ──────────
+        [HarmonyPatch]
+        public static class Patch_RegisterQueue_Guard
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                try
+                {
+                    foreach (var m in typeof(Controllers.CashRegisterController).GetMethods(
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                        if (m.Name == "CanOrder") return m;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[RegGuard] target: {ex.Message}"); }
+                return null;
+            }
+
+            private static float _nextLog;
+
+            static void Postfix(Controllers.CashRegisterController __instance, ref bool __result)
+            {
+                if (!__result) return;
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                try
+                {
+                    string owner = MPRegisterSync.CurrentShopOwner;
+                    if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return;
+                    if (!MPRestSync.AllPlayers().Contains(owner)) return;   // AI shops native
+                    bool staffed = false;
+                    try { staffed = __instance.employeeInstance != null; } catch { }
+                    if (staffed) return;                                    // synthetic NPC manning it — allow
+                    __result = false;
+                    if (UnityEngine.Time.unscaledTime >= _nextLog)
+                    {
+                        _nextLog = UnityEngine.Time.unscaledTime + 5f;
+                        Plugin.Logger.LogInfo($"[RegGuard] blocked queue in '{owner}' shop — register not locally staffed yet.");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[RegGuard] {ex.Message}"); }
+            }
+        }
+
     }
 }

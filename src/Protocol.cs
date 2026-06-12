@@ -803,6 +803,10 @@ namespace BigAmbitionsMP
         public float Y { get; set; }
         public float Z { get; set; }
         public bool On { get; set; }
+        /// <summary>Address key of the shop ("12 MainStreet") — receivers use it
+        /// to find the BuildingRegistration for synthetic staffing (the duty
+        /// position alone can't name the building from outside the interior).</summary>
+        public string Address { get; set; } = "";
     }
 
     public class MoneyAdjustPayload

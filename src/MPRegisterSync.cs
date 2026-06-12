@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using BigAmbitions.Characters.Skills;   // SkillName
+using Entities;                          // EmployeeInstance
 using Il2CppInterop.Runtime;
 using UnityEngine;
 
@@ -27,7 +29,7 @@ namespace BigAmbitionsMP
         // posKey → cashier playerId
         private static readonly Dictionary<string, (string playerId, Vector3 pos)> _cashiers = new();
 
-        public static void Reset() { _cashiers.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = ""; }
+        public static void Reset() { _cashiers.Clear(); _synthetics.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = ""; }
 
         // ── Current building context (set by the building entry patch) ────────
         // After the rival-translation, businessOwnerRivalId holds the OWNING
@@ -55,11 +57,24 @@ namespace BigAmbitionsMP
             {
                 _cashiers[k] = (p.PlayerId, pos);
                 Plugin.Logger.LogInfo($"[Register] '{p.PlayerId}' ON duty at {k}.");
+                // Synthetic staffing on every machine EXCEPT the worker's own
+                // (there the real player works natively).  Main-thread: Apply
+                // can run on the network poll thread; staffing touches IL2CPP.
+                if (p.PlayerId != MPConfig.PlayerId && !string.IsNullOrEmpty(p.Address))
+                {
+                    string addr = p.Address; string pid = p.PlayerId;
+                    GameStatePatcher.EnqueueOnMainThread(() => TryStaffSynthetic(addr, pid));
+                }
             }
             else if (_cashiers.TryGetValue(k, out var e) && e.playerId == p.PlayerId)
             {
                 _cashiers.Remove(k);
                 Plugin.Logger.LogInfo($"[Register] '{p.PlayerId}' OFF duty at {k}.");
+                if (p.PlayerId != MPConfig.PlayerId && !string.IsNullOrEmpty(p.Address))
+                {
+                    string addr = p.Address;
+                    GameStatePatcher.EnqueueOnMainThread(() => RemoveSynthetic(addr));
+                }
             }
         }
 
@@ -70,6 +85,7 @@ namespace BigAmbitionsMP
             foreach (var kv in _cashiers) if (kv.Value.playerId == playerId) dead.Add(kv.Key);
             foreach (var k in dead) _cashiers.Remove(k);
             if (dead.Count > 0) Plugin.Logger.LogInfo($"[Register] cleared {dead.Count} duty post(s) of departed '{playerId}'.");
+            GameStatePatcher.EnqueueOnMainThread(() => RemoveSyntheticsOf(playerId));
         }
 
         private static Controllers.CashRegisterController? FindNearestRegister(Vector3 from, float maxDist)
@@ -134,11 +150,96 @@ namespace BigAmbitionsMP
         private static void SendToggle(Vector3 pos, bool on)
         {
             var p = new RegisterCashierPayload
-            { PlayerId = MPConfig.PlayerId, X = pos.x, Y = pos.y, Z = pos.z, On = on };
+            {
+                PlayerId = MPConfig.PlayerId, X = pos.x, Y = pos.y, Z = pos.z, On = on,
+                Address = CurrentShopAddress   // worker is inside the shop when toggling
+            };
             Apply(p);   // local echo first — instant feedback
             var env = MessageEnvelope.Create(MessageType.RegisterCashier, MPConfig.PlayerId, p);
             if (MPServer.IsRunning) MPServer.BroadcastAny(env);
             else MPClient.SendEnvelope(env);
+        }
+
+        // ── Synthetic staffing (Wave-2, user ruling 2026-06-11) ───────────────
+        // The native customer flow needs a REAL serving employee on the
+        // customer's machine; the working player is invisible to the game
+        // there.  While a player is on duty, every OTHER machine injects a
+        // synthetic EmployeeInstance (built by the game's own factory) into the
+        // global roster assigned to that shop — the game's employee simulation
+        // then spawns/serves natively, exactly like the proven pre-session-hire
+        // path.  Removed on duty-off / player leave.  The duty OWNER's machine
+        // never injects (the real player works there natively), so the
+        // authoritative host save can only pick one up if a CLIENT-owned shop
+        // is involved — synthetic ids are prefixed for a later save-strip.
+        private static readonly Dictionary<string, (string playerId, EmployeeInstance inst)> _synthetics = new();
+
+        private static void TryStaffSynthetic(string addressKey, string playerId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey) || _synthetics.ContainsKey(addressKey)) return;
+                var gi = SaveGameManager.Current;
+                if (gi == null) return;
+
+                BuildingRegistration? reg = null;
+                foreach (var r in gi.BuildingRegistrations)
+                    if (r != null && GameStateReader.AddressKey(r) == addressKey) { reg = r; break; }
+                if (reg == null)
+                {
+                    Plugin.Logger.LogWarning($"[SynthStaff] no registration found for '{addressKey}' — cannot staff.");
+                    return;
+                }
+
+                int before = gi.EmployeeInstances?.Count ?? -1;
+                var inst = Helpers.EmployeeHelper.CreateAIEmployeeInstance(SkillName.CustomerService);
+                if (inst == null) { Plugin.Logger.LogWarning("[SynthStaff] factory returned null."); return; }
+                inst.id = $"BAMP_DUTY_{playerId}_{addressKey.Replace(' ', '_')}";
+                inst.hourlyWage = 0f;
+                inst.satisfaction = 100f;
+                inst.assignedAddress = new Address(reg.StreetName, reg.StreetNumber);
+
+                var stations = new Il2CppSystem.Collections.Generic.List<BigAmbitions.Items.ItemName>();
+                stations.Add(BigAmbitions.Items.ItemName.CheckoutCounterRight);
+                stations.Add(BigAmbitions.Items.ItemName.CheckoutCounterLeft);
+                stations.Add(BigAmbitions.Items.ItemName.CashRegister);
+                inst.assignedWorkStationItems = stations;
+
+                var days = new Il2CppSystem.Collections.Generic.List<BigAmbitions.DayNightCycle.DayOfWeekOrdered>();
+                for (int d = 1; d <= 7; d++) days.Add((BigAmbitions.DayNightCycle.DayOfWeekOrdered)d);
+                inst.assignedWeeklyDays = days;
+                inst.assignedWeeklyHours = 168;   // semantics unverified — observe + log
+
+                gi.EmployeeInstances.Add(inst);
+                try { Helpers.EmployeeHelper.EmployeeInstancesDictionary[inst.id] = inst; } catch { }
+                _synthetics[addressKey] = (playerId, inst);
+                Plugin.Logger.LogInfo(
+                    $"[SynthStaff] injected '{inst.id}' for '{playerId}' at '{addressKey}' " +
+                    $"(roster {before}→{gi.EmployeeInstances.Count}; days=7 hours=168 wage=0).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] staff '{addressKey}': {ex}"); }
+        }
+
+        private static void RemoveSynthetic(string addressKey)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey) || !_synthetics.TryGetValue(addressKey, out var s)) return;
+                _synthetics.Remove(addressKey);
+                try { Helpers.EmployeeHelper.UnassignEmployeeFromAllWorkshifts(s.inst); }
+                catch (Exception ux) { Plugin.Logger.LogWarning($"[SynthStaff] unassign: {ux.Message}"); }
+                var gi = SaveGameManager.Current;
+                if (gi?.EmployeeInstances != null) gi.EmployeeInstances.Remove(s.inst);
+                try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(s.inst.id); } catch { }
+                Plugin.Logger.LogInfo($"[SynthStaff] removed synthetic at '{addressKey}'.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] remove '{addressKey}': {ex.Message}"); }
+        }
+
+        private static void RemoveSyntheticsOf(string playerId)
+        {
+            var dead = new List<string>();
+            foreach (var kv in _synthetics) if (kv.Value.playerId == playerId) dead.Add(kv.Key);
+            foreach (var k in dead) RemoveSynthetic(k);
         }
 
     }
