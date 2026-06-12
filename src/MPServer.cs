@@ -1230,7 +1230,15 @@ namespace BigAmbitionsMP
                     // Slice 2: the sale consumes REAL stock.  The host is the
                     // interior authority — decrement here; the interior diff
                     // (hash covers cargo Amount) carries it to every machine.
-                    GameStatePatcher.ApplySaleStockDecrement(rs.Address, rs.Items, rs.BuyerId);
+                    string shortfall = GameStatePatcher.ApplySaleStockDecrement(rs.Address, rs.Items, rs.BuyerId);
+                    // Oversell window (replica lag / racing buyers): the charge
+                    // already happened buyer-side — surface the divergence to
+                    // both parties instead of letting it pass silently.
+                    if (!string.IsNullOrEmpty(shortfall))
+                    {
+                        MPHub.NotifyParty(rs.OwnerId, $"Stock shortfall at {rs.Address}: sold {shortfall} beyond shelf stock.");
+                        MPHub.NotifyParty(rs.BuyerId, $"Heads up: {rs.Address} was short on {shortfall} — the shelf was out of sync.");
+                    }
                 });
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[RemoteSale] {ex.Message}"); }

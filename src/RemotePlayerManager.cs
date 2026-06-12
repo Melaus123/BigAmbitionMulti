@@ -338,6 +338,15 @@ namespace BigAmbitionsMP
             if (go.activeSelf != sameRoom)
             {
                 go.SetActive(sameRoom);
+                if (sameRoom && mover != null)
+                {
+                    // While hidden the mover doesn't run — snap to the live
+                    // target so the avatar doesn't glide from its stale spot
+                    // (user saw the worker "teleport a bit" on shop entry).
+                    go.transform.position = mover.TargetPosition;
+                    go.transform.rotation = mover.TargetRotation;
+                    mover.Velocity = Vector3.zero;
+                }
                 Plugin.Logger.LogInfo(
                     $"[InteriorMask] '{p.PlayerId}' {(sameRoom ? "shown" : "hidden")} — " +
                     $"their bldg='{p.Bldg}' mine='{MPRegisterSync.CurrentShopAddress}'.");

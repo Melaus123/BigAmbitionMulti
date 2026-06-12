@@ -277,7 +277,7 @@ namespace BigAmbitionsMP
 
         /// <summary>PRIVATE notice to one player (gift/loan events are nobody
         /// else''s business): local notice for the host, private chat otherwise.</summary>
-        private static void NotifyParty(string playerId, string text)
+        internal static void NotifyParty(string playerId, string text)
         {
             if (playerId == MPConfig.PlayerId) MPChat.AddNotice(text);
             else MPServer.SendChatPrivate("Hub", playerId, text);

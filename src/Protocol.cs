@@ -368,6 +368,12 @@ namespace BigAmbitionsMP
         /// <summary>Cargo manifest ("ItemName:amount;…") so remote ghosts show
         /// the bed/handtruck boxes (they derive from cargo) — user bug 2026-06-11.</summary>
         public string Cargo { get; set; } = "";
+        /// <summary>Address key of the building this vehicle is inside ("" =
+        /// outdoors).  Cross-interior mask v2: tagged sender-side (near the
+        /// owner while they're inside → that building; near them outside → "";
+        /// far from them → last tag kept), so a cart LEFT in a shop stays
+        /// hidden from players in other same-type interiors.</summary>
+        public string Bldg { get; set; } = "";
     }
 
     /// <summary>

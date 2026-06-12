@@ -768,6 +768,30 @@ namespace BigAmbitionsMP
                         }
                     }
                     catch { }
+                    // Handcart-boxes evidence (user, 2026-06-12): flatbed boxes
+                    // sync, cart boxes don't — log each vehicle's manifest when
+                    // it changes so the next run shows whether the cart manifest
+                    // is empty (cargo lives elsewhere) or full (visual builder).
+                    if (!_lastManifestLogged.TryGetValue(inst.id, out var prevCargo) || prevCargo != cargo)
+                    {
+                        _lastManifestLogged[inst.id] = cargo;
+                        Plugin.Logger.LogInfo($"[Vehicle] manifest {tn} '{inst.id}': {(cargo.Length > 0 ? cargo : "(empty)")}");
+                    }
+
+                    // Cross-interior tag (v2 — replaces the owner-proximity
+                    // heuristic): a vehicle near ME while I'm inside a building
+                    // belongs to that interior; near me outside → outdoors; far
+                    // from me → keep its last tag (left where it was).
+                    string bldg = _lastVehicleBldg.TryGetValue(inst.id, out var prevB) ? prevB : "";
+                    try
+                    {
+                        var me = Helpers.PlayerHelper.PlayerController?.Character?.transform;
+                        if (me != null && UnityEngine.Vector3.Distance(me.position, t.position) < 30f)
+                            bldg = MPRegisterSync.CurrentShopAddress;   // "" when outdoors
+                    }
+                    catch { }
+                    _lastVehicleBldg[inst.id] = bldg;
+
                     fleet.Vehicles.Add(new VehicleEntry
                     {
                         VehicleId = inst.id,
@@ -777,6 +801,7 @@ namespace BigAmbitionsMP
                         X = t.position.x, Y = t.position.y, Z = t.position.z,
                         Qx = t.rotation.x, Qy = t.rotation.y, Qz = t.rotation.z, Qw = t.rotation.w,
                         Cargo = cargo,
+                        Bldg  = bldg,
                     });
                 }
                 CurrentOpenDriven = openDriven;
@@ -810,6 +835,11 @@ namespace BigAmbitionsMP
         // When false, ApplyVehicleFleet returns early (no ghost vehicles
         // spawned for the host's owned cars).  Used by F4 master kill switch.
         public static bool ClientApplyFleetEnabled { get; set; } = true;
+
+        // Sender-side per-vehicle state: last logged cargo manifest (handcart
+        // evidence) and last interior tag (cross-interior mask v2).
+        private static readonly Dictionary<string, string> _lastManifestLogged = new();
+        private static readonly Dictionary<string, string> _lastVehicleBldg = new();
 
         public static void ApplyVehicleFleet(VehicleFleetPayload p)
         {
@@ -858,26 +888,19 @@ namespace BigAmbitionsMP
                     rv.TargetAt  = Time.unscaledTime;
                     rv.SenderT   = p.T;
 
-                    // Cross-interior mask: a cart pushed inside a building otherwise
-                    // shows up in OTHER same-type interiors (shared coordinate
-                    // space).  Hide this owner's ghosts sitting next to their masked
-                    // avatar; street vehicles are far from the avatar and unaffected.
-                    // LIMIT: a vehicle LEFT inside while the owner walks out stays
-                    // visible (no per-vehicle building tag yet — v1).
+                    // Cross-interior mask v2 (per-vehicle building tag — fixes the
+                    // vehicle-LEFT-inside case): show the ghost only when its tag
+                    // matches MY current building ("" = outdoors, always shown).
                     if (rv.Go != null)
                     {
-                        bool maskVeh = false;
-                        if (RemotePlayerManager.IsMasked(p.OwnerId))
-                        {
-                            var op = RemotePlayerManager.GetPlayerPosition(p.OwnerId);
-                            if (op.HasValue && Vector3.Distance(pos, op.Value) < 30f) maskVeh = true;
-                        }
+                        bool maskVeh = !string.IsNullOrEmpty(e.Bldg)
+                                       && e.Bldg != MPRegisterSync.CurrentShopAddress;
                         if (rv.Go.activeSelf == maskVeh)
                         {
                             rv.Go.SetActive(!maskVeh);
                             Plugin.Logger.LogInfo(
-                                $"[InteriorMask] ghost '{e.TypeName}' ({e.VehicleId}) " +
-                                $"{(maskVeh ? "hidden with" : "shown — no longer beside")} masked owner '{p.OwnerId}'.");
+                                $"[InteriorMask] ghost '{e.TypeName}' ({e.VehicleId}) {(maskVeh ? "hidden" : "shown")} — " +
+                                $"tag='{e.Bldg}' mine='{MPRegisterSync.CurrentShopAddress}'.");
                         }
                     }
                 }

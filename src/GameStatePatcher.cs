@@ -912,16 +912,17 @@ namespace BigAmbitionsMP
         /// owner's local shelf VISUAL (box models) may lag until the next
         /// interior refresh — data and sync are correct immediately.
         /// </summary>
-        public static void ApplySaleStockDecrement(string addressKey, System.Collections.Generic.List<SaleItem>? items, string buyerId)
+        public static string ApplySaleStockDecrement(string addressKey, System.Collections.Generic.List<SaleItem>? items, string buyerId)
         {
+            var shortfall = new System.Text.StringBuilder();
             try
             {
-                if (items == null || items.Count == 0 || string.IsNullOrEmpty(addressKey)) return;
+                if (items == null || items.Count == 0 || string.IsNullOrEmpty(addressKey)) return "";
                 var reg = FindRegistration(addressKey);
                 if (reg?.itemInstances == null)
                 {
                     Plugin.Logger.LogWarning($"[Stock] no registration/items for '{addressKey}' — sale not decremented.");
-                    return;
+                    return "";
                 }
                 foreach (var s in items)
                 {
@@ -946,9 +947,12 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo(
                         $"[Stock] '{addressKey}': -{sold} {(BigAmbitions.Items.ItemName)s.ItemName} (sold to {buyerId})" +
                         (remaining > 0 ? $" — SHORT by {remaining} (stock didn't cover the sale)." : "."));
+                    if (remaining > 0)
+                        shortfall.Append($"{(BigAmbitions.Items.ItemName)s.ItemName} x{remaining}, ");
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] decrement '{addressKey}': {ex.Message}"); }
+            return shortfall.ToString().TrimEnd(' ', ',');
         }
 
         /// <summary>

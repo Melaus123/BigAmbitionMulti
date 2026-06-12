@@ -33,7 +33,7 @@ namespace BigAmbitionsMP
         // posKey → cashier playerId
         private static readonly Dictionary<string, (string playerId, Vector3 pos)> _cashiers = new();
 
-        public static void Reset() { _cashiers.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = ""; }
+        public static void Reset() { _cashiers.Clear(); _empDuty.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = ""; }
 
         // ── Current building context (set by the building entry patch) ────────
         // After the rival-translation, businessOwnerRivalId holds the OWNING
@@ -136,6 +136,7 @@ namespace BigAmbitionsMP
                     SendToggle(_dutyPos, false);
                 }
 
+                TickEmployeeDuty();                               // employee-staffed stations (data-driven, 5s)
                 MPPatches.Patch_MPOrderFinalizer.TickPending();   // service-moment completion
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] duty: {ex.Message}"); }
@@ -147,17 +148,82 @@ namespace BigAmbitionsMP
         public static bool IsStaffedByOtherPlayer(Vector3 registerPos)
             => _cashiers.TryGetValue(Key(registerPos), out var e) && e.playerId != MPConfig.PlayerId;
 
-        private static void SendToggle(Vector3 pos, bool on)
+        private static void SendToggle(Vector3 pos, bool on, string? address = null)
         {
             var p = new RegisterCashierPayload
             {
                 PlayerId = MPConfig.PlayerId, X = pos.x, Y = pos.y, Z = pos.z, On = on,
-                Address = CurrentShopAddress   // worker is inside the shop when toggling
+                Address = address ?? CurrentShopAddress   // personal duty: worker is inside the shop
             };
             Apply(p);   // local echo first — instant feedback
             var env = MessageEnvelope.Create(MessageType.RegisterCashier, MPConfig.PlayerId, p);
             if (MPServer.IsRunning) MPServer.BroadcastAny(env);
             else MPClient.SendEnvelope(env);
+        }
+
+        // ── Employee-staffed registers (user batch, 2026-06-12): a shop run by
+        // MY HIRED EMPLOYEES must be shoppable for visitors even when I'm not
+        // at the till.  Their machines can't simulate my employees (the
+        // staffing evaluator refuses rival-translated shops), so the OWNER's
+        // machine answers from DATA: every 5s, for each of my businesses, each
+        // checkout-station item instance, ask the game's own
+        // IsEmployeeStationEmployedAtHour and broadcast duty ON/OFF.  Visitors
+        // then buy through the same self-checkout + RemoteSale path.  KNOWN
+        // cosmetic gap: visitors see no cashier body at employee-run tills.
+        private static float _nextEmpScanAt;
+        private static readonly Dictionary<string, Vector3> _empDuty = new();   // posKey → pos
+
+        private static void TickEmployeeDuty()
+        {
+            if (Time.unscaledTime < _nextEmpScanAt) return;
+            _nextEmpScanAt = Time.unscaledTime + 5f;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null) return;
+                var live = new Dictionary<string, (Vector3 pos, string addr)>();
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null) continue;
+                    bool mine; try { mine = reg.RentedByPlayer; } catch { continue; }
+                    if (!mine || reg.itemInstances == null) continue;
+                    string addr = GameStateReader.AddressKey(reg);
+                    foreach (var kv in reg.itemInstances)
+                    {
+                        var ii = kv.Value;
+                        if (ii == null) continue;
+                        var iname = ii.itemName;
+                        if (iname != BigAmbitions.Items.ItemName.CheckoutCounterRight
+                            && iname != BigAmbitions.Items.ItemName.CheckoutCounterLeft
+                            && iname != BigAmbitions.Items.ItemName.CashRegister) continue;
+                        bool staffed = false;
+                        try { staffed = Helpers.EmployeeHelper.IsEmployeeStationEmployedAtHour(reg, ii.id?.ToString() ?? "", -1); }
+                        catch { }
+                        if (!staffed) continue;
+                        var pos = new Vector3(ii.position.x, ii.position.y, ii.position.z);
+                        live[Key(pos)] = (pos, addr);
+                    }
+                }
+                // Newly staffed stations → ON; no-longer-staffed → OFF.
+                foreach (var kv in live)
+                    if (!_empDuty.ContainsKey(kv.Key))
+                    {
+                        _empDuty[kv.Key] = kv.Value.pos;
+                        SendToggle(kv.Value.pos, true, kv.Value.addr);
+                        Plugin.Logger.LogInfo($"[Register] employee-staffed station ON at {kv.Key} ({kv.Value.addr}).");
+                    }
+                var stale = new List<string>();
+                foreach (var kv in _empDuty)
+                    if (!live.ContainsKey(kv.Key)) stale.Add(kv.Key);
+                foreach (var k in stale)
+                {
+                    // Don't stomp PERSONAL duty at the same register.
+                    if (!(_onDuty && Key(_dutyPos) == k)) SendToggle(_empDuty[k], false);
+                    _empDuty.Remove(k);
+                    Plugin.Logger.LogInfo($"[Register] employee-staffed station OFF at {k}.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] employee duty: {ex.Message}"); }
         }
 
         /// <summary>The CURRENT shop's set price for an item (synced store
