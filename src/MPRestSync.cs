@@ -70,6 +70,12 @@ namespace BigAmbitionsMP
         public static bool LocalVoteActive => _localVoteActive;
         public static double LocalGoal     => _localGoal;
 
+        /// <summary>The live activity object (null when not seated) — lets
+        /// MPRegisterSync read WorkActivity._employeeStationController, the
+        /// EXACT station being worked (replaces the nearest-register-in-5m
+        /// guess; decompile sweep 2026-06-12).</summary>
+        public static object? CurrentActivityObject => _curAct;
+
         // ── Dock data: passthrough of the activity's own buttons ─────────────
         public sealed class DockButton
         {

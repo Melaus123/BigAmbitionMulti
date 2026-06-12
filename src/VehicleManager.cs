@@ -1000,9 +1000,34 @@ namespace BigAmbitionsMP
         private static bool IsOpenVehicle(string typeName)
         {
             if (string.IsNullOrEmpty(typeName)) return false;
+            // The game's own flag (decompile sweep 2026-06-12): VehicleType.enclosed
+            // is exactly what this substring list was guessing at.
+            try
+            {
+                var vt = Vehicles.VehicleTypes.VehicleTypeHelper.GetVehicleType(typeName);
+                if (vt != null) return !vt.enclosed;
+            }
+            catch { }
+            // Fallback heuristic for unknown/mod types only.
             foreach (var k in OpenVehicleNames)
                 if (typeName.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0) return true;
             return false;
+        }
+
+        /// <summary>Root-cause fix for the ghost-vehicle save leak (decompile
+        /// sweep 2026-06-12): CreateAndSpawnVehicle UNCONDITIONALLY adds the
+        /// instance to SaveGameManager.Current.VehicleInstances — save data.
+        /// Deregister our visual-only ghosts immediately at spawn; the save-time
+        /// strip stays as backstop.</summary>
+        private static void DeregisterGhostFromSave(VehicleInstance? inst)
+        {
+            try
+            {
+                var list = SaveGameManager.Current?.VehicleInstances;
+                if (list != null && inst != null && list.Remove(inst))
+                    Plugin.Logger.LogInfo($"[Vehicle] ghost '{inst.id}' deregistered from save data at spawn.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] ghost deregister: {ex.Message}"); }
         }
 
         /// <summary>Where the rider/pusher stands relative to the vehicle ghost.
@@ -1094,6 +1119,7 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning("[Vehicle] CreateAndSpawnVehicle returned null.");
                 return null;
             }
+            DeregisterGhostFromSave(inst);   // remote ghost: visual-only, never save data
 
             var go  = vc.gameObject;
             int ownedAfterSpawn = SafeCount(() => VehicleHelper.AllPlayerVehicles?.Count ?? -1);
@@ -1164,6 +1190,7 @@ namespace BigAmbitionsMP
                 return null;
             }
             if (vc == null) return null;
+            DeregisterGhostFromSave(inst);   // visual ghost: never save data
 
             var go = vc.gameObject;
             try { VehicleHelper.UnregisterPlayerVehicle(vc); } catch { }

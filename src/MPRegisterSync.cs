@@ -138,9 +138,26 @@ namespace BigAmbitionsMP
                 bool working = MPRestSync.CurrentActivityName() == "Work";
                 if (working && !_onDuty)
                 {
-                    var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
-                    if (ch == null) return;
-                    var reg = FindNearestRegister(ch.position, 5f);
+                    // The EXACT station from the live WorkActivity (it holds
+                    // _employeeStationController — decompile sweep 2026-06-12;
+                    // replaces the nearest-register-in-5m guess that could bind
+                    // duty to the wrong till in dense shops).
+                    Controllers.CashRegisterController? reg = null;
+                    try
+                    {
+                        var act = MPRestSync.CurrentActivityObject;
+                        if (act != null)
+                            reg = MPReflect.Get(act.GetType(), act, "_employeeStationController")
+                                  as Controllers.CashRegisterController;
+                    }
+                    catch { }
+                    if (reg == null)
+                    {
+                        // Fallback: proximity (activity shape drifted / non-register station type).
+                        var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
+                        if (ch == null) return;
+                        reg = FindNearestRegister(ch.position, 5f);
+                    }
                     if (reg == null) return;   // working some other station — not register duty
                     _onDuty = true;
                     _dutyPos = reg.transform.position;
