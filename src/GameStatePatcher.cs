@@ -845,6 +845,24 @@ namespace BigAmbitionsMP
         public static List<string> ReplicatedInteriorAddresses()
             => new List<string>(_lastItemSer.Keys);
 
+        /// <summary>Replace gi.marketEvents with the host's authoritative list
+        /// (MAIN THREAD).  MarketEvent is a plain data class — Newtonsoft
+        /// round-trips it wholesale.</summary>
+        public static void ApplyMarketEvents(string json)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.marketEvents == null) return;
+                var list = Newtonsoft.Json.JsonConvert.DeserializeObject<List<MarketEvent>>(json);
+                if (list == null) return;
+                gi.marketEvents.Clear();
+                foreach (var e in list) if (e != null) gi.marketEvents.Add(e);
+                Plugin.Logger.LogInfo($"[Patcher] market events applied: {list.Count} event(s) from host.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyMarketEvents: {ex.Message}"); }
+        }
+
         /// <summary>True when this registration's business belongs to a SESSION
         /// PLAYER (after the rival-translation, businessOwnerRivalId carries the
         /// owning player's id).  The game has NO such concept — to it a replica

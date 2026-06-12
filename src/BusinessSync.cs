@@ -382,6 +382,32 @@ namespace BigAmbitionsMP
         /// Called once per Update on the host.  Runs the change detector as a
         /// time-boxed incremental sweep (resumes every frame until complete).
         /// </summary>
+        // ── Market events (Phase A of fair-rival economy, 2026-06-12) ─────────
+        // gi.marketEvents (shortages/hype/backorders) is generated host-side
+        // only (clients suppress the sim) and drives shelf fills + price
+        // multipliers locally — without this sync clients never see ANY event.
+        private static int _lastMarketEventsHash;
+        private static float _nextMarketEventsAt;
+
+        private static void TickMarketEvents()
+        {
+            float now = UnityEngine.Time.realtimeSinceStartup;
+            if (now < _nextMarketEventsAt) return;
+            _nextMarketEventsAt = now + 5f;
+            try
+            {
+                var events = SaveGameManager.Current?.marketEvents;
+                if (events == null) return;
+                string json = Newtonsoft.Json.JsonConvert.SerializeObject(events);
+                int h = MPAudit.StableHash(json);
+                if (h == _lastMarketEventsHash) return;
+                _lastMarketEventsHash = h;
+                MPServer.BroadcastMarketEvents(json);
+                Plugin.Logger.LogInfo($"[BusinessSync] market events changed ({events.Count} event(s)) — broadcast.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] market events: {ex.Message}"); }
+        }
+
         public static void Tick()
         {
             if (!MPServer.IsRunning) return;
@@ -391,6 +417,7 @@ namespace BigAmbitionsMP
             // table to everyone (the duplicate seen in the load profile).  Skip until the
             // world is live; steady-state deltas resume after release.
             if (TimeSync.IsStartupHeld) return;
+            TickMarketEvents();
             float now = UnityEngine.Time.realtimeSinceStartup;
             if (!_scanInProgress)
             {

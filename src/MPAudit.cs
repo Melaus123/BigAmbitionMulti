@@ -59,6 +59,12 @@ namespace BigAmbitionsMP
             try { (p.BizHash, p.BizCount, p.BizBuckets) = BizTableHash(); } catch { }
             try
             {
+                var ev = SaveGameManager.Current?.marketEvents;
+                if (ev != null) p.MarketEventsHash = StableHash(Newtonsoft.Json.JsonConvert.SerializeObject(ev));
+            }
+            catch { }
+            try
+            {
                 foreach (var addr in GameStatePatcher.ReplicatedInteriorAddresses())
                 {
                     if (p.Interiors.Count >= MaxInteriors) break;
@@ -275,6 +281,10 @@ namespace BigAmbitionsMP
                 bool rosterOk = p.RosterHash == mine.RosterHash;
                 Check(p.PlayerId, "roster", rosterOk, $"client 0x{p.RosterHash:X8} vs host 0x{mine.RosterHash:X8}");
 
+                bool eventsOk = p.MarketEventsHash == mine.MarketEventsHash;
+                Check(p.PlayerId, "marketEvents", eventsOk,
+                    $"client 0x{p.MarketEventsHash:X8} vs host 0x{mine.MarketEventsHash:X8}");
+
                 int intOk = 0, intChecked = 0;
                 foreach (var ci in p.Interiors)
                 {
@@ -288,7 +298,7 @@ namespace BigAmbitionsMP
 
                 Plugin.Logger.LogInfo(
                     $"[Audit] '{p.PlayerId}': clock {(clockOk ? "OK" : "DRIFT")} biz {(bizOk ? "OK" : "DIVERGED")} " +
-                    $"roster {(rosterOk ? "OK" : "DIVERGED")} interiors {intOk}/{intChecked} OK " +
+                    $"roster {(rosterOk ? "OK" : "DIVERGED")} events {(eventsOk ? "OK" : "DIVERGED")} interiors {intOk}/{intChecked} OK " +
                     $"(${p.Money:F0}, veh {p.VehicleCount}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Audit] HostHandle: {ex.Message}"); }

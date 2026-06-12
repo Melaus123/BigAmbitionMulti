@@ -178,6 +178,27 @@ namespace BigAmbitionsMP
         /// host has no source of truth for what other players own locally.
         /// </summary>
         private static readonly Dictionary<string, RivalsStatsRequestPayload> _clientSelfStats = new();
+
+        /// <summary>Self-reported weekly income for a session player's business
+        /// at this address (0 if unknown).  Bridges the rival-AI fairness
+        /// patches: the host's replica registrations have empty order history,
+        /// so "is this business succeeding" reads the leaderboard stats.</summary>
+        public static float SessionBusinessWeeklyIncome(string addressKey)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey)) return 0f;
+                foreach (var kv in _clientSelfStats)
+                {
+                    var list = kv.Value?.Businesses;
+                    if (list == null) continue;
+                    foreach (var b in list)
+                        if (b != null && b.AddressKey == addressKey) return b.WeeklyIncome;
+                }
+            }
+            catch { }
+            return 0f;
+        }
         private static Thread? _pollThread;
         private static volatile bool _running;
 
@@ -1679,6 +1700,14 @@ namespace BigAmbitionsMP
             foreach (var peer in _clients)
                 if (peer.Id != sender.Id)
                     peer.Send(writer, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>Authoritative market-events list → all clients.</summary>
+        public static void BroadcastMarketEvents(string json)
+        {
+            if (!_running || string.IsNullOrEmpty(json)) return;
+            Broadcast(MessageEnvelope.Create(MessageType.MarketEvents, "host",
+                new MarketEventsPayload { Json = json }));
         }
 
         /// <summary>Tell one client to log its per-registration audit hashes for

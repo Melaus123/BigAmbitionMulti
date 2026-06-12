@@ -363,6 +363,14 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.MarketEvents:
+                {
+                    var me = env.GetPayload<MarketEventsPayload>();
+                    if (me != null && !string.IsNullOrEmpty(me.Json))
+                        GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.ApplyMarketEvents(me.Json));
+                    break;
+                }
+
                 case MessageType.LoanOffer:
                 {
                     var lo = env.GetPayload<LoanOfferPayload>();
@@ -780,8 +788,30 @@ namespace BigAmbitionsMP
                 SelfOwnedBusinessesCount = bizCount,
                 SelfWeeklyIncome         = weeklyIncome,
             };
+            // Per-business breakdown for the host's fair-rival patches (real
+            // GetAvgWeeklyIncome — only computable here, where the order
+            // history lives).
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations != null)
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null || !reg.RentedByPlayer) continue;
+                        float wk = 0f;
+                        try { wk = reg.GetAvgWeeklyIncome(); } catch { }
+                        p.Businesses.Add(new RivalBusinessInfo
+                        {
+                            AddressKey   = GameStateReader.AddressKey(reg),
+                            BusinessName = reg.BusinessName?.ToString() ?? "",
+                            BusinessType = reg.businessTypeName ?? "",
+                            WeeklyIncome = wk,
+                        });
+                    }
+            }
+            catch { }
             Send(MessageEnvelope.Create(MessageType.RivalsStatsRequest, MPConfig.PlayerId, p));
-            Plugin.Logger.LogInfo($"[Client] Sent RivalsStatsRequest with self-stats: bldgs={bldgCount} biz={bizCount} income=${weeklyIncome:F0}.");
+            Plugin.Logger.LogInfo($"[Client] Sent RivalsStatsRequest with self-stats: bldgs={bldgCount} biz={bizCount} income=${weeklyIncome:F0} ({p.Businesses.Count} business rows).");
         }
 
         // ── Outbound ──────────────────────────────────────────────────────────

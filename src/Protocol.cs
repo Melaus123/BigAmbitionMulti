@@ -93,6 +93,7 @@ namespace BigAmbitionsMP
         RemoteSale           = 112, // Buyer → Host: I bought items in another player's shop (buyer already paid locally); host validates and credits the owner.
         AuditReport          = 113, // Client → Host: periodic state-hash audit (clock, business table, roster, interior replicas) — host compares against its own state and logs [Audit] MISMATCH on divergence.
         AuditDrill           = 114, // Host → Client: a biz bucket diverged persistently — log your per-registration hashes for these buckets so the two logs can be diffed offline.
+        MarketEvents         = 115, // Host → All: the authoritative gi.marketEvents list (shortages/hype/backorders drive shelf fills + prices; clients suppress the generating sim and would otherwise never see one).
     }
 
     // ── Envelope ───────────────────────────────────────────────────────────────
@@ -852,6 +853,9 @@ namespace BigAmbitionsMP
         public List<int> BizBuckets { get; set; } = new();
         public int    RosterHash    { get; set; }
         public int    VehicleCount  { get; set; }        // report-only (fleets are per-player)
+        /// <summary>Hash of gi.marketEvents (host-authoritative, synced via
+        /// MessageType.MarketEvents — convergence verified here).</summary>
+        public int    MarketEventsHash { get; set; }
         public List<AddressHashInfo> Interiors { get; set; } = new();
     }
 
@@ -866,6 +870,14 @@ namespace BigAmbitionsMP
     public class AuditDrillPayload
     {
         public List<int> Buckets { get; set; } = new();
+    }
+
+    /// <summary>Host → all: gi.marketEvents serialized wholesale (plain data
+    /// class — Newtonsoft round-trips it).  Authoritative on the host; clients
+    /// replace their local list.</summary>
+    public class MarketEventsPayload
+    {
+        public string Json { get; set; } = "";
     }
 
     /// <summary>Player on/off duty at a cash register (MessageType.RegisterCashier).</summary>
@@ -1084,6 +1096,10 @@ namespace BigAmbitionsMP
         public int    SelfOwnedBuildingsCount  { get; set; }
         public int    SelfOwnedBusinessesCount { get; set; }
         public float  SelfWeeklyIncome         { get; set; }
+        /// <summary>Per-business breakdown (AddressKey + WeeklyIncome) — feeds
+        /// the host's fair-rival patches: the host's replicas have no order
+        /// history, so "is this player business succeeding" reads this.</summary>
+        public List<RivalBusinessInfo> Businesses { get; set; } = new();
     }
 
     /// <summary>
