@@ -244,16 +244,10 @@ namespace BigAmbitionsMP
                 var inst = Helpers.EmployeeHelper.CreateAIEmployeeInstance(SkillName.CustomerService);
                 if (inst == null) { Plugin.Logger.LogWarning("[SynthStaff] factory returned null."); return; }
                 inst.id = $"BAMP_DUTY_{playerId}_{addressKey.Replace(' ', '_')}";
-                // The serving entity IS the other player as far as the buyer can
-                // tell — any "served by" UI must show the player's name (user
-                // spec: buying must feel like buying from the player).
-                try
-                {
-                    string ownerName = RemotePlayerManager.ResolveDisplayName(playerId);
-                    if (!string.IsNullOrEmpty(ownerName) && inst.characterData != null)
-                        inst.characterData.name = ownerName;
-                }
-                catch (Exception nx) { Plugin.Logger.LogWarning($"[SynthStaff] name override: {nx.Message}"); }
+                // (Name override REMOVED 2026-06-12: it is the one injection-path
+                //  delta between the WORKING run-3 build and every failing build
+                //  since — and the user ruled the name irrelevant anyway.  Bisect:
+                //  this build restores run-3 injection semantics exactly.)
                 inst.hourlyWage = 0f;
                 inst.satisfaction = 100f;
                 inst.assignedAddress = new Address(reg.StreetName, reg.StreetNumber);
@@ -276,15 +270,13 @@ namespace BigAmbitionsMP
                     $"[SynthStaff] injected '{inst.id}' for '{playerId}' at '{addressKey}' " +
                     $"(roster {before}→{gi.EmployeeInstances.Count}; days=7 hours=168 wage=0).");
 
-                // Spawn-reliability (run 4: NPC never arrived in ~10 game-hours;
-                // run 3 it came in seconds) — kick the game's own scheduler tick
-                // so shift evaluation can't depend on tick-boundary luck.
+                // (RunHourly kick REMOVED 2026-06-12: didn't help in runs 5/7 and
+                //  an off-cycle scheduler tick has unknown side effects — part of
+                //  the revert-to-run-3 bisect.  Time log + price dump are pure
+                //  reads and stay.)
                 try { var (d, h) = GameStateReader.GetGameTime();
-                      Plugin.Logger.LogInfo($"[SynthStaff] game time day={d} hr={h:F1}; kicking EmployeeHelper.RunHourly()."); }
+                      Plugin.Logger.LogInfo($"[SynthStaff] game time day={d} hr={h:F1}."); }
                 catch { }
-                try { Helpers.EmployeeHelper.RunHourly(); }
-                catch (Exception kx) { Plugin.Logger.LogWarning($"[SynthStaff] RunHourly kick: {kx.Message}"); }
-
                 LogShopPrices(reg, "[SynthStaff/prices]");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] staff '{addressKey}': {ex}"); }
