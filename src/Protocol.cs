@@ -1123,6 +1123,11 @@ namespace BigAmbitionsMP
         /// / gameVariables.daysPerYear) so the rivals profile shows the real age
         /// instead of a default.</summary>
         public int AgeInYears { get; set; }
+        /// <summary>Character gender (BigAmbitions.Characters.Gender as int;
+        /// -1 = unknown).  Fallback-portrait fidelity: if the portrait PNG
+        /// hasn't arrived yet, the game GENERATES a face — without this it
+        /// always generated a default-gender one.</summary>
+        public int Gender { get; set; } = -1;
     }
 
     /// <summary>Host → All: trigger a coordinated MP save.  Every player saves

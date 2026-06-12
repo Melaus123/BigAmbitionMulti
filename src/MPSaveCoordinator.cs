@@ -613,6 +613,10 @@ namespace BigAmbitionsMP
             // save boundary is the reliable choke point — strip them here for
             // EVERY save path (host, client, sync menu variant).
             GameStatePatcher.StripGhostVehicles("save");
+            // Same choke point: the rivals UI auto-creates RivalState history
+            // entries for our synthetic PLAYER rows — strip before they
+            // serialize and accumulate.
+            GameStatePatcher.StripSyntheticRivalStates("save");
             string charName = "";
             int    day      = 0;
             try

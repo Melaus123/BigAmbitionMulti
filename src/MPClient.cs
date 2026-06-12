@@ -734,6 +734,7 @@ namespace BigAmbitionsMP
             string name = string.IsNullOrWhiteSpace(p.CharacterName) ? p.PlayerId : p.CharacterName;
             GameStatePatcher.ClientRivalNames[p.PlayerId] = name;
             if (p.AgeInYears > 0) GameStatePatcher.ClientPlayerAges[p.PlayerId] = p.AgeInYears;
+                    if (p.Gender >= 0) GameStatePatcher.ClientPlayerGenders[p.PlayerId] = p.Gender;
             Plugin.Logger.LogInfo($"[Client] PlayerProfile: '{p.PlayerId}' → '{name}' age={p.AgeInYears} portrait={(string.IsNullOrEmpty(p.PortraitPngBase64) ? "none" : "yes")}.");
             // Decode the relayed portrait on the main thread (Texture2D create).
             string portraitB64 = p.PortraitPngBase64;
@@ -906,7 +907,8 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Client] SendPlayerProfile read failed: {ex.Message}"); }
             string portrait = ""; try { portrait = GameStatePatcher.ReadLocalPortraitBase64(); } catch { }
             int age = 0; try { age = GameStatePatcher.LocalAgeInYears(); } catch { }
-            var p = new PlayerProfilePayload { PlayerId = MPConfig.PlayerId, CharacterName = name, PortraitPngBase64 = portrait, AgeInYears = age };
+            int gender = -1; try { var gi2 = SaveGameManager.Current; if (gi2?.charactersData != null && gi2.charactersData.Count > 0) gender = (int)gi2.charactersData[0].gender; } catch { }
+            var p = new PlayerProfilePayload { PlayerId = MPConfig.PlayerId, CharacterName = name, PortraitPngBase64 = portrait, AgeInYears = age, Gender = gender };
             if (!string.IsNullOrEmpty(portrait)) GameStatePatcher.LocalPortraitSent = true;   // image goes over once
             Send(MessageEnvelope.Create(MessageType.PlayerProfile, MPConfig.PlayerId, p));
             Plugin.Logger.LogInfo($"[Client] Sent PlayerProfile: PlayerId='{MPConfig.PlayerId}' CharacterName='{name}' age={age} portrait={(string.IsNullOrEmpty(portrait) ? "none" : portrait.Length + "b64")}.");

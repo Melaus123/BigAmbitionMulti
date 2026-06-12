@@ -218,6 +218,9 @@ namespace BigAmbitionsMP
         /// <summary>PlayerId → their character age in years (from PlayerProfile),
         /// so the rivals profile shows the real age, not a default.</summary>
         public static readonly System.Collections.Generic.Dictionary<string, int> ClientPlayerAges = new();
+        /// <summary>playerId → gender (BigAmbitions.Characters.Gender as int) —
+        /// generated-portrait fallback fidelity.</summary>
+        public static readonly System.Collections.Generic.Dictionary<string, int> ClientPlayerGenders = new();
 
         /// <summary>True once we've sent our profile WITH a non-empty portrait —
         /// whether on the initial game-entry send or a later re-send.  Ensures
@@ -551,6 +554,14 @@ namespace BigAmbitionsMP
                 ownedBusinesses             = new System.Collections.Generic.List<BuildingRegistration>(),
                 ownedRetailOfficeBusinesses = new System.Collections.Generic.List<BuildingRegistration>(),
             };
+            // Generated-portrait fallback matches the real character's gender
+            // (the synced PNG overrides this whenever it has arrived).
+            try
+            {
+                if (ClientPlayerGenders.TryGetValue(playerId, out var g) && g >= 0)
+                    rd.gender = (BigAmbitions.Characters.Gender)g;
+            }
+            catch { }
             PopulateRivalOwnedFromSync(rd, playerId);
             return rd;
         }
@@ -577,11 +588,17 @@ namespace BigAmbitionsMP
                 if (rd.ownedRetailOfficeBusinesses != null) rd.ownedRetailOfficeBusinesses.Clear();
 
                 System.Collections.Generic.HashSet<string>? syncedAddrs = null;
+                System.Collections.Generic.Dictionary<string, float>? syncedIncome = null;
                 if (ClientRivalStats.TryGetValue(id, out var stat) && stat.Businesses != null && stat.Businesses.Count > 0)
                 {
-                    syncedAddrs = new System.Collections.Generic.HashSet<string>();
+                    syncedAddrs  = new System.Collections.Generic.HashSet<string>();
+                    syncedIncome = new System.Collections.Generic.Dictionary<string, float>();
                     foreach (var b in stat.Businesses)
-                        if (!string.IsNullOrEmpty(b.AddressKey)) syncedAddrs.Add(b.AddressKey);
+                        if (!string.IsNullOrEmpty(b.AddressKey))
+                        {
+                            syncedAddrs.Add(b.AddressKey);
+                            syncedIncome[b.AddressKey] = b.WeeklyIncome;
+                        }
                 }
 
                 var gi = SaveGameManager.Current;
@@ -608,6 +625,22 @@ namespace BigAmbitionsMP
                         {
                             if (rd.ownedBusinesses             != null) rd.ownedBusinesses.Add(reg);
                             if (rd.ownedRetailOfficeBusinesses != null) rd.ownedRetailOfficeBusinesses.Add(reg);
+                            // Feed the replica's dailyIncomes from the synced
+                            // per-business weekly figure: RivalData.WeeklyIncome
+                            // and the detail-view graphs compute NATIVELY from
+                            // dailyIncomes.TakeLast(7) — replicas had it empty,
+                            // so player rows graphed flat zero (0.11 UI map).
+                            try
+                            {
+                                if (syncedIncome != null
+                                    && syncedIncome.TryGetValue(GameStateReader.AddressKey(reg), out var wk)
+                                    && reg.dailyIncomes != null)
+                                {
+                                    reg.dailyIncomes.Clear();
+                                    for (int d = 0; d < 7; d++) reg.dailyIncomes.Add(wk / 7f);
+                                }
+                            }
+                            catch { }
                         }
                     }
                     catch { }
@@ -1056,6 +1089,36 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Patcher] Items refresh: destroyed={destroyed} spawned={spawned} kept={liveById.Count} failed={failed} (dict size {dictCount}{(fullRebuild ? ", FULL rebuild" : "")}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] RefreshItemsForActiveBuilding: {ex.Message}"); }
+        }
+
+        /// <summary>Remove RivalState entries the rivals UI auto-created for
+        /// SESSION-PLAYER ids (SelectedRivalUI.FillRivalState fills missing
+        /// histories for anything it displays — synthetic player rows included).
+        /// Players are not rivals; left in, these serialize into the .hsg and
+        /// accumulate across sessions (0.11 UI map, save-contamination risk).
+        /// Called at the save boundary like StripGhostVehicles.</summary>
+        public static int StripSyntheticRivalStates(string when)
+        {
+            int removed = 0;
+            try
+            {
+                var list = SaveGameManager.Current?.rivalStates;
+                if (list == null) return 0;
+                for (int i = list.Count - 1; i >= 0; i--)
+                {
+                    string rid = list[i]?.rivalId ?? "";
+                    if (string.IsNullOrEmpty(rid)) continue;
+                    bool player = rid == MPConfig.PlayerId || ClientPlayerRoster.ContainsKey(rid);
+                    try { if (!player) player = MPRestSync.AllPlayers().Contains(rid); } catch { }
+                    if (!player) continue;
+                    list.RemoveAt(i);
+                    removed++;
+                }
+                if (removed > 0)
+                    Plugin.Logger.LogInfo($"[Patcher] stripped {removed} synthetic player RivalState(s) from save data ({when}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] rivalState strip: {ex.Message}"); }
+            return removed;
         }
 
         /// <summary>Remove leaked ghost vehicles from the save data.  Ghost ids

@@ -679,6 +679,7 @@ namespace BigAmbitionsMP
                     {
                         _characterNamesByPlayerId[p.PlayerId] = p.CharacterName ?? "";
                         if (p.AgeInYears > 0) GameStatePatcher.ClientPlayerAges[p.PlayerId] = p.AgeInYears;
+                if (p.Gender >= 0) GameStatePatcher.ClientPlayerGenders[p.PlayerId] = p.Gender;
                         string resolvedName = string.IsNullOrWhiteSpace(p.CharacterName) ? p.PlayerId : p.CharacterName;
                         // Populate HOST's local caches so host's own UI can
                         // render this player as a rival.  Mirrors what the
@@ -1882,7 +1883,8 @@ namespace BigAmbitionsMP
                 GameStatePatcher.ClientRivalNames[MPConfig.PlayerId] = name;
                 string portrait = ""; try { portrait = GameStatePatcher.ReadLocalPortraitBase64(); } catch { }
                 int age = 0; try { age = GameStatePatcher.LocalAgeInYears(); } catch { }
-                var p = new PlayerProfilePayload { PlayerId = MPConfig.PlayerId, CharacterName = name, PortraitPngBase64 = portrait, AgeInYears = age };
+                int gender = -1; try { if (gi?.charactersData != null && gi.charactersData.Count > 0) gender = (int)gi.charactersData[0].gender; } catch { }
+                var p = new PlayerProfilePayload { PlayerId = MPConfig.PlayerId, CharacterName = name, PortraitPngBase64 = portrait, AgeInYears = age, Gender = gender };
                 if (!string.IsNullOrEmpty(portrait)) GameStatePatcher.LocalPortraitSent = true;   // image goes over once
                 Broadcast(MessageEnvelope.Create(MessageType.PlayerProfile, "host", p));
                 Plugin.Logger.LogInfo($"[Server] Broadcast host profile: PlayerId='{MPConfig.PlayerId}' CharacterName='{name}' age={age} portrait={(string.IsNullOrEmpty(portrait) ? "none" : "yes")}.");
