@@ -272,6 +272,32 @@ namespace BigAmbitionsMP
         /// working (probe filter — keeps station-evaluator logging on-topic).</summary>
         public static bool IsDutyStation(Vector3 pos) => _cashiers.ContainsKey(Key(pos));
 
+        /// <summary>The CURRENT shop's set price for an item (synced store
+        /// table — the only charge source that matters per user), or -1 when
+        /// the table has no entry.</summary>
+        public static float GetShopPrice(int itemNameValue)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null || string.IsNullOrEmpty(CurrentShopAddress)) return -1f;
+                foreach (var r in gi.BuildingRegistrations)
+                {
+                    if (r == null || GameStateReader.AddressKey(r) != CurrentShopAddress) continue;
+                    var prices = r.retailPrices;
+                    if (prices != null)
+                        for (int i = 0; i < prices.Count; i++)
+                        {
+                            var rp = prices[i];
+                            if (rp != null && (int)rp.itemName == itemNameValue) return rp.price;
+                        }
+                    return -1f;
+                }
+            }
+            catch { }
+            return -1f;
+        }
+
         private static void TryStaffSynthetic(string addressKey, string playerId, string stationId, Vector3 dutyPos)
         {
             try

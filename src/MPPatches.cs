@@ -2150,24 +2150,9 @@ namespace BigAmbitionsMP
                     sb.Append($"total={total:F2} shopOwner='{MPRegisterSync.CurrentShopOwner}'");
                     Plugin.Logger.LogInfo(sb.ToString());
 
-                    // RemoteSale slice 1: bought in ANOTHER player's shop →
-                    // route the revenue through the host.  AI-rival ids fall
-                    // out at host validation (not in the lobby roster).
-                    string owner = MPRegisterSync.CurrentShopOwner;
-                    if (!string.IsNullOrEmpty(owner) && owner != MPConfig.PlayerId && total > 0f)
-                    {
-                        var sale = new RemoteSalePayload
-                        {
-                            BuyerId = MPConfig.PlayerId,
-                            OwnerId = owner,
-                            Address = MPRegisterSync.CurrentShopAddress,
-                            Total   = total,
-                            Desc    = desc.ToString().TrimEnd(' ', ','),
-                        };
-                        if (MPServer.IsRunning) MPServer.HandleRemoteSale(sale);   // host bought in a client's shop
-                        else MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.RemoteSale, MPConfig.PlayerId, sale));
-                        Plugin.Logger.LogInfo($"[RemoteSale] sent: ${total:F2} to '{owner}' ({sale.Address}).");
-                    }
+                    // (RemoteSale send MOVED to Patch_MPOrderFinalizer 2026-06-12 —
+                    //  single source of truth, charged from the synced store table.
+                    //  This probe keeps logging order composition only.)
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[SalesProbe] {ex.Message}"); }
             }
@@ -2396,6 +2381,104 @@ namespace BigAmbitionsMP
                         : $"[StaffEval] GetEmployeeWorkShift → shift(emp='{__result.employeeId}' station='{__result.itemInstanceId}' {__result.startingHour}-{__result.endingHour})");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] shift probe: {ex.Message}"); }
+            }
+        }
+
+        // ── [MPSale] MP order finalizer (2026-06-12, user-approved design).
+        // The native OnPlaceOrder decrements LOCAL replica stock and books
+        // revenue into a LOCAL ledger — and NREs on the replica's missing
+        // stock graph anyway (disasm: GetStockInstance /
+        // CheckStockAvailableForEntries).  A player-shop sale is a
+        // cross-machine transaction: charge the buyer HERE from the synced
+        // store price table; stock + revenue land on the OWNER's machine via
+        // RemoteSale.  Native code never runs in player shops; everything the
+        // buyer sees (paid-marking, success close, callbacks) is the game's
+        // own PurchaseUI machinery. ───────────────────────────────────────────
+        [HarmonyPatch]
+        public static class Patch_MPOrderFinalizer
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                try
+                {
+                    foreach (var m in typeof(Controllers.CashRegisterController).GetMethods(
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                        if (m.Name == "OnPlaceOrder" && m.DeclaringType == typeof(Controllers.CashRegisterController))
+                            return m;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSale] target: {ex.Message}"); }
+                return null;
+            }
+
+            static bool Prefix(Controllers.CashRegisterController __instance,
+                               Il2CppSystem.Collections.Generic.List<BigAmbitions.Items.CargoInstance> orderedCargoInstances)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                string owner = MPRegisterSync.CurrentShopOwner;
+                if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return true;
+                if (!MPRestSync.AllPlayers().Contains(owner)) return true;   // AI shops fully native
+                try
+                {
+                    string act0 = "none";
+                    try { act0 = MPRestSync.CurrentActivityName() ?? "none"; } catch { }
+
+                    float total = 0f;
+                    var desc = new System.Text.StringBuilder();
+                    if (orderedCargoInstances != null)
+                        for (int i = 0; i < orderedCargoInstances.Count; i++)
+                        {
+                            var c = orderedCargoInstances[i];
+                            if (c == null) continue;
+                            float price = MPRegisterSync.GetShopPrice((int)c.itemName);
+                            if (price < 0f) price = (float)c.pricePerUnit;   // table miss → cargo stamp
+                            total += c.amount * price;
+                            if (desc.Length < 160) desc.Append($"{c.itemName} x{c.amount}, ");
+                        }
+
+                    MPHub.ApplyMoneyDelta(-total, $"Purchase at {MPRegisterSync.CurrentShopAddress}");
+
+                    var sale = new RemoteSalePayload
+                    {
+                        BuyerId = MPConfig.PlayerId,
+                        OwnerId = owner,
+                        Address = MPRegisterSync.CurrentShopAddress,
+                        Total   = total,
+                        Desc    = desc.ToString().TrimEnd(' ', ','),
+                    };
+                    if (MPServer.IsRunning) MPServer.HandleRemoteSale(sale);
+                    else MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.RemoteSale, MPConfig.PlayerId, sale));
+
+                    // Native paid-marking + native SUCCESS close — fires the
+                    // opener's completion callbacks (the state release).
+                    try
+                    {
+                        var uiObj = UnityEngine.Object.FindObjectOfType(Il2CppInterop.Runtime.Il2CppType.Of<UI.Purchase.PurchaseUI>());
+                        var ui = uiObj?.TryCast<UI.Purchase.PurchaseUI>();
+                        if (ui != null)
+                        {
+                            ui.SetCargoInstancesToPaid();
+                            ui.Close(new Il2CppSystem.Nullable<bool>(true));
+                        }
+                        else Plugin.Logger.LogWarning("[MPSale] PurchaseUI not found — paid, but UI not closed.");
+                    }
+                    catch (Exception ux) { Plugin.Logger.LogWarning($"[MPSale] UI close: {ux.Message}"); }
+
+                    string act1 = "none";
+                    try { act1 = MPRestSync.CurrentActivityName() ?? "none"; } catch { }
+                    Plugin.Logger.LogInfo(
+                        $"[MPSale] finalized: total=${total:F2} owner='{owner}' items='{sale.Desc}' activity '{act0}'→'{act1}'.");
+
+                    // If the purchase activity survived the success close, the
+                    // callback chain didn't release us — use the generic
+                    // activity-finish fallback (the rest-dock X path).
+                    if (act1 != "none" && act1 == act0)
+                    {
+                        Plugin.Logger.LogWarning($"[MPSale] activity '{act1}' persisted after close — invoking StandUp fallback.");
+                        try { MPRestSync.StandUp(); } catch (Exception sx) { Plugin.Logger.LogWarning($"[MPSale] StandUp: {sx.Message}"); }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSale] finalizer: {ex}"); }
+                return false;   // the native finalizer NEVER runs in player shops
             }
         }
 
