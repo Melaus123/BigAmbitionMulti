@@ -436,6 +436,10 @@ namespace BigAmbitionsMP
                 BroadcastLobbyUpdate();   // keep everyone's roster (incl. the in-game F9 list) current
                 if (!IsInLobby)
                     BroadcastPlayerLeft(leftPlayer); // also tell remaining clients to remove the capsule
+                // Host's own duty map: a departed worker must not leave a
+                // phantom "staffed" register (see HandlePlayerLeft client-side).
+                var lp = leftPlayer;
+                GameStatePatcher.EnqueueOnMainThread(() => MPRegisterSync.RemovePlayer(lp));
             }
 
             // If a player disconnected during the startup hold, drop them from the

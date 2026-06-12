@@ -620,7 +620,13 @@ namespace BigAmbitionsMP
         {
             var payload = env.GetPayload<PlayerLeftPayload>();
             if (payload == null) return;
-            GameStatePatcher.EnqueueOnMainThread(() => RemotePlayerManager.Remove(payload.PlayerId));
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                RemotePlayerManager.Remove(payload.PlayerId);
+                // A departed worker must not leave a phantom "staffed" register
+                // (buyers would be charged with no owner to receive the sale).
+                MPRegisterSync.RemovePlayer(payload.PlayerId);
+            });
         }
 
         private static void HandleAppearanceSync(MessageEnvelope env)
