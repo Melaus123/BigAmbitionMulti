@@ -194,6 +194,16 @@ namespace BigAmbitionsMP
                 var inst = Helpers.EmployeeHelper.CreateAIEmployeeInstance(SkillName.CustomerService);
                 if (inst == null) { Plugin.Logger.LogWarning("[SynthStaff] factory returned null."); return; }
                 inst.id = $"BAMP_DUTY_{playerId}_{addressKey.Replace(' ', '_')}";
+                // The serving entity IS the other player as far as the buyer can
+                // tell — any "served by" UI must show the player's name (user
+                // spec: buying must feel like buying from the player).
+                try
+                {
+                    string ownerName = RemotePlayerManager.ResolveDisplayName(playerId);
+                    if (!string.IsNullOrEmpty(ownerName) && inst.characterData != null)
+                        inst.characterData.name = ownerName;
+                }
+                catch (Exception nx) { Plugin.Logger.LogWarning($"[SynthStaff] name override: {nx.Message}"); }
                 inst.hourlyWage = 0f;
                 inst.satisfaction = 100f;
                 inst.assignedAddress = new Address(reg.StreetName, reg.StreetNumber);
