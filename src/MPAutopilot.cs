@@ -174,25 +174,15 @@ namespace BigAmbitionsMP
                         return;
 
                     case State.HostWaitClient:
-                        // LobbyPlayers always includes host (index 0).  Once
-                        // a second entry appears, a client connected.
-                        try
-                        {
-                            int count = MPServer.LobbyPlayers?.Count ?? 0;
-                            if (count > 1)
-                            {
-                                Plugin.Logger.LogInfo($"[Autopilot/Host] {count - 1} client(s) connected — starting new game.");
-                                Transition(State.HostStartingGame);
-                                return;
-                            }
-                        }
-                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Autopilot/Host] WaitClient: {ex.Message}"); }
-                        // Log a heartbeat every 10s while waiting.
-                        if (inState > 10f && (int)inState % 10 == 0 && _attempts != (int)inState / 10)
-                        {
-                            _attempts = (int)inState / 10;
-                            Plugin.Logger.LogInfo($"[Autopilot/Host] still waiting for client... ({inState:F0}s)");
-                        }
+                        // AUTO-START RETIRED (2026-06-12): auto-calling
+                        // StartNewGame the instant a client connects collided
+                        // with the user driving the menus three times (manual
+                        // re-host cuts the client mid-init — the original
+                        // double-init stall trap).  The autopilot now ONLY
+                        // hosts the server; the user starts from the lobby
+                        // (their actual workflow: Lobby Start, new or load).
+                        Plugin.Logger.LogInfo("[Autopilot/Host] hosting ready — start the game from the lobby (auto-start retired).");
+                        Transition(State.Done);
                         return;
 
                     case State.HostStartingGame:

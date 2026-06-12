@@ -145,6 +145,15 @@ namespace BigAmbitionsMP
                     if (reg == null) return;   // working some other station — not register duty
                     _onDuty = true;
                     _dutyPos = reg.transform.position;
+                    // If this station was broadcast as EMPLOYEE-staffed (the
+                    // schedule query also matches the working owner), retract
+                    // that first — personal duty owns the till now.
+                    string myKey = Key(_dutyPos);
+                    if (_empDuty.ContainsKey(myKey))
+                    {
+                        SendToggle(_empDuty[myKey], false);
+                        _empDuty.Remove(myKey);
+                    }
                     SendToggle(_dutyPos, true);
                     // Worker-side price-table snapshot — cross-machine evidence
                     // pairing for any future price dispute.
@@ -234,6 +243,10 @@ namespace BigAmbitionsMP
                         catch { }
                         if (!staffed) continue;
                         var pos = new Vector3(ii.position.x, ii.position.y, ii.position.z);
+                        // The OWNER personally working reads as "employed" to the
+                        // schedule query — that's PERSONAL duty, not staff (user
+                        // saw a staff NPC spawn on top of their working avatar).
+                        if (_onDuty && Key(_dutyPos) == Key(pos)) continue;
                         live[Key(pos)] = (pos, addr, stationId);
                     }
                 }
