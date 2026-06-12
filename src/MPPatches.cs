@@ -2322,43 +2322,12 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── [EmpSpawn] passive: the employee-NPC SPAWN chain (2026-06-12).
-        // Run 3 vs 4/5 proved staffing evaluation runs at INTERIOR POPULATION
-        // (client entered seconds before injection → staffed; entered minutes
-        // before → never staffed; 10 game-hours of ticks did nothing).  These
-        // log the spawn chain when the re-entry experiment staffs the register,
-        // naming the entry point we must invoke at injection time. ───────────
-        [HarmonyPatch]
-        public static class Patch_EmployeeSpawn_Probe
-        {
-            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-            {
-                var list = new System.Collections.Generic.List<System.Reflection.MethodBase>();
-                try
-                {
-                    foreach (var m in typeof(Employee).GetMethods(
-                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
-                        if (m.Name == "Start" || m.Name == "SetEmployeeStation")
-                            if (m.DeclaringType == typeof(Employee)) list.Add(m);
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[EmpSpawn] targets: {ex.Message}"); }
-                return list;
-            }
-
-            static void Postfix(Employee __instance, System.Reflection.MethodBase __originalMethod)
-            {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                try
-                {
-                    string id = "?";
-                    try { id = __instance.employeeInstance?.id ?? "null"; } catch { }
-                    Plugin.Logger.LogInfo(
-                        $"[EmpSpawn] {__originalMethod.Name} on '{__instance.gameObject.name}' " +
-                        $"instanceId='{id}' isPlayer={__instance.isPlayer} pos={__instance.transform.position}");
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[EmpSpawn] {ex.Message}"); }
-            }
-        }
+        // ([EmpSpawn] probe REMOVED 2026-06-12: patching Employee.Start /
+        //  SetEmployeeStation — Unity lifecycle methods on a game NPC class —
+        //  NREd repeatedly on the host and is the prime suspect for the
+        //  price-change CTD (only new code in that build; the GameManager.Update
+        //  lesson again).  The re-entry experiment needs no probe: AssignProbe
+        //  below already logs any register assignment.) ───────────────────────
 
         // ── [RegGuard] queue-entry guard (2026-06-11).  In another player's
         // shop the native queue happily accepts a customer even when NO serving
