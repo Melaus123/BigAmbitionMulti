@@ -39,4 +39,8 @@ log-only (no cache priming/side effects) before deleting; they are guarded one-s
 
 | InteriorMask | RemotePlayerManager.SpawnOrUpdate + VehicleManager.ApplyVehicleFleet | [InteriorMask] | PERMANENT (production diagnostic) | Logs every avatar/ghost hide-show from the cross-interior mask (same-type interiors share one coordinate space). Lines are load-bearing evidence if masking ever misfires. |
 
-| RegShield | MPPatches Patch_RegisterOrder_Shield (OnPlaceOrder) | [RegShield] | ACTIVE (probe + shield) | Prefix logs employee/employeeInstance/playerCustomer null-state at order time in player shops (names the NRE root); Finalizer swallows the native NRE there + OnOrderCancel so the buyer dequeues instead of hard-locking. Probe half REMOVED once the purchase path is fixed; shield half stays until purchase verified. |
+| RegShield | MPPatches Patch_RegisterOrder_Shield (OnPlaceOrder) | [RegShield] | ACTIVE (probe + shield) | Prefix logs employee/employeeInstance/playerCustomer null-state at order time in player shops (names the NRE root); Finalizer swallows the native NRE there + OnOrderCancel so the buyer dequeues instead of hard-locking. Probe half REMOVED once the purchase path is fixed; shield half stays until purchase verified. RUN 2: shield fired but OnOrderCancel ALSO NREd — superseded by RegGuard prevention; keep as last-line shield. |
+
+| RegGuard | MPPatches Patch_RegisterQueue_Guard (CanOrder) | [RegGuard] | ACTIVE (production guard) | Blocks queue-join in player shops while the register has no LOCAL employeeInstance — the doomed-queue hard lock becomes impossible. Allows through once synthetic staffing lands. |
+
+| SynthStaff | MPRegisterSync.TryStaffSynthetic | [SynthStaff] | ACTIVE (fix attempt #1 of synthetic-employee approach, instrumented) | Logs every injection/removal step (factory result, roster counts, assignment fields). weeklyHours=168 semantics UNVERIFIED — first run shows whether the game's sim spawns the NPC. |

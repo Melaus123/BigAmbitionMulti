@@ -90,3 +90,22 @@ Rejected alternatives: real RivalData records for players (rival AI simulation w
 act on them — buy buildings etc.); mapping player shops onto existing AI rivals (wrong
 ownership semantics); owner-mode translation (rented=true would give visitors free
 restock pickup, not customer purchase).
+
+## 2026-06-11 — register: native-unaided DEAD END; user ruling = SYNTHETIC EMPLOYEE
+
+Run 2 evidence: RegShield swallowed the OnPlaceOrder NRE but native OnOrderCancel
+ALSO NREd (probe prefix NREd too) — the local customer-service graph is broken at
+every layer without a serving entity.  2-attempt cap reached on letting the native
+checkout run unaided.  USER RULING: synthetic employee (most native feel).
+
+SHIPPED v1: duty broadcast carries shop Address; non-owner machines inject a
+factory-built EmployeeInstance (EmployeeHelper.CreateAIEmployeeInstance(CustomerService),
+ns Entities) into gi.EmployeeInstances assigned to the shop (checkout stations,
+Mon-Sun, weeklyHours=168 [?], wage 0, id BAMP_DUTY_*).  Game''s own employee sim
+should spawn + assign the NPC = the PROVEN pre-session-hire cross-machine path.
+RegGuard (CanOrder postfix) blocks queue-join while register.employeeInstance==null.
+
+OPEN after first run: does the sim spawn the NPC (schedule semantics)?  Does
+OnPlaceOrder then succeed or hit the missing-rival-record null next?  v2 items:
+hide the NPC body under the worker''s avatar; strip BAMP_DUTY_* from saves
+(client-owned-shop case); price display timing (host must price BEFORE visitors).
