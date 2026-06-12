@@ -579,10 +579,19 @@ namespace BigAmbitionsMP
             // sees a vehicle here, just a prop: no ownership, no ticket, no entry.
             int killed = StripVehicleComponents(go);
             // Freeze physics — we drive the ghost purely by the synced transform.
+            // EVERY rigidbody in the hierarchy, same as SpawnVisualGhost: this
+            // path froze only the ROOT, and the 0.11 prefabs carry dynamic
+            // child rigidbodies — the client could shove the host's parked
+            // vehicles by walking into them (resurfaced bug, 2026-06-12).
             try
             {
-                var rb = go.GetComponent<Rigidbody>();
-                if (rb != null) rb.isKinematic = true;
+                var rbs = go.GetComponentsInChildren(typeof(Rigidbody), true);
+                if (rbs != null)
+                    for (int i = 0; i < rbs.Length; i++)
+                    {
+                        var rb = rbs[i] as Rigidbody;
+                        if (rb != null) rb.isKinematic = true;
+                    }
             }
             catch { }
 
