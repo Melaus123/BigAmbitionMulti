@@ -2235,23 +2235,9 @@ namespace BigAmbitionsMP
                        && MPRestSync.AllPlayers().Contains(owner);
             }
 
-            static void Prefix(Controllers.CashRegisterController __instance)
-            {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                try
-                {
-                    if (!InPlayerShop()) return;
-                    string emp = "?", inst = "?", cust = "?";
-                    try { emp  = (__instance.employee == null)         ? "null" : "set"; } catch { }
-                    try { inst = (__instance.employeeInstance == null) ? "null" : "set"; } catch { }
-                    try { cust = (__instance.playerCustomer == null)   ? "null" : "set"; } catch { }
-                    Plugin.Logger.LogInfo(
-                        $"[RegShield] OnPlaceOrder entry in '{MPRegisterSync.CurrentShopOwner}' shop: " +
-                        $"employee={emp} employeeInstance={inst} playerCustomer={cust} " +
-                        $"dutyStaffed={MPRegisterSync.IsStaffedByOtherPlayer(__instance.transform.position)}");
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[RegShield] probe: {ex.Message}"); }
-            }
+            // (Probe prefix REMOVED 2026-06-12 — purchase path verified; the
+            //  finalizer below stays as a last-line shield should any native
+            //  OnPlaceOrder run slip past the MP finalizer's conditions.)
 
             static Exception? Finalizer(Exception __exception, Controllers.CashRegisterController __instance)
             {
@@ -2273,116 +2259,10 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── [AssignProbe] passive: WHO assigns an employee to a register and
-        // WHEN (2026-06-11 run 4: synthetic NPC never spawned in ~10 game-hours
-        // while run 3 took seconds — the spawn/assign trigger is the unknown).
-        // Fires rarely (assignments only); logs station, instance id, body. ───
-        [HarmonyPatch]
-        public static class Patch_AssignEmployee_Probe
-        {
-            static System.Reflection.MethodBase? TargetMethod()
-            {
-                try
-                {
-                    foreach (var m in typeof(Controllers.CashRegisterController).GetMethods(
-                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
-                        if (m.Name == "AssignEmployee") return m;
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[AssignProbe] target: {ex.Message}"); }
-                return null;
-            }
-
-            static void Postfix(Controllers.CashRegisterController __instance)
-            {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                try
-                {
-                    string id = "?";
-                    try { id = __instance.employeeInstance?.id ?? "null"; } catch { }
-                    Plugin.Logger.LogInfo(
-                        $"[AssignProbe] AssignEmployee on '{__instance.gameObject.name}' at {__instance.transform.position} " +
-                        $"instanceId='{id}' employeeSet={__instance.employee != null}");
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[AssignProbe] {ex.Message}"); }
-            }
-        }
-
-        // ([EmpSpawn] probe REMOVED 2026-06-12: patching Employee.Start /
-        //  SetEmployeeStation — Unity lifecycle methods on a game NPC class —
-        //  NREd repeatedly on the host and is the prime suspect for the
-        //  price-change CTD (only new code in that build; the GameManager.Update
-        //  lesson again).  The re-entry experiment needs no probe: AssignProbe
-        //  below already logs any register assignment.) ───────────────────────
-
-        // ── [StaffEval] gate override + probe (2026-06-12, disasm-mapped).
-        // Run 10 named the failing gate: ShouldUpdateEmployee → False on every
-        // invocation for the rival-translated shop (the "is this my business"
-        // class of check).  The gate is a pure predicate — flip it to TRUE for
-        // exactly one case: an UNSTAFFED register a lobby player is actively
-        // working.  Everything downstream stays native game code; the
-        // GetEmployeeWorkShift probe keeps watching the next gate. ────────────
-        [HarmonyPatch]
-        public static class Patch_StaffEval_GateOverride
-        {
-            static System.Reflection.MethodBase? TargetMethod()
-            {
-                try
-                {
-                    foreach (var m in typeof(EmployeeStationController).GetMethods(
-                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
-                        if (m.Name == "ShouldUpdateEmployee" && m.DeclaringType == typeof(EmployeeStationController))
-                            return m;
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] gate target: {ex.Message}"); }
-                return null;
-            }
-
-            static void Postfix(EmployeeStationController __instance, ref bool __result)
-            {
-                if (__result) return;
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                try
-                {
-                    if (!MPRegisterSync.IsDutyStation(__instance.transform.position)) return;
-                    bool unstaffed = false;
-                    try { unstaffed = __instance.employeeInstance == null; } catch { }
-                    if (!unstaffed) return;
-                    __result = true;
-                    Plugin.Logger.LogInfo("[StaffEval] ShouldUpdateEmployee FORCED TRUE (duty register, unstaffed).");
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] gate: {ex.Message}"); }
-            }
-        }
-
-        [HarmonyPatch]
-        public static class Patch_StaffEval_ShiftProbe
-        {
-            static System.Reflection.MethodBase? TargetMethod()
-            {
-                try
-                {
-                    foreach (var m in typeof(EmployeeStationController).GetMethods(
-                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
-                        if (m.Name == "GetEmployeeWorkShift" && m.DeclaringType == typeof(EmployeeStationController))
-                            return m;
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] shift target: {ex.Message}"); }
-                return null;
-            }
-
-            static void Postfix(EmployeeStationController __instance, WorkShift? __result)
-            {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                try
-                {
-                    if (!MPRegisterSync.IsDutyStation(__instance.transform.position)) return;
-                    Plugin.Logger.LogInfo(__result == null
-                        ? "[StaffEval] GetEmployeeWorkShift → null"
-                        : $"[StaffEval] GetEmployeeWorkShift → shift(emp='{__result.employeeId}' station='{__result.itemInstanceId}' {__result.startingHour}-{__result.endingHour})");
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] shift probe: {ex.Message}"); }
-            }
-        }
+        // (AssignProbe + StaffEval gate-override/shift-probe + EmpSpawn probe
+        //  all REMOVED 2026-06-12 — the synthetic-staffing approach they served
+        //  was superseded by the MP order finalizer + self-checkout routing;
+        //  history in .modding/03-systems/cross-player-shopping.md.)
 
         // ── [MPSale] MP order finalizer (2026-06-12, user-approved design).
         // The native OnPlaceOrder decrements LOCAL replica stock and books
@@ -2459,6 +2339,16 @@ namespace BigAmbitionsMP
                     _pendingAct0    = act0;
                     _pendingAt      = UnityEngine.Time.unscaledTime + SERVICE_SECONDS;
                     _pending        = true;
+
+                    // The worker rings you up — play the native register
+                    // animation on THEIR avatar locally for the service beat.
+                    try
+                    {
+                        int idx = RemotePlayerManager.ResolveTriggerIndex("UsingCashRegister");
+                        if (idx >= 0) RemotePlayerManager.ApplyTrigger(owner, idx);
+                    }
+                    catch { }
+
                     Plugin.Logger.LogInfo($"[MPSale] order taken (${total:F2}) — ringing up...");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSale] order intake: {ex}"); }

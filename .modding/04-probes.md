@@ -35,7 +35,13 @@ log-only (no cache priming/side effects) before deleting; they are guarded one-s
 
 | FreezeGate telemetry | MPCanvasUI.TickOverlayFreezeGate | [FreezeGate] | ACTIVE (localization) | 15s heartbeat while pending-freeze armed + LOUD warn if the silent IsConnected clear disarms it — answers why the 180s fail-safe never fired in the 2026-06-11 run. REMOVE with the fail-safe fix. |
 
-| ShelfGate override | MPPatches Patch_ShelfGate_ShouldShow | [ShelfGate] | ACTIVE (fix attempt #1, instrumented) | Forces shelf CTA ON inside another LOBBY player's shop (ShopGate proved the cause: player id in businessOwnerRivalId has no RivalData record). Throttled log on every forced frame window. If pickup works end-to-end → keep + replicate pattern for the register gate; if downstream breaks → log localizes the next gate. |
+| ShelfGate override | MPPatches Patch_ShelfGate_ShouldShow | [ShelfGate] | PERMANENT (production) | VERIFIED: forces shelf CTA ON inside another lobby player's shop (player owner ids have no RivalData record). Load-bearing for cross-player shopping. |
+
+| MPSale finalizer | MPPatches Patch_MPOrderFinalizer | [MPSale] | PERMANENT (production) | The MP order finalizer: skips native OnPlaceOrder in player shops (it NREs on the replica's missing stock graph and books locally anyway); charges from the synced store table after a ~2s service beat (cancel-safe), RemoteSale carries revenue + structured items to the owner. VERIFIED at $22 ×2 purchases 2026-06-12. |
+
+| SelfCheckout routing | MPPatches Patch_RegisterInteract_SelfCheckout | [SelfCheckout] | PERMANENT (production) | Register click in a duty-staffed player shop routes to the game's native self-checkout flow. VERIFIED. |
+
+| Stock decrement | GameStatePatcher.ApplySaleStockDecrement | [Stock] | PERMANENT (production) | Host-authoritative stock decrement per sale (slice 2); logs every deduction + SHORT warnings. Verification pending one run. |
 
 | InteriorMask | RemotePlayerManager.SpawnOrUpdate + VehicleManager.ApplyVehicleFleet | [InteriorMask] | PERMANENT (production diagnostic) | Logs every avatar/ghost hide-show from the cross-interior mask (same-type interiors share one coordinate space). Lines are load-bearing evidence if masking ever misfires. |
 
@@ -43,4 +49,4 @@ log-only (no cache priming/side effects) before deleting; they are guarded one-s
 
 | RegGuard | MPPatches Patch_RegisterQueue_Guard (CanOrder) | [RegGuard] | ACTIVE (production guard) | Blocks queue-join in player shops while the register has no LOCAL employeeInstance — the doomed-queue hard lock becomes impossible. Allows through once synthetic staffing lands. |
 
-| SynthStaff | MPRegisterSync.TryStaffSynthetic | [SynthStaff] | ACTIVE (fix attempt #1 of synthetic-employee approach, instrumented) | Logs every injection/removal step (factory result, roster counts, assignment fields). weeklyHours=168 semantics UNVERIFIED — first run shows whether the game's sim spawns the NPC. |
+| SynthStaff | (DELETED 2026-06-12) | [SynthStaff] | REMOVED | Synthetic-employee staffing machinery deleted after the self-checkout pivot verified: the native staffing evaluator's first gate (ShouldUpdateEmployee) refuses rival-translated shops; no roster/WorkShift injection can reach it. Also removed: StaffEval gate-override + shift probe, AssignProbe, RegGuard's synthetic allowance, RegShield's probe prefix (shield finalizer kept). |
