@@ -2692,7 +2692,13 @@ namespace BigAmbitionsMP
                     if (UnityEngine.Time.unscaledTime >= _nextLog)
                     {
                         _nextLog = UnityEngine.Time.unscaledTime + 5f;
-                        Plugin.Logger.LogInfo($"[RegGuard] blocked queue in '{owner}' shop — register not locally staffed yet.");
+                        // Native "there's no one at the register" toast — the
+                        // same key the game shows for an unstaffed hairdresser
+                        // till.  Accurate model (user 2026-06-12): no cashier =
+                        // no checkout, clearly said, nothing locks.
+                        try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, "notification_cashregister_no_employee"); }
+                        catch { }
+                        Plugin.Logger.LogInfo($"[RegGuard] blocked queue in '{owner}' shop — no cashier on duty (notified buyer).");
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[RegGuard] {ex.Message}"); }
