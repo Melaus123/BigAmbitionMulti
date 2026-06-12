@@ -10,3 +10,6 @@ obj/
 # OS
 Thumbs.db
 desktop.ini
+
+# Local test harness (machine-specific launchers etc.) - never published
+/local/
