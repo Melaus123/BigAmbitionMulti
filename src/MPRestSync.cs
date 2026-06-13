@@ -305,7 +305,7 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<Type, System.Reflection.MemberInfo?> _durProps = new();
 
         /// <summary>All session player names (for the who-voted checklist).</summary>
-        public static List<string> AllPlayers()
+        public static IReadOnlyList<string> AllPlayers()
             => MPServer.IsRunning ? MPServer.LobbyPlayers
              : MPClient.IsConnected ? MPClient.LobbyPlayers : new List<string>();
 

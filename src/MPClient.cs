@@ -17,8 +17,12 @@ namespace BigAmbitionsMP
         private static Thread? _pollThread;
         private static volatile bool _running;
 
-        /// <summary>Player list last received from the host's lobby update.</summary>
-        public static readonly List<string> LobbyPlayers = new();
+        /// <summary>Player list last received from the host's lobby update.
+        /// CONCURRENT: replaced wholesale on the poll thread (lobby update / connect /
+        /// disconnect), read on the main thread (lobby UI, roster).  Published as an
+        /// immutable snapshot — single writer thread + volatile = safe without a lock.</summary>
+        public static IReadOnlyList<string> LobbyPlayers => _lobbyPlayers;
+        private static volatile List<string> _lobbyPlayers = new();
 
         /// <summary>True while in the pre-game lobby; false once the host starts the game.</summary>
         public static bool IsInLobby { get; private set; } = true;
@@ -100,7 +104,7 @@ namespace BigAmbitionsMP
             _client?.Stop();
             _pollThread?.Join(1000);
             IsInLobby = true;
-            LobbyPlayers.Clear();
+            _lobbyPlayers = new List<string>();
             _server = null;
             _client = null;
         }
@@ -112,7 +116,7 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo("[Client] Connected to host.");
             _server   = peer;
             IsInLobby = true;
-            LobbyPlayers.Clear();
+            _lobbyPlayers = new List<string>();
 
             // Send Hello
             var hello = new HelloPayload
@@ -426,8 +430,7 @@ namespace BigAmbitionsMP
         {
             var payload = env.GetPayload<LobbyUpdatePayload>();
             if (payload == null) return;
-            LobbyPlayers.Clear();
-            LobbyPlayers.AddRange(payload.Players);
+            _lobbyPlayers = payload.Players != null ? new List<string>(payload.Players) : new List<string>();
             EnforceStartingCash = payload.EnforceStartingCash;
             LobbyAges.Clear();
             if (payload.Ages != null) foreach (var kv in payload.Ages) LobbyAges[kv.Key] = kv.Value;

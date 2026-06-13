@@ -4047,7 +4047,7 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Rebuild the recipient chips ("All" + each other player).</summary>
-        private void RebuildChips(List<string>? players)
+        private void RebuildChips(IReadOnlyList<string>? players)
         {
             foreach (var c in _mpChips) { try { UnityEngine.Object.Destroy(c.rt.gameObject); } catch { } }
             _mpChips.Clear();
@@ -4122,7 +4122,7 @@ namespace BigAmbitionsMP
 
             // Roster source = the connected-players list (persists in-game + is kept
             // fresh by the host re-broadcasting LobbyUpdate on connect/disconnect).
-            List<string>? players = MPServer.IsRunning ? MPServer.LobbyPlayers
+            IReadOnlyList<string>? players = MPServer.IsRunning ? MPServer.LobbyPlayers
                                   : MPClient.IsConnected ? MPClient.LobbyPlayers : null;
             int count = players?.Count ?? 0;
 

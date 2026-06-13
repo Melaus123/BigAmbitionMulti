@@ -21,8 +21,34 @@ namespace BigAmbitionsMP
         /// violation, so this must be a ConcurrentDictionary.</summary>
         public static readonly ConcurrentDictionary<string, string> BuildingOwners = new();
 
-        /// <summary>Ordered list of player IDs currently in the lobby (host is always index 0).</summary>
-        public static readonly List<string> LobbyPlayers = new();
+        /// <summary>Ordered list of player IDs currently in the lobby (host is always
+        /// index 0).  CONCURRENT: mutated under _lobbyLock on the poll thread (Hello /
+        /// disconnect) and the main thread (host start / kick / mid-game join), and
+        /// published as an immutable snapshot read locklessly by every consumer
+        /// (copy-on-write).  Mutate only via the Lobby* helpers below.</summary>
+        public static IReadOnlyList<string> LobbyPlayers => _lobbyPlayers;
+        private static volatile List<string> _lobbyPlayers = new();
+        private static readonly object _lobbyLock = new();
+        private static void LobbyReset(string hostId) { lock (_lobbyLock) _lobbyPlayers = new List<string> { hostId }; }
+        private static void LobbyClear() { lock (_lobbyLock) _lobbyPlayers = new List<string>(); }
+        private static void LobbyAdd(string id)
+        {
+            lock (_lobbyLock)
+            {
+                if (_lobbyPlayers.Contains(id)) return;
+                _lobbyPlayers = new List<string>(_lobbyPlayers) { id };
+            }
+        }
+        private static void LobbyRemove(string id)
+        {
+            lock (_lobbyLock)
+            {
+                if (!_lobbyPlayers.Contains(id)) return;
+                var n = new List<string>(_lobbyPlayers);
+                n.Remove(id);
+                _lobbyPlayers = n;
+            }
+        }
 
         /// <summary>True while waiting in the lobby; false once the game has been started.</summary>
         public static bool IsInLobby { get; private set; } = true;
@@ -269,8 +295,7 @@ namespace BigAmbitionsMP
 
             // Reset lobby state for a fresh session
             IsInLobby = true;
-            LobbyPlayers.Clear();
-            LobbyPlayers.Add(MPConfig.PlayerId); // host is always the first player
+            LobbyReset(MPConfig.PlayerId); // host is always the first player
             EnforceStartingCash = true;
             StartingCashByPlayer.Clear();
             StartingAgeByPlayer.Clear();
@@ -328,7 +353,7 @@ namespace BigAmbitionsMP
             _server?.Stop();
             _pollThread?.Join(1000);
             IsInLobby = true;
-            LobbyPlayers.Clear();
+            LobbyClear();
             _peerNames.Clear();
             _clients.Clear();
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
@@ -486,7 +511,7 @@ namespace BigAmbitionsMP
             // Remove from lobby player list
             if (_peerNames.TryGetValue(peer.Id, out leftPlayer))
             {
-                LobbyPlayers.Remove(leftPlayer);
+                LobbyRemove(leftPlayer);
                 _peerNames.TryRemove(peer.Id, out _);
                 BroadcastLobbyUpdate();   // keep everyone's roster (incl. the in-game F9 list) current
                 if (!IsInLobby)
@@ -1081,7 +1106,7 @@ namespace BigAmbitionsMP
                         if (p.Id == kv.Key) { try { p.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:kicked")); } catch { } break; }
                     break;
                 }
-            LobbyPlayers.Remove(playerId);
+            LobbyRemove(playerId);
             BroadcastLobbyUpdate();
             Plugin.Logger.LogInfo($"[Server] KICKED '{playerId}' from the lobby (banned until re-host).");
         }
@@ -1168,8 +1193,7 @@ namespace BigAmbitionsMP
                 StableIdByPlayer[hello.PlayerId] = hello.StableId;
 
             // Add to lobby and tell everyone
-            if (!LobbyPlayers.Contains(hello.PlayerId))
-                LobbyPlayers.Add(hello.PlayerId);
+            LobbyAdd(hello.PlayerId);
             BroadcastLobbyUpdate();
             Plugin.Logger.LogInfo($"[Server] '{hello.PlayerId}' joined lobby. Players: {string.Join(", ", LobbyPlayers)}");
         }
@@ -1188,7 +1212,7 @@ namespace BigAmbitionsMP
                     StableIdByPlayer[hello.PlayerId] = hello.StableId;
                 // Late join — keep the roster current for everyone (the in-game F9
                 // window reads LobbyPlayers) by adding + re-broadcasting it.
-                if (!LobbyPlayers.Contains(hello.PlayerId)) LobbyPlayers.Add(hello.PlayerId);
+                LobbyAdd(hello.PlayerId);
                 BroadcastLobbyUpdate();
 
                 // Mid-session JOIN/RECONNECT into an active MP save session (Phase
