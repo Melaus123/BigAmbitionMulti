@@ -19,7 +19,7 @@
 
 ## Installation
 
-1. Download the `.zip` from the [latest release](https://github.com/Melaus123/BigAmbitionMulti/releases/latest).
+1. Download the `.zip` from the [releases page](https://github.com/Melaus123/BigAmbitionMulti/releases).
 2. Extract it — you'll get a `BigAmbitionsMP` folder.
 3. Copy that `BigAmbitionsMP` folder into your local mods folder:
    ```
