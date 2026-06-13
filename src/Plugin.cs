@@ -78,7 +78,7 @@ namespace BigAmbitionsMP
             MPAutopilot.Init();
 #endif
 
-            Plugin.Logger.LogInfo("BigAmbitionsMP loaded. Canvas UI active — press F8 to toggle.");
+            Plugin.Logger.LogInfo($"BigAmbitionsMP v{MyPluginInfo.PLUGIN_VERSION} ({MyPluginInfo.BuildTag}) loaded. Canvas UI active.");
             return Task.CompletedTask;
         }
 
