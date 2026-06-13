@@ -296,7 +296,6 @@ namespace BigAmbitionsMP
             MPSaveManager.EnsureVersionCached();
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
-            TickTestRig();           // F3 — flatbed with minimum gift-shop equipment (Wave-2 test rig)
             MPRegisterSync.TickDuty();   // mirror the native Work activity into register duty (1s self-throttle)
             MPHub.TickSalePopups();      // rising +$ worker feedback (per-frame: smooth rise/fade)
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
@@ -1125,57 +1124,11 @@ namespace BigAmbitionsMP
             return rt.rect.Contains(local);
         }
 
-        // ── F3 test rig (user request, Wave-2 shop tests): ONE flatbed beside
-        // the player carrying the minimum GIFT SHOP equipment — checkout
-        // counter, cash register, paper bags, shelves, cheap gifts.  Real
-        // owned vehicle (driveable/unloadable); reuses the proven ghost-spawn
-        // API minus the de-registration.  MP-session only. ───────────────────
-        private bool _testRigF3Down;
-        private static int _testRigN;
-
-        private void TickTestRig()
-        {
-            bool f3 = Input.GetKey(KeyCode.F3);
-            if (f3 && !_testRigF3Down && (MPServer.IsRunning || MPClient.IsConnected) && IsInGame())
-            {
-                try
-                {
-                    var ch = Helpers.PlayerHelper.PlayerController?.Character?.transform;
-                    if (ch == null) { Plugin.Logger.LogWarning("[TestRig] no player character."); }
-                    else
-                    {
-                        var pos = ch.position + ch.forward * 7f + Vector3.up * 0.5f;
-                        var rot = Quaternion.LookRotation(ch.right, Vector3.up);   // sideways at the curb
-                        var inst = new VehicleInstance("ba:vehicletype_flatbed");
-                        inst.id = $"BAMP_TESTRIG_{++_testRigN}";
-                        if (inst.cargoInstances == null)
-                            inst.cargoInstances = new System.Collections.Generic.List<BigAmbitions.Items.CargoInstance>();
-                        // Minimum gift-shop kit (paid stock, $0 cost basis).
-                        // (CashRegister dropped — the checkout counter is the
-                        //  full checkout deal; baskets added — both user.)
-                        // price: rig-made cargo previously carried 0f — suspected
-                        // source of the $0 checkout (AI-shop stock arrives
-                        // pre-priced; CheapGift's default retail is $18 per user).
-                        (string item, int amount, float price)[] kit =
-                        {
-                            ("ba:itemname_checkoutcounterright",    1,  0f),
-                            ("ba:itemname_paperbag",              100,  0f),
-                            ("ba:itemname_stackofshoppingbaskets",  1,  0f),
-                            ("ba:itemname_roundedshelf",            2,  0f),
-                            ("ba:itemname_cheapgift",              60, 18f),
-                        };
-                        foreach (var (item, amount, price) in kit)
-                            inst.cargoInstances.Add(new BigAmbitions.Items.CargoInstance(item, amount, price, true));
-                        var vc = VehicleHelper.CreateAndSpawnVehicle(inst, pos, rot);
-                        Plugin.Logger.LogInfo(vc != null
-                            ? $"[TestRig] flatbed '{inst.id}' spawned at {pos} with gift-shop kit (gifts pre-priced $18)."
-                            : "[TestRig] CreateAndSpawnVehicle returned null.");
-                    }
-                }
-                catch (Exception ex) { Plugin.Logger.LogError($"[TestRig] {ex.Message}"); }
-            }
-            _testRigF3Down = f3;
-        }
+        // ── F3 test rig REMOVED for public release (2026-06-12): it spawned a
+        // real owned flatbed pre-loaded with sellable stock and was exempt from
+        // the ghost strip, so it persisted into saves — an economy/clutter vector
+        // (sweep finding M1).  The BAMP_TESTRIG strip exemption in
+        // GameStatePatcher is retained as a backstop for any pre-existing save.
 
         // ── Spawn de-stack v2 (stage-4): every player loads on the SAME spawn
         // point and the capsules shove each other.  ONE navmesh-validated

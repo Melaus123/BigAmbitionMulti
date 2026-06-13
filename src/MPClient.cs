@@ -33,8 +33,10 @@ namespace BigAmbitionsMP
         /// host (LobbyPref); the host bakes it into this client's start settings.</summary>
         public static int ChosenStartingAge = 18;
 
-        /// <summary>Per-player starting ages from the host (LobbyUpdate), for lobby display.</summary>
-        public static readonly Dictionary<string, int> LobbyAges = new();
+        /// <summary>Per-player starting ages from the host (LobbyUpdate), for lobby display.
+        /// CONCURRENT: cleared/repopulated on the poll thread (HandleLobbyUpdate),
+        /// read per-frame on the main thread (lobby UI).</summary>
+        public static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> LobbyAges = new();
 
         /// <summary>True if the host is resuming a saved game (from LobbyUpdate) — the
         /// client hides the new-game settings (age) since they come from the save.</summary>
@@ -1115,7 +1117,11 @@ namespace BigAmbitionsMP
         {
             while (_running)
             {
-                _client?.PollEvents();
+                // A message handler throwing must NOT kill the network thread —
+                // that would silently drop the client out of the session.  Catch,
+                // log, and keep polling.
+                try { _client?.PollEvents(); }
+                catch (Exception ex) { Plugin.Logger.LogError($"[Client] PollEvents: {ex}"); }
                 Thread.Sleep(15);
             }
         }

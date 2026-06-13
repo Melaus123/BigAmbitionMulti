@@ -50,7 +50,9 @@ namespace BigAmbitionsMP
         /// <summary>Per-player self-chosen starting age (playerId → age, host included).
         /// Unlike cash, each player picks their OWN; the host just aggregates them for
         /// display + bakes each into that player's start settings.</summary>
-        public static readonly Dictionary<string, int> StartingAgeByPlayer = new();
+        // CONCURRENT: written by the lobby UI (main thread) and the LobbyPref
+        // handler (poll thread); copy-constructed during lobby broadcasts.
+        public static readonly ConcurrentDictionary<string, int> StartingAgeByPlayer = new();
 
         public static int StartingAgeFor(string playerId, int baseAge)
             => (!string.IsNullOrEmpty(playerId) && StartingAgeByPlayer.TryGetValue(playerId, out var v) && v > 0) ? v : baseAge;
@@ -65,8 +67,14 @@ namespace BigAmbitionsMP
             if (IsInLobby) BroadcastLobbyUpdate();
         }
 
-        private static readonly HashSet<NetPeer>        _clients   = new();
-        private static readonly Dictionary<int, string> _peerNames = new(); // peer.Id → playerId
+        // CONCURRENT: the connection registry is mutated on the poll thread (Hello
+        // adds, disconnect removes) AND on the main thread (mid-game join approval
+        // adds), and iterated on the main thread for every broadcast (~10 Hz).
+        // Plain collections corrupt under that race — the same hazard documented
+        // for BuildingOwners above — so both are concurrent.  _clients is a
+        // ConcurrentDictionary used as a set; iterate it via .Keys.
+        private static readonly ConcurrentDictionary<NetPeer, byte> _clients   = new();
+        private static readonly ConcurrentDictionary<int, string>   _peerNames = new(); // peer.Id → playerId
         /// <summary>playerId → immutable StableId (for save/ownership persistence).
         /// Includes the host's own.  Populated from each client's Hello.
         /// CONCURRENT: written on the poll thread (Hello) + main thread (host
@@ -128,7 +136,7 @@ namespace BigAmbitionsMP
         /// session so it can load in.  Phase 4 load.</summary>
         public static void SendLoadDataToEachClient(string session, MpManifest m)
         {
-            foreach (var peer in _clients)
+            foreach (var peer in _clients.Keys)
             {
                 if (!_peerNames.TryGetValue(peer.Id, out var pid)) continue;
                 if (!StableIdByPlayer.TryGetValue(pid, out var stable) || string.IsNullOrEmpty(stable)) continue;
@@ -169,7 +177,9 @@ namespace BigAmbitionsMP
         /// messages from each connected client + host's own profile.
         /// Used as the display name in RivalsSnapshot / RivalsStatsSnapshot.
         /// </summary>
-        public static readonly Dictionary<string, string> _characterNamesByPlayerId = new();
+        // CONCURRENT: written on the poll thread (PlayerProfile handler) and the
+        // main thread (host's own profile); read on both during snapshot builds.
+        public static readonly ConcurrentDictionary<string, string> _characterNamesByPlayerId = new();
 
         /// <summary>
         /// PlayerId → most recent self-reported stats from that client (Wave 7).
@@ -177,7 +187,9 @@ namespace BigAmbitionsMP
         /// BuildRivalsStatsSnapshot to populate non-host player rows since
         /// host has no source of truth for what other players own locally.
         /// </summary>
-        private static readonly Dictionary<string, RivalsStatsRequestPayload> _clientSelfStats = new();
+        // CONCURRENT: written on the poll thread (RivalsStatsRequest handler),
+        // enumerated on the main thread (rival-fairness patches, snapshot build).
+        private static readonly ConcurrentDictionary<string, RivalsStatsRequestPayload> _clientSelfStats = new();
 
         /// <summary>Self-reported weekly income for a session player's business
         /// at this address (0 if unknown).  Bridges the rival-AI fairness
@@ -343,7 +355,7 @@ namespace BigAmbitionsMP
             // client uses the StartingMoney we bake into its own Settings copy.
             int baseCash = settings.StartingMoney;
             int baseAge  = settings.StartingAge;
-            foreach (var peer in _clients)
+            foreach (var peer in _clients.Keys)
             {
                 string pid  = _peerNames.TryGetValue(peer.Id, out var p) ? p : "";
                 int    cash = StartingCashFor(pid, baseCash);
@@ -460,7 +472,7 @@ namespace BigAmbitionsMP
         private static void OnPeerDisconnected(NetPeer peer, DisconnectInfo info)
         {
             Plugin.Logger.LogInfo($"[Server] Peer disconnected: {peer.Id} — {info.Reason}");
-            _clients.Remove(peer);
+            _clients.TryRemove(peer, out _);
             lock (_pendingJoins) _pendingJoins.Remove(peer.Id);   // abandoned join request
 
             // Clear any interior subscription the peer held so we stop polling
@@ -475,7 +487,7 @@ namespace BigAmbitionsMP
             if (_peerNames.TryGetValue(peer.Id, out leftPlayer))
             {
                 LobbyPlayers.Remove(leftPlayer);
-                _peerNames.Remove(peer.Id);
+                _peerNames.TryRemove(peer.Id, out _);
                 BroadcastLobbyUpdate();   // keep everyone's roster (incl. the in-game F9 list) current
                 if (!IsInLobby)
                     BroadcastPlayerLeft(leftPlayer); // also tell remaining clients to remove the capsule
@@ -1010,7 +1022,9 @@ namespace BigAmbitionsMP
 
         // ── Join control: bans (kick/reject — stand until the host re-hosts)
         //    and mid-game join requests awaiting the host's approval. ────────
-        private static readonly HashSet<string> _banned = new();
+        // CONCURRENT: written on the main thread (kick/reject UI), read on the
+        // poll thread (HandleHello ban check).  ConcurrentDictionary used as a set.
+        private static readonly ConcurrentDictionary<string, byte> _banned = new();
         private static readonly Dictionary<int, (NetPeer peer, HelloPayload hello)> _pendingJoins = new();
 
         /// <summary>Snapshot for the host's approval popup.</summary>
@@ -1058,12 +1072,12 @@ namespace BigAmbitionsMP
         public static void KickFromLobby(string playerId)
         {
             if (string.IsNullOrEmpty(playerId) || playerId == MPConfig.PlayerId) return;
-            _banned.Add(playerId);
-            if (StableIdByPlayer.TryGetValue(playerId, out var st) && !string.IsNullOrEmpty(st)) _banned.Add(st);
+            _banned[playerId] = 0;
+            if (StableIdByPlayer.TryGetValue(playerId, out var st) && !string.IsNullOrEmpty(st)) _banned[st] = 0;
             foreach (var kv in _peerNames)
                 if (kv.Value == playerId)
                 {
-                    foreach (var p in _clients)
+                    foreach (var p in _clients.Keys)
                         if (p.Id == kv.Key) { try { p.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:kicked")); } catch { } break; }
                     break;
                 }
@@ -1074,8 +1088,8 @@ namespace BigAmbitionsMP
 
         private static void Ban(HelloPayload hello)
         {
-            _banned.Add(hello.PlayerId);
-            if (!string.IsNullOrEmpty(hello.StableId)) _banned.Add(hello.StableId);
+            _banned[hello.PlayerId] = 0;
+            if (!string.IsNullOrEmpty(hello.StableId)) _banned[hello.StableId] = 0;
         }
 
         /// <summary>Clear join control on a fresh hosting session ("re-form
@@ -1130,7 +1144,7 @@ namespace BigAmbitionsMP
             if (!ValidateHelloIdentity(peer, hello)) return;
 
             // Banned (kicked or rejected) — out until the host re-hosts.
-            if (_banned.Contains(hello.PlayerId) || (!string.IsNullOrEmpty(hello.StableId) && _banned.Contains(hello.StableId)))
+            if (_banned.ContainsKey(hello.PlayerId) || (!string.IsNullOrEmpty(hello.StableId) && _banned.ContainsKey(hello.StableId)))
             {
                 Plugin.Logger.LogInfo($"[Server] Hello from BANNED '{hello.PlayerId}' — disconnected.");
                 try { peer.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:banned")); } catch { }
@@ -1148,7 +1162,7 @@ namespace BigAmbitionsMP
                 return;
             }
 
-            _clients.Add(peer);
+            _clients[peer] = 0;
             _peerNames[peer.Id] = hello.PlayerId;
             if (!string.IsNullOrEmpty(hello.StableId))
                 StableIdByPlayer[hello.PlayerId] = hello.StableId;
@@ -1168,7 +1182,7 @@ namespace BigAmbitionsMP
             // identity while the request sat in the queue.
             if (!ValidateHelloIdentity(peer, hello)) return;
             {
-                _clients.Add(peer);
+                _clients[peer] = 0;
                 _peerNames[peer.Id] = hello.PlayerId;
                 if (!string.IsNullOrEmpty(hello.StableId))
                     StableIdByPlayer[hello.PlayerId] = hello.StableId;
@@ -1345,7 +1359,7 @@ namespace BigAmbitionsMP
                     // so the frozen-until-synced flow won't run for this player —
                     // serve their world state directly now their scene is loaded.
                     if (playerId != MPConfig.PlayerId)
-                        foreach (var p in _clients)
+                        foreach (var p in _clients.Keys)
                             if (_peerNames.TryGetValue(p.Id, out var nm) && nm == playerId)
                                 sendTo.Add(p);
                 }
@@ -1379,14 +1393,14 @@ namespace BigAmbitionsMP
                     // serve snapshots now.  Flush to any clients already on the wait screen.
                     _hostSnapshotsReady = true;
                     hostJustReady = true;
-                    foreach (var p in _clients)
+                    foreach (var p in _clients.Keys)
                         if (_peerNames.TryGetValue(p.Id, out var nm) && _inGamePlayers.Contains(nm))
                             sendTo.Add(p);
                 }
                 else if (!isHost && _hostSnapshotsReady)
                 {
                     // A client's scene is ready and the host can serve — send its world now.
-                    foreach (var p in _clients)
+                    foreach (var p in _clients.Keys)
                         if (_peerNames.TryGetValue(p.Id, out var nm) && nm == playerId)
                             sendTo.Add(p);
                 }
@@ -1519,7 +1533,7 @@ namespace BigAmbitionsMP
                     // happened (one-shot), but THIS player just froze on their
                     // local startup hold and applied the world — ack them with a
                     // direct StartupRelease so they unfreeze.  Idempotent.
-                    foreach (var p in _clients)
+                    foreach (var p in _clients.Keys)
                         if (_peerNames.TryGetValue(p.Id, out var nm) && nm == playerId)
                         {
                             Send(p, MessageEnvelope.Create(
@@ -1651,7 +1665,7 @@ namespace BigAmbitionsMP
 
             // Apply on the host, then relay to every other client.
             TimeSync.SetManualPause(payload.Paused);
-            foreach (var peer in _clients)
+            foreach (var peer in _clients.Keys)
                 if (peer.Id != sender.Id)
                     Send(peer, MessageEnvelope.Create(
                         MessageType.ManualPause, "host", payload));
@@ -1787,7 +1801,7 @@ namespace BigAmbitionsMP
             // Confirm to the OTHER clients (not the requester — it already rented
             // locally, so re-applying would double-charge it).  They mark it taken.
             var confirm = MessageEnvelope.Create(MessageType.RentConfirm, "host", req);
-            foreach (var p in _clients)
+            foreach (var p in _clients.Keys)
                 if (p != peer) Send(p, confirm);
             Plugin.Logger.LogInfo($"[Server] Rent confirmed: {req.AddressKey} → {senderPid} (relayed to {_clients.Count - 1} other client(s)).");
 
@@ -1847,7 +1861,7 @@ namespace BigAmbitionsMP
             var bytes  = env.Serialize();
             var writer = new NetDataWriter();
             writer.Put(bytes);
-            foreach (var peer in _clients)
+            foreach (var peer in _clients.Keys)
                 if (peer.Id != sender.Id)
                     peer.Send(writer, DeliveryMethod.Unreliable);
         }
@@ -1866,7 +1880,7 @@ namespace BigAmbitionsMP
             var bytes  = env.Serialize();
             var writer = new NetDataWriter();
             writer.Put(bytes);
-            foreach (var peer in _clients)
+            foreach (var peer in _clients.Keys)
                 if (peer.Id != sender.Id)
                     peer.Send(writer, DeliveryMethod.ReliableOrdered);
         }
@@ -1884,7 +1898,7 @@ namespace BigAmbitionsMP
         public static void SendAuditDrill(string playerId, List<int> buckets)
         {
             if (!_running || buckets == null || buckets.Count == 0) return;
-            foreach (var peer in _clients)
+            foreach (var peer in _clients.Keys)
             {
                 if (!_peerNames.TryGetValue(peer.Id, out var pid) || pid != playerId) continue;
                 Send(peer, MessageEnvelope.Create(MessageType.AuditDrill, "host",
@@ -1918,7 +1932,7 @@ namespace BigAmbitionsMP
             var bytes  = env.Serialize();
             var writer = new NetDataWriter();
             writer.Put(bytes);
-            foreach (var peer in _clients)
+            foreach (var peer in _clients.Keys)
                 if (peer.Id != sender.Id)
                     peer.Send(writer, DeliveryMethod.ReliableOrdered);
         }
@@ -2434,7 +2448,7 @@ namespace BigAmbitionsMP
             var bytes  = env.Serialize();
             var writer = new NetDataWriter();
             writer.Put(bytes);
-            foreach (var peer in _clients)
+            foreach (var peer in _clients.Keys)
                 peer.Send(writer, DeliveryMethod.Unreliable);
         }
 
@@ -2495,7 +2509,7 @@ namespace BigAmbitionsMP
             var bytes  = env.Serialize();
             var writer = new NetDataWriter();
             writer.Put(bytes);
-            foreach (var peer in _clients)
+            foreach (var peer in _clients.Keys)
                 peer.Send(writer, DeliveryMethod.ReliableOrdered);
         }
 
@@ -2518,7 +2532,7 @@ namespace BigAmbitionsMP
                 foreach (var kv in _peerNames)
                 {
                     if (kv.Value != playerId) continue;
-                    foreach (var peer in _clients)
+                    foreach (var peer in _clients.Keys)
                         if (peer.Id == kv.Key)
                         {
                             Send(peer, MessageEnvelope.Create(type, "host", payload));
@@ -2561,7 +2575,7 @@ namespace BigAmbitionsMP
                 foreach (var kv in _peerNames)
                 {
                     if (kv.Value != toId) continue;
-                    foreach (var peer in _clients)
+                    foreach (var peer in _clients.Keys)
                         if (peer.Id == kv.Key)
                         {
                             Send(peer, MessageEnvelope.Create(MessageType.Chat, "host",
@@ -2597,7 +2611,12 @@ namespace BigAmbitionsMP
         {
             while (_running)
             {
-                _server?.PollEvents();
+                // A message handler throwing (e.g. a transient collection race or
+                // a malformed payload) must NOT kill the network thread — that
+                // would freeze the whole session with no recovery short of
+                // re-hosting.  Catch, log, and keep polling.
+                try { _server?.PollEvents(); }
+                catch (Exception ex) { Plugin.Logger.LogError($"[Server] PollEvents: {ex}"); }
                 Thread.Sleep(15);
             }
         }

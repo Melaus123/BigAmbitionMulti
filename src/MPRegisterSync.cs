@@ -37,8 +37,10 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class MPRegisterSync
     {
-        // posKey → cashier
-        private static readonly Dictionary<string, (string playerId, Vector3 pos, bool employee)> _cashiers = new();
+        // posKey → cashier.  CONCURRENT: Apply runs on the network poll thread
+        // (RegisterCashier handler) and the main thread (local duty echo), while
+        // the checkout-routing Harmony patches read it on the main thread.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string playerId, Vector3 pos, bool employee)> _cashiers = new();
 
         public static void Reset() { _cashiers.Clear(); _empDuty.Clear(); _synthetics.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = ""; }
 
@@ -80,7 +82,7 @@ namespace BigAmbitionsMP
             }
             else if (_cashiers.TryGetValue(k, out var e) && e.playerId == p.PlayerId)
             {
-                _cashiers.Remove(k);
+                _cashiers.TryRemove(k, out _);
                 Plugin.Logger.LogInfo($"[Register] '{p.PlayerId}' OFF duty at {k}.");
                 if (e.employee && p.PlayerId != MPConfig.PlayerId)
                     GameStatePatcher.EnqueueOnMainThread(() => RemoveSyntheticAtStation(k));
@@ -95,7 +97,7 @@ namespace BigAmbitionsMP
             foreach (var k in dead)
             {
                 bool wasEmployee = _cashiers[k].employee;
-                _cashiers.Remove(k);
+                _cashiers.TryRemove(k, out _);
                 if (wasEmployee && playerId != MPConfig.PlayerId)
                 {
                     var key = k;

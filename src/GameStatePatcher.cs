@@ -144,7 +144,9 @@ namespace BigAmbitionsMP
         /// circuits with the host's name — bypassing the game's cache lookup
         /// entirely for known IDs.
         /// </summary>
-        public static readonly System.Collections.Generic.Dictionary<string, string> ClientRivalNames = new();
+        // CONCURRENT: written on the poll thread (PlayerProfile handlers, MPServer/
+        // MPClient) and bulk-rebuilt on the main thread (ApplyRivalsSnapshot).
+        public static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> ClientRivalNames = new();
 
         /// <summary>
         /// Ordered FIFO of rival IDs to be consumed by client's GenerateRivals.
@@ -182,7 +184,9 @@ namespace BigAmbitionsMP
         /// additional rows into the rivals leaderboard for each non-local
         /// player — same approach the game uses to add the local player row.
         /// </summary>
-        public static readonly System.Collections.Generic.Dictionary<string, string> ClientPlayerRoster = new();
+        // CONCURRENT: written on the poll thread (host PlayerProfile handler),
+        // bulk-rebuilt and read on the main thread (leaderboard injection).
+        public static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> ClientPlayerRoster = new();
 
         /// <summary>
         /// id → RivalData reference, captured when the local game's
@@ -199,7 +203,9 @@ namespace BigAmbitionsMP
         /// Consulted by the RivalLeaderboard.GetRivalLeaderboardData Postfix
         /// to override the locally-computed (and therefore stale) values.
         /// </summary>
-        public static readonly System.Collections.Generic.Dictionary<string, RivalStatsInfo> ClientRivalStats = new();
+        // CONCURRENT: written on the poll thread (RivalsStatsRequest handler),
+        // bulk-rebuilt and read on the main thread (leaderboard build).
+        public static readonly System.Collections.Concurrent.ConcurrentDictionary<string, RivalStatsInfo> ClientRivalStats = new();
 
         /// <summary>
         /// AddressKey → host-authoritative weekly income for a rival-owned
@@ -217,10 +223,12 @@ namespace BigAmbitionsMP
 
         /// <summary>PlayerId → their character age in years (from PlayerProfile),
         /// so the rivals profile shows the real age, not a default.</summary>
-        public static readonly System.Collections.Generic.Dictionary<string, int> ClientPlayerAges = new();
+        // CONCURRENT: written on the poll thread (PlayerProfile handlers).
+        public static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> ClientPlayerAges = new();
         /// <summary>playerId → gender (BigAmbitions.Characters.Gender as int) —
         /// generated-portrait fallback fidelity.</summary>
-        public static readonly System.Collections.Generic.Dictionary<string, int> ClientPlayerGenders = new();
+        // CONCURRENT: written on the poll thread (PlayerProfile handlers).
+        public static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> ClientPlayerGenders = new();
 
         /// <summary>True once we've sent our profile WITH a non-empty portrait —
         /// whether on the initial game-entry send or a later re-send.  Ensures
