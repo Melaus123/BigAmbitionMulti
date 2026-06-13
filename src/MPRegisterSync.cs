@@ -42,7 +42,17 @@ namespace BigAmbitionsMP
         // the checkout-routing Harmony patches read it on the main thread.
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string playerId, Vector3 pos, bool employee)> _cashiers = new();
 
-        public static void Reset() { _cashiers.Clear(); _empDuty.Clear(); _synthetics.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = ""; }
+        public static void Reset()
+        {
+            // Remove the synthetic duty NPCs we injected from the live game first,
+            // so a scene-exit/disconnect autosave can't write them into a save (they
+            // are runtime-only and would otherwise orphan — they live in gi.Employee-
+            // Instances but not in _synthetics after a load).  RemoveSynthetic clears
+            // each from gi + the dictionary + its work shifts; iterate a key copy
+            // because it mutates _synthetics.
+            foreach (var key in new List<string>(_synthetics.Keys)) RemoveSynthetic(key);
+            _cashiers.Clear(); _empDuty.Clear(); _synthetics.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = "";
+        }
 
         // ── Current building context (set by the building entry patch) ────────
         // After the rival-translation, businessOwnerRivalId holds the OWNING
@@ -360,6 +370,12 @@ namespace BigAmbitionsMP
                 inst.satisfaction = 100f;
                 inst.assignedAddress = new Address(reg.StreetName, reg.StreetNumber);
 
+                // Backstop against duplicate roster entries: a prior save could have
+                // persisted a synthetic with this same deterministic id before the
+                // load-boundary strip ran.  Drop any existing match before adding.
+                for (int i = gi.EmployeeInstances.Count - 1; i >= 0; i--)
+                    if (gi.EmployeeInstances[i]?.id == inst.id) gi.EmployeeInstances.RemoveAt(i);
+
                 gi.EmployeeInstances.Add(inst);
                 try { Helpers.EmployeeHelper.EmployeeInstancesDictionary[inst.id] = inst; } catch { }
                 _synthetics[addressKey] = (playerId, inst, dutyPos);
@@ -434,6 +450,58 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[SynthStaff] staff NPC removed at '{addressKey}'.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] remove '{addressKey}': {ex.Message}"); }
+        }
+
+        /// <summary>Remove ORPHANED synthetic duty employees (id prefix "BAMP_DUTY_")
+        /// left in gi.EmployeeInstances by a prior save.  Synthetic staff are
+        /// runtime-only and tracked in _synthetics; after a load _synthetics is empty
+        /// but the deserialized copies remain in the roster, where they accumulate one
+        /// duplicate per save/load cycle and are unreachable for cleanup.  Run at the
+        /// world-ready load boundary, where no live serving NPC exists yet, so it is
+        /// safe to strip every such entry NOT currently tracked in _synthetics (the
+        /// live ones — e.g. injected during join quiesce — are kept).</summary>
+        public static int StripOrphanSyntheticEmployees(string when)
+        {
+            int removed = 0;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                var list = gi?.EmployeeInstances;
+                if (list == null) return 0;
+                var live = new HashSet<string>();
+                foreach (var kv in _synthetics)
+                    if (kv.Value.inst != null && !string.IsNullOrEmpty(kv.Value.inst.id)) live.Add(kv.Value.inst.id);
+                for (int i = list.Count - 1; i >= 0; i--)
+                {
+                    string id = list[i]?.id ?? "";
+                    if (!id.StartsWith("BAMP_DUTY_") || live.Contains(id)) continue;
+                    // Strip this employee's work shifts from every registration first.
+                    try
+                    {
+                        if (gi!.BuildingRegistrations != null)
+                            foreach (var r in gi.BuildingRegistrations)
+                            {
+                                if (r?.scheduleDays == null) continue;
+                                for (int d = 0; d < r.scheduleDays.Count; d++)
+                                {
+                                    var day = r.scheduleDays[d];
+                                    if (day?.workShifts == null) continue;
+                                    var dead = new List<WorkShift>();
+                                    for (int j = 0; j < day.workShifts.Count; j++)
+                                        if (day.workShifts[j]?.employeeId == id) dead.Add(day.workShifts[j]);
+                                    foreach (var w in dead) day.RemoveWorkShift(w);
+                                }
+                            }
+                    }
+                    catch (Exception sx) { Plugin.Logger.LogWarning($"[SynthStaff] orphan shift strip ({when}): {sx.Message}"); }
+                    list.RemoveAt(i);
+                    try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(id); } catch { }
+                    removed++;
+                    Plugin.Logger.LogInfo($"[SynthStaff] orphan staff stripped ({when}): '{id}'.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] orphan strip ({when}): {ex.Message}"); }
+            return removed;
         }
 
         /// <summary>Invoke the game's staffing evaluator (UpdateEmployee — the
