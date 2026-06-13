@@ -34,14 +34,18 @@ fresh-install runs.
   logs + session manifest); (d) confirm MPAudit stays on in release builds.
 - [You] Nothing now; verified in session S1.
 
-### W3 — Latency tooling (item 3)
-- [Me] Fetch clumsy, write `local\launch-mp-latency-test.bat`: start conditioner
-  (lag ~100ms + jitter, ~2% loss on the mod's UDP port) → run the normal
-  two-instance launcher → on exit, force-kill the conditioner and verify the
-  process is gone. Post-session checklist printed at the end.
-- [You] Run session S2 (~30 min of normal play). Nothing to remember —
-  the wrapper owns start/stop, and the ping log line catches a leftover
-  conditioner in any later run.
+### W3 — Latency tooling (item 3) — DEFERRED (2026-06-13)
+- BLOCKER: both instances run on one PC over loopback (127.0.0.1:7777). clumsy
+  (WinDivert) cannot reliably intercept loopback traffic, and Windows
+  short-circuits same-machine traffic to the loopback path even via the LAN IP,
+  so a single-machine clumsy wrapper would add no latency. The mod's own
+  LiteNetLib sim is compiled out of the NuGet 1.3.1 release build, and the
+  user's rule forbids any latency mechanism in the build.
+- Working options (need a setup decision): 2nd LAN machine, a VM for instance 2
+  (virtual adapter clumsy CAN see), or a real remote peer.
+- DECISION (2026-06-13, user): DEFER latency testing for now; rely on S3 soak +
+  S4 chaos and accept the latency-pass gap. Revisit if a 2nd machine/VM/remote
+  peer becomes available.
 
 ### W4 — Soak + lifecycle chaos (item 4) — after W1 returns (touches src)
 - [Me] Code: extend MPAutopilot with a random in-game action driver (move,
@@ -66,5 +70,13 @@ fresh-install runs.
 | S4 | Lifecycle chaos (scripted) | join/leave/load edges (kill mid-load, cancel-during-load, rejoin) | ~30 min semi-attended |
 
 ## Status
-- 2026-06-12: W1 launched (background workflow). W2–W4 queued behind it.
-  Sessions S1–S4 scheduled after W2 lands.
+- 2026-06-12: W1 (sweep) ran — 18 confirmed findings + 1 gap; hit token cap
+  mid-verification (~85 leads unverified). Full catalog in local\.
+- 2026-06-13: ALL confirmed findings fixed + pushed (HIGH H1/H2/H3, MEDIUM
+  M1/M2/M3 + M4 cluster, LOW dict races). 8 fix commits afaf487..eec2719.
+- S1 baseline run PASSED (no regressions). Runtime-verified: thread-safety core
+  flow, H3, M1. PENDING user runtime check: H2 (employee duty), M2, M3.
+- W3/S2 latency: DEFERRED (loopback blocker — see W3).
+- OPEN: ~85 sweep leads (resume workflow wf_a44defda-672, awaiting user
+  budget go-ahead); W4 soak/chaos harness (S3/S4) not yet built; W2 version
+  gate + self-diagnosis not yet built.
