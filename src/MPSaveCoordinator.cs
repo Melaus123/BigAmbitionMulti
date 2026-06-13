@@ -132,6 +132,11 @@ namespace BigAmbitionsMP
                 var slot = PerformLocalSave(session);
                 SetSessionMetadata(session, slot.Day);
                 MergeSlot(session, slot);
+                // Loan ledger rides every session save, exactly as HostSaveNow does.
+                // The pause-menu save is often the session's FIRST save, so a loan
+                // accepted beforehand would otherwise never reach disk (the ledger
+                // path needs the session folder, which PerformLocalSave just created).
+                MPHub.SaveLedger();
             }
             catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] HostSaveSync save: {ex}"); }
         }
