@@ -346,7 +346,9 @@ namespace BigAmbitionsMP
             // (F3-F12 diagnostic toggle tick removed 2026-06-10.)
             MPSaveCoordinator.DiagPhase("Update: TickMpSave");           TickMpSave();   // Phase 4 — suppress SP autosave, upload saves, host autosave
             MPSaveCoordinator.DiagPhase("Update: TickCashSync");         TickCashSync(); // Phase 4 — live cash stream to host
+#if BAMP_DEV
             MPSaveCoordinator.DiagPhase("Update: MPAutopilot");          MPAutopilot.Tick();
+#endif
             MPSaveCoordinator.DiagTick();    // count down the diagnostic window
 
             // Perf attribution: frame stats + the per-system summary every 10s.
@@ -2639,7 +2641,9 @@ namespace BigAmbitionsMP
             _pt = MPPerf.Begin(); BusinessSync.Tick();         MPPerf.End("BizHost",  _pt);   // host change detection (time-boxed sweep)
             _pt = MPPerf.Begin(); BusinessSync.TickClient();   MPPerf.End("BizClient",_pt);   // client pushes own businesses up
             _pt = MPPerf.Begin(); MPPriceSync.Tick();          MPPerf.End("Price",    _pt);   // live retail prices of own businesses (both roles)
-            _pt = MPPerf.Begin(); MPAudit.Tick();              MPPerf.End("Audit",    _pt);   // client → host state-hash audit (30s; silent-divergence detector)
+#if BAMP_DEV
+            _pt = MPPerf.Begin(); MPAudit.Tick();              MPPerf.End("Audit",    _pt);   // client → host state-hash audit (30s) — Dev builds only
+#endif
             _pt = MPPerf.Begin(); MPRestSync.Tick();           MPPerf.End("Rest",     _pt);   // votes, seated state, watchdog (0.5s)
             MPRestSync.HostSkipFrame();   // host clock executor — every frame for smoothness
             MPHub.HostTick();             // loan ledger: daily interest/payment drafts

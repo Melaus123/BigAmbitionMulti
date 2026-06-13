@@ -13,9 +13,15 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class MPPerf
     {
-        // 2026-06-12: ON for the post-port performance pass (per-system table
-        // every 10s in both logs).  Costs a Stopwatch read per bracket.
-        public static bool Enabled = true;
+        // Diagnostic scaffolding — excluded from the shipped build.  ON only in a
+        // `-c Dev` build (BAMP_DEV); the per-system table costs a Stopwatch read
+        // per bracket and is for local performance tuning, not end users.
+        public static bool Enabled =
+#if BAMP_DEV
+            true;
+#else
+            false;
+#endif
         private const float ReportSeconds = 10f;
 
         private sealed class Slot { public double Total; public double Max; public int Calls; }

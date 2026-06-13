@@ -10,6 +10,17 @@
     <RootNamespace>BigAmbitionsMP</RootNamespace>
   </PropertyGroup>
 
+  <!-- Build configs.  The shipped mod is built Release (or Debug) and does NOT
+       define BAMP_DEV, so the test/diagnostic scaffolding (MPAutopilot, MPPerf,
+       MPLoadProfiler, MPAudit) is inert — nothing runs on a player's machine.
+       Build `-c Dev` to turn that scaffolding back on for local testing. -->
+  <PropertyGroup>
+    <Configurations>Debug;Release;Dev</Configurations>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Dev'">
+    <DefineConstants>$(DefineConstants);BAMP_DEV</DefineConstants>
+  </PropertyGroup>
+
   <PropertyGroup>
     <GameDir>C:\Program Files (x86)\Steam\steamapps\common\Big Ambitions\</GameDir>
     <ManagedDir>$(GameDir)Big Ambitions_Data\Managed\</ManagedDir>

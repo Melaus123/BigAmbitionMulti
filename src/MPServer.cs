@@ -927,11 +927,13 @@ namespace BigAmbitionsMP
 
                 case MessageType.AuditReport:
                 {
+#if BAMP_DEV
                     // Client's periodic state-hash audit — compare to OUR state
                     // on the main thread (BuildReport walks game objects).
                     var ar = env.GetPayload<AuditReportPayload>();
                     if (ar != null && SenderIs(ar.PlayerId, senderPid, env.Type))
                         GameStatePatcher.EnqueueOnMainThread(() => MPAudit.HostHandle(ar));
+#endif
                     break;
                 }
 

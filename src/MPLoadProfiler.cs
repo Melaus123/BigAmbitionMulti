@@ -20,8 +20,14 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class MPLoadProfiler
     {
-        /// <summary>Master on/off — flip to false to silence in normal play.</summary>
-        public static bool Enabled = false;   // load-timing investigation done — re-enable when profiling
+        /// <summary>Diagnostic scaffolding — excluded from the shipped build.  ON
+        /// only in a `-c Dev` build (BAMP_DEV); otherwise every Mark/Span no-ops.</summary>
+        public static bool Enabled =
+#if BAMP_DEV
+            true;
+#else
+            false;
+#endif
 
         private static readonly Stopwatch _sw = Stopwatch.StartNew();
         private static readonly string    _file = $@"C:\dumps\loadprof.{System.Diagnostics.Process.GetCurrentProcess().Id}.txt";
