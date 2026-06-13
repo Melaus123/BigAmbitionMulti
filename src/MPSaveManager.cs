@@ -98,6 +98,16 @@ namespace BigAmbitionsMP
             return string.IsNullOrEmpty(sp) ? "" : Path.GetFileName(sp.TrimEnd('/', '\\'));
         }
 
+        /// <summary>Game version name from the cache ONLY — never resolves via
+        /// IL2CPP, so it is safe to call from the network poll thread (returns ""
+        /// if the main thread hasn't cached it yet).  Used by the Hello version
+        /// gate, which runs on the poll thread.</summary>
+        public static string GameVersionNameCached()
+        {
+            var cached = _spVersionCache;
+            return string.IsNullOrEmpty(cached) ? "" : Path.GetFileName(cached.TrimEnd('/', '\\'));
+        }
+
         /// <summary>MP root for the current game version, a SIBLING of the SP
         /// version folder so the SP menu never lists it:
         /// ".../SaveGames/_BAMP_MP/EA 0.10".</summary>

@@ -139,14 +139,30 @@ namespace BigAmbitionsMP
 
     // ── Payload types ─────────────────────────────────────────────────────────
 
+    /// <summary>Wire-protocol version.  Bump ONLY when a change makes this build
+    /// unable to interoperate with the previous one (message layout or semantics).
+    /// Mod patch releases that don't change the wire keep the same number.  The
+    /// Hello handshake refuses any peer whose number differs, so an out-of-date
+    /// build can't join and then misparse messages.</summary>
+    public static class ProtocolInfo
+    {
+        public const int Version = 1;
+    }
+
     /// <summary>Sent by client on connect.</summary>
     public class HelloPayload
     {
         public string PlayerId { get; set; } = "";
-        public string Version  { get; set; } = "";
+        public string Version  { get; set; } = "";   // mod version string (display)
         /// <summary>Immutable identity (SteamID64 / guid-…) — the key for save +
         /// ownership persistence, distinct from the mutable PlayerId display name.</summary>
         public string StableId { get; set; } = "";
+        /// <summary>Wire-protocol version (ProtocolInfo.Version).  A missing field
+        /// from an older build deserializes to 0, so it fails the host's check.</summary>
+        public int    Protocol { get; set; }
+        /// <summary>Game version name (e.g. "EA 0.11") — the host refuses a mismatch
+        /// so two players on different game builds can't desync.</summary>
+        public string Game     { get; set; } = "";
     }
 
     /// <summary>

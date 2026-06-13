@@ -1162,10 +1162,32 @@ namespace BigAmbitionsMP
             return false;
         }
 
+        /// <summary>Refuse a peer running an incompatible build BEFORE binding any
+        /// identity — a protocol-number mismatch means the wire format differs (an
+        /// out-of-date mod build would misparse messages), and a game-version
+        /// mismatch means the two installs would desync.  The refusal tag carries
+        /// the host's versions so the client can show exactly what to match.</summary>
+        private static bool ValidateHelloVersion(NetPeer peer, HelloPayload hello)
+        {
+            string hostGame = MPSaveManager.GameVersionNameCached();
+            // Game-version check is skipped when either side is unknown (empty) so a
+            // not-yet-cached host can't wrongly reject; the protocol number always gates.
+            bool protocolOk = hello.Protocol == ProtocolInfo.Version;
+            bool gameOk = string.IsNullOrEmpty(hello.Game) || string.IsNullOrEmpty(hostGame) || hello.Game == hostGame;
+            if (protocolOk && gameOk) return true;
+
+            Plugin.Logger.LogWarning(
+                $"[Server] Hello from '{hello.PlayerId}' refused — version mismatch " +
+                $"(client mod {hello.Version}/p{hello.Protocol}/{hello.Game} vs host {MyPluginInfo.PLUGIN_VERSION}/p{ProtocolInfo.Version}/{hostGame}).");
+            try { peer.Disconnect(System.Text.Encoding.UTF8.GetBytes($"BAMP:version:{MyPluginInfo.PLUGIN_VERSION}|{hostGame}")); } catch { }
+            return false;
+        }
+
         private static void HandleHello(NetPeer peer, MessageEnvelope env)
         {
             var hello = env.GetPayload<HelloPayload>();
             if (hello == null) return;
+            if (!ValidateHelloVersion(peer, hello)) return;
             if (!ValidateHelloIdentity(peer, hello)) return;
 
             // Banned (kicked or rejected) — out until the host re-hosts.

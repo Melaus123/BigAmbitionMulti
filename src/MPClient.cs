@@ -123,7 +123,9 @@ namespace BigAmbitionsMP
             {
                 PlayerId = MPConfig.PlayerId,
                 Version  = MyPluginInfo.PLUGIN_VERSION,
-                StableId = MPConfig.StableId
+                StableId = MPConfig.StableId,
+                Protocol = ProtocolInfo.Version,
+                Game     = MPSaveManager.GameVersionNameCached()
             };
             Send(MessageEnvelope.Create(MessageType.Hello, MPConfig.PlayerId, hello));
         }
@@ -146,6 +148,17 @@ namespace BigAmbitionsMP
                     else if (tag == "BAMP:kicked") why = "KICKED by host";
                     else if (tag == "BAMP:banned") why = "Banned until host re-hosts";
                     else if (tag == "BAMP:identity") why = "Join refused — player identity invalid or already connected";
+                    else if (tag.StartsWith("BAMP:version"))
+                    {
+                        // Tag carries the host's "mod|game" versions so we can name both sides.
+                        string rest = tag.StartsWith("BAMP:version:") ? tag.Substring("BAMP:version:".Length) : "";
+                        var parts = rest.Split('|');
+                        string hostMod  = parts.Length > 0 && parts[0].Length > 0 ? parts[0] : "?";
+                        string hostGame = parts.Length > 1 && parts[1].Length > 0 ? parts[1] : "?";
+                        why = $"Join refused — version mismatch. Host: BigAmbitionsMP {hostMod} / {hostGame}; " +
+                              $"you: {MyPluginInfo.PLUGIN_VERSION} / {MPSaveManager.GameVersionNameCached()}. " +
+                              "Both players need the same mod and game version.";
+                    }
                     Plugin.Logger.LogInfo($"[Client] disconnect reason tag: '{tag}' → \"{why}\"");
                 }
             }
