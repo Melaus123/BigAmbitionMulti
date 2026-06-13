@@ -13,3 +13,11 @@ desktop.ini
 
 # Local test harness (machine-specific launchers etc.) - never published
 /local/
+
+# Dev-only working material — kept on disk for continuity, not part of the mod
+# and not published.  (Modding knowledge base, run logs, session logs, planning
+# docs, and Claude Code project config.)
+/.modding/
+/.claude/
+/context-log-*.md
+/release-hardening-plan.md
