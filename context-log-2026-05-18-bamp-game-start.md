@@ -2401,3 +2401,8 @@ PHASE 4 — SAVE PERSISTENCE (design locked 2026-05-31, in progress)
 ## LATENCY TESTING DEFERRED + LOOPBACK FINDING (2026-06-13)
 - FINDING: clumsy/WinDivert cannot condition the two same-PC instances — they talk over loopback (127.0.0.1:7777), WinDivert can''t intercept loopback, and Windows short-circuits same-machine traffic to the loopback path even via the LAN IP. LiteNetLib''s built-in sim is compiled out of the NuGet 1.3.1 release build. So single-machine latency injection via clumsy is a dead end. Working options: 2nd LAN machine / VM for instance 2 / real remote peer. (rule)
 - DECISION (user): DEFER latency testing (W3/S2); rely on S3 soak + S4 chaos; accept the latency-pass gap. Revisit if a 2nd machine/VM/remote peer is available. (situational: until test hardware changes)
+
+## W2 VERSION GATE DONE (2026-06-13, f94ef57)
+- Hello handshake now carries ProtocolInfo.Version (wire-protocol int, starts at 1, bump only on wire-breaking changes) + game version name; host ValidateHelloVersion refuses a mismatch BEFORE binding identity, disconnect tag "BAMP:version:{hostMod}|{hostGame}" → client shows specifics. Added MPSaveManager.GameVersionNameCached() (cache-only, poll-thread-safe). An older build (no Protocol field → 0) is now cleanly refused. (rule)
+- MPAudit confirmed NOT debug-gated (no #if DEBUG anywhere) → stays on in release. (rule)
+- W2 REMAINING: (b) per-cycle peer-ping log line — SKIPPED for now (was mainly conditioner-leftover detection; latency deferred); (c) bug-report bundle (zip logs+manifest) — not built, proposed trigger = "/bugreport" chat command (no new UI). (situational: release-hardening campaign)
