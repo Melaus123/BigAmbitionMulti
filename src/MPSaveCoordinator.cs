@@ -205,8 +205,15 @@ namespace BigAmbitionsMP
         public static void ClientHandleSaveNow(SaveNowPayload payload)
         {
             if (payload == null || string.IsNullOrEmpty(payload.SessionName)) return;
-            string session = payload.SessionName;
-            lock (_lock) { _activeSessionName = session; }
+            string session = payload.SessionName;   // where THIS save goes (may be "<base>-auto")
+            // Keep the client's durable session pointer on the manual BASE, mirroring
+            // the host (HostSaveNow leaves _activeSessionName on the base and only
+            // suffixes the per-save copy).  If an autosave's "-auto" name stuck here,
+            // a later client Save-and-Exit with an empty name would ship its final
+            // .hsg into the -auto sibling while the host coordinates the base session,
+            // so a base-session resume would load the client's stale save.
+            string canonical = session.EndsWith("-auto") ? session.Substring(0, session.Length - "-auto".Length) : session;
+            lock (_lock) { _activeSessionName = canonical; }
 
             GameStatePatcher.EnqueueOnMainThread(() =>
             {
