@@ -559,6 +559,7 @@ namespace BigAmbitionsMP
 
         internal static void DiagWrite(string msg)
         {
+#if BAMP_DEV
             try
             {
                 if (_diagWriter == null)
@@ -569,15 +570,18 @@ namespace BigAmbitionsMP
                 _diagWriter.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}][t{Environment.CurrentManagedThreadId}] {msg}");
             }
             catch { }
+#endif
         }
 
         /// <summary>Start (or extend) the diagnostic window — first-chance exception
         /// logging + per-frame heartbeat — for the post-save crash window.</summary>
         internal static void DiagArm(int frames = 360)   // ~6s @ 60fps
         {
+#if BAMP_DEV
             EnsureDiag();
             _diagFramesLeft = frames;
             _diagActive = true;
+#endif
         }
 
         /// <summary>Per-frame heartbeat (main thread).  Writes a marker BEFORE each
