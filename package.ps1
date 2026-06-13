@@ -73,6 +73,8 @@ Copy-Item (Join-Path $outDir "0Harmony.dll")          (Join-Path $modDir "Depend
 Copy-Item (Join-Path $outDir "LiteNetLib.dll")        (Join-Path $modDir "Dependencies")
 Copy-Item (Join-Path $root "assets\BAMP_ChatIcon.png") $modDir
 Copy-Item (Join-Path $root "assets\BAMP_HubIcon.png")  $modDir
+# MIT requires the bundled Harmony / LiteNetLib license notices to travel with them.
+Copy-Item (Join-Path $root "THIRD-PARTY-NOTICES.txt")  $modDir
 
 # ── 6. Zip it ────────────────────────────────────────────────────────────────
 $suffix = if ($dllIsDev) { "-DEV" } else { "" }
