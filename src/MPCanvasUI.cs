@@ -1335,6 +1335,18 @@ namespace BigAmbitionsMP
                 var settings = MPReflect.Get(act.GetType(), act, "_diplomaSettings") as DiplomaSettings;
                 var diploma  = MPReflect.Get(act.GetType(), act, "_diploma") as Diploma;
                 if (settings == null || diploma == null) { _trainPending = null; return; }
+                // Prerequisite gate: an advanced course can't be taken until its
+                // required diploma is held.  Native StudyActivity.StartStudying (and
+                // BizManSettings) enforce exactly this; our honorary-degree dialog
+                // bypasses the native start, so mirror the check here for the local
+                // player or a client could buy a course out of order.
+                if (settings.requiredDiploma != DiplomaName.Undefined
+                    && !EducationHelper.HasCompletedDiploma(settings.requiredDiploma))
+                {
+                    try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error,
+                        $"Requires the {settings.requiredDiploma} course first."); } catch { }
+                    _trainPending = null; return;
+                }
                 int remaining = settings.RequiredHours * 60 - diploma.minutesStudied;
                 if (remaining <= 0)
                 {
