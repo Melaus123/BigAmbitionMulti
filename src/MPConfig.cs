@@ -30,22 +30,37 @@ namespace BigAmbitionsMP
             _cachedLanIp = "";
             try
             {
+                // SCORE candidates rather than taking the first match: a machine with
+                // a VPN / VirtualBox / Hamachi / WSL adapter would otherwise hand out
+                // that adapter's address instead of the real Wi-Fi/Ethernet LAN IP.
+                string best = ""; int bestScore = int.MinValue;
                 foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
                 {
                     if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
                     if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback) continue;
                     var props = ni.GetIPProperties();
-                    if (props.GatewayAddresses.Count == 0) continue;   // no route → virtual/disconnected adapter, skip
+                    if (props.GatewayAddresses.Count == 0) continue;   // no route → not a usable LAN adapter
+                    string nm = (ni.Name + " " + ni.Description).ToLowerInvariant();
+                    if (nm.Contains("virtual") || nm.Contains("vmware") || nm.Contains("virtualbox")
+                        || nm.Contains("hyper-v") || nm.Contains("hamachi") || nm.Contains("zerotier")
+                        || nm.Contains("tailscale") || nm.Contains("vpn") || nm.Contains("wsl")
+                        || nm.Contains("docker") || nm.Contains("pseudo") || nm.Contains("tap-")
+                        || nm.Contains("tunnel")) continue;   // skip virtual/VPN adapters by name
                     foreach (var ua in props.UnicastAddresses)
                     {
                         var a = ua.Address;
-                        if (a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && !System.Net.IPAddress.IsLoopback(a))
-                        {
-                            _cachedLanIp = a.ToString();
-                            return _cachedLanIp;
-                        }
+                        if (a.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork || System.Net.IPAddress.IsLoopback(a)) continue;
+                        int score = 0;
+                        if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Ethernet) score += 3;
+                        else if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211) score += 2;
+                        var b = a.GetAddressBytes();
+                        if (b[0] == 192 && b[1] == 168) score += 2;                       // typical home LAN
+                        else if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) score += 1;
+                        else if (b[0] == 10) score += 1;
+                        if (score > bestScore) { bestScore = score; best = a.ToString(); }
                     }
                 }
+                _cachedLanIp = best;
             }
             catch { }
             return _cachedLanIp;

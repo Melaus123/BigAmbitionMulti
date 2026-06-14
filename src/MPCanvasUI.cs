@@ -3625,9 +3625,29 @@ namespace BigAmbitionsMP
             if (_lwConnInfo != null)
             {
                 string info;
-                string hostAddr = MPConfig.LocalLanIp(); if (string.IsNullOrEmpty(hostAddr)) hostAddr = MPConfig.HostIP;
-                if      (host)                   info = _showIp ? $"Others join at:   {hostAddr} : {MPConfig.Port}"
-                                                                : "Others join at:   ••••••••   (hidden)";
+                if (host)
+                {
+                    if (!_showIp) info = "Others join at:   ••••••••   (hidden)";
+                    else
+                    {
+                        int port = MPConfig.Port;
+                        string lan = MPConfig.LocalLanIp();
+                        string pub = MPNet.PublicIp;
+                        var ib = new System.Text.StringBuilder();
+                        if (!string.IsNullOrEmpty(lan)) ib.Append($"Same network:   {lan} : {port}\n");
+                        if (!string.IsNullOrEmpty(pub))
+                        {
+                            string fw = MPNet.Upnp == MPNet.UpnpState.Mapped
+                                            ? "  <color=#8CE08C>(router auto-forwarded ✓)</color>"
+                                      : MPNet.Upnp == MPNet.UpnpState.Trying
+                                            ? "  <color=#AAAAAA>(opening router port…)</color>"
+                                            : $"  <color=#FFD24A>(forward UDP {port} on your router)</color>";
+                            ib.Append($"Over internet:   {pub} : {port}{fw}");
+                        }
+                        else ib.Append(MPNet.PublicIpTried ? "Over internet:   (public IP unavailable)" : "Over internet:   (looking up…)");
+                        info = ib.Length > 0 ? ib.ToString() : $"Others join at:   {MPConfig.HostIP} : {port}";
+                    }
+                }
                 else if (MPClient.IsConnected)   info = "Connected to host";
                 else if (MPClient.IsConnecting)  info = "Connecting…";
                 else

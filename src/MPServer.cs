@@ -340,6 +340,8 @@ namespace BigAmbitionsMP
             _pollThread.Start();
 
             Plugin.Logger.LogInfo($"[Server] Listening on port {port}");
+            MPNet.FetchPublicIpAsync();                          // public IP for the lobby "Show IP"
+            MPNet.TryForwardAsync(port, MPConfig.LocalLanIp());  // best-effort UPnP open of UDP <port> (fails safe)
             return true;
         }
 
@@ -351,6 +353,7 @@ namespace BigAmbitionsMP
             if (_running)
                 Plugin.Logger.LogWarning($"[Server] STOP called ({_clients.Count} client(s) will see RemoteConnectionClose) from: {Environment.StackTrace}");
             _running = false;
+            MPNet.RemoveMappingAsync();   // best-effort UPnP cleanup (harmless if it can't run)
             _server?.Stop();
             _pollThread?.Join(1000);
             IsInLobby = true;
