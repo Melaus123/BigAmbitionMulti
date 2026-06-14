@@ -114,7 +114,7 @@ namespace BigAmbitionsMP
                 if ((MPServer.IsRunning || MPClient.IsConnected) && !MPCanvasUI.AblateTime)
                 {
                     bool frozen = TimeSync.ManualPaused || TimeSync.IsStartupHeld;
-                    UnityEngine.Time.timeScale = frozen ? 0f : 1f;
+                    UnityEngine.Time.timeScale = (frozen || MPCanvasUI.FreezeClock) ? 0f : 1f;
                 }
                 MPPerf.End("GMUpd", _pf);
             }

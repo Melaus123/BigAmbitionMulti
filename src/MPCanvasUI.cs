@@ -313,6 +313,7 @@ namespace BigAmbitionsMP
         // suppression is what makes the game spike ~70ms every 256ms.
         public static bool AblateTime;     // (ruled out — kept only for the TimeMachine patch reference)
         public static bool AblateNet;      // F6 mode 3: skip network PollEvents (test the network)
+        public static bool FreezeClock;    // F6 mode 2: force timeScale=0 — test if the spike is game-clock-driven
         private static int  _ablateMode;   // DEV F6 cycle: 0 normal, 1 SANITY+40ms, 2 hide MP-UI, 3 network-off
         private static void HookRenderTiming()
         {
@@ -346,7 +347,8 @@ namespace BigAmbitionsMP
             if (Input.GetKeyDown(KeyCode.F6))
             {
                 _ablateMode = (_ablateMode + 1) % 3;
-                var _abn = new[] { "OFF (normal MP)", "SANITY +40ms/frame (MUST spike)", "SKIP entire MP sync chain (WorldSnap/PosSync/Time/Market/Save/Cash)" };
+                FreezeClock = (_ablateMode == 2);
+                var _abn = new[] { "OFF (normal MP)", "SANITY +40ms/frame (MUST spike)", "FREEZE GAME CLOCK (timeScale=0 — is the spike clock-driven?)" };
                 Plugin.Logger.LogInfo($"[Ablate] mode {_ablateMode} = {_abn[_ablateMode]} (F6)");
             }
             if (_ablateMode == 1) System.Threading.Thread.Sleep(40);   // SANITY control: guaranteed +40ms/frame — proves F6 + the spike meter react
@@ -578,7 +580,7 @@ namespace BigAmbitionsMP
                 // the game's own Update) overrides menu / bench / bed pauses —
                 // opening a menu no longer stops time for anyone.
                 bool frozen = TimeSync.ManualPaused || TimeSync.IsStartupHeld;
-                if (!AblateTime) Time.timeScale = frozen ? 0f : 1f;
+                if (!AblateTime) Time.timeScale = (frozen || FreezeClock) ? 0f : 1f;
 
                 // World-clock guardian: taxi 1× clamp + unaccounted-acceleration
                 // net (known skips are suppressed at the TimeMachine patch).
