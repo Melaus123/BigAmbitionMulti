@@ -362,6 +362,7 @@ namespace BigAmbitionsMP
             MPSaveCoordinator.DiagPhase("Update: TickCashSync");         TickCashSync(); // Phase 4 — live cash stream to host
 #if BAMP_DEV
             MPSaveCoordinator.DiagPhase("Update: MPAutopilot");          MPAutopilot.Tick();
+            TickAnimProbe();   // run-animation pipeline snapshot (SP vs host diff)
 #endif
             MPSaveCoordinator.DiagTick();    // count down the diagnostic window
 
@@ -2078,6 +2079,68 @@ namespace BigAmbitionsMP
             try { return SaveGameManager.Current != null && PlayerHelper.PlayerController != null; }
             catch { return false; }
         }
+
+#if BAMP_DEV
+        private float _animProbeNext;
+        private Vector3 _animProbeLastPos;
+        private Vector3 _animProbeLastPosH;
+        private Vector3 _animProbeLastPosA;
+        /// <summary>DEV anim probe — every 0.5s in-game (tagged SP/HOST/CLIENT), logs
+        /// the local player's run-animation pipeline: NavMeshAgent (is it moving?) →
+        /// Animator state (enabled/speed/cull/updateMode) → every FLOAT param (the
+        /// locomotion drivers) → current state per layer (hash + normalizedTime, so
+        /// we can see if it's frozen).  Run in SP (works) then host (broken) and diff
+        /// the lines: the field that differs is where the chain breaks.</summary>
+        private void TickAnimProbe()
+        {
+            if (!IsInGame()) return;
+            if (Time.unscaledTime < _animProbeNext) return;
+            _animProbeNext = Time.unscaledTime + 0.5f;
+            try
+            {
+                var ch = PlayerHelper.PlayerController?.Character;
+                if (ch == null) return;
+                var model = ch.transform.Find("Model");
+                var anim  = (model != null ? model.GetComponent<Animator>() : null) ?? ch.GetComponentInChildren<Animator>();
+                var agent = ch.GetComponent<UnityEngine.AI.NavMeshAgent>();
+                string role = MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
+
+                var sb = new System.Text.StringBuilder();
+                sb.Append($"[AnimProbe/{role}] ");
+                sb.Append(agent == null ? "agent=NULL"
+                    : $"agent(en={agent.enabled},onMesh={agent.isOnNavMesh},vel={agent.velocity.magnitude:F2},hasPath={agent.hasPath})");
+                if (anim == null) { sb.Append(" anim=NULL"); Plugin.Logger.LogInfo(sb.ToString()); return; }
+                sb.Append($" anim(en={anim.enabled},speed={anim.speed:F2},root={anim.applyRootMotion},upd={anim.updateMode},cull={anim.cullingMode})");
+                // Did the character actually translate, and is the game suppressing input?
+                // Three position sources: the Character root (what locomotion/the
+                // probe read), the game's reported player pos, and the Animator's
+                // own transform (the visible Model).  The one that moves while the
+                // others don't is where the disconnect is.  chId catches a stale ref.
+                var pos = ch.transform.position;
+                float movedC = _animProbeLastPos == default ? 0f : (pos - _animProbeLastPos).magnitude;
+                _animProbeLastPos = pos;
+                Vector3 posH = pos; try { posH = PlayerHelper.GetPosition(); } catch { }
+                float movedH = _animProbeLastPosH == default ? 0f : (posH - _animProbeLastPosH).magnitude;
+                _animProbeLastPosH = posH;
+                var posA = anim.transform.position;
+                float movedA = _animProbeLastPosA == default ? 0f : (posA - _animProbeLastPosA).magnitude;
+                _animProbeLastPosA = posA;
+                bool hasInput = false; try { hasInput = GameManager.HasInputSelected(); } catch { }
+                sb.Append($" chId={ch.GetInstanceID()} movedRoot={movedC:F2} movedPlayerPos={movedH:F2} movedModel={movedA:F2} posRoot=({pos.x:F1},{pos.z:F1}) posPlayer=({posH.x:F1},{posH.z:F1}) input(supp={MPChat.SuppressGameInput},hasInput={hasInput})");
+                var ps = anim.parameters;
+                for (int i = 0; i < ps.Length; i++)
+                    if (ps[i].type == AnimatorControllerParameterType.Float)
+                        sb.Append($" {ps[i].name}={anim.GetFloat(ps[i].name):F2}");
+                for (int l = 0; l < anim.layerCount && l < 3; l++)
+                {
+                    var st = anim.GetCurrentAnimatorStateInfo(l);
+                    sb.Append($" L{l}(hash={st.fullPathHash},nt={(st.normalizedTime % 1f):F2},w={anim.GetLayerWeight(l):F2})");
+                }
+                Plugin.Logger.LogInfo(sb.ToString());
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[AnimProbe] {ex.Message}"); }
+        }
+#endif
 
         private void TickGameLoadDetect()
         {
@@ -4770,6 +4833,7 @@ namespace BigAmbitionsMP
         /// </summary>
         private float _startupDiagTimer;
         private bool  _startupScreenWasShown;
+        private float _startupHeldSince;
 
         private void TickStartupScreen()
         {
@@ -4832,7 +4896,16 @@ namespace BigAmbitionsMP
                 return;
             }
 
-            bool show = (MPServer.IsRunning || MPClient.IsConnected) && TimeSync.IsStartupHeld;
+            // Suppress the one-frame flash on an INSTANT-release hold: hosting alone
+            // (no one to wait for) begins AND ends the startup hold within ~1 frame,
+            // so the full-screen "waiting for players" overlay would flash for that
+            // single frame (the "~8s flicker").  Only show it once the hold has
+            // actually persisted a beat — a genuine multi-player wait lasts seconds.
+            // Unscaled time, because it must keep ticking through the timeScale=0 freeze.
+            bool held = (MPServer.IsRunning || MPClient.IsConnected) && TimeSync.IsStartupHeld;
+            if (!held) _startupHeldSince = 0f;
+            else if (_startupHeldSince == 0f) _startupHeldSince = Time.unscaledTime;
+            bool show = held && (Time.unscaledTime - _startupHeldSince) > 0.3f;
             _startupScreenGO.SetActive(show);
 
             // Diagnostics: log show transitions + sample the real timeScale/screen state
