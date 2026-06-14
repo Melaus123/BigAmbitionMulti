@@ -71,13 +71,6 @@ namespace BigAmbitionsMP
             }
             Plugin.Logger.LogInfo($"[Plugin] Patch summary: {okClasses} class(es) OK, {failClasses} failed, {totalPatched} method(s) patched total.");
 
-            // Optional testing-aid: drive new-game setup automatically when
-            // BAMP_AUTOROLE env var is set.  Dev builds only — excluded from the
-            // shipped mod so it can never run on a player's machine.
-#if BAMP_DEV
-            MPAutopilot.Init();
-#endif
-
             Plugin.Logger.LogInfo($"BigAmbitionsMP v{MyPluginInfo.PLUGIN_VERSION} ({MyPluginInfo.BuildTag}) loaded. Canvas UI active.");
             return Task.CompletedTask;
         }

@@ -16,12 +16,15 @@ namespace BigAmbitionsMP
         private static readonly System.Collections.Concurrent.ConcurrentQueue<Action> _mainThreadQueue = new();
 
         /// <summary>Called from the Unity Update loop by MainThreadDispatcher.</summary>
+        public static int DrainCounter;   // DIAG (spike tracer): actions run; MPPerf reads + resets per frame
+
         public static void DrainQueue()
         {
             while (_mainThreadQueue.TryDequeue(out var action))
             {
                 try { action(); }
                 catch (Exception ex) { Plugin.Logger.LogError($"[Patcher] Dispatch error: {ex.Message}"); }
+                DrainCounter++;
             }
         }
 

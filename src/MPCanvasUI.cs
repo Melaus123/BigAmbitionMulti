@@ -361,7 +361,6 @@ namespace BigAmbitionsMP
             MPSaveCoordinator.DiagPhase("Update: TickMpSave");           TickMpSave();   // Phase 4 — suppress SP autosave, upload saves, host autosave
             MPSaveCoordinator.DiagPhase("Update: TickCashSync");         TickCashSync(); // Phase 4 — live cash stream to host
 #if BAMP_DEV
-            MPSaveCoordinator.DiagPhase("Update: MPAutopilot");          MPAutopilot.Tick();
             TickAnimProbe();   // run-animation pipeline snapshot (SP vs host diff)
 #endif
             MPSaveCoordinator.DiagTick();    // count down the diagnostic window
