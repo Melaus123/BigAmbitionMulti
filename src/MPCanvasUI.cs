@@ -356,7 +356,6 @@ namespace BigAmbitionsMP
             MPSaveCoordinator.DiagPhase("Update: TickTimeSync");         TickTimeSync();
             MPSaveCoordinator.DiagPhase("Update: TickMarketSync");       TickMarketSync();
             MPSaveCoordinator.DiagPhase("Update: TickProfileResend");    TickProfileResend();
-            MPSaveCoordinator.DiagPhase("Update: TickIntroNamePrefill"); TickIntroNamePrefill();
             MPSaveCoordinator.DiagPhase("Update: TickSuppressBlackOverlay"); TickSuppressBlackOverlay(); // backlog #6 fix
             // (F3-F12 diagnostic toggle tick removed 2026-06-10.)
             MPSaveCoordinator.DiagPhase("Update: TickMpSave");           TickMpSave();   // Phase 4 — suppress SP autosave, upload saves, host autosave
@@ -2097,7 +2096,6 @@ namespace BigAmbitionsMP
                 ParkedVehicleSync.Reset();
                 MPRegisterSync.Reset();   // duty posts die with the scene
                 _appearanceSig = ""; _appearanceNextAt = 0f;
-                _introNameFilled = false;       // re-arm intro-name prefill on next char-gen
                 _blackOverlayCanvas = null;     // re-scan on fresh game load (#6)
                 _blackOverlayFindTimer = 0f;
 
@@ -2462,44 +2460,23 @@ namespace BigAmbitionsMP
         }
 
         // ── Intro-scene name pre-fill (#2) ───────────────────────────────────
-        // One-shot: when an IntroCharacterCustomizer appears (host or client just
-        // entered char-gen), pre-fill the first TMP_InputField with MPConfig.PlayerId
-        // so the user doesn't have to retype the same name they put in the F8 panel.
-        // Re-armed by Reset() (called on game load).
-        private bool _introNameFilled;
-
-        private void TickIntroNamePrefill()
+        // When the character-creation screen is created, pre-fill its name field
+        // with the name the user set in the F8 lobby panel (MPConfig.PlayerId) so
+        // they don't retype it.  EVENT-DRIVEN: a Harmony Postfix on
+        // IntroCharacterCustomizer.Start (MPPatches) calls this ONCE when the screen
+        // appears.  Replaces a per-frame FindObjectsOfType that, after a save load
+        // (char-gen never runs), scanned the whole object table forever — a 90->12fps
+        // single-player drain (perf log 2026-06-14).
+        internal static void PrefillIntroName(IntroCharacterCustomizer customizer)
         {
-            if (_introNameFilled) return;
-            // The customizer only exists in the pre-game char-creation flow (before
-            // a PlayerController spawns).  Once we're in the world it can NEVER
-            // appear — so disarm here.  Without this, after LOADING A SAVE (where
-            // char-gen never runs, so the flag never set) this ran a full-scene
-            // FindObjectsOfType EVERY FRAME for the whole session — a major single-
-            // player perf drain that hid in the unbracketed "game+render" bucket
-            // (perf log 2026-06-14: vanilla 90fps vs modded 12fps).
-            if (IsInGame()) { _introNameFilled = true; return; }
             try
             {
-                var found = UnityEngine.Object.FindObjectsOfType(typeof(IntroCharacterCustomizer));
-                if (found == null || found.Length == 0) return;
-                var customizer = found[0] as IntroCharacterCustomizer;
                 if (customizer == null) return;
-
                 var fields = customizer.GetComponentsInChildren(typeof(TMP_InputField), true);
                 if (fields == null || fields.Length == 0) return;
 
-                Plugin.Logger.LogInfo(
-                    $"[IntroName] IntroCharacterCustomizer detected — {fields.Length} TMP_InputField(s):");
-                for (int i = 0; i < fields.Length; i++)
-                {
-                    var f = fields[i] as TMP_InputField;
-                    if (f == null) continue;
-                    Plugin.Logger.LogInfo($"[IntroName]   [{i}] '{f.gameObject.name}' text='{f.text}'");
-                }
-
                 var preferred = MPConfig.PlayerId;
-                if (string.IsNullOrWhiteSpace(preferred)) { _introNameFilled = true; return; }
+                if (string.IsNullOrWhiteSpace(preferred)) return;
 
                 // Split on first space for first/last-name dual-field forms.
                 string first = preferred, last = "";
@@ -2520,13 +2497,8 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[IntroName] pre-filled field[{i}] '{f.gameObject.name}' ← '{fill}'");
                     filled++;
                 }
-                _introNameFilled = true;
             }
-            catch (Exception ex)
-            {
-                Plugin.Logger.LogWarning($"[IntroName] {ex.Message}");
-                _introNameFilled = true;        // don't spam — try once, give up on error
-            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[IntroName] prefill: {ex.Message}"); }
         }
 
         // (Legacy diagnostic F-key suite REMOVED 2026-06-10 — F3 exit-bandaid

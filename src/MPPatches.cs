@@ -216,6 +216,20 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: IntroCharacterCustomizer.Start — name pre-fill (event-driven) ─
+        // Fires ONCE when the character-creation screen is created; pre-fills the
+        // name field with the F8-lobby name.  Replaced a per-frame FindObjectsOfType
+        // poll that drained single-player (90->12fps) — see MPCanvasUI.PrefillIntroName.
+        [HarmonyPatch(typeof(Intro.IntroCharacterCustomizer), "Start")]
+        public static class Patch_IntroCharacterCustomizer_Prefill
+        {
+            static void Postfix(Intro.IntroCharacterCustomizer __instance)
+            {
+                try { MPCanvasUI.PrefillIntroName(__instance); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[IntroName] Start postfix: {ex.Message}"); }
+            }
+        }
+
         // ── Patch: TaxiController.OnClickToUseTaxi ────────────────────────────
         // Fires when a player hails a taxi.  On a client we forward it to the
         // host so the host stops its real taxi — the ghost then stops too, so
