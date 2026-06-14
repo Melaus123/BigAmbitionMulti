@@ -2471,6 +2471,14 @@ namespace BigAmbitionsMP
         private void TickIntroNamePrefill()
         {
             if (_introNameFilled) return;
+            // The customizer only exists in the pre-game char-creation flow (before
+            // a PlayerController spawns).  Once we're in the world it can NEVER
+            // appear — so disarm here.  Without this, after LOADING A SAVE (where
+            // char-gen never runs, so the flag never set) this ran a full-scene
+            // FindObjectsOfType EVERY FRAME for the whole session — a major single-
+            // player perf drain that hid in the unbracketed "game+render" bucket
+            // (perf log 2026-06-14: vanilla 90fps vs modded 12fps).
+            if (IsInGame()) { _introNameFilled = true; return; }
             try
             {
                 var found = UnityEngine.Object.FindObjectsOfType(typeof(IntroCharacterCustomizer));
@@ -2618,6 +2626,10 @@ namespace BigAmbitionsMP
         private void TickPositionSync()
         {
             if (!IsInGame()) return;
+            // Everything below is multiplayer machinery (sync ticks + MP UI ticks).
+            // It must NOT run in single-player — it was leaking ~12ms/frame with
+            // 100ms+ spikes into SP (perf log 2026-06-14).  One gate covers it all.
+            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
 
             // (Discovery-probe block removed 2026-06-12 dead-code sweep: all
             //  verified log-only with missions complete — see .modding/04-probes.md.)
