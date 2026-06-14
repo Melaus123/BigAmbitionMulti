@@ -739,7 +739,7 @@ namespace BigAmbitionsMP
                 rt.localScale = new Vector3(0.01f, 0.01f, 0.01f);
 
                 var tmp = labelGO.AddComponent<TextMeshProUGUI>();
-                tmp.text      = ownerId + "'s car";
+                tmp.text      = MPNames.Resolve(ownerId) + "'s car";
                 tmp.fontSize  = 42f;
                 tmp.alignment = TextAlignmentOptions.Center;
                 tmp.color     = new Color(1f, 0.85f, 0.4f);

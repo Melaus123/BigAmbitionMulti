@@ -572,9 +572,10 @@ namespace BigAmbitionsMP
                                || info.Reason == DisconnectReason.DisconnectPeerCalled;
                 try
                 {
+                    string leftName = DisplayNameFor(leftPlayer);
                     string notice = cleanLeave
-                        ? $"{leftPlayer} left the game."
-                        : $"{leftPlayer} lost connection — game paused until they rejoin.";
+                        ? $"{leftName} left the game."
+                        : $"{leftName} lost connection — game paused until they rejoin.";
                     MPChat.AddNotice(notice);          // host's own F9 chat
                     BroadcastChat("", "— " + notice);  // remaining clients' chat (no sender prefix)
 
@@ -1446,8 +1447,8 @@ namespace BigAmbitionsMP
                 if (sendTo.Count > 0)
                 {
                     Plugin.Logger.LogInfo($"[Server] Reconnect: '{playerId}' scene loaded — sent live world state.");
-                    MPChat.AddNotice($"{playerId} reconnected.");
-                    BroadcastChat("", $"— {playerId} reconnected.");
+                    MPChat.AddNotice($"{DisplayNameFor(playerId)} reconnected.");
+                    BroadcastChat("", $"— {DisplayNameFor(playerId)} reconnected.");
                     // Lift the pause we applied when they dropped (only the
                     // disconnect pause — a deliberate manual pause stays).
                     ResumeFromDisconnectPause();
@@ -2113,7 +2114,7 @@ namespace BigAmbitionsMP
         /// PlayerId if the character name isn't known yet (e.g. before the
         /// player has finished character creation or sent their profile).
         /// </summary>
-        private static string DisplayNameFor(string playerId)
+        public static string DisplayNameFor(string playerId)
         {
             if (string.IsNullOrEmpty(playerId)) return "";
             if (_characterNamesByPlayerId.TryGetValue(playerId, out var n) && !string.IsNullOrWhiteSpace(n))
@@ -2153,6 +2154,23 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Server] Broadcast host profile: PlayerId='{MPConfig.PlayerId}' CharacterName='{name}' age={age} portrait={(string.IsNullOrEmpty(portrait) ? "none" : "yes")}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BroadcastHostProfile: {ex.Message}"); }
+        }
+
+        /// <summary>Write the host's own character name into the name maps right
+        /// away (no broadcast) so any rivals/business snapshot built BEFORE the
+        /// full profile broadcast already resolves the host's in-character name
+        /// instead of the PlayerId.  Main thread (reads CharacterData); no-op
+        /// until the real name is available.</summary>
+        public static void SeedHostName()
+        {
+            try
+            {
+                string name = MPNames.LocalCharacterName();
+                if (string.IsNullOrWhiteSpace(name) || name == MPConfig.PlayerId) return;
+                _characterNamesByPlayerId[MPConfig.PlayerId] = name;
+                GameStatePatcher.ClientRivalNames[MPConfig.PlayerId] = name;
+            }
+            catch { }
         }
 
         // ── Rivals roster sync (Phase 1d Wave 2) ─────────────────────────────

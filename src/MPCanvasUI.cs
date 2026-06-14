@@ -87,6 +87,7 @@ namespace BigAmbitionsMP
         // profile once the portrait file appears, until it goes out once.
         private float _profileResendTimer = 5f;
         private float _profileResendElapsed = 0f;
+        private bool  _profileNameConfirmed = false;   // a REAL character name (not the PlayerId fallback) has gone out
 
         // ── in-game player HUD (F9 toggle) ────────────────────────────────────
         private bool        _hudVisible;
@@ -734,7 +735,7 @@ namespace BigAmbitionsMP
                 {
                     var v = MPRestSync.Votes[i];
                     if (i > 0) sb.Append("   ");
-                    sb.Append($"<color=#CFE3FF>{v.PlayerId}</color>: {NiceActivity(v.Activity)} until {MPRestSync.Fmt(v.GoalMinutes)}");
+                    sb.Append($"<color=#CFE3FF>{MPNames.Resolve(v.PlayerId)}</color>: {NiceActivity(v.Activity)} until {MPRestSync.Fmt(v.GoalMinutes)}");
                 }
                 _restBanner.text = sb.ToString();
             }
@@ -2310,6 +2311,7 @@ namespace BigAmbitionsMP
                 MPLoadProfiler.Mark(
                     $"HOST fully loaded → world-ready (overlayGone={overlayGone}, carsReady={carsReady}, " +
                     $"parked={_carParkedCached}, traffic={_carTrafficCached}, fallback={fallback}, elapsed {_pendingFreezeElapsed:F1}s)");
+                MPServer.SeedHostName();   // host name in the map before any rivals/business snapshot
                 MPServer.MarkWorldReady(MPConfig.PlayerId, hostSelf: true);
             }
             else
@@ -2775,27 +2777,40 @@ namespace BigAmbitionsMP
         private void TickProfileResend()
         {
             bool connected = MPClient.IsConnected || MPServer.IsRunning;
-            if (!IsInGame() || !connected) { GameStatePatcher.LocalPortraitSent = false; _profileResendElapsed = 0f; _profileResendTimer = 5f; return; }
-            // Already went out (either the initial game-entry send carried it, or
-            // a prior re-send did) — never send the image a second time.
-            if (GameStatePatcher.LocalPortraitSent) return;
+            if (!IsInGame() || !connected)
+            {
+                // Reset on leave/disconnect so a RECONNECT re-sends the profile —
+                // the reconnecting client's name map (and others' view of it) was
+                // wiped by the world reload.
+                GameStatePatcher.LocalPortraitSent = false;
+                _profileNameConfirmed = false;
+                _profileResendElapsed = 0f; _profileResendTimer = 5f; return;
+            }
+            // Done only once BOTH a real character name AND the portrait have gone out.
+            if (GameStatePatcher.LocalPortraitSent && _profileNameConfirmed) return;
 
             _profileResendTimer -= Time.unscaledDeltaTime;
             _profileResendElapsed += Time.unscaledDeltaTime;
             if (_profileResendTimer > 0f) return;
             _profileResendTimer = 3f;
-            if (_profileResendElapsed > 600f) { GameStatePatcher.LocalPortraitSent = true; return; }   // give up after ~10 min
+            if (_profileResendElapsed > 600f) { GameStatePatcher.LocalPortraitSent = true; _profileNameConfirmed = true; return; }   // give up after ~10 min
 
             try
             {
-                // Only re-send once the portrait is actually readable (else wait,
-                // so we don't spam name/age every 3s).  The send sets
-                // LocalPortraitSent=true because the portrait is now non-empty.
-                string portrait = GameStatePatcher.ReadLocalPortraitBase64();
-                if (string.IsNullOrEmpty(portrait)) return;
+                // Decoupled name vs portrait (the old gate waited for the portrait,
+                // so a late character name — player still in char-gen at first send —
+                // never propagated and the PlayerId fallback stuck).  Re-send when
+                // EITHER becomes newly available; stop when both are confirmed.
+                bool nameReal      = MPNames.LocalCharacterName() != MPConfig.PlayerId;
+                bool portraitReady = !string.IsNullOrEmpty(GameStatePatcher.ReadLocalPortraitBase64());
+                bool nameNew     = nameReal      && !_profileNameConfirmed;
+                bool portraitNew = portraitReady && !GameStatePatcher.LocalPortraitSent;
+                if (!nameNew && !portraitNew) return;   // nothing new yet — wait, don't spam
+
                 if (MPClient.IsConnected) MPClient.SendPlayerProfile();
                 else if (MPServer.IsRunning) MPServer.BroadcastHostProfile();
-                Plugin.Logger.LogInfo("[UI] Re-sent player profile now that the portrait is on disk.");
+                if (nameReal) _profileNameConfirmed = true;
+                Plugin.Logger.LogInfo($"[UI] Re-sent player profile (nameReady={nameReal}, portrait={portraitReady}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[UI] TickProfileResend: {ex.Message}"); }
         }
@@ -4107,7 +4122,7 @@ namespace BigAmbitionsMP
             if (players != null)
                 foreach (var p in players)
                     if (!string.IsNullOrEmpty(p) && p != MPConfig.PlayerId)
-                        AddChip(p, p, ref x);
+                        AddChip(MPNames.Resolve(p), p, ref x);
             _chipsTotalW = x;
             _chipScroll  = 0f;
             if (_mpChipsContent != null)
@@ -4148,16 +4163,19 @@ namespace BigAmbitionsMP
             // Neutralize any rich-text tags typed into chat ("<b>" → "< b>").
             static string Esc(string s) => s.Replace("<", "< ");
             if (l.Notice) return $"<color=#9AA3B2><i>— {Esc(l.Text)}</i></color>";
+            // Resolve sender/recipient ids to in-character names for display; the
+            // ids themselves remain the routing/colour key.
+            string fromName = Esc(MPNames.Resolve(l.From));
             if (!string.IsNullOrEmpty(l.To))
             {
                 bool mine = l.From == MPConfig.PlayerId;
-                string tag = mine ? $"[To {Esc(l.To)}]" : $"[From {Esc(l.From)}]";
+                string tag = mine ? $"[To {Esc(MPNames.Resolve(l.To))}]" : $"[From {fromName}]";
                 return $"<color={PrivateColor}>{tag}</color>  {Esc(l.Text)}";
             }
             string col = l.From == MPConfig.PlayerId
                 ? "#5BFF5B"
                 : ChatPalette[Mathf.Abs(l.From.GetHashCode()) % ChatPalette.Length];
-            return $"<color={col}>{Esc(l.From)}:</color>  {Esc(l.Text)}";
+            return $"<color={col}>{fromName}:</color>  {Esc(l.Text)}";
         }
 
         private void RefreshMpWindow()
@@ -4871,7 +4889,7 @@ namespace BigAmbitionsMP
 
             string body = (waiting != null && waiting.Count > 0)
                 ? "Waiting for these players to finish loading:\n\n" +
-                  string.Join("\n", waiting.Select(n => $"<color=#FFD24A>{n}</color>"))
+                  string.Join("\n", waiting.Select(n => $"<color=#FFD24A>{MPNames.Resolve(n)}</color>"))
                 : "Waiting for all players to finish loading…";
 
             // Countdown to the force-release (host knows the elapsed time;
