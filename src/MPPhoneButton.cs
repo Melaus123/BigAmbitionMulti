@@ -230,6 +230,7 @@ namespace BigAmbitionsMP
             if (btn == null) btn = go.AddComponent(typeof(Button))! as Button;
             if (btn != null)
             {
+                btn.interactable = true; btn.enabled = true;     // a clone inherits the template's state; keep ours live
                 btn.onClick = new Button.ButtonClickedEvent();   // clear template listeners
                 btn.onClick.AddListener((UnityAction)(() => { OpenRequested = true; }));
                 if (target != null) btn.targetGraphic = target;
@@ -364,6 +365,7 @@ namespace BigAmbitionsMP
             if (btn == null) btn = go.AddComponent(typeof(Button))! as Button;
             if (btn != null)
             {
+                btn.interactable = true; btn.enabled = true;     // a clone inherits the template's state; keep ours live
                 btn.onClick = new Button.ButtonClickedEvent();
                 btn.onClick.AddListener((UnityAction)(() => { HubOpenRequested = true; }));
                 if (target != null) btn.targetGraphic = target;

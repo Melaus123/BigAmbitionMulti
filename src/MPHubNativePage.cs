@@ -160,6 +160,7 @@ namespace BigAmbitionsMP
                 var btn = btnComp != null ? btnComp as Button : null;
                 if (btn != null)
                 {
+                    btn.interactable = true; btn.enabled = true;   // a clone inherits the template's state; keep ours live
                     btn.onClick = new Button.ButtonClickedEvent();
                     btn.onClick.AddListener((UnityAction)(() => { OpenRequested = true; }));
                 }
