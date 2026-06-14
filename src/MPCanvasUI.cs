@@ -311,8 +311,9 @@ namespace BigAmbitionsMP
         // DEV ablation (F6): when true the mod STOPS managing time — lets the game's
         // TimeMachine + native timeScale run — so we can A/B whether OUR time
         // suppression is what makes the game spike ~70ms every 256ms.
-        public static bool AblateTime;
-        private static int  _ablateMode;   // DEV F6 cycle: 0 normal, 1 hide MP-UI, 2 no phone-button, 3 suppress time
+        public static bool AblateTime;     // (ruled out — kept only for the TimeMachine patch reference)
+        public static bool AblateNet;      // F6 mode 3: skip network PollEvents (test the network)
+        private static int  _ablateMode;   // DEV F6 cycle: 0 normal, 1 SANITY+40ms, 2 hide MP-UI, 3 network-off
         private static void HookRenderTiming()
         {
             if (_renderHooked) return;
@@ -345,11 +346,13 @@ namespace BigAmbitionsMP
             if (Input.GetKeyDown(KeyCode.F6))
             {
                 _ablateMode = (_ablateMode + 1) % 4;
-                AblateTime  = (_ablateMode == 3);
-                if (_canvasGO != null) _canvasGO.SetActive(_ablateMode != 1);   // mode 1: hide our whole MP UI
-                var _abn = new[] { "OFF (normal MP)", "HIDE MP-UI canvas", "STOP phone-button inject", "suppress time" };
-                Plugin.Logger.LogInfo($"[Ablate] mode {_ablateMode} = {_abn[_ablateMode]} (F6)");
+                AblateNet = (_ablateMode == 3);
+                if (_canvasGO != null) _canvasGO.SetActive(_ablateMode != 2);   // mode 2: hide our whole MP UI
+                var _abn = new[] { "OFF (normal MP)", "SANITY +40ms/frame (MUST spike if harness works)", "HIDE MP-UI canvas", "NETWORK off (skip PollEvents)" };
+                string _conf = _ablateMode == 2 ? $"  [canvas.activeSelf now = {(_canvasGO != null ? _canvasGO.activeSelf.ToString() : "null")}]" : "";
+                Plugin.Logger.LogInfo($"[Ablate] mode {_ablateMode} = {_abn[_ablateMode]} (F6){_conf}");
             }
+            if (_ablateMode == 1) System.Threading.Thread.Sleep(40);   // SANITY control: guaranteed +40ms/frame — proves F6 + the spike meter actually react
 #endif
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
@@ -457,12 +460,9 @@ namespace BigAmbitionsMP
             // BizPhone Chat button: inject once per game scene while MP active;
             // its click requests an MP-window toggle (same as F9).  The icon
             // pulses while chat lines are unread (window closed).
-            if (_ablateMode != 2)   // DEV ablation mode 2 stops grafting/maintaining our phone button
-            {
-                MPPhoneButton.Tick(IsInGame(), MPServer.IsRunning || MPClient.IsConnected);
-                MPPhoneButton.TickPulse(_mpWinVisible);
-                MPPhoneButton.TickHubPulse(_hubVisible);
-            }
+            MPPhoneButton.Tick(IsInGame(), MPServer.IsRunning || MPClient.IsConnected);
+            MPPhoneButton.TickPulse(_mpWinVisible);
+            MPPhoneButton.TickHubPulse(_hubVisible);
             if (MPPhoneButton.OpenRequested)
             {
                 MPPhoneButton.OpenRequested = false;
