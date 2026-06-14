@@ -40,7 +40,7 @@ namespace BigAmbitionsMP
         // posKey → cashier.  CONCURRENT: Apply runs on the network poll thread
         // (RegisterCashier handler) and the main thread (local duty echo), while
         // the checkout-routing Harmony patches read it on the main thread.
-        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string playerId, Vector3 pos, bool employee)> _cashiers = new();
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string playerId, Vector3 pos, bool employee, string address, string stationId)> _cashiers = new();
 
         public static void Reset()
         {
@@ -78,7 +78,7 @@ namespace BigAmbitionsMP
             string k = Key(pos);
             if (p.On)
             {
-                _cashiers[k] = (p.PlayerId, pos, p.Employee);
+                _cashiers[k] = (p.PlayerId, pos, p.Employee, p.Address ?? "", p.StationId ?? "");
                 Plugin.Logger.LogInfo($"[Register] '{p.PlayerId}' ON duty at {k}{(p.Employee ? " (employee)" : "")}.");
                 // EMPLOYEE duty on another machine → spawn the visible staff
                 // NPC (immersion; commerce works without it).  Main-thread:
@@ -213,6 +213,30 @@ namespace BigAmbitionsMP
         /// self-checkout routing and the queue guard.</summary>
         public static bool IsStaffedByOtherPlayer(Vector3 registerPos)
             => _cashiers.TryGetValue(Key(registerPos), out var e) && e.playerId != MPConfig.PlayerId;
+
+        /// <summary>Snapshot of the current duty posts, as ON payloads — for
+        /// re-syncing a (re)joining peer.  Duty is EVENT-tracked (broadcast only
+        /// when it changes via SendToggle), and a (re)connect runs Reset() during
+        /// the world reload, wiping the peer's map.  The reconnect resync re-sends
+        /// world/rivals/business but NOT duty, so a reconnected client saw staffed
+        /// tills as unstaffed ("no employees") until a toggle re-broadcast (field
+        /// bug 2026-06-13: host personally on the till, client reconnected mid-
+        /// session, couldn't buy until the host toggled off/on).  The host's map is
+        /// the authoritative union (it applies + relays every RegisterCashier).</summary>
+        public static List<RegisterCashierPayload> SnapshotDuty()
+        {
+            var list = new List<RegisterCashierPayload>();
+            foreach (var kv in _cashiers)
+            {
+                var e = kv.Value;
+                list.Add(new RegisterCashierPayload
+                {
+                    PlayerId = e.playerId, X = e.pos.x, Y = e.pos.y, Z = e.pos.z,
+                    On = true, Employee = e.employee, Address = e.address, StationId = e.stationId
+                });
+            }
+            return list;
+        }
 
         private static void SendToggle(Vector3 pos, bool on, string? address = null,
                                        bool employee = false, string stationId = "")

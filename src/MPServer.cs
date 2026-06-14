@@ -1347,6 +1347,8 @@ namespace BigAmbitionsMP
                             SendRivalsSnapshotTo(joinPeer);
                             // Business table — sent once, then deltas as they change.
                             SendBusinessSnapshotTo(joinPeer);
+                            // Who's currently on the registers (event-tracked; not in any snapshot).
+                            SendRegisterDutyTo(joinPeer);
                         }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Late-join snapshot: {ex.Message}"); }
                     });
@@ -1379,10 +1381,36 @@ namespace BigAmbitionsMP
                     BroadcastHostProfile();
                     SendRivalsSnapshotTo(peer);
                     SendBusinessSnapshotTo(peer);
+                    SendRegisterDutyTo(peer);   // event-tracked duty is wiped by the peer's world reload — re-sync it
                     MPLoadProfiler.Mark($"HOST sent full world state to peer {peer.Id}");
                     Plugin.Logger.LogInfo($"[Server] Sent full world state to peer {peer.Id}.");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendWorldStateTo: {ex.Message}"); }
+            });
+        }
+
+        /// <summary>Re-send current register-duty state to a (re)joining peer.  Duty
+        /// is event-tracked (broadcast only on change), and the peer's world reload
+        /// on (re)connect runs MPRegisterSync.Reset(), clearing its map — while the
+        /// resync above re-sends world/rivals/business but NOT duty.  Result before
+        /// this: a reconnected client saw staffed registers as unstaffed ("no
+        /// employees") until someone toggled duty off/on (field bug 2026-06-13).
+        /// Sent peer-targeted, on the main thread (IL2CPP), after the world state so
+        /// it lands on a peer that has already applied its reload + Reset.</summary>
+        public static void SendRegisterDutyTo(NetPeer peer)
+        {
+            if (peer == null) return;
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                try
+                {
+                    var duties = MPRegisterSync.SnapshotDuty();
+                    foreach (var d in duties)
+                        Send(peer, MessageEnvelope.Create(MessageType.RegisterCashier, d.PlayerId, d));
+                    if (duties.Count > 0)
+                        Plugin.Logger.LogInfo($"[Server] Re-sent {duties.Count} register-duty post(s) to peer {peer.Id}.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendRegisterDutyTo: {ex.Message}"); }
             });
         }
 
