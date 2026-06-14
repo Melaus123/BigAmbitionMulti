@@ -79,13 +79,15 @@ namespace BigAmbitionsMP
                     string srole = MPServer.IsRunning ? "MP-HOST" : (MPClient.IsConnected ? "MP-CLIENT" : "SP");
                     float gapMs = _lastSpikeAt > 0f ? (_spikeClock - _lastSpikeAt) * 1000f : 0f;
                     int rem = 0; try { rem = RemotePlayerManager.GetRemotePlayerIds().Count; } catch { }
-                    Plugin.Logger.LogInfo($"[Spike/{srole}] dt={dtMs:F0}ms gap={gapMs:F0}ms drained={GameStatePatcher.DrainCounter} remotes={rem}");
+                    var (gd, gh) = GameStateReader.GetGameTime();
+                    Plugin.Logger.LogInfo($"[Spike/{srole}] dt={dtMs:F0}ms gap={gapMs:F0}ms drained={GameStatePatcher.DrainCounter} clockW={GameStateReader.ClockWriteCounter} gt={gd}d{gh:F2}h ts={UnityEngine.Time.timeScale:F2} remotes={rem}");
                     _lastSpikeAt = _spikeClock;
                 }
                 catch { }
 #endif
             }
-            GameStatePatcher.DrainCounter = 0;   // per-frame reset for the spike tracer
+            GameStatePatcher.DrainCounter = 0;        // per-frame reset for the spike tracer
+            GameStateReader.ClockWriteCounter = 0;
 
             double now = _sw.Elapsed.TotalMilliseconds;
             if (_windowStartMs == 0) { _windowStartMs = now; return; }
