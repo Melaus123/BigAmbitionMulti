@@ -301,6 +301,31 @@ namespace BigAmbitionsMP
 
         // ── Update ────────────────────────────────────────────────────────────
 
+        // DIAG: time the camera render phase (cull -> render) to localize the
+        // recurring 256ms hitch — is it RENDERING or a MonoBehaviour we trigger?
+        // Built-in pipeline fires Camera.onPreCull/onPostRender; SRP (URP/HDRP)
+        // fires RenderPipelineManager.begin/endCameraRendering.  Whichever the game
+        // uses, "CamRender" accumulates the main-thread camera render time.
+        private static bool _renderHooked;
+        private static long _camRenderT0;
+        private static void HookRenderTiming()
+        {
+            if (_renderHooked) return;
+            _renderHooked = true;
+            try
+            {
+                Camera.onPreCull    += _ => { _camRenderT0 = MPPerf.Begin(); };
+                Camera.onPostRender += _ => { MPPerf.End("CamRender", _camRenderT0); };
+            }
+            catch { }
+            try
+            {
+                UnityEngine.Rendering.RenderPipelineManager.beginCameraRendering += (_, __) => { _camRenderT0 = MPPerf.Begin(); };
+                UnityEngine.Rendering.RenderPipelineManager.endCameraRendering   += (_, __) => { MPPerf.End("CamRender", _camRenderT0); };
+            }
+            catch { }
+        }
+
         private void Update()
         {
             // Resolve + cache the save version folder on the MAIN thread, unconditionally
@@ -310,6 +335,7 @@ namespace BigAmbitionsMP
             // arrive before it is in-game.  Caching here, every frame from the start,
             // guarantees the path is ready so NO poll-thread handler ever calls IL2CPP.
             MPSaveManager.EnsureVersionCached();
+            HookRenderTiming();      // DIAG: camera-render timing (render vs logic for the 256ms hitch)
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
             MPRegisterSync.TickDuty();   // mirror the native Work activity into register duty (1s self-throttle)
