@@ -4,7 +4,7 @@ namespace BigAmbitionsMP
     {
         public const string PLUGIN_GUID = "com.bigambitions.multiplayer";
         public const string PLUGIN_NAME = "BigAmbitionsMP";
-        public const string PLUGIN_VERSION = "0.1.0";
+        public const string PLUGIN_VERSION = "0.1.1";
 
         /// <summary>True only in a `-c Dev` build (BAMP_DEV defined) — the
         /// test/diagnostic scaffolding is compiled in.  Shipped builds are false.</summary>

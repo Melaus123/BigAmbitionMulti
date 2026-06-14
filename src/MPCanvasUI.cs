@@ -3157,10 +3157,19 @@ namespace BigAmbitionsMP
             }
 
             // Click — replace the whole event so the original prefab's persistent
-            // listeners (e.g. open Load Game) don't also fire.
+            // listeners (e.g. open Load Game) don't also fire.  Force interactable:
+            // the LoadGameButton template is disabled by the game when the player has
+            // no saved games (MainMenuController), and an Instantiate clone inherits
+            // that darkened, un-clickable state — which dead-clicked the Multiplayer
+            // button for any brand-new player.  This is our own button; keep it live.
             var btn = clone.GetComponent<Button>();
-            btn.onClick = new Button.ButtonClickedEvent();
-            btn.onClick.AddListener(new UnityEngine.Events.UnityAction(onClick.Invoke));
+            if (btn != null)
+            {
+                btn.interactable = true;
+                btn.enabled = true;
+                btn.onClick = new Button.ButtonClickedEvent();
+                btn.onClick.AddListener(new UnityEngine.Events.UnityAction(onClick.Invoke));
+            }
             return clone;
         }
 
@@ -3208,7 +3217,7 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] CloneButtonInto '{label}': {ex.Message}"); }
-            try { var btn = clone.GetComponent<Button>(); if (btn != null) { btn.onClick = new Button.ButtonClickedEvent(); btn.onClick.AddListener(new UnityEngine.Events.UnityAction(onClick.Invoke)); } } catch { }
+            try { var btn = clone.GetComponent<Button>(); if (btn != null) { btn.interactable = true; btn.enabled = true; btn.onClick = new Button.ButtonClickedEvent(); btn.onClick.AddListener(new UnityEngine.Events.UnityAction(onClick.Invoke)); } } catch { }
             return clone;
         }
 
