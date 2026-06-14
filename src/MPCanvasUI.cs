@@ -350,7 +350,6 @@ namespace BigAmbitionsMP
 
             // Player sync ticks — run regardless of panel visibility or build state
             MPSaveCoordinator.DiagPhase("Update: TickGameLoadDetect");   TickGameLoadDetect();
-            TickBehaviorTuning();   // spread the game's batched NPC-AI update (MP ~256ms stutter)
             MPSaveCoordinator.DiagPhase("Update: TickStartupTimeout");   TickStartupTimeout();
             MPSaveCoordinator.DiagPhase("Update: TickWorldSnapshot");    long _ws = MPPerf.Begin(); TickWorldSnapshot(); MPPerf.End("WorldSnap", _ws);
             MPSaveCoordinator.DiagPhase("Update: TickPositionSync");     long _ps = MPPerf.Begin(); TickPositionSync(); MPPerf.End("PosSync*", _ps);
@@ -401,7 +400,6 @@ namespace BigAmbitionsMP
                 if (_mpWin != null) _mpWin.SetActive(false);
                 _mpChatFocus = false; _mpDragging = false; _mpOpacityDragging = false; _mpResizing = false;
                 SyncChatNavBlock(false); MPChat.SuppressGameInput = false;
-                _behaviorTuned = false;   // re-apply the NPC-AI spread next MP session
             }
             _mpWasInGame = mpInGame;
 
@@ -2769,28 +2767,6 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogError($"[UI] TickTimeSync error: {ex.Message}");
             }
-        }
-
-        // ── NPC-AI batch spreader (MP stutter fix) ────────────────────────────
-        // The game's BehaviorManager batch-updates EVERY NPC behavior tree on one
-        // frame per fixed interval (~0.25s).  In MP the world clock is held at a
-        // busy hour, so the city stays at peak NPC density and that batch lands as
-        // a ~70ms hitch every ~256ms — the MP "stutter" (profiler-localized via the
-        // razor-sharp 256ms [Spike] cadence, 2026-06-14).  EveryFrame spreads the
-        // same work smoothly across frames.  Applied once per MP session.
-        private static bool _behaviorTuned;
-        private void TickBehaviorTuning()
-        {
-            if (_behaviorTuned) return;
-            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-            if (!IsInGame()) return;
-            try
-            {
-                GameManager.Command_SetBehaviorManagerUpdateTime(0f);   // 0 = EveryFrame
-                _behaviorTuned = true;
-                Plugin.Logger.LogInfo("[Perf] BehaviorManager → EveryFrame (spread NPC AI; was a batched ~0.25s spike).");
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Perf] BehaviorManager tune failed: {ex.Message}"); }
         }
 
         /// <summary>
