@@ -345,14 +345,11 @@ namespace BigAmbitionsMP
 #if BAMP_DEV
             if (Input.GetKeyDown(KeyCode.F6))
             {
-                _ablateMode = (_ablateMode + 1) % 4;
-                AblateNet = (_ablateMode == 3);
-                if (_canvasGO != null) _canvasGO.SetActive(_ablateMode != 2);   // mode 2: hide our whole MP UI
-                var _abn = new[] { "OFF (normal MP)", "SANITY +40ms/frame (MUST spike if harness works)", "HIDE MP-UI canvas", "NETWORK off (skip PollEvents)" };
-                string _conf = _ablateMode == 2 ? $"  [canvas.activeSelf now = {(_canvasGO != null ? _canvasGO.activeSelf.ToString() : "null")}]" : "";
-                Plugin.Logger.LogInfo($"[Ablate] mode {_ablateMode} = {_abn[_ablateMode]} (F6){_conf}");
+                _ablateMode = (_ablateMode + 1) % 3;
+                var _abn = new[] { "OFF (normal MP)", "SANITY +40ms/frame (MUST spike)", "SKIP entire MP sync chain (WorldSnap/PosSync/Time/Market/Save/Cash)" };
+                Plugin.Logger.LogInfo($"[Ablate] mode {_ablateMode} = {_abn[_ablateMode]} (F6)");
             }
-            if (_ablateMode == 1) System.Threading.Thread.Sleep(40);   // SANITY control: guaranteed +40ms/frame — proves F6 + the spike meter actually react
+            if (_ablateMode == 1) System.Threading.Thread.Sleep(40);   // SANITY control: guaranteed +40ms/frame — proves F6 + the spike meter react
 #endif
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
@@ -395,6 +392,8 @@ namespace BigAmbitionsMP
             // Player sync ticks — run regardless of panel visibility or build state
             MPSaveCoordinator.DiagPhase("Update: TickGameLoadDetect");   TickGameLoadDetect();
             MPSaveCoordinator.DiagPhase("Update: TickStartupTimeout");   TickStartupTimeout();
+            if (_ablateMode != 2)   // DEV ablation mode 2 (F6): skip our ENTIRE per-frame MP sync chain
+            {
             MPSaveCoordinator.DiagPhase("Update: TickWorldSnapshot");    long _ws = MPPerf.Begin(); TickWorldSnapshot(); MPPerf.End("WorldSnap", _ws);
             MPSaveCoordinator.DiagPhase("Update: TickPositionSync");     long _ps = MPPerf.Begin(); TickPositionSync(); MPPerf.End("PosSync*", _ps);
             MPSaveCoordinator.DiagPhase("Update: TickTimeSync");         TickTimeSync();
@@ -404,6 +403,7 @@ namespace BigAmbitionsMP
             // (F3-F12 diagnostic toggle tick removed 2026-06-10.)
             MPSaveCoordinator.DiagPhase("Update: TickMpSave");           TickMpSave();   // Phase 4 — suppress SP autosave, upload saves, host autosave
             MPSaveCoordinator.DiagPhase("Update: TickCashSync");         TickCashSync(); // Phase 4 — live cash stream to host
+            }
 #if BAMP_DEV
             TickAnimProbe();   // run-animation pipeline snapshot (SP vs host diff)
 #endif
