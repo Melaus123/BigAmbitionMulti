@@ -3631,21 +3631,13 @@ namespace BigAmbitionsMP
                     else
                     {
                         int port = MPConfig.Port;
-                        string lan = MPConfig.LocalLanIp();
                         string pub = MPNet.PublicIp;
-                        var ib = new System.Text.StringBuilder();
-                        if (!string.IsNullOrEmpty(lan)) ib.Append($"Same network:   {lan} : {port}\n");
                         if (!string.IsNullOrEmpty(pub))
-                        {
-                            string fw = MPNet.Upnp == MPNet.UpnpState.Mapped
-                                            ? "  <color=#8CE08C>(router auto-forwarded ✓)</color>"
-                                      : MPNet.Upnp == MPNet.UpnpState.Trying
-                                            ? "  <color=#AAAAAA>(opening router port…)</color>"
-                                            : $"  <color=#FFD24A>(forward UDP {port} on your router)</color>";
-                            ib.Append($"Over internet:   {pub} : {port}{fw}");
-                        }
-                        else ib.Append(MPNet.PublicIpTried ? "Over internet:   (public IP unavailable)" : "Over internet:   (looking up…)");
-                        info = ib.Length > 0 ? ib.ToString() : $"Others join at:   {MPConfig.HostIP} : {port}";
+                            info = $"Others join at:   {pub} : {port}\n<size=15><color=#AAAAAA>(forward UDP {port} to this PC on your router)</color></size>";
+                        else if (!MPNet.PublicIpTried)
+                            info = "Others join at:   (looking up your IP…)";
+                        else
+                            info = $"Others join at:   {MPConfig.HostIP} : {port}";
                     }
                 }
                 else if (MPClient.IsConnected)   info = "Connected to host";
