@@ -106,9 +106,9 @@ namespace BigAmbitionsMP
         private readonly IModLogger? _inner;
         public ModLog(IModLogger? inner) { _inner = inner; }
 
-        public void LogInfo(object msg)    { var s = $"[BAMP] {msg}";  if (_inner != null) _inner.Info(s);  else Debug.Log(s); }
-        public void LogWarning(object msg) { var s = $"[BAMP] {msg}";  if (_inner != null) _inner.Warn(s);  else Debug.LogWarning(s); }
-        public void LogError(object msg)   { var s = $"[BAMP] {msg}";  if (_inner != null) _inner.Error(s); else Debug.LogError(s); }
+        public void LogInfo(object msg)    { MPLog.Record("INFO", msg?.ToString() ?? ""); var s = $"[BAMP] {msg}";  if (_inner != null) _inner.Info(s);  else Debug.Log(s); }
+        public void LogWarning(object msg) { MPLog.Record("WARN", msg?.ToString() ?? ""); var s = $"[BAMP] {msg}";  if (_inner != null) _inner.Warn(s);  else Debug.LogWarning(s); }
+        public void LogError(object msg)   { MPLog.Record("ERR ", msg?.ToString() ?? ""); var s = $"[BAMP] {msg}";  if (_inner != null) _inner.Error(s); else Debug.LogError(s); }
         public void LogDebug(object msg)   => LogInfo(msg);
     }
 }

@@ -189,6 +189,7 @@ namespace BigAmbitionsMP
                         SessionEnded = true;
                         GameStateReader.SetNativePause(true);   // true pause (red border) under the notice
                         Plugin.Logger.LogWarning("[Client] Host connection lost in-game — session ended; notice shown (dismiss to continue offline as a single-player fork).");
+                        MPLog.Dump("client: host connection lost in-game");
                     }
                 }
                 catch { }
@@ -586,6 +587,8 @@ namespace BigAmbitionsMP
             var snap = env.GetPayload<WorldSnapshotPayload>();
             if (snap == null) return;
 
+            if (!string.IsNullOrEmpty(snap.SessionId) && MPLog.SessionId != snap.SessionId)
+                MPLog.BeginSession(snap.SessionId, "client");
             Plugin.Logger.LogInfo($"[Client] Received world snapshot: {snap.BuildingOwners.Count} buildings tracked.");
             GameStatePatcher.ApplyWorldSnapshot(snap);
         }

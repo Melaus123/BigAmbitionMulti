@@ -2569,6 +2569,7 @@ namespace BigAmbitionsMP
             }
 
             private static System.Reflection.MethodInfo? _selfService;
+            private static float _lastDeclineLogAt;
 
             static bool Prefix(Controllers.CashRegisterController __instance, ref bool __result)
             {
@@ -2578,7 +2579,19 @@ namespace BigAmbitionsMP
                     string owner = MPRegisterSync.CurrentShopOwner;
                     if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return true;
                     if (!MPRestSync.AllPlayers().Contains(owner)) return true;          // AI shops native
-                    if (!MPRegisterSync.IsStaffedByOtherPlayer(__instance.transform.position)) return true;  // nobody working it
+                    if (!MPRegisterSync.IsStaffedByOtherPlayer(__instance.transform.position))
+                    {
+                        // Decline path (the "no employees" field bug): a real
+                        // player's shop, but no one on duty at THIS register — fall
+                        // through to native.  Logged (throttled) so the failure is
+                        // VISIBLE instead of inferred from a missing success line.
+                        if (UnityEngine.Time.unscaledTime - _lastDeclineLogAt > 1.5f)
+                        {
+                            _lastDeclineLogAt = UnityEngine.Time.unscaledTime;
+                            Plugin.Logger.LogInfo($"[SelfCheckout] DECLINED in '{owner}' shop — no one on duty at this register (native 'no employees' path). pos={__instance.transform.position}");
+                        }
+                        return true;
+                    }
 
                     if (_selfService == null)
                         foreach (var m in typeof(Controllers.CashRegisterController).GetMethods(

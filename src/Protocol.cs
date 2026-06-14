@@ -176,6 +176,10 @@ namespace BigAmbitionsMP
 
         /// <summary>Serialised List&lt;ProductMarketEntry&gt; as JSON string.</summary>
         public string MarketEntriesJson { get; set; } = "[]";
+
+        /// <summary>Host's session id — clients adopt it so both machines' logs
+        /// correlate to the same session (observability).</summary>
+        public string SessionId { get; set; } = "";
     }
 
     /// <summary>A single building changed ownership.</summary>

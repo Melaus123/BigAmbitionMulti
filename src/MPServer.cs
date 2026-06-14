@@ -305,6 +305,7 @@ namespace BigAmbitionsMP
             _peerNames.Clear();
             StableIdByPlayer.Clear();
             StableIdByPlayer[MPConfig.PlayerId] = MPConfig.StableId; // host's own
+            MPLog.BeginSession(System.Guid.NewGuid().ToString("N").Substring(0, 8), "host");
             _clients.Clear();         // stale peers from a torn-down session
             BuildingOwners.Clear();   // per-session state — a new game must not inherit
             CashByStableId.Clear();   // owners/cash; the load path re-seeds from the manifest
@@ -581,6 +582,7 @@ namespace BigAmbitionsMP
 
                     if (!cleanLeave)
                     {
+                        MPLog.Dump($"host: '{leftPlayer}' lost connection ({info.Reason})");
                         _pausedByDisconnect = true;    // cleared on reconnect or overlay dismiss
                         DisconnectPauseWho  = leftPlayer;
                         BroadcastManualPause(true);
@@ -2721,6 +2723,7 @@ namespace BigAmbitionsMP
             {
                 BuildingOwners   = new Dictionary<string, string>(BuildingOwners),
                 MarketEntriesJson = GameStateReader.GetMarketEntriesJson(),
+                SessionId         = MPLog.SessionId,
             };
         }
 
