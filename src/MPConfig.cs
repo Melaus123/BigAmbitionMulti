@@ -18,6 +18,39 @@ namespace BigAmbitionsMP
         public static string HostIP   { get; private set; } = "127.0.0.1";
         public static int    Port     { get; private set; } = 7777;
 
+        private static string? _cachedLanIp;
+        /// <summary>This machine's best-guess LAN IPv4 — the address other players on
+        /// the SAME network use to join (e.g. 192.168.x.x).  Detected locally from the
+        /// network adapters; makes NO external calls.  Returns "" if none is found
+        /// (callers fall back to the configured HostIP).  For internet play the host
+        /// still needs their PUBLIC ip + a forwarded port; this is the LAN address.</summary>
+        public static string LocalLanIp()
+        {
+            if (_cachedLanIp != null) return _cachedLanIp;
+            _cachedLanIp = "";
+            try
+            {
+                foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                    if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback) continue;
+                    var props = ni.GetIPProperties();
+                    if (props.GatewayAddresses.Count == 0) continue;   // no route → virtual/disconnected adapter, skip
+                    foreach (var ua in props.UnicastAddresses)
+                    {
+                        var a = ua.Address;
+                        if (a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && !System.Net.IPAddress.IsLoopback(a))
+                        {
+                            _cachedLanIp = a.ToString();
+                            return _cachedLanIp;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return _cachedLanIp;
+        }
+
         /// <summary>
         /// STABLE, immutable identity used as the key for persistent progress
         /// (saves + building ownership) — NOT the display name (PlayerId), which

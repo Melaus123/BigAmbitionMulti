@@ -3563,7 +3563,8 @@ namespace BigAmbitionsMP
             if (_lwConnInfo != null)
             {
                 string info;
-                if      (host)                   info = _showIp ? $"Others join at:   {MPConfig.HostIP} : {MPConfig.Port}"
+                string hostAddr = MPConfig.LocalLanIp(); if (string.IsNullOrEmpty(hostAddr)) hostAddr = MPConfig.HostIP;
+                if      (host)                   info = _showIp ? $"Others join at:   {hostAddr} : {MPConfig.Port}"
                                                                 : "Others join at:   ••••••••   (hidden)";
                 else if (MPClient.IsConnected)   info = "Connected to host";
                 else if (MPClient.IsConnecting)  info = "Connecting…";
