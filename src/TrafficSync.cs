@@ -54,6 +54,9 @@ namespace BigAmbitionsMP
         // Keyed by the host's Gley pool index.
         private static readonly Dictionary<int, TrafficGhost> _ghosts = new();
 
+        /// <summary>Client-side count of spawned traffic ghosts — perf correlation.</summary>
+        public static int ClientTrafficGhostCount => _ghosts.Count;
+
         // A networked position jump bigger than this is a reused pool slot or a
         // teleport — snap the ghost rather than sliding it across the screen.
         private const float SnapDistance = 12f;

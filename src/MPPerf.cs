@@ -31,7 +31,7 @@ namespace BigAmbitionsMP
         private static int    _frames;
         private static double _frameTotalMs, _frameMaxMs;
         private static int    _spikes;
-        private static int    _gc0, _gc1, _gc2, _gcIl;
+        private static int    _gc0, _gc1, _gc2;
 
         public static long Begin() => Enabled ? _sw.ElapsedTicks : 0L;
 
@@ -43,13 +43,19 @@ namespace BigAmbitionsMP
             s.Total += ms; s.Calls++; if (ms > s.Max) s.Max = ms;
         }
 
-        /// <summary>Once per frame (end of Update).  Collects frame stats and
-        /// emits the summary when the window elapses.  Quiet unless MP active.</summary>
+        /// <summary>Once per frame (end of Update).  Collects frame stats and emits
+        /// a summary when the window elapses.  Runs in SINGLE-PLAYER too — each
+        /// window is tagged SP / MP-HOST / MP-CLIENT, so an SP-then-MP session in
+        /// one launch yields directly-comparable baselines for diffing the cost.
+        /// Only accumulates while actually in a game (menus/loading reset).</summary>
         public static void FrameTick(float unscaledDt)
         {
             if (!Enabled) return;
-            if (!MPServer.IsRunning && !MPClient.IsConnected)
-            {   // not in MP — don't accumulate stale windows
+
+            bool inGame = false;
+            try { inGame = SaveGameManager.Current != null; } catch { }
+            if (!inGame)
+            {   // menu/loading — don't pollute a window with non-gameplay frames
                 _slots.Clear(); _frames = 0; _frameTotalMs = 0; _frameMaxMs = 0; _spikes = 0;
                 _windowStartMs = _sw.Elapsed.TotalMilliseconds;
                 return;
@@ -67,30 +73,44 @@ namespace BigAmbitionsMP
 
             try
             {
-                string role = MPServer.IsRunning ? "HOST" : "CLIENT";
+                string role = MPServer.IsRunning ? "MP-HOST" : (MPClient.IsConnected ? "MP-CLIENT" : "SP");
                 double avgFrame = _frames > 0 ? _frameTotalMs / _frames : 0;
-                // GC activity this window: our CoreCLR side (gen0/1/2 deltas) +
-                // the game's IL2CPP side if exposed — collector pauses are the
-                // classic source of RHYTHMIC hitches.
                 int g0 = System.GC.CollectionCount(0), g1 = System.GC.CollectionCount(1), g2 = System.GC.CollectionCount(2);
                 string gc = $" gc {g0 - _gc0}/{g1 - _gc1}/{g2 - _gc2}";
                 _gc0 = g0; _gc1 = g1; _gc2 = g2;
-                try
-                {
-                    int gi = System.GC.CollectionCount(0);
-                    gc += $" il2cpp {gi - _gcIl}";
-                    _gcIl = gi;
-                }
-                catch { }
+
                 var sb = new System.Text.StringBuilder();
                 sb.Append($"[Perf/{role}] {(now - _windowStartMs) / 1000.0:F1}s: {_frames}f avg {avgFrame:F1}ms ({(avgFrame > 0 ? 1000.0 / avgFrame : 0):F0}fps) worst {_frameMaxMs:F0}ms spikes {_spikes}{gc} |");
+
+                // Per-system detail.  NOTE: Parked/Traffic/Biz/etc. are SUBSETS of
+                // PosSync* — so for the ours-vs-game split below, sum only the
+                // TOP-LEVEL brackets (Drain + WorldSnap + PosSync*), never all.
+                double modTicks = 0;
                 foreach (var kv in _slots)
                 {
                     var s = kv.Value;
                     if (s.Calls == 0) continue;
-                    // avg ms attributable PER FRAME (not per call) + worst single call
-                    sb.Append($" {kv.Key}={s.Total / _frames:F2}/{s.Max:F1}");
+                    double perFrame = s.Total / _frames;
+                    if (kv.Key == "Drain" || kv.Key == "WorldSnap" || kv.Key == "PosSync*") modTicks += perFrame;
+                    sb.Append($" {kv.Key}={perFrame:F2}/{s.Max:F1}");
                 }
+                // modTicks = time inside OUR per-frame work; gameOther = the rest of
+                // the frame (game logic + render + our Harmony patch bodies, which
+                // aren't bracketed).  A large gameOther in MP vs SP = cost we INDUCED
+                // in the game (extra NPCs/ghosts it now simulates), not our ticks.
+                sb.Append($" || modTicks={modTicks:F1}ms game+render={(avgFrame - modTicks):F1}ms");
+
+                // Entity load — correlate frame cost with what we've added to the scene.
+                try
+                {
+                    int remotes = RemotePlayerManager.GetRemotePlayerIds().Count;
+                    if (MPServer.IsRunning)
+                        sb.Append($" | ent parked={ParkedVehicleSync.HostTrackedCount} traffic={TrafficSync.HostTrafficCount()} remotes={remotes} clients={MPServer.ConnectedCount}");
+                    else if (MPClient.IsConnected)
+                        sb.Append($" | ent parkedGhosts={ParkedVehicleSync.ClientGhostCount} trafficGhosts={TrafficSync.ClientTrafficGhostCount} remotes={remotes}");
+                }
+                catch { }
+
                 Plugin.Logger.LogInfo(sb.ToString());
             }
             catch { }
