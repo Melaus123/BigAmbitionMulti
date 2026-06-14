@@ -126,6 +126,11 @@ namespace BigAmbitionsMP
         private Transform? _handContent;
         private bool _handContentSearched;
 
+        // Cached main camera for label billboarding.  Camera.main is a tagged
+        // scene search — refresh at most 1x/s instead of every frame per remote.
+        private static Camera? _billboardCam;
+        private static float   _billboardCamAt = -999f;
+
         private void LateUpdate()
         {
             if (_ikT == null || Anim == null) return;
@@ -267,8 +272,13 @@ namespace BigAmbitionsMP
                 _labelTransform = transform.Find("BAMP_Label");
                 _labelSearched  = true;
             }
-            if (_labelTransform != null && Camera.main != null)
-                _labelTransform.rotation = Camera.main.transform.rotation;
+            if (_labelTransform != null)
+            {
+                if (_billboardCam == null || Time.unscaledTime - _billboardCamAt > 1f)
+                { _billboardCam = Camera.main; _billboardCamAt = Time.unscaledTime; }
+                if (_billboardCam != null)
+                    _labelTransform.rotation = _billboardCam.transform.rotation;
+            }
             MPPerf.End("RemUpd", _pf);
         }
     }
