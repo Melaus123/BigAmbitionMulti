@@ -13,15 +13,13 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class MPPerf
     {
-        // Diagnostic scaffolding — excluded from the shipped build.  ON only in a
-        // `-c Dev` build (BAMP_DEV); the per-system table costs a Stopwatch read
-        // per bracket and is for local performance tuning, not end users.
-        public static bool Enabled =
-#if BAMP_DEV
-            true;
-#else
-            false;
-#endif
+        // Always on in every build (2026-06-14).  The per-bracket Stopwatch reads
+        // cost ~nothing (~20ns each, a couple µs/sec total at 70fps), and shipping
+        // the profiler in the PLAYER build means a stuttering field report carries
+        // its own [Perf] lines inside the submitted log — no special diagnostic
+        // build needs to be pre-armed.  A player submitting their log is their
+        // opt-in to have it reviewed.
+        public static bool Enabled = true;
         private const float ReportSeconds = 10f;
 
         private sealed class Slot { public double Total; public double Max; public int Calls; }
