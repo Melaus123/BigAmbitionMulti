@@ -1503,106 +1503,44 @@ namespace BigAmbitionsMP
             // (Taxi-crash bisect Postfix/Finalizer removed 2026-06-10 — solved.)
         }
 
-        // ── FIX: spurious hover re-entry pulses (the "highlight leak") ────────
-        // HiDiag showed the client's building highlights are its OWN cursor
-        // system re-firing OnIoEnter: ghost vehicles popping in/out or driving
-        // through the idle cursor's ray flip MouseController's target, and when
-        // the ray lands back on the building it re-enters → highlight pulse
-        // with no local cause.  A GENUINE hover always involves the mouse
-        // moving, so: skip OnIoEnter when this same building was exited a
-        // moment ago with the cursor in (almost) the same spot.  MP-gated —
-        // single-player behaviour untouched.
-        [HarmonyPatch(typeof(CityBuildingController), nameof(CityBuildingController.OnIoExit))]
-        public static class Patch_CBC_OnIoExit_Record
-        {
-            internal static readonly Dictionary<int, (float t, UnityEngine.Vector2 mp)> LastExit = new();
-            static void Postfix(CityBuildingController __instance)
-            {
-                try
-                {
-                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                    if (__instance == null) return;
-                    LastExit[__instance.GetInstanceID()] = (
-                        UnityEngine.Time.realtimeSinceStartup,
-                        new UnityEngine.Vector2(UnityEngine.Input.mousePosition.x, UnityEngine.Input.mousePosition.y));
-                }
-                catch { }
-            }
-        }
-
+        // ── Building-hover pick guard — DEV-ONLY (two-instance testing) ───────
+        // History: the "highlight leak" (the client showed building highlights
+        // that tracked the HOST's mouse but not its target) was a SINGLE-MACHINE,
+        // TWO-INSTANCE artifact — the unfocused instance still receives the OS
+        // cursor position (as out-of-bounds coords, the mouse being over the other
+        // window) and the game picks buildings with it.  The fix that actually
+        // worked (user-confirmed) was THIS focus/out-of-bounds guard.  A separate
+        // idle/ghost-vehicle "debounce" theorised for residual flicker barely
+        // fired, was descoped, and broke the HOST's own highlighting in real play,
+        // so it has been removed entirely.
+        //
+        // On SEPARATE machines each player has their own cursor, so the bleed is
+        // impossible and building highlighting is fully local (the game's OnIoEnter
+        // is local-visual; we never broadcast it).  So the RELEASE build carries NO
+        // hover patch at all — native highlighting on host and client.  This guard
+        // compiles ONLY into the DEV build, where two instances share one machine
+        // and one OS cursor.
+#if BAMP_DEV
         [HarmonyPatch(typeof(CityBuildingController), nameof(CityBuildingController.OnIoEnter))]
-        public static class Patch_CBC_OnIoEnter_HoverDebounce
+        public static class Patch_CBC_OnIoEnter_DevFocusGuard
         {
-            private const float ReEnterWindowSeconds = 0.6f;
-            private const float CursorIdleSqPixels   = 9f;     // ≤3 px = cursor didn't move
-            private static float _winStart; private static int _winCount;   // HiDiag (reinstated — highlight effort resumed)
-
-            static bool Prefix(CityBuildingController __instance)
+            static bool Prefix()
             {
                 try
                 {
                     if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
-                    if (__instance == null) return true;
-
-                    // ★ THE root cause (2026-06-10, pick-trace-confirmed): on a
-                    // single machine the UNFOCUSED instance still receives the
-                    // system cursor position — as negative / out-of-bounds
-                    // coordinates (the mouse is over the OTHER instance's
-                    // window) — and the game picks buildings with them.  An
-                    // unfocused window, or a cursor outside the window, must
-                    // not hover-pick at all.
+                    // The UNFOCUSED instance (mouse is over the OTHER window) must
+                    // not hover-pick — its cursor coords belong to the other game.
                     if (!UnityEngine.Application.isFocused) return false;
-                    var mpos = UnityEngine.Input.mousePosition;
-                    if (mpos.x < 0f || mpos.y < 0f ||
-                        mpos.x >= UnityEngine.Screen.width || mpos.y >= UnityEngine.Screen.height)
+                    var m = UnityEngine.Input.mousePosition;
+                    if (m.x < 0f || m.y < 0f || m.x >= UnityEngine.Screen.width || m.y >= UnityEngine.Screen.height)
                         return false;
-
-                    float now = UnityEngine.Time.realtimeSinceStartup;
-
-                    // Rule 1 (same building): exited a moment ago with an idle
-                    // cursor → ghost re-pop, swallow.
-                    bool suppress = false;
-                    if (Patch_CBC_OnIoExit_Record.LastExit.TryGetValue(__instance.GetInstanceID(), out var rec))
-                    {
-                        float dt = now - rec.t;
-                        var mp = new UnityEngine.Vector2(UnityEngine.Input.mousePosition.x, UnityEngine.Input.mousePosition.y);
-                        suppress = dt < ReEnterWindowSeconds && (mp - rec.mp).sqrMagnitude < CursorIdleSqPixels;
-                    }
-
-                    // Rule 2 (any building): the mouse is idle AND the camera is
-                    // still — the world under the cursor can't legitimately
-                    // change, so ANY new hover is a ghost crossing/popping in
-                    // the ray (HiDiag showed the residual flicker ALTERNATES
-                    // between adjacent buildings, which Rule 1 can't catch).
-                    bool idleScene = now - MPCanvasUI.InputUnstableAt > 0.25f;
-                    if (idleScene) suppress = true;
-
-                    if (now - _winStart > 1f) { _winStart = now; _winCount = 0; }
-                    if (++_winCount <= 30)
-                    {
-                        string nm = "?"; try { nm = __instance.name; } catch { }
-                        // Pick-trace: where does this building sit ON SCREEN vs the
-                        // mouse?  Near-match ⇒ cursor-offset theory; far apart ⇒ the
-                        // pick ray comes from a different camera than the render one.
-                        string trace = "";
-                        try
-                        {
-                            var cam = UnityEngine.Camera.main;
-                            var mp2 = UnityEngine.Input.mousePosition;
-                            if (cam != null)
-                            {
-                                var sp = cam.WorldToScreenPoint(__instance.transform.position);
-                                trace = $" mouse=({mp2.x:F0},{mp2.y:F0}) bldg=({sp.x:F0},{sp.y:F0},z{sp.z:F0}) cam='{cam.name}'";
-                            }
-                        }
-                        catch { }
-                        Plugin.Logger.LogInfo($"[HiDiag/{(MPServer.IsRunning ? "HOST" : "CLIENT")}] OnIoEnter '{nm}'{(suppress ? (idleScene ? " SUPPRESSED-idle" : " SUPPRESSED") : "")}{trace}");
-                    }
-                    return !suppress;
                 }
-                catch { return true; }
+                catch { }
+                return true;
             }
         }
+#endif
 
         // (Patch_CBC_SetHighlight_Diag REMOVED 2026-06-10 — leftover highlight
         //  diagnostic.  Its detour sat on a method the taxi-map filter tail

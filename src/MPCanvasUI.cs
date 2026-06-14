@@ -412,12 +412,6 @@ namespace BigAmbitionsMP
             // (F7 test-row removed 2026-06-10 — capture complete: offsets are
             //  zero for all open types; passive RideProbe sampling remains.)
 
-            // Input-stability tracking for the hover-flicker suppressor: while
-            // the MOUSE is idle and the CAMERA isn't moving, nothing new can
-            // legitimately come under the cursor — so any hover-enter in that
-            // state is a ghost popping through the ray (see MPPatches
-            // Patch_CBC_OnIoEnter_HoverDebounce).
-            TickInputStability();
             TickCameraAudit();
 
             // BizPhone Chat button: inject once per game scene while MP active;
@@ -2225,32 +2219,6 @@ namespace BigAmbitionsMP
                     _camAuditSig = sig;
                     Plugin.Logger.LogInfo($"[CamAudit] enabled cameras ({cams.Length}): {sig}| Camera.main='{Camera.main?.name}'");
                 }
-            }
-            catch { }
-        }
-
-        // ── Input stability (hover-flicker suppression) ───────────────────────
-        /// <summary>realtimeSinceStartup of the last frame where the mouse OR the
-        /// main camera moved.  While both are still, the world under the cursor
-        /// can't legitimately change — used to swallow ghost-induced hover pops.</summary>
-        public static float InputUnstableAt;
-        private Vector3 _isLastMouse;
-        private Vector3 _isLastCamPos;
-        private void TickInputStability()
-        {
-            try
-            {
-                var m = Input.mousePosition;
-                bool moved = (m - _isLastMouse).sqrMagnitude > 9f;   // >3 px
-                _isLastMouse = m;
-                var cam = Camera.main;
-                if (cam != null)
-                {
-                    var cp = cam.transform.position;
-                    if ((cp - _isLastCamPos).sqrMagnitude > 0.0025f) moved = true;   // >5 cm
-                    _isLastCamPos = cp;
-                }
-                if (moved) InputUnstableAt = Time.realtimeSinceStartup;
             }
             catch { }
         }
