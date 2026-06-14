@@ -99,8 +99,12 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(GameManager), "Update")]
         public static class Patch_GameManager_Update
         {
+            private static long _gameT0;
+            static void Prefix() { _gameT0 = MPPerf.Begin(); }   // DIAG: time the GAME's own Update body
+
             static void Postfix()
             {
+                MPPerf.End("GameBody", _gameT0);   // cost of GameManager.Update itself (excludes our postfix)
                 long _pf = MPPerf.Begin();   // DIAG: per-frame patch-body cost
                 GameStatePatcher.DrainQueue();
 
