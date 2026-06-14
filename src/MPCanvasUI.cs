@@ -308,6 +308,10 @@ namespace BigAmbitionsMP
         // uses, "CamRender" accumulates the main-thread camera render time.
         private static bool _renderHooked;
         private static long _camRenderT0;
+        // DEV ablation (F6): when true the mod STOPS managing time — lets the game's
+        // TimeMachine + native timeScale run — so we can A/B whether OUR time
+        // suppression is what makes the game spike ~70ms every 256ms.
+        public static bool AblateTime;
         private static void HookRenderTiming()
         {
             if (_renderHooked) return;
@@ -336,6 +340,13 @@ namespace BigAmbitionsMP
             // guarantees the path is ready so NO poll-thread handler ever calls IL2CPP.
             MPSaveManager.EnsureVersionCached();
             HookRenderTiming();      // DIAG: camera-render timing (render vs logic for the 256ms hitch)
+#if BAMP_DEV
+            if (Input.GetKeyDown(KeyCode.F6))
+            {
+                AblateTime = !AblateTime;
+                Plugin.Logger.LogInfo($"[Ablate] time-management suppressed = {AblateTime} (F6) — {(AblateTime ? "letting the GAME run time/skips natively" : "back to normal MP time")}");
+            }
+#endif
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
             MPRegisterSync.TickDuty();   // mirror the native Work activity into register duty (1s self-throttle)
@@ -560,11 +571,11 @@ namespace BigAmbitionsMP
                 // the game's own Update) overrides menu / bench / bed pauses —
                 // opening a menu no longer stops time for anyone.
                 bool frozen = TimeSync.ManualPaused || TimeSync.IsStartupHeld;
-                Time.timeScale = frozen ? 0f : 1f;
+                if (!AblateTime) Time.timeScale = frozen ? 0f : 1f;
 
                 // World-clock guardian: taxi 1× clamp + unaccounted-acceleration
                 // net (known skips are suppressed at the TimeMachine patch).
-                if (!frozen)
+                if (!frozen && !AblateTime)
                     TickWorldClock();
             }
             catch (Exception ex)

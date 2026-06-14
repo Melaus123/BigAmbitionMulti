@@ -111,7 +111,7 @@ namespace BigAmbitionsMP
                 // Second timeScale enforcement point — runs after the game's own Update,
                 // so nothing the game does mid-frame can let the world pause or skip.
                 // (MPCanvasUI.LateUpdate is the primary point; this backs it up.)
-                if (MPServer.IsRunning || MPClient.IsConnected)
+                if ((MPServer.IsRunning || MPClient.IsConnected) && !MPCanvasUI.AblateTime)
                 {
                     bool frozen = TimeSync.ManualPaused || TimeSync.IsStartupHeld;
                     UnityEngine.Time.timeScale = frozen ? 0f : 1f;
@@ -1829,6 +1829,7 @@ namespace BigAmbitionsMP
             static bool Prefix()
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                if (MPCanvasUI.AblateTime) return true;        // DEV ablation (F6): let the machine run
                 // No taxi bypass: the ride machine is stopped instantly (taxi
                 // v2 = instant arrival), so it must never self-advance either.
                 return false;                                  // machine never self-advances in MP
