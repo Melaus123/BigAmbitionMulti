@@ -3422,6 +3422,19 @@ namespace BigAmbitionsMP
                 _joinFocus = RectHit(_joinIpRT, mp) ? 1 : RectHit(_joinPortRT, mp) ? 2 : 0;
             }
 
+            // Ctrl+V paste — Input.inputString does not carry clipboard pastes, so the
+            // box couldn't be pasted into.  Read the clipboard explicitly.
+            if (_joinFocus != 0 && (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)) && Input.GetKeyDown(KeyCode.V))
+            {
+                try
+                {
+                    var sb = new System.Text.StringBuilder();
+                    foreach (char ch in GUIUtility.systemCopyBuffer ?? "") if (!char.IsControl(ch)) sb.Append(ch);
+                    if (_joinFocus == 1) _joinIp += sb.ToString(); else _joinPort += sb.ToString();
+                }
+                catch { }
+            }
+
             if (_joinFocus != 0 && Input.inputString.Length > 0)
             {
                 string s = _joinFocus == 1 ? _joinIp : _joinPort;
@@ -3431,9 +3444,14 @@ namespace BigAmbitionsMP
                     else if (c == '\n' || c == '\r') { OnJoinConnect(); return; }
                     else if (!char.IsControl(c)) s += c;
                 }
-                if (_joinFocus == 1) { _joinIp = s;   if (_joinIpLbl   != null) _joinIpLbl.text   = s; }
-                else                 { _joinPort = s; if (_joinPortLbl != null) _joinPortLbl.text = s; }
+                if (_joinFocus == 1) _joinIp = s; else _joinPort = s;
             }
+
+            // Blinking caret on the focused field — there was no cursor before, so it
+            // wasn't clear typing was going anywhere.
+            bool joinCaret = Mathf.FloorToInt(Time.unscaledTime * 2f) % 2 == 0;
+            if (_joinIpLbl   != null) _joinIpLbl.text   = _joinIp   + (_joinFocus == 1 && joinCaret ? "|" : "");
+            if (_joinPortLbl != null) _joinPortLbl.text = _joinPort + (_joinFocus == 2 && joinCaret ? "|" : "");
         }
 
         private void OnJoinConnect()
