@@ -230,8 +230,22 @@ namespace BigAmbitionsMP
 
         // ─────────────────────────────────────────────────────────────────────
 
+        /// <summary>The live UI component (one DontDestroyOnLoad instance) so
+        /// Harmony patches can reach instance state (e.g. chat typing focus).</summary>
+        public static MPCanvasUI? Instance { get; private set; }
+
+        /// <summary>Clear chat typing-focus + input suppression.  Called from the
+        /// HandleEscapeClick guard so Escape always escapes our input block instead
+        /// of crashing the game's escape handler.</summary>
+        public static void ClearChatFocus()
+        {
+            if (Instance != null) Instance._mpChatFocus = false;
+            MPChat.SuppressGameInput = false;
+        }
+
         private void Awake()
         {
+            Instance = this;
             DontDestroyOnLoad(gameObject);
             // #1 — pre-fill the F8 panel from persisted MPConfig (saved last
             // time the user clicked Host/Join).  Awake runs after Plugin.Load
@@ -4249,11 +4263,17 @@ namespace BigAmbitionsMP
             if (_mpWin == null || !_mpWin.activeSelf) { _chatSuppress = false; return; }
             var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
 
-            // Chat's contribution to the input-suppression flag.  The FLAG
-            // ITSELF is owned by LateUpdate (computed fresh every frame) —
-            // direct latching writes here once locked a player's keyboard
-            // forever when the chat window was closed (2026-06-10).
-            _chatSuppress = _mpChatFocus || _mpDragging || _mpResizing || _mpOpacityDragging || RectHit(_mpWinRT, mp);
+            // Chat's contribution to the input-suppression flag.  FOCUS-ONLY: we
+            // force the game's keyboard/shortcut gate ONLY while the chat box is
+            // actually focused for typing.  Clicks that land ON the window are
+            // already blocked by the game itself (MouseController gates every world
+            // click on EventSystem.IsPointerOverGameObject, and the window's
+            // background Image is a raycast target), so hovering/dragging the window
+            // must NOT freeze movement — the old hover hit-test did, and also broke
+            // GameManager.HandleEscapeClick (forced HasInputSelected with nothing
+            // selected → NRE on car exit).  The FLAG is still computed fresh every
+            // frame in Update (no latching — that once locked the keyboard, 2026-06-10).
+            _chatSuppress = _mpChatFocus;
 
             if (Input.GetMouseButtonDown(0))
             {

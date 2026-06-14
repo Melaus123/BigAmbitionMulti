@@ -2058,6 +2058,35 @@ namespace BigAmbitionsMP
             static void Postfix(ref bool __result) { if (MPChat.SuppressGameInput) __result = true; }
         }
 
+        // Escape-safety guard for our HasInputSelected override.  The patch above
+        // can make GameManager.HasInputSelected() return true while NOTHING is
+        // EventSystem-selected (our chat is a custom canvas input, not a Unity-
+        // selected object).  The game's HandleEscapeClick then derefs
+        // EventSystem.current.currentSelectedGameObject with no null check
+        // (GameManager.cs:968) → an NRE that aborts Update on every Escape press —
+        // the "stuck after exiting a car, Escape does nothing" field bug.  When we
+        // detect that exact state, clear our chat focus/suppression and skip the
+        // native body so it can't throw; Escape now ESCAPES our block instead of
+        // crashing.  Inert when SuppressGameInput is false (returns true = run native).
+        [HarmonyPatch(typeof(GameManager), "HandleEscapeClick")]
+        public static class Patch_GM_HandleEscapeClick_NullGuard
+        {
+            static bool Prefix()
+            {
+                try
+                {
+                    var es = UnityEngine.EventSystems.EventSystem.current;
+                    if (MPChat.SuppressGameInput && (es == null || es.currentSelectedGameObject == null))
+                    {
+                        MPCanvasUI.ClearChatFocus();
+                        return false;   // skip native — it would NRE on the null selection
+                    }
+                }
+                catch { }
+                return true;
+            }
+        }
+
         [HarmonyPatch]
         public static class Patch_MiniMenu_SaveGame
         {
