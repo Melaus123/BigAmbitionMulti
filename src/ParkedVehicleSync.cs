@@ -70,6 +70,15 @@ namespace BigAmbitionsMP
         private static float _diffTimer;
         private static float _fullTimer;
         private static float _diagTimer;
+        private static float _displacementTimer;
+        // Per-peer instant resync: the position we last sent each client a parked
+        // snapshot at.  When a client moves more than ResyncMoveDist from it
+        // (teleport, fast-travel, or BA's large interior<->street teleport on
+        // building enter/exit), resend immediately instead of making them wait up
+        // to FullSnapshotInterval (30s) for the next full broadcast.  Concurrent:
+        // written on the host tick (main) and entries dropped from network handlers.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Vector3> _lastSentPosByPlayer = new();
+        private const float ResyncMoveDistSq = 60f * 60f;
 
         // ── Client state ─────────────────────────────────────────────────────
         // ALL metadata the host has told us about (regardless of distance).
@@ -140,6 +149,8 @@ namespace BigAmbitionsMP
             _diffTimer = 0f;
             _fullTimer = 0f;
             _diagTimer = 0f;
+            _displacementTimer = 0f;
+            _lastSentPosByPlayer.Clear();
             _cullTimer = 0f;
             _levelUnscaled = 0f;
 
@@ -210,6 +221,15 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo(
                     $"[ParkedSync] HOST tracking {_hostTracked.Count} car(s); pending adds={_pendingAdds.Count} removes={_pendingRemoves.Count}.");
             }
+
+            // Instant per-peer resync on large movement (twice a second is plenty
+            // and avoids a per-frame allocation).
+            _displacementTimer += dt;
+            if (_displacementTimer >= 0.5f)
+            {
+                _displacementTimer = 0f;
+                TickPeerDisplacement();
+            }
         }
 
         private static ParkedSnapshotPayload BuildDiffSnapshot()
@@ -276,6 +296,68 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning($"[ParkedSync] BuildFullSnapshot: {ex.Message}");
             }
             return snap;
+        }
+
+        // ── Per-peer instant resync (teleport / building-exit / fast-travel) ──
+
+        /// <summary>Full parked snapshot of cars near a single point — no side
+        /// effects on the broadcast timers/queues (unlike BuildFullSnapshot, which
+        /// flushes diffs and resets the full-snapshot cadence).</summary>
+        private static ParkedSnapshotPayload BuildSnapshotAround(Vector3 center)
+        {
+            var snap = new ParkedSnapshotPayload { IsFullSnapshot = true };
+            try
+            {
+                var dead = new List<long>();
+                foreach (var kv in _hostTracked)
+                {
+                    if (kv.Value == null) { dead.Add(kv.Key); continue; }
+                    if (!kv.Value.activeInHierarchy) continue;
+                    var pos = kv.Value.transform.position;
+                    float dx = pos.x - center.x, dy = pos.y - center.y, dz = pos.z - center.z;
+                    if (dx * dx + dy * dy + dz * dz > HostSendRadiusSq) continue;
+                    var dto = MakeDto(kv.Key, kv.Value);
+                    if (dto != null) snap.Cars.Add(dto);
+                }
+                foreach (var k in dead) _hostTracked.Remove(k);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[ParkedSync] BuildSnapshotAround: {ex.Message}"); }
+            return snap;
+        }
+
+        /// <summary>Drop a peer's last-sent position so the next displacement pass
+        /// re-syncs them from scratch.  Called on (re)join and building-exit so a
+        /// player who teleported/reloaded gets parked cars immediately rather than
+        /// at the next 30s full snapshot.  Thread-safe.</summary>
+        public static void ForgetPeer(string playerId)
+        {
+            if (!string.IsNullOrEmpty(playerId)) _lastSentPosByPlayer.TryRemove(playerId, out _);
+        }
+
+        /// <summary>Host: for each connected client, if they've moved far since we
+        /// last sent them parked cars (or we've forgotten them on (re)join), resend
+        /// a fresh full snapshot around their position now.  Main thread.</summary>
+        private static void TickPeerDisplacement()
+        {
+            try
+            {
+                foreach (var (peer, pid) in MPServer.ConnectedClientPeers())
+                {
+                    var posN = RemotePlayerManager.GetPlayerPosition(pid);
+                    if (posN == null) continue;
+                    var pos = posN.Value;
+                    if (_lastSentPosByPlayer.TryGetValue(pid, out var last))
+                    {
+                        float dx = pos.x - last.x, dy = pos.y - last.y, dz = pos.z - last.z;
+                        if (dx * dx + dy * dy + dz * dz < ResyncMoveDistSq) continue;   // not far enough — wait
+                    }
+                    _lastSentPosByPlayer[pid] = pos;
+                    var snap = BuildSnapshotAround(pos);
+                    MPServer.SendParkedSnapshotTo(peer, snap);
+                    Plugin.Logger.LogInfo($"[ParkedSync] instant resync to '{pid}' (moved/joined) — {snap.Cars.Count} car(s).");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[ParkedSync] TickPeerDisplacement: {ex.Message}"); }
         }
 
         // ── Host-side proximity cull ─────────────────────────────────────────

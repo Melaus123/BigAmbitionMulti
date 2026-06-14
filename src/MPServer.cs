@@ -685,6 +685,7 @@ namespace BigAmbitionsMP
                     {
                         var pc = peer;
                         GameStatePatcher.EnqueueOnMainThread(() => InteriorSync.HandleExit(pc, p.PlayerId, p.AddressKey));
+                        ParkedVehicleSync.ForgetPeer(p.PlayerId);   // door teleport — resync their parked cars now
                     }
                     break;
                 }
@@ -1350,6 +1351,8 @@ namespace BigAmbitionsMP
                             SendBusinessSnapshotTo(joinPeer);
                             // Who's currently on the registers (event-tracked; not in any snapshot).
                             SendRegisterDutyTo(joinPeer);
+                            // Parked cars near the joiner — resync as soon as their position is known.
+                            ParkedVehicleSync.ForgetPeer(joinName);
                         }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Late-join snapshot: {ex.Message}"); }
                     });
@@ -1449,6 +1452,7 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Server] Reconnect: '{playerId}' scene loaded — sent live world state.");
                     MPChat.AddNotice($"{DisplayNameFor(playerId)} reconnected.");
                     BroadcastChat("", $"— {DisplayNameFor(playerId)} reconnected.");
+                    ParkedVehicleSync.ForgetPeer(playerId);   // resync their parked cars after the reload
                     // Lift the pause we applied when they dropped (only the
                     // disconnect pause — a deliberate manual pause stays).
                     ResumeFromDisconnectPause();
@@ -2496,6 +2500,25 @@ namespace BigAmbitionsMP
         {
             if (!_running) return;
             Broadcast(MessageEnvelope.Create(MessageType.ParkedSnapshot, "host", payload));
+        }
+
+        /// <summary>Host: send ONE peer a parked-vehicle snapshot (per-peer resync
+        /// on teleport / building-exit / (re)join).</summary>
+        public static void SendParkedSnapshotTo(NetPeer peer, ParkedSnapshotPayload payload)
+        {
+            if (!_running || peer == null || payload == null) return;
+            Send(peer, MessageEnvelope.Create(MessageType.ParkedSnapshot, "host", payload));
+        }
+
+        /// <summary>Host: connected client peers paired with their player ids
+        /// (snapshot copy; both backing maps are concurrent, safe to enumerate).</summary>
+        public static List<(NetPeer peer, string playerId)> ConnectedClientPeers()
+        {
+            var list = new List<(NetPeer, string)>();
+            foreach (var peer in _clients.Keys)
+                if (_peerNames.TryGetValue(peer.Id, out var pid) && !string.IsNullOrEmpty(pid))
+                    list.Add((peer, pid));
+            return list;
         }
 
         // ── Broadcast helpers ─────────────────────────────────────────────────
