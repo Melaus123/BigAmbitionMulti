@@ -312,6 +312,7 @@ namespace BigAmbitionsMP
         // TimeMachine + native timeScale run — so we can A/B whether OUR time
         // suppression is what makes the game spike ~70ms every 256ms.
         public static bool AblateTime;
+        private static int  _ablateMode;   // DEV F6 cycle: 0 normal, 1 hide MP-UI, 2 no phone-button, 3 suppress time
         private static void HookRenderTiming()
         {
             if (_renderHooked) return;
@@ -343,8 +344,11 @@ namespace BigAmbitionsMP
 #if BAMP_DEV
             if (Input.GetKeyDown(KeyCode.F6))
             {
-                AblateTime = !AblateTime;
-                Plugin.Logger.LogInfo($"[Ablate] time-management suppressed = {AblateTime} (F6) — {(AblateTime ? "letting the GAME run time/skips natively" : "back to normal MP time")}");
+                _ablateMode = (_ablateMode + 1) % 4;
+                AblateTime  = (_ablateMode == 3);
+                if (_canvasGO != null) _canvasGO.SetActive(_ablateMode != 1);   // mode 1: hide our whole MP UI
+                var _abn = new[] { "OFF (normal MP)", "HIDE MP-UI canvas", "STOP phone-button inject", "suppress time" };
+                Plugin.Logger.LogInfo($"[Ablate] mode {_ablateMode} = {_abn[_ablateMode]} (F6)");
             }
 #endif
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
@@ -453,9 +457,12 @@ namespace BigAmbitionsMP
             // BizPhone Chat button: inject once per game scene while MP active;
             // its click requests an MP-window toggle (same as F9).  The icon
             // pulses while chat lines are unread (window closed).
-            MPPhoneButton.Tick(IsInGame(), MPServer.IsRunning || MPClient.IsConnected);
-            MPPhoneButton.TickPulse(_mpWinVisible);
-            MPPhoneButton.TickHubPulse(_hubVisible);
+            if (_ablateMode != 2)   // DEV ablation mode 2 stops grafting/maintaining our phone button
+            {
+                MPPhoneButton.Tick(IsInGame(), MPServer.IsRunning || MPClient.IsConnected);
+                MPPhoneButton.TickPulse(_mpWinVisible);
+                MPPhoneButton.TickHubPulse(_hubVisible);
+            }
             if (MPPhoneButton.OpenRequested)
             {
                 MPPhoneButton.OpenRequested = false;
