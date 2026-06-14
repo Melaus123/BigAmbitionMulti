@@ -101,6 +101,7 @@ namespace BigAmbitionsMP
         {
             static void Postfix()
             {
+                long _pf = MPPerf.Begin();   // DIAG: per-frame patch-body cost
                 GameStatePatcher.DrainQueue();
 
                 // Second timeScale enforcement point — runs after the game's own Update,
@@ -111,6 +112,7 @@ namespace BigAmbitionsMP
                     bool frozen = TimeSync.ManualPaused || TimeSync.IsStartupHeld;
                     UnityEngine.Time.timeScale = frozen ? 0f : 1f;
                 }
+                MPPerf.End("GMUpd", _pf);
             }
 
             // (GMShield Finalizer RETIRED 2026-06-12 dead-code sweep: zero
@@ -191,6 +193,7 @@ namespace BigAmbitionsMP
         {
             static void Postfix(UnityEngine.Animator __instance, string __0)
             {
+                long _pf = MPPerf.Begin();   // DIAG: fires per NPC trigger — measure call count + cost
                 try
                 {
                     if (!MPServer.IsRunning && !MPClient.IsConnected) return;
@@ -198,6 +201,7 @@ namespace BigAmbitionsMP
                     RemotePlayerManager.SendLocalTrigger(RemotePlayerManager.ResolveTriggerIndex(__0));
                 }
                 catch { /* never let an animator trigger break the game */ }
+                finally { MPPerf.End("AnimTrig", _pf); }
             }
         }
 
@@ -206,6 +210,7 @@ namespace BigAmbitionsMP
         {
             static void Postfix(UnityEngine.Animator __instance, int __0)
             {
+                long _pf = MPPerf.Begin();   // DIAG: fires per NPC trigger — measure call count + cost
                 try
                 {
                     if (!MPServer.IsRunning && !MPClient.IsConnected) return;
@@ -213,6 +218,7 @@ namespace BigAmbitionsMP
                     RemotePlayerManager.SendLocalTrigger(RemotePlayerManager.ResolveTriggerIndex(__0));
                 }
                 catch { /* never let an animator trigger break the game */ }
+                finally { MPPerf.End("AnimTrig", _pf); }
             }
         }
 

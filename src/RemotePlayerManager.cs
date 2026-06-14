@@ -151,6 +151,7 @@ namespace BigAmbitionsMP
             {
                 if (!_ikHumanChecked) { _ikHumanChecked = true; _ikHuman = Anim.isHuman; }
                 if (!_ikHuman) return;
+                long _pf = MPPerf.Begin();   // DIAG: per-remote IK solve cost
 
                 // Smooth the anchors — packets step at 10 Hz and raw application
                 // makes the hands pop between spots.
@@ -166,6 +167,7 @@ namespace BigAmbitionsMP
                 // elbows on turns — the "arms coming off" wobble).
                 MPHandIk.SolveArm(Anim, true,  space.TransformPoint(_ikL), Vector3.down);
                 MPHandIk.SolveArm(Anim, false, space.TransformPoint(_ikR), Vector3.down);
+                MPPerf.End("RemLate", _pf);
             }
             catch { }
         }
@@ -192,6 +194,7 @@ namespace BigAmbitionsMP
 
         private void Update()
         {
+            long _pf = MPPerf.Begin();   // DIAG: per-remote per-frame avatar mirror cost
             // Riding/pushing an open vehicle: follow the vehicle ghost rigidly
             // (position + facing) — its own dead reckoning does the smoothing.
             if (RideAttach != null)
@@ -266,6 +269,7 @@ namespace BigAmbitionsMP
             }
             if (_labelTransform != null && Camera.main != null)
                 _labelTransform.rotation = Camera.main.transform.rotation;
+            MPPerf.End("RemUpd", _pf);
         }
     }
 

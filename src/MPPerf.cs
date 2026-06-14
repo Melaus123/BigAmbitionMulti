@@ -90,7 +90,10 @@ namespace BigAmbitionsMP
                     if (s.Calls == 0) continue;
                     double perFrame = s.Total / _frames;
                     if (kv.Key == "Drain" || kv.Key == "WorldSnap" || kv.Key == "PosSync*") modTicks += perFrame;
-                    sb.Append($" {kv.Key}={perFrame:F2}/{s.Max:F1}");
+                    double cpf = (double)s.Calls / _frames;   // calls/frame — exposes hot patches fired per-NPC
+                    sb.Append(cpf > 1.5
+                        ? $" {kv.Key}={perFrame:F2}/{s.Max:F1}/{cpf:F0}x"
+                        : $" {kv.Key}={perFrame:F2}/{s.Max:F1}");
                 }
                 // modTicks = time inside OUR per-frame work; gameOther = the rest of
                 // the frame (game logic + render + our Harmony patch bodies, which
