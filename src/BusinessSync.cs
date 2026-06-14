@@ -760,16 +760,26 @@ namespace BigAmbitionsMP
         // a ≤12s propagation delay is invisible while the I/O drops to ~zero.
         // LogoFilesEqual is content-based, so a same-content rescan never
         // triggers a rebroadcast.
-        private const float LogoRescanSeconds = 10f;
+        private const float LogoRescanSeconds        = 10f;    // existing dir: cheap metadata re-check cadence
+        private const float LogoMissingRescanSeconds = 120f;   // no dir (AI/rival/uncustomized): back off hard
         private sealed class LogoCacheEntry
         {
             public float NextScanAt;
             public System.Collections.Generic.List<LogoFile> Files = new();
-            public bool DirMissingLogged;   // "No logo dir yet" logged once per business
-            public int  LastSig;            // count/bytes signature — log only on change
+            public bool DirMissingLogged;   // "No logo dir" logged once per business
+            public long MetaSig = -1;       // file name/size/mtime signature — content re-read only on change
         }
         private static readonly System.Collections.Generic.Dictionary<string, LogoCacheEntry> _logoCache = new();
 
+        // Reading + Base64-encoding every named business's logo files every 10s was a
+        // main-thread BusinessSync spike (~70ms, BizHost) AND the bulk of the per-frame
+        // save-folder I/O (Procmon-confirmed 2026-06-14): hundreds of AI/rival businesses
+        // have NO logo dir yet were stat'd every 10s, and player businesses had their logo
+        // CONTENT re-read+encoded every 10s even when unchanged.  Now: no dir -> back off
+        // to 120s; a real dir -> a cheap metadata signature (names/sizes/mtimes) every 10s,
+        // and the expensive content read happens ONLY when that signature changes (i.e. the
+        // player actually edited the logo).  LogoFilesEqual stays content-based, and an
+        // unchanged scan returns the SAME cached list, so it never triggers a rebroadcast.
         private static System.Collections.Generic.List<LogoFile> ReadLogoFilesCached(string businessName, string logoShape)
         {
             if (!_logoCache.TryGetValue(businessName, out var e))
@@ -777,40 +787,57 @@ namespace BigAmbitionsMP
 
             float now = UnityEngine.Time.realtimeSinceStartup;
             if (now < e.NextScanAt) return e.Files;
-            e.NextScanAt = now + LogoRescanSeconds;
+            e.NextScanAt = now + LogoMissingRescanSeconds;   // default: back off; a real dir drops to 10s below
 
             try
             {
                 string dir = LogoHelper.GetPlayerBusinessLogoPath(businessName);
-                if (!string.IsNullOrEmpty(dir) && System.IO.Directory.Exists(dir))
+                if (string.IsNullOrEmpty(dir) || !System.IO.Directory.Exists(dir))
                 {
-                    var files = new System.Collections.Generic.List<LogoFile>();
-                    int total = 0;
-                    foreach (var f in System.IO.Directory.GetFiles(dir))
+                    if (!string.IsNullOrEmpty(logoShape) && !e.DirMissingLogged)
                     {
-                        try
-                        {
-                            var bytes = System.IO.File.ReadAllBytes(f);
-                            files.Add(new LogoFile
-                            {
-                                Name   = System.IO.Path.GetFileName(f),
-                                Base64 = Convert.ToBase64String(bytes),
-                            });
-                            total += bytes.Length;
-                        }
-                        catch (Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] read {f}: {ex.Message}"); }
+                        e.DirMissingLogged = true;
+                        Plugin.Logger.LogInfo($"[BusinessSync] No logo dir for '{businessName}' — rescan backed off to {LogoMissingRescanSeconds:F0}s.");
                     }
-                    e.Files = files;
-                    int sig = files.Count * 31 + total;
-                    if (files.Count > 0 && sig != e.LastSig)
-                        Plugin.Logger.LogInfo($"[BusinessSync] Logo files for '{businessName}': {files.Count} file(s), {total}B total");
-                    e.LastSig = sig;
+                    return e.Files;   // no content read; stays as-is (empty for AI businesses)
                 }
-                else if (!string.IsNullOrEmpty(logoShape) && !e.DirMissingLogged)
+
+                e.NextScanAt = now + LogoRescanSeconds;   // real dir — re-check at 10s, but CHEAPLY
+
+                // Cheap change signature: file name + size + mtime, NO content read.
+                var paths = System.IO.Directory.GetFiles(dir);
+                System.Array.Sort(paths, System.StringComparer.Ordinal);
+                long sig = 17;
+                foreach (var f in paths)
                 {
-                    e.DirMissingLogged = true;
-                    Plugin.Logger.LogInfo($"[BusinessSync] No logo dir yet for '{businessName}' (dir='{dir}') — logged once.");
+                    try
+                    {
+                        var fi = new System.IO.FileInfo(f);
+                        sig = sig * 31 + System.IO.Path.GetFileName(f).GetHashCode();
+                        sig = sig * 31 + fi.Length;
+                        sig = sig * 31 + fi.LastWriteTimeUtc.Ticks;
+                    }
+                    catch { }
                 }
+                if (sig == e.MetaSig) return e.Files;   // unchanged — skip the expensive Base64 content read
+                e.MetaSig = sig;
+
+                // Changed (or first read) — now do the expensive read + encode.
+                var files = new System.Collections.Generic.List<LogoFile>();
+                int total = 0;
+                foreach (var f in paths)
+                {
+                    try
+                    {
+                        var bytes = System.IO.File.ReadAllBytes(f);
+                        files.Add(new LogoFile { Name = System.IO.Path.GetFileName(f), Base64 = Convert.ToBase64String(bytes) });
+                        total += bytes.Length;
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] read {f}: {ex.Message}"); }
+                }
+                e.Files = files;
+                if (files.Count > 0)
+                    Plugin.Logger.LogInfo($"[BusinessSync] Logo files for '{businessName}' changed: {files.Count} file(s), {total}B (re-read).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] Logo dir read for {businessName}: {ex.Message}"); }
             return e.Files;
