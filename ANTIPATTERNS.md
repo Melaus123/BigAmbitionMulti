@@ -84,5 +84,73 @@ Class considered eradicated; re-verify before each release via the grep above.
 - `RemotePlayerManager.FindHeldTemplate` (`src/RemotePlayerManager.cs:875`) — uses the
   heaviest API (`Resources.FindObjectsOfTypeAll(Transform)`); safe only because
   double-cached. Don't loosen the cache.
-- `MPPhoneButton.DeepDumpPhoneArt` (`src/MPPhoneButton.cs:569`) — dead diagnostic with a
-  full-scene scan; safe because unreferenced. Delete rather than re-wire.
+
+---
+
+## Class 2 — NRE from a Unity "fake-null" object in a patched/hot path
+
+**Pattern.** A Harmony patch body or a per-frame read dereferences a game object
+(vehicle, character, NavMeshAgent, animator, controller) that the game can
+**destroy or swap mid-operation**. Unity's overloaded `==` reports the destroyed
+reference as null, but *using* it (method call, field access) still throws
+`NullReferenceException`. The NRE lands inside a hot game method we've patched.
+
+**Why it bites.** An NRE thrown from inside a patched game method can abort the
+game's own logic for that frame — producing hangs and stuck states (taxi boarding
+hang, ride that never ends), not just a logged error. It's intermittent (only when
+the swap races our access), so it's hard to reproduce.
+
+**Detection grep.**
+```
+rg -n "HarmonyPatch|Finalizer|GetComponent|\.transform|\.gameObject" src/ | rg -i "patch|finalizer"
+```
+For each patch that dereferences a game object, ask: can that object be destroyed
+between the game obtaining it and our code touching it?
+
+**Safe fixes.**
+1. **Unity-aware null guard** at the top of the body: `if (obj == null) return;`
+   (uses Unity's destroyed-object semantics).
+2. **Harmony `Finalizer`** that swallows the NRE for that specific method when the
+   object raced away — the established pattern here (used as a shield, logs once).
+3. Re-resolve the object from a live registry instead of holding a stale reference.
+
+**Known instances (all fixed).**
+- NavMesh NRE shield, taxi boarding (`fd70d09` / `7fbe85e`).
+- Gley vehicle NRE shield, taxi-hang root cause (`fd70d09`).
+- `EntityController.UpdateNavMeshTargets` finalizer shield.
+
+---
+
+## Class 3 — Reflection / hardcoded field access that silently breaks on a game update
+
+**Pattern.** Reading a game type via reflection (`AccessTools.Field/Property`,
+`GetField`, field-name strings) or assuming a specific field/shape. Big Ambitions
+is in active Early Access — field names, shapes, and which field holds the live
+value **change between versions**.
+
+**Why it bites.** It fails *silently* — no crash, just a wrong or stale value, or a
+scan that quietly misses newly-added entries. Far harder to catch than a compile
+error because the build is fine and only the behavior is wrong.
+
+**Detection grep.**
+```
+rg -n "AccessTools\.(Field|Property)|GetField|GetProperty|\.GetValue\(" src/
+```
+For each, confirm it tolerates a missing/renamed field (null-checks the lookup) and
+reads the *live* source, not a stale snapshot field.
+
+**Safe fixes.**
+1. Prefer a stable public API / singleton over reflection where one exists.
+2. Validate the reflected member resolved (non-null) on load; log loudly if not.
+3. After a game version bump, re-run the detection grep and re-verify each site.
+
+**Known instances.**
+- Activity-duration scan missed the new 0.11 fields → recurring skip-cancel bug
+  (`42be2e9`).
+- `GameStateReader.GetGameTime` read a stale save-file time field instead of the
+  live clock (found 2026-06-14; a minor read-source bug, separate from the stutter).
+
+---
+
+*Registry seeded from real fix history (git log + investigation notes); it is not
+exhaustive — add a class the moment a second instance of any pattern shows up.*
