@@ -301,46 +301,6 @@ namespace BigAmbitionsMP
 
         // ── Update ────────────────────────────────────────────────────────────
 
-        // DIAG: time the camera render phase (cull -> render) to localize the
-        // recurring 256ms hitch — is it RENDERING or a MonoBehaviour we trigger?
-        // Built-in pipeline fires Camera.onPreCull/onPostRender; SRP (URP/HDRP)
-        // fires RenderPipelineManager.begin/endCameraRendering.  Whichever the game
-        // uses, "CamRender" accumulates the main-thread camera render time.
-        private static bool _renderHooked;
-        private static long _camRenderT0;
-        // DEV ablation (F6): when true the mod STOPS managing time — lets the game's
-        // TimeMachine + native timeScale run — so we can A/B whether OUR time
-        // suppression is what makes the game spike ~70ms every 256ms.
-        public static bool AblateTime;     // (ruled out — kept only for the TimeMachine patch reference)
-        public static bool AblateNet;      // F6 mode 3: skip network PollEvents (test the network)
-        public static bool FreezeClock;    // F6 mode 2: force timeScale=0 — test if the spike is game-clock-driven
-        public static bool AblateTrafficFeed; // F6 mode 3: skip ONLY the per-frame Gley camera/density feed (isolate it from the rest of sync)
-        public static bool AblateSync;     // F6 mode 4: skip the ENTIRE per-frame MP sync chain (clock still runs — decoupled from FreezeClock)
-        private static int  _ablateMode;   // DEV F6 cycle: 0 normal, 1 SANITY+40ms, 2 freeze-clock, 3 traffic-feed-off, 4 all-sync-off
-        // DEV F7 sweep: change the game's BehaviorManager (Behavior Designer) batch
-        // interval to a DISTINCTIVE value and watch whether the ~257ms spike period
-        // TRACKS it. Tracks => the NPC behavior-tree batch IS the stutter; stays
-        // glued at 257ms (with readback proving the field changed) => it is NOT.
-        private static readonly float[] _behIntervals = { 1.0f, 2.0f, 0.5f, 0.1f, -1f };
-        private static int _behIdx = -1;
-        private static void HookRenderTiming()
-        {
-            if (_renderHooked) return;
-            _renderHooked = true;
-            try
-            {
-                Camera.onPreCull    += _ => { _camRenderT0 = MPPerf.Begin(); };
-                Camera.onPostRender += _ => { MPPerf.End("CamRender", _camRenderT0); };
-            }
-            catch { }
-            try
-            {
-                UnityEngine.Rendering.RenderPipelineManager.beginCameraRendering += (_, __) => { _camRenderT0 = MPPerf.Begin(); };
-                UnityEngine.Rendering.RenderPipelineManager.endCameraRendering   += (_, __) => { MPPerf.End("CamRender", _camRenderT0); };
-            }
-            catch { }
-        }
-
         private void Update()
         {
             // Resolve + cache the save version folder on the MAIN thread, unconditionally
@@ -350,69 +310,6 @@ namespace BigAmbitionsMP
             // arrive before it is in-game.  Caching here, every frame from the start,
             // guarantees the path is ready so NO poll-thread handler ever calls IL2CPP.
             MPSaveManager.EnsureVersionCached();
-            HookRenderTiming();      // DIAG: camera-render timing (render vs logic for the 256ms hitch)
-#if BAMP_DEV
-            if (Input.GetKeyDown(KeyCode.F6))
-            {
-                _ablateMode       = (_ablateMode + 1) % 5;
-                // Clean single-variable isolation — each mode flips exactly ONE knob.
-                FreezeClock        = (_ablateMode == 2);   // timeScale=0, sync STILL runs
-                AblateTrafficFeed  = (_ablateMode == 3);   // skip ONLY the Gley camera/density feed
-                AblateSync         = (_ablateMode == 4);   // skip the WHOLE sync chain, clock still runs
-                var _abn = new[] {
-                    "OFF (normal MP)",
-                    "SANITY +40ms/frame (MUST spike)",
-                    "FREEZE CLOCK only (timeScale=0, sync still runs — is the spike clock-driven?)",
-                    "TRAFFIC FEED off only (skip Gley camera/density feed — is the spike the traffic feed?)",
-                    "ALL SYNC off only (clock still runs — is the spike anywhere in our sync chain?)",
-                };
-                Plugin.Logger.LogInfo($"[Ablate] mode {_ablateMode} = {_abn[_ablateMode]} (F6)");
-            }
-            if (_ablateMode == 1) System.Threading.Thread.Sleep(40);   // SANITY control: guaranteed +40ms/frame — proves F6 + the spike meter react
-
-            // F7: BehaviorManager batch-interval sweep (definitive BD test).
-            if (Input.GetKeyDown(KeyCode.F7))
-            {
-                _behIdx = (_behIdx + 1) % _behIntervals.Length;
-                float val = _behIntervals[_behIdx];
-                // -1 = restore game default (0.25s SpecifySeconds, the value that
-                // produces the observed 257ms period if BD is the culprit).
-                float applied = (val < 0f) ? 0.25f : val;
-                try { GameManager.Command_SetBehaviorManagerUpdateTime(applied); }
-                catch (Exception e) { Plugin.Logger.LogWarning($"[BehTune] set failed: {e.Message}"); }
-
-                // Read the value back off the live singleton so we KNOW it took —
-                // otherwise a glued 257ms period can't be told from a no-op setter.
-                string rb = "readback failed";
-                try
-                {
-                    var t    = HarmonyLib.AccessTools.TypeByName("BehaviorDesigner.Runtime.BehaviorManager");
-                    var inst = HarmonyLib.AccessTools.Property(t, "instance")?.GetValue(null)
-                               ?? HarmonyLib.AccessTools.Field(t, "instance")?.GetValue(null);
-                    var secs = HarmonyLib.AccessTools.Property(t, "UpdateIntervalSeconds")?.GetValue(inst);
-                    var mode = HarmonyLib.AccessTools.Property(t, "UpdateInterval")?.GetValue(inst);
-                    var trees = HarmonyLib.AccessTools.Property(t, "BehaviorTrees")?.GetValue(inst)
-                                as System.Collections.ICollection;
-                    rb = $"secs={secs} mode={mode} trees={(trees?.Count.ToString() ?? "?")}";
-                }
-                catch (Exception e) { rb = $"readback err: {e.Message}"; }
-
-                string label = (val < 0f) ? "DEFAULT 0.25s" : $"{val}s";
-                Plugin.Logger.LogInfo($"[BehTune] F7 -> set BehaviorManager interval {label}; live {rb}. " +
-                    $"PREDICT: if BD is the stutter, [Spike] gap period should track ~{(int)(applied*1000)}ms.");
-            }
-
-            // F8: A/B the overlay-scan fix. OFF (default) = fixed (scan latched off
-            // once the world is up). ON = the OLD per-0.25s full-scene FindObjectOfType
-            // walk. If the 257ms spike RETURNS with F8 on and OvlScan Max ~58ms → the
-            // overlay scan is the confirmed cause and the default fix removes it.
-            if (Input.GetKeyDown(KeyCode.F8))
-            {
-                ForceOverlayScan = !ForceOverlayScan;
-                Plugin.Logger.LogInfo($"[OvlAblate] F8 -> ForceOverlayScan={ForceOverlayScan} " +
-                    $"({(ForceOverlayScan ? "OLD per-0.25s scan ON — spike should RETURN" : "FIXED — scan latched off, spike should be GONE")})");
-            }
-#endif
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
             MPRegisterSync.TickDuty();   // mirror the native Work activity into register duty (1s self-throttle)
@@ -454,8 +351,6 @@ namespace BigAmbitionsMP
             // Player sync ticks — run regardless of panel visibility or build state
             MPSaveCoordinator.DiagPhase("Update: TickGameLoadDetect");   TickGameLoadDetect();
             MPSaveCoordinator.DiagPhase("Update: TickStartupTimeout");   TickStartupTimeout();
-            if (!AblateSync)   // DEV ablation F6 mode 4: skip our ENTIRE per-frame MP sync chain (clock keeps running)
-            {
             MPSaveCoordinator.DiagPhase("Update: TickWorldSnapshot");    long _ws = MPPerf.Begin(); TickWorldSnapshot(); MPPerf.End("WorldSnap", _ws);
             MPSaveCoordinator.DiagPhase("Update: TickPositionSync");     long _ps = MPPerf.Begin(); TickPositionSync(); MPPerf.End("PosSync*", _ps);
             MPSaveCoordinator.DiagPhase("Update: TickTimeSync");         TickTimeSync();
@@ -465,7 +360,6 @@ namespace BigAmbitionsMP
             // (F3-F12 diagnostic toggle tick removed 2026-06-10.)
             MPSaveCoordinator.DiagPhase("Update: TickMpSave");           TickMpSave();   // Phase 4 — suppress SP autosave, upload saves, host autosave
             MPSaveCoordinator.DiagPhase("Update: TickCashSync");         TickCashSync(); // Phase 4 — live cash stream to host
-            }
 #if BAMP_DEV
             TickAnimProbe();   // run-animation pipeline snapshot (SP vs host diff)
 #endif
@@ -640,11 +534,11 @@ namespace BigAmbitionsMP
                 // the game's own Update) overrides menu / bench / bed pauses —
                 // opening a menu no longer stops time for anyone.
                 bool frozen = TimeSync.ManualPaused || TimeSync.IsStartupHeld;
-                if (!AblateTime) Time.timeScale = (frozen || FreezeClock) ? 0f : 1f;
+                Time.timeScale = frozen ? 0f : 1f;
 
                 // World-clock guardian: taxi 1× clamp + unaccounted-acceleration
                 // net (known skips are suppressed at the TimeMachine patch).
-                if (!frozen && !AblateTime)
+                if (!frozen)
                     TickWorldClock();
             }
             catch (Exception ex)
@@ -2519,19 +2413,17 @@ namespace BigAmbitionsMP
         //  same way — "twice a second, forever … rhythmic car stutter"; this is
         //  the twin that was missed.)
         private static bool _overlayConfirmedGone;
-        internal static bool ForceOverlayScan;   // DEV F8: restore the old per-0.25s scan for an A/B measurement
         internal static bool IsLoadingOverlayUp()
         {
             bool worldUp = false;
             try { worldUp = Helpers.PlayerHelper.PlayerController != null; } catch { }
-            if (!worldUp) _overlayConfirmedGone = false;                    // fresh load → re-arm the scan
-            if (_overlayConfirmedGone && !ForceOverlayScan) return false;   // latched gone → skip the scan
+            if (!worldUp) _overlayConfirmedGone = false;   // fresh load → re-arm the scan
+            if (_overlayConfirmedGone) return false;       // latched gone → skip the scan
 
             float now = Time.unscaledTime;
             if (now < _overlayCheckNext) return _overlayCheckCached;
             _overlayCheckNext = now + 0.25f;
 
-            long _ovb = MPPerf.Begin();
             bool up;
             try
             {
@@ -2550,7 +2442,6 @@ namespace BigAmbitionsMP
                 }
             }
             catch { up = false; }    // never hang the startup on a detection error
-            MPPerf.End("OvlScan", _ovb);
             _overlayCheckCached = up;
             if (!up && worldUp) _overlayConfirmedGone = true;   // confirmed gone with world live → latch off
             return up;

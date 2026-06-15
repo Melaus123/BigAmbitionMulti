@@ -2738,11 +2738,8 @@ namespace BigAmbitionsMP
                 // a malformed payload) must NOT kill the network thread — that
                 // would freeze the whole session with no recovery short of
                 // re-hosting.  Catch, log, and keep polling.
-                if (!MPCanvasUI.AblateNet)
-                {
-                    try { _server?.PollEvents(); }
-                    catch (Exception ex) { Plugin.Logger.LogError($"[Server] PollEvents: {ex}"); }
-                }
+                try { _server?.PollEvents(); }
+                catch (Exception ex) { Plugin.Logger.LogError($"[Server] PollEvents: {ex}"); }
                 Thread.Sleep(15);
             }
         }

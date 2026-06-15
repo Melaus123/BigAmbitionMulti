@@ -35,15 +35,12 @@ namespace BigAmbitionsMP
         /// <summary>
         /// Attempts to apply a day/time value to the local GameInstance.
         /// </summary>
-        public static int ClockWriteCounter;   // DIAG (spike tracer): SetGameTime calls/frame; MPPerf reads + resets
-
         public static void SetGameTime(int day, float hourOfDay)
         {
             try
             {
                 var gi = SaveGameManager.Current;
                 if (gi == null) return;
-                ClockWriteCounter++;
 
                 // hourOfDay is fractional (Hour + Minute/60).  Hour is an int
                 // field, Minute a float field — split before writing.

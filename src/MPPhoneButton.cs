@@ -546,96 +546,6 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[PhoneBtn] CopyIconMetrics: {ex.Message}"); }
         }
 
-        /// <summary>Logs every graphic in the phone's screen region plus the
-        /// Smartphone subtree's components — pins down where the visible phone
-        /// body art actually lives (it is NOT in the Smartphone canvas: growing
-        /// those rects moved buttons but never the art, and the geometry-match
-        /// attempt found only look-alike city-map panels).</summary>
-        private static void DeepDumpPhoneArt(Transform smartphoneRoot)
-        {
-            try
-            {
-                Plugin.Logger.LogInfo("[PhoneDump] ── Smartphone subtree (with components) ──");
-                DumpGraphicsTree(smartphoneRoot, 0, 6);
-
-                var container = smartphoneRoot.Find("Container");
-                var crt = container != null ? container as RectTransform : null;
-                if (crt == null) return;
-                GetWorldBounds(crt, out float cL, out float cB, out float cW, out float cH);
-                float cR = cL + cW, cT = cB + cH, cArea = cW * cH;
-                Plugin.Logger.LogInfo($"[PhoneDump] container world: L={cL:F0} B={cB:F0} {cW:F0}x{cH:F0}");
-
-                // EVERY Graphic in the scene that covers ≥40% of the phone region.
-                var graphics = UnityEngine.Object.FindObjectsOfType(typeof(Graphic), true);
-                int logged = 0;
-                for (int i = 0; i < graphics.Length && logged < 25; i++)
-                {
-                    var gr = graphics[i] as Graphic;
-                    if (gr == null) continue;
-                    var rt = gr.rectTransform;
-                    if (rt == null || IsDescendantOf(rt, smartphoneRoot)) continue;
-                    GetWorldBounds(rt, out float l, out float b, out float w, out float h);
-                    float ix = Mathf.Min(cR, l + w) - Mathf.Max(cL, l);
-                    float iy = Mathf.Min(cT, b + h) - Mathf.Max(cB, b);
-                    if (ix <= 0f || iy <= 0f || ix * iy < cArea * 0.4f) continue;
-                    string detail = gr.GetType().Name;
-                    var img = gr as Image;
-                    if (img != null) detail += $" sprite='{img.sprite?.name}' type={img.type}";
-                    var raw = gr as RawImage;
-                    if (raw != null) detail += $" texture='{raw.texture?.name}'";
-                    Plugin.Logger.LogInfo($"[PhoneDump] overlap: '{PathOf(rt)}' {detail} world={w:F0}x{h:F0} bottom={b:F0} active={gr.gameObject.activeInHierarchy}");
-                    logged++;
-                }
-                Plugin.Logger.LogInfo($"[PhoneDump] ── end ({logged} overlapping graphic(s)) ──");
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[PhoneDump] {ex.Message}"); }
-        }
-
-        private static void DumpGraphicsTree(Transform tr, int depth, int maxDepth)
-        {
-            if (tr == null || depth > maxDepth) return;
-            try
-            {
-                var sb = new System.Text.StringBuilder();
-                var comps = tr.GetComponents(typeof(Component));
-                for (int i = 0; i < comps.Length; i++)
-                {
-                    var c = comps[i];
-                    if (c == null) continue;
-                    string cn = c.GetType().Name;
-                    if (cn is "Transform" or "RectTransform" or "CanvasRenderer") continue;
-                    var img = c as Image;
-                    if (img != null) { sb.Append($"Image(sprite='{img.sprite?.name}',{img.type}) "); continue; }
-                    var raw = c as RawImage;
-                    if (raw != null) { sb.Append($"RawImage(tex='{raw.texture?.name}') "); continue; }
-                    sb.Append(cn).Append(' ');
-                }
-                var rt = tr as RectTransform;
-                string size = rt != null ? $"[{rt.rect.width:F0}x{rt.rect.height:F0}]" : "";
-                Plugin.Logger.LogInfo($"[PhoneDump] {new string(' ', depth * 2)}{tr.name}{size} ({(tr.gameObject.activeSelf ? "on" : "OFF")}) {sb}");
-                for (int i = 0; i < tr.childCount && i < 16; i++)
-                    DumpGraphicsTree(tr.GetChild(i), depth + 1, maxDepth);
-            }
-            catch { }
-        }
-
-        /// <summary>Axis-aligned world bounds (UI canvases aren't rotated).</summary>
-        private static void GetWorldBounds(RectTransform rt, out float left, out float bottom, out float w, out float h)
-        {
-            var r = rt.rect; var s = rt.lossyScale; var p = rt.position;
-            w = r.width * s.x; h = r.height * s.y;
-            left = p.x - rt.pivot.x * w;
-            bottom = p.y - rt.pivot.y * h;
-        }
-
-        private static bool IsDescendantOf(Transform t, Transform ancestor)
-        {
-            int guard = 0;
-            for (var p = t; p != null && guard++ < 24; p = p.parent)
-                if (p == ancestor) return true;
-            return false;
-        }
-
         private static void GrowKeepingBottom(Transform? tr, float extra)
         {
             if (tr == null) return;
@@ -648,18 +558,6 @@ namespace BigAmbitionsMP
                 rt.anchoredPosition = new Vector2(rt.anchoredPosition.x, rt.anchoredPosition.y + extra * rt.pivot.y);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[PhoneBtn] grow '{tr.name}': {ex.Message}"); }
-        }
-
-        private static string PathOf(Transform tr)
-        {
-            try
-            {
-                var sb = new System.Text.StringBuilder(tr.name);
-                var p = tr.parent; int guard = 0;
-                while (p != null && guard++ < 12) { sb.Insert(0, p.name + "/"); p = p.parent; }
-                return sb.ToString();
-            }
-            catch { return tr.name; }
         }
 
         /// <summary>Load any icon PNG from the plugins folder (owned texture).</summary>

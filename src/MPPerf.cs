@@ -30,8 +30,6 @@ namespace BigAmbitionsMP
         private static double _frameTotalMs, _frameMaxMs;
         private static int    _spikes;
         private static int    _gc0, _gc1, _gc2;
-        private static float  _spikeClock;   // DIAG: cumulative unscaled time, for spike-gap measurement
-        private static float  _lastSpikeAt;
 
         public static long Begin() => Enabled ? _sw.ElapsedTicks : 0L;
 
@@ -62,32 +60,10 @@ namespace BigAmbitionsMP
             }
 
             _frames++;
-            _spikeClock += unscaledDt;
             double dtMs = unscaledDt * 1000.0;
             _frameTotalMs += dtMs;
             if (dtMs > _frameMaxMs) _frameMaxMs = dtMs;
-            if (dtMs > 33.4)
-            {
-                _spikes++;   // worse than 30 FPS for that frame
-#if BAMP_DEV
-                // Spike tracer — captures EACH spike's context instead of the 10s
-                // aggregate: gap since the last spike (periodic vs bursty) and how
-                // many network actions drained that frame (network-apply
-                // correlation).  Answers "what's different during the stutter".
-                try
-                {
-                    string srole = MPServer.IsRunning ? "MP-HOST" : (MPClient.IsConnected ? "MP-CLIENT" : "SP");
-                    float gapMs = _lastSpikeAt > 0f ? (_spikeClock - _lastSpikeAt) * 1000f : 0f;
-                    int rem = 0; try { rem = RemotePlayerManager.GetRemotePlayerIds().Count; } catch { }
-                    var (gd, gh) = GameStateReader.GetGameTime();
-                    Plugin.Logger.LogInfo($"[Spike/{srole}] dt={dtMs:F0}ms gap={gapMs:F0}ms drained={GameStatePatcher.DrainCounter} clockW={GameStateReader.ClockWriteCounter} gt={gd}d{gh:F2}h ts={UnityEngine.Time.timeScale:F2} remotes={rem}");
-                    _lastSpikeAt = _spikeClock;
-                }
-                catch { }
-#endif
-            }
-            GameStatePatcher.DrainCounter = 0;        // per-frame reset for the spike tracer
-            GameStateReader.ClockWriteCounter = 0;
+            if (dtMs > 33.4) _spikes++;   // worse than 30 FPS for that frame
 
             double now = _sw.Elapsed.TotalMilliseconds;
             if (_windowStartMs == 0) { _windowStartMs = now; return; }

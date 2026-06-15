@@ -1139,11 +1139,8 @@ namespace BigAmbitionsMP
                 // A message handler throwing must NOT kill the network thread —
                 // that would silently drop the client out of the session.  Catch,
                 // log, and keep polling.
-                if (!MPCanvasUI.AblateNet)
-                {
-                    try { _client?.PollEvents(); }
-                    catch (Exception ex) { Plugin.Logger.LogError($"[Client] PollEvents: {ex}"); }
-                }
+                try { _client?.PollEvents(); }
+                catch (Exception ex) { Plugin.Logger.LogError($"[Client] PollEvents: {ex}"); }
                 Thread.Sleep(15);
             }
         }
