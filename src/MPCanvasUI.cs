@@ -319,6 +319,20 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo("[VehProbe] F6 pressed — spawning the next uncollected vehicle batch.");
                 VehicleManager.DevProbeUncollected(5);
             }
+            // DIAG:INVESTIGATION(passenger-ride) — F8 toggles the lock on the car YOU are driving,
+            //   so the other instance can F7-board it. Stand-in for the in-car lock toggle.
+            if (Input.GetKeyDown(KeyCode.F8))
+            {
+                string vid = VehicleManager.CurrentDrivenVehicleId();
+                if (string.IsNullOrEmpty(vid)) Plugin.Logger.LogInfo("[Ride] F8: you're not driving a vehicle.");
+                else
+                {
+                    bool setLocked = !PassengerSync.IsLocked(vid);   // toggle
+                    if (MPServer.IsRunning) MPServer.HostSetLock(vid, setLocked);
+                    else                    MPClient.SendVehicleLock(vid, setLocked);
+                    Plugin.Logger.LogInfo($"[Ride] F8: '{vid}' lock -> {(setLocked ? "LOCKED" : "UNLOCKED")}");
+                }
+            }
 #endif
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)

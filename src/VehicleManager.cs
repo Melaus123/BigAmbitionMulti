@@ -288,6 +288,26 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>The MP vehicleId of the vehicle the LOCAL player is currently driving, or ""
+        /// (used by the in-car lock toggle to know which vehicle the owner is in).</summary>
+        public static string CurrentDrivenVehicleId()
+        {
+            try
+            {
+                var list = VehicleHelper.AllPlayerVehicles;
+                if (list == null) return "";
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var vc = list[i];
+                    if (vc != null && vc.controlledByPlayer && vc.vehicleInstance != null
+                        && !string.IsNullOrEmpty(vc.vehicleInstance.id))
+                        return vc.vehicleInstance.id;
+                }
+            }
+            catch { }
+            return "";
+        }
+
         /// <summary>The open vehicle WE are currently pushing/riding, if any —
         /// the vehicle-local anchor for the hand-IK sync (refreshed each fleet
         /// read; null when on foot or in an enclosed vehicle).</summary>
