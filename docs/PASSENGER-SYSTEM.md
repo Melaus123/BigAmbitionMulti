@@ -1,6 +1,6 @@
 # Passenger ("ride shotgun") system — design plan
 
-Status: **design complete; door-data probe built; implementation not started.** Living doc.
+Status: **design complete; door-data resolved (derive from wheels + approach point); implementation not started.** Living doc.
 
 ## Goal
 
@@ -168,20 +168,23 @@ The driver keeps their normal menu (park / sell / sleep) plus the new **Lock** t
    (a Cinemachine vcam). For the passenger, point the vcam's Follow target at the ghost
    transform; restore on exit.
 
-## Door/seat data — probe built (run it to decide read-vs-derive)
+## Door/seat data — RESOLVED: derive from wheels + the game's approach point
 
-`VehicleHierarchyProbe` (`src/VehicleHierarchyProbe.cs`, `DIAG:DEVTOOL`, `#if BAMP_DEV`)
-dumps each vehicle type's child transforms **once**, on the first ghost spawn of that type.
-To collect: run a **Dev** host+client session and drive a few different cars; the *observer's*
-log gets, per type:
+Probe result (`vordv150`/F150, `honzamimic`, `vordtiaravic`): **no car names its doors** —
+the body is a single mesh. But every car carries, consistently named:
+- four wheels `FrontLeft/FrontRight/RearLeft/RearRight_WheelController` → the car's lateral
+  (track) and longitudinal (wheelbase) frame. F150: wheels at **x=±0.77**, front **z=+1.51**,
+  rear **z=−1.69** (local).
+- the game's driver approach point **`NavmeshTarget`** (left/driver side; F150 at **(−1.21, 0, 0.33)**).
 
-```
-[VehProbe] === '<type>' : N transforms; footprint(local) ~ W=.. H=.. L=.. ===
-[VehProbe] <type> **  'Door_FR' local=(x,y,z)      ← '**' flags door/seat/enter names
-[VehProbe] === '<type>' end — K door/seat/enter-named transform(s) (READ … / DERIVE …) ===
-```
+So we **derive** door/seat anchors automatically, per car, **no manual measuring, no position
+table**:
+- **Passenger door approach** = X-mirror of `NavmeshTarget` (right side): ~**(+1.21, 0, 0.33)**
+  for the F150 — matches the collaborator's hardcoded `right * 1.1m` (sanity-confirmed).
+- **Lateral seat/standing offset** = right-wheel |x| (≈ track/2) + a small margin.
+- **Front vs rear seat z** from the front/rear wheel z (for multi-seat in P3).
 
-If **K>0** → the prefabs name their doors and we **read** door positions straight off the
-ghost (no manual measuring, all types). If **K=0** → no named doors, so we **derive** a
-passenger-side offset from the footprint width. Seat *count* is authored either way (a short
-`vehicleTypeName`-keyed table).
+Only **seat *count*** is authored — a short `vehicleTypeName`-keyed table (MVP = 1 passenger).
+`VehicleHierarchyProbe` (`DIAG:DEVTOOL`) stays so we accumulate wheel/navmesh data for the
+remaining car types during normal play. (Its `footprint` line is unreliable — bounds get
+polluted by shadow/effect renderers; use the wheels, not the footprint.)
