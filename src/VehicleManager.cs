@@ -616,32 +616,42 @@ namespace BigAmbitionsMP
         }
 
 #if BAMP_DEV
-        // DIAG:INVESTIGATION(passenger-doors) — spawn the next few not-yet-probed vehicle
-        //   types near the local player so VehicleHierarchyProbe dumps their wheel/door data
-        //   (the passenger seat/door table), then despawn them. Returns how many remain
-        //   uncollected. Works in single-player too. See docs/PASSENGER-SYSTEM.md.
+        private static readonly System.Collections.Generic.List<string> _devProbeBatch = new();
+
+        // DIAG:INVESTIGATION(passenger-doors) — spawn the next few not-yet-probed vehicle types
+        //   in a ROW beside the local player so VehicleHierarchyProbe dumps their wheel/door
+        //   data AND they stay VISIBLE for eyeballing 2-seater vs 4-seater. Each press first
+        //   despawns the previous batch. Returns how many types remain uncollected. Works in SP.
         public static int DevProbeUncollected(int maxCount)
         {
-            int probed = 0, remaining = 0;
+            int spawned = 0, remaining = 0;
             try
             {
-                Vector3 basePos;
-                try { basePos = Helpers.PlayerHelper.PlayerController.Character.transform.position; }
-                catch { basePos = Vector3.zero; }
+                // Clear the previous viewing batch.
+                foreach (var id in _devProbeBatch) { try { DespawnByVehicleId(id); } catch { } }
+                _devProbeBatch.Clear();
+
+                Vector3 basePos = Vector3.zero, right = Vector3.right, fwd = Vector3.forward;
+                try
+                {
+                    var ch = Helpers.PlayerHelper.PlayerController.Character.transform;
+                    basePos = ch.position; right = ch.right; fwd = ch.forward;
+                }
+                catch { }
                 var names = VehicleTypeHelper.GetVehicleTypeNames();
                 if (names == null) return 0;
                 foreach (var type in names)
                 {
                     if (string.IsNullOrEmpty(type) || VehicleHierarchyProbe.HasDumped(type)) continue;
-                    if (probed >= maxCount) { remaining++; continue; }
-                    var pos = basePos + new Vector3(8f, 0f, 0f);   // off to the side; despawned same frame
+                    if (spawned >= maxCount) { remaining++; continue; }
+                    // A row ahead-and-right of the player, ~4 m apart, so they don't overlap.
+                    var pos = basePos + fwd * 6f + right * (spawned * 4f) + Vector3.up * 0.5f;
                     var entry = new VehicleEntry { VehicleId = "PROBE_" + type, TypeName = type,
                         X = pos.x, Y = pos.y, Z = pos.z, Qw = 1f };
                     var rv = SpawnRemoteVehicle(MPConfig.PlayerId, entry, pos, Quaternion.identity);
-                    if (rv != null) DespawnByVehicleId(entry.VehicleId);   // probe fired inside SpawnRemoteVehicle
-                    probed++;
+                    if (rv != null) { _devProbeBatch.Add(entry.VehicleId); spawned++; }   // leave visible; probe already fired
                 }
-                Plugin.Logger.LogInfo($"[VehProbe] DevProbeUncollected: probed {probed} new type(s); {remaining} still uncollected (press F5 again).");
+                Plugin.Logger.LogInfo($"[VehProbe] F5: spawned {spawned} car(s) beside you to view (data dumped); {remaining} type(s) still uncollected — F5 again for the next batch.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[VehProbe] DevProbeUncollected: {ex.Message}"); }
             return remaining;
