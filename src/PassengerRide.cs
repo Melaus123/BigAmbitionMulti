@@ -24,6 +24,12 @@ namespace BigAmbitionsMP
         private static bool   _pinned;            // arrived at the seat and locked to it
         private static float  _pinFallback;       // unscaled-time deadline to pin if the walk never arrives
         private static GameObject? _hiddenModel;  // our "Model" child we hid (restore on exit)
+        private static bool   _exitRequested;     // already asked the host to release us (car vanished)
+        private static float  _ghostGoneSince = -1f;   // when our ridden ghost first went missing (-1 = present)
+
+        /// <summary>True once we're actually pinned in the seat — drives the passenger HUD so the
+        /// "Exit Vehicle" button only appears after we're really aboard, not on board-approval.</summary>
+        internal static bool IsSeated => _pinned && _localVeh != "";
 
         // ── remote riders we've pinned (pid → vehicleId) ────────────────────
         private static readonly Dictionary<string, string> _remotePinned = new();
@@ -66,10 +72,14 @@ namespace BigAmbitionsMP
                 }
                 catch { }
             }
-            if (hit != "" && PassengerSync.IsLocked(hit)) hit = "";   // only unlocked cars are boardable
-
+            // Locked cars STILL highlight (so you can tell they're interactable) — clicking one
+            // tells you it's locked instead of boarding.
             if (hit != _hovered) { ClearHighlight(); if (hit != "") SetHighlight(hit); _hovered = hit; }
-            if (_hovered != "" && Input.GetMouseButtonDown(0)) RequestBoard(_hovered);
+            if (_hovered != "" && Input.GetMouseButtonDown(0))
+            {
+                if (PassengerSync.IsLocked(_hovered)) PassengerHud.Toast("Vehicle locked.");
+                else RequestBoard(_hovered);
+            }
         }
 
         private static void SetHighlight(string vid)
@@ -151,7 +161,21 @@ namespace BigAmbitionsMP
             if (_localVeh == "") return;
 
             var ghost = VehicleManager.GhostTransform(_localVeh);
-            if (ghost == null) { EndLocalRide(beside: false); return; }   // car despawned under us
+            if (ghost == null)
+            {
+                // Our ridden car isn't here — either still spawning (board just approved) or it drove
+                // off / the owner left. Wait briefly; if it's truly gone, ask the host to release our
+                // seat so we don't hold a phantom occupancy. NEVER pin without a car — that used to
+                // freeze + hide the player in place ("got the Exit button but never got in").
+                if (_ghostGoneSince < 0f) _ghostGoneSince = Time.unscaledTime;
+                else if (Time.unscaledTime - _ghostGoneSince > 3f && !_exitRequested)
+                {
+                    RequestExit();
+                    _exitRequested = true;
+                }
+                return;
+            }
+            _ghostGoneSince = -1f;
 
             if (!_pinned && Time.unscaledTime >= _pinFallback) StartPin();
             if (_pinned) PinLocalToSeat(ghost, _localSeat);
@@ -160,17 +184,18 @@ namespace BigAmbitionsMP
         private static void BeginLocalRide(string vehicleId, int seat)
         {
             _localVeh = vehicleId; _localSeat = seat; _pinned = false;
+            _exitRequested = false; _ghostGoneSince = -1f;
             _pinFallback = Time.unscaledTime + 4f;   // pin anyway if the walk never arrives
 
             var pc = PlayerHelper.PlayerController;
             var ghost = VehicleManager.GhostTransform(vehicleId);
-            if (pc == null || ghost == null) { StartPin(); return; }
+            if (pc == null || ghost == null) return;   // no car yet — TickLocalRide waits / pins later
             try
             {
                 Vector3 door = ghost.TransformPoint(DoorLocal(seat));
                 pc.SetGoal(door, new UnityEngine.Events.UnityAction(StartPin));   // walk; pin on arrival
             }
-            catch { StartPin(); }
+            catch { /* walk failed — the pin fallback in TickLocalRide still seats us */ }
         }
 
         private static void StartPin()
@@ -228,6 +253,7 @@ namespace BigAmbitionsMP
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] EndLocalRide: {ex.Message}"); }
             _localVeh = ""; _localSeat = -1; _pinned = false;
+            _exitRequested = false; _ghostGoneSince = -1f;
         }
 
         // ── remote riders rendering ──────────────────────────────────────────

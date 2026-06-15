@@ -2064,6 +2064,11 @@ namespace BigAmbitionsMP
         private static void ResolveBoard(string playerId, string vehicleId)
         {
             var res = new PassengerBoardResultPayload { PlayerId = playerId, VehicleId = vehicleId };
+            // Release any seat this player already holds BEFORE choosing one, so a re-board (even if
+            // a prior exit was missed on the host) frees their stale seat and they get the FRONT seat
+            // again, not the next one down — the "passenger lands in the rear-left" bug. The result
+            // broadcast below re-syncs every client (their ApplyBoard releases the old seat too).
+            PassengerSync.ApplyExit(playerId);
             if (PassengerSync.HostCanBoard(vehicleId, playerId, out int seat, out string reason))
             {
                 res.Seat = seat;

@@ -622,21 +622,44 @@ namespace BigAmbitionsMP
         /// post-load rebuilds (the ignore resets when a collider is destroyed/recreated).</summary>
         public static void TickVehicleCollisionIgnores()
         {
-            if (!MPServer.IsRunning) return;                       // client avatars have no collider
+            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
             if (UnityEngine.Time.unscaledTime < _nextIgnoreRefresh) return;
-            _nextIgnoreRefresh = UnityEngine.Time.unscaledTime + 1f;
+            _nextIgnoreRefresh = UnityEngine.Time.unscaledTime + 1.5f;
             try
             {
-                if (_players.Count == 0) return;
-                var vehCols = VehicleManager.AllVehicleColliders();
-                if (vehCols.Count == 0) return;
-                foreach (var kv in _players)
+                // Nobody should physically push a car they don't authoritatively control. The avatar
+                // shares the local player's layer (needed for Gley raycast detection), so a layer-
+                // matrix exclusion can't single it out — we ignore each relevant collider PAIR.
+
+                // (1) The LOCAL player must not shove GHOSTS (other players' cars). BOTH roles — this
+                //     was the missing case: a client could walk into a ghost and the snap-back made
+                //     it "zoom". Their OWN real cars are deliberately left collidable.
+                var ghostCols = VehicleManager.AllGhostColliders();
+                var lc = PlayerHelper.PlayerController?.Character;
+                if (lc != null && ghostCols.Count > 0)
                 {
-                    if (kv.Value == null) continue;
-                    var ac = kv.Value.GetComponent<Collider>();    // the root capsule
-                    if (ac == null) continue;
-                    for (int i = 0; i < vehCols.Count; i++)
-                        if (vehCols[i] != null) UnityEngine.Physics.IgnoreCollision(ac, vehCols[i], true);
+                    var playerCols = lc.GetComponentsInChildren<Collider>(true);
+                    for (int pi = 0; pi < playerCols.Length; pi++)
+                    {
+                        if (playerCols[pi] == null) continue;
+                        for (int i = 0; i < ghostCols.Count; i++)
+                            if (ghostCols[i] != null) UnityEngine.Physics.IgnoreCollision(playerCols[pi], ghostCols[i], true);
+                    }
+                }
+
+                // (2) HOST only: remote avatars must not shove ANY vehicle (the host's real cars are
+                //     dynamic + drivable; avatars carry a SOLID collider for Gley detection).
+                if (MPServer.IsRunning && _players.Count > 0)
+                {
+                    var vehCols = VehicleManager.AllVehicleColliders();
+                    foreach (var kv in _players)
+                    {
+                        if (kv.Value == null) continue;
+                        var ac = kv.Value.GetComponentInChildren<Collider>();   // the root capsule
+                        if (ac == null) continue;
+                        for (int i = 0; i < vehCols.Count; i++)
+                            if (vehCols[i] != null) UnityEngine.Physics.IgnoreCollision(ac, vehCols[i], true);
+                    }
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[RemotePlayer] collision-ignore refresh: {ex.Message}"); }

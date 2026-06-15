@@ -165,6 +165,7 @@ namespace BigAmbitionsMP
         }
         private const float MaxVehicleExtrapolateSeconds = 0.3f;
         private const float VehicleSnapDistance          = 15f;
+        private const float MaxVehicleSpeed              = 60f;   // m/s (~216 km/h); faster ⇒ a shove/glitch — don't extrapolate
 
         // Gameplay components destroyed on a ghost so the game stops treating it
         // as a vehicle anyone owns — no map icon, no tickets, not enterable.
@@ -380,7 +381,13 @@ namespace BigAmbitionsMP
                         // delta = two packets in one frame → keep prior velocity.
                         float vdt = p.T - rv.SenderT;
                         if (vdt > 0.005f)
-                            rv.Velocity = (pos - rv.TargetPos) / vdt;
+                        {
+                            var v = (pos - rv.TargetPos) / vdt;
+                            // A shove or network hiccup yields an absurd velocity; dead-reckoning it
+                            // (TickSmoothing) makes the ghost ZOOM across the map. Cap it — no car
+                            // exceeds ~60 m/s, so anything faster means "don't extrapolate".
+                            rv.Velocity = v.magnitude > MaxVehicleSpeed ? Vector3.zero : v;
+                        }
                     }
                     rv.TargetPos = pos;
                     rv.TargetRot = rot;
@@ -883,6 +890,20 @@ namespace BigAmbitionsMP
                 if (list != null)
                     for (int i = 0; i < list.Count; i++)
                         if (list[i] != null) result.AddRange(list[i].GetComponentsInChildren<Collider>(true));
+            }
+            catch { }
+            return result;
+        }
+
+        /// <summary>Colliders of GHOST vehicles only (not the local player's own cars) — used to
+        /// stop the LOCAL player from shoving other players' cars without affecting their own.</summary>
+        public static System.Collections.Generic.List<Collider> AllGhostColliders()
+        {
+            var result = new System.Collections.Generic.List<Collider>();
+            try
+            {
+                foreach (var rv in _remoteVehicles.Values)
+                    if (rv?.Go != null) result.AddRange(rv.Go.GetComponentsInChildren<Collider>(true));
             }
             catch { }
             return result;

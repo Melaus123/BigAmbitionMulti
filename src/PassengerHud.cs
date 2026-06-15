@@ -5,27 +5,41 @@ using UnityEngine.UI;
 namespace BigAmbitionsMP
 {
     /// <summary>
-    /// The passenger's in-ride UI — the equivalent of the driver's in-car menu, minus the actions
-    /// a passenger can't take (no Sell, no driving). For now it's the core "Exit Vehicle" action
-    /// (Park's passenger analogue); Sleep can be added once CanSleep() is resolvable for a ghost.
-    /// Shown only while the LOCAL player is riding. Built once, then toggled. Ticked each frame
-    /// from MPCanvasUI.Update. See docs/PASSENGER-SYSTEM.md.
+    /// The passenger's in-ride UI. For now the core "Exit Vehicle" action (shown only once we're
+    /// actually seated, not on board-approval) plus a transient toast used for "Vehicle locked".
+    /// The driver's native ItemPanelUI can't be reused for a passenger — it's hard-wired to
+    /// GameManager.selectedVehicle + a live VehicleController, neither of which a passenger riding
+    /// a ghost has — so this is a lightweight stand-in. Built once, lazily; ticked from
+    /// MPCanvasUI.Update. See docs/PASSENGER-SYSTEM.md.
     /// </summary>
     internal static class PassengerHud
     {
-        private static GameObject? _canvas;   // whole screen-space canvas (toggled)
+        private static GameObject? _canvas;
+        private static GameObject? _exitBtn;
+        private static GameObject? _toast;
+        private static TextMeshProUGUI? _toastLabel;
+        private static float _toastUntil;
         private static bool _built;
 
         public static void Tick()
         {
-            bool riding = !string.IsNullOrEmpty(PassengerSync.LocalRidingVehicleId);
-            if (!riding)
-            {
-                if (_canvas != null) _canvas.SetActive(false);
-                return;
-            }
+            if (!_built && (MPServer.IsRunning || MPClient.IsConnected)) Build();
+            if (_canvas == null) return;
+
+            bool seated = PassengerRide.IsSeated;
+            if (_exitBtn != null && _exitBtn.activeSelf != seated) _exitBtn.SetActive(seated);
+
+            bool toastOn = Time.unscaledTime < _toastUntil;
+            if (_toast != null && _toast.activeSelf != toastOn) _toast.SetActive(toastOn);
+        }
+
+        /// <summary>Briefly flash a centred message (e.g. "Vehicle locked.").</summary>
+        public static void Toast(string msg)
+        {
             if (!_built) Build();
-            if (_canvas != null) _canvas.SetActive(true);
+            if (_toastLabel != null) _toastLabel.text = msg;
+            _toastUntil = Time.unscaledTime + 2f;
+            if (_toast != null) _toast.SetActive(true);
         }
 
         private static void Build()
@@ -44,32 +58,62 @@ namespace BigAmbitionsMP
                 canvasGO.AddComponent<GraphicRaycaster>();
                 _canvas = canvasGO;
 
-                // "Exit Vehicle" button, bottom-centre.
-                var btnGO = new GameObject("ExitButton");
-                btnGO.transform.SetParent(canvasGO.transform, false);
-                var img = btnGO.AddComponent<Image>();
-                img.color = new Color(0.12f, 0.12f, 0.14f, 0.92f);
-                var rt = btnGO.GetComponent<RectTransform>();
-                rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0.5f, 0f);
-                rt.anchoredPosition = new Vector2(0f, 90f);
-                rt.sizeDelta = new Vector2(240f, 60f);
+                _exitBtn = BuildExitButton(canvasGO.transform);
+                _exitBtn.SetActive(false);
 
-                var btn = btnGO.AddComponent<Button>();
-                btn.onClick = new Button.ButtonClickedEvent();
-                btn.onClick.AddListener(new UnityEngine.Events.UnityAction(PassengerRide.RequestExit));
-
-                var txtGO = new GameObject("Label");
-                txtGO.transform.SetParent(btnGO.transform, false);
-                var tmp = txtGO.AddComponent<TextMeshProUGUI>();
-                tmp.text      = "Exit Vehicle";
-                tmp.alignment = TextAlignmentOptions.Center;
-                tmp.fontSize  = 24f;
-                tmp.color     = Color.white;
-                var lrt = txtGO.GetComponent<RectTransform>();
-                lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one;
-                lrt.offsetMin = Vector2.zero; lrt.offsetMax = Vector2.zero;
+                _toast = BuildToast(canvasGO.transform);
+                _toast.SetActive(false);
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[PassengerHud] build: {ex.Message}"); }
+        }
+
+        private static GameObject BuildExitButton(Transform parent)
+        {
+            var btnGO = new GameObject("ExitButton");
+            btnGO.transform.SetParent(parent, false);
+            var img = btnGO.AddComponent<Image>();
+            img.color = new Color(0.12f, 0.12f, 0.14f, 0.92f);
+            var rt = btnGO.GetComponent<RectTransform>();
+            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0.5f, 0f);
+            rt.anchoredPosition = new Vector2(0f, 90f);
+            rt.sizeDelta = new Vector2(240f, 60f);
+
+            var btn = btnGO.AddComponent<Button>();
+            btn.onClick = new Button.ButtonClickedEvent();
+            btn.onClick.AddListener(new UnityEngine.Events.UnityAction(PassengerRide.RequestExit));
+
+            AddLabel(btnGO.transform, "Exit Vehicle", 24f);
+            return btnGO;
+        }
+
+        private static GameObject BuildToast(Transform parent)
+        {
+            var toastGO = new GameObject("Toast");
+            toastGO.transform.SetParent(parent, false);
+            var img = toastGO.AddComponent<Image>();
+            img.color = new Color(0f, 0f, 0f, 0.78f);
+            var rt = toastGO.GetComponent<RectTransform>();
+            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.anchoredPosition = new Vector2(0f, 160f);
+            rt.sizeDelta = new Vector2(360f, 56f);
+
+            _toastLabel = AddLabel(toastGO.transform, "", 26f);
+            return toastGO;
+        }
+
+        private static TextMeshProUGUI AddLabel(Transform parent, string text, float size)
+        {
+            var txtGO = new GameObject("Label");
+            txtGO.transform.SetParent(parent, false);
+            var tmp = txtGO.AddComponent<TextMeshProUGUI>();
+            tmp.text      = text;
+            tmp.alignment = TextAlignmentOptions.Center;
+            tmp.fontSize  = size;
+            tmp.color     = Color.white;
+            var lrt = txtGO.GetComponent<RectTransform>();
+            lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one;
+            lrt.offsetMin = Vector2.zero; lrt.offsetMax = Vector2.zero;
+            return tmp;
         }
     }
 }
