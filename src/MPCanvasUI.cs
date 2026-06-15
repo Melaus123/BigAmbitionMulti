@@ -324,6 +324,7 @@ namespace BigAmbitionsMP
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
             MPRegisterSync.TickDuty();   // mirror the native Work activity into register duty (1s self-throttle)
             MPHub.TickSalePopups();      // rising +$ worker feedback (per-frame: smooth rise/fade)
+            PassengerRide.Update();      // passenger ride: board → pin-to-seat → exit + remote-rider rendering
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
             MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion
             // (quiesce-off 4s timer RETIRED 2026-06-11 — stage-4 migration #1:

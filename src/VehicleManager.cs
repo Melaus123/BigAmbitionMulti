@@ -816,6 +816,19 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>The transform of a spawned remote ghost vehicle, or null.</summary>
+        public static Transform? GhostTransform(string vehicleId)
+            => (vehicleId != null && _remoteVehicles.TryGetValue(vehicleId, out var rv) && rv.Go != null)
+               ? rv.Go.transform : null;
+
+        /// <summary>Every spawned ghost vehicle as (vehicleId, transform).</summary>
+        public static System.Collections.Generic.IEnumerable<(string, Transform)> AllGhosts()
+        {
+            foreach (var kv in _remoteVehicles)
+                if (kv.Value != null && kv.Value.Go != null)
+                    yield return (kv.Key, kv.Value.Go.transform);
+        }
+
         /// <summary>Despawns one ghost by vehicle id.</summary>
         public static void DespawnByVehicleId(string vehicleId)
         {
