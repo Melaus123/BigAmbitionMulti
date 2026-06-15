@@ -194,6 +194,25 @@ Only **seat *count*** is authored — a short `vehicleTypeName`-keyed table (MVP
 remaining car types during normal play. (Its `footprint` line is unreliable — bounds get
 polluted by shadow/effect renderers; use the wheels, not the footprint.)
 
+## Save persistence & nametags
+
+**Save (safe by construction — see ANTIPATTERNS Class 5):** we never touch the native save
+format. World/economy state rides on the host's native save + the join replay on load.
+Passenger state lives only in `PassengerSync`'s runtime dictionaries (never written to `gi`),
+and `PassengerSync.Reset()` clears it on load:
+- **Occupancy** (who's riding) = runtime; resets on load and re-establishes as players act —
+  correct (you reload on foot, not magically still in someone's car).
+- **Lock** = MVP resets to unlocked on load (zero save risk); a side-file keyed to the session
+  is the safe path if we ever want it to persist. Never injected into the native save.
+
+So there's no save-corruption risk and nothing extra to serialise.
+
+**Nametags:** the remote-player name (`BAMP_Label`) is a separate billboarding child that
+`SetDriving` does **not** hide — so a driver keeps their name floating over the car. A
+passenger uses the same mechanism: on other machines the riding player's avatar is pinned to
+the ghost at the passenger seat with its model hidden but the label kept, so their name floats
+above the passenger seat ("X riding"). You don't see your own (normal). 1c wires this for riders.
+
 ## Implementation status / map
 
 **Done — committed, compiles in both configs, no gameplay yet:**

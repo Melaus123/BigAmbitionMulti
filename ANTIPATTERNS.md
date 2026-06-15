@@ -186,5 +186,42 @@ recent: passenger **locks + seat occupancy** (added 2026-06-15) — shipped *wit
 
 ---
 
+## Class 5 — New MP state vs. the native save (leak-in / persist-out)
+
+**Pattern.** Our MP-only state collides with the game's single-player save two ways, both
+easy to forget:
+- **Leak-in:** MP-only *runtime* objects (remote ghosts, replicated props) get written
+  **into** the native save (e.g. ghost vehicles landing in `gi.VehicleInstances`),
+  corrupting/bloating a save that's later loaded in single-player.
+- **Persist-out:** a net-new authoritative state that *should* survive a save/load isn't in
+  the native save at all, so it's silently lost on reload.
+
+**Why it bites.** The save format is the game's, not ours — modifying it risks corrupting
+saves (a feature we must never break), and the gap is invisible until someone loads.
+
+**Rules / decision tree for every new authoritative state:**
+- **Never modify the native save format** (no new fields on `gi` / the `.hsg`). World/economy
+  state already lives in the host's native save and re-syncs to clients via the join replay
+  (Class 4) on load — leave persistence to the game.
+- **Runtime / avatar state** (positions, who's-driving/riding) → **not saved**; re-established
+  on load. (Passenger occupancy is here.)
+- **MP-only runtime objects** → keep them **out** of the save (de-register before the game
+  serialises — see `DeregisterGhostFromSave`).
+- **Net-new persistent settings** (e.g. a vehicle lock) → either accept a reset on load, or
+  persist in a **side-file** keyed to the session — **never** inside the native save.
+
+**Detection.** Adding state? Ask: *could this be written into the save?* (→ de-register) and
+*should it survive a load?* (→ side-file, not the native save).
+```
+rg "VehicleInstances|SaveGameManager.Current|DeregisterGhost|gi\." src/
+```
+
+**Known instances.** Ghost vehicles kept out of `gi.VehicleInstances`
+(`DeregisterGhostFromSave`, "never save data"). Passenger occupancy = runtime (resets on
+load via `PassengerSync.Reset()`); passenger lock = runtime for MVP (resets), side-file if
+we ever want it to persist — never injected into the save.
+
+---
+
 *Registry seeded from real fix history (git log + investigation notes); it is not
 exhaustive — add a class the moment a second instance of any pattern shows up.*
