@@ -25,6 +25,14 @@ namespace BigAmbitionsMP
         }
     }
 
+    // Cache the live ItemPanelUI so the passenger HUD can clone its Park/Sleep buttons for the
+    // native look (the passenger rides a ghost, so it never gets its own SetVehicle call).
+    [HarmonyPatch(typeof(ItemPanelUI), "Start")]
+    public static class Patch_ItemPanelUI_Start_Cache
+    {
+        static void Postfix(ItemPanelUI __instance) { PassengerHud.NativePanel = __instance; }
+    }
+
     // The same panel is reused for placed ITEMS — hide our vehicle-only button then.
     [HarmonyPatch(typeof(ItemPanelUI), nameof(ItemPanelUI.SetItemInstance))]
     public static class Patch_ItemPanelUI_SetItemInstance_Lock

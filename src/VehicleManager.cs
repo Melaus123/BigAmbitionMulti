@@ -604,6 +604,10 @@ namespace BigAmbitionsMP
             try { if (vc.poi != null) UnityEngine.Object.Destroy(vc.poi.gameObject); } catch { }
             // Destroy every gameplay component — after this the game no longer
             // sees a vehicle here, just a prop: no ownership, no ticket, no entry.
+            // Capture the vehicle's sleep environment BEFORE stripping the controller — a passenger
+            // riding this ghost can't reach the real VehicleController, so this is their only handle
+            // on it (PassengerHud's Sleep button uses it). Best-effort; null if not yet populated.
+            try { if (vc.sleepEnvironment != null) _sleepEnvByVehicleId[e.VehicleId] = vc.sleepEnvironment; } catch { }
             int killed = StripVehicleComponents(go);
             // Freeze physics — we drive the ghost purely by the synced transform.
             // EVERY rigidbody in the hierarchy, same as SpawnVisualGhost: this
@@ -894,6 +898,14 @@ namespace BigAmbitionsMP
             catch { }
             return result;
         }
+
+        // vehicleId → the ghost's captured SleepEnvironment (read before the controller is stripped),
+        // so a PASSENGER riding this ghost can sleep without the real VehicleController.
+        private static readonly System.Collections.Generic.Dictionary<string, PlayerActivity.SleepEnvironment> _sleepEnvByVehicleId = new();
+
+        /// <summary>The captured sleep environment for a ghost vehicle, or null.</summary>
+        public static PlayerActivity.SleepEnvironment? SleepEnvironmentFor(string vehicleId)
+            => (vehicleId != null && _sleepEnvByVehicleId.TryGetValue(vehicleId, out var s)) ? s : null;
 
         /// <summary>Colliders of GHOST vehicles only (not the local player's own cars) — used to
         /// stop the LOCAL player from shoving other players' cars without affecting their own.</summary>
