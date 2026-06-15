@@ -849,6 +849,27 @@ namespace BigAmbitionsMP
                     yield return (kv.Key, kv.Value.Go.transform);
         }
 
+        /// <summary>The transform of one of the LOCAL player's OWN (real, non-ghost) vehicles by
+        /// MP id, or null. Lets us pin a remote passenger to the car WE own — on our screen that
+        /// car is the real native vehicle, not a ghost, so AllGhosts/GhostTransform won't find it.</summary>
+        public static Transform? LocalVehicleTransform(string vehicleId)
+        {
+            if (string.IsNullOrEmpty(vehicleId)) return null;
+            try
+            {
+                var list = VehicleHelper.AllPlayerVehicles;
+                if (list == null) return null;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var vc = list[i];
+                    if (vc != null && vc.vehicleInstance != null && vc.vehicleInstance.id == vehicleId)
+                        return vc.transform;
+                }
+            }
+            catch { }
+            return null;
+        }
+
         /// <summary>Despawns one ghost by vehicle id.</summary>
         public static void DespawnByVehicleId(string vehicleId)
         {

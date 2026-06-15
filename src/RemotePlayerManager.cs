@@ -1188,7 +1188,15 @@ namespace BigAmbitionsMP
                     col.height   = 1.8f;
                     col.radius   = 0.4f;
                     col.center   = new Vector3(0f, 0.9f, 0f);
-                    col.isTrigger = false;
+                    // TRIGGER, not a solid collider.  ROOT CAUSE of the recurring "remote players
+                    // shove parked/driven cars by walking into them" bug (ANTIPATTERNS class 6):
+                    // a SOLID kinematic collider that the mover repositions every frame imparts
+                    // force to any dynamic vehicle rigidbody it overlaps.  The two prior fixes only
+                    // froze GHOST-vehicle rigidbodies (SpawnRemoteVehicle) and never touched THIS
+                    // collider, so it kept resurfacing.  A trigger imparts NO physical force, yet
+                    // Gley still detects players because Gley RAYCASTS the player layer and raycasts
+                    // hit triggers (queriesHitTriggers defaults true) — so traffic still stops.
+                    col.isTrigger = true;
 
                     var rb = root.AddComponent<Rigidbody>();
                     rb.isKinematic = true;
@@ -1302,6 +1310,14 @@ namespace BigAmbitionsMP
                     if (System.Array.IndexOf(_killScripts, c.GetType().Name) >= 0)
                         UnityEngine.Object.Destroy(c);
                 }
+                // The cloned model is VISUAL-ONLY: strip every collider + rigidbody it carries
+                // (bone / ragdoll physics) so it can NEVER impart force to vehicles or the world.
+                // Defence-in-depth for ANTIPATTERNS class 6 — the root capsule is already a
+                // trigger; this catches any physics hiding deeper in the character hierarchy.
+                foreach (var rb in model.GetComponentsInChildren<Rigidbody>(true))
+                    if (rb != null) UnityEngine.Object.Destroy(rb);
+                foreach (var col in model.GetComponentsInChildren<Collider>(true))
+                    if (col != null) UnityEngine.Object.Destroy(col);
             }
             catch (Exception ex)
             {

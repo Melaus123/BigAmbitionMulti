@@ -180,10 +180,15 @@ namespace BigAmbitionsMP
         // ── remote riders rendering ──────────────────────────────────────────
         private static void TickRemoteRiders()
         {
-            var want = new Dictionary<string, string>();   // pid → vid (riders this frame)
-            foreach (var (vid, ghost) in VehicleManager.AllGhosts())
+            var want = new Dictionary<string, string>();   // pid → vid (remote riders this frame)
+            foreach (var vid in PassengerSync.OccupiedVehicleIds())
             {
-                if (ghost == null) continue;
+                // Resolve the vehicle's transform on THIS machine: another player's car is a ghost,
+                // but the OWNER's own car is the REAL native vehicle (not a ghost) — riders of it
+                // must be pinned to it too, else the passenger never sits on the owner's screen
+                // (and, pre-trigger-fix, kept shoving the car).
+                Transform? veh = VehicleManager.GhostTransform(vid) ?? VehicleManager.LocalVehicleTransform(vid);
+                if (veh == null) continue;
                 var riders = PassengerSync.RidersOf(vid);
                 if (riders == null) continue;
                 foreach (var kv in riders)
@@ -193,8 +198,8 @@ namespace BigAmbitionsMP
                     want[pid] = vid;
                     try
                     {
-                        RemotePlayerManager.SetDriving(pid, true);                  // hide their walk model
-                        RemotePlayerManager.SetRide(pid, ghost, SeatLocal(kv.Key)); // pin (nametag) to the seat
+                        RemotePlayerManager.SetDriving(pid, true);                // hide their walk model
+                        RemotePlayerManager.SetRide(pid, veh, SeatLocal(kv.Key)); // pin (nametag) to the seat
                     }
                     catch { }
                 }

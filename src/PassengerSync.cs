@@ -113,6 +113,9 @@ namespace BigAmbitionsMP
         public static IReadOnlyDictionary<int, string>? RidersOf(string vehicleId)
             => (vehicleId != null && _seatsOf.TryGetValue(vehicleId, out var d)) ? d : null;
 
+        /// <summary>Every vehicle id that currently has at least one rider (snapshot copy).</summary>
+        public static IEnumerable<string> OccupiedVehicleIds() => new List<string>(_seatsOf.Keys);
+
         /// <summary>Apply an authoritative board (host-approved). A player rides at most one
         /// seat, so any prior seat is released first.</summary>
         public static void ApplyBoard(string vehicleId, string playerId, int seat)

@@ -223,5 +223,54 @@ we ever want it to persist — never injected into the save.
 
 ---
 
+## Class 6 — Remote-avatar / ghost physics presence shoves authoritative objects
+
+**Pattern.** A *visual-only* replicated object — a remote player's avatar, a vehicle
+ghost, a replicated prop — is given (or inherits) a **solid (non-trigger) collider
+and/or a live rigidbody** and is then **moved every frame** by a position-sync mover.
+A moving solid body imparts force to any **dynamic** rigidbody it overlaps. The
+authoritative object (the owner's real, drivable car) gets shoved around by something
+that is supposed to be a pure visual.
+
+**Why it bites.** Whoever added the replication tests as the object's *owner*, where
+the car is the real native vehicle and nothing pushes it; the shove only appears on
+the **other** machine, where the pusher is a replicated avatar. It recurs because
+"replicated thing" and "the physics on it" are configured in different places, and a
+fix applied to one replication path (e.g. *ghost vehicles*) does not cover the others
+(*remote avatars*, *held props*, the *cloned character model's* bone/ragdoll physics).
+Twice "fixed" by freezing ghost-vehicle rigidbodies (`SpawnRemoteVehicle`) — which
+never touched the remote-avatar collider that was the actual shover.
+
+**Detection grep.**
+```
+rg -n "AddComponent<(Rigidbody|CapsuleCollider|BoxCollider|SphereCollider|MeshCollider)>|isTrigger|isKinematic|Instantiate\(" src/RemotePlayerManager.cs src/VehicleManager.cs
+```
+For every collider/rigidbody on a replicated (non-local-player) object, ask: is it a
+**trigger**, and is every rigidbody in its hierarchy **kinematic/destroyed**? A cloned
+prefab (`Instantiate`) inherits the source's physics — strip it.
+
+**Safe fixes.**
+1. **Trigger, not solid.** Detection systems that need the collider (Gley traffic)
+   use **raycasts**, and raycasts hit triggers (`queriesHitTriggers` defaults true) —
+   so a trigger keeps detection while imparting **no** force. (`RemotePlayerManager`
+   root capsule, 2026-06-15.)
+2. **Strip physics from cloned visuals.** After `Instantiate`-ing a character model
+   or prefab for replication, destroy every `Collider` + `Rigidbody` in its hierarchy
+   — it is visual-only (`StripModelScripts`, 2026-06-15).
+3. **Freeze every rigidbody in the hierarchy** (not just the root) on ghost vehicles —
+   0.11 prefabs carry dynamic child rigidbodies (`SpawnRemoteVehicle` / `SpawnVisualGhost`).
+4. Apply the guard **at the single construction point**, so it re-applies on every
+   respawn (avatars are destroyed on world load and rebuilt from the next packet).
+
+**Known instances (all fixed).**
+- Ghost vehicles pushable — root-only rigidbody freeze missed child bodies
+  (`9f5be3b`, 2026-06-12) → full-hierarchy freeze.
+- Remote-player root capsule was a **solid** moving collider → shoved the owner's real
+  car (the recurring "clients push cars by walking into them"; also why a boarding
+  passenger shoved the car on the owner's screen). Fixed 2026-06-15 → **trigger** +
+  strip the cloned model's colliders/rigidbodies.
+
+---
+
 *Registry seeded from real fix history (git log + investigation notes); it is not
 exhaustive — add a class the moment a second instance of any pattern shows up.*
