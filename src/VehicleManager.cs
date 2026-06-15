@@ -655,7 +655,19 @@ namespace BigAmbitionsMP
                     var entry = new VehicleEntry { VehicleId = "PROBE_" + type, TypeName = type,
                         X = pos.x, Y = pos.y, Z = pos.z, Qw = 1f };
                     var rv = SpawnRemoteVehicle(MPConfig.PlayerId, entry, pos, Quaternion.identity);
-                    if (rv != null) { _devProbeBatch.Add(entry.VehicleId); spawned++; }   // leave visible; probe already fired
+                    if (rv != null)
+                    {
+                        _devProbeBatch.Add(entry.VehicleId);   // leave visible; probe already fired
+                        // Relabel the floating tag with the TYPE NAME so each car is identifiable
+                        // on sight (you can't enter a stripped ghost to read its name).
+                        try
+                        {
+                            var tag = rv.Label != null ? rv.Label.GetComponent<TextMeshProUGUI>() : null;
+                            if (tag != null) { tag.text = type.Replace("ba:vehicletype_", ""); tag.color = new Color(0.4f, 0.9f, 1f); }
+                        }
+                        catch { }
+                        spawned++;
+                    }
                 }
                 Plugin.Logger.LogInfo($"[VehProbe] F5: spawned {spawned} car(s) beside you to view (data dumped); {remaining} type(s) still uncollected — F5 again for the next batch.");
             }
