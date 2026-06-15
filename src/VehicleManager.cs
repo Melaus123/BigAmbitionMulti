@@ -368,6 +368,9 @@ namespace BigAmbitionsMP
                         _remoteVehicles[e.VehicleId] = rv;
                         Plugin.Logger.LogInfo($"[Vehicle] ghost '{e.TypeName}' ({e.VehicleId}) rebuilt — cargo changed ({cargoSig}).");
                     }
+#if BAMP_DEV
+                    Vector3 _zoomPre = rv.Go != null ? rv.Go.transform.position : pos;   // DIAG:INVESTIGATION(vehicle-zoom)
+#endif
                     if (rv.Go != null && Vector3.Distance(rv.Go.transform.position, pos) > VehicleSnapDistance)
                     {
                         // Teleport (ferry, recovery) — snap, don't slide.
@@ -392,6 +395,18 @@ namespace BigAmbitionsMP
                     rv.TargetPos = pos;
                     rv.TargetRot = rot;
                     rv.TargetAt  = Time.unscaledTime;
+#if BAMP_DEV
+                    // DIAG:INVESTIGATION(vehicle-zoom) — log abnormal client position applies (the
+                    //   "zoom"): how far this packet moved the car, inter-packet dt (SenderT is still
+                    //   the OLD stamp here), resulting velocity, and snap-vs-lerp.
+                    {
+                        float _zd = Vector3.Distance(_zoomPre, pos);
+                        if (_zd > 5f)
+                            Plugin.Logger.LogWarning(
+                                $"[VehZoom] apply '{e.VehicleId}' ({e.TypeName}) Δ{_zd:F1}m vdt={(p.T - rv.SenderT):F3} " +
+                                $"vel={rv.Velocity.magnitude:F1} {(_zd > VehicleSnapDistance ? "SNAP" : "lerp")}");
+                    }
+#endif
                     rv.SenderT   = p.T;
 
                     // Cross-interior mask v2 (per-vehicle building tag — fixes the
@@ -978,6 +993,17 @@ namespace BigAmbitionsMP
                 // motion stays continuous between packets even at low FPS.
                 float ahead = Mathf.Min(now - rv.TargetAt, MaxVehicleExtrapolateSeconds);
                 var predicted = rv.TargetPos + rv.Velocity * ahead;
+#if BAMP_DEV
+                // DIAG:INVESTIGATION(vehicle-zoom) — the visible lurch: predicted point far from the
+                //   ghost's current position. Reveals stale TargetPos / runaway velocity / bad packet.
+                {
+                    float _pd = Vector3.Distance(t.position, predicted);
+                    if (_pd > 8f)
+                        Plugin.Logger.LogWarning(
+                            $"[VehZoom] smooth '{rv.OwnerId}' lurch {_pd:F1}m vel={rv.Velocity.magnitude:F1} " +
+                            $"ahead={ahead:F2} tgt=({rv.TargetPos.x:F0},{rv.TargetPos.z:F0})");
+                }
+#endif
                 t.position = Vector3.Lerp(t.position, predicted, k);
                 t.rotation = Quaternion.Slerp(t.rotation, rv.TargetRot, k);
                 if (rv.Label != null && cam != null)

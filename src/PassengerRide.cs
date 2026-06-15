@@ -67,7 +67,10 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (Physics.Raycast(cam.ScreenPointToRay(Input.mousePosition), out var rh, 80f))
+                    // Solid colliders ONLY (QueryTriggerInteraction.Ignore): cars carry large trigger
+                    // volumes (parking/proximity) that were being "hovered" from far away and made
+                    // distant clicks register as the car. Tighter max range, too.
+                    if (Physics.Raycast(cam.ScreenPointToRay(Input.mousePosition), out var rh, 45f, ~0, QueryTriggerInteraction.Ignore))
                         hit = VehicleManager.GhostIdFor(rh.collider != null ? rh.collider.transform : null);
                 }
                 catch { }
