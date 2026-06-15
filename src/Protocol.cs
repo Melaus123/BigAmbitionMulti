@@ -94,6 +94,45 @@ namespace BigAmbitionsMP
         AuditReport          = 113, // Client → Host: periodic state-hash audit (clock, business table, roster, interior replicas) — host compares against its own state and logs [Audit] MISMATCH on divergence.
         AuditDrill           = 114, // Host → Client: a biz bucket diverged persistently — log your per-registration hashes for these buckets so the two logs can be diffed offline.
         MarketEvents         = 115, // Host → All: the authoritative gi.marketEvents list (shortages/hype/backorders drive shelf fills + prices; clients suppress the generating sim and would otherwise never see one).
+
+        // Passengers (ride shotgun in another player's car — host-authoritative).
+        PassengerBoardRequest = 120, // Client → Host: request to ride vehicle V.
+        PassengerBoardResult  = 121, // Host → All: V's passenger = player P at seat S (S<0 = rejected; Reason set for the requester's popup).
+        PassengerExit         = 122, // Any → Host → All: player P left vehicle V (rider exit OR host kick).
+        VehicleLockSet        = 123, // Owner → Host → All: vehicle V passenger-lock = Locked.
+    }
+
+    // ── Passenger payloads (ride shotgun) ───────────────────────────────────────
+
+    /// <summary>Client → host: request to ride another player's vehicle.</summary>
+    public class PassengerBoardRequestPayload
+    {
+        public string PlayerId  { get; set; } = "";
+        public string VehicleId { get; set; } = "";
+    }
+
+    /// <summary>Host → all: authoritative passenger seating (Seat &lt; 0 = rejected).</summary>
+    public class PassengerBoardResultPayload
+    {
+        public string PlayerId  { get; set; } = "";
+        public string VehicleId { get; set; } = "";
+        public int    Seat      { get; set; } = -1;
+        public string Reason    { get; set; } = "";
+    }
+
+    /// <summary>Any → host → all: a rider left a vehicle (exit or kick).</summary>
+    public class PassengerExitPayload
+    {
+        public string PlayerId  { get; set; } = "";
+        public string VehicleId { get; set; } = "";
+    }
+
+    /// <summary>Owner → host → all: set a vehicle's passenger lock.</summary>
+    public class VehicleLockPayload
+    {
+        public string OwnerId   { get; set; } = "";
+        public string VehicleId { get; set; } = "";
+        public bool   Locked    { get; set; }
     }
 
     // ── Envelope ───────────────────────────────────────────────────────────────

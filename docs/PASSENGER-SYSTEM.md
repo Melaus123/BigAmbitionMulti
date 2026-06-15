@@ -67,9 +67,11 @@ already pin to ghost cars:
    checked first — before walking**. If locked, show a **"door locked" popup** and do not
    move. Start with a generic passenger-side offset; refine to per-`vehicleTypeName` door
    points later for "walk to the correct door."
-5. **Lock UI** = a toggle appended to the **in-car driver menu**
-   (`UIs.Instance.playerHUD.itemPanelUI.vehicleInfo` — already shows parking/park/sell
-   while the owner is in the car). Shown only to the driver/owner.
+5. **Lock UI** = a toggle appended to the **in-car bottom menu** (`ItemPanelUI`, the busy
+   panel shown while driving). Place it on the **left**, shaped/scaled to fit the crowded
+   panel. Shown only to the driver/owner. **The lock NEVER affects the owner** (they always
+   enter/use their own car) and **never blocks a passenger EXIT** (a rider can always leave,
+   locked or not) — it only refuses *new* boards by other players.
 6. **Host-authoritative** eligibility and seat assignment.
 7. **No driving for the passenger.** The rider is a pure occupant and can never gain
    vehicle control — no driving input or authority while pinned.
@@ -103,7 +105,10 @@ follows. Driver stops/leaves → grace, then auto-exit.
   position**; navmesh-resnap; brief reboard cooldown.
 
 **Lock** — driver toggles in the in-car menu → `SetLock` to host → host enforces future
-boards + broadcasts. Default: keeps current riders, blocks new boards.
+boards + broadcasts. Default: keeps current riders, blocks new *boards by others*. The owner
+is exempt (lock never affects their own use); a passenger **exit is always allowed** even
+while locked. The passenger rides the **same `ItemPanelUI`** the driver gets, with only the
+button changes (no Sell; Sleep gated by `CanSleep()`; Park → "Exit Vehicle").
 
 ## Per-vehicle door/seat offsets (authoring)
 
@@ -188,3 +193,31 @@ Only **seat *count*** is authored — a short `vehicleTypeName`-keyed table (MVP
 `VehicleHierarchyProbe` (`DIAG:DEVTOOL`) stays so we accumulate wheel/navmesh data for the
 remaining car types during normal play. (Its `footprint` line is unreliable — bounds get
 polluted by shadow/effect renderers; use the wheels, not the footprint.)
+
+## Implementation status / map
+
+**Done — committed, compiles, not yet wired:**
+- **Protocol** (`src/Protocol.cs`): `PassengerBoardRequest`=120, `PassengerBoardResult`=121,
+  `PassengerExit`=122, `VehicleLockSet`=123, + their payload classes.
+- **`PassengerSync`** (`src/PassengerSync.cs`): host-authoritative backbone — per-vehicle
+  lock, single-seat occupancy, vehicle ownership (`NoteFleet`/`OwnerOf`), and `HostCanBoard`
+  eligibility (owner-exempt, lock-aware, seat-free) + local-ride state. No gameplay/UI yet.
+
+**Next — wire the netcode (state syncs; still no visible gameplay):**
+- HOST dispatch (`MPServer`): `120` → `HostCanBoard` → broadcast `121`; `122` → `ApplyExit`
+  → re-broadcast; `123` → `SetLock` → re-broadcast. Add `PassengerSync.NoteFleet(p.OwnerId,
+  ids)` inside `HandleVehicleSync`.
+- CLIENT dispatch (`MPClient`): `121` → `ApplyBoard`; `122` → `ApplyExit`; `123` → `SetLock`.
+- Senders: client `SendBoardRequest` / `SendExit`; owner `SendLock`.
+- Call `PassengerSync.Reset()` on new-game/shutdown (alongside `TrafficSync.Reset()` etc.).
+
+**Then — gameplay (final increment):**
+- **Board CTA:** mirror `VehicleCtaBehavior` on the vehicle overlay → a "Ride" CTA for
+  another player's *unlocked* ghost → `SendBoardRequest`.
+- **Ride mechanic:** on approved `121`, walk the local player to the derived passenger door
+  (X-mirror of `NavmeshTarget`) → freeze + pin the local player to `_remoteVehicles[V].Go`
+  at the passenger offset → retarget `GameManager.vehicleCamera` Follow to the ghost. Exit
+  reverses + drops them beside the car; reboard cooldown.
+- **UI:** lock toggle on `ItemPanelUI` (driver-only, left, scaled to fit); passenger HUD =
+  the same panel with Sleep gated by `VehicleInfoPanel.CanSleep()` + "Exit Vehicle" (relabel
+  of park), no Sell, no driving.
