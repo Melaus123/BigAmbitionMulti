@@ -268,6 +268,18 @@ namespace BigAmbitionsMP
                     HandleRentConfirm(env);
                     break;
 
+                case MessageType.PassengerBoardResult:
+                    HandlePassengerBoardResultMsg(env);
+                    break;
+
+                case MessageType.PassengerExit:
+                    HandlePassengerExitMsg(env);
+                    break;
+
+                case MessageType.VehicleLockSet:
+                    HandleVehicleLockMsg(env);
+                    break;
+
                 case MessageType.RentDeny:
                     HandleRentDeny(env);
                     break;
@@ -875,6 +887,56 @@ namespace BigAmbitionsMP
             var p = new PlayerExitedBuildingPayload { PlayerId = MPConfig.PlayerId, AddressKey = addressKey };
             Send(MessageEnvelope.Create(MessageType.PlayerExitedBuilding, MPConfig.PlayerId, p));
             Plugin.Logger.LogInfo($"[Client] Sent PlayerExitedBuilding for '{addressKey}'.");
+        }
+
+        // ── Passenger (ride shotgun) ──────────────────────────────────────────
+        /// <summary>Client → host: ask to ride vehicle V (host validates owner/lock/seat).</summary>
+        public static void SendBoardRequest(string vehicleId)
+        {
+            if (!IsConnected || string.IsNullOrEmpty(vehicleId)) return;
+            Send(MessageEnvelope.Create(MessageType.PassengerBoardRequest, MPConfig.PlayerId,
+                new PassengerBoardRequestPayload { PlayerId = MPConfig.PlayerId, VehicleId = vehicleId }));
+        }
+
+        /// <summary>Client → host: I'm leaving vehicle V (always allowed, even when locked).</summary>
+        public static void SendPassengerExit(string vehicleId)
+        {
+            if (!IsConnected) return;
+            Send(MessageEnvelope.Create(MessageType.PassengerExit, MPConfig.PlayerId,
+                new PassengerExitPayload { PlayerId = MPConfig.PlayerId, VehicleId = vehicleId }));
+        }
+
+        /// <summary>Owner-client → host: set my vehicle's passenger lock.</summary>
+        public static void SendVehicleLock(string vehicleId, bool locked)
+        {
+            if (!IsConnected || string.IsNullOrEmpty(vehicleId)) return;
+            Send(MessageEnvelope.Create(MessageType.VehicleLockSet, MPConfig.PlayerId,
+                new VehicleLockPayload { OwnerId = MPConfig.PlayerId, VehicleId = vehicleId, Locked = locked }));
+        }
+
+        private static void HandlePassengerBoardResultMsg(MessageEnvelope env)
+        {
+            var p = env.GetPayload<PassengerBoardResultPayload>();
+            if (p == null) return;
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                if (p.Seat >= 0) PassengerSync.ApplyBoard(p.VehicleId, p.PlayerId, p.Seat);
+                // (rejection reason → the local requester's "door locked" popup is wired in the ride layer)
+            });
+        }
+
+        private static void HandlePassengerExitMsg(MessageEnvelope env)
+        {
+            var p = env.GetPayload<PassengerExitPayload>();
+            if (p == null) return;
+            GameStatePatcher.EnqueueOnMainThread(() => PassengerSync.ApplyExit(p.PlayerId));
+        }
+
+        private static void HandleVehicleLockMsg(MessageEnvelope env)
+        {
+            var p = env.GetPayload<VehicleLockPayload>();
+            if (p == null) return;
+            GameStatePatcher.EnqueueOnMainThread(() => PassengerSync.SetLock(p.VehicleId, p.Locked));
         }
 
         /// <summary>

@@ -657,6 +657,18 @@ namespace BigAmbitionsMP
                     HandleVehicleSync(peer, senderPid, env);
                     break;
 
+                case MessageType.PassengerBoardRequest:
+                    HandlePassengerBoardRequest(senderPid, env);
+                    break;
+
+                case MessageType.PassengerExit:
+                    HandlePassengerExit(senderPid, env);
+                    break;
+
+                case MessageType.VehicleLockSet:
+                    HandleVehicleLockSet(senderPid, env);
+                    break;
+
                 case MessageType.TaxiHail:
                     HandleTaxiHail(env);
                     break;
@@ -2011,8 +2023,12 @@ namespace BigAmbitionsMP
                 return;
             }
 
-            // Apply on the host's own screen
-            GameStatePatcher.EnqueueOnMainThread(() => VehicleManager.ApplyVehicleFleet(payload));
+            // Apply on the host's own screen + record ownership for passenger eligibility.
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                PassengerSync.NoteFleet(payload.OwnerId, VehicleIds(payload));
+                VehicleManager.ApplyVehicleFleet(payload);
+            });
 
             // Relay to every other connected client
             var bytes  = env.Serialize();
@@ -2023,11 +2039,88 @@ namespace BigAmbitionsMP
                     peer.Send(writer, DeliveryMethod.ReliableOrdered);
         }
 
+        private static System.Collections.Generic.IEnumerable<string> VehicleIds(VehicleFleetPayload payload)
+        {
+            if (payload?.Vehicles == null) yield break;
+            foreach (var v in payload.Vehicles) if (v != null) yield return v.VehicleId;
+        }
+
         /// <summary>Broadcasts the host's own vehicle fleet to all clients.</summary>
         public static void BroadcastVehicleSync(VehicleFleetPayload payload)
         {
             if (!_running) return;
+            PassengerSync.NoteFleet(payload.OwnerId, VehicleIds(payload));   // host owns these
             Broadcast(MessageEnvelope.Create(MessageType.VehicleSync, MPConfig.PlayerId, payload));
+        }
+
+        // ── Passenger (ride shotgun) — host-authoritative ─────────────────────
+        private static void HandlePassengerBoardRequest(string senderPid, MessageEnvelope env)
+        {
+            var p = env.GetPayload<PassengerBoardRequestPayload>();
+            if (p == null || !SenderIs(p.PlayerId, senderPid, MessageType.PassengerBoardRequest)) return;
+            GameStatePatcher.EnqueueOnMainThread(() => ResolveBoard(p.PlayerId, p.VehicleId));
+        }
+
+        /// <summary>Host: validate + apply a board, then broadcast the authoritative result.
+        /// Main thread (PassengerSync is single-threaded). Used for client requests AND the
+        /// host's own player (HostBoardRequest).</summary>
+        private static void ResolveBoard(string playerId, string vehicleId)
+        {
+            var res = new PassengerBoardResultPayload { PlayerId = playerId, VehicleId = vehicleId };
+            if (PassengerSync.HostCanBoard(vehicleId, playerId, out int seat, out string reason))
+            {
+                res.Seat = seat;
+                PassengerSync.ApplyBoard(vehicleId, playerId, seat);
+            }
+            else { res.Seat = -1; res.Reason = reason; }
+            Broadcast(MessageEnvelope.Create(MessageType.PassengerBoardResult, MPConfig.PlayerId, res));
+        }
+
+        private static void HandlePassengerExit(string senderPid, MessageEnvelope env)
+        {
+            var p = env.GetPayload<PassengerExitPayload>();
+            if (p == null || !SenderIs(p.PlayerId, senderPid, MessageType.PassengerExit)) return;
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                PassengerSync.ApplyExit(p.PlayerId);
+                Broadcast(MessageEnvelope.Create(MessageType.PassengerExit, MPConfig.PlayerId, p));
+            });
+        }
+
+        private static void HandleVehicleLockSet(string senderPid, MessageEnvelope env)
+        {
+            var p = env.GetPayload<VehicleLockPayload>();
+            if (p == null || !SenderIs(p.OwnerId, senderPid, MessageType.VehicleLockSet)) return;
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                if (PassengerSync.OwnerOf(p.VehicleId) != p.OwnerId) return;   // only the real owner may lock
+                PassengerSync.SetLock(p.VehicleId, p.Locked);
+                Broadcast(MessageEnvelope.Create(MessageType.VehicleLockSet, MPConfig.PlayerId, p));
+            });
+        }
+
+        // Host-local initiation (the HOST player boarding/exiting/locking — no round trip).
+        // Call on the main thread.
+        public static void HostBoardRequest(string vehicleId)
+        {
+            if (!_running) return;
+            ResolveBoard(MPConfig.PlayerId, vehicleId);
+        }
+
+        public static void HostExit(string vehicleId)
+        {
+            if (!_running) return;
+            PassengerSync.ApplyExit(MPConfig.PlayerId);
+            Broadcast(MessageEnvelope.Create(MessageType.PassengerExit, MPConfig.PlayerId,
+                new PassengerExitPayload { PlayerId = MPConfig.PlayerId, VehicleId = vehicleId }));
+        }
+
+        public static void HostSetLock(string vehicleId, bool locked)
+        {
+            if (!_running || PassengerSync.OwnerOf(vehicleId) != MPConfig.PlayerId) return;
+            PassengerSync.SetLock(vehicleId, locked);
+            Broadcast(MessageEnvelope.Create(MessageType.VehicleLockSet, MPConfig.PlayerId,
+                new VehicleLockPayload { OwnerId = MPConfig.PlayerId, VehicleId = vehicleId, Locked = locked }));
         }
 
         private static void HandleTaxiHail(MessageEnvelope env)

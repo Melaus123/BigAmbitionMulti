@@ -196,22 +196,22 @@ polluted by shadow/effect renderers; use the wheels, not the footprint.)
 
 ## Implementation status / map
 
-**Done — committed, compiles, not yet wired:**
+**Done — committed, compiles in both configs, no gameplay yet:**
 - **Protocol** (`src/Protocol.cs`): `PassengerBoardRequest`=120, `PassengerBoardResult`=121,
-  `PassengerExit`=122, `VehicleLockSet`=123, + their payload classes.
-- **`PassengerSync`** (`src/PassengerSync.cs`): host-authoritative backbone — per-vehicle
-  lock, single-seat occupancy, vehicle ownership (`NoteFleet`/`OwnerOf`), and `HostCanBoard`
-  eligibility (owner-exempt, lock-aware, seat-free) + local-ride state. No gameplay/UI yet.
+  `PassengerExit`=122, `VehicleLockSet`=123, + payloads.
+- **`PassengerSync`** (`src/PassengerSync.cs`): host-authoritative state — per-vehicle lock
+  (owner-exempt, exit-always), **multi-seat** occupancy (lowest-free-seat = front-passenger-
+  first then rear), vehicle ownership, `HostCanBoard` eligibility, local-ride state. Seat
+  *count* per type is authored later (default 1).
+- **Dispatch wired** (`MPServer`/`MPClient`): host validates board requests
+  (`ResolveBoard` → broadcast `121`), exits, and owner lock-sets; clients apply the
+  authoritative results. Ownership fed from `HandleVehicleSync`/`BroadcastVehicleSync` via
+  `NoteFleet`. Initiation: client `SendBoardRequest`/`SendPassengerExit`/`SendVehicleLock`;
+  host-local `MPServer.HostBoardRequest`/`HostExit`/`HostSetLock`. `PassengerSync.Reset()` on
+  new game. **State now syncs across machines when triggered** — but nothing triggers it yet
+  (no CTA/UI) and there's no visible ride.
 
-**Next — wire the netcode (state syncs; still no visible gameplay):**
-- HOST dispatch (`MPServer`): `120` → `HostCanBoard` → broadcast `121`; `122` → `ApplyExit`
-  → re-broadcast; `123` → `SetLock` → re-broadcast. Add `PassengerSync.NoteFleet(p.OwnerId,
-  ids)` inside `HandleVehicleSync`.
-- CLIENT dispatch (`MPClient`): `121` → `ApplyBoard`; `122` → `ApplyExit`; `123` → `SetLock`.
-- Senders: client `SendBoardRequest` / `SendExit`; owner `SendLock`.
-- Call `PassengerSync.Reset()` on new-game/shutdown (alongside `TrafficSync.Reset()` etc.).
-
-**Then — gameplay (final increment):**
+**Next — gameplay (the visible board → ride → exit; needs an in-game test):**
 - **Board CTA:** mirror `VehicleCtaBehavior` on the vehicle overlay → a "Ride" CTA for
   another player's *unlocked* ghost → `SendBoardRequest`.
 - **Ride mechanic:** on approved `121`, walk the local player to the derived passenger door

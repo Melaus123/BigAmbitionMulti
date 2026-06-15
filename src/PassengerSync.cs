@@ -3,36 +3,48 @@ using System.Collections.Generic;
 namespace BigAmbitionsMP
 {
     /// <summary>
-    /// Host-authoritative passenger ("ride shotgun") state: per-vehicle lock + single-seat
+    /// Host-authoritative passenger ("ride shotgun") state: per-vehicle lock + multi-seat
     /// occupancy, vehicle ownership, and board eligibility. This is the netcode backbone —
-    /// the gameplay (board CTA, walk-to-door, pin-to-ghost, camera, the in-car UI) lives in
-    /// the ride/UI layer and consumes this state. See docs/PASSENGER-SYSTEM.md.
+    /// the gameplay (board CTA on a ghost, walk-to-door, pin-to-ghost, camera, the in-car UI)
+    /// lives in the ride/UI layer and consumes this state. See docs/PASSENGER-SYSTEM.md.
     ///
-    /// MVP: one passenger seat per vehicle (shotgun). Multi-seat comes later (P3).
+    /// Seats: 1 = front passenger (shotgun), 2..N = rear. Boarding fills the lowest free seat,
+    /// so it goes front-passenger-first then rear. Seat COUNT is per vehicle TYPE — authored
+    /// later (the wheel/NavmeshTarget data gives the door positions); default 1 until then.
+    /// The OWNER is never a passenger: on every machine their own car is the real drivable
+    /// vehicle (native enter flow); only OTHER players' cars are ghosts, and the "Ride" CTA
+    /// only appears on a ghost — so passenger logic only ever runs for non-owners.
     /// </summary>
     public static class PassengerSync
     {
-        // vehicleId → owner playerId. The HOST builds this from every player's VehicleSync
-        // fleet, so it can answer "who owns V?" when validating a board request.
+        private const int DefaultPassengerSeats = 1;   // until the per-type seat-count table is authored
+
+        // vehicleId → owner playerId (HOST builds this from every player's VehicleSync fleet).
         private static readonly Dictionary<string, string> _ownerOf = new();
-        // vehicleId → locked (owner refuses NEW passengers; never affects owner or exits).
+        // vehicleId → locked (owner refuses NEW passengers; never affects the owner or exits).
         private static readonly Dictionary<string, bool> _locked = new();
-        // vehicleId → rider playerId (MVP: at most one).
-        private static readonly Dictionary<string, string> _riderOf = new();
-        // rider playerId → vehicleId (reverse index for clean exits/disconnects).
-        private static readonly Dictionary<string, string> _vehicleOfRider = new();
+        // vehicleId → passenger-seat count (authored per type; default 1).
+        private static readonly Dictionary<string, int> _seatCount = new();
+        // vehicleId → (seat → rider playerId).
+        private static readonly Dictionary<string, Dictionary<int, string>> _seatsOf = new();
+        // rider playerId → (vehicleId, seat) — reverse index for clean exits/disconnects.
+        private static readonly Dictionary<string, (string vid, int seat)> _rideOf = new();
 
         /// <summary>The vehicle the LOCAL player is currently riding ("" = on foot).</summary>
         public static string LocalRidingVehicleId { get; private set; } = "";
+        /// <summary>The LOCAL player's seat while riding (-1 = on foot). 1 = shotgun, 2.. = rear.</summary>
+        public static int LocalSeat { get; private set; } = -1;
 
         /// <summary>Clear all state — host shutdown / new game.</summary>
         public static void Reset()
         {
             _ownerOf.Clear();
             _locked.Clear();
-            _riderOf.Clear();
-            _vehicleOfRider.Clear();
+            _seatCount.Clear();
+            _seatsOf.Clear();
+            _rideOf.Clear();
             LocalRidingVehicleId = "";
+            LocalSeat = -1;
         }
 
         // ── Ownership (host) ──────────────────────────────────────────────────
@@ -47,6 +59,15 @@ namespace BigAmbitionsMP
         public static string OwnerOf(string vehicleId)
             => (vehicleId != null && _ownerOf.TryGetValue(vehicleId, out var o)) ? o : "";
 
+        // ── Seat count (per type; authored later, default 1) ──────────────────
+        public static void SetSeatCount(string vehicleId, int seats)
+        {
+            if (!string.IsNullOrEmpty(vehicleId) && seats > 0) _seatCount[vehicleId] = seats;
+        }
+
+        public static int SeatCount(string vehicleId)
+            => (vehicleId != null && _seatCount.TryGetValue(vehicleId, out var n) && n > 0) ? n : DefaultPassengerSeats;
+
         // ── Lock (authoritative state, mirrored everywhere) ───────────────────
         public static bool IsLocked(string vehicleId)
             => vehicleId != null && _locked.TryGetValue(vehicleId, out var l) && l;
@@ -58,21 +79,23 @@ namespace BigAmbitionsMP
         }
 
         // ── Occupancy ─────────────────────────────────────────────────────────
-        public static string RiderOf(string vehicleId)
-            => (vehicleId != null && _riderOf.TryGetValue(vehicleId, out var r)) ? r : "";
-
         public static bool IsRiding(string playerId)
-            => !string.IsNullOrEmpty(playerId) && _vehicleOfRider.ContainsKey(playerId);
+            => !string.IsNullOrEmpty(playerId) && _rideOf.ContainsKey(playerId);
+
+        /// <summary>Seat → rider map for a vehicle (null if nobody aboard).</summary>
+        public static IReadOnlyDictionary<int, string>? RidersOf(string vehicleId)
+            => (vehicleId != null && _seatsOf.TryGetValue(vehicleId, out var d)) ? d : null;
 
         /// <summary>Apply an authoritative board (host-approved). A player rides at most one
-        /// vehicle, so any prior seat is released first.</summary>
+        /// seat, so any prior seat is released first.</summary>
         public static void ApplyBoard(string vehicleId, string playerId, int seat)
         {
             if (string.IsNullOrEmpty(vehicleId) || string.IsNullOrEmpty(playerId) || seat < 0) return;
             ApplyExit(playerId);
-            _riderOf[vehicleId] = playerId;
-            _vehicleOfRider[playerId] = vehicleId;
-            if (playerId == MPConfig.PlayerId) LocalRidingVehicleId = vehicleId;
+            if (!_seatsOf.TryGetValue(vehicleId, out var seats)) { seats = new Dictionary<int, string>(); _seatsOf[vehicleId] = seats; }
+            seats[seat] = playerId;
+            _rideOf[playerId] = (vehicleId, seat);
+            if (playerId == MPConfig.PlayerId) { LocalRidingVehicleId = vehicleId; LocalSeat = seat; }
         }
 
         /// <summary>Apply an authoritative exit (rider left / kicked / disconnected). Always
@@ -80,30 +103,41 @@ namespace BigAmbitionsMP
         public static void ApplyExit(string playerId)
         {
             if (string.IsNullOrEmpty(playerId)) return;
-            if (_vehicleOfRider.TryGetValue(playerId, out var vid))
+            if (_rideOf.TryGetValue(playerId, out var r))
             {
-                _vehicleOfRider.Remove(playerId);
-                if (_riderOf.TryGetValue(vid, out var r) && r == playerId) _riderOf.Remove(vid);
+                _rideOf.Remove(playerId);
+                if (_seatsOf.TryGetValue(r.vid, out var seats))
+                {
+                    if (seats.TryGetValue(r.seat, out var p) && p == playerId) seats.Remove(r.seat);
+                    if (seats.Count == 0) _seatsOf.Remove(r.vid);
+                }
             }
-            if (playerId == MPConfig.PlayerId) LocalRidingVehicleId = "";
+            if (playerId == MPConfig.PlayerId) { LocalRidingVehicleId = ""; LocalSeat = -1; }
         }
 
         // ── Host eligibility ──────────────────────────────────────────────────
         /// <summary>HOST: may <paramref name="requesterPid"/> board <paramref name="vehicleId"/>?
-        /// On success sets <paramref name="seat"/> (≥0); on failure sets <paramref name="reason"/>
-        /// (shown to the requester, e.g. the "door locked" popup). The owner is never a valid
-        /// requester (they drive their own car), and a locked vehicle refuses new boards.</summary>
+        /// Assigns the lowest free passenger seat (1 = front shotgun, 2..N = rear), so seating
+        /// fills front-passenger-first then rear. On failure sets <paramref name="reason"/>
+        /// (shown to the requester, e.g. the "door locked" popup). The owner is rejected (they
+        /// drive their own car natively) and a locked vehicle refuses new boards.</summary>
         public static bool HostCanBoard(string vehicleId, string requesterPid, out int seat, out string reason)
         {
             seat = -1;
             reason = "";
             string owner = OwnerOf(vehicleId);
-            if (string.IsNullOrEmpty(owner))                 { reason = "vehicle unknown"; return false; }
-            if (owner == requesterPid)                       { reason = "your own vehicle"; return false; }
-            if (IsLocked(vehicleId))                          { reason = "door locked"; return false; }
-            if (!string.IsNullOrEmpty(RiderOf(vehicleId)))    { reason = "seat taken"; return false; }
-            seat = 1;   // MVP: single shotgun seat
-            return true;
+            if (string.IsNullOrEmpty(owner))   { reason = "vehicle unknown"; return false; }
+            if (owner == requesterPid)         { reason = "your own vehicle"; return false; }
+            if (IsLocked(vehicleId))            { reason = "door locked"; return false; }
+
+            int count = SeatCount(vehicleId);
+            _seatsOf.TryGetValue(vehicleId, out var seats);
+            for (int s = 1; s <= count; s++)
+            {
+                if (seats == null || !seats.ContainsKey(s)) { seat = s; return true; }
+            }
+            reason = "vehicle full";
+            return false;
         }
     }
 }

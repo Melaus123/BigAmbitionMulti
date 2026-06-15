@@ -2159,6 +2159,7 @@ namespace BigAmbitionsMP
                 TrafficSync.Reset();
                 ParkedVehicleSync.Reset();
                 MPRegisterSync.Reset();   // duty posts die with the scene
+                PassengerSync.Reset();    // passenger seats/locks die with the scene
                 _appearanceSig = ""; _appearanceNextAt = 0f;
                 _blackOverlayCanvas = null;     // re-scan on fresh game load (#6)
                 _blackOverlayFindTimer = 0f;
