@@ -43,8 +43,10 @@ already pin to ghost cars:
 - **Per-type offset table** `VehicleManager.RideOffsetFor(typeName)` ([:484](../src/VehicleManager.cs:484))
   — today coarse (scooters → sit-on; cars → 1 m back = driver seat). We extend it with
   passenger/door offsets.
-- **Offset-capture tooling.** A `RideProbe` already exists to sample ground-truth seat
-  offsets in-game (works in SP too). Reuse it to author passenger-seat/door offsets per car.
+- **Offset data (no live tool).** A prior `RideProbe` diagnostic (since removed) found the
+  driver offset is ≈ zero for open-top vehicles and ~1 m back for closed cars
+  (`RideOffsetFor`). There is **no** live probe now — passenger offsets would be hand-tuned
+  or captured with a small dev helper we'd rebuild.
 - **Driving visibility.** `RemotePlayerManager.SetDriving()` hides the walking model while driving.
 
 ## Design decisions
@@ -69,6 +71,9 @@ already pin to ghost cars:
    (`UIs.Instance.playerHUD.itemPanelUI.vehicleInfo` — already shows parking/park/sell
    while the owner is in the car). Shown only to the driver/owner.
 6. **Host-authoritative** eligibility and seat assignment.
+7. **No driving for the passenger.** The rider is a pure occupant and can never gain
+   vehicle control — no driving input or authority while pinned.
+8. **Passenger HUD** (bottom of screen) mirrors the driver's in-car menu, trimmed (below).
 
 ## Synced state
 
@@ -104,9 +109,24 @@ boards + broadcasts. Default: keeps current riders, blocks new boards.
 
 - Extend `RideOffsetFor` into a table keyed on `vehicleTypeName`:
   `{ driverOffset (exists), passengerDoorApproachOffset, passengerExitOffset }` (+ per-seat later).
-- Use the existing **`RideProbe`** to capture offsets in-game per car (drag/sample, dump to
-  table) rather than eyeballing numbers in code. Generic side offset covers all cars until
-  authored.
+- Capture offsets with a small dev helper (spawn car, drag anchors, dump to table) rather
+  than eyeballing numbers in code. A generic passenger-side offset covers all cars until
+  authored. (No live `RideProbe` exists anymore — rebuild if needed.)
+
+## Passenger HUD (bottom of screen)
+
+While riding, show the passenger a bottom-of-screen menu modeled on the driver's in-car
+menu (`itemPanelUI.vehicleInfo`), but **trimmed**:
+
+- **Sleep** — the same option the driver gets, gated by the **same requirements** the
+  driver's sleep uses (reuse the game's sleep-eligibility check; don't reimplement it).
+- **Exit Vehicle** — this is the driver's "Park car" action **relabeled**. A passenger
+  leaving has *no* parking side-effect (it's not their car), so the wording must not say
+  "park" — it just dismounts them (see Exit flow).
+- **No "Sell car"** — owner-only.
+- **No driving controls** — the passenger never gets vehicle control (decision 7).
+
+The driver keeps their normal menu (park / sell / sleep) plus the new **Lock** toggle.
 
 ## Phasing
 
