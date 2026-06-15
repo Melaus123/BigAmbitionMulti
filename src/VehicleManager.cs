@@ -615,6 +615,39 @@ namespace BigAmbitionsMP
             };
         }
 
+#if BAMP_DEV
+        // DIAG:INVESTIGATION(passenger-doors) — spawn the next few not-yet-probed vehicle
+        //   types near the local player so VehicleHierarchyProbe dumps their wheel/door data
+        //   (the passenger seat/door table), then despawn them. Returns how many remain
+        //   uncollected. Works in single-player too. See docs/PASSENGER-SYSTEM.md.
+        public static int DevProbeUncollected(int maxCount)
+        {
+            int probed = 0, remaining = 0;
+            try
+            {
+                Vector3 basePos;
+                try { basePos = Helpers.PlayerHelper.PlayerController.Character.transform.position; }
+                catch { basePos = Vector3.zero; }
+                var names = VehicleTypeHelper.GetVehicleTypeNames();
+                if (names == null) return 0;
+                foreach (var type in names)
+                {
+                    if (string.IsNullOrEmpty(type) || VehicleHierarchyProbe.HasDumped(type)) continue;
+                    if (probed >= maxCount) { remaining++; continue; }
+                    var pos = basePos + new Vector3(8f, 0f, 0f);   // off to the side; despawned same frame
+                    var entry = new VehicleEntry { VehicleId = "PROBE_" + type, TypeName = type,
+                        X = pos.x, Y = pos.y, Z = pos.z, Qw = 1f };
+                    var rv = SpawnRemoteVehicle(MPConfig.PlayerId, entry, pos, Quaternion.identity);
+                    if (rv != null) DespawnByVehicleId(entry.VehicleId);   // probe fired inside SpawnRemoteVehicle
+                    probed++;
+                }
+                Plugin.Logger.LogInfo($"[VehProbe] DevProbeUncollected: probed {probed} new type(s); {remaining} still uncollected (press F5 again).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[VehProbe] DevProbeUncollected: {ex.Message}"); }
+            return remaining;
+        }
+#endif
+
         /// <summary>
         /// Spawns a pure-visual vehicle ghost of the given model: a real game
         /// vehicle, immediately demoted to an inert prop (de-registered, POI

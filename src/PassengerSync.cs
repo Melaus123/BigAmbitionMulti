@@ -21,8 +21,10 @@ namespace BigAmbitionsMP
 
         // vehicleId → owner playerId (HOST builds this from every player's VehicleSync fleet).
         private static readonly Dictionary<string, string> _ownerOf = new();
-        // vehicleId → locked (owner refuses NEW passengers; never affects the owner or exits).
-        private static readonly Dictionary<string, bool> _locked = new();
+        // Vehicles the owner has explicitly UNLOCKED to passengers. Default is LOCKED
+        // (privacy-first): a car refuses passengers until its owner opens it, and a load
+        // resets everything back to locked. Never affects the owner; never blocks an exit.
+        private static readonly HashSet<string> _unlocked = new();
         // vehicleId → passenger-seat count (authored per type; default 1).
         private static readonly Dictionary<string, int> _seatCount = new();
         // vehicleId → (seat → rider playerId).
@@ -39,7 +41,7 @@ namespace BigAmbitionsMP
         public static void Reset()
         {
             _ownerOf.Clear();
-            _locked.Clear();
+            _unlocked.Clear();
             _seatCount.Clear();
             _seatsOf.Clear();
             _rideOf.Clear();
@@ -70,12 +72,13 @@ namespace BigAmbitionsMP
 
         // ── Lock (authoritative state, mirrored everywhere) ───────────────────
         public static bool IsLocked(string vehicleId)
-            => vehicleId != null && _locked.TryGetValue(vehicleId, out var l) && l;
+            => string.IsNullOrEmpty(vehicleId) || !_unlocked.Contains(vehicleId);   // default LOCKED
 
         public static void SetLock(string vehicleId, bool locked)
         {
             if (string.IsNullOrEmpty(vehicleId)) return;
-            _locked[vehicleId] = locked;
+            if (locked) _unlocked.Remove(vehicleId);
+            else        _unlocked.Add(vehicleId);
         }
 
         // ── Occupancy ─────────────────────────────────────────────────────────
@@ -120,8 +123,9 @@ namespace BigAmbitionsMP
         public static PassengerSnapshotPayload BuildSnapshot()
         {
             var snap = new PassengerSnapshotPayload();
-            foreach (var kv in _locked)
-                if (kv.Value) snap.Locks.Add(new PassengerLockEntry { VehicleId = kv.Key, Locked = true });
+            // Default is locked, so transmit only the EXCEPTIONS (vehicles the owner opened).
+            foreach (var vid in _unlocked)
+                snap.Locks.Add(new PassengerLockEntry { VehicleId = vid, Locked = false });
             foreach (var veh in _seatsOf)
                 foreach (var s in veh.Value)
                     snap.Seats.Add(new PassengerSeatEntry { VehicleId = veh.Key, Seat = s.Key, PlayerId = s.Value });
@@ -132,7 +136,7 @@ namespace BigAmbitionsMP
         public static void ApplySnapshot(PassengerSnapshotPayload snap)
         {
             if (snap == null) return;
-            _locked.Clear();
+            _unlocked.Clear();
             _seatsOf.Clear();
             _rideOf.Clear();
             LocalRidingVehicleId = "";

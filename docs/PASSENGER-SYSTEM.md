@@ -52,7 +52,8 @@ already pin to ghost cars:
 ## Design decisions
 
 1. **Eligibility.** Ride a vehicle that is (a) owned by **another player** and (b)
-   **unlocked.** Lock defaults to *unlocked*. All three facts (owner, driving, lock) are
+   **unlocked.** Lock defaults to **locked** (privacy-first: a car refuses passengers until
+   its owner opens it, and a load re-locks). All three facts (owner, driving, lock) are
    host-validated, never trusted from the wire. (Owner + driving already synced;
    lock is new state.)
 2. **No in-seat model (initial).** While riding, the rider's own model is **hidden**
@@ -194,6 +195,11 @@ Only **seat *count*** is authored — a short `vehicleTypeName`-keyed table (MVP
 remaining car types during normal play. (Its `footprint` line is unreliable — bounds get
 polluted by shadow/effect renderers; use the wheels, not the footprint.)
 
+To collect the rest fast (works in single-player): **F5** (`DIAG:INVESTIGATION(passenger-
+doors)`, Dev only) spawns + probes the next ~5 **not-yet-seen** vehicle types beside you, then
+despawns them; the log ends with "N still uncollected (press F5 again)". Press until N=0, then
+send the `[VehProbe]` lines and I'll fill the per-type seat/door table.
+
 ## Save persistence & nametags
 
 **Save (safe by construction — see ANTIPATTERNS Class 5):** we never touch the native save
@@ -202,8 +208,9 @@ Passenger state lives only in `PassengerSync`'s runtime dictionaries (never writ
 and `PassengerSync.Reset()` clears it on load:
 - **Occupancy** (who's riding) = runtime; resets on load and re-establishes as players act —
   correct (you reload on foot, not magically still in someone's car).
-- **Lock** = MVP resets to unlocked on load (zero save risk); a side-file keyed to the session
-  is the safe path if we ever want it to persist. Never injected into the native save.
+- **Lock** = resets to **locked** on load (privacy-first; zero save risk); a side-file keyed
+  to the session is the safe path if we ever want unlocks to persist. Never injected into the
+  native save.
 
 So there's no save-corruption risk and nothing extra to serialise.
 

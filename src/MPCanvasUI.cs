@@ -310,6 +310,12 @@ namespace BigAmbitionsMP
             // arrive before it is in-game.  Caching here, every frame from the start,
             // guarantees the path is ready so NO poll-thread handler ever calls IL2CPP.
             MPSaveManager.EnsureVersionCached();
+#if BAMP_DEV
+            // DIAG:INVESTIGATION(passenger-doors) — F5 spawns + probes the next few not-yet-seen
+            //   vehicle types (wheel/door data for the passenger seat table), then despawns them.
+            if (Input.GetKeyDown(KeyCode.F5))
+                VehicleManager.DevProbeUncollected(5);
+#endif
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
             MPRegisterSync.TickDuty();   // mirror the native Work activity into register duty (1s self-throttle)

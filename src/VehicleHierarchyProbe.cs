@@ -17,6 +17,11 @@ namespace BigAmbitionsMP
     {
         private static readonly HashSet<string> _dumped = new();
 
+        /// <summary>Has this vehicle type already been dumped? (Used by the dev batch-spawner
+        /// to skip already-collected types.)</summary>
+        internal static bool HasDumped(string typeName)
+            => !string.IsNullOrEmpty(typeName) && _dumped.Contains(typeName);
+
         internal static void DumpOnce(GameObject vehicle, string typeName)
         {
             if (vehicle == null) return;
