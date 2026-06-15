@@ -223,52 +223,45 @@ we ever want it to persist — never injected into the save.
 
 ---
 
-## Class 6 — Remote-avatar / ghost physics presence shoves authoritative objects
+## Class 6 — Cloning a native UI control inherits its serialized behavior
 
-**Pattern.** A *visual-only* replicated object — a remote player's avatar, a vehicle
-ghost, a replicated prop — is given (or inherits) a **solid (non-trigger) collider
-and/or a live rigidbody** and is then **moved every frame** by a position-sync mover.
-A moving solid body imparts force to any **dynamic** rigidbody it overlaps. The
-authoritative object (the owner's real, drivable car) gets shoved around by something
-that is supposed to be a pure visual.
+**Pattern.** We `Instantiate` a native UI control (a Button, a list row) to reuse its
+styling, then wire our own behavior onto the clone. But the clone carries the original's
+**serialized state** — most dangerously its **persistent `onClick` listener** set in the
+prefab (e.g. the Park button's persistent click → `ClickPark` → `ExitVehicle`).
+`RemoveAllListeners()` clears only **runtime** (`AddListener`) listeners, NOT persistent
+ones — so the clone fires BOTH our action and the original's.
 
-**Why it bites.** Whoever added the replication tests as the object's *owner*, where
-the car is the real native vehicle and nothing pushes it; the shove only appears on
-the **other** machine, where the pusher is a replicated avatar. It recurs because
-"replicated thing" and "the physics on it" are configured in different places, and a
-fix applied to one replication path (e.g. *ghost vehicles*) does not cover the others
-(*remote avatars*, *held props*, the *cloned character model's* bone/ragdoll physics).
-Twice "fixed" by freezing ghost-vehicle rigidbodies (`SpawnRemoteVehicle`) — which
-never touched the remote-avatar collider that was the actual shover.
+**Why it bites.** It looks wired correctly (we added our listener and it works), so the bug
+shows up only as a spurious *second* action on click (our button "Unlock" also exited the
+vehicle). The clone also drags along other serialized components — localization drivers that
+re-overwrite our label, the source's icon, key-hint labels.
 
 **Detection grep.**
 ```
-rg -n "AddComponent<(Rigidbody|CapsuleCollider|BoxCollider|SphereCollider|MeshCollider)>|isTrigger|isKinematic|Instantiate\(" src/RemotePlayerManager.cs src/VehicleManager.cs
+rg -n "Instantiate\(" src/ | rg -i "button|panel|row|cell"
 ```
-For every collider/rigidbody on a replicated (non-local-player) object, ask: is it a
-**trigger**, and is every rigidbody in its hierarchy **kinematic/destroyed**? A cloned
-prefab (`Instantiate`) inherits the source's physics — strip it.
+For each cloned control, confirm `onClick` was **replaced** (not just `RemoveAllListeners`),
+and any inherited driver components (localization, etc.) were stripped.
 
 **Safe fixes.**
-1. **Trigger, not solid.** Detection systems that need the collider (Gley traffic)
-   use **raycasts**, and raycasts hit triggers (`queriesHitTriggers` defaults true) —
-   so a trigger keeps detection while imparting **no** force. (`RemotePlayerManager`
-   root capsule, 2026-06-15.)
-2. **Strip physics from cloned visuals.** After `Instantiate`-ing a character model
-   or prefab for replication, destroy every `Collider` + `Rigidbody` in its hierarchy
-   — it is visual-only (`StripModelScripts`, 2026-06-15).
-3. **Freeze every rigidbody in the hierarchy** (not just the root) on ghost vehicles —
-   0.11 prefabs carry dynamic child rigidbodies (`SpawnRemoteVehicle` / `SpawnVisualGhost`).
-4. Apply the guard **at the single construction point**, so it re-applies on every
-   respawn (avatars are destroyed on world load and rebuilt from the next packet).
+1. **Replace the whole event, don't clear it:** `btn.onClick = new Button.ButtonClickedEvent();`
+   then `AddListener(...)`. This drops persistent + runtime listeners. The established pattern
+   here — `MPPhoneButton` (comments it: "clear template listeners"), `MPHubNativePage`, `MPCanvasUI`.
+2. **Strip inherited driver components** you don't want (e.g. a `TextLocalizationComponent`
+   that would re-localize your label out from under you).
+3. **Build from scratch** when you don't actually need the native styling (`PassengerHud`).
 
 **Known instances (all fixed).**
-- Ghost vehicles pushable — root-only rigidbody freeze missed child bodies
-  (`9f5be3b`, 2026-06-12) → full-hierarchy freeze.
-- Remote-player root capsule was a **solid** moving collider → shoved the owner's real
-  car (the recurring "clients push cars by walking into them"; also why a boarding
-  passenger shoved the car on the owner's screen). Fixed 2026-06-15 → **trigger** +
-  strip the cloned model's colliders/rigidbodies.
+- Menu / phone "Multiplayer" buttons cloned from native rows → reset `onClick`
+  (`MPPhoneButton`, `MPHubNativePage`, `MPCanvasUI`).
+- Passenger **Lock/Unlock** button cloned from Park → forgot the reset, used
+  `RemoveAllListeners` → unlocking ALSO exited the car. Fixed 2026-06-15.
+
+> The recurring "remote avatars shove vehicles" bug is **not** in this registry — it was a
+> single bug we mis-fixed twice (we kept freezing *ghost-vehicle* rigidbodies when the shover
+> was the *remote-avatar collider*). Final fix: solid collider + per-pair `IgnoreCollision`
+> (`TickVehicleCollisionIgnores`). One bug, not a class.
 
 ---
 

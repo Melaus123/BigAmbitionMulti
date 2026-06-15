@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.Reflection;
+using HarmonyLib;
 using UnityEngine;
 using Helpers;
 
@@ -16,8 +18,6 @@ namespace BigAmbitionsMP
     /// </summary>
     internal static class PassengerRide
     {
-        private const float BoardRange = 7f;   // metres: how close to a ghost F7 will board
-
         // ── local ride ────────────────────────────────────────────────────────
         private static string _localVeh  = "";    // what we're currently rendering as ridden ("" = on foot)
         private static int    _localSeat = -1;
@@ -39,36 +39,88 @@ namespace BigAmbitionsMP
 
             try
             {
-#if BAMP_DEV
-                // DIAG:INVESTIGATION(passenger-ride) — F7 boards the nearest unlocked ghost in
-                //   range (or exits if already aboard). Stand-in until the in-car "Ride" CTA lands.
-                if (Input.GetKeyDown(KeyCode.F7)) ToggleBoardNearest();
-#endif
+                TickHoverHighlight();   // cursor over an unlocked ghost → outline + board on click
                 TickLocalRide();
                 TickRemoteRiders();
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] Update: {ex.Message}"); }
         }
 
-        // ── board / exit initiation ──────────────────────────────────────────
-#if BAMP_DEV
-        private static void ToggleBoardNearest()
-        {
-            if (PassengerSync.IsRiding(MPConfig.PlayerId)) { RequestExit(); return; }
+        // ── click-to-board + hover outline (mirrors a driver entering: hover → click) ──
+        private static string _hovered = "";
+        private static readonly List<(GameObject go, int layer)> _hiLayers = new();
+        private static int _outlineLayer = -2;   // -2 = unresolved
 
-            Vector3 me = LocalPos();
-            string best = ""; float bestSq = BoardRange * BoardRange;
-            foreach (var (vid, t) in VehicleManager.AllGhosts())
+        private static void TickHoverHighlight()
+        {
+            if (PassengerSync.IsRiding(MPConfig.PlayerId)) { ClearHighlight(); return; }
+
+            var cam = Camera.main;
+            string hit = "";
+            if (cam != null)
             {
-                if (t == null) continue;
-                float d = (t.position - me).sqrMagnitude;
-                if (d < bestSq) { bestSq = d; best = vid; }
+                try
+                {
+                    if (Physics.Raycast(cam.ScreenPointToRay(Input.mousePosition), out var rh, 80f))
+                        hit = VehicleManager.GhostIdFor(rh.collider != null ? rh.collider.transform : null);
+                }
+                catch { }
             }
-            if (best == "") { Plugin.Logger.LogInfo($"[Ride] F7: no ghost car within {BoardRange}m."); return; }
-            Plugin.Logger.LogInfo($"[Ride] F7: requesting board of '{best}'.");
-            RequestBoard(best);
+            if (hit != "" && PassengerSync.IsLocked(hit)) hit = "";   // only unlocked cars are boardable
+
+            if (hit != _hovered) { ClearHighlight(); if (hit != "") SetHighlight(hit); _hovered = hit; }
+            if (_hovered != "" && Input.GetMouseButtonDown(0)) RequestBoard(_hovered);
         }
-#endif
+
+        private static void SetHighlight(string vid)
+        {
+            int layer = OutlineLayer();
+            if (layer < 0) return;   // unresolved — skip the visual; click-to-board still works
+            var t = VehicleManager.GhostTransform(vid);
+            if (t == null) return;
+            foreach (var r in t.GetComponentsInChildren<Renderer>(true))
+            {
+                if (r == null) continue;
+                _hiLayers.Add((r.gameObject, r.gameObject.layer));
+                r.gameObject.layer = layer;
+            }
+        }
+
+        private static void ClearHighlight()
+        {
+            for (int i = 0; i < _hiLayers.Count; i++)
+                if (_hiLayers[i].go != null) _hiLayers[i].go.layer = _hiLayers[i].layer;
+            _hiLayers.Clear();
+            _hovered = "";
+        }
+
+        // Resolve the game's outline layer once (reflection — tolerates a renamed field, see
+        // ANTIPATTERNS class 3; null-checked + logged, and the highlight is optional).
+        private static int OutlineLayer()
+        {
+            if (_outlineLayer != -2) return _outlineLayer;
+            _outlineLayer = -1;
+            try
+            {
+                var ty = AccessTools.TypeByName("LayerHelper")
+                      ?? AccessTools.TypeByName("Helpers.LayerHelper")
+                      ?? AccessTools.TypeByName("BigAmbitions.LayerHelper");
+                if (ty != null)
+                {
+                    var fi = ty.GetField("InteractiveItemsOutlinedLayerIndex", BindingFlags.Public | BindingFlags.Static);
+                    if (fi != null) _outlineLayer = (int)fi.GetValue(null);
+                    else
+                    {
+                        var pi = ty.GetProperty("InteractiveItemsOutlinedLayerIndex", BindingFlags.Public | BindingFlags.Static);
+                        if (pi != null) _outlineLayer = (int)pi.GetValue(null);
+                    }
+                }
+            }
+            catch { }
+            if (_outlineLayer < 0)
+                Plugin.Logger.LogWarning("[Ride] outline layer unresolved — hover highlight off (click-to-board still works).");
+            return _outlineLayer;
+        }
 
         private static void RequestBoard(string vehicleId)
         {
@@ -76,7 +128,8 @@ namespace BigAmbitionsMP
             else                    MPClient.SendBoardRequest(vehicleId);
         }
 
-        private static void RequestExit()
+        /// <summary>Leave the current ride (called by the passenger HUD's Exit Vehicle button).</summary>
+        internal static void RequestExit()
         {
             string vid = PassengerSync.LocalRidingVehicleId;
             if (string.IsNullOrEmpty(vid)) return;
@@ -242,11 +295,5 @@ namespace BigAmbitionsMP
             3 => new Vector3( 1.15f, 0f, -0.85f),
             _ => new Vector3( 1.15f, 0f,  0.15f),
         };
-
-        private static Vector3 LocalPos()
-        {
-            try { var ch = PlayerHelper.PlayerController?.Character; return ch != null ? ch.transform.position : Vector3.zero; }
-            catch { return Vector3.zero; }
-        }
     }
 }

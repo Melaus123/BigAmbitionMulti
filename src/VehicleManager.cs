@@ -870,6 +870,38 @@ namespace BigAmbitionsMP
             return null;
         }
 
+        /// <summary>Every collider on every vehicle on THIS machine — ghosts + the local player's
+        /// real cars. Used to keep remote-avatar colliders from shoving them (IgnoreCollision).</summary>
+        public static System.Collections.Generic.List<Collider> AllVehicleColliders()
+        {
+            var result = new System.Collections.Generic.List<Collider>();
+            try
+            {
+                foreach (var rv in _remoteVehicles.Values)
+                    if (rv?.Go != null) result.AddRange(rv.Go.GetComponentsInChildren<Collider>(true));
+                var list = VehicleHelper.AllPlayerVehicles;
+                if (list != null)
+                    for (int i = 0; i < list.Count; i++)
+                        if (list[i] != null) result.AddRange(list[i].GetComponentsInChildren<Collider>(true));
+            }
+            catch { }
+            return result;
+        }
+
+        /// <summary>The ghost vehicleId a (collider) transform belongs to, walking up parents,
+        /// or "" if it isn't part of a ghost. Used by click-to-board cursor picking.</summary>
+        public static string GhostIdFor(Transform t)
+        {
+            try
+            {
+                for (var cur = t; cur != null; cur = cur.parent)
+                    foreach (var kv in _remoteVehicles)
+                        if (kv.Value?.Go != null && kv.Value.Go.transform == cur) return kv.Key;
+            }
+            catch { }
+            return "";
+        }
+
         /// <summary>Despawns one ghost by vehicle id.</summary>
         public static void DespawnByVehicleId(string vehicleId)
         {

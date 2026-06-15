@@ -79,6 +79,12 @@ namespace BigAmbitionsMP
             clone.transform.SetAsFirstSibling();        // leftmost in the button row
             var btn = clone.GetComponent<Button>();
 
+            // CRITICAL: replace the whole click event. The clone inherited Park's PERSISTENT
+            // (serialized) onClick -> ClickPark -> ExitVehicle; RemoveAllListeners() only clears
+            // RUNTIME listeners, not persistent ones, so the clone was both unlocking AND exiting
+            // the car. A fresh event is the established fix (see MPPhoneButton, ANTIPATTERNS class 6).
+            if (btn != null) btn.onClick = new Button.ButtonClickedEvent();
+
             // Drop any localization driver on the clone so it can't overwrite our label on the
             // next language/binding event (reflection by type name — no namespace dependency).
             foreach (var comp in clone.GetComponentsInChildren(typeof(Component), true))

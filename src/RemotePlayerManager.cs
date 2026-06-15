@@ -613,6 +613,35 @@ namespace BigAmbitionsMP
             if (cap != null) cap.gameObject.SetActive(!driving);
         }
 
+        private static float _nextIgnoreRefresh;
+        /// <summary>HOST: keep remote-avatar colliders from physically shoving vehicles WITHOUT
+        /// removing them (Gley needs a solid collider on the player layer to detect players by
+        /// raycast).  Because avatars share the local player's layer we can't exclude the pair via
+        /// the layer matrix, so we ignore collisions per collider-pair (each avatar × every vehicle
+        /// collider), re-applied on a short interval to cover freshly-spawned avatars/vehicles and
+        /// post-load rebuilds (the ignore resets when a collider is destroyed/recreated).</summary>
+        public static void TickVehicleCollisionIgnores()
+        {
+            if (!MPServer.IsRunning) return;                       // client avatars have no collider
+            if (UnityEngine.Time.unscaledTime < _nextIgnoreRefresh) return;
+            _nextIgnoreRefresh = UnityEngine.Time.unscaledTime + 1f;
+            try
+            {
+                if (_players.Count == 0) return;
+                var vehCols = VehicleManager.AllVehicleColliders();
+                if (vehCols.Count == 0) return;
+                foreach (var kv in _players)
+                {
+                    if (kv.Value == null) continue;
+                    var ac = kv.Value.GetComponent<Collider>();    // the root capsule
+                    if (ac == null) continue;
+                    for (int i = 0; i < vehCols.Count; i++)
+                        if (vehCols[i] != null) UnityEngine.Physics.IgnoreCollision(ac, vehCols[i], true);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RemotePlayer] collision-ignore refresh: {ex.Message}"); }
+        }
+
         /// <summary>Every known appearance — used by the host to broadcast the full set.</summary>
         public static List<PlayerAppearancePayload> GetAllAppearances() =>
             new List<PlayerAppearancePayload>(_appearances.Values);
@@ -1188,15 +1217,14 @@ namespace BigAmbitionsMP
                     col.height   = 1.8f;
                     col.radius   = 0.4f;
                     col.center   = new Vector3(0f, 0.9f, 0f);
-                    // TRIGGER, not a solid collider.  ROOT CAUSE of the recurring "remote players
-                    // shove parked/driven cars by walking into them" bug (ANTIPATTERNS class 6):
-                    // a SOLID kinematic collider that the mover repositions every frame imparts
-                    // force to any dynamic vehicle rigidbody it overlaps.  The two prior fixes only
-                    // froze GHOST-vehicle rigidbodies (SpawnRemoteVehicle) and never touched THIS
-                    // collider, so it kept resurfacing.  A trigger imparts NO physical force, yet
-                    // Gley still detects players because Gley RAYCASTS the player layer and raycasts
-                    // hit triggers (queriesHitTriggers defaults true) — so traffic still stops.
-                    col.isTrigger = true;
+                    // SOLID, not a trigger.  Gley detects players by RAYCAST and its query IGNORES
+                    // triggers, so a trigger makes traffic run remote players over (observed
+                    // 2026-06-15).  Keep the collider solid (traffic still stops) and instead stop
+                    // it SHOVING vehicles with per-pair Physics.IgnoreCollision against every vehicle
+                    // collider — a layer-matrix exclusion can't be used because the avatar shares
+                    // the LOCAL player's layer, which must keep colliding with vehicles.  See
+                    // TickVehicleCollisionIgnores() (refreshed on a short interval, host only).
+                    col.isTrigger = false;
 
                     var rb = root.AddComponent<Rigidbody>();
                     rb.isKinematic = true;
@@ -1312,8 +1340,8 @@ namespace BigAmbitionsMP
                 }
                 // The cloned model is VISUAL-ONLY: strip every collider + rigidbody it carries
                 // (bone / ragdoll physics) so it can NEVER impart force to vehicles or the world.
-                // Defence-in-depth for ANTIPATTERNS class 6 — the root capsule is already a
-                // trigger; this catches any physics hiding deeper in the character hierarchy.
+                // The host-only root capsule is handled separately (TickVehicleCollisionIgnores);
+                // this catches any physics hiding deeper in the cloned character hierarchy.
                 foreach (var rb in model.GetComponentsInChildren<Rigidbody>(true))
                     if (rb != null) UnityEngine.Object.Destroy(rb);
                 foreach (var col in model.GetComponentsInChildren<Collider>(true))
