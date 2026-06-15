@@ -280,6 +280,10 @@ namespace BigAmbitionsMP
                     HandleVehicleLockMsg(env);
                     break;
 
+                case MessageType.PassengerSnapshot:
+                    HandlePassengerSnapshotMsg(env);
+                    break;
+
                 case MessageType.RentDeny:
                     HandleRentDeny(env);
                     break;
@@ -937,6 +941,13 @@ namespace BigAmbitionsMP
             var p = env.GetPayload<VehicleLockPayload>();
             if (p == null) return;
             GameStatePatcher.EnqueueOnMainThread(() => PassengerSync.SetLock(p.VehicleId, p.Locked));
+        }
+
+        private static void HandlePassengerSnapshotMsg(MessageEnvelope env)
+        {
+            var p = env.GetPayload<PassengerSnapshotPayload>();
+            if (p == null) return;
+            GameStatePatcher.EnqueueOnMainThread(() => PassengerSync.ApplySnapshot(p));
         }
 
         /// <summary>

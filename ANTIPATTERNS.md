@@ -152,5 +152,39 @@ reads the *live* source, not a stale snapshot field.
 
 ---
 
+## Class 4 — New host-authoritative state not replayed to joiners / hot-joiners
+
+**Pattern.** A new host-authoritative state (building ownership, interiors, traffic, parked
+cars, market, rivals, loans, **passenger locks/seats**, …) is kept in sync via *incremental*
+updates, but is **not** included in the initial state a player receives when they **join**
+(or hot-join mid-session). The host has it; a fresh joiner does not — until the next
+incremental update, which for event-driven state may be **never**.
+
+**Why it bites.** Invisible to the host (always has the state) and to the person who added
+it (they test by playing *as host*). Only a **joiner** sees the gap, and only for state that
+doesn't refresh on a timer. Classic symptom: "the player who joined sees X missing/wrong."
+It's forgotten every time because adding the state and adding its *join replay* are two
+separate edits in two separate places.
+
+**Detection.** When you add a new authoritative state, ask: *is it in the join/connect
+snapshot path?* Every authoritative subsystem should send a full snapshot to a connecting
+peer.
+```
+rg "Snapshot|OnPeerConnected|HandleHello|Welcome|SendInitial" src/
+```
+The new state should appear in that on-connect send. If it only has an incremental
+broadcast and no on-connect send, it's this bug.
+
+**Fix.** Add a full-state snapshot for the new state, sent to a peer in the **on-connect /
+WorldReady** flow alongside the existing ones (BusinessSnapshot, ParkedSnapshot, …). Make
+sure a mid-session hot-join hits the same path.
+
+**Known instances.** The on-connect send list is long *precisely because this keeps
+recurring*: business, interior, parked, traffic, market, rivals, appearance, loans, … Most
+recent: passenger **locks + seat occupancy** (added 2026-06-15) — shipped *with* a
+`PassengerSnapshot` on join, specifically to not repeat this class.
+
+---
+
 *Registry seeded from real fix history (git log + investigation notes); it is not
 exhaustive — add a class the moment a second instance of any pattern shows up.*

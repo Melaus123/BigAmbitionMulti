@@ -100,6 +100,7 @@ namespace BigAmbitionsMP
         PassengerBoardResult  = 121, // Host → All: V's passenger = player P at seat S (S<0 = rejected; Reason set for the requester's popup).
         PassengerExit         = 122, // Any → Host → All: player P left vehicle V (rider exit OR host kick).
         VehicleLockSet        = 123, // Owner → Host → All: vehicle V passenger-lock = Locked.
+        PassengerSnapshot     = 124, // Host → joiner: full passenger lock + seat state (join replay).
     }
 
     // ── Passenger payloads (ride shotgun) ───────────────────────────────────────
@@ -133,6 +134,27 @@ namespace BigAmbitionsMP
         public string OwnerId   { get; set; } = "";
         public string VehicleId { get; set; } = "";
         public bool   Locked    { get; set; }
+    }
+
+    /// <summary>Host → joiner: the full passenger lock + seat state (join replay), so a
+    /// connecting player sees existing locks and who's already riding which vehicle.</summary>
+    public class PassengerSnapshotPayload
+    {
+        public System.Collections.Generic.List<PassengerLockEntry> Locks { get; set; } = new();
+        public System.Collections.Generic.List<PassengerSeatEntry> Seats { get; set; } = new();
+    }
+
+    public class PassengerLockEntry
+    {
+        public string VehicleId { get; set; } = "";
+        public bool   Locked    { get; set; }
+    }
+
+    public class PassengerSeatEntry
+    {
+        public string VehicleId { get; set; } = "";
+        public int    Seat      { get; set; }
+        public string PlayerId  { get; set; } = "";
     }
 
     // ── Envelope ───────────────────────────────────────────────────────────────

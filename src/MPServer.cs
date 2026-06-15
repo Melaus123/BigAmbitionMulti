@@ -1368,6 +1368,8 @@ namespace BigAmbitionsMP
                             SendBusinessSnapshotTo(joinPeer);
                             // Who's currently on the registers (event-tracked; not in any snapshot).
                             SendRegisterDutyTo(joinPeer);
+                            // Passenger locks + who's already riding (event-tracked; join replay).
+                            SendPassengerSnapshotTo(joinPeer);
                             // Parked cars near the joiner — resync as soon as their position is known.
                             ParkedVehicleSync.ForgetPeer(joinName);
                         }
@@ -1403,6 +1405,7 @@ namespace BigAmbitionsMP
                     SendRivalsSnapshotTo(peer);
                     SendBusinessSnapshotTo(peer);
                     SendRegisterDutyTo(peer);   // event-tracked duty is wiped by the peer's world reload — re-sync it
+                    SendPassengerSnapshotTo(peer);   // passenger locks + seats (event-tracked; join replay)
                     MPLoadProfiler.Mark($"HOST sent full world state to peer {peer.Id}");
                     Plugin.Logger.LogInfo($"[Server] Sent full world state to peer {peer.Id}.");
                 }
@@ -2176,6 +2179,17 @@ namespace BigAmbitionsMP
         // ── Interior sync (Phase 2) ──────────────────────────────────────────
 
         /// <summary>Send a single building's interior snapshot to one peer (initial response to InteriorRequest).</summary>
+        /// <summary>Send the full passenger lock + seat state to a single peer (join replay).</summary>
+        public static void SendPassengerSnapshotTo(LiteNetLib.NetPeer peer)
+        {
+            if (peer == null) return;
+            try
+            {
+                Send(peer, MessageEnvelope.Create(MessageType.PassengerSnapshot, "host", PassengerSync.BuildSnapshot()));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendPassengerSnapshotTo: {ex.Message}"); }
+        }
+
         public static void SendInteriorSnapshotTo(LiteNetLib.NetPeer peer, InteriorSnapshotPayload snap)
         {
             if (!_running || peer == null || snap == null) return;

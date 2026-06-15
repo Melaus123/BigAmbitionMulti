@@ -115,6 +115,34 @@ namespace BigAmbitionsMP
             if (playerId == MPConfig.PlayerId) { LocalRidingVehicleId = ""; LocalSeat = -1; }
         }
 
+        // ── Join replay (full snapshot — see ANTIPATTERNS Class 4) ────────────
+        /// <summary>HOST: build the full lock + seat state for a connecting peer.</summary>
+        public static PassengerSnapshotPayload BuildSnapshot()
+        {
+            var snap = new PassengerSnapshotPayload();
+            foreach (var kv in _locked)
+                if (kv.Value) snap.Locks.Add(new PassengerLockEntry { VehicleId = kv.Key, Locked = true });
+            foreach (var veh in _seatsOf)
+                foreach (var s in veh.Value)
+                    snap.Seats.Add(new PassengerSeatEntry { VehicleId = veh.Key, Seat = s.Key, PlayerId = s.Value });
+            return snap;
+        }
+
+        /// <summary>JOINER: replace lock + occupancy with the host's authoritative snapshot.</summary>
+        public static void ApplySnapshot(PassengerSnapshotPayload snap)
+        {
+            if (snap == null) return;
+            _locked.Clear();
+            _seatsOf.Clear();
+            _rideOf.Clear();
+            LocalRidingVehicleId = "";
+            LocalSeat = -1;
+            if (snap.Locks != null)
+                foreach (var l in snap.Locks) if (l != null) SetLock(l.VehicleId, l.Locked);
+            if (snap.Seats != null)
+                foreach (var s in snap.Seats) if (s != null) ApplyBoard(s.VehicleId, s.PlayerId, s.Seat);
+        }
+
         // ── Host eligibility ──────────────────────────────────────────────────
         /// <summary>HOST: may <paramref name="requesterPid"/> board <paramref name="vehicleId"/>?
         /// Assigns the lowest free passenger seat (1 = front shotgun, 2..N = rear), so seating
