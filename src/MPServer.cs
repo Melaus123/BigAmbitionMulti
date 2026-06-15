@@ -2029,7 +2029,7 @@ namespace BigAmbitionsMP
             // Apply on the host's own screen + record ownership for passenger eligibility.
             GameStatePatcher.EnqueueOnMainThread(() =>
             {
-                PassengerSync.NoteFleet(payload.OwnerId, VehicleIds(payload));
+                PassengerSync.NoteFleet(payload);
                 VehicleManager.ApplyVehicleFleet(payload);
             });
 
@@ -2042,17 +2042,11 @@ namespace BigAmbitionsMP
                     peer.Send(writer, DeliveryMethod.ReliableOrdered);
         }
 
-        private static System.Collections.Generic.IEnumerable<string> VehicleIds(VehicleFleetPayload payload)
-        {
-            if (payload?.Vehicles == null) yield break;
-            foreach (var v in payload.Vehicles) if (v != null) yield return v.VehicleId;
-        }
-
         /// <summary>Broadcasts the host's own vehicle fleet to all clients.</summary>
         public static void BroadcastVehicleSync(VehicleFleetPayload payload)
         {
             if (!_running) return;
-            PassengerSync.NoteFleet(payload.OwnerId, VehicleIds(payload));   // host owns these
+            PassengerSync.NoteFleet(payload);   // host owns these (records owner + type)
             Broadcast(MessageEnvelope.Create(MessageType.VehicleSync, MPConfig.PlayerId, payload));
         }
 

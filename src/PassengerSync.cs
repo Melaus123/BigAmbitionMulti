@@ -25,8 +25,25 @@ namespace BigAmbitionsMP
         // (privacy-first): a car refuses passengers until its owner opens it, and a load
         // resets everything back to locked. Never affects the owner; never blocks an exit.
         private static readonly HashSet<string> _unlocked = new();
-        // vehicleId → passenger-seat count (authored per type; default 1).
-        private static readonly Dictionary<string, int> _seatCount = new();
+        // vehicleId → vehicle TYPE (HOST builds this from VehicleSync fleets, for seat-count lookup).
+        private static readonly Dictionary<string, string> _typeOf = new();
+        // Authored per-TYPE passenger-seat counts (driver excluded). Anything NOT listed defaults
+        // to 1 (the 2-seaters + the 3 small trucks deliverytruck/freighttruckt1/mersaididash).
+        // 4-seaters → 3; scooter/flatbed/handtruck → 0 (no passenger). Names confirmed from the probe.
+        private static readonly Dictionary<string, int> _seatsByType = new()
+        {
+            ["ba:vehicletype_bima320"]         = 3,
+            ["ba:vehicletype_honzamimic"]      = 3,
+            ["ba:vehicletype_mersaidis500"]    = 3,
+            ["ba:vehicletype_missamvillian"]   = 3,
+            ["ba:vehicletype_petrollsfanton"]  = 3,
+            ["ba:vehicletype_umcnunavut"]      = 3,
+            ["ba:vehicletype_vordtiaravic"]    = 3,
+            ["ba:vehicletype_vordv150"]        = 3,
+            ["ba:vehicletype_electricscooter"] = 0,   // 1-seaters: driver only, no passenger
+            ["ba:vehicletype_flatbed"]         = 0,
+            ["ba:vehicletype_handtruck"]       = 0,
+        };
         // vehicleId → (seat → rider playerId).
         private static readonly Dictionary<string, Dictionary<int, string>> _seatsOf = new();
         // rider playerId → (vehicleId, seat) — reverse index for clean exits/disconnects.
@@ -41,8 +58,8 @@ namespace BigAmbitionsMP
         public static void Reset()
         {
             _ownerOf.Clear();
+            _typeOf.Clear();
             _unlocked.Clear();
-            _seatCount.Clear();
             _seatsOf.Clear();
             _rideOf.Clear();
             LocalRidingVehicleId = "";
@@ -50,25 +67,32 @@ namespace BigAmbitionsMP
         }
 
         // ── Ownership (host) ──────────────────────────────────────────────────
-        /// <summary>HOST: record which player owns these vehicle ids (from a fleet sync).</summary>
-        public static void NoteFleet(string ownerId, IEnumerable<string> vehicleIds)
+        /// <summary>HOST: record owner + type for each vehicle in a fleet sync (for eligibility
+        /// and the seat-count lookup).</summary>
+        public static void NoteFleet(VehicleFleetPayload payload)
         {
-            if (string.IsNullOrEmpty(ownerId) || vehicleIds == null) return;
-            foreach (var id in vehicleIds)
-                if (!string.IsNullOrEmpty(id)) _ownerOf[id] = ownerId;
+            if (payload == null || string.IsNullOrEmpty(payload.OwnerId) || payload.Vehicles == null) return;
+            foreach (var v in payload.Vehicles)
+            {
+                if (v == null || string.IsNullOrEmpty(v.VehicleId)) continue;
+                _ownerOf[v.VehicleId] = payload.OwnerId;
+                if (!string.IsNullOrEmpty(v.TypeName)) _typeOf[v.VehicleId] = v.TypeName;
+            }
         }
 
         public static string OwnerOf(string vehicleId)
             => (vehicleId != null && _ownerOf.TryGetValue(vehicleId, out var o)) ? o : "";
 
         // ── Seat count (per type; authored later, default 1) ──────────────────
-        public static void SetSeatCount(string vehicleId, int seats)
-        {
-            if (!string.IsNullOrEmpty(vehicleId) && seats > 0) _seatCount[vehicleId] = seats;
-        }
+        /// <summary>Passenger seats (driver excluded) for a vehicle TYPE — the authored table,
+        /// default 1. Callable by type on either side (e.g. the client resolves type from the ghost).</summary>
+        public static int PassengerSeatsForType(string typeName)
+            => (typeName != null && _seatsByType.TryGetValue(typeName, out var n)) ? n : DefaultPassengerSeats;
 
+        /// <summary>Passenger seats for a specific vehicle id (host resolves its type).</summary>
         public static int SeatCount(string vehicleId)
-            => (vehicleId != null && _seatCount.TryGetValue(vehicleId, out var n) && n > 0) ? n : DefaultPassengerSeats;
+            => (vehicleId != null && _typeOf.TryGetValue(vehicleId, out var type))
+               ? PassengerSeatsForType(type) : DefaultPassengerSeats;
 
         // ── Lock (authoritative state, mirrored everywhere) ───────────────────
         public static bool IsLocked(string vehicleId)
