@@ -2231,6 +2231,9 @@ namespace BigAmbitionsMP
             }
         }
 
+        // DIAG:INVESTIGATION(staff-spawn) — observe-only probe; logs the work-shift lookup to
+        //   name the next gate if the employee spawn chain refuses. Remove when concluded.
+#if BAMP_DEV
         // ── [StaffEval] shift-lookup probe (resurrected instrumentation: names
         // the next gate if the spawn chain still refuses). ────────────────────
         [HarmonyPatch]
@@ -2262,6 +2265,7 @@ namespace BigAmbitionsMP
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] shift probe: {ex.Message}"); }
             }
         }
+#endif
 
         // ── [MPSale] MP order finalizer (2026-06-12, user-approved design).
         // The native OnPlaceOrder decrements LOCAL replica stock and books

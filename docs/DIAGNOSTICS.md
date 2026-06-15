@@ -56,8 +56,11 @@ and verify:
   `#if BAMP_DEV`).
 - `DIAG:INVESTIGATION(anim-norun)` — `MPCanvasUI.TickAnimProbe` (the open "no running
   animation" host bug). Remove when that bug is closed.
-- *Removed this pass:* the stutter investigation's harness, the entry-bug kill-switches,
-  the vehicle-colour dump (concluded), and the F12 black-overlay A/B toggle.
+- `DIAG:INVESTIGATION(staff-spawn)` — `MPPatches.Patch_StaffEval_ShiftProbe` (observe-only
+  work-shift logging; was shipping, now `#if BAMP_DEV`). Remove when concluded.
+- *Removed:* the stutter investigation's harness, the entry-bug kill-switches, the
+  vehicle-colour dump + `DumpFullCarColor`/`LooksLikeTruck` (concluded), and the F12
+  black-overlay A/B toggle.
 
 > Migration note: anything predating this convention that still lacks a `DIAG:` tag should
 > be tagged the next time it's touched, or removed if its investigation has concluded.

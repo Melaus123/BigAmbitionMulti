@@ -61,32 +61,6 @@ namespace BigAmbitionsMP
         // teleport — snap the ghost rather than sliding it across the screen.
         private const float SnapDistance = 12f;
 
-        // One-time colour diagnostics (host reads / client applies).
-        // ColorDumpEnabled gates the FULL per-vehicle material dump (~360 log
-        // lines + a renderer/property sweep per dumped car).  It produced 79k
-        // log lines in one session — re-enable only when actively debugging
-        // vehicle colours.
-        private static readonly bool ColorDumpEnabled = false;
-        private static int _colorDiagHost;
-        private static int _colorDiagClient;
-        // Indices whose full colour state has been dumped (host / client).
-        // Separate caps for trucks vs regular cars so we're guaranteed to see
-        // truck data even if non-trucks fill the first 4 slots.
-        private static readonly HashSet<int> _colorDumpHost   = new();
-        private static readonly HashSet<int> _colorDumpClient = new();
-        private static readonly HashSet<int> _truckDumpHost   = new();
-        private static readonly HashSet<int> _truckDumpClient = new();
-
-        /// <summary>Heuristic: does this prefab name look like a delivery/box truck?</summary>
-        private static bool LooksLikeTruck(string model)
-        {
-            if (string.IsNullOrEmpty(model)) return false;
-            string m = model.ToLowerInvariant();
-            return m.Contains("truck") || m.Contains("box")
-                || m.Contains("delivery") || m.Contains("van")
-                || m.Contains("lorry") || m.Contains("cargo");
-        }
-
         private static float _hostBroadcastTimer;
         private static float _lightBroadcastTimer;
         private static bool  _clientTrafficKilled;
@@ -113,12 +87,6 @@ namespace BigAmbitionsMP
             _trafficPrefabs      = null;
             _taxiResumeAt.Clear();
             _carRenderers.Clear();
-            _colorDiagHost   = 0;
-            _colorDiagClient = 0;
-            _colorDumpHost.Clear();
-            _colorDumpClient.Clear();
-            _truckDumpHost.Clear();
-            _truckDumpClient.Clear();
             _ghosts.Clear();          // ghost GameObjects die with the old scene
 
             // Ghost anchor (#7) — clear last-outside memory so a new game/save
@@ -288,18 +256,6 @@ namespace BigAmbitionsMP
                         _carColors[index] = new CarColorEntry { Model = model, Pos = pos, Colors = colors };
                     }
 
-                    if (_colorDiagHost < 8)
-                    {
-                        _colorDiagHost++;
-                        Plugin.Logger.LogInfo(
-                            $"[TrafficColor] host car[{index}] '{model}' {colors.Count / 6} group(s)");
-                    }
-                    bool truckH = LooksLikeTruck(model);
-                    bool dumpH  = ColorDumpEnabled && (truckH
-                        ? (_truckDumpHost.Count < 4 && _truckDumpHost.Add(index))
-                        : (_colorDumpHost.Count < 2 && _colorDumpHost.Add(index)));
-                    if (dumpH) DumpFullCarColor(go, index, "HOST", model);
-
                     snap.Cars.Add(new TrafficCarDto
                     {
                         Index = index,
@@ -317,117 +273,6 @@ namespace BigAmbitionsMP
             return snap;
         }
 
-        /// <summary>
-        /// Diagnostic — logs the complete colour/material state of a car.
-        /// For every non-wheel renderer dumps EACH material in `sharedMaterials`
-        /// (sub-meshes — a single MeshRenderer often has multiple slots, e.g. a
-        /// truck cab + box on the same mesh) with shader, name, all Color/
-        /// Vector/Float/Texture properties (shared + MPB).  Run on the host
-        /// (real car) and client (ghost) for the same index; diffing the two
-        /// pinpoints exactly what differs.
-        /// </summary>
-        private static void DumpFullCarColor(GameObject car, int index, string side, string model)
-        {
-            try
-            {
-                var rootT = car.transform;
-                var mpb = new MaterialPropertyBlock();
-                var rends = car.GetComponentsInChildren(typeof(Renderer), true);
-                int dumped = 0;
-                Plugin.Logger.LogInfo(
-                    $"[ColorDump] === {side} idx={index} model='{model}' renderers={rends.Length} ===");
-
-                for (int i = 0; i < rends.Length; i++)
-                {
-                    var r = rends[i] as Renderer;
-                    if (r == null) continue;
-                    if (r.gameObject.name.Contains("Wheel")) continue;   // noise
-
-                    string path = BuildHierarchyPath(r.transform, rootT);
-                    string rType = r.GetType().Name;
-
-                    // sharedMaterials = all sub-mesh slots (cab vs box can be
-                    // separate slots on the same MeshRenderer).
-                    var mats = r.sharedMaterials;
-                    int matCount = mats != null ? mats.Length : 0;
-
-                    if (matCount == 0)
-                    {
-                        Plugin.Logger.LogInfo(
-                            $"[ColorDump] {side} idx={index} [{dumped}] '{path}' ({rType}) NO_MAT");
-                        dumped++;
-                        continue;
-                    }
-
-                    r.GetPropertyBlock(mpb);
-
-                    for (int m = 0; m < matCount; m++)
-                    {
-                        var mat = mats[m];
-                        if (mat == null || mat.shader == null)
-                        {
-                            Plugin.Logger.LogInfo(
-                                $"[ColorDump] {side} idx={index} [{dumped}.{m}] '{path}' ({rType}) NULL_MAT");
-                            continue;
-                        }
-
-                        var sh = mat.shader;
-                        int n = sh.GetPropertyCount();
-                        Plugin.Logger.LogInfo(
-                            $"[ColorDump] {side} idx={index} [{dumped}.{m}] '{path}' ({rType}) shader='{sh.name}' mat='{mat.name}' props={n}");
-
-                        for (int p = 0; p < n; p++)
-                        {
-                            string pn = sh.GetPropertyName(p);
-                            string val;
-                            switch (sh.GetPropertyType(p))
-                            {
-                                case UnityEngine.Rendering.ShaderPropertyType.Color:
-                                    val = $"COL s={mat.GetColor(pn)} m={mpb.GetColor(pn)}"; break;
-                                case UnityEngine.Rendering.ShaderPropertyType.Vector:
-                                    val = $"VEC s={mat.GetVector(pn)} m={mpb.GetVector(pn)}"; break;
-                                case UnityEngine.Rendering.ShaderPropertyType.Float:
-                                case UnityEngine.Rendering.ShaderPropertyType.Range:
-                                    val = $"FLT s={mat.GetFloat(pn):0.###} m={mpb.GetFloat(pn):0.###}"; break;
-                                case UnityEngine.Rendering.ShaderPropertyType.Texture:
-                                {
-                                    var st = mat.GetTexture(pn);
-                                    var mt = mpb.GetTexture(pn);
-                                    val = $"TEX s='{(st != null ? st.name : "<null>")}'(id={(st != null ? st.GetInstanceID() : 0)}) m='{(mt != null ? mt.name : "<null>")}'(id={(mt != null ? mt.GetInstanceID() : 0)})";
-                                    break;
-                                }
-                                default:
-                                    continue;   // skip Int / others
-                            }
-                            Plugin.Logger.LogInfo($"[ColorDump] {side} idx={index} [{dumped}.{m}]   {pn} : {val}");
-                        }
-                    }
-                    dumped++;
-                }
-                Plugin.Logger.LogInfo(
-                    $"[ColorDump] === {side} idx={index} end ({dumped} non-wheel renderers) ===");
-            }
-            catch (Exception ex)
-            {
-                Plugin.Logger.LogWarning($"[ColorDump] {side} idx={index}: {ex.Message}");
-            }
-        }
-
-        /// <summary>"Body/Cab/RoofMesh" — hierarchy path relative to the car root.</summary>
-        private static string BuildHierarchyPath(Transform t, Transform root)
-        {
-            if (t == null) return "<null>";
-            if (t == root) return t.name;
-            var sb = new System.Text.StringBuilder(t.name);
-            var cur = t.parent;
-            while (cur != null && cur != root)
-            {
-                sb.Insert(0, "/");
-                sb.Insert(0, cur.name);
-                cur = cur.parent;
-            }
-            return sb.ToString();
-        }
 
         /// <summary>"VordTiaraVic(Clone)22" → "VordTiaraVic".</summary>
         private static string StripCloneSuffix(string name)
@@ -601,12 +446,6 @@ namespace BigAmbitionsMP
                     r.SetPropertyBlock(mpb);
                     ri++; applied++;
                 }
-                if (_colorDiagClient < 8)
-                {
-                    _colorDiagClient++;
-                    Plugin.Logger.LogInfo(
-                        $"[TrafficColor] ghost '{model}' apply {groups} group(s) → {applied} renderer(s)");
-                }
             }
             catch (Exception ex)
             {
@@ -774,15 +613,6 @@ namespace BigAmbitionsMP
                         g.LastColors = car.Colors;
                     }
 
-                    // Diagnostic — full colour dump of the first few coloured ghosts.
-                    if (ColorDumpEnabled && g.Go != null && g.LastColors != null)
-                    {
-                        bool truckC = LooksLikeTruck(car.Model);
-                        bool dumpC  = truckC
-                            ? (_truckDumpClient.Count < 4 && _truckDumpClient.Add(car.Index))
-                            : (_colorDumpClient.Count < 2 && _colorDumpClient.Add(car.Index));
-                        if (dumpC) DumpFullCarColor(g.Go, car.Index, "CLIENT", car.Model);
-                    }
                 }
 
                 // Despawn ghosts whose host car is no longer in the snapshot.
