@@ -310,11 +310,6 @@ namespace BigAmbitionsMP
         /// Moves an existing remote-player capsule, or spawns one on first call.
         /// No-ops when not in-game.
         /// </summary>
-        // CLAUDE-DIAGNOSTIC — master kill-switch flag.  When false, SpawnOrUpdate
-        // skips spawn AND skips position updates (so existing destroyed players
-        // don't get re-spawned).  Used by the F4 master toggle.
-        public static bool ClientSpawnEnabled { get; set; } = true;
-
         public static void DestroyAllRemotePlayers()
         {
             foreach (var kv in _players)
@@ -326,7 +321,6 @@ namespace BigAmbitionsMP
         public static void SpawnOrUpdate(PlayerPositionPayload p)
         {
             if (SaveGameManager.Current == null) return;
-            if (!ClientSpawnEnabled) return;          // CLAUDE-DIAGNOSTIC kill-switch
 
             // Don't spawn/update remote players until WE are actually standing in the
             // game world.  SaveGameManager.Current goes non-null at SaveGameManager.New()
@@ -976,13 +970,6 @@ namespace BigAmbitionsMP
         private static bool _animProbeMissing;
         private static readonly Dictionary<string, float> _animBaseline = new();
         private static readonly HashSet<string> _animChanged = new();
-
-        // Discovery probe — reads the FULL animator parameter array through
-        // interop EVERY FRAME (~110ms/frame while it ran, profiler-measured
-        // 2026-06-09: most of the host's terrible first minute).  The action-
-        // anim relay it informed shipped 2026-05-31; re-enable only for new
-        // animator research.
-        private static readonly bool AnimProbeEnabled = false;
 
         // ── Colour capture / apply ────────────────────────────────────────────
         //

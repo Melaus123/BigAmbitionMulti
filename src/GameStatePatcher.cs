@@ -27,14 +27,6 @@ namespace BigAmbitionsMP
 
         private static void RunOnMainThread(Action action) => _mainThreadQueue.Enqueue(action);
 
-        // CLAUDE-DIAGNOSTIC — kill-switch flags for the entry-bug investigation.
-        // Each apply path gates on its respective flag; F4 master toggle in
-        // MPCanvasUI flips them all at once so we can test which state-mutating
-        // sync (if any) is preventing the client's building-entry chain.
-        public static bool ClientApplyOwnership { get; set; } = true;
-        public static bool ClientApplyTime      { get; set; } = true;
-        public static bool ClientApplyMarket    { get; set; } = true;
-
         /// <summary>
         /// Public entry point so MPServer and MPClient can dispatch game-start actions
         /// from their background network threads onto the Unity main thread.
@@ -45,23 +37,19 @@ namespace BigAmbitionsMP
 
         public static void ApplyWorldSnapshot(WorldSnapshotPayload snap)
         {
-            if (!ClientApplyOwnership && !ClientApplyMarket) return;   // CLAUDE-DIAGNOSTIC F4 gate
             RunOnMainThread(() =>
             {
                 Plugin.Logger.LogInfo("[Patcher] Applying world snapshot...");
 
                 // Mark any buildings owned by other players as unavailable locally
-                if (ClientApplyOwnership)
+                foreach (var kv in snap.BuildingOwners)
                 {
-                    foreach (var kv in snap.BuildingOwners)
-                    {
-                        if (kv.Value != "" && kv.Value != MPConfig.PlayerId)
-                            MarkBuildingUnavailable(kv.Key);
-                    }
+                    if (kv.Value != "" && kv.Value != MPConfig.PlayerId)
+                        MarkBuildingUnavailable(kv.Key);
                 }
 
                 // Apply market entries
-                if (ClientApplyMarket && !string.IsNullOrEmpty(snap.MarketEntriesJson))
+                if (!string.IsNullOrEmpty(snap.MarketEntriesJson))
                     ApplyMarketSnapshot(snap.MarketEntriesJson);
 
                 Plugin.Logger.LogInfo("[Patcher] World snapshot applied.");
@@ -70,7 +58,6 @@ namespace BigAmbitionsMP
 
         public static void ApplyBuildingOwnership(BuildingOwnershipPayload payload)
         {
-            if (!ClientApplyOwnership) return;   // CLAUDE-DIAGNOSTIC F4 gate
             RunOnMainThread(() =>
             {
                 if (payload.OwnerPlayerId == MPConfig.PlayerId)
@@ -88,7 +75,6 @@ namespace BigAmbitionsMP
 
         public static void ApplyBuildingVacated(string addressKey)
         {
-            if (!ClientApplyOwnership) return;   // CLAUDE-DIAGNOSTIC F4 gate
             RunOnMainThread(() =>
             {
                 MarkBuildingAvailable(addressKey);
@@ -98,7 +84,6 @@ namespace BigAmbitionsMP
 
         public static void ApplyGameTime(GameTimeSyncPayload payload)
         {
-            if (!ClientApplyTime) return;        // CLAUDE-DIAGNOSTIC F4 gate
             RunOnMainThread(() =>
             {
                 try
@@ -305,7 +290,6 @@ namespace BigAmbitionsMP
         /// </summary>
         public static void ApplyRivalsSnapshot(RivalsSnapshotPayload payload)
         {
-            if (!ClientApplyOwnership) return;
             if (payload == null) return;
             RunOnMainThread(() =>
             {
@@ -485,7 +469,6 @@ namespace BigAmbitionsMP
         /// </summary>
         public static void ApplyRivalsStatsSnapshot(RivalsStatsSnapshotPayload payload)
         {
-            if (!ClientApplyOwnership) return;
             if (payload == null) return;
             RunOnMainThread(() =>
             {
@@ -679,7 +662,6 @@ namespace BigAmbitionsMP
         /// </summary>
         public static void ApplyInteriorSnapshot(InteriorSnapshotPayload payload)
         {
-            if (!ClientApplyOwnership) return;
             if (payload == null || string.IsNullOrEmpty(payload.AddressKey)) return;
             RunOnMainThread(() =>
             {
@@ -1411,7 +1393,6 @@ namespace BigAmbitionsMP
 
         public static void ApplyBusinessSnapshot(BusinessSnapshotPayload payload)
         {
-            if (!ClientApplyOwnership) return;   // gated under existing kill-switch flag
             MPLoadProfiler.Mark($"CLIENT ApplyBusinessSnapshot QUEUED ({payload.Businesses.Count} buildings)");
             RunOnMainThread(() =>
             {
@@ -1666,7 +1647,6 @@ namespace BigAmbitionsMP
 
         public static void ApplyBusinessChange(BusinessInfo info)
         {
-            if (!ClientApplyOwnership) return;
             RunOnMainThread(() =>
             {
                 if (ApplyBusinessInfoLocal(info))
@@ -2125,7 +2105,6 @@ namespace BigAmbitionsMP
 
         public static void ApplyMarketSnapshot(string marketJson)
         {
-            if (!ClientApplyMarket) return;      // CLAUDE-DIAGNOSTIC F4 gate
             RunOnMainThread(() =>
             {
                 try
