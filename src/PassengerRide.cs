@@ -23,7 +23,6 @@ namespace BigAmbitionsMP
         private static int    _localSeat = -1;
         private static bool   _pinned;            // arrived at the seat and locked to it
         private static float  _pinFallback;       // unscaled-time deadline to pin if the walk never arrives
-        private static GameObject? _hiddenModel;  // our "Model" child we hid (restore on exit)
         private static bool   _exitRequested;     // already asked the host to release us (car vanished)
         private static float  _ghostGoneSince = -1f;   // when our ridden ghost first went missing (-1 = present)
 
@@ -190,7 +189,8 @@ namespace BigAmbitionsMP
                              Vector3.Distance(ch.transform.position, ghost.TransformPoint(DoorLocal(_localSeat))) < 2.5f;
                 if (atCar || Time.unscaledTime >= _pinFallback) StartPin();
             }
-            if (_pinned) PinLocalToSeat(ghost, _localSeat);
+            // Once "in" (StartPin), nothing per-frame: ToggleVisibility deactivated the avatar and the
+            // vehicle camera follows the ghost directly, so the ride continues on its own.
         }
 
         private static void BeginLocalRide(string vehicleId, int seat)
@@ -210,33 +210,71 @@ namespace BigAmbitionsMP
             catch { /* walk failed — the pin fallback in TickLocalRide still seats us */ }
         }
 
+        // ── the "in the car" transition — the EXACT native enter calls (minus ownership/drive) ──
+        private static Transform? _savedCamFollow;
+        private static Transform? _savedCamLookAt;
+
         private static void StartPin()
         {
             if (_pinned || _localVeh == "") return;
             _pinned = true;
             try
             {
-                var ch = PlayerHelper.PlayerController?.Character;
-                if (ch == null) return;
-                var agent = ch.navmeshAgent;
-                if (agent != null)
-                    try { agent.updatePosition = false; agent.updateRotation = false; agent.isStopped = true; } catch { }
-                _hiddenModel = ch.transform.Find("Model")?.gameObject;   // don't render ourselves standing in the seat
-                if (_hiddenModel != null) _hiddenModel.SetActive(false);
+                var pc = PlayerHelper.PlayerController;
+                var ghost = VehicleManager.GhostTransform(_localVeh);
+                if (pc == null) return;
+                // Same thing entering a car does (VehicleController/CarController.EnterVehicle): hide
+                // the avatar, lock independent movement, switch to the vehicle camera — minus the two
+                // driver-only lines (ActiveVehicleId + controlledByPlayer), which we must NOT set on
+                // another player's car. The camera is pointed at the ghost since it isn't our own.
+                try { pc.Character?.ToggleVisibility(false); } catch { }   // avatar disappears (native)
+                SetVehicleNavBlocker(true);                                // movement locked (native)
+                SwitchToVehicleCamera(ghost);                              // camera → car view (native)
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] StartPin: {ex.Message}"); }
         }
 
-        private static void PinLocalToSeat(Transform ghost, int seat)
+        /// <summary>The game's own movement lock (PlayerController.SetNavigationBlocker) via reflection
+        /// — same registry as Map/Sleep/etc.; the enum isn't directly referenceable. Vehicle = 26.</summary>
+        private static void SetVehicleNavBlocker(bool blocked)
         {
             try
             {
-                var ch = PlayerHelper.PlayerController?.Character;
-                if (ch == null) return;
-                ch.transform.position = ghost.TransformPoint(SeatLocal(seat));
-                ch.transform.rotation = Quaternion.Euler(0f, ghost.eulerAngles.y, 0f);
+                var pc = PlayerHelper.PlayerController;
+                if (pc == null) return;
+                var m = pc.GetType().GetMethod(blocked ? "SetNavigationBlocker" : "UnsetNavigationBlocker",
+                    BindingFlags.Public | BindingFlags.Instance);
+                if (m == null) return;
+                var enumType = m.GetParameters()[0].ParameterType;
+                m.Invoke(pc, new[] { System.Enum.ToObject(enumType, 26) });   // NavigationBlocker.Vehicle
             }
-            catch { }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] navblock: {ex.Message}"); }
+        }
+
+        private static void SwitchToVehicleCamera(Transform? ghost)
+        {
+            try
+            {
+                var gm = InstanceBehavior<GameManager>.Instance;
+                var cam = gm != null ? gm.vehicleCamera : null;
+                if (cam == null) return;
+                _savedCamFollow = cam.Follow; _savedCamLookAt = cam.LookAt;   // restore for the driver later
+                if (ghost != null) { cam.Follow = ghost; cam.LookAt = ghost; }
+                CameraHelper.SetCamera(cam);
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] camera enter: {ex.Message}"); }
+        }
+
+        private static void RestoreCamera()
+        {
+            try
+            {
+                var gm = InstanceBehavior<GameManager>.Instance;
+                if (gm == null) return;
+                if (gm.vehicleCamera != null) { gm.vehicleCamera.Follow = _savedCamFollow; gm.vehicleCamera.LookAt = _savedCamLookAt; }
+                if (gm.pedestrianCamera != null) CameraHelper.SetCamera(gm.pedestrianCamera);
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] camera exit: {ex.Message}"); }
         }
 
         private static void EndLocalRide(bool beside)
@@ -248,18 +286,19 @@ namespace BigAmbitionsMP
                 var ch = pc?.Character;
                 var ghost = VehicleManager.GhostTransform(_localVeh);
 
-                if (_hiddenModel != null) { try { _hiddenModel.SetActive(true); } catch { } _hiddenModel = null; }
+                // Reverse the native enter (only if we actually got in): avatar back, movement
+                // unlocked, camera restored — then teleport to the exit door (current car position).
+                if (_pinned)
+                {
+                    try { ch?.ToggleVisibility(true); } catch { }   // re-activates the character
+                    SetVehicleNavBlocker(false);
+                    RestoreCamera();
+                }
 
                 if (ch != null)
                 {
-                    var agent = ch.navmeshAgent;
                     Vector3 outPos = (beside && ghost != null) ? ghost.TransformPoint(DoorLocal(_localSeat)) : ch.transform.position;
-                    if (agent != null)
-                    {
-                        try { agent.updatePosition = true; agent.updateRotation = true; agent.isStopped = false; } catch { }
-                        try { agent.Warp(outPos); } catch { ch.transform.position = outPos; }
-                    }
-                    else ch.transform.position = outPos;
+                    try { ch.navmeshAgent?.Warp(outPos); } catch { try { ch.transform.position = outPos; } catch { } }
                 }
                 try { pc?.ResetNavigation(); } catch { }
             }
