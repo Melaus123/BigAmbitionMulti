@@ -1059,6 +1059,11 @@ namespace BigAmbitionsMP
                 var arr = new Transform[anchors.Count];
                 for (int i = 0; i < anchors.Count; i++) arr[i] = anchors[i];
 
+                // DEV F6 mode 3: isolate the per-frame Gley feed — skip ONLY these
+                // three calls (UpdateCamera/UpdateCameraPositions/UpdateMaxCars) to
+                // see whether continuously re-feeding Gley is the 256ms/70ms spike.
+                if (MPCanvasUI.AblateTrafficFeed) return;
+
                 // Feed every player to both anchor APIs — UpdateCamera drives the
                 // active-grid squares (where traffic spawns), UpdateCameraPositions
                 // the density manager.
