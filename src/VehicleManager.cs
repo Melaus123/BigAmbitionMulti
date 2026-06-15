@@ -639,7 +639,13 @@ namespace BigAmbitionsMP
                 }
                 catch { }
                 var names = VehicleTypeHelper.GetVehicleTypeNames();
-                if (names == null) return 0;
+                if (names == null || names.Count == 0)
+                {
+                    Plugin.Logger.LogWarning("[VehProbe] no vehicle types available yet " +
+                        "(GetVehicleTypeNames empty) — be in a loaded game and try again.");
+                    return 0;
+                }
+                Plugin.Logger.LogInfo($"[VehProbe] {names.Count} vehicle type(s) total; finding uncollected…");
                 foreach (var type in names)
                 {
                     if (string.IsNullOrEmpty(type) || VehicleHierarchyProbe.HasDumped(type)) continue;

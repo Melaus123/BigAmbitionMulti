@@ -311,10 +311,14 @@ namespace BigAmbitionsMP
             // guarantees the path is ready so NO poll-thread handler ever calls IL2CPP.
             MPSaveManager.EnsureVersionCached();
 #if BAMP_DEV
-            // DIAG:INVESTIGATION(passenger-doors) — F5 spawns + probes the next few not-yet-seen
-            //   vehicle types (wheel/door data for the passenger seat table), then despawns them.
-            if (Input.GetKeyDown(KeyCode.F5))
+            // DIAG:INVESTIGATION(passenger-doors) — F6 spawns a visible row of the next few
+            //   not-yet-seen vehicle types (their wheel/door data is dumped). F5 was unreliable
+            //   (likely game-bound); F6 is the proven ablation key. Entry log proves it fired.
+            if (Input.GetKeyDown(KeyCode.F6))
+            {
+                Plugin.Logger.LogInfo("[VehProbe] F6 pressed — spawning the next uncollected vehicle batch.");
                 VehicleManager.DevProbeUncollected(5);
+            }
 #endif
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
