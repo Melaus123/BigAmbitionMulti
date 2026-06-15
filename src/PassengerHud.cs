@@ -25,14 +25,19 @@ namespace BigAmbitionsMP
         private static GameObject? _toast;
         private static TextMeshProUGUI? _toastLabel;
         private static float _toastUntil;
-        private static bool _built;
+        private static bool _baseBuilt;
+        private static bool _buttonsBuilt;
 
         public static void Tick()
         {
-            if (!_built && (MPServer.IsRunning || MPClient.IsConnected)) Build();
+            if (!_baseBuilt && (MPServer.IsRunning || MPClient.IsConnected)) BuildBase();
             if (_canvas == null) return;
 
             bool seated = PassengerRide.IsSeated;
+            // Build the buttons the FIRST time we're seated — by then we're deep in-game and the
+            // ItemPanelUI.Start postfix has cached NativePanel, so the native clone actually works.
+            // (Building eagerly on the first MP frame ran before the HUD existed → ugly fallback.)
+            if (seated && !_buttonsBuilt) BuildButtons();
             if (_buttonPanel != null && _buttonPanel.activeSelf != seated) _buttonPanel.SetActive(seated);
 
             bool toastOn = Time.unscaledTime < _toastUntil;
@@ -42,7 +47,7 @@ namespace BigAmbitionsMP
         /// <summary>Briefly flash a centred message (e.g. "Vehicle locked.").</summary>
         public static void Toast(string msg)
         {
-            if (!_built) Build();
+            if (!_baseBuilt) BuildBase();
             if (_toastLabel != null) _toastLabel.text = msg;
             _toastUntil = Time.unscaledTime + 2f;
             if (_toast != null) _toast.SetActive(true);
@@ -59,9 +64,9 @@ namespace BigAmbitionsMP
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[PassengerHud] sleep: {ex.Message}"); }
         }
 
-        private static void Build()
+        private static void BuildBase()
         {
-            _built = true;   // even on failure — don't retry a broken build every frame
+            _baseBuilt = true;   // even on failure — don't retry a broken build every frame
             try
             {
                 var canvasGO = new GameObject("BAMP_PassengerHud");
@@ -78,26 +83,38 @@ namespace BigAmbitionsMP
                 _buttonPanel = new GameObject("Buttons");
                 _buttonPanel.transform.SetParent(canvasGO.transform, false);
                 var prt = _buttonPanel.AddComponent<RectTransform>();
-                prt.anchorMin = prt.anchorMax = prt.pivot = new Vector2(1f, 0f);
+                prt.anchorMin = prt.anchorMax = prt.pivot = new Vector2(0.5f, 0f);   // bottom-centre
                 prt.anchoredPosition = Vector2.zero;
-
-                bool cloned = false;
-                if (NativePanel != null)
-                {
-                    var exit  = CloneNativeButton(_buttonPanel.transform, NativePanel.parkButton,  "Exit Vehicle",
-                                                  new UnityEngine.Events.UnityAction(PassengerRide.RequestExit), new Vector2(-40f, 40f));
-                    var sleep = CloneNativeButton(_buttonPanel.transform, NativePanel.sleepButton, "Sleep",
-                                                  new UnityEngine.Events.UnityAction(OnSleep), new Vector2(-40f, 112f));
-                    cloned = exit != null;
-                }
-                if (!cloned) BuildPlainExit(_buttonPanel.transform);   // fallback if the native panel wasn't ready
-
                 _buttonPanel.SetActive(false);
 
                 _toast = BuildToast(canvasGO.transform);
                 _toast.SetActive(false);
             }
-            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[PassengerHud] build: {ex.Message}"); }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[PassengerHud] base build: {ex.Message}"); }
+        }
+
+        private static void BuildButtons()
+        {
+            _buttonsBuilt = true;
+            try
+            {
+                if (_buttonPanel == null) return;
+                bool cloned = false;
+                if (NativePanel != null)
+                {
+                    var exit  = CloneNativeButton(_buttonPanel.transform, NativePanel.parkButton,  "Exit Vehicle",
+                                                  new UnityEngine.Events.UnityAction(PassengerRide.RequestExit), new Vector2(0f, 40f));
+                    var sleep = CloneNativeButton(_buttonPanel.transform, NativePanel.sleepButton, "Sleep",
+                                                  new UnityEngine.Events.UnityAction(OnSleep), new Vector2(0f, 112f));
+                    cloned = exit != null;
+                }
+                if (!cloned)
+                {
+                    BuildPlainExit(_buttonPanel.transform);
+                    Plugin.Logger.LogWarning("[PassengerHud] native panel not cached at seat time — plain Exit button used.");
+                }
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[PassengerHud] button build: {ex.Message}"); }
         }
 
         private static GameObject? CloneNativeButton(Transform parent, Button src, string label,
@@ -110,7 +127,7 @@ namespace BigAmbitionsMP
             var rt = clone.GetComponent<RectTransform>();
             if (rt != null)
             {
-                rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(1f, 0f);   // bottom-right
+                rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0.5f, 0f);   // bottom-centre
                 rt.anchoredPosition = anchoredPos;
             }
 
@@ -142,9 +159,9 @@ namespace BigAmbitionsMP
             var img = btnGO.AddComponent<Image>();
             img.color = new Color(0.12f, 0.12f, 0.14f, 0.92f);
             var rt = btnGO.GetComponent<RectTransform>();
-            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(1f, 0f);
-            rt.anchoredPosition = new Vector2(-40f, 40f);
-            rt.sizeDelta = new Vector2(220f, 56f);
+            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0.5f, 0f);   // bottom-centre
+            rt.anchoredPosition = new Vector2(0f, 40f);
+            rt.sizeDelta = new Vector2(240f, 56f);
             var btn = btnGO.AddComponent<Button>();
             btn.onClick = new Button.ButtonClickedEvent();
             btn.onClick.AddListener(new UnityEngine.Events.UnityAction(PassengerRide.RequestExit));

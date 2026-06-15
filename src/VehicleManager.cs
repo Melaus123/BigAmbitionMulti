@@ -389,7 +389,18 @@ namespace BigAmbitionsMP
                             // A shove or network hiccup yields an absurd velocity; dead-reckoning it
                             // (TickSmoothing) makes the ghost ZOOM across the map. Cap it — no car
                             // exceeds ~60 m/s, so anything faster means "don't extrapolate".
-                            rv.Velocity = v.magnitude > MaxVehicleSpeed ? Vector3.zero : v;
+                            bool _capped = v.magnitude > MaxVehicleSpeed;
+                            rv.Velocity = _capped ? Vector3.zero : v;
+#if BAMP_DEV
+                            // DIAG:INVESTIGATION(vehicle-zoom) — the smoking gun: a packet that WOULD
+                            //   have flung the ghost across the map (runaway extrapolation velocity).
+                            //   If this fires, the cap is suppressing the zoom; if it never fires but
+                            //   the zoom is still seen, the cause is elsewhere.
+                            if (_capped)
+                                Plugin.Logger.LogWarning(
+                                    $"[VehZoom] CAP '{e.VehicleId}' runaway vel {v.magnitude:F0} m/s zeroed " +
+                                    $"(Δ{Vector3.Distance(rv.TargetPos, pos):F1}m vdt={vdt:F3})");
+#endif
                         }
                     }
                     rv.TargetPos = pos;

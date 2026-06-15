@@ -180,7 +180,16 @@ namespace BigAmbitionsMP
             }
             _ghostGoneSince = -1f;
 
-            if (!_pinned && Time.unscaledTime >= _pinFallback) StartPin();
+            // Become "seated" (which is what shows the Exit HUD) only once we've actually REACHED the
+            // car — not on a short timer while still walking up, and not if we never make it. The
+            // timeout is just a backstop for a failed walk path (then we warp into the seat).
+            if (!_pinned)
+            {
+                var ch = PlayerHelper.PlayerController?.Character;
+                bool atCar = ch != null &&
+                             Vector3.Distance(ch.transform.position, ghost.TransformPoint(DoorLocal(_localSeat))) < 2.5f;
+                if (atCar || Time.unscaledTime >= _pinFallback) StartPin();
+            }
             if (_pinned) PinLocalToSeat(ghost, _localSeat);
         }
 
@@ -188,7 +197,7 @@ namespace BigAmbitionsMP
         {
             _localVeh = vehicleId; _localSeat = seat; _pinned = false;
             _exitRequested = false; _ghostGoneSince = -1f;
-            _pinFallback = Time.unscaledTime + 4f;   // pin anyway if the walk never arrives
+            _pinFallback = Time.unscaledTime + 10f;   // backstop only: warp into the seat if the walk fails
 
             var pc = PlayerHelper.PlayerController;
             var ghost = VehicleManager.GhostTransform(vehicleId);
