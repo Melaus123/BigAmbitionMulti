@@ -156,7 +156,7 @@ namespace BigAmbitionsMP
             {
                 if (!_ikHumanChecked) { _ikHumanChecked = true; _ikHuman = Anim.isHuman; }
                 if (!_ikHuman) return;
-                long _pf = MPPerf.Begin();   // DIAG: per-remote IK solve cost
+                long _pf = MPPerf.Begin();   // DIAG:FIELD — per-remote IK solve cost (RemLate bracket)
 
                 // Smooth the anchors — packets step at 10 Hz and raw application
                 // makes the hands pop between spots.
@@ -199,7 +199,7 @@ namespace BigAmbitionsMP
 
         private void Update()
         {
-            long _pf = MPPerf.Begin();   // DIAG: per-remote per-frame avatar mirror cost
+            long _pf = MPPerf.Begin();   // DIAG:FIELD — per-remote avatar mirror cost (RemUpd bracket)
             // Riding/pushing an open vehicle: follow the vehicle ghost rigidly
             // (position + facing) — its own dead reckoning does the smoothing.
             if (RideAttach != null)

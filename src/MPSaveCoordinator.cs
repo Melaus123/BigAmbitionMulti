@@ -551,6 +551,7 @@ namespace BigAmbitionsMP
         // any managed exception — with its full stack — right before a crash.
         // Per-process file (PID in the name) so the host's and client's traces don't
         // interleave in one file when both run on the same machine.
+        // DIAG:DEVTOOL — save/exception tracing → C:\dumps (#if BAMP_DEV only). See docs/DIAGNOSTICS.md.
         private static readonly string DiagFile = $@"C:\dumps\savediag.{System.Diagnostics.Process.GetCurrentProcess().Id}.txt";
         private static bool          _diagInstalled;
         private static volatile bool _diagActive;

@@ -11,6 +11,9 @@ namespace BigAmbitionsMP
     /// attributed to a specific system, or ruled out as mod-caused entirely.
     /// Costs ~nothing while enabled (a Stopwatch read per bracket).
     /// </summary>
+    // DIAG:FIELD — the [Perf] summary + all per-subsystem brackets (incl. RemUpd/RemLate)
+    //   ship in the player build so submitted bug-report logs carry perf data.
+    //   Log-only, cheap. See docs/DIAGNOSTICS.md.
     public static class MPPerf
     {
         // Always on in every build (2026-06-14).  The per-bracket Stopwatch reads

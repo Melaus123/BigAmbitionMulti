@@ -18,6 +18,7 @@ namespace BigAmbitionsMP
     /// loadprof files.  Each line: "&lt;wall&gt;  [&lt;elapsed&gt; ms][t&lt;thread&gt;] &lt;label&gt;".
     /// Durations are logged as "&lt;label&gt; took &lt;n&gt; ms" via Span().
     /// </summary>
+    // DIAG:DEVTOOL — load-timing profiler → C:\dumps (#if BAMP_DEV only; no-ops in player builds). See docs/DIAGNOSTICS.md.
     public static class MPLoadProfiler
     {
         /// <summary>Diagnostic scaffolding — excluded from the shipped build.  ON

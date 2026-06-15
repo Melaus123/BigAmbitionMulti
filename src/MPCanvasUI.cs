@@ -2090,6 +2090,8 @@ namespace BigAmbitionsMP
         /// locomotion drivers) → current state per layer (hash + normalizedTime, so
         /// we can see if it's frozen).  Run in SP (works) then host (broken) and diff
         /// the lines: the field that differs is where the chain breaks.</summary>
+        // DIAG:INVESTIGATION(anim-norun) — open "no running animation" host bug. Called only
+        //   under #if BAMP_DEV; remove when that bug is closed. See docs/DIAGNOSTICS.md.
         private void TickAnimProbe()
         {
             if (!IsInGame()) return;
@@ -2600,34 +2602,10 @@ namespace BigAmbitionsMP
         // game's own state machine isn't disturbed.
         private static Canvas? _blackOverlayCanvas;
         private static float _blackOverlayFindTimer;
-        // CLAUDE-DIAGNOSTIC — A/B toggle for backlog #6 first-domino test.
-        // Default ON (current behaviour).  F12 toggles live; when OFF the
-        // suppressor stands down and we'll see the game's natural behaviour
-        // around the BlackOverlay canvas.
-        private static bool _bsoEnabled = true;
-        private bool _bsoF12Down;
-
         private void TickSuppressBlackOverlay()
         {
             if (!MPClient.IsConnected) return;
             if (!IsInGame()) return;
-
-            // F12 toggle — flip the suppression flag, and if turning OFF,
-            // immediately re-enable the canvas in case we'd disabled it.
-            bool f12 = Input.GetKey(KeyCode.F12);
-            if (f12 && !_bsoF12Down)
-            {
-                _bsoEnabled = !_bsoEnabled;
-                Plugin.Logger.LogInfo($"[ClientFix] BlackOverlay suppression toggled → {_bsoEnabled}");
-                if (!_bsoEnabled && _blackOverlayCanvas != null)
-                {
-                    try { _blackOverlayCanvas.enabled = true; } catch { }
-                    Plugin.Logger.LogInfo("[ClientFix] BlackOverlay re-enabled (toggled off).");
-                }
-            }
-            _bsoF12Down = f12;
-
-            if (!_bsoEnabled) return;     // suppression off — stand down
 
             // If we've lost the cached reference (Unity destroyed the canvas
             // on scene change, etc.), rescan periodically.
