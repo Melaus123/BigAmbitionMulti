@@ -237,7 +237,14 @@ above the passenger seat ("X riding"). You don't see your own (normal). 1c wires
   new game. **State now syncs across machines when triggered** — but nothing triggers it yet
   (no CTA/UI) and there's no visible ride.
 
-**Next — gameplay (the visible board → ride → exit; needs an in-game test):**
+**Next — gameplay (the visible board → ride → exit; needs an in-game test).** Hooks grounded:
+- Local-player control: walk = `playerController.SetGoal(point, onArrive)` (the game's own
+  enter mechanism) or `Character.MoveToPosition(...)`; pin = `Character.navmeshAgent.Warp(
+  seatWorld)` per frame; freeze = `Character.Freeze()`/`UnFreeze()` (`BaseHuman`); exit =
+  `playerController.ResetNavigation()` + `Warp` beside the car.
+- CTA = mirror `VehicleCtaBehavior`; camera = `GameManager.vehicleCamera` (Cinemachine) via
+  `CameraHelper.SetCamera`, Follow → ghost; UI = `ItemPanelUI` buttons + `VehicleInfoPanel.CanSleep()`.
+
 - **Board CTA:** mirror `VehicleCtaBehavior` on the vehicle overlay → a "Ride" CTA for
   another player's *unlocked* ghost → `SendBoardRequest`.
 - **Ride mechanic:** on approved `121`, walk the local player to the derived passenger door
