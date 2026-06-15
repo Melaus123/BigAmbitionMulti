@@ -601,6 +601,9 @@ namespace BigAmbitionsMP
                 $"{ownedBefore}→{ownedAfterSpawn}→{ownedAfterStrip}, poi='{poiName}', " +
                 $"{killed} gameplay component(s) destroyed.");
 
+#if BAMP_DEV
+            VehicleHierarchyProbe.DumpOnce(go, e.TypeName);   // DIAG:DEVTOOL — passenger door/seat discovery (once per type)
+#endif
             var label = CreateOwnerLabel(go, ownerId);
             return new RemoteVehicle
             {

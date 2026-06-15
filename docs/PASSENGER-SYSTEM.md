@@ -1,6 +1,6 @@
 # Passenger ("ride shotgun") system — design plan
 
-Status: **design / not started.** Living doc — update as decisions firm up.
+Status: **design complete; door-data probe built; implementation not started.** Living doc.
 
 ## Goal
 
@@ -134,14 +134,14 @@ The driver keeps their normal menu (park / sell / sleep) plus the new **Lock** t
   unlocked, host-validated); board via existing enter flow + lock-check-first + "door
   locked" popup; pin local player to the ghost (reuse `RideAttach`); hide model + camera
   follow; exit beside car; lock toggle on the in-car menu.
-- **P2:** per-`vehicleTypeName` door table (via RideProbe) + walk-to-correct-door; driver "kick."
+- **P2:** per-`vehicleTypeName` door table (offsets captured via a small rebuilt dev helper) + walk-to-correct-door; driver "kick."
 - **P3:** multiple seats / passengers; seat-availability UI.
 - **P4 (optional):** visible seated body model.
 
 ## Borrow vs build
 
 - **Already ours (reuse):** driven-vehicle sync, ghost-car objects, avatar→ghost pinning,
-  per-type offset table, RideProbe, drive-visibility hiding.
+  per-type offset table, drive-visibility hiding.
 - **Build new:** the lock state + UI toggle, host-authoritative passenger eligibility/seat
   assignment, the "door locked" popup, passenger-side offsets (vs the existing driver
   offset), and the exit-beside-car placement.
@@ -149,13 +149,39 @@ The driver keeps their normal menu (park / sell / sleep) plus the new **Lock** t
   that the freeze + pin + hide-model + camera-lock + reboard-cooldown shape works; we
   already have the pin half.
 
-## Open items
+## Open items — resolved (implementation hooks identified)
 
 1. ~~Does a remote driver render a car?~~ **Resolved:** yes — `VehicleManager._remoteVehicles`
    gives a per-`VehicleId` ghost car object; board targets it.
-2. **Board/exit trigger:** reuse the driver's enter interaction (decided). Confirm the
-   exact input/prompt hook used for entering a car and mirror it for the passenger door.
-3. **Lock UI hook (to investigate):** exact injection point on `itemPanelUI.vehicleInfo`
-   (locate the park/sell controls, add a sibling toggle via our uGUI injection).
-4. **Rider camera (to investigate):** reuse `GameManager.vehicleCamera` locked to the ghost
-   vs our own follow cam.
+2. **Board/exit trigger — resolved.** Entering a car is **UI-CTA-driven**: `VehicleOverlay`
+   / `VehicleCtaBehavior` call `VehicleController.DriveVehicle()` (which runs the `SetGoal`
+   walk-to-entrance). For boarding we add a parallel **"Ride" CTA** on the vehicle overlay,
+   shown only when the target is another player's *unlocked* ghost, that runs our board flow
+   (lock check → `SetGoal(passengerDoor)` → pin). Exit mirrors it.
+3. **Lock UI + passenger HUD — resolved.** The in-car buttons live on **`ItemPanelUI`**
+   (`autoParkButton`, `sleepButton`; `vehicleInfo` is a `VehicleInfoPanel`). Sleep
+   eligibility is **`VehicleInfoPanel.CanSleep()`** — reuse it verbatim (decision 8). The
+   **lock toggle** is a sibling button injected onto `ItemPanelUI`, shown only to the
+   driver/owner. The **passenger HUD** mirrors this panel: `sleepButton` gated by
+   `CanSleep()` + an **"Exit Vehicle"** button (the park action, relabeled), no sell, no driving.
+4. **Rider camera — resolved.** `CameraHelper.SetCamera(GameManager.Instance.vehicleCamera)`
+   (a Cinemachine vcam). For the passenger, point the vcam's Follow target at the ghost
+   transform; restore on exit.
+
+## Door/seat data — probe built (run it to decide read-vs-derive)
+
+`VehicleHierarchyProbe` (`src/VehicleHierarchyProbe.cs`, `DIAG:DEVTOOL`, `#if BAMP_DEV`)
+dumps each vehicle type's child transforms **once**, on the first ghost spawn of that type.
+To collect: run a **Dev** host+client session and drive a few different cars; the *observer's*
+log gets, per type:
+
+```
+[VehProbe] === '<type>' : N transforms; footprint(local) ~ W=.. H=.. L=.. ===
+[VehProbe] <type> **  'Door_FR' local=(x,y,z)      ← '**' flags door/seat/enter names
+[VehProbe] === '<type>' end — K door/seat/enter-named transform(s) (READ … / DERIVE …) ===
+```
+
+If **K>0** → the prefabs name their doors and we **read** door positions straight off the
+ghost (no manual measuring, all types). If **K=0** → no named doors, so we **derive** a
+passenger-side offset from the footprint width. Seat *count* is authored either way (a short
+`vehicleTypeName`-keyed table).
