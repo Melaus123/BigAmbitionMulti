@@ -14,6 +14,12 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class MPConfig
     {
+        public sealed class BugReportDiscordTag
+        {
+            public string Label = "";
+            public string Id = "";
+        }
+
         public static string PlayerId { get; private set; } = "Player1";
         public static string HostIP   { get; private set; } = "127.0.0.1";
         public static int    Port     { get; private set; } = 7777;
@@ -101,6 +107,96 @@ namespace BigAmbitionsMP
         /// <summary>The mod's install folder (ModsLocal\BigAmbitionsMP) — asset
         /// lookups (icons) read from here; replaces BepInEx.Paths.PluginPath.</summary>
         public static string ModRootPath { get; private set; } = ".";
+        public static string ConfigPath => _cfgPath;
+
+        public static string BugReportDiscordWebhookUrlLive()
+        {
+            try
+            {
+                return GetLiveString("BugReportDiscordWebhookUrl").Trim();
+            }
+            catch { return ""; }
+        }
+
+        public static string BugReportDiscordCrashTagIdLive()
+        {
+            try { return CleanDiscordTagId(GetLiveString("BugReportDiscordCrashTagId")); }
+            catch { return ""; }
+        }
+
+        public static IReadOnlyList<BugReportDiscordTag> BugReportDiscordBugTagsLive()
+        {
+            var tags = new List<BugReportDiscordTag>();
+            try
+            {
+                string raw = GetLiveString("BugReportDiscordBugTags");
+                if (string.IsNullOrWhiteSpace(raw)) return tags;
+
+                foreach (var part in raw.Split(new[] { ';', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    string item = part.Trim();
+                    if (item.Length == 0) continue;
+
+                    string label;
+                    string id;
+                    int eq = item.IndexOf('=');
+                    if (eq >= 0)
+                    {
+                        label = item.Substring(0, eq).Trim();
+                        id = item.Substring(eq + 1).Trim();
+                    }
+                    else
+                    {
+                        label = "Bug";
+                        id = item;
+                    }
+
+                    id = CleanDiscordTagId(id);
+                    if (id.Length == 0) continue;
+                    if (label.Length == 0) label = "Bug";
+                    tags.Add(new BugReportDiscordTag { Label = label, Id = id });
+                }
+            }
+            catch { }
+            return tags;
+        }
+
+        public static bool AllowBugReportCrashTestLive()
+        {
+            try
+            {
+                string v = GetLiveString("AllowBugReportCrashTest");
+                return v.Equals("true", StringComparison.OrdinalIgnoreCase)
+                       || v.Equals("1", StringComparison.OrdinalIgnoreCase)
+                       || v.Equals("yes", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+
+        private static string GetLiveString(string key)
+        {
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(_cfgPath) && File.Exists(_cfgPath))
+                {
+                    var live = JsonConvert.DeserializeObject<Dictionary<string, string>>(File.ReadAllText(_cfgPath));
+                    if (live != null && live.TryGetValue(key, out var v))
+                        return v ?? "";
+                }
+            }
+            catch { }
+            return Get(key);
+        }
+
+        private static string CleanDiscordTagId(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return "";
+            value = value.Trim();
+            var chars = new List<char>(value.Length);
+            foreach (char c in value)
+                if (char.IsDigit(c)) chars.Add(c);
+            return new string(chars.ToArray());
+        }
 
         /// <summary>The GAME install root this process runs from (e.g.
         /// "C:\BigAmbitions2").  ModsLocal is SHARED by every install
