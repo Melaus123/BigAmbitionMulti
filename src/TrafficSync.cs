@@ -795,8 +795,28 @@ namespace BigAmbitionsMP
                 var t = g.Go.transform;
                 float ahead = Mathf.Min(now - g.TargetAt, MaxExtrapolateSeconds);
                 var predicted = g.TargetPos + g.Velocity * ahead;
+#if BAMP_DEV
+                Vector3 _pre = t.position;
+#endif
                 t.position = Vector3.Lerp(t.position, predicted, k);
                 t.rotation = Quaternion.Slerp(t.rotation, g.TargetRot, k);
+#if BAMP_DEV
+                // DIAG:INVESTIGATION(traffic-streak) — the actual reported artifact: a traffic ghost
+                //   moving a big distance in ONE frame, especially SIDEWAYS (offAxis ~90° = across its
+                //   own facing = off the road network). Logs the inputs so we can tell whether it's a
+                //   far TargetPos (snapshot/pool reuse), runaway Velocity, or stale extrapolation.
+                {
+                    Vector3 mv = t.position - _pre;
+                    float d = mv.magnitude;
+                    if (d > 3f)
+                    {
+                        float offAxis = mv.sqrMagnitude > 0.0001f ? Vector3.Angle(t.forward, mv) : 0f;
+                        Plugin.Logger.LogWarning(
+                            $"[TrafStreak] {d:F1}m/frame offAxis={offAxis:F0}° vel={g.Velocity.magnitude:F1} ahead={ahead:F2} " +
+                            $"from=({_pre.x:F0},{_pre.z:F0}) to=({t.position.x:F0},{t.position.z:F0}) tgt=({g.TargetPos.x:F0},{g.TargetPos.z:F0})");
+                    }
+                }
+#endif
             }
         }
 

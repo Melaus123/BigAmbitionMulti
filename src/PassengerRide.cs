@@ -76,7 +76,17 @@ namespace BigAmbitionsMP
             }
             // Locked cars STILL highlight (so you can tell they're interactable) — clicking one
             // tells you it's locked instead of boarding.
-            if (hit != _hovered) { ClearHighlight(); if (hit != "") SetHighlight(hit); _hovered = hit; }
+            if (hit != _hovered)
+            {
+#if BAMP_DEV
+                // DIAG:INVESTIGATION(passenger-highlight) — is the cursor actually hitting a ghost,
+                //   and did the outline layer resolve? Distinguishes "raycast misses" from "outline
+                //   resolved but not rendering" (you reported not seeing the highlight this build).
+                if (hit != "")
+                    Plugin.Logger.LogInfo($"[RideHi] hover ghost '{hit}' locked={PassengerSync.IsLocked(hit)} outlineLayer={OutlineLayer()}");
+#endif
+                ClearHighlight(); if (hit != "") SetHighlight(hit); _hovered = hit;
+            }
             if (_hovered != "" && Input.GetMouseButtonDown(0))
             {
                 if (PassengerSync.IsLocked(_hovered)) PassengerHud.Toast("Vehicle locked.");
@@ -90,12 +100,20 @@ namespace BigAmbitionsMP
             if (layer < 0) return;   // unresolved — skip the visual; click-to-board still works
             var t = VehicleManager.GhostTransform(vid);
             if (t == null) return;
+            int n = 0;
             foreach (var r in t.GetComponentsInChildren<Renderer>(true))
             {
                 if (r == null) continue;
                 _hiLayers.Add((r.gameObject, r.gameObject.layer));
                 r.gameObject.layer = layer;
+                n++;
             }
+#if BAMP_DEV
+            // DIAG:INVESTIGATION(passenger-highlight) — n=0 means the ghost has no renderers to
+            //   outline; n>0 but no visible outline means the game's outline pass isn't drawing our
+            //   ghosts on that layer (→ different fix needed).
+            Plugin.Logger.LogInfo($"[RideHi] highlight '{vid}': {n} renderer(s) → layer {layer}");
+#endif
         }
 
         private static void ClearHighlight()
