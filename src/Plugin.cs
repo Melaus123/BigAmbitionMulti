@@ -40,6 +40,7 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"BigAmbitionsMP loading (official loader, modId='{context.ModId}', root='{context.ModRootPath}')...");
 
             MPConfig.Init(context.ModRootPath);
+            MPBugReport.MarkSessionStarted();
 
             // Persistent host object for our UI component (Mono: custom
             // MonoBehaviours need no registration — AddComponent just works).
@@ -77,6 +78,7 @@ namespace BigAmbitionsMP
 
         public override Task OnUnloadAsync()
         {
+            try { MPBugReport.MarkCleanShutdown(); } catch { }
             try { _harmony?.UnpatchAll(_harmony.Id); } catch { }
             try { MPServer.Stop(); } catch { }
             try { MPClient.Disconnect(); } catch { }

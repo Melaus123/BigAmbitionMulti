@@ -46,6 +46,27 @@ This beta exists to find bugs, so please report them. [Open an issue](https://gi
   %USERPROFILE%\AppData\LocalLow\Hovgaard Games\Big Ambitions\Player.log
   ```
 
+In multiplayer, click the `Report` button in the in-game chat window to open a bug report form. Use `Attach files` to include screenshots, short videos, logs, or other useful files. Files over 24 MB are kept out of the Discord upload so one large video does not make the whole report fail.
+
+In multiplayer chat, you can also type `/bug what happened here`. The mod creates a report folder under:
+
+```
+%USERPROFILE%\AppData\LocalLow\Hovgaard Games\Big Ambitions\ModsLocal\BigAmbitionsMP\bug-reports\
+```
+
+To send reports to Discord automatically, add `BugReportDiscordWebhookUrl` to the mod config JSON with your Discord webhook URL. The webhook is never hardcoded in the mod. Discord uploads include the player's description, `Player.log`, `Player-prev.log` when present, `bamp-ring.log`, and selected attachments; the local report folder keeps a fuller set for deeper investigation.
+
+For Discord forum channels with required tags, configure the forum tag IDs in the mod config JSON:
+
+```
+"BugReportDiscordCrashTagId": "123456789012345678",
+"BugReportDiscordBugTags": "Bugs=123456789012345679;Performance=123456789012345680;Desync=123456789012345681"
+```
+
+Crash reports apply the crash tag automatically. Manual bug reports show a `Type` button in the report popup so the player can choose one of the configured bug tags before sending.
+
+For local testing only, `AllowBugReportCrashTest=true` enables `/bugcrash confirm reason`. This intentionally closes the game so the next launch can show the crash-report popup.
+
 ## Building from source
 
 Requires the .NET SDK and a local Big Ambitions install (the project references the game's own assemblies). Build the shipping mod with `dotnet build -c Release`; run `package.ps1` to produce a distributable zip. A `dotnet build -c Dev` build re-enables developer/diagnostic tooling that the shipped build leaves out.
