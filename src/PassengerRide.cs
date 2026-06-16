@@ -170,10 +170,14 @@ namespace BigAmbitionsMP
                 // seat so we don't hold a phantom occupancy. NEVER pin without a car — that used to
                 // freeze + hide the player in place ("got the Exit button but never got in").
                 if (_ghostGoneSince < 0f) _ghostGoneSince = Time.unscaledTime;
-                else if (Time.unscaledTime - _ghostGoneSince > 3f && !_exitRequested)
+                else if (Time.unscaledTime - _ghostGoneSince > 3f)
                 {
-                    RequestExit();
-                    _exitRequested = true;
+                    // Car stayed gone — owner drove far / desynced / DISCONNECTED. Disembark LOCALLY:
+                    // revert to our normal avatar + restore camera/movement even if the host is gone
+                    // and can never confirm the exit. Never leave the passenger stuck hidden + frozen.
+                    RequestExit();                                 // best-effort host notify (no-op if host gone)
+                    PassengerSync.ApplyExit(MPConfig.PlayerId);    // clear our local ride mirror (prevents re-begin)
+                    EndLocalRide(beside: false);                   // ToggleVisibility(true) + unlock + restore camera
                 }
                 return;
             }

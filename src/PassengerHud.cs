@@ -44,6 +44,13 @@ namespace BigAmbitionsMP
             if (_toast != null && _toast.activeSelf != toastOn) _toast.SetActive(toastOn);
         }
 
+        /// <summary>Toast a host board-rejection reason ("vehicle full" → "Vehicle full.").</summary>
+        public static void ToastReason(string reason)
+        {
+            if (string.IsNullOrEmpty(reason)) return;
+            Toast(char.ToUpper(reason[0]) + reason.Substring(1) + ".");
+        }
+
         /// <summary>Briefly flash a centred message (e.g. "Vehicle locked.").</summary>
         public static void Toast(string msg)
         {

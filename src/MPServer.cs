@@ -2074,7 +2074,11 @@ namespace BigAmbitionsMP
                 res.Seat = seat;
                 PassengerSync.ApplyBoard(vehicleId, playerId, seat);
             }
-            else { res.Seat = -1; res.Reason = reason; }
+            else
+            {
+                res.Seat = -1; res.Reason = reason;
+                if (playerId == MPConfig.PlayerId) PassengerHud.ToastReason(reason);   // host's own click → feedback
+            }
             Broadcast(MessageEnvelope.Create(MessageType.PassengerBoardResult, MPConfig.PlayerId, res));
         }
 

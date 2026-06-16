@@ -925,7 +925,7 @@ namespace BigAmbitionsMP
             GameStatePatcher.EnqueueOnMainThread(() =>
             {
                 if (p.Seat >= 0) PassengerSync.ApplyBoard(p.VehicleId, p.PlayerId, p.Seat);
-                // (rejection reason → the local requester's "door locked" popup is wired in the ride layer)
+                else if (p.PlayerId == MPConfig.PlayerId) PassengerHud.ToastReason(p.Reason);   // "Vehicle full." etc.
             });
         }
 
