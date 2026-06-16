@@ -681,6 +681,17 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.InteriorOwnerSnapshot:
+                {
+                    var p = env.GetPayload<InteriorSnapshotPayload>();
+                    if (p != null)
+                    {
+                        var pc = peer;
+                        GameStatePatcher.EnqueueOnMainThread(() => InteriorSync.HandleOwnerSnapshot(pc, senderPid, p));
+                    }
+                    break;
+                }
+
                 case MessageType.PlayerExitedBuilding:
                 {
                     // Mutates the same subscriber dictionaries as Tick (main thread)
@@ -2089,7 +2100,7 @@ namespace BigAmbitionsMP
             try
             {
                 Send(peer, MessageEnvelope.Create(MessageType.InteriorSnapshot, "host", snap));
-                Plugin.Logger.LogInfo($"[Server] Sent interior snapshot to peer={peer.Id} addr='{snap.AddressKey}': designs={snap.InteriorDesigns.Count} prices={snap.RetailPrices.Count} dirt={snap.DirtSpots.Count}.");
+                Plugin.Logger.LogInfo($"[Server] Sent interior snapshot to peer={peer.Id} addr='{snap.AddressKey}': {InteriorSync.SnapshotSummary(snap)}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendInteriorSnapshotTo: {ex.Message}"); }
         }
@@ -2111,7 +2122,7 @@ namespace BigAmbitionsMP
                     sent++;
                 }
                 if (sent > 0)
-                    Plugin.Logger.LogInfo($"[Server] Interior diff broadcast to {sent} subscriber(s) for '{snap.AddressKey}'.");
+                    Plugin.Logger.LogInfo($"[Server] Interior diff broadcast to {sent} subscriber(s) for '{snap.AddressKey}': {InteriorSync.SnapshotSummary(snap)}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BroadcastInteriorSnapshotTo: {ex.Message}"); }
         }

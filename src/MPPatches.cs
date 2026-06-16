@@ -353,6 +353,7 @@ namespace BigAmbitionsMP
                     if (reg == null) return;
                     var addr = GameStateReader.AddressKey(reg);
                     if (string.IsNullOrEmpty(addr)) return;
+                    if (InteriorSync.TrySendOwnerSnapshotOnEntry(reg, addr)) return;
                     MPClient.SendInteriorRequest(addr);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] DelayedEnterBuilding interior-req: {ex.Message}"); }
@@ -379,6 +380,7 @@ namespace BigAmbitionsMP
                     if (reg == null) return;
                     var addr = GameStateReader.AddressKey(reg);
                     if (string.IsNullOrEmpty(addr)) return;
+                    InteriorSync.NotifyLocalBuildingExit(addr);
                     MPClient.SendPlayerExitedBuilding(addr);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] ExitFromBuilding_InteriorSync prefix: {ex.Message}"); }

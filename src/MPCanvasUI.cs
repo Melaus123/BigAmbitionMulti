@@ -2751,6 +2751,7 @@ namespace BigAmbitionsMP
             TickTrainingPopup();          // honorary-degree confirm dialog (school doors)
             TickHubWindow();
             _pt = MPPerf.Begin(); InteriorSync.Tick();         MPPerf.End("Interior", _pt);   // diff-push to subscribed clients
+            _pt = MPPerf.Begin(); InteriorSync.TickClientOwner(); MPPerf.End("InteriorOwner", _pt);   // owner pushes their own shop interior to host
             _pt = MPPerf.Begin(); GameStatePatcher.DrainPendingLogoRefreshes(); MPPerf.End("LogoRefresh", _pt);
 
             // Send our character appearance once the character is ready.

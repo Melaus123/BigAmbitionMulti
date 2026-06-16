@@ -55,9 +55,10 @@ namespace BigAmbitionsMP
         BusinessChange   = 51, // Host → All: single building business state changed.
 
         // Interiors (Phase 2: building interior sync on entry + while inside)
-        InteriorRequest      = 60, // Client → Host: "I entered building X, subscribe me + send snapshot."
-        InteriorSnapshot     = 61, // Host → Client: full interior state of one building.
-        PlayerExitedBuilding = 62, // Client → Host: "I exited building X, unsubscribe me."
+        InteriorRequest       = 60, // Client → Host: "I entered building X, subscribe me + send snapshot."
+        InteriorSnapshot      = 61, // Host → Client: full interior state of one building.
+        PlayerExitedBuilding  = 62, // Client → Host: "I exited building X, unsubscribe me."
+        InteriorOwnerSnapshot = 63, // Client owner → Host: authoritative interior for a business that player runs.
 
         // Rivals (Phase 1d Wave 2: synthetic-rival sync so buildingOwnerRivalId
         // lookups resolve to a real name instead of "undefined" on the client).
@@ -989,6 +990,8 @@ namespace BigAmbitionsMP
     {
         public string                     AddressKey      { get; set; } = "";
         public string                     Layout          { get; set; } = "";
+        public string                     OwnerPlayerId   { get; set; } = "";
+        public bool                       ItemInstancesAuthoritative { get; set; } = true;
         public List<InteriorDesignInfo>   InteriorDesigns { get; set; } = new();
         public List<RetailPriceInfo>      RetailPrices    { get; set; } = new();
         public List<DirtSpotInfo>         DirtSpots       { get; set; } = new();
