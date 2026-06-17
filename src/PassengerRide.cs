@@ -55,6 +55,21 @@ namespace BigAmbitionsMP
         private static string _hovered = "";
         private static readonly List<(GameObject go, int layer)> _hiLayers = new();
         private static int _outlineLayer = -2;   // -2 = unresolved
+        private static int _pickMask;   // 0 = unresolved; the game's hover-layer mask (built once)
+#if BAMP_DEV
+        private static float _nextMissLog;
+#endif
+
+        // The game's own cursor-hover layer mask (= MouseController.DefaultObjectTypes), replicated so the
+        // passenger pick is IDENTICAL to the owner's car-hover (same layers, solid-only). Built once.
+        private static int PickMask()
+        {
+            if (_pickMask != 0) return _pickMask;
+            _pickMask = LayerMask.GetMask("InteractiveItems", "InteractiveItemsOutlined", "Buildings",
+                                          "BuildingsOutlined", "Vehicles", "PlayerVehicles", "Ground");
+            if (_pickMask == 0) _pickMask = ~0;   // layer names not found — fall back to everything
+            return _pickMask;
+        }
 
         private static void TickHoverHighlight()
         {
@@ -62,18 +77,40 @@ namespace BigAmbitionsMP
 
             var cam = Camera.main;
             string hit = "";
+#if BAMP_DEV
+            string missDbg = "";
+#endif
             if (cam != null)
             {
                 try
                 {
-                    // Solid colliders ONLY (QueryTriggerInteraction.Ignore): cars carry large trigger
-                    // volumes (parking/proximity) that were being "hovered" from far away and made
-                    // distant clicks register as the car. Tighter max range, too.
-                    if (Physics.Raycast(cam.ScreenPointToRay(Input.mousePosition), out var rh, 45f, ~0, QueryTriggerInteraction.Ignore))
-                        hit = VehicleManager.GhostIdFor(rh.collider != null ? rh.collider.transform : null);
+                    // IDENTICAL to the native owner-highlight (MouseController.Run): the game's own hover
+                    // layer mask, 600 m, SOLID-only (QueryTriggerInteraction.Ignore). No invented range or
+                    // trigger params — the same query the game uses to outline a hovered car for the driver.
+                    // The earlier ~0 mask hit ground/clutter first ("too small"); triggers made it "too big".
+                    // GhostIdFor maps the hit to a ghost and returns "" for ground/buildings, so when the
+                    // cursor is over a ghost car the first solid hit is the car body — exactly like native.
+                    var ray = cam.ScreenPointToRay(Input.mousePosition);
+                    if (Physics.Raycast(ray, out var rh, 600f, PickMask(), QueryTriggerInteraction.Ignore) && rh.transform != null)
+                    {
+                        hit = VehicleManager.GhostIdFor(rh.transform);
+#if BAMP_DEV
+                        if (hit == "") missDbg = $"{(rh.collider != null ? rh.collider.name : "?")}@{rh.distance:F1}m(L{rh.transform.gameObject.layer})";
+#endif
+                    }
                 }
                 catch { }
             }
+#if BAMP_DEV
+            // DIAG:INVESTIGATION(passenger-highlight) — if we're pointing near a car but mapping no
+            //   ghost, log the nearest non-ghost hit (throttled) so a persistent miss is diagnosable
+            //   without another test cycle. A successful hover logs below on change instead.
+            if (hit == "" && missDbg != "" && Time.unscaledTime > _nextMissLog)
+            {
+                _nextMissLog = Time.unscaledTime + 1f;
+                Plugin.Logger.LogInfo($"[RideHi] hover MISS — nearest non-ghost hit {missDbg} (no ghost mapped under cursor)");
+            }
+#endif
             // Locked cars STILL highlight (so you can tell they're interactable) — clicking one
             // tells you it's locked instead of boarding.
             if (hit != _hovered)

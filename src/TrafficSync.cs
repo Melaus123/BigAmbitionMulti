@@ -40,7 +40,20 @@ namespace BigAmbitionsMP
             public Vector3       Velocity;
             public float         TargetAt;            // CLIENT unscaled time TargetPos arrived
             public float         HostT;               // HOST sample time of TargetPos (packet stamp)
+            public Rigidbody?    Body;                // cached ROOT rigidbody — driven via MovePosition so the
+                                                      //   kinematic ghost acts as a solid obstacle (2026-06-16)
+#if BAMP_DEV
+            public Vector3       LastMoveTarget;      // where TickGhosts last placed it; drift from this = the real push
+            public bool          HasMoveTarget;
+#endif
         }
+#if BAMP_DEV
+        // [PushDrift] worst per-frame displacement of a NEAR ghost AWAY from where TickGhosts placed it
+        //   (= physics/the player shoving it). The old dev=0 missed this: it sampled the car at its target
+        //   AFTER the per-frame correction. This catches the transient shove. Reported + reset by [Push].
+        private static float _maxGhostDrift;
+        private static bool  _maxGhostDriftKin = true;
+#endif
         // Don't predict further than this past the last packet — a stopped or
         // turning car otherwise overshoots while we wait for fresh data.
         private const float MaxExtrapolateSeconds = 0.3f;
@@ -132,6 +145,10 @@ namespace BigAmbitionsMP
                     if (Time.timeSinceLevelLoad > 5f)
                         SuppressLocalTraffic();
                     TickGhosts();
+#if BAMP_DEV
+                    TickCensus();
+                    TickPushProbe();
+#endif
                 }
             }
             catch (Exception ex)
@@ -562,9 +579,15 @@ namespace BigAmbitionsMP
                         }
                     }
 
-                    // A pool slot reused by a DIFFERENT model = a different car —
-                    // respawn fresh so the wrong mesh doesn't slide into view.
-                    if (g != null && g.Go != null && g.Model != car.Model)
+                    // A pool slot reused for a DIFFERENT car = respawn fresh instead of sliding the old
+                    // ghost across the map (the streak; the red [StreakMarker] confirmed these were the
+                    // streaking ghosts). Two tells of reuse between 10 Hz packets: the MODEL changed, OR the
+                    // position jumped further than any real car could travel in 100 ms (> SnapDistance ≈
+                    // >120 m/s). Same-model reuse used to slip the model check and slide; catching the big
+                    // jump here is a clean break — old ghost destroyed, a fresh one spawns at the new pos
+                    // below. (ANTIPATTERNS class 7: a reused pool index is not a stable identity.)
+                    if (g != null && g.Go != null
+                        && (g.Model != car.Model || Vector3.Distance(g.Go.transform.position, pos) > SnapDistance))
                     {
                         try { UnityEngine.Object.Destroy(g.Go); } catch { }
                         g = null;
@@ -575,29 +598,18 @@ namespace BigAmbitionsMP
                         var go = SpawnTrafficGhost(car.Model, pos, rot);
                         if (go == null) { _ghosts.Remove(car.Index); continue; }
                         g = new TrafficGhost { Go = go, Model = car.Model, TargetPos = pos, TargetRot = rot, TargetAt = Time.unscaledTime, HostT = snap.T };
+                        g.Body = go.GetComponent<Rigidbody>();   // ROOT rb only (a child rb would teleport just that part)
                         _ghosts[car.Index] = g;
                     }
                     else
                     {
-                        // A jump bigger than SnapDistance = a reused slot of the
-                        // same model, or a teleport — snap instead of sliding.
-                        if (Vector3.Distance(g.Go.transform.position, pos) > SnapDistance)
-                        {
-                            g.Go.transform.position = pos;
-                            g.Go.transform.rotation = rot;
-                            g.Velocity = Vector3.zero;
-                        }
-                        else
-                        {
-                            // Velocity from the HOST's sample clock (packet stamp)
-                            // — client arrival times are frame-quantized and made
-                            // the velocity estimate jitter.  If two packets land
-                            // in one frame (tiny dt), KEEP the previous velocity
-                            // (zeroing it froze extrapolation = visible stutter).
-                            float hdt = snap.T - g.HostT;
-                            if (hdt > 0.005f)
-                                g.Velocity = (pos - g.TargetPos) / hdt;
-                        }
+                        // Same live car, small inter-packet move (a big jump = slot reuse, respawned above).
+                        // Velocity from the HOST's packet stamp for smooth extrapolation between 10 Hz packets;
+                        // if two packets land in one client frame (tiny dt) keep the previous velocity (zeroing
+                        // it froze extrapolation = visible stutter).
+                        float hdt = snap.T - g.HostT;
+                        if (hdt > 0.005f)
+                            g.Velocity = (pos - g.TargetPos) / hdt;
                         g.TargetPos = pos;
                         g.TargetRot = rot;
                         g.TargetAt  = Time.unscaledTime;
@@ -789,31 +801,61 @@ namespace BigAmbitionsMP
             // uncapped factor saturates past ~70ms frames).
             float k   = Mathf.Min(Time.deltaTime * GhostLerp, 0.5f);
             float now = Time.unscaledTime;
+#if BAMP_DEV
+            var _pcDrift = PlayerHelper.PlayerController?.Character;
+            Vector3 _ppDrift = _pcDrift != null ? _pcDrift.transform.position : new Vector3(1e9f, 1e9f, 1e9f);
+#endif
             foreach (var g in _ghosts.Values)
             {
                 if (g.Go == null) continue;
                 var t = g.Go.transform;
+#if BAMP_DEV
+                // Measure how far this ghost moved AWAY from where we last placed it — only for ghosts near
+                //   the player (= the actual push). Tracked here every frame; the [Push] probe reports it.
+                if (g.HasMoveTarget && (t.position - _ppDrift).sqrMagnitude < 25f)
+                {
+                    float _drift = (t.position - g.LastMoveTarget).magnitude;
+                    if (_drift > _maxGhostDrift) { _maxGhostDrift = _drift; _maxGhostDriftKin = g.Body == null || g.Body.isKinematic; }
+                }
+#endif
                 float ahead = Mathf.Min(now - g.TargetAt, MaxExtrapolateSeconds);
                 var predicted = g.TargetPos + g.Velocity * ahead;
+                Vector3    smoothedPos = Vector3.Lerp(t.position, predicted, k);
+                Quaternion smoothedRot = Quaternion.Slerp(t.rotation, g.TargetRot, k);
 #if BAMP_DEV
                 Vector3 _pre = t.position;
 #endif
-                t.position = Vector3.Lerp(t.position, predicted, k);
-                t.rotation = Quaternion.Slerp(t.rotation, g.TargetRot, k);
-#if BAMP_DEV
-                // DIAG:INVESTIGATION(traffic-streak) — the actual reported artifact: a traffic ghost
-                //   moving a big distance in ONE frame, especially SIDEWAYS (offAxis ~90° = across its
-                //   own facing = off the road network). Logs the inputs so we can tell whether it's a
-                //   far TargetPos (snapshot/pool reuse), runaway Velocity, or stale extrapolation.
+                // 2026-06-16 (user-approved): drive the kinematic ghost with MovePosition/MoveRotation
+                //   (a physics-correct swept move) instead of transform.position, so it acts as a SOLID
+                //   obstacle that BLOCKS the local player and can't be shoved — like the host's real cars.
+                //   Falls back to the transform if a ghost has no root rigidbody. (Evaluating — may need a
+                //   FixedUpdate pass if it stutters.)
+                if (g.Body != null)
                 {
-                    Vector3 mv = t.position - _pre;
+                    g.Body.MovePosition(smoothedPos);
+                    g.Body.MoveRotation(smoothedRot);
+                }
+                else
+                {
+                    t.position = smoothedPos;
+                    t.rotation = smoothedRot;
+                }
+#if BAMP_DEV
+                g.LastMoveTarget = smoothedPos;   // record where we placed it; next frame's drift from this = the push
+                g.HasMoveTarget  = true;
+#endif
+#if BAMP_DEV
+                // DIAG:INVESTIGATION(traffic-streak) — a ghost moving a big distance in ONE frame, esp.
+                //   SIDEWAYS. MovePosition defers the transform update, so measure the INTENDED move.
+                {
+                    Vector3 mv = smoothedPos - _pre;
                     float d = mv.magnitude;
                     if (d > 3f)
                     {
                         float offAxis = mv.sqrMagnitude > 0.0001f ? Vector3.Angle(t.forward, mv) : 0f;
                         Plugin.Logger.LogWarning(
                             $"[TrafStreak] {d:F1}m/frame offAxis={offAxis:F0}° vel={g.Velocity.magnitude:F1} ahead={ahead:F2} " +
-                            $"from=({_pre.x:F0},{_pre.z:F0}) to=({t.position.x:F0},{t.position.z:F0}) tgt=({g.TargetPos.x:F0},{g.TargetPos.z:F0})");
+                            $"from=({_pre.x:F0},{_pre.z:F0}) to=({smoothedPos.x:F0},{smoothedPos.z:F0}) tgt=({g.TargetPos.x:F0},{g.TargetPos.z:F0})");
                     }
                 }
 #endif
@@ -1158,21 +1200,154 @@ namespace BigAmbitionsMP
         /// reliable than density-0 + clear, which lost the race when the client
         /// moved into freshly-activated grid areas.
         /// </summary>
+#if BAMP_DEV
+        // DIAG:INVESTIGATION(client-traffic) — is the client LEAKING local Gley cars despite
+        //   SuppressLocalTraffic? ClearTraffic() is no-op'd by Patch_TM_ClearTraffic while MP-active,
+        //   so suppression may only DISABLE the manager and leave already-spawned cars in the scene
+        //   (dynamic = pushable [E]; mis-simulated = "streak" [D]). Census the survivors + the nearest
+        //   one's kinematic state, 1 Hz. Pair with [TrafStreak]: streak + activeGley>0 ⇒ local Gley.
+        private static float _nextCensus;
+        private static void TickCensus()
+        {
+            if (Time.unscaledTime < _nextCensus) return;
+            _nextCensus = Time.unscaledTime + 1f;
+            try
+            {
+                var tm = TrafficManager.Instance;
+                int gley = 0, active = 0; float nd = 999f; bool nk = false; string nn = "";
+                var pc = PlayerHelper.PlayerController?.Character;
+                Vector3 pp = pc != null ? pc.transform.position : Vector3.zero;
+                var list = tm?.trafficVehicles?.GetVehicleList();
+                if (list != null)
+                {
+                    gley = list.Count;
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        var comp = list[i] as Component;
+                        if (comp == null || !comp.gameObject.activeInHierarchy) continue;
+                        active++;
+                        if (pc != null)
+                        {
+                            float d = Vector3.Distance(comp.transform.position, pp);
+                            if (d < nd) { nd = d; nn = comp.gameObject.name; var rb = comp.GetComponentInChildren<Rigidbody>(); nk = rb == null || rb.isKinematic; }
+                        }
+                    }
+                }
+                Plugin.Logger.LogInfo(
+                    $"[TrafCensus] gleyTM.enabled={(tm != null ? tm.enabled.ToString() : "<null>")} killed={_clientTrafficKilled} " +
+                    $"gleyCars={gley} activeGley={active} ghosts={_ghosts.Count} pvGhosts={VehicleManager.RemoteVehicleCount} " +
+                    $"nearestGley={(nn == "" ? "none" : $"'{nn}' d={nd:F1} kinematic={nk}")}");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TrafCensus] {ex.Message}"); }
+        }
+
+        // DIAG:INVESTIGATION(push) — the client can push only DRIVING traffic cars, NOT parked ones
+        //   (user-verified 2026-06-16). Both parked + driving ghosts are frozen kinematic + Gley-stripped in
+        //   code; the ONLY differences are (1) TickGhosts sets driving ghosts' transform.position every frame,
+        //   and (2) they're NOT in the local-player IgnoreCollision set (only player-vehicle ghosts are).
+        //   Reports the nearest TRAFFIC ghost's RUNTIME state: rigidbodies really kinematic? solid collider?
+        //   ignored vs the player? displaced from its synced target (= being pushed)?
+        private static float _nextPushProbe;
+        private static void TickPushProbe()
+        {
+            if (Time.unscaledTime < _nextPushProbe) return;
+            _nextPushProbe = Time.unscaledTime + 0.5f;
+            try
+            {
+                var pc = PlayerHelper.PlayerController?.Character;
+                if (pc == null) return;
+                Vector3 pp = pc.transform.position;
+
+                var cc  = pc.GetComponentInChildren<CharacterController>(true);
+                var prb = pc.GetComponentInChildren<Rigidbody>(true);
+                string rbInfo = prb == null ? "none" : $"{(prb.isKinematic ? "kin" : "DYN")}/{prb.collisionDetectionMode}";
+
+                // Nearest traffic ghost + its main SOLID collider (the body the player would contact).
+                TrafficGhost? near = null; float ndSq = 8f * 8f;
+                foreach (var g in _ghosts.Values)
+                {
+                    if (g.Go == null) continue;
+                    float sq = (g.Go.transform.position - pp).sqrMagnitude;
+                    if (sq < ndSq) { ndSq = sq; near = g; }
+                }
+                Collider? ghostSolid = null;
+                if (near != null && near.Go != null)
+                    foreach (var col in near.Go.GetComponentsInChildren<Collider>(true))
+                        if (col != null && !col.isTrigger) { ghostSolid = col; break; }
+
+                // DIAG(bubble): the PLAYER's OWN colliders (Character subtree ONLY — the earlier dump wrongly
+                //   walked the shared scene root and swept in a parked car's parking sphere + every pedestrian).
+                //   For each SOLID one, ",HITS"/",noHit" = does it actually collide with the ghost body (layer
+                //   matrix ON and pair not ignored)? That pins the "pusher" vs the movement "blocker".
+                var sbp = new System.Text.StringBuilder();
+                foreach (var c in pc.GetComponentsInChildren<Collider>(true))
+                {
+                    if (c == null) continue;
+                    string dim = c is CapsuleCollider cap ? $"r{cap.radius:F2}h{cap.height:F2}"
+                               : c is SphereCollider sph  ? $"r{sph.radius:F2}"
+                               : c is BoxCollider box      ? $"{box.size.x:F1}x{box.size.z:F1}"
+                               : "mesh";
+                    string hit = "";
+                    if (!c.isTrigger && ghostSolid != null)
+                    {
+                        bool layerOn = !Physics.GetIgnoreLayerCollision(c.gameObject.layer, ghostSolid.gameObject.layer);
+                        bool pairOn  = !Physics.GetIgnoreCollision(c, ghostSolid);
+                        hit = layerOn && pairOn ? ",HITS" : ",noHit";
+                    }
+                    sbp.Append($"{c.name}({c.GetType().Name.Replace("Collider", "")},{dim},{(c.isTrigger ? "trig" : "solid")},L{c.gameObject.layer}{hit}) ");
+                }
+                string playerInfo = $"CC={(cc != null)} rb={rbInfo} cols=[{sbp}]";
+
+                if (near == null || near.Go == null) { Plugin.Logger.LogInfo($"[Push] player {playerInfo}; no traffic ghost within 8 m"); return; }
+
+                var sb = new System.Text.StringBuilder();
+                foreach (var col in near.Go.GetComponentsInChildren<Collider>(true))
+                {
+                    if (col == null) continue;
+                    var rb = col.attachedRigidbody;
+                    sb.Append($"{col.name}[{(col.isTrigger ? "trig" : "solid")},{(rb == null ? "noRb" : rb.isKinematic ? "kin" : "DYN")},L{col.gameObject.layer}] ");
+                }
+                float dev = Vector3.Distance(near.Go.transform.position, near.TargetPos);
+                Plugin.Logger.LogInfo($"[Push] player {playerInfo} | nearestTraffic d={Mathf.Sqrt(ndSq):F1} dev={dev:F1} maxDrift={_maxGhostDrift:F2}m(kin={_maxGhostDriftKin}) body={(near.Body != null ? "root(MovePosition)" : "none(transform)")} | ghostCols: {sb}");
+                _maxGhostDrift = 0f;   // reset the measurement window after reporting
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Push] {ex.Message}"); }
+        }
+
+#endif
+
         private static void SuppressLocalTraffic()
         {
-            // CLAUDE-DIAGNOSTIC — toggle flag for backlog #6 first-domino test.
             if (!ClientTrafficSuppressionEnabled) return;
 
             var tm = TrafficManager.Instance;
             if (tm == null) return;
-            if (!tm.enabled) return;                 // already killed
 
-            try { tm.ClearTraffic(); } catch { }
-            tm.enabled = false;                      // stops Update/FixedUpdate → no sim, no spawn
-            if (!_clientTrafficKilled)
+            // Kill the client's local Gley traffic — the client renders host-synced ghosts instead.
+            // ClearTraffic is host-scoped again (Patch_TM_ClearTraffic no longer no-ops the client), so
+            // it actually runs here now (the previous direct-deactivation workaround is gone). Re-assert
+            // whenever the manager is live OR any car is still active: the census (2026-06-16) showed the
+            // game can re-enable the manager mid-session and a one-shot disable stranded ~20 cars. Cheap
+            // pool scan, early-out once clean. Ghosts unaffected (cloned from the cached prefab map).
+            bool anyActive = false;
+            try
             {
-                _clientTrafficKilled = true;
-                Plugin.Logger.LogInfo("[TrafficSync] Local traffic killed (TrafficManager disabled + cleared).");
+                var list = tm.trafficVehicles?.GetVehicleList();
+                if (list != null)
+                    for (int i = 0; i < list.Count && !anyActive; i++)
+                        if (list[i] is Component c && c.gameObject.activeSelf) anyActive = true;
+            }
+            catch { }
+
+            if (tm.enabled || anyActive)
+            {
+                try { tm.ClearTraffic(); } catch { }
+                tm.enabled = false;                  // stops Update/FixedUpdate → no sim, no spawn
+                if (!_clientTrafficKilled)
+                {
+                    _clientTrafficKilled = true;
+                    Plugin.Logger.LogInfo("[TrafficSync] Local traffic killed (ClearTraffic + manager disabled).");
+                }
             }
         }
 

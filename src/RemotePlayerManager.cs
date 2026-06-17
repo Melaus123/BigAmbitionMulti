@@ -623,6 +623,9 @@ namespace BigAmbitionsMP
         public static void TickVehicleCollisionIgnores()
         {
             if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+#if BAMP_DEV
+            TickAvatarSenseProbe();   // host-side Option-B diagnostic (self-gated host-only + 1 Hz)
+#endif
             if (UnityEngine.Time.unscaledTime < _nextIgnoreRefresh) return;
             _nextIgnoreRefresh = UnityEngine.Time.unscaledTime + 1.5f;
             try
@@ -652,6 +655,25 @@ namespace BigAmbitionsMP
                 if (MPServer.IsRunning && _players.Count > 0)
                 {
                     var vehCols = VehicleManager.AllVehicleColliders();
+                    // Gley TRAFFIC cars are NOT in AllVehicleColliders — gather their solid colliders too, so the
+                    //   avatar (kept SOLID so Gley's raycast still senses it and brakes — IgnoreCollision doesn't
+                    //   affect raycasts) doesn't physically SHOVE live traffic. THIS was the real push: the
+                    //   host-side avatar shoving traffic, then the host syncing the shoved positions down.
+                    var trafCols = new List<Collider>();
+                    try
+                    {
+                        var tlist = GleyTrafficSystem.TrafficManager.Instance?.trafficVehicles?.GetVehicleList();
+                        if (tlist != null)
+                            for (int i = 0; i < tlist.Count; i++)
+                            {
+                                var tc = tlist[i] as Component;
+                                if (tc == null || !tc.gameObject.activeInHierarchy) continue;
+                                foreach (var col in tc.GetComponentsInChildren<Collider>(true))
+                                    if (col != null && !col.isTrigger) trafCols.Add(col);
+                            }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[RemotePlayer] traffic-ignore gather: {ex.Message}"); }
+
                     foreach (var kv in _players)
                     {
                         if (kv.Value == null) continue;
@@ -659,11 +681,51 @@ namespace BigAmbitionsMP
                         if (ac == null) continue;
                         for (int i = 0; i < vehCols.Count; i++)
                             if (vehCols[i] != null) UnityEngine.Physics.IgnoreCollision(ac, vehCols[i], true);
+                        for (int i = 0; i < trafCols.Count; i++)
+                            UnityEngine.Physics.IgnoreCollision(ac, trafCols[i], true);   // don't shove live Gley traffic
                     }
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[RemotePlayer] collision-ignore refresh: {ex.Message}"); }
         }
+
+#if BAMP_DEV
+        // DIAG:INVESTIGATION(traffic-stop, Option B) — does the HOST's Gley traffic SENSE + slow near each
+        //   remote avatar? (User: cars drive into the client instead of stopping.) The avatar carries a
+        //   SOLID collider on the host-player layer (RemotePlayerManager spawn), so Gley's raycast SHOULD
+        //   detect it. Logs the avatar's layer + solid state + the nearest active traffic car's distance and
+        //   speed. Cars that keep approaching to d≈0 = host NOT sensing the avatar (fix detectability);
+        //   cars that hold off / slow = host IS braking (fix the client sync that isn't reflecting it).
+        private static float _nextAvSense;
+        private static void TickAvatarSenseProbe()
+        {
+            if (!MPServer.IsRunning) return;
+            if (UnityEngine.Time.unscaledTime < _nextAvSense) return;
+            _nextAvSense = UnityEngine.Time.unscaledTime + 1f;
+            try
+            {
+                var list = GleyTrafficSystem.TrafficManager.Instance?.trafficVehicles?.GetVehicleList();
+                foreach (var kv in _players)
+                {
+                    var av = kv.Value;
+                    if (av == null) continue;
+                    var ac = av.GetComponentInChildren<Collider>();
+                    UnityEngine.Vector3 ap = av.transform.position;
+                    float nd = 999f, nspeed = -1f;
+                    if (list != null)
+                        for (int i = 0; i < list.Count; i++)
+                        {
+                            var c = list[i] as Component;
+                            if (c == null || !c.gameObject.activeInHierarchy) continue;
+                            float d = (c.transform.position - ap).magnitude;
+                            if (d < nd) { nd = d; var rb = c.GetComponentInChildren<Rigidbody>(); nspeed = rb != null ? rb.velocity.magnitude : -1f; }
+                        }
+                    Plugin.Logger.LogInfo($"[AvSense] avatar '{kv.Key}' layer={av.layer}({UnityEngine.LayerMask.LayerToName(av.layer)}) colSolid={(ac != null && !ac.isTrigger)} nearestCar d={nd:F1} speed={nspeed:F1}");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[AvSense] {ex.Message}"); }
+        }
+#endif
 
         /// <summary>Every known appearance — used by the host to broadcast the full set.</summary>
         public static List<PlayerAppearancePayload> GetAllAppearances() =>
@@ -1237,9 +1299,9 @@ namespace BigAmbitionsMP
                     root.layer = playerLayer;
 
                     var col = root.AddComponent<CapsuleCollider>();
-                    col.height   = 1.8f;
-                    col.radius   = 0.4f;
-                    col.center   = new Vector3(0f, 0.9f, 0f);
+                    col.height   = 1.65f;                       // match the real client capsule (was 1.8)
+                    col.radius   = 0.25f;                       // match the real client capsule (was 0.4 — needlessly large)
+                    col.center   = new Vector3(0f, 0.825f, 0f); // half-height (was 0.9 for the taller capsule)
                     // SOLID, not a trigger.  Gley detects players by RAYCAST and its query IGNORES
                     // triggers, so a trigger makes traffic run remote players over (observed
                     // 2026-06-15).  Keep the collider solid (traffic still stops) and instead stop

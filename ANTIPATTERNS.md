@@ -265,5 +265,38 @@ and any inherited driver components (localization, etc.) were stripped.
 
 ---
 
+## Class 7 — Rendering a reused pool index as one continuous entity
+
+**Pattern.** A networked entity is keyed by a **reusable pool index** (a slot number), not a
+stable identity. When the source recycles a slot — despawns the object in slot N and reuses N
+for a *different* object elsewhere — the receiver still treats slot N as the *same* entity and
+animates continuity (lerp/smooth) from the old position to the new one.
+
+**Why it bites.** Invisible on the host (it owns the real objects). On the client the one ghost
+for that slot is dragged across the map between unrelated objects — a "car zooming with no
+physics" streak. A *model/type* check catches reuse that changes the mesh, but **same-type reuse
+slips through** and slides. Confirmed 0.1.x: Gley recycles its `VehicleComponent` pool index
+(`vc.GetIndex()`), so a traffic ghost slid between recycled cars (the red `[StreakMarker]`
+confirmed the streaking ghosts were exactly these).
+
+**Detection grep.**
+```
+rg -n "GetIndex|\.Index|poolIndex|slot" src/ | rg -i "ghost|snapshot|sync"
+```
+For each index-keyed sync, ask: is the index a **stable per-entity id**, or a **reusable slot**?
+If reusable, does the receiver treat a discontinuity as a *new* entity?
+
+**Safe fixes.**
+1. **Treat any discontinuity as a new entity** (the invariant): on the receiver, if a slot's new
+   position jumps further than the entity could physically travel between packets (> a teleport
+   threshold) OR its model/type changed, **destroy + respawn** the ghost fresh — never slide it.
+2. Key by a **stable identity** if the source exposes one (preferred; Gley does not).
+
+**Known instances (fixed).**
+- Traffic ghost slid between recycled Gley pool slots → clean-break on model-change OR
+  `> SnapDistance` jump in `TrafficSync.ApplySnapshot`. Fixed 2026-06-16.
+
+---
+
 *Registry seeded from real fix history (git log + investigation notes); it is not
 exhaustive — add a class the moment a second instance of any pattern shows up.*

@@ -874,6 +874,9 @@ namespace BigAmbitionsMP
             return null;
         }
 
+        /// <summary>Count of player-vehicle ghosts on this client (census/diagnostics).</summary>
+        public static int RemoteVehicleCount => _remoteVehicles.Count;
+
         /// <summary>Every collider on every vehicle on THIS machine — ghosts + the local player's
         /// real cars. Used to keep remote-avatar colliders from shoving them (IgnoreCollision).</summary>
         public static System.Collections.Generic.List<Collider> AllVehicleColliders()

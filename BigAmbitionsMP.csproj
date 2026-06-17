@@ -11,8 +11,8 @@
   </PropertyGroup>
 
   <!-- Build configs.  The shipped mod is built Release (or Debug) and does NOT
-       define BAMP_DEV, so the test/diagnostic scaffolding (MPAutopilot, MPPerf,
-       MPLoadProfiler, MPAudit) is inert — nothing runs on a player's machine.
+       define BAMP_DEV, so the test/diagnostic scaffolding (MPPerf, MPLoadProfiler,
+       MPAudit) is inert — nothing runs on a player's machine.  (MPAutopilot removed.)
        Build `-c Dev` to turn that scaffolding back on for local testing. -->
   <PropertyGroup>
     <Configurations>Debug;Release;Dev</Configurations>
