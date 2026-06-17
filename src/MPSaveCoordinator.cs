@@ -653,55 +653,62 @@ namespace BigAmbitionsMP
             var restoreSynthetics = MPRegisterSync.StripSyntheticsForSave("save");
             string charName = "";
             int    day      = 0;
+            // Per-player subfolder keyed by the STABLE id (not the game's characterId) so load can find it
+            // deterministically by identity.  charName/day/folder/ok are declared BEFORE the try so the log +
+            // the returned slot below can still read them — and so the finally that restores the synthetics
+            // ALWAYS runs even if the save work throws (a failed save must never leave the session un-staffed).
+            string folder   = MPSaveManager.MpCharacterFolder(sessionName, MPConfig.StableId);
+            bool   ok        = false;
             try
             {
-                var gi = SaveGameManager.Current;
-                if (gi != null && gi.charactersData != null && gi.charactersData.Count > 0)
-                    charName = gi.charactersData[0]?.name ?? "";
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] read char name: {ex.Message}"); }
-            try { day = GameStateReader.GetGameTime().day; } catch { }
-
-            // Per-player subfolder keyed by the STABLE id (not the game's
-            // characterId) so load can find it deterministically by identity.
-            string folder = MPSaveManager.MpCharacterFolder(sessionName, MPConfig.StableId);
-
-            bool ok = false;
-            DiagWrite($"about to call SaveGameManager.Save  SavingInProgress={SafeSavingInProgress()}");
-            // RETRY: the game serializes through a FIXED temp file
-            // (%TEMP%\Hovgaard Games\Big Ambitions\tempUncompressedSave) shared
-            // by BOTH local instances — coordinated saves fire on host+client
-            // simultaneously and collide ("being used by another process",
-            // client slot then missing from the manifest → session load never
-            // reached that client).  The launch bat now gives instance 2 its
-            // own %TEMP%; this retry covers any remaining collision.
-            for (int attempt = 0; attempt < 3 && !ok; attempt++)
-            {
-                if (attempt > 0)
+                try
                 {
-                    Plugin.Logger.LogWarning($"[MPSave] save attempt {attempt} failed — retrying in 1.2s.");
-                    try { System.Threading.Thread.Sleep(1200); } catch { }
+                    var gi = SaveGameManager.Current;
+                    if (gi != null && gi.charactersData != null && gi.charactersData.Count > 0)
+                        charName = gi.charactersData[0]?.name ?? "";
                 }
-                try { ok = SaveGameManager.Save(SaveGameManager.SaveType.Default, SaveFileName, folder); }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] SaveGameManager.Save: {ex.Message}"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] read char name: {ex.Message}"); }
+                try { day = GameStateReader.GetGameTime().day; } catch { }
+
+                DiagWrite($"about to call SaveGameManager.Save  SavingInProgress={SafeSavingInProgress()}");
+                // RETRY: the game serializes through a FIXED temp file
+                // (%TEMP%\Hovgaard Games\Big Ambitions\tempUncompressedSave) shared
+                // by BOTH local instances — coordinated saves fire on host+client
+                // simultaneously and collide ("being used by another process",
+                // client slot then missing from the manifest → session load never
+                // reached that client).  The launch bat now gives instance 2 its
+                // own %TEMP%; this retry covers any remaining collision.
+                for (int attempt = 0; attempt < 3 && !ok; attempt++)
+                {
+                    if (attempt > 0)
+                    {
+                        Plugin.Logger.LogWarning($"[MPSave] save attempt {attempt} failed — retrying in 1.2s.");
+                        try { System.Threading.Thread.Sleep(1200); } catch { }
+                    }
+                    try { ok = SaveGameManager.Save(SaveGameManager.SaveType.Default, SaveFileName, folder); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] SaveGameManager.Save: {ex.Message}"); }
+                }
+                DiagWrite($"returned from Save ok={ok}");
+
+                // CRITICAL: the game serializes the GameInstance on a BACKGROUND thread.
+                // If anything mutates the gi while that thread is reading it, the managed
+                // heap corrupts and coreclr failfasts (the host save crash we hit — a
+                // fatal 0xc0000005 detected right after serialization).  Block here until
+                // serialization finishes so the gi is stable for its whole duration.  We
+                // run on the main thread, so blocking it means NOTHING else touches the
+                // gi during the save — at the cost of a brief, expected save stutter.
+                DiagWrite("about to JoinSaveGameThreads");
+                try { SaveGameManager.JoinSaveGameThreads(); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] JoinSaveGameThreads: {ex.Message}"); }
+                DiagWrite("returned from JoinSaveGameThreads");
             }
-            DiagWrite($"returned from Save ok={ok}");
-
-            // CRITICAL: the game serializes the GameInstance on a BACKGROUND thread.
-            // If anything mutates the gi while that thread is reading it, the managed
-            // heap corrupts and coreclr failfasts (the host save crash we hit — a
-            // fatal 0xc0000005 detected right after serialization).  Block here until
-            // serialization finishes so the gi is stable for its whole duration.  We
-            // run on the main thread, so blocking it means NOTHING else touches the
-            // gi during the save — at the cost of a brief, expected save stutter.
-            DiagWrite("about to JoinSaveGameThreads");
-            try { SaveGameManager.JoinSaveGameThreads(); }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] JoinSaveGameThreads: {ex.Message}"); }
-            DiagWrite("returned from JoinSaveGameThreads");
-
-            // Serialization is finished — safe to mutate gi again.  Re-add the synthetic cashiers we stripped
-            // above so the live MP session is exactly as it was; only the on-disk bytes are clean.
-            try { restoreSynthetics(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore synthetics: {ex.Message}"); }
+            finally
+            {
+                // ALWAYS re-add the synthetic cashiers we stripped above — even if the save threw — so a failure
+                // can't leave the live session with un-staffed registers.  JoinSaveGameThreads (inside the try)
+                // has returned in every normal/caught path by here, so serialization is done and gi is safe.
+                try { restoreSynthetics(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore synthetics: {ex.Message}"); }
+            }
 
             Plugin.Logger.LogInfo($"[MPSave] Local save '{sessionName}': ok={ok} char='{charName}' day={day} → {folder}");
 
