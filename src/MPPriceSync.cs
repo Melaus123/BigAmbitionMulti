@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using Buildings;
 using Entities;
@@ -37,11 +38,19 @@ namespace BigAmbitionsMP
         // foreign businesses).
         private static readonly HashSet<string> _foreignAddrs = new();
         private static float _nextScanAt;
+        // Host-only cache (Class 4 join replay): the latest price payload per player-shop addr — replayed to a
+        // connecting peer so a hot-joiner gets ALL current player-shop prices, not just AI ones. Concurrent: the
+        // host records from BOTH the network-thread relay and the main-thread Tick. Keyed by addr (bounded).
+        private static readonly ConcurrentDictionary<string, RetailPricesPayload> _hostCache = new();
+        internal static void HostRecord(RetailPricesPayload? p)
+        { if (p != null && !string.IsNullOrEmpty(p.AddressKey)) _hostCache[p.AddressKey] = p; }
+        internal static ICollection<RetailPricesPayload> HostCachedPayloads => _hostCache.Values;
 
         public static void Reset()
         {
             _lastHash.Clear();
             _foreignAddrs.Clear();
+            _hostCache.Clear();
             _nextScanAt = 0f;
         }
 

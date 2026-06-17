@@ -193,10 +193,10 @@ recent: passenger **locks + seat occupancy** (added 2026-06-15) — shipped *wit
 - `gi.marketEvents` (shortages/hype) — broadcast only on change (hash-gated), missing from the on-connect send →
   a hot-joiner saw no active market events, possibly forever. Added `SendMarketEventsTo` to both on-connect paths
   + cleared the hash on `Reset`. Fixed 2026-06-17.
-- **OPEN (deferred):** player-run shop **retail prices** are seeded on-connect only for AI businesses, not player
-  shops (`BusinessSync` excludes them — they ride the `MPPriceSync` change-channel + the InteriorSnapshot-on-entry).
-  A hot-joiner's price-competition sim runs on stale inputs until the owner re-prices or the joiner enters the shop.
-  Not yet fixed — needs a per-peer owned-shop price send on connect.
+- player-run shop **retail prices** were seeded on-connect only for AI businesses, not player shops — a hot-joiner's
+  price-competition sim ran on stale inputs until an owner re-priced or the joiner entered the shop. The host now
+  caches every price payload it sends/relays (`MPPriceSync._hostCache`, fed via `HostRecord` from
+  `BroadcastRetailPrices`) and replays them with `SendPlayerShopPricesTo` on both on-connect paths. Fixed 2026-06-17.
 
 ---
 

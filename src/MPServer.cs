@@ -967,7 +967,7 @@ namespace BigAmbitionsMP
                         break;
                     }
                     GameStatePatcher.EnqueueOnMainThread(() => MPPriceSync.Apply(rp));
-                    Broadcast(MessageEnvelope.Create(MessageType.RetailPrices, "host", rp));
+                    BroadcastRetailPrices(rp);   // relay to all + cache for join replay (Class 4)
                     break;
                 }
 
@@ -1420,6 +1420,8 @@ namespace BigAmbitionsMP
                             SendPassengerSnapshotTo(joinPeer);
                             // Active market events (change-broadcast only; a hot-joiner would otherwise miss them).
                             SendMarketEventsTo(joinPeer);
+                            // Player-run shop prices (change-broadcast only; a hot-joiner would otherwise miss them).
+                            SendPlayerShopPricesTo(joinPeer);
                             // Parked cars near the joiner — resync as soon as their position is known.
                             ParkedVehicleSync.ForgetPeer(joinName);
                         }
@@ -1457,6 +1459,7 @@ namespace BigAmbitionsMP
                     SendRegisterDutyTo(peer);   // event-tracked duty is wiped by the peer's world reload — re-sync it
                     SendPassengerSnapshotTo(peer);   // passenger locks + seats (event-tracked; join replay)
                     SendMarketEventsTo(peer);        // active market events (change-broadcast only; join replay)
+                    SendPlayerShopPricesTo(peer);    // player-run shop prices (change-broadcast only; join replay)
                     MPLoadProfiler.Mark($"HOST sent full world state to peer {peer.Id}");
                     Plugin.Logger.LogInfo($"[Server] Sent full world state to peer {peer.Id}.");
                 }
@@ -2857,7 +2860,30 @@ namespace BigAmbitionsMP
         public static void BroadcastRetailPrices(RetailPricesPayload p)
         {
             if (!_running || p == null) return;
+            MPPriceSync.HostRecord(p);   // cache for join replay (Class 4): a hot-joiner needs player-shop prices
             Broadcast(MessageEnvelope.Create(MessageType.RetailPrices, "host", p));
+        }
+
+        /// <summary>Join replay (anti-pattern Class 4): send every known player-run shop's current price table to
+        /// ONE connecting peer. Player-shop prices are broadcast only on CHANGE, so without this a hot-joiner's
+        /// price-competition sim runs on stale inputs until an owner re-prices or the joiner enters the shop.
+        /// Replays the host's cache of own + relayed price payloads — each carries the correct OwnerId, so the
+        /// joiner's own shops are skipped by MPPriceSync.Apply's own-echo guard. Main thread (on-connect path).</summary>
+        public static void SendPlayerShopPricesTo(NetPeer peer)
+        {
+            if (!_running || peer == null) return;
+            try
+            {
+                int sent = 0;
+                foreach (var p in MPPriceSync.HostCachedPayloads)   // .Values is a thread-safe snapshot
+                {
+                    if (p == null || string.IsNullOrEmpty(p.AddressKey)) continue;
+                    Send(peer, MessageEnvelope.Create(MessageType.RetailPrices, "host", p));
+                    sent++;
+                }
+                if (sent > 0) Plugin.Logger.LogInfo($"[Server] Sent {sent} player-shop price table(s) to peer {peer.Id} (join replay).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendPlayerShopPricesTo: {ex.Message}"); }
         }
 
         /// <summary>Host: relay a chat line to every connected client.</summary>
