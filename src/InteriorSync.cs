@@ -32,7 +32,17 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<int, string>          _buildingByPeer  = new();
         // addressKey → last-broadcast hash, so we only push when something changed.
         private static readonly Dictionary<string, int>          _lastHashByAddr  = new();
+        private sealed class OwnerInteriorState
+        {
+            public string OwnerPlayerId = "";
+            public InteriorSnapshotPayload Snapshot = new();
+            public int Hash;
+        }
+        private static readonly Dictionary<string, OwnerInteriorState> _ownerSnapshotsByAddr = new();
+        private static readonly Dictionary<string, int> _lastLocalOwnerHashByAddr = new();
         private static float _lastPollAt;
+        private static float _lastOwnerPollAt;
+        private static string _localOwnerAddress = "";
 
         /// <summary>Reset all subscription + cache state.  Called on host shutdown / new game.</summary>
         public static void Reset()
@@ -40,7 +50,11 @@ namespace BigAmbitionsMP
             _subsByBuilding.Clear();
             _buildingByPeer.Clear();
             _lastHashByAddr.Clear();
+            _ownerSnapshotsByAddr.Clear();
+            _lastLocalOwnerHashByAddr.Clear();
             _lastPollAt = 0f;
+            _lastOwnerPollAt = 0f;
+            _localOwnerAddress = "";
         }
 
         // ── Subscription management ───────────────────────────────────────────
@@ -76,7 +90,7 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[InteriorSync] Sub: peer={peer.Id} player='{playerId}' addr='{addressKey}' (now {set.Count} subscriber(s) on this building, {_subsByBuilding.Count} active building(s)).");
 
                 // Send initial snapshot to this peer only.
-                var snap = BuildSnapshot(addressKey);
+                var snap = BuildSnapshotForHostSend(addressKey);
                 if (snap == null) return;
                 _lastHashByAddr[addressKey] = ComputeHash(snap);
                 MPServer.SendInteriorSnapshotTo(peer, snap);
@@ -140,7 +154,7 @@ namespace BigAmbitionsMP
                 var addrs = new List<string>(_subsByBuilding.Keys);
                 foreach (var addr in addrs)
                 {
-                    var snap = BuildSnapshot(addr);
+                    var snap = BuildSnapshotForHostSend(addr);
                     if (snap == null) continue;
                     int hash = ComputeHash(snap);
                     if (_lastHashByAddr.TryGetValue(addr, out var prev) && prev == hash) continue;
@@ -153,6 +167,171 @@ namespace BigAmbitionsMP
         }
 
         // ── Snapshot construction ─────────────────────────────────────────────
+
+        public static void TickClientOwner()
+        {
+            if (!MPClient.IsConnected || MPServer.IsRunning) return;
+            if (string.IsNullOrEmpty(_localOwnerAddress)) return;
+            float now = UnityEngine.Time.realtimeSinceStartup;
+            if (now - _lastOwnerPollAt < PollIntervalSeconds) return;
+            _lastOwnerPollAt = now;
+            SendLocalOwnerSnapshot(_localOwnerAddress, force: false, reason: "tick");
+        }
+
+        public static bool TrySendOwnerSnapshotOnEntry(BuildingRegistration reg, string addressKey)
+        {
+            if (!MPClient.IsConnected || MPServer.IsRunning) return false;
+            if (reg == null || string.IsNullOrEmpty(addressKey)) return false;
+            if (!IsLocalOwnerBusiness(reg)) return false;
+            _localOwnerAddress = addressKey;
+            SendLocalOwnerSnapshot(addressKey, force: true, reason: "entry");
+            return true;
+        }
+
+        public static void NotifyLocalBuildingExit(string addressKey)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return;
+            if (_localOwnerAddress == addressKey)
+            {
+                SendLocalOwnerSnapshot(addressKey, force: true, reason: "exit");
+                _localOwnerAddress = "";
+            }
+        }
+
+        public static void HandleOwnerSnapshot(NetPeer peer, string playerId, InteriorSnapshotPayload payload)
+        {
+            if (!MPServer.IsRunning || peer == null || payload == null || string.IsNullOrEmpty(payload.AddressKey)) return;
+            try
+            {
+                if (!HostKnowsPlayerOwnsAddress(playerId, payload.AddressKey))
+                {
+                    Plugin.Logger.LogWarning($"[InteriorSync] OwnerSnapshot rejected: player='{playerId}' addr='{payload.AddressKey}' is not the recorded owner.");
+                    return;
+                }
+
+                payload.OwnerPlayerId = playerId;
+                payload.ItemInstancesAuthoritative = true;
+                int hash = ComputeHash(payload);
+                bool changed = !_ownerSnapshotsByAddr.TryGetValue(payload.AddressKey, out var prev) || prev.Hash != hash;
+                _ownerSnapshotsByAddr[payload.AddressKey] = new OwnerInteriorState
+                {
+                    OwnerPlayerId = playerId,
+                    Snapshot = payload,
+                    Hash = hash,
+                };
+                _lastHashByAddr[payload.AddressKey] = hash;
+
+                Plugin.Logger.LogInfo($"[InteriorSync] OwnerSnapshot accepted from '{playerId}' addr='{payload.AddressKey}': {SnapshotSummary(payload)}{(changed ? "" : " (unchanged)")}.");
+                if (!changed) return;
+
+                GameStatePatcher.ApplyInteriorSnapshot(payload);
+                if (_subsByBuilding.TryGetValue(payload.AddressKey, out var set))
+                    MPServer.BroadcastInteriorSnapshotTo(set, payload);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] HandleOwnerSnapshot: {ex.Message}"); }
+        }
+
+        private static bool SendLocalOwnerSnapshot(string addressKey, bool force, string reason)
+        {
+            try
+            {
+                var snap = BuildSnapshot(addressKey);
+                if (snap == null)
+                {
+                    Plugin.Logger.LogWarning($"[InteriorSync] OwnerSnapshot not sent ({reason}): no snapshot for '{addressKey}'.");
+                    return false;
+                }
+                snap.OwnerPlayerId = MPConfig.PlayerId;
+                snap.ItemInstancesAuthoritative = true;
+                int hash = ComputeHash(snap);
+                if (!force && _lastLocalOwnerHashByAddr.TryGetValue(addressKey, out var prev) && prev == hash)
+                    return true;
+                _lastLocalOwnerHashByAddr[addressKey] = hash;
+                MPClient.SendInteriorOwnerSnapshot(snap);
+                Plugin.Logger.LogInfo($"[InteriorSync] Sent owner snapshot ({reason}) addr='{addressKey}': {SnapshotSummary(snap)}.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[InteriorSync] SendLocalOwnerSnapshot: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static InteriorSnapshotPayload? BuildSnapshotForHostSend(string addressKey)
+        {
+            if (_ownerSnapshotsByAddr.TryGetValue(addressKey, out var ownerState))
+                return ownerState.Snapshot;
+
+            var snap = BuildSnapshot(addressKey);
+            if (snap == null) return null;
+            if (TryRemoteOwnerForAddress(addressKey, out var ownerId))
+            {
+                snap.OwnerPlayerId = ownerId;
+                if (snap.ItemInstances.Count == 0)
+                    snap.ItemInstancesAuthoritative = false;
+            }
+            return snap;
+        }
+
+        private static bool IsLocalOwnerBusiness(BuildingRegistration reg)
+        {
+            try { if (reg.RentedByPlayer) return true; } catch { }
+            try
+            {
+                string owner = reg.businessOwnerRivalId?.ToString() ?? "";
+                return !string.IsNullOrEmpty(owner) && owner == MPConfig.PlayerId;
+            }
+            catch { return false; }
+        }
+
+        private static bool HostKnowsPlayerOwnsAddress(string playerId, string addressKey)
+        {
+            if (string.IsNullOrEmpty(playerId) || string.IsNullOrEmpty(addressKey)) return false;
+            try
+            {
+                if (MPServer.BuildingOwners.TryGetValue(addressKey, out var owner) && owner == playerId)
+                    return true;
+            }
+            catch { }
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return false;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null || GameStateReader.AddressKey(reg) != addressKey) continue;
+                    string b = reg.buildingOwnerRivalId?.ToString() ?? "";
+                    string biz = reg.businessOwnerRivalId?.ToString() ?? "";
+                    return b == playerId || biz == playerId;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static bool TryRemoteOwnerForAddress(string addressKey, out string ownerId)
+        {
+            ownerId = "";
+            try
+            {
+                if (MPServer.BuildingOwners.TryGetValue(addressKey, out var owner)
+                    && !string.IsNullOrEmpty(owner)
+                    && owner != "host"
+                    && owner != MPConfig.PlayerId)
+                {
+                    ownerId = owner;
+                    return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        internal static string SnapshotSummary(InteriorSnapshotPayload snap)
+        {
+            return $"designs={snap.InteriorDesigns.Count} prices={snap.RetailPrices.Count} dirt={snap.DirtSpots.Count} items={snap.ItemInstances.Count} itemAuth={snap.ItemInstancesAuthoritative}";
+        }
 
         public static InteriorSnapshotPayload? BuildSnapshot(string addressKey)
         {

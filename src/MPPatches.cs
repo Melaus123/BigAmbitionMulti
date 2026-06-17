@@ -353,6 +353,7 @@ namespace BigAmbitionsMP
                     if (reg == null) return;
                     var addr = GameStateReader.AddressKey(reg);
                     if (string.IsNullOrEmpty(addr)) return;
+                    if (InteriorSync.TrySendOwnerSnapshotOnEntry(reg, addr)) return;
                     MPClient.SendInteriorRequest(addr);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] DelayedEnterBuilding interior-req: {ex.Message}"); }
@@ -379,6 +380,7 @@ namespace BigAmbitionsMP
                     if (reg == null) return;
                     var addr = GameStateReader.AddressKey(reg);
                     if (string.IsNullOrEmpty(addr)) return;
+                    InteriorSync.NotifyLocalBuildingExit(addr);
                     MPClient.SendPlayerExitedBuilding(addr);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] ExitFromBuilding_InteriorSync prefix: {ex.Message}"); }
@@ -398,13 +400,16 @@ namespace BigAmbitionsMP
         {
             static bool Prefix()
             {
-                // CLAUDE-DIAGNOSTIC — symmetrize on host AND client.  Path X test:
-                // if blocking on client also lets DelayedEnterBuildingActions fire,
-                // ClearTraffic was the gate; if not, this was a dead end.
-                if (MPServer.IsRunning || MPClient.IsConnected)
+                // HOST ONLY (Backlog #7): the game clears traffic on building entry; on the host that
+                // would wipe the street for every client still standing outside, so we no-op it.
+                // The CLIENT must NOT block ClearTraffic — TrafficSync.SuppressLocalTraffic RELIES on it
+                // to kill local Gley cars. The 2026-05-20 "Path X" client-side block was a diagnostic
+                // that silently neutralised that suppression (→ leftover pushable cars, confirmed
+                // 2026-06-16 [TrafCensus]); reverted to host-only 2026-06-16. SetPause/ClearTrafficOnArea
+                // keep their client block for now (SetPause is the one tied to client building entry).
+                if (MPServer.IsRunning)
                 {
-                    string side = MPServer.IsRunning ? "host" : "client";
-                    Plugin.Logger.LogInfo($"[TMBlock] ClearTraffic() — SKIPPED ({side} MP active).");
+                    Plugin.Logger.LogInfo("[TMBlock] ClearTraffic() — SKIPPED (host MP active).");
                     return false;
                 }
                 return true;

@@ -759,6 +759,23 @@ namespace BigAmbitionsMP
                     {
                         if (reg.itemInstances != null)
                         {
+                            bool protectPlayerBusiness = false;
+                            try
+                            {
+                                protectPlayerBusiness = IsSessionPlayerBusiness(reg)
+                                                        || reg.RentedByPlayer
+                                                        || !string.IsNullOrEmpty(payload.OwnerPlayerId);
+                            }
+                            catch { }
+
+                            if (protectPlayerBusiness
+                                && payload.ItemInstances.Count == 0
+                                && !payload.ItemInstancesAuthoritative)
+                            {
+                                Plugin.Logger.LogWarning($"[Patcher] Interior item apply skipped for '{payload.AddressKey}': empty non-authoritative player-business snapshot would clear {reg.itemInstances.Count} local item(s).");
+                            }
+                            else
+                            {
                             if (!_lastItemSer.TryGetValue(payload.AddressKey, out var lastSer))
                                 lastSer = new Dictionary<string, string>();
                             var newSer  = new Dictionary<string, string>();
@@ -821,11 +838,12 @@ namespace BigAmbitionsMP
                             reg.itemInstances.Clear();
                             foreach (var kv in newDict) reg.itemInstances[kv.Key] = kv.Value;
                             _lastItemSer[payload.AddressKey] = newSer;
+                            }
                         }
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] itemInstances apply: {ex.Message}"); }
 
-                    Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' designs={payload.InteriorDesigns.Count} prices={payload.RetailPrices.Count} dirt={payload.DirtSpots.Count} items={payload.ItemInstances.Count} (changed={changedIds.Count} removed={removedIds.Count}).");
+                    Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' {InteriorSync.SnapshotSummary(payload)} (changed={changedIds.Count} removed={removedIds.Count}).");
 
                     // Trigger a visual refresh of the interior IF the local
                     // player is currently inside THIS building.  Writing to

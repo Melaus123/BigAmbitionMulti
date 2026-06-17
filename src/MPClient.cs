@@ -755,7 +755,7 @@ namespace BigAmbitionsMP
         {
             var payload = env.GetPayload<InteriorSnapshotPayload>();
             if (payload == null) return;
-            Plugin.Logger.LogInfo($"[Client] Received interior snapshot for '{payload.AddressKey}': designs={payload.InteriorDesigns.Count} prices={payload.RetailPrices.Count} dirt={payload.DirtSpots.Count}.");
+            Plugin.Logger.LogInfo($"[Client] Received interior snapshot for '{payload.AddressKey}': {InteriorSync.SnapshotSummary(payload)}.");
             GameStatePatcher.ApplyInteriorSnapshot(payload);
         }
 
@@ -891,6 +891,15 @@ namespace BigAmbitionsMP
             var p = new PlayerExitedBuildingPayload { PlayerId = MPConfig.PlayerId, AddressKey = addressKey };
             Send(MessageEnvelope.Create(MessageType.PlayerExitedBuilding, MPConfig.PlayerId, p));
             Plugin.Logger.LogInfo($"[Client] Sent PlayerExitedBuilding for '{addressKey}'.");
+        }
+
+        /// <summary>Client owner → host: authoritative interior for a business this player runs.</summary>
+        public static void SendInteriorOwnerSnapshot(InteriorSnapshotPayload payload)
+        {
+            if (!IsConnected || payload == null || string.IsNullOrEmpty(payload.AddressKey)) return;
+            payload.OwnerPlayerId = MPConfig.PlayerId;
+            payload.ItemInstancesAuthoritative = true;
+            Send(MessageEnvelope.Create(MessageType.InteriorOwnerSnapshot, MPConfig.PlayerId, payload));
         }
 
         // ── Passenger (ride shotgun) ──────────────────────────────────────────

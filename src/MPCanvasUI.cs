@@ -1,5 +1,11 @@
 using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.UI;
 using TMPro;
 using Helpers;
@@ -107,9 +113,10 @@ namespace BigAmbitionsMP
         private TextMeshProUGUI?  _mpCollapseLbl;   private RectTransform? _mpCollapseRT;  // ▾/▸ toggle
         private bool          _mpPlayersCollapsed;
         private TextMeshProUGUI?  _mpChatLog;        private RectTransform? _mpChatPanelRT;
-        private TextMeshProUGUI?  _mpChatInputLbl;  private RectTransform? _mpChatInputRT;
+        private TMP_InputField?   _mpChatInputField; private RectTransform? _mpChatInputRT;
         private string        _mpChatInput = "";    private bool _mpChatFocus;
         private RectTransform? _mpSendRT;
+        private RectTransform? _mpReportRT;
         private RectTransform? _mpGripRT;            // bottom-left corner resize handle
         private bool          _mpResizing;           private Vector2 _mpResizeStartMouse; private Vector2 _mpResizeStartSize;
         private RectTransform? _mpOpacityTrackRT; private RectTransform? _mpOpacityFillRT; private RectTransform? _mpOpacityKnobRT;
@@ -227,6 +234,26 @@ namespace BigAmbitionsMP
         // ── deferred init ─────────────────────────────────────────────────────
         private bool _built;
         private int  _initDelay;
+        private bool _crashReportPopupVisible;
+        private string _crashReportMessage = "";
+        private readonly List<string> _crashReportAttachments = new();
+        private GameObject? _crashReportGO;
+        private RectTransform? _crashReportRT;
+        private RectTransform? _crashReportInputRT;
+        private RectTransform? _crashReportTagRT;
+        private RectTransform? _crashReportAttachRT;
+        private RectTransform? _crashReportSendRT;
+        private RectTransform? _crashReportDismissRT;
+        private TMP_InputField? _crashReportInputField;
+        private TextMeshProUGUI? _crashReportTitleLbl;
+        private TextMeshProUGUI? _crashReportBodyLbl;
+        private TextMeshProUGUI? _crashReportTagLbl;
+        private TextMeshProUGUI? _crashReportStatusLbl;
+        private bool _crashReportFocus = true;
+        private bool _crashReportAutoFocusPending;
+        private bool _crashReportIsCrash = true;
+        private Sprite? _crashReportStyledWith;
+        private int _bugReportTagIndex;
 
         // ─────────────────────────────────────────────────────────────────────
 
@@ -257,9 +284,23 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo(
                 $"[UI] F8 panel pre-fill: name='{_name}' port={_port} ip={_ip}");
 
+            if (MPBugReport.PendingCrashDetected)
+            {
+                _crashReportPopupVisible = true;
+                _crashReportIsCrash = true;
+                _crashReportMessage = "Previous game session appears to have crashed.";
+                _crashReportAttachments.Clear();
+                _crashReportAutoFocusPending = true;
+            }
+
             // Stage-4 migration #1: the join quiesce ends on the lifecycle
             // WorldReady EVENT (replaces the hand-tuned 4s timer).
             MPLifecycle.PhaseChanged += OnLifecyclePhase;
+        }
+
+        private void OnApplicationQuit()
+        {
+            MPBugReport.MarkCleanShutdown();
         }
 
         private void OnLifecyclePhase(MPLifecycle.MPPhase prev, MPLifecycle.MPPhase next)
@@ -395,12 +436,20 @@ namespace BigAmbitionsMP
             }
 
             if (_canvasGO == null) return;
+            TickCrashReportPopup();
 
             // The MP window is an IN-GAME widget: auto-shown when a game is live,
             // forced hidden everywhere else (menu/intro).  F9 toggles it while in
             // game.  This is what keeps it from lingering after "exit to menu".
             bool mpInGame = _mpWin != null && IsInGame()
                           && (MPServer.IsRunning || MPClient.IsConnected);
+            if (!mpInGame && _mpWin != null)
+            {
+                _mpWinVisible = false;
+                if (_mpWin.activeSelf) _mpWin.SetActive(false);
+                _mpChatFocus = false; _mpDragging = false; _mpOpacityDragging = false; _mpResizing = false;
+                SyncChatNavBlock(false); MPChat.SuppressGameInput = false;
+            }
             if (mpInGame && !_mpWasInGame)
             {
                 // Default CLOSED on entering a game (user 2026-06-10) — the
@@ -2696,6 +2745,7 @@ namespace BigAmbitionsMP
             TickTrainingPopup();          // honorary-degree confirm dialog (school doors)
             TickHubWindow();
             _pt = MPPerf.Begin(); InteriorSync.Tick();         MPPerf.End("Interior", _pt);   // diff-push to subscribed clients
+            _pt = MPPerf.Begin(); InteriorSync.TickClientOwner(); MPPerf.End("InteriorOwner", _pt);   // owner pushes their own shop interior to host
             _pt = MPPerf.Begin(); GameStatePatcher.DrainPendingLogoRefreshes(); MPPerf.End("LogoRefresh", _pt);
 
             // Send our character appearance once the character is ready.
@@ -3902,6 +3952,340 @@ namespace BigAmbitionsMP
 
         // ── HUD builder ───────────────────────────────────────────────────────
 
+        private void BuildCrashReportPopup(Transform canvasRoot)
+        {
+            _crashReportGO = MakeGO("BAMP_CrashReportPopup", canvasRoot);
+            var ort = _crashReportGO.GetComponent<RectTransform>();
+            ort.anchorMin = Vector2.zero;
+            ort.anchorMax = Vector2.one;
+            ort.offsetMin = ort.offsetMax = Vector2.zero;
+
+            var shade = _crashReportGO.AddComponent<Image>();
+            shade.color = new Color(0f, 0f, 0f, 0.68f);
+
+            var panel = MakeGO("Panel", _crashReportGO.transform);
+            _crashReportRT = panel.GetComponent<RectTransform>();
+            _crashReportRT.anchorMin = _crashReportRT.anchorMax = new Vector2(0.5f, 0.5f);
+            _crashReportRT.pivot = new Vector2(0.5f, 0.5f);
+            _crashReportRT.sizeDelta = new Vector2(620f, 366f);
+            _crashReportRT.anchoredPosition = Vector2.zero;
+
+            var panelImg = panel.AddComponent<Image>();
+            panelImg.color = new Color(0.08f, 0.09f, 0.12f, 0.98f);
+
+            var header = MakeGO("Header", panel.transform);
+            var hrt = header.GetComponent<RectTransform>();
+            Stretch(hrt, 0f, 0f, 0f, 46f, top: true);
+            var hi = header.AddComponent<Image>();
+            hi.color = C_HDR;
+
+            _crashReportTitleLbl = MakeLabel(header.transform, "Crash report", 18, C_WHITE, 18f, 0f, 320f, 46f, TextAlignmentOptions.Left);
+            ApplyFont(_crashReportTitleLbl);
+            var tag = MakeLabel(header.transform, "BigAmbitionsMP", 12, new Color(0.78f, 0.84f, 0.94f, 1f), 456f, 0f, 140f, 46f, TextAlignmentOptions.Right);
+            ApplyFont(tag);
+
+            _crashReportBodyLbl = MakeLabel(panel.transform,
+                "The previous game session did not close cleanly. Describe what happened, what you were doing, and whether you were host or client.",
+                14, C_LBLGREY, 22f, -62f, 576f, 40f, TextAlignmentOptions.TopLeft);
+            _crashReportBodyLbl.enableWordWrapping = true;
+            ApplyFont(_crashReportBodyLbl);
+
+            var sprite = IsAlive(_panelSprite) ? _panelSprite : EnsureRoundedSprite();
+            (_crashReportTagRT, _crashReportTagLbl) = MakeHubButton("Type: Bugs", Vector2.zero, 178f, new Color(0.28f, 0.32f, 0.42f, 1f), 28f, sprite, panel.transform);
+            SetTopLeft(_crashReportTagRT, 22f, -108f);
+            _crashReportTagLbl.fontSize = 12;
+
+            var input = MakeGO("Input", panel.transform);
+            _crashReportInputRT = input.GetComponent<RectTransform>();
+            SetAnchored(_crashReportInputRT, 22f, -144f, 576f, 112f);
+            var inputImg = input.AddComponent<Image>();
+            inputImg.color = C_FIELD;
+
+            var viewport = MakeGO("TextArea", input.transform);
+            var vrt = viewport.GetComponent<RectTransform>();
+            vrt.anchorMin = Vector2.zero; vrt.anchorMax = Vector2.one;
+            vrt.offsetMin = new Vector2(12f, 8f); vrt.offsetMax = new Vector2(-12f, -8f);
+            viewport.AddComponent<RectMask2D>();
+
+            var textGO = MakeGO("Text", viewport.transform);
+            var trt = textGO.GetComponent<RectTransform>();
+            trt.anchorMin = Vector2.zero; trt.anchorMax = Vector2.one;
+            trt.offsetMin = Vector2.zero; trt.offsetMax = Vector2.zero;
+            var inputText = textGO.AddComponent<TextMeshProUGUI>();
+            inputText.fontSize = 14; inputText.color = C_WHITE;
+            inputText.alignment = TextAlignmentOptions.TopLeft;
+            inputText.enableWordWrapping = true;
+            inputText.overflowMode = TextOverflowModes.ScrollRect;
+            ApplyFont(inputText);
+
+            _crashReportInputField = input.AddComponent<TMP_InputField>();
+            _crashReportInputField.textViewport = vrt;
+            _crashReportInputField.textComponent = inputText;
+            _crashReportInputField.targetGraphic = inputImg;
+            _crashReportInputField.lineType = TMP_InputField.LineType.MultiLineNewline;
+            _crashReportInputField.characterLimit = 700;
+            _crashReportInputField.text = _crashReportMessage;
+            _crashReportInputField.caretWidth = 2;
+            _crashReportInputField.customCaretColor = true;
+            _crashReportInputField.caretColor = C_WHITE;
+            _crashReportInputField.selectionColor = new Color(0.30f, 0.50f, 0.85f, 0.55f);
+            _crashReportInputField.onValueChanged.AddListener(v => _crashReportMessage = TrimCrashReportMessage(v));
+            _crashReportInputField.onSelect.AddListener(_ => _crashReportFocus = true);
+            _crashReportInputField.onDeselect.AddListener(_ => _crashReportFocus = false);
+
+            _crashReportStatusLbl = MakeLabel(panel.transform, "", 12, C_LBLGREY, 22f, -266f, 576f, 22f, TextAlignmentOptions.Left);
+            ApplyFont(_crashReportStatusLbl);
+
+            (_crashReportAttachRT, var attachLbl) = MakeHubButton("Attach files", Vector2.zero, 150f, new Color(0.28f, 0.32f, 0.42f, 1f), 36f, sprite, panel.transform);
+            SetTopLeft(_crashReportAttachRT, 22f, -306f);
+            attachLbl.fontSize = 13;
+
+            (_crashReportSendRT, var sendLbl) = MakeHubButton("Send report", Vector2.zero, 148f, C_BTNBLUE, 36f, sprite, panel.transform);
+            SetTopLeft(_crashReportSendRT, 286f, -306f);
+            sendLbl.fontSize = 13;
+
+            (_crashReportDismissRT, var dismissLbl) = MakeHubButton("Dismiss", Vector2.zero, 132f, C_STOP, 36f, sprite, panel.transform);
+            SetTopLeft(_crashReportDismissRT, 450f, -306f);
+            dismissLbl.fontSize = 13;
+
+            _crashReportGO.SetActive(false);
+        }
+
+        private void TickCrashReportPopup()
+        {
+            if (!_crashReportPopupVisible)
+            {
+                if (_crashReportGO != null && _crashReportGO.activeSelf) _crashReportGO.SetActive(false);
+                return;
+            }
+            if (_canvasGO == null) return;
+            if (_crashReportGO == null) BuildCrashReportPopup(_canvasGO.transform);
+            StyleCrashReportPopup();
+            if (_crashReportGO != null && !_crashReportGO.activeSelf) _crashReportGO.SetActive(true);
+            if (_crashReportAutoFocusPending && _crashReportInputField != null)
+            {
+                try
+                {
+                    EventSystem.current?.SetSelectedGameObject(_crashReportInputField.gameObject);
+                    _crashReportInputField.ActivateInputField();
+                    _crashReportInputField.MoveTextEnd(false);
+                }
+                catch { }
+                _crashReportAutoFocusPending = false;
+            }
+
+            RefreshCrashReportText();
+
+            var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+            if (Input.GetMouseButtonDown(0))
+            {
+                if (_crashReportSendRT != null && RectHit(_crashReportSendRT, mp)) { SendCrashReportPopup(); return; }
+                if (_crashReportDismissRT != null && RectHit(_crashReportDismissRT, mp)) { DismissCrashReportPopup(); return; }
+                if (_crashReportAttachRT != null && RectHit(_crashReportAttachRT, mp)) { AttachFilesToBugReport(); return; }
+                if (_crashReportTagRT != null && RectHit(_crashReportTagRT, mp)) { NextBugReportTag(); return; }
+                _crashReportFocus = _crashReportInputRT != null && RectHit(_crashReportInputRT, mp);
+            }
+
+            if (!_crashReportFocus) return;
+            if (Input.GetKeyDown(KeyCode.Escape)) { _crashReportFocus = false; return; }
+        }
+
+        private void OpenManualBugReport()
+        {
+            _crashReportIsCrash = false;
+            _crashReportMessage = "";
+            _crashReportAttachments.Clear();
+            _bugReportTagIndex = 0;
+            _crashReportPopupVisible = true;
+            _crashReportFocus = true;
+            _crashReportAutoFocusPending = true;
+            if (_crashReportInputField != null)
+                _crashReportInputField.SetTextWithoutNotify("");
+            MPChat.AddNotice("bug report window opened");
+        }
+
+        private void AttachFilesToBugReport()
+        {
+            try
+            {
+                foreach (var file in ShowAttachFileDialog())
+                {
+                    if (string.IsNullOrWhiteSpace(file) || !File.Exists(file)) continue;
+                    if (!_crashReportAttachments.Contains(file, StringComparer.OrdinalIgnoreCase))
+                        _crashReportAttachments.Add(file);
+                }
+                RefreshCrashReportText();
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[BugReport] attach file dialog failed: {ex.Message}");
+                if (_crashReportStatusLbl != null)
+                    _crashReportStatusLbl.text = "Attach failed: " + ex.Message;
+            }
+        }
+
+        private static string[] ShowAttachFileDialog()
+        {
+            string[] files = Array.Empty<string>();
+            Exception? error = null;
+
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    files = NativeFilePicker.PickBugReportAttachments();
+                }
+                catch (Exception ex) { error = ex; }
+            });
+
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
+            thread.Join();
+
+            if (error != null) throw error;
+            return files;
+        }
+
+        private void StyleCrashReportPopup()
+        {
+            if (_crashReportGO == null) return;
+            var sprite = IsAlive(_panelSprite) ? _panelSprite : EnsureRoundedSprite();
+            if (sprite != null && !ReferenceEquals(_crashReportStyledWith, sprite))
+            {
+                foreach (var img in _crashReportGO.GetComponentsInChildren<Image>(true))
+                {
+                    if (img.gameObject == _crashReportGO) continue;
+                    try { img.sprite = sprite; img.type = Image.Type.Sliced; } catch { }
+                }
+                _crashReportStyledWith = sprite;
+            }
+            if (IsAlive(_gameFont))
+                foreach (var t in _crashReportGO.GetComponentsInChildren<TMP_Text>(true)) ApplyFont(t);
+        }
+
+        private void RefreshCrashReportText()
+        {
+            if (_crashReportTitleLbl != null)
+                _crashReportTitleLbl.text = _crashReportIsCrash ? "Crash report" : "Bug report";
+            if (_crashReportBodyLbl != null)
+            {
+                _crashReportBodyLbl.text = _crashReportIsCrash
+                    ? "The previous game session did not close cleanly. Describe what happened, what you were doing, and whether you were host or client."
+                    : "Describe the bug, what you were doing, and whether you were host or client. Attach screenshots or short videos if they help.";
+            }
+            if (_crashReportInputField != null && _crashReportInputField.text != _crashReportMessage)
+                _crashReportInputField.SetTextWithoutNotify(_crashReportMessage);
+            RefreshCrashReportTagText();
+            if (_crashReportStatusLbl != null)
+            {
+                string attach = _crashReportAttachments.Count == 0
+                    ? "No extra files selected."
+                    : $"{_crashReportAttachments.Count} file(s) selected for Discord upload. Files over 24 MB are skipped.";
+                _crashReportStatusLbl.text = (MPConfig.BugReportDiscordWebhookUrlLive().Length > 0
+                    ? "Uploads description, Player logs, bamp-ring.log and attachments. "
+                    : "Discord upload is not configured. A local report folder will be saved. ") + attach;
+            }
+        }
+
+        private void SendCrashReportPopup()
+        {
+            try
+            {
+                if (_crashReportInputField != null) _crashReportMessage = _crashReportInputField.text ?? "";
+                string prefix = _crashReportIsCrash ? "previous crash: " : "manual bug report: ";
+                MPBugReport.Create(prefix + _crashReportMessage, openFolder: false, attachments: _crashReportAttachments, discordTagIds: SelectedDiscordForumTagIds());
+                if (_crashReportIsCrash) MPBugReport.AcknowledgePendingCrash();
+                _crashReportPopupVisible = false;
+                if (_crashReportGO != null) _crashReportGO.SetActive(false);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[BugReport] crash popup send failed: {ex.Message}");
+                if (_crashReportStatusLbl != null) _crashReportStatusLbl.text = "Report failed: " + ex.Message;
+            }
+        }
+
+        private void DismissCrashReportPopup()
+        {
+            if (_crashReportIsCrash) MPBugReport.AcknowledgePendingCrash();
+            _crashReportPopupVisible = false;
+            if (_crashReportGO != null) _crashReportGO.SetActive(false);
+        }
+
+        private void NextBugReportTag()
+        {
+            if (_crashReportIsCrash) return;
+            var tags = MPConfig.BugReportDiscordBugTagsLive();
+            if (tags.Count == 0)
+            {
+                if (_crashReportStatusLbl != null)
+                    _crashReportStatusLbl.text = "No Discord bug tags are configured yet. Add BugReportDiscordBugTags to the mod config.";
+                MPChat.AddNotice("no Discord bug tags configured");
+                return;
+            }
+            _bugReportTagIndex = (_bugReportTagIndex + 1) % tags.Count;
+            RefreshCrashReportTagText();
+        }
+
+        private IEnumerable<string> SelectedDiscordForumTagIds()
+        {
+            if (_crashReportIsCrash)
+            {
+                string crashTag = MPConfig.BugReportDiscordCrashTagIdLive();
+                if (!string.IsNullOrWhiteSpace(crashTag)) yield return crashTag;
+                yield break;
+            }
+
+            var tags = MPConfig.BugReportDiscordBugTagsLive();
+            if (tags.Count == 0) yield break;
+            _bugReportTagIndex = Mathf.Clamp(_bugReportTagIndex, 0, tags.Count - 1);
+            yield return tags[_bugReportTagIndex].Id;
+        }
+
+        private static IEnumerable<string> DefaultBugDiscordForumTagIds()
+        {
+            var tags = MPConfig.BugReportDiscordBugTagsLive();
+            if (tags.Count > 0)
+                yield return tags[0].Id;
+        }
+
+        private void RefreshCrashReportTagText()
+        {
+            if (_crashReportTagRT != null)
+                _crashReportTagRT.gameObject.SetActive(true);
+            if (_crashReportTagLbl == null) return;
+
+            if (_crashReportIsCrash)
+            {
+                _crashReportTagLbl.text = string.IsNullOrWhiteSpace(MPConfig.BugReportDiscordCrashTagIdLive())
+                    ? "Type: Crash (not configured)"
+                    : "Type: Crash";
+                return;
+            }
+
+            var tags = MPConfig.BugReportDiscordBugTagsLive();
+            if (tags.Count == 0)
+            {
+                _crashReportTagLbl.text = "Type: configure tags";
+                return;
+            }
+
+            _bugReportTagIndex = Mathf.Clamp(_bugReportTagIndex, 0, tags.Count - 1);
+            _crashReportTagLbl.text = "Type: " + tags[_bugReportTagIndex].Label;
+        }
+
+        private static string TrimCrashReportMessage(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return "";
+            value = value.Replace("\r", "");
+            return value.Length > 700 ? value.Substring(0, 700) : value;
+        }
+
+        // (2026-06-16) Removed 8 dead hand-rolled text-editing helpers (TrimTextLimit, RenderTextWithCaret,
+        // ControlDown, CleanClipboardForInput, InsertTextAtCaret, MoveCaretVertical, EditTextBuffer,
+        // EscapeCrashText) — leftovers from the pre-TMP_InputField chat input; EditTextBuffer (the entry
+        // point) had zero callers and the rest only called each other.
+
         private const float HUD_W = 230f;
         private const float HUD_ROW_H = 22f;
         private const float HUD_PAD = 8f;
@@ -4006,7 +4390,7 @@ namespace BigAmbitionsMP
             titleImg.color = new Color(0.15f, 0.18f, 0.27f, 1f);
             if (_panelSprite != null) { try { titleImg.sprite = _panelSprite; titleImg.type = Image.Type.Sliced; } catch { } }
             AddFade(titleImg);
-            ApplyFont(MakeLabel(titleGO.transform, "Chat", 14, C_WHITE, 10f, 0f, 200f, MP_TITLE_H, TextAlignmentOptions.Left));
+            ApplyFont(MakeLabel(titleGO.transform, "Chat", 14, C_WHITE, 10f, 0f, 120f, MP_TITLE_H, TextAlignmentOptions.Left));
             // Close [X] — right edge of the title bar (phone button re-opens).
             var closeGO = MakeGO("Close", titleGO.transform);
             _mpCloseRT = closeGO.GetComponent<RectTransform>();
@@ -4017,6 +4401,22 @@ namespace BigAmbitionsMP
             closeLbl.text = "X"; closeLbl.fontSize = 13; closeLbl.alignment = TextAlignmentOptions.Center;
             closeLbl.color = new Color(0.85f, 0.58f, 0.58f, 1f);
             ApplyFont(closeLbl);
+
+            var reportGO = MakeGO("Report", titleGO.transform);
+            _mpReportRT = reportGO.GetComponent<RectTransform>();
+            _mpReportRT.anchorMin = _mpReportRT.anchorMax = _mpReportRT.pivot = new Vector2(1f, 0.5f);
+            _mpReportRT.anchoredPosition = new Vector2(-168f, 0f);
+            _mpReportRT.sizeDelta = new Vector2(58f, 20f);
+            var reportImg = reportGO.AddComponent<Image>();
+            reportImg.color = new Color(0.45f, 0.25f, 0.24f, 1f);
+            if (_panelSprite != null) { try { reportImg.sprite = _panelSprite; reportImg.type = Image.Type.Sliced; } catch { } }
+            var reportLbl = MakeLabel(reportGO.transform, "Report", 11, C_WHITE, 0f, 0f, 58f, 20f, TextAlignmentOptions.Center);
+            var reportLblRT = reportLbl.rectTransform;
+            reportLblRT.anchorMin = Vector2.zero;
+            reportLblRT.anchorMax = Vector2.one;
+            reportLblRT.offsetMin = Vector2.zero;
+            reportLblRT.offsetMax = Vector2.zero;
+            ApplyFont(reportLbl);
 
             // Opacity slider — lives IN the title bar (right side, before [X])
             // so no vertical space is spent on it.  Slim track + fill + knob.
@@ -4099,13 +4499,33 @@ namespace BigAmbitionsMP
             _mpChatInputRT.offsetMax = new Vector2(-(MP_SEND_W + MP_PAD * 2f), MP_PAD + MP_INPUT_H);
             var inImg = inGO.AddComponent<Image>(); inImg.color = C_FIELD;
             if (_panelSprite != null) { try { inImg.sprite = _panelSprite; inImg.type = Image.Type.Sliced; } catch { } }
-            var inTextGO = MakeGO("t", inGO.transform);
+            var inputViewport = MakeGO("TextArea", inGO.transform);
+            var ivrt = inputViewport.GetComponent<RectTransform>();
+            ivrt.anchorMin = Vector2.zero; ivrt.anchorMax = Vector2.one;
+            ivrt.offsetMin = new Vector2(7f, 0f); ivrt.offsetMax = new Vector2(-7f, 0f);
+            inputViewport.AddComponent<RectMask2D>();
+            var inTextGO = MakeGO("Text", inputViewport.transform);
             var itrt = inTextGO.GetComponent<RectTransform>();
-            itrt.anchorMin = Vector2.zero; itrt.anchorMax = Vector2.one; itrt.offsetMin = new Vector2(7f, 0f); itrt.offsetMax = new Vector2(-7f, 0f);
-            _mpChatInputLbl = inTextGO.AddComponent<TextMeshProUGUI>();
-            _mpChatInputLbl.fontSize = SZ_FLD; _mpChatInputLbl.color = C_WHITE; _mpChatInputLbl.alignment = TextAlignmentOptions.Left;
-            _mpChatInputLbl.enableWordWrapping = false; _mpChatInputLbl.overflowMode = TextOverflowModes.Ellipsis;
-            ApplyFont(_mpChatInputLbl);
+            itrt.anchorMin = Vector2.zero; itrt.anchorMax = Vector2.one; itrt.offsetMin = Vector2.zero; itrt.offsetMax = Vector2.zero;
+            var chatText = inTextGO.AddComponent<TextMeshProUGUI>();
+            chatText.fontSize = SZ_FLD; chatText.color = C_WHITE; chatText.alignment = TextAlignmentOptions.Left;
+            chatText.enableWordWrapping = false; chatText.overflowMode = TextOverflowModes.ScrollRect;
+            ApplyFont(chatText);
+
+            _mpChatInputField = inGO.AddComponent<TMP_InputField>();
+            _mpChatInputField.textViewport = ivrt;
+            _mpChatInputField.textComponent = chatText;
+            _mpChatInputField.targetGraphic = inImg;
+            _mpChatInputField.lineType = TMP_InputField.LineType.SingleLine;
+            _mpChatInputField.characterLimit = 120;
+            _mpChatInputField.caretWidth = 2;
+            _mpChatInputField.customCaretColor = true;
+            _mpChatInputField.caretColor = C_WHITE;
+            _mpChatInputField.selectionColor = new Color(0.30f, 0.50f, 0.85f, 0.55f);
+            _mpChatInputField.onValueChanged.AddListener(v => _mpChatInput = v ?? "");
+            _mpChatInputField.onSelect.AddListener(_ => _mpChatFocus = true);
+            _mpChatInputField.onDeselect.AddListener(_ => _mpChatFocus = false);
+            _mpChatInputField.onSubmit.AddListener(_ => SubmitMpChat());
 
             // Send — anchored bottom-right.
             var sGO = MakeGO("Send", _mpWin.transform);
@@ -4287,11 +4707,8 @@ namespace BigAmbitionsMP
                 }
                 catch { }
             }
-            if (_mpChatInputLbl != null)
-            {
-                bool caret = _mpChatFocus && (Mathf.FloorToInt(Time.unscaledTime * 2f) % 2 == 0);
-                try { _mpChatInputLbl.text = _mpChatInput + (caret ? "|" : ""); } catch { }
-            }
+            if (_mpChatInputField != null && _mpChatInputField.text != _mpChatInput)
+                _mpChatInputField.SetTextWithoutNotify(_mpChatInput);
         }
 
         private void TickMpWindow()
@@ -4309,6 +4726,7 @@ namespace BigAmbitionsMP
             // GameManager.HandleEscapeClick (forced HasInputSelected with nothing
             // selected → NRE on car exit).  The FLAG is still computed fresh every
             // frame in Update (no latching — that once locked the keyboard, 2026-06-10).
+            _mpChatFocus = _mpChatInputField != null && _mpChatInputField.isFocused;
             _chatSuppress = _mpChatFocus;
 
             if (Input.GetMouseButtonDown(0))
@@ -4320,11 +4738,11 @@ namespace BigAmbitionsMP
 
                 if      (chipHit)                         { }
                 else if (RectHit(_mpCloseRT, mp))         { ToggleMpWindow(); return; }
+                else if (RectHit(_mpReportRT, mp))        { OpenManualBugReport(); return; }
                 else if (RectHit(_mpGripRT, mp))          { _mpResizing = true; _mpResizeStartMouse = mp; _mpResizeStartSize = _mpWinRT != null ? _mpWinRT.sizeDelta : new Vector2(MPW_W, MPW_H); }
                 else if (RectHit(_mpOpacityTrackRT, mp))  { _mpOpacityDragging = true; ApplyOpacityFromMouse(mp); }   // before title: the track lives IN the bar
                 else if (RectHit(_mpTitleRT, mp))         { _mpDragging = true; _mpDragLast = mp; }
                 else if (RectHit(_mpSendRT, mp))          SubmitMpChat();
-                else                                      _mpChatFocus = RectHit(_mpChatInputRT, mp);
             }
             if (Input.GetMouseButtonUp(0)) { _mpDragging = false; _mpOpacityDragging = false; _mpResizing = false; }
 
@@ -4374,19 +4792,10 @@ namespace BigAmbitionsMP
                 }
             }
 
-            // Chat typing (when the input is focused).
-            if (_mpChatFocus)
+            if (_mpChatFocus && Input.GetKeyDown(KeyCode.Escape))
             {
-                if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter)) { SubmitMpChat(); return; }
-                if (Input.GetKeyDown(KeyCode.Escape)) { _mpChatFocus = false; return; }
-                string s = _mpChatInput;
-                foreach (char c in Input.inputString)
-                {
-                    if (c == '\b') { if (s.Length > 0) s = s.Substring(0, s.Length - 1); }
-                    else if (c == '\n' || c == '\r') { /* submit handled by Return key */ }
-                    else if (!char.IsControl(c) && s.Length < 120) s += c;
-                }
-                _mpChatInput = s;
+                _mpChatInputField?.DeactivateInputField();
+                _mpChatFocus = false;
             }
 
             // While the chat box is focused, block player movement so typing WASD
@@ -4448,9 +4857,57 @@ namespace BigAmbitionsMP
 
         private void SubmitMpChat()
         {
+            if (_mpChatInputField != null) _mpChatInput = _mpChatInputField.text ?? "";
             string t = _mpChatInput.Trim();
             _mpChatInput = "";
+            if (_mpChatInputField != null)
+            {
+                _mpChatInputField.SetTextWithoutNotify("");
+                _mpChatInputField.ActivateInputField();
+            }
             if (t.Length == 0) return;
+
+            if (t.Equals("/bug", StringComparison.OrdinalIgnoreCase) ||
+                t.StartsWith("/bug ", StringComparison.OrdinalIgnoreCase))
+            {
+                string reason = t.Length > 4 ? t.Substring(4).Trim() : "";
+                try
+                {
+                    var report = MPBugReport.Create(reason, discordTagIds: DefaultBugDiscordForumTagIds());
+                    string msg = report.DiscordUploadQueued
+                        ? "bug report saved and Discord upload queued"
+                        : "bug report saved";
+                    MPChat.AddNotice($"{msg}: {report.DirectoryPath}");
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogWarning($"[BugReport] manual command failed: {ex.Message}");
+                    MPChat.AddNotice("bug report failed: " + ex.Message);
+                }
+                return;
+            }
+
+#if BAMP_DEV
+            // Dev builds ONLY (maintainer decision 2026-06-16): the intentional-crash test never ships in Release.
+            if (t.Equals("/bugcrash", StringComparison.OrdinalIgnoreCase) ||
+                t.StartsWith("/bugcrash ", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!MPConfig.AllowBugReportCrashTestLive())
+                {
+                    MPChat.AddNotice("crash test is disabled in config");
+                    return;
+                }
+                string rest = t.Length > 9 ? t.Substring(9).Trim() : "";
+                if (!rest.StartsWith("confirm", StringComparison.OrdinalIgnoreCase))
+                {
+                    MPChat.AddNotice("type /bugcrash confirm <reason> to intentionally close the game");
+                    return;
+                }
+                string reason = rest.Length > 7 ? rest.Substring(7).Trim() : "manual crash test";
+                MPBugReport.CrashForTest(reason);
+                return;
+            }
+#endif
 
             // One-off whisper: "/w <name> <message>" (unique prefix match) —
             // sends private without changing the selected chip.
