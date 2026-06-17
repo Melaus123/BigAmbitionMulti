@@ -646,6 +646,11 @@ namespace BigAmbitionsMP
             // entries for our synthetic PLAYER rows — strip before they
             // serialize and accumulate.
             GameStatePatcher.StripSyntheticRivalStates("save");
+            // Same choke point (anti-pattern Class 5): synthetic register cashiers (BAMP_DUTY_*) + their injected
+            // WorkShifts are MP-only runtime objects — strip them so they can't leak into a single-player load
+            // (where the world-ready cleanup never runs), then RESTORE the exact objects after serialization
+            // completes (below) so live MP gameplay is undisturbed.
+            var restoreSynthetics = MPRegisterSync.StripSyntheticsForSave("save");
             string charName = "";
             int    day      = 0;
             try
@@ -693,6 +698,10 @@ namespace BigAmbitionsMP
             try { SaveGameManager.JoinSaveGameThreads(); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] JoinSaveGameThreads: {ex.Message}"); }
             DiagWrite("returned from JoinSaveGameThreads");
+
+            // Serialization is finished — safe to mutate gi again.  Re-add the synthetic cashiers we stripped
+            // above so the live MP session is exactly as it was; only the on-disk bytes are clean.
+            try { restoreSynthetics(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore synthetics: {ex.Message}"); }
 
             Plugin.Logger.LogInfo($"[MPSave] Local save '{sessionName}': ok={ok} char='{charName}' day={day} → {folder}");
 

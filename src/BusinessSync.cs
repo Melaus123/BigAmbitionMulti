@@ -534,6 +534,8 @@ namespace BigAmbitionsMP
             _scanInProgress = false;
             _scanCursor     = 0;
             _cycleStartedAt = 0f;
+            _lastMarketEventsHash = 0;   // re-emit market events to a fresh session / re-host (don't suppress via a stale hash)
+            _nextMarketEventsAt   = 0f;
         }
 
         // ── Field reading ─────────────────────────────────────────────────────

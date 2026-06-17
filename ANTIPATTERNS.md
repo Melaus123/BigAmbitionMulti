@@ -75,10 +75,13 @@ message? If you can't *see* the guard in the code, treat it as suspect.
   3×/0.5s (biggest mod frame cost) → **direct singleton**.
 - Char-gen name prefill (`src/MPPatches.cs:231`) — per-frame FindObjectsOfType poll
   drained SP 90→12fps → **one-shot on `IntroCharacterCustomizer.Start`**.
+- `MPCanvasUI.TickSuppressBlackOverlay` — `FindObjectsOfType(Canvas)` every 2s FOREVER while the (rarely-present)
+  BlackOverlay was uncached: a throttle with no stop condition. Now scans only in a short window armed by each
+  building entry (`ArmBlackOverlayScan`, called from `Patch_DelayedEnterBuilding`). Fixed 2026-06-17.
 
-**Audit status.** 2026-06-14: full sweep of all 24 call sites — **0 latent
-instances**. Every periodic/in-game scan is cached, latched, guarded, or per-message.
-Class considered eradicated; re-verify before each release via the grep above.
+**Audit status.** 2026-06-14: full sweep of all 24 call sites — 0 latent. 2026-06-17 re-audit (after the
+passenger / bug-report-PR churn) found ONE new instance (`TickSuppressBlackOverlay`, above), now fixed.
+Re-verify before each release via the grep above — "eradicated" only lasts until the next poll/scan is added.
 
 **Watch-list (safe today, fragile if changed).**
 - `RemotePlayerManager.FindHeldTemplate` (`src/RemotePlayerManager.cs:875`) — uses the
@@ -149,6 +152,10 @@ reads the *live* source, not a stale snapshot field.
   (`42be2e9`).
 - `GameStateReader.GetGameTime` read a stale save-file time field instead of the
   live clock (found 2026-06-14; a minor read-source bug, separate from the stutter).
+- `GameStateReader` GameSpeedController watchdog members (`Paused` / `isFastForwarding` /
+  `isTimeControlDisabled`) had null-checked reads but NO loud load-time validation — a rename would *silently*
+  disable the time-freeze watchdog (re-opening the 2026-06-10 hard-lock). Added an on-load non-null assert that
+  `LogError`s (the safe-fix #2 above). Fixed 2026-06-17.
 
 ---
 
@@ -183,6 +190,13 @@ sure a mid-session hot-join hits the same path.
 recurring*: business, interior, parked, traffic, market, rivals, appearance, loans, … Most
 recent: passenger **locks + seat occupancy** (added 2026-06-15) — shipped *with* a
 `PassengerSnapshot` on join, specifically to not repeat this class.
+- `gi.marketEvents` (shortages/hype) — broadcast only on change (hash-gated), missing from the on-connect send →
+  a hot-joiner saw no active market events, possibly forever. Added `SendMarketEventsTo` to both on-connect paths
+  + cleared the hash on `Reset`. Fixed 2026-06-17.
+- **OPEN (deferred):** player-run shop **retail prices** are seeded on-connect only for AI businesses, not player
+  shops (`BusinessSync` excludes them — they ride the `MPPriceSync` change-channel + the InteriorSnapshot-on-entry).
+  A hot-joiner's price-competition sim runs on stale inputs until the owner re-prices or the joiner enters the shop.
+  Not yet fixed — needs a per-peer owned-shop price send on connect.
 
 ---
 
@@ -220,6 +234,12 @@ rg "VehicleInstances|SaveGameManager.Current|DeregisterGhost|gi\." src/
 (`DeregisterGhostFromSave`, "never save data"). Passenger occupancy = runtime (resets on
 load via `PassengerSync.Reset()`); passenger lock = runtime for MVP (resets), side-file if
 we ever want it to persist — never injected into the save.
+- Synthetic register cashiers (`BAMP_DUTY_*` EmployeeInstances + their injected WorkShifts) were stripped at
+  world-ready + `Reset` but NOT on the SAVE path — so a coordinated/autosave with a remote player on register-duty
+  leaked them into the `.hsg`, contaminating a single-player load (where world-ready never fires). Added
+  `MPRegisterSync.StripSyntheticsForSave` (strip ALL — live included — then restore the exact objects after
+  serialization) to `PerformLocalSave`, beside the ghost/rival-state strips. Fixed 2026-06-17. **Lesson: the save
+  choke point must strip EVERY MP-only injected object, not just the ones the world-ready pass cleans.**
 
 ---
 

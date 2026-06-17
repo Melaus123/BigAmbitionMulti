@@ -326,6 +326,10 @@ namespace BigAmbitionsMP
                 try { TrafficSync.OnEnteredBuilding("DelayedEnterBuildingActions"); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] DelayedEnterBuilding prefix: {ex.Message}"); }
 
+                // Arm the client-side BlackOverlay suppressor: the overlay can only get stuck-on right after a
+                // building-entry transition, so scan for it in a short window after entry (not forever).
+                try { MPCanvasUI.ArmBlackOverlayScan(); } catch { }
+
                 // Shop context for RemoteSale: whose shop is the player inside?
                 // ([ShopGate] classification probe retired 2026-06-12 sweep —
                 //  its discriminator shipped as the purchaser-enable fix.)

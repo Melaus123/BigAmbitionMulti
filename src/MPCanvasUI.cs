@@ -2667,6 +2667,11 @@ namespace BigAmbitionsMP
         // game's own state machine isn't disturbed.
         private static Canvas? _blackOverlayCanvas;
         private static float _blackOverlayFindTimer;
+        // The BlackOverlay only gets stuck-on right after a (broken) client building-entry transition. Without a
+        // stop condition the uncached scan below walked the whole object table every 2s FOREVER on a normal
+        // client (anti-pattern Class 1). Arm a short scan window on each building entry instead; idle otherwise.
+        private static int _blackOverlayScanTriesLeft;
+        internal static void ArmBlackOverlayScan() => _blackOverlayScanTriesLeft = 4;  // ~8s of 2s-throttled scans post-entry
         private void TickSuppressBlackOverlay()
         {
             if (!MPClient.IsConnected) return;
@@ -2676,9 +2681,12 @@ namespace BigAmbitionsMP
             // on scene change, etc.), rescan periodically.
             if (_blackOverlayCanvas == null)
             {
+                // Only scan within a window armed by a building entry — no entry, no forever-poll.
+                if (_blackOverlayScanTriesLeft <= 0) return;
                 _blackOverlayFindTimer -= Time.unscaledDeltaTime;
                 if (_blackOverlayFindTimer > 0f) return;
                 _blackOverlayFindTimer = 2f;
+                _blackOverlayScanTriesLeft--;
 
                 try
                 {

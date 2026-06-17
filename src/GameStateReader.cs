@@ -313,6 +313,18 @@ namespace BigAmbitionsMP
                 $"isFastFwd={_gscPIsFastFwd?.Name ?? "null"} " +
                 $"playerSpd={_gscPPlayerSpd?.Name ?? "null"} " +
                 $"currentSpd={_gscPCurrentSpd?.Name ?? "null"}");
+
+            // SAFETY VALIDATION (anti-pattern Class 3): Paused / isFastForwarding / isTimeControlDisabled feed
+            // the time-freeze watchdog (EnsureTimeNotLocked). If a game update renames any, MPReflect returns
+            // null and every watchdog getter silently reads false → the watchdog believes time is NEVER locked
+            // and stops clearing real locks (re-opening the 2026-06-10 hard-lock). Fail LOUDLY so a version bump
+            // surfaces HERE, at load, instead of as a frozen session in the field.
+            if (_gscPPaused == null || _gscPIsFastFwd == null || _gscPTimeCtrl == null)
+                Plugin.Logger.LogError(
+                    "[GameStateReader] CRITICAL: a GameSpeedController time-watchdog member failed to resolve " +
+                    $"(Paused={_gscPPaused?.Name ?? "NULL"}, isFastForwarding={_gscPIsFastFwd?.Name ?? "NULL"}, " +
+                    $"isTimeControlDisabled={_gscPTimeCtrl?.Name ?? "NULL"}) — the time-freeze watchdog is DISABLED " +
+                    "and sessions may hard-lock. A game update likely renamed a field; re-map it in EnsureGSCProbed.");
         }
 
         /// <summary>

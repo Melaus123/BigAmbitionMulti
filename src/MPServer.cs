@@ -1418,6 +1418,8 @@ namespace BigAmbitionsMP
                             SendRegisterDutyTo(joinPeer);
                             // Passenger locks + who's already riding (event-tracked; join replay).
                             SendPassengerSnapshotTo(joinPeer);
+                            // Active market events (change-broadcast only; a hot-joiner would otherwise miss them).
+                            SendMarketEventsTo(joinPeer);
                             // Parked cars near the joiner — resync as soon as their position is known.
                             ParkedVehicleSync.ForgetPeer(joinName);
                         }
@@ -1454,6 +1456,7 @@ namespace BigAmbitionsMP
                     SendBusinessSnapshotTo(peer);
                     SendRegisterDutyTo(peer);   // event-tracked duty is wiped by the peer's world reload — re-sync it
                     SendPassengerSnapshotTo(peer);   // passenger locks + seats (event-tracked; join replay)
+                    SendMarketEventsTo(peer);        // active market events (change-broadcast only; join replay)
                     MPLoadProfiler.Mark($"HOST sent full world state to peer {peer.Id}");
                     Plugin.Logger.LogInfo($"[Server] Sent full world state to peer {peer.Id}.");
                 }
@@ -2040,6 +2043,25 @@ namespace BigAmbitionsMP
             if (!_running || string.IsNullOrEmpty(json)) return;
             Broadcast(MessageEnvelope.Create(MessageType.MarketEvents, "host",
                 new MarketEventsPayload { Json = json }));
+        }
+
+        /// <summary>Join replay (anti-pattern Class 4): send the current market events to ONE connecting peer.
+        /// MarketEvents are broadcast only on CHANGE (hash-gated), so without this a hot-joiner would see no
+        /// active shortages/hype until the event set next changes — which may be never. Call on the main thread
+        /// (reads gi); the on-connect senders already are.</summary>
+        public static void SendMarketEventsTo(NetPeer peer)
+        {
+            if (!_running || peer == null) return;
+            try
+            {
+                var events = SaveGameManager.Current?.marketEvents;
+                if (events == null || events.Count == 0) return;
+                string json = Newtonsoft.Json.JsonConvert.SerializeObject(events);
+                Send(peer, MessageEnvelope.Create(MessageType.MarketEvents, "host",
+                    new MarketEventsPayload { Json = json }));
+                Plugin.Logger.LogInfo($"[Server] Sent {events.Count} market event(s) to peer {peer.Id} (join replay).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendMarketEventsTo: {ex.Message}"); }
         }
 
         /// <summary>Tell one client to log its per-registration audit hashes for

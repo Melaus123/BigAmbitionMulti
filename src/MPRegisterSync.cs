@@ -528,6 +528,87 @@ namespace BigAmbitionsMP
             return removed;
         }
 
+        /// <summary>SAVE-path strip (anti-pattern Class 5): the synthetic register cashiers (BAMP_DUTY_*) and
+        /// their injected WorkShifts are MP-only runtime objects and must NOT be serialised into the .hsg —
+        /// they would leak into a single-player load, where the world-ready cleanup never runs.  Unlike
+        /// StripOrphanSyntheticEmployees, this removes ALL of them (live ones included), then RESTORES the exact
+        /// objects via the returned delegate so the live MP session is undisturbed (only the on-disk bytes are
+        /// clean).  Call the delegate AFTER serialization finishes (JoinSaveGameThreads) — NEVER before, since
+        /// mutating gi mid-serialise corrupts the save.  Safe to call on a save that has none (returns a no-op).</summary>
+        public static System.Action StripSyntheticsForSave(string when)
+        {
+            var removedEmployees = new List<EmployeeInstance>();
+            var removedShifts    = new List<(ScheduleDay day, WorkShift shift)>();
+            try
+            {
+                var gi   = SaveGameManager.Current;
+                var list = gi?.EmployeeInstances;
+                if (list == null) return () => { };
+                for (int i = list.Count - 1; i >= 0; i--)
+                {
+                    var emp = list[i];
+                    string id = emp?.id ?? "";
+                    if (!id.StartsWith("BAMP_DUTY_")) continue;
+                    // Capture + strip this synthetic's work shifts from every registration.
+                    try
+                    {
+                        if (gi!.BuildingRegistrations != null)
+                            foreach (var r in gi.BuildingRegistrations)
+                            {
+                                if (r?.scheduleDays == null) continue;
+                                for (int d = 0; d < r.scheduleDays.Count; d++)
+                                {
+                                    var day = r.scheduleDays[d];
+                                    if (day?.workShifts == null) continue;
+                                    var dead = new List<WorkShift>();
+                                    for (int j = 0; j < day.workShifts.Count; j++)
+                                        if (day.workShifts[j]?.employeeId == id) dead.Add(day.workShifts[j]);
+                                    foreach (var w in dead) { removedShifts.Add((day, w)); day.RemoveWorkShift(w); }
+                                }
+                            }
+                    }
+                    catch (Exception sx) { Plugin.Logger.LogWarning($"[SynthStaff] save shift strip ({when}): {sx.Message}"); }
+                    removedEmployees.Add(emp!);
+                    list.RemoveAt(i);
+                    try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(id); } catch { }
+                }
+                if (removedEmployees.Count > 0)
+                    Plugin.Logger.LogInfo($"[SynthStaff] stripped {removedEmployees.Count} synthetic(s) for save ({when}); restore after serialize.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] save strip ({when}): {ex.Message}"); }
+
+            // Restore delegate — re-add the EXACT objects after serialization completes (dup-guarded; the main
+            // thread is blocked through the save, so no tick can re-inject during the window, but be defensive).
+            return () =>
+            {
+                try
+                {
+                    var gi = SaveGameManager.Current;
+                    if (gi?.EmployeeInstances == null) return;
+                    foreach (var emp in removedEmployees)
+                    {
+                        if (emp == null || string.IsNullOrEmpty(emp.id)) continue;
+                        bool exists = false;
+                        for (int i = 0; i < gi.EmployeeInstances.Count; i++)
+                            if (gi.EmployeeInstances[i]?.id == emp.id) { exists = true; break; }
+                        if (!exists) gi.EmployeeInstances.Add(emp);
+                        try { Helpers.EmployeeHelper.EmployeeInstancesDictionary[emp.id] = emp; } catch { }
+                    }
+                    foreach (var (day, shift) in removedShifts)
+                    {
+                        if (day?.workShifts == null || shift == null) continue;
+                        bool present = false;
+                        for (int j = 0; j < day.workShifts.Count; j++)
+                            if (ReferenceEquals(day.workShifts[j], shift)) { present = true; break; }
+                        if (!present) day.AddWorkShift(shift);
+                    }
+                    if (removedEmployees.Count > 0)
+                        Plugin.Logger.LogInfo($"[SynthStaff] restored {removedEmployees.Count} synthetic(s) after save ({when}).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] save restore ({when}): {ex.Message}"); }
+            };
+        }
+
         /// <summary>Invoke the game's staffing evaluator (UpdateEmployee — the
         /// disasm-mapped spawner) on unstaffed synthetic stations every 5s;
         /// nothing calls it for rival-translated shops natively.</summary>
