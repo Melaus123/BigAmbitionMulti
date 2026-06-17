@@ -531,7 +531,7 @@ namespace BigAmbitionsMP
         /// if the host still has it this session, else the manifest slot's.</summary>
         internal static float BestCashFor(MpManifest m, string stableId)
         {
-            if (MPServer.CashByStableId.TryGetValue(stableId, out var live) && live != 0f) return live;
+            if (MPServer.CashByStableId.TryGetValue(stableId, out var live)) return live;   // a live figure (incl. a genuine $0) wins; only fall back to the slot when we have NO live cash at all
             var slot = m.Slots.Find(s => s.StableId == stableId);
             return slot?.Money ?? 0f;
         }

@@ -634,7 +634,8 @@ namespace BigAmbitionsMP
                             {
                                 if (syncedIncome != null
                                     && syncedIncome.TryGetValue(GameStateReader.AddressKey(reg), out var wk)
-                                    && reg.dailyIncomes != null)
+                                    && reg.dailyIncomes != null
+                                    && !reg.RentedByPlayer)   // never overwrite the OWNER'S own income series from a rival's synced figure
                                 {
                                     reg.dailyIncomes.Clear();
                                     for (int d = 0; d < 7; d++) reg.dailyIncomes.Add(wk / 7f);
@@ -1711,18 +1712,38 @@ namespace BigAmbitionsMP
                 var reg = FindRegistration(info.AddressKey);
                 if (reg == null) return false;
 
-                // Tier A — name, type, closed.
-                reg.BusinessName        = info.BusinessName;
-                reg.businessTypeName    = info.BusinessTypeName;
-                reg.temporarilyClosed   = info.TemporarilyClosed;
+                // Is this the RECEIVER'S OWN business?  The owner is the authority for their own shop's
+                // name / description / sign / logo / hours — the host holds only a (possibly stale or blank)
+                // replica and must NOT overwrite those here.  RentedByPlayer is the reliable "mine" flag (the
+                // game sets it for buildings THIS player rents); OwnerPlayerId==self is the host's positive
+                // attribution.  Other players' shops + AI businesses are NOT "mine" → the host's relay applies
+                // normally.  (NOTE: IsSessionPlayerBusiness is the WRONG test here — it's true for ANY player's
+                // shop and false for your OWN freshly-loaded shop, because it keys on the empty businessOwnerRivalId.)
+                bool receiverOwnsThis = false;
+                try
+                {
+                    receiverOwnsThis = reg.RentedByPlayer
+                                     || (!string.IsNullOrEmpty(info.OwnerPlayerId) && info.OwnerPlayerId == MPConfig.PlayerId);
+                }
+                catch { }
 
-                // Rental marketplace state (Phase 1b).  Overrides client's
-                // local AI-economy decisions.  If host considers this building
-                // vacant + rentable but client's AI has filled it, these
-                // writes flip the client's view back to "for rent."
-                reg.AvailableForRent    = info.AvailableForRent;
-                reg.RentPerDay          = info.RentPerDay;
-                reg.lastDeposit         = info.LastDeposit;
+                // Tier A (name/type/closed) + rental-marketplace state.  Owner-authored / host-AI-economy view —
+                // skip entirely for the receiver's OWN shop so a stale/blank host replica can't overwrite it.
+                if (!receiverOwnsThis)
+                {
+                    // Tier A — name, type, closed.
+                    reg.BusinessName        = info.BusinessName;
+                    reg.businessTypeName    = info.BusinessTypeName;
+                    reg.temporarilyClosed   = info.TemporarilyClosed;
+
+                    // Rental marketplace state (Phase 1b).  Overrides client's
+                    // local AI-economy decisions.  If host considers this building
+                    // vacant + rentable but client's AI has filled it, these
+                    // writes flip the client's view back to "for rent."
+                    reg.AvailableForRent    = info.AvailableForRent;
+                    reg.RentPerDay          = info.RentPerDay;
+                    reg.lastDeposit         = info.LastDeposit;
+                }
 
                 // AI-business retail prices (host-authoritative; the client's
                 // rival sim is suppressed so its tables stay empty otherwise).
@@ -1739,22 +1760,25 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] AI prices apply '{info.AddressKey}': {ex.Message}"); }
 
-                // Tier B — description + sign + logo.
-                reg.BusinessDescription = info.BusinessDescription;
+                // Tier B — description + sign + logo (owner-authored).  Skip for the receiver's OWN shop.
+                if (!receiverOwnsThis)
+                {
+                    reg.BusinessDescription = info.BusinessDescription;
 
-                if (reg.signAppearanceSettings != null)
-                {
-                    reg.signAppearanceSettings.signType         = (SignType)info.SignType;
-                    reg.signAppearanceSettings.signLight        = new SerializableColor(info.SignLightPacked);
-                    reg.signAppearanceSettings.lamp             = new SerializableColor(info.LampPacked);
-                }
-                if (reg.logoSettings != null)
-                {
-                    reg.logoSettings.logoShape       = info.LogoShape;
-                    reg.logoSettings.font            = (FontFace)info.LogoFont;
-                    reg.logoSettings.logoColor       = new SerializableColor(info.LogoColorPacked);
-                    reg.logoSettings.fontColor       = new SerializableColor(info.FontColorPacked);
-                    reg.logoSettings.backgroundColor = new SerializableColor(info.BackgroundColorPacked);
+                    if (reg.signAppearanceSettings != null)
+                    {
+                        reg.signAppearanceSettings.signType         = (SignType)info.SignType;
+                        reg.signAppearanceSettings.signLight        = new SerializableColor(info.SignLightPacked);
+                        reg.signAppearanceSettings.lamp             = new SerializableColor(info.LampPacked);
+                    }
+                    if (reg.logoSettings != null)
+                    {
+                        reg.logoSettings.logoShape       = info.LogoShape;
+                        reg.logoSettings.font            = (FontFace)info.LogoFont;
+                        reg.logoSettings.logoColor       = new SerializableColor(info.LogoColorPacked);
+                        reg.logoSettings.fontColor       = new SerializableColor(info.FontColorPacked);
+                        reg.logoSettings.backgroundColor = new SerializableColor(info.BackgroundColorPacked);
+                    }
                 }
 
                 // Operating hours (Phase 1c) — without these, suppression on
@@ -1762,10 +1786,10 @@ namespace BigAmbitionsMP
                 // closed.  Replace verbatim from host.
                 try
                 {
-                    // Player shops' hours are the OWNER's — never clear them from a (possibly empty) host
-                    // sync; only AI businesses take host-authoritative hours (mirrors the price guard above).
+                    // The owner's OWN shop hours live in their save — never overwrite them from the host's
+                    // (possibly stale/blank) replica.  AI + other players' shops take the host's relayed hours.
                     if (reg.scheduleDays != null && info.Schedule != null && info.Schedule.Count > 0
-                        && !IsSessionPlayerBusiness(reg))
+                        && !receiverOwnsThis)
                     {
                         reg.scheduleDays.Clear();
                         foreach (var d in info.Schedule)
@@ -1793,10 +1817,9 @@ namespace BigAmbitionsMP
                 // PLAYER-owned buildings (host bought it), host's value here
                 // will likely be either empty or a player-id string; we log
                 // it so the test data tells us what to translate.
-                // RentedByPlayer is intentionally NOT applied on client — host
-                // having RentedByPlayer=true means HOST owns it, but writing
-                // true on client would make the CLIENT think they own it.
-                // Wave 2 will translate that into a synthetic rival.
+                // RentedByPlayer is TRANSLATED, not copied: the host's RentedByPlayer means the HOST rents it,
+                // which is meaningless on the client.  The client's own tenancy is derived from OwnerPlayerId
+                // (the host's positive per-player attribution) and otherwise PRESERVED (never blind-cleared).
                 string priorBuildingOwner = reg.buildingOwnerRivalId?.ToString() ?? "";
                 string priorBusinessOwner = reg.businessOwnerRivalId?.ToString() ?? "";
                 bool   priorRented        = reg.RentedByPlayer;
@@ -1805,7 +1828,11 @@ namespace BigAmbitionsMP
                     // Default: mirror host's rival-id fields verbatim.
                     string newBuildingOwner = info.BuildingOwnerRivalId ?? "";
                     string newBusinessOwner = info.BusinessOwnerRivalId ?? "";
-                    bool   newRented        = false;   // host's true ≠ client's true (Wave 3 translation)
+                    // Tenancy: PRESERVE what the client already had unless the host POSITIVELY attributes the
+                    // building to a specific player.  The old default of `false` clobbered the client's own
+                    // tenancy whenever the host's OwnerPlayerId was momentarily empty (ownership-sync gap at
+                    // join / reclaim miss) — silently losing the building, persisted on the next autosave.
+                    bool   newRented        = priorRented;
 
                     // Wave 3 translation: if host marked the building as owned
                     // by a HUMAN player (OwnerPlayerId set), translate per
@@ -1813,9 +1840,9 @@ namespace BigAmbitionsMP
                     if (!string.IsNullOrEmpty(info.OwnerPlayerId))
                     {
                         if (info.OwnerPlayerId == MPConfig.PlayerId)
-                        { newRented = true; newBuildingOwner = ""; }  // it's OURS — clear any stray rival-owner
+                        { newRented = true; newBuildingOwner = ""; }                  // it's OURS — clear any stray rival-owner
                         else
-                            newBuildingOwner = info.OwnerPlayerId;    // owned by another player; treat as rival
+                        { newRented = false; newBuildingOwner = info.OwnerPlayerId; } // another player owns it — release our (stale) tenancy
                     }
                     if (!string.IsNullOrEmpty(info.BusinessOwnerPlayerId)
                         && info.BusinessOwnerPlayerId != MPConfig.PlayerId)
@@ -1928,7 +1955,8 @@ namespace BigAmbitionsMP
                     {
                         Plugin.Logger.LogInfo($"[Patcher] No logo files received for {info.AddressKey} ('{info.BusinessName}') — host had no directory.");
                     }
-                    if (info.LogoFiles != null && info.LogoFiles.Count > 0 && !string.IsNullOrEmpty(info.BusinessName))
+                    if (info.LogoFiles != null && info.LogoFiles.Count > 0 && !string.IsNullOrEmpty(info.BusinessName)
+                        && !receiverOwnsThis)   // don't overwrite the owner's own logo image files with the host's replica
                     {
                         try
                         {

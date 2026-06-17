@@ -326,16 +326,38 @@ For each clear on a player-owned registration collection, confirm it's gated: ei
    built from its own replica of a player-owned thing `Authoritative = false`; the receiver refuses to modify
    a player business's interior from a non-authoritative snapshot. ONE gate protects every collection, present
    and future (`ApplyInteriorSnapshot`).
-2. **Count + ownership guard** for paths with no owner-push channel: never clear a player business's collection
-   from an empty host sync (`ApplyBusinessInfoLocal` prices + schedule).
+2. **Count + ownership guard** for paths with no owner-push channel: never overwrite a player business's own
+   state from an empty/stale host sync (`ApplyBusinessInfoLocal`).
+
+**⚠ GOTCHA — use the RIGHT "is this the receiver's own business?" test.** `IsSessionPlayerBusiness(reg)` is the
+WRONG test for this guard: it keys on `reg.businessOwnerRivalId`, which is **empty for the receiver's own
+freshly-loaded shop** (the game tracks your own business via `RentedByPlayer`, not a rival-id) and **true for
+ANY other player's shop**. So `!IsSessionPlayerBusiness(reg)` *fails open* for your own shop (lets the host
+clobber it) while *over-skipping* other players' shops (which should still receive the host's relay). The
+correct "mine" test is **`reg.RentedByPlayer || info.OwnerPlayerId == MPConfig.PlayerId`** — what
+`ApplyInteriorSnapshot`'s 3-way OR already used. The first `scheduleDays` fix (2026-06-17 AM) used
+`!IsSessionPlayerBusiness` and was silently ineffective until a broad re-audit caught it.
+
+**Not just `.Clear()` — scalar overwrites count too.** The same class includes plain field assignments
+(`reg.BusinessName` / `BusinessDescription` / sign / logo / `RentedByPlayer` / …) overwritten from a stale host
+replica. The `rg "reg\.\w+\.Clear\(\)"` grep MISSES these — also scan `ApplyBusinessInfoLocal`-style appliers
+for unconditional `reg.<field> = info.<field>` writes onto a player-owned reg.
 
 **Known instances (all fixed).**
 - `ApplyInteriorSnapshot` `itemInstances` — empty non-authoritative snapshot cleared shop stock (the original
   "furniture vanishing on re-enter" report). Fixed via owner-authoritative push + item guard.
 - `ApplyInteriorSnapshot` `interiorDesigns` / `retailPrices` / `dirtSpots` — same wipe, unguarded siblings of
   the items fix → whole-snapshot `Authoritative` flag + a single receiver gate. Fixed 2026-06-17.
-- `ApplyBusinessInfoLocal` `scheduleDays` — operating-hours wipe; count + ownership guard mirroring the adjacent
-  prices block. Fixed 2026-06-17.
+- `ApplyBusinessInfoLocal` — owner's own shop **name / type / description / sign / logo / availability / rent**
+  (scalar writes, all unguarded) + **operating hours** (the schedule guard used the wrong `IsSessionPlayerBusiness`
+  test and failed open). Gated behind a correct `receiverOwnsThis` (`RentedByPlayer || OwnerPlayerId==self`).
+  Fixed 2026-06-17 PM.
+- `ApplyBusinessInfoLocal` ownership — `RentedByPlayer` defaulted to `false`, clobbering the client's own tenancy
+  when the host's `OwnerPlayerId` was momentarily empty (ownership-sync gap at join). Now PRESERVES prior tenancy
+  unless the host positively attributes the building elsewhere. Fixed 2026-06-17 PM.
+- `PopulateRivalOwnedFromSync` `dailyIncomes` — rival-stats apply matched the owner's own reg by address only and
+  overwrote its income series from a foreign figure under ownership divergence. Guarded with `RentedByPlayer`.
+  Fixed 2026-06-17 PM.
 
 ---
 
