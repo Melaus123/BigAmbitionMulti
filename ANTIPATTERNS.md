@@ -298,5 +298,46 @@ If reusable, does the receiver treat a discontinuity as a *new* entity?
 
 ---
 
+## Class 8 — Destructive snapshot apply (clearing local persistent state from a non-authoritative copy)
+
+**Pattern.** A host→client sync handler `Clear()`s and repopulates a LOCAL, PERSISTENT collection on a
+player-owned registration (interior `itemInstances` / `interiorDesigns` / `retailPrices` / `dirtSpots`,
+business `scheduleDays`, …) from a network snapshot. But **the host is not authoritative for a player's own
+business** — its copy is a blank/stale replica (the real data lives in that client's `.hsg`). So an empty or
+stale snapshot **wipes the player's real data**, and because these are saved fields the loss persists after a
+save/reload.
+
+**Why it bites.** Invisible to the host (it never receives its own state) and to the owner while present
+(they push their truth on entry/poll/exit). It only bites when a receiver applies a *host-built* copy of a
+*player-owned* thing — a visitor viewing the shop, or the owner before ownership has synced / right after a
+join. The clear-then-repopulate looks correct in isolation; the danger is only the **empty source × player-
+owned target** combination — which is exactly the case the host can't fill (owner offline / hasn't visited).
+
+**Detection grep.**
+```
+rg -n "reg\.\w+\.Clear\(\)" src/
+```
+For each clear on a player-owned registration collection, confirm it's gated: either the snapshot is flagged
+**authoritative** (only the owner's own push is) or there's a **count + ownership** guard
+(`Count > 0 && !IsSessionPlayerBusiness(reg)`). An ungated clear on a player business is this bug.
+
+**Safe fixes.**
+1. **Whole-snapshot authoritative flag (preferred — collection-agnostic).** The host flags any snapshot it
+   built from its own replica of a player-owned thing `Authoritative = false`; the receiver refuses to modify
+   a player business's interior from a non-authoritative snapshot. ONE gate protects every collection, present
+   and future (`ApplyInteriorSnapshot`).
+2. **Count + ownership guard** for paths with no owner-push channel: never clear a player business's collection
+   from an empty host sync (`ApplyBusinessInfoLocal` prices + schedule).
+
+**Known instances (all fixed).**
+- `ApplyInteriorSnapshot` `itemInstances` — empty non-authoritative snapshot cleared shop stock (the original
+  "furniture vanishing on re-enter" report). Fixed via owner-authoritative push + item guard.
+- `ApplyInteriorSnapshot` `interiorDesigns` / `retailPrices` / `dirtSpots` — same wipe, unguarded siblings of
+  the items fix → whole-snapshot `Authoritative` flag + a single receiver gate. Fixed 2026-06-17.
+- `ApplyBusinessInfoLocal` `scheduleDays` — operating-hours wipe; count + ownership guard mirroring the adjacent
+  prices block. Fixed 2026-06-17.
+
+---
+
 *Registry seeded from real fix history (git log + investigation notes); it is not
 exhaustive — add a class the moment a second instance of any pattern shows up.*

@@ -357,6 +357,16 @@ namespace BigAmbitionsMP
         public static void ClientHandleLoadData(LoadDataPayload p)
         {
             if (p == null) return;
+            // Proposal 2 (2026-06-17): host says our saved character exists but its .hsg can't be read right
+            // now — do NOT fresh-start (that abandons the real save). Leave cleanly so the player can reconnect
+            // to retry, or the host can recover the file. Checked BEFORE the empty-hsg fresh path below.
+            if (p.SaveUnavailable)
+            {
+                Plugin.Logger.LogError("[MPSave] Host reports our save is temporarily unavailable — aborting join WITHOUT fresh-starting (your character is not lost).");
+                try { MPChat.AddNotice("Your save couldn't be loaded right now — your character is safe. Try reconnecting, or ask the host to check the session save."); } catch { }
+                MPClient.Disconnect();
+                return;
+            }
             // Mid-join fallback (empty .hsg): the host has no stored save for
             // us — start a fresh character with the host's settings.  (The
             // "load your own local copy" variant was REMOVED 2026-06-10: a

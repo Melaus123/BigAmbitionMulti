@@ -211,6 +211,7 @@ namespace BigAmbitionsMP
 
                 payload.OwnerPlayerId = playerId;
                 payload.ItemInstancesAuthoritative = true;
+                payload.Authoritative = true;   // owner's own push — authoritative for the whole interior
                 int hash = ComputeHash(payload);
                 bool changed = !_ownerSnapshotsByAddr.TryGetValue(payload.AddressKey, out var prev) || prev.Hash != hash;
                 _ownerSnapshotsByAddr[payload.AddressKey] = new OwnerInteriorState
@@ -243,6 +244,7 @@ namespace BigAmbitionsMP
                 }
                 snap.OwnerPlayerId = MPConfig.PlayerId;
                 snap.ItemInstancesAuthoritative = true;
+                snap.Authoritative = true;   // owner's own push — authoritative for the whole interior
                 int hash = ComputeHash(snap);
                 if (!force && _lastLocalOwnerHashByAddr.TryGetValue(addressKey, out var prev) && prev == hash)
                     return true;
@@ -265,11 +267,17 @@ namespace BigAmbitionsMP
 
             var snap = BuildSnapshot(addressKey);
             if (snap == null) return null;
-            if (TryRemoteOwnerForAddress(addressKey, out var ownerId))
+            // RULE (2026-06-17): the host is authoritative ONLY for businesses it itself owns (and pure
+            // AI/world ones). For anything a PLAYER owns, this is the host's own — possibly blank/stale —
+            // replica, so flag the WHOLE snapshot non-authoritative: the receiver must never let it clear
+            // their real interior. Only the owner's own push (cached above) is authoritative.
+            bool playerOwned = MPServer.BuildingOwners.TryGetValue(addressKey, out var owner)
+                               && !string.IsNullOrEmpty(owner) && owner != "host";
+            if (playerOwned)
             {
-                snap.OwnerPlayerId = ownerId;
-                if (snap.ItemInstances.Count == 0)
-                    snap.ItemInstancesAuthoritative = false;
+                snap.Authoritative              = false;
+                snap.ItemInstancesAuthoritative = false;
+                if (TryRemoteOwnerForAddress(addressKey, out var ownerId)) snap.OwnerPlayerId = ownerId;
             }
             return snap;
         }

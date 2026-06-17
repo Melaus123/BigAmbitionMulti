@@ -169,11 +169,27 @@ namespace BigAmbitionsMP
                 var data = MPSaveCoordinator.ReadSaveBytesGzip(session, stable);
                 if (data == null)
                 {
-                    // No stored slot for this peer (their coordinated save may
-                    // have failed — temp-file collision) — STILL instruct them:
-                    // empty payload = fresh character with the host's settings.
-                    // The old silent `continue` left the client sitting in the
-                    // lobby while everyone else loaded (user bug 2026-06-12).
+                    // Proposal 2 (2026-06-17): distinguish a brand-NEW player (no saved character — fresh-start
+                    // is correct) from a RETURNING one whose .hsg we can't read right now. A manifest slot exists
+                    // once a player has ever been saved this session, so slot-present + null .hsg means their
+                    // real character exists but the file is missing/locked/corrupt. Fresh-starting them would
+                    // abandon that save (and, once they re-save, overwrite any chance of recovery) — so refuse,
+                    // and tell the client so the player can reconnect to retry / the host can recover the file.
+                    bool hasSavedCharacter = m.Slots != null && m.Slots.Exists(s => s.StableId == stable);
+                    if (hasSavedCharacter)
+                    {
+                        Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
+                        {
+                            SessionName      = session,
+                            HsgGzipBase64    = "",
+                            SaveUnavailable  = true,
+                            FallbackSettings = LastStartSettings,
+                        }));
+                        Plugin.Logger.LogError($"[Server] Returning player '{pid}' (stable={stable}) has a save slot but its .hsg is unreadable — REFUSING to fresh-start (would abandon their character). Sent save-unavailable.");
+                        continue;
+                    }
+                    // Genuinely new player (no slot to protect) — empty payload = fresh character with host
+                    // settings. (The old silent `continue` left them stuck in the lobby — user bug 2026-06-12.)
                     float kc = GetKnownCash(pid);
                     Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
                     {
@@ -182,7 +198,7 @@ namespace BigAmbitionsMP
                         Money            = Math.Max(0f, kc),
                         FallbackSettings = LastStartSettings,
                     }));
-                    Plugin.Logger.LogWarning($"[Server] No stored .hsg for '{pid}' (stable={stable}) — sent fresh-character fallback.");
+                    Plugin.Logger.LogWarning($"[Server] No save slot for new player '{pid}' (stable={stable}) — sent fresh-character fallback.");
                     continue;
                 }
                 float cash = MPSaveCoordinator.BestCashFor(m, stable);
@@ -1313,18 +1329,39 @@ namespace BigAmbitionsMP
                         }
                         else
                         {
-                            // No stored .hsg — still instruct the client: load
-                            // its LOCAL session copy, else fresh character.
-                            float kc = GetKnownCash(hello.PlayerId);
-                            Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
+                            // Proposal 2 (2026-06-17): a manifest slot exists once this player has been saved
+                            // this session, so slot-present + null .hsg means their real character exists but
+                            // the file is missing/locked/corrupt. Fresh-starting would abandon it — refuse and
+                            // tell the client so the player can reconnect to retry / the host can recover. A
+                            // brand-new joiner (no slot) still gets the normal fresh-character fallback.
+                            var mm = MPSaveManager.ReadManifest(session);
+                            bool hasSavedCharacter = mm?.Slots != null && mm.Slots.Exists(s => s.StableId == stable);
+                            if (hasSavedCharacter)
                             {
-                                SessionName = session,
-                                HsgGzipBase64 = "",
-                                Money = Math.Max(0f, kc),
-                                FallbackSettings = LastStartSettings,
-                            }));
-                            sentLoad = true;
-                            Plugin.Logger.LogInfo($"[Server] Mid-session join by '{hello.PlayerId}': no stored .hsg — sent local-or-fresh fallback instruction.");
+                                Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
+                                {
+                                    SessionName      = session,
+                                    HsgGzipBase64    = "",
+                                    SaveUnavailable  = true,
+                                    FallbackSettings = LastStartSettings,
+                                }));
+                                sentLoad = true;
+                                Plugin.Logger.LogError($"[Server] Mid-session join by '{hello.PlayerId}' (stable={stable}): has a save slot but its .hsg is unreadable — REFUSING to fresh-start. Sent save-unavailable.");
+                            }
+                            else
+                            {
+                                // Genuinely new joiner — no slot to protect.
+                                float kc = GetKnownCash(hello.PlayerId);
+                                Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
+                                {
+                                    SessionName = session,
+                                    HsgGzipBase64 = "",
+                                    Money = Math.Max(0f, kc),
+                                    FallbackSettings = LastStartSettings,
+                                }));
+                                sentLoad = true;
+                                Plugin.Logger.LogInfo($"[Server] Mid-session join by '{hello.PlayerId}': no save slot — sent fresh-character fallback.");
+                            }
                         }
                     }
                 }

@@ -674,6 +674,19 @@ namespace BigAmbitionsMP
                         return;
                     }
 
+                    // CATCH-ALL (2026-06-17): the host's own replica of a PLAYER-owned business is flagged
+                    // non-authoritative (InteriorSync.BuildSnapshotForHostSend). Such a snapshot must NEVER
+                    // touch the owner's real interior — only the owner's OWN authoritative push may. This one
+                    // gate protects EVERY collection below (designs / prices / dirt / items + any added later).
+                    bool isPlayerBusiness = false;
+                    try { isPlayerBusiness = IsSessionPlayerBusiness(reg) || reg.RentedByPlayer || !string.IsNullOrEmpty(payload.OwnerPlayerId); }
+                    catch { }
+                    if (isPlayerBusiness && !payload.Authoritative)
+                    {
+                        Plugin.Logger.LogWarning($"[Patcher] Interior apply SKIPPED for '{payload.AddressKey}': non-authoritative snapshot for a player-owned business — kept local interior.");
+                        return;
+                    }
+
                     // Layout (string; controls which BusinessLayoutSet is used)
                     if (!string.IsNullOrEmpty(payload.Layout))
                         reg.Layout = payload.Layout;
@@ -1749,7 +1762,10 @@ namespace BigAmbitionsMP
                 // closed.  Replace verbatim from host.
                 try
                 {
-                    if (reg.scheduleDays != null)
+                    // Player shops' hours are the OWNER's — never clear them from a (possibly empty) host
+                    // sync; only AI businesses take host-authoritative hours (mirrors the price guard above).
+                    if (reg.scheduleDays != null && info.Schedule != null && info.Schedule.Count > 0
+                        && !IsSessionPlayerBusiness(reg))
                     {
                         reg.scheduleDays.Clear();
                         foreach (var d in info.Schedule)

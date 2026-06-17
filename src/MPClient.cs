@@ -899,6 +899,7 @@ namespace BigAmbitionsMP
             if (!IsConnected || payload == null || string.IsNullOrEmpty(payload.AddressKey)) return;
             payload.OwnerPlayerId = MPConfig.PlayerId;
             payload.ItemInstancesAuthoritative = true;
+            payload.Authoritative = true;   // owner's own push — authoritative for the whole interior
             Send(MessageEnvelope.Create(MessageType.InteriorOwnerSnapshot, MPConfig.PlayerId, payload));
         }
 

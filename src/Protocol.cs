@@ -1053,6 +1053,10 @@ namespace BigAmbitionsMP
         public string                     Layout          { get; set; } = "";
         public string                     OwnerPlayerId   { get; set; } = "";
         public bool                       ItemInstancesAuthoritative { get; set; } = true;
+        // Whole-snapshot authority (2026-06-17): false ONLY when the host built this from its own replica of
+        // a PLAYER-owned business (a possibly blank/stale copy). The receiver must never let a non-authoritative
+        // snapshot clear a player business's interior. Default true = owner push / AI / world (apply normally).
+        public bool                       Authoritative   { get; set; } = true;
         public List<InteriorDesignInfo>   InteriorDesigns { get; set; } = new();
         public List<RetailPriceInfo>      RetailPrices    { get; set; } = new();
         public List<DirtSpotInfo>         DirtSpots       { get; set; } = new();
@@ -1289,6 +1293,12 @@ namespace BigAmbitionsMP
         public string HsgGzipBase64  { get; set; } = "";
         public int    RawLength      { get; set; }
         public float  Money          { get; set; }
+        // Host → client (Proposal 2, 2026-06-17): "you HAVE a saved character in this session, but I can't read
+        // its .hsg right now (missing / locked / corrupt)." The client must NOT fresh-start on this — that would
+        // abandon the real save (and, once it re-saves, destroy any chance of recovery). Set only when a manifest
+        // slot exists but ReadSaveBytesGzip returned null. A brand-new player (no slot) still gets a normal
+        // empty-hsg fresh-start.
+        public bool   SaveUnavailable { get; set; } = false;
         /// <summary>Mid-join fallback chain: when HsgGzipBase64 is EMPTY the
         /// client loads its own LOCAL session save if present, else starts a
         /// fresh character with these host settings (null → Normal preset).</summary>
