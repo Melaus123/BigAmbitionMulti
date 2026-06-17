@@ -32,12 +32,12 @@ Every player installs the same way.
 
 ## Hosting and joining
 
-- One player **hosts**; the others **join** by entering the host's IP address.
-- The default port is **7777 (UDP)**. For internet play the host needs that port reachable — forward it on the router, or use a LAN / VPN tool (Radmin, ZeroTier, Hamachi, etc.). On the same local network, the host's LAN IP works directly.
+- One player **hosts**; the others **join** by entering the host's IP address (shown in the host's lobby).
+- The default port is **7777 (UDP)**. The host needs that port reachable over the internet — forward it on the router, or use a virtual-network tool (ZeroTier, Radmin, Hamachi, etc.) so everyone connects as if on the same network.
 
 ## Reporting bugs
 
-This beta exists to find bugs, so please report them. [Open an issue](https://github.com/Melaus123/BigAmbitionMulti/issues) with:
+This beta exists to find bugs, so please report them. The easiest way is in-game: type **`/bug <what happened>`** in chat, or click **Report** in the chat window — it packages your logs and session details into a folder (and can upload them to Discord if a webhook is configured; your IP is stripped from uploads). You can also [open an issue](https://github.com/Melaus123/BigAmbitionMulti/issues) with:
 
 - What happened and what you expected.
 - Whether you were the **host** or a **client**.
