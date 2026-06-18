@@ -130,6 +130,11 @@ namespace BigAmbitionsMP
         /// </summary>
         public static void ReceiveClockSync(int hostDay, float hostHour)
         {
+            // Precedence (forward-compatible): while a consensus skip is active, the skip's fast-run is the SOLE
+            // time authority on this machine — routine drift-correction stands down so it can't fight or jump
+            // past the fast-run. Phase 2's rate-based drift inherits this same guard.
+            if (MPRestSync.SkipActive) return;
+
             var (localDay, localHour) = GameStateReader.GetGameTime();
 
             float hostTotal  = hostDay  * 24f + hostHour;
