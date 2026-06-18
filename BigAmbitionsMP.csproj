@@ -31,6 +31,13 @@
     <ModDeployDir>$(LOCALAPPDATA)Low\Hovgaard Games\Big Ambitions\ModsLocal\BigAmbitionsMP\</ModDeployDir>
   </PropertyGroup>
 
+  <!-- Keep standalone tooling out of the game mod assembly. -->
+  <ItemGroup>
+    <Compile Remove="tools\**\*.cs" />
+    <EmbeddedResource Remove="tools\**\*" />
+    <None Remove="tools\**\*" />
+  </ItemGroup>
+
   <!-- NuGet -->
   <ItemGroup>
     <PackageReference Include="Lib.Harmony" Version="2.3.3" />

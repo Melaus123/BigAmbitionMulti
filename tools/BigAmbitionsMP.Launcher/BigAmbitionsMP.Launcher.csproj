@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>BigAmbitionsMP.Manager</AssemblyName>
+    <RootNamespace>BigAmbitionsMP.Launcher</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="launcher-settings.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="launcher-secrets.example.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="assets\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,37 @@
+{
+  "appTitle": "BAMP Manager",
+  "disclaimer": "Unofficial community mod manager. No official Big Ambitions assets are bundled.",
+  "githubOwner": "Melaus123",
+  "githubRepository": "BigAmbitionMulti",
+  "steamAppId": "1331550",
+  "steamProcessName": "Big Ambitions",
+  "steamExecutableName": "Big Ambitions.exe",
+  "publisherFolder": "Hovgaard Games",
+  "gameDataFolder": "Big Ambitions",
+  "modsFolderName": "ModsLocal",
+  "modFolderName": "BigAmbitionsMP",
+  "mainAssembly": "BigAmbitionsMP.dll",
+  "installManifestName": "install-manifest.json",
+  "backupFolderName": "_backups",
+  "launcherSecretsFileName": "launcher-secrets.json",
+  "launcherWebhookEnvironmentVariable": "BAMP_BUG_REPORT_WEBHOOK",
+  "launcherBackgroundImage": "launcher-background.png",
+  "launcherBugReportIcon": "bug-report-icon.png",
+  "launcherBugReportTagLabel": "Launcher",
+  "launcherBugReportTagId": "1516949155904360559",
+  "knownManifestNames": [
+    "install-manifest.json",
+    "manifest.json"
+  ],
+  "requiredFiles": [
+    "BigAmbitionsMP.dll",
+    "Dependencies/0Harmony.dll",
+    "Dependencies/LiteNetLib.dll"
+  ],
+  "recommendedFiles": [
+    "BAMP_ChatIcon.png",
+    "BAMP_HubIcon.png",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.txt"
+  ]
+}
