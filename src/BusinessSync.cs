@@ -639,6 +639,22 @@ namespace BigAmbitionsMP
                                     });
                                 }
                             }
+                            if (sd.workShifts != null)
+                            {
+                                for (int j = 0; j < sd.workShifts.Count; j++)
+                                {
+                                    var w = sd.workShifts[j];
+                                    if (w == null || IsSyntheticDutyEmployee(w.employeeId)) continue;
+                                    dto.WorkShifts.Add(new WorkShiftInfo
+                                    {
+                                        EmployeeId     = w.employeeId ?? "",
+                                        ItemInstanceId = w.itemInstanceId ?? "",
+                                        StartingHour   = w.startingHour,
+                                        EndingHour     = w.endingHour,
+                                        Type           = (int)w.type,
+                                    });
+                                }
+                            }
                             info.Schedule.Add(dto);
                         }
                     }
@@ -750,9 +766,24 @@ namespace BigAmbitionsMP
                     if (sa[j].StartingHour != sb[j].StartingHour) return false;
                     if (sa[j].EndingHour   != sb[j].EndingHour)   return false;
                 }
+                var wa = a[i].WorkShifts;
+                var wb = b[i].WorkShifts;
+                if (wa.Count != wb.Count) return false;
+                for (int j = 0; j < wa.Count; j++)
+                {
+                    if (wa[j].EmployeeId     != wb[j].EmployeeId)     return false;
+                    if (wa[j].ItemInstanceId != wb[j].ItemInstanceId) return false;
+                    if (wa[j].StartingHour   != wb[j].StartingHour)   return false;
+                    if (wa[j].EndingHour     != wb[j].EndingHour)     return false;
+                    if (wa[j].Type           != wb[j].Type)           return false;
+                }
             }
             return true;
         }
+
+        private static bool IsSyntheticDutyEmployee(string? employeeId)
+            => !string.IsNullOrEmpty(employeeId)
+            && employeeId.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix, StringComparison.Ordinal);
 
         // ── Logo-file payload cache ───────────────────────────────────────────
         // ReadInfo runs for every business each poll tick; re-scanning the logo

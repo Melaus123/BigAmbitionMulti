@@ -751,6 +751,7 @@ namespace BigAmbitionsMP
         public int Day    { get; set; }
         public bool IsOpen { get; set; }
         public List<OpeningHourSlotInfo> OpeningHourSlots { get; set; } = new();
+        public List<WorkShiftInfo> WorkShifts { get; set; } = new();
     }
 
     /// <summary>One contiguous open-hours window within a day (e.g. 09:00-17:00).</summary>
@@ -758,6 +759,16 @@ namespace BigAmbitionsMP
     {
         public int StartingHour { get; set; }
         public int EndingHour   { get; set; }
+    }
+
+    /// <summary>One employee assignment inside a business schedule day.</summary>
+    public class WorkShiftInfo
+    {
+        public string EmployeeId     { get; set; } = "";
+        public string ItemInstanceId { get; set; } = "";
+        public int    StartingHour   { get; set; }
+        public int    EndingHour     { get; set; }
+        public int    Type           { get; set; }
     }
 
     /// <summary>A single file from the player-business logo directory.</summary>

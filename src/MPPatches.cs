@@ -1954,7 +1954,7 @@ namespace BigAmbitionsMP
         {
             static bool Prefix(Entities.EmployeeInstance __instance)
             {
-                if (__instance?.id != null && __instance.id.StartsWith("BAMP_DUTY_"))
+                if (__instance?.id != null && __instance.id.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix))
                     return false;   // synthetic has no demands → 0/0 NaN; leave its satisfaction untouched
                 return true;
             }

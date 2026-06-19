@@ -1816,6 +1816,21 @@ namespace BigAmbitionsMP
                                 foreach (var slot in d.OpeningHourSlots)
                                     sd.openingHourSlots.Add(new OpeningHourSlot(slot.StartingHour, slot.EndingHour));
                             }
+                            if (sd.workShifts != null && d.WorkShifts != null)
+                            {
+                                foreach (var shift in d.WorkShifts)
+                                {
+                                    if (shift == null) continue;
+                                    sd.AddWorkShift(new WorkShift
+                                    {
+                                        employeeId     = shift.EmployeeId ?? "",
+                                        itemInstanceId = shift.ItemInstanceId ?? "",
+                                        startingHour   = shift.StartingHour,
+                                        endingHour     = shift.EndingHour,
+                                        type           = (WorkShiftType)shift.Type,
+                                    });
+                                }
+                            }
                             reg.scheduleDays.Add(sd);
                         }
                     }

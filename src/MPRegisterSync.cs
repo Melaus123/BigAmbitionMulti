@@ -37,6 +37,8 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class MPRegisterSync
     {
+        public const string SyntheticDutyEmployeeIdPrefix = "BAMP_DUTY_";
+
         // posKey → cashier.  CONCURRENT: Apply runs on the network poll thread
         // (RegisterCashier handler) and the main thread (local duty echo), while
         // the checkout-routing Harmony patches read it on the main thread.
@@ -389,7 +391,7 @@ namespace BigAmbitionsMP
 
                 var inst = Helpers.EmployeeHelper.CreateAIEmployeeInstance("ba:skill_customerservice");
                 if (inst == null) { Plugin.Logger.LogWarning("[SynthStaff] factory returned null."); return; }
-                inst.id = $"BAMP_DUTY_{playerId}_{addressKey.Replace(' ', '_')}";
+                inst.id = $"{SyntheticDutyEmployeeIdPrefix}{playerId}_{addressKey.Replace(' ', '_')}";
                 inst.hourlyWage = 0f;
                 inst.satisfaction = 100f;
                 inst.assignedAddress = new Address(reg.StreetName, reg.StreetNumber);
@@ -485,7 +487,7 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] remove '{addressKey}': {ex.Message}"); }
         }
 
-        /// <summary>Remove ORPHANED synthetic duty employees (id prefix "BAMP_DUTY_")
+        /// <summary>Remove ORPHANED synthetic duty employees.
         /// left in gi.EmployeeInstances by a prior save.  Synthetic staff are
         /// runtime-only and tracked in _synthetics; after a load _synthetics is empty
         /// but the deserialized copies remain in the roster, where they accumulate one
@@ -507,7 +509,7 @@ namespace BigAmbitionsMP
                 for (int i = list.Count - 1; i >= 0; i--)
                 {
                     string id = list[i]?.id ?? "";
-                    if (!id.StartsWith("BAMP_DUTY_") || live.Contains(id)) continue;
+                    if (!id.StartsWith(SyntheticDutyEmployeeIdPrefix) || live.Contains(id)) continue;
                     // Strip this employee's work shifts from every registration first.
                     try
                     {
@@ -557,7 +559,7 @@ namespace BigAmbitionsMP
                 {
                     var emp = list[i];
                     string id = emp?.id ?? "";
-                    if (!id.StartsWith("BAMP_DUTY_")) continue;
+                    if (!id.StartsWith(SyntheticDutyEmployeeIdPrefix)) continue;
                     // Capture + strip this synthetic's work shifts from every registration.
                     try
                     {
