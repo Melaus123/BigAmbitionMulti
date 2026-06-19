@@ -1894,6 +1894,39 @@ namespace BigAmbitionsMP
             }
         }
 
+        // (5) Our synthetic on-duty staff has zero "demands", so the game's hourly satisfaction calc does
+        // 0/0 → NaN. Skip it for the synthetic; it keeps its mod-set satisfaction (100). (2026-06-19.)
+        [HarmonyPatch(typeof(Entities.EmployeeInstance), "UpdateSatisfaction")]
+        public static class Patch_EmployeeInstance_UpdateSatisfaction_SkipSynthetic
+        {
+            static bool Prefix(Entities.EmployeeInstance __instance)
+            {
+                if (__instance?.id != null && __instance.id.StartsWith("BAMP_DUTY_"))
+                    return false;   // synthetic has no demands → 0/0 NaN; leave its satisfaction untouched
+                return true;
+            }
+        }
+
+        // (6) A disconnected player's RivalState lingers in gi.rivalStates, but GetRivalData refuses an
+        // off-roster id → returns null → RivalsHelper.RunDaily dereferences it on the next day-roll (crash on
+        // every machine). Pre-drop any rivalState whose RivalData no longer resolves: connected players resolve
+        // via the GetRivalData fallback and AI rivals via the cache (both kept); only stale/orphan entries go.
+        // MP-only. (2026-06-19.)
+        [HarmonyPatch(typeof(BigAmbitions.Rivals.RivalsHelper), "RunDaily")]
+        public static class Patch_RivalsHelper_RunDaily_DropOrphanRivalStates
+        {
+            static void Prefix()
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                var states = SaveGameManager.Current?.rivalStates;
+                if (states == null) return;
+                int removed = states.RemoveAll(rs => rs == null
+                    || BigAmbitions.Rivals.RivalsHelper.GetRivalData(rs.rivalId) == null);
+                if (removed > 0)
+                    Plugin.Logger.LogInfo($"[RivalGuard] dropped {removed} stale/orphan rivalState(s) before RunDaily.");
+            }
+        }
+
         // ── Patch: TaxiSystem.TravelTo — arms instant-arrival mode ────────────
         [HarmonyPatch]
         public static class Patch_TaxiSystem_TravelTo_Arm

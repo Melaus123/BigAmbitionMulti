@@ -399,6 +399,9 @@ namespace BigAmbitionsMP
                 // .BuildEmployeeByNameLookup → ContainsKey(null)) and in EmployeeTooltip (name.Localize()) —
                 // breaking the Contacts app. Any non-empty name closes both. (2026-06-19 bug fix.)
                 inst.characterData.name = "On-Duty Staff";
+                // Also give it a sane adult age — the factory leaves ageInDays = 0, which reads as a newborn
+                // and skews the retirement-notice math in the daily employee tick. Use the game's own helper.
+                inst.characterData.ageInDays = Helpers.RecruitmentHelper.GetRandomEmployeeAgeInDays();
 
                 // Backstop against duplicate roster entries: a prior save could have
                 // persisted a synthetic with this same deterministic id before the

@@ -423,6 +423,12 @@ namespace BigAmbitionsMP
                                 {
                                     id        = r.Id,
                                     rivalName = string.IsNullOrEmpty(r.Name) ? r.Id : r.Name,
+                                    // Init owned-lists empty (Site-2/BuildSyntheticPlayerRivalData does the same) so
+                                    // RivalData.WeeklyIncome / leaderboard reads never NRE if anything touches this
+                                    // cache entry before the game's RefreshRivals backfills them.
+                                    ownedBuildings              = new System.Collections.Generic.List<BuildingRegistration>(),
+                                    ownedBusinesses             = new System.Collections.Generic.List<BuildingRegistration>(),
+                                    ownedRetailOfficeBusinesses = new System.Collections.Generic.List<BuildingRegistration>(),
                                 };
                                 cacheAdded++;
                             }
