@@ -1508,6 +1508,20 @@ namespace BigAmbitionsMP
             }
         }
 
+        // MP season consistency (2026-06-19): SeasonalDecorations is a PER-MACHINE PlayerPref that gates which
+        // seasonal item variants are sold (RemoveSeasonalItems + BuildingRegistration.GetItemNameBySeason).
+        // Differing prefs would make players sell different seasonal items. Force it consistent (= on, the
+        // normal seasonal behavior) for everyone in an MP session so the economy matches. Side effect: seasonal
+        // decorations show in MP regardless of the local toggle; the toggle effectively no-ops in a session.
+        [HarmonyPatch(typeof(PlayerPrefSettings), "SeasonalDecorations", MethodType.Getter)]
+        public static class Patch_PlayerPrefSettings_SeasonalDecorations_ForceConsistent
+        {
+            static void Postfix(ref bool __result)
+            {
+                if (MPServer.IsRunning || MPClient.IsConnected) __result = true;
+            }
+        }
+
         // ── Diagnostic: CityMapFilters.ApplyFilters ───────────────────────────
         // The map's "for rent" highlight discrepancy investigation.  Our snapshot
         // apply runs once at sync time and our diagnostic shows host/client state
