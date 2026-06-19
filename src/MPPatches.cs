@@ -92,8 +92,7 @@ namespace BigAmbitionsMP
         }
 
         // ── Patch: GameManager.Update ─────────────────────────────────────────
-        // Postfix runs AFTER the game's own Update, so TickSuppression overrides
-        // any timeScale the game set during its frame — we reliably win the race.
+        // Postfix runs AFTER the game's own Update — used to drain our main-thread action queue each frame.
         // NESTED class — REQUIRED so Plugin.cs actually applies it (see the rent
         // patch note above; method-level patches on bare MPPatches are skipped).
         [HarmonyPatch(typeof(GameManager), "Update")]
@@ -102,15 +101,10 @@ namespace BigAmbitionsMP
             static void Postfix()
             {
                 GameStatePatcher.DrainQueue();
-
-                // Second timeScale enforcement point — runs after the game's own Update,
-                // so nothing the game does mid-frame can let the world pause or skip.
-                // (MPCanvasUI.LateUpdate is the primary point; this backs it up.)
-                if (MPServer.IsRunning || MPClient.IsConnected)
-                {
-                    bool frozen = TimeSync.ManualPaused || TimeSync.IsStartupHeld;
-                    UnityEngine.Time.timeScale = frozen ? 0f : 1f;
-                }
+                // (Removed the second timeScale-enforcement point 2026-06-18: it was speculative defense-in-depth
+                //  with no specific issue behind it. MPCanvasUI.LateUpdate already re-applies timeScale every
+                //  frame, and this Postfix runs AFTER the game's Update — so it never even protected
+                //  RunMainGameTick's delta, which already ran in Update. The per-frame LateUpdate set suffices.)
             }
 
             // (GMShield Finalizer RETIRED 2026-06-12 dead-code sweep: zero
