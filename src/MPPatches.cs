@@ -1489,6 +1489,25 @@ namespace BigAmbitionsMP
             }
         }
 
+        // Host-authoritative market events (2026-06-19, bucket 2 follow-up — audit catch): NewDay also calls
+        // ProductMarketHelper.RunDaily (SEPARATE from CompetitionHelper.RunDaily), which CREATES market events
+        // (hype / shortage / max-providers) via RNG. Clients must NOT generate their own — they receive the
+        // host's authoritative gi.marketEvents via the MarketEvents sync (Protocol MessageType.MarketEvents,
+        // whose comment already assumes "clients suppress the generating sim"). Still clear the lowest-market-
+        // price cache daily (the only other place it was cleared) so synced competitor prices are reflected in
+        // price-acceptability. Host + single-player generate events normally.
+        [HarmonyPatch(typeof(Helpers.ProductMarketHelper), "RunDaily")]
+        public static class Patch_ProductMarketHelper_RunDaily_SkipOnClient
+        {
+            static bool Prefix()
+            {
+                if (!MPClient.IsConnected) return true;
+                ItemHelper.ClearLmpCache();
+                Plugin.Logger.LogInfo("[Suppress] ProductMarketHelper.RunDaily skipped on client (host-authoritative market events; LMP cache cleared).");
+                return false;
+            }
+        }
+
         // ── Diagnostic: CityMapFilters.ApplyFilters ───────────────────────────
         // The map's "for rent" highlight discrepancy investigation.  Our snapshot
         // apply runs once at sync time and our diagnostic shows host/client state
