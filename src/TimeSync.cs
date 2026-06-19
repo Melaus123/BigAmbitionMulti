@@ -32,11 +32,12 @@ namespace BigAmbitionsMP
 
         // ── Drift alignment thresholds ────────────────────────────────────────
 
-        /// <summary>Drifts below this (game-hours) are ignored — floating-point noise.</summary>
-        public const float DRIFT_IGNORE_HOURS = 0.02f;   // ~1 game-minute
+        /// <summary>Drifts below this (game-hours) are within tolerance — no correction.</summary>
+        public const float DRIFT_IGNORE_HOURS = 0.05f;   // 3 game-minutes (user-set 2026-06-18)
 
-        /// <summary>Drifts above this (game-hours) trigger a hard snap rather than a nudge.</summary>
-        public const float DRIFT_SNAP_HOURS   = 0.50f;   // 30 game-minutes
+        // (DRIFT_SNAP_HOURS removed 2026-06-18: no hard clock-snap anymore. Beyond the dead-band we correct by
+        //  RUNNING time — speed up when behind, freeze when ahead — never by writing the clock. The continuous
+        //  correction caps drift, so it never accumulates to a size that would have needed a snap.)
 
 
         // ── Startup pause hold ────────────────────────────────────────────────
@@ -110,10 +111,14 @@ namespace BigAmbitionsMP
 
         // ── Drift state ───────────────────────────────────────────────────────
 
-        // Remaining game-hours of gradual correction to drip in.
+        // Remaining game-hours of forward catch-up to RUN (we're behind the host). Drained by
+        // TickClockCorrection, which drives the game tick rather than writing the clock. AHEAD is handled by the
+        // freeze flag below, not here.
         private static float _correctionHours;
-        private static float _correctionElapsed;
-        private const  float CORRECTION_REAL_SECS = 3f;  // spread over 3 real seconds
+        /// <summary>True while we're AHEAD of the host: the RunMainGameTick prefix (MPPatches) zeroes the tick
+        /// delta so the clock + economy HOLD until the host catches up — the player and the visible world keep
+        /// moving (timeScale untouched). Never rewind. Released by a later sync once we're back in tolerance.</summary>
+        public static volatile bool AheadHeld;
 
         // ── Authorized-write handshake with the anti-skip watchdog ───────────
         // TickWorldClock (MPCanvasUI) reverts any fast clock advance — which is
@@ -144,24 +149,30 @@ namespace BigAmbitionsMP
             float absDrift = Mathf.Abs(drift);
 
             if (absDrift < DRIFT_IGNORE_HOURS)
-                return;   // negligible — do nothing
-
-            if (absDrift >= DRIFT_SNAP_HOURS)
             {
-                // Large drift — hard snap (only happens if there was a real desync)
-                Plugin.Logger.LogWarning($"[TimeSync] Large drift ({drift:+0.##;-0.##} h) — hard snap.");
-                GameStateReader.SetGameTime(hostDay, hostHour);
-                _wroteClock        = true;   // tell the watchdog this jump is OURS
-                _correctionHours   = 0f;
-                _correctionElapsed = 0f;
+                // Within tolerance — cancel any pending catch-up and release any freeze.
+                _correctionHours = 0f;
+                AheadHeld        = false;
                 return;
             }
 
-            // Small–medium drift — schedule a gradual drip over 3 real seconds
-            // (accumulate if a second sync arrives before the first finishes)
-            _correctionHours  += drift;
-            _correctionElapsed = 0f;
-            Plugin.Logger.LogInfo($"[TimeSync] Drift {drift:+0.###;-0.###} h → gradual correction.");
+            if (drift > 0f)
+            {
+                // BEHIND the host — schedule a forward catch-up that RUNS the sim (TickClockCorrection drives
+                // the game tick), so the catch-up simulates the economy instead of writing the clock past it.
+                // Re-targeted on each sync; no hard snap regardless of size.
+                _correctionHours = drift;
+                AheadHeld        = false;
+                Plugin.Logger.LogInfo($"[TimeSync] behind {drift:+0.###} h → run-forward catch-up.");
+            }
+            else
+            {
+                // AHEAD of the host — FREEZE our game-time tick (the RunMainGameTick prefix zeroes its delta)
+                // until the host catches up; never rewind. Released by a later sync once back in tolerance.
+                _correctionHours = 0f;
+                AheadHeld        = true;
+                Plugin.Logger.LogInfo($"[TimeSync] ahead {drift:+0.###;-0.###} h → hold clock until host catches up.");
+            }
         }
 
         /// <summary>
@@ -170,28 +181,21 @@ namespace BigAmbitionsMP
         /// </summary>
         public static void TickClockCorrection()
         {
-            if (_correctionHours == 0f) return;
-            if (Time.timeScale   == 0f) return;   // paused — hold correction
+            if (_correctionHours <= 0f) return;   // only the BEHIND catch-up runs here; AHEAD = the freeze flag
+            if (Time.timeScale   == 0f) return;   // paused — hold
 
-            _correctionElapsed += Time.unscaledDeltaTime;
-            float fraction      = Mathf.Clamp01(_correctionElapsed / CORRECTION_REAL_SECS);
+            // Close the gap by RUNNING time forward this frame (same engine as the skip), capped per frame, so
+            // the catch-up simulates the economy instead of writing the clock past it.
+            float advanceMin = Mathf.Min(MPRestSync.SkipMinutesPerRealSecond * Time.unscaledDeltaTime,
+                                         MPRestSync.MaxSkipMinutesPerFrame);
+            advanceMin = Mathf.Min(advanceMin, _correctionHours * 60f);   // don't overshoot the remaining gap
+            if (advanceMin <= 0f) return;
 
-            // Apply a proportional slice this frame
-            float applyHours = _correctionHours * (Time.unscaledDeltaTime / CORRECTION_REAL_SECS);
-            applyHours = Mathf.Clamp(applyHours, -Mathf.Abs(_correctionHours), Mathf.Abs(_correctionHours));
-
-            var (d, h) = GameStateReader.GetGameTime();
-            float total  = d * 24f + h + applyHours;
-            int  newDay  = Mathf.Max(0, (int)(total / 24f));
-            float newHour = total % 24f;
-            if (newHour < 0f) { newDay--; newHour += 24f; }
-
-            GameStateReader.SetGameTime(newDay, newHour);
-            _wroteClock = true;   // authorized drip — watchdog re-bases, not rejects
-            _correctionHours -= applyHours;
-
-            if (Mathf.Abs(_correctionHours) < 0.001f)
-                _correctionHours = 0f;
+            var gm = InstanceBehavior<GameManager>.Instance;
+            if (gm != null) gm.RunMainGameTick(advanceMin);
+            _wroteClock       = true;            // authorized fast-advance — the watchdog re-bases, doesn't pin
+            _correctionHours -= advanceMin / 60f;
+            if (_correctionHours < 0.0001f) _correctionHours = 0f;
         }
     }
 }
