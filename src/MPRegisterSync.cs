@@ -393,6 +393,12 @@ namespace BigAmbitionsMP
                 inst.hourlyWage = 0f;
                 inst.satisfaction = 100f;
                 inst.assignedAddress = new Address(reg.StreetName, reg.StreetNumber);
+                // REQUIRED: the AI-employee factory leaves characterData.name null, but this synthetic is added
+                // to gi.EmployeeInstances + EmployeeInstancesDictionary, which the game iterates. A null name
+                // throws ArgumentNullException in the phone Contacts list-build (ContactScrollerController
+                // .BuildEmployeeByNameLookup → ContainsKey(null)) and in EmployeeTooltip (name.Localize()) —
+                // breaking the Contacts app. Any non-empty name closes both. (2026-06-19 bug fix.)
+                inst.characterData.name = "On-Duty Staff";
 
                 // Backstop against duplicate roster entries: a prior save could have
                 // persisted a synthetic with this same deterministic id before the
