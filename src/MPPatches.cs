@@ -1472,6 +1472,23 @@ namespace BigAmbitionsMP
             }
         }
 
+        // Host-authoritative AI economy (2026-06-19, bucket 2): the daily AI city-economy — new/closed AI
+        // businesses, residential/warehouse rent-availability swaps, and per-neighborhood market demand — must
+        // run on ONE machine, or each client evolves a different city. Suppress it on clients; the host's results
+        // arrive via BusinessSync (AI business identity/prices + AvailableForRent) and the market snapshot
+        // (importPriceIndex + demandValues, the latter added in Phase A1). NeighbourhoodStats need not sync —
+        // only RunDaily (now skipped on clients) reads it. Host + single-player run it normally.
+        [HarmonyPatch(typeof(Helpers.CompetitionHelper), "RunDaily")]
+        public static class Patch_CompetitionHelper_RunDaily_SkipOnClient
+        {
+            static bool Prefix()
+            {
+                if (!MPClient.IsConnected) return true;
+                Plugin.Logger.LogInfo("[Suppress] CompetitionHelper.RunDaily skipped on client (host-authoritative AI economy).");
+                return false;
+            }
+        }
+
         // ── Diagnostic: CityMapFilters.ApplyFilters ───────────────────────────
         // The map's "for rent" highlight discrepancy investigation.  Our snapshot
         // apply runs once at sync time and our diagnostic shows host/client state
