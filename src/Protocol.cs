@@ -1012,8 +1012,9 @@ namespace BigAmbitionsMP
     public class RestSkipStatePayload
     {
         public List<RestVoteEntry> Votes { get; set; } = new();
-        public int  Required   { get; set; }
-        public bool SkipActive { get; set; }
+        public int    Required    { get; set; }
+        public bool   SkipActive  { get; set; }
+        public double GoalMinutes { get; set; }   // absolute total-game-minutes target, so clients fast-run to it
     }
 
     /// <summary>Live retail prices for one business (MessageType.RetailPrices).

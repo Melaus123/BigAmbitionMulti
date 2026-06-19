@@ -2742,7 +2742,7 @@ namespace BigAmbitionsMP
             _pt = MPPerf.Begin(); MPAudit.Tick();              MPPerf.End("Audit",    _pt);   // client → host state-hash audit (30s) — Dev builds only
 #endif
             _pt = MPPerf.Begin(); MPRestSync.Tick();           MPPerf.End("Rest",     _pt);   // votes, seated state, watchdog (0.5s)
-            MPRestSync.HostSkipFrame();   // host clock executor — every frame for smoothness
+            MPRestSync.TickSkipFrame();   // per-frame skip executor (host + clients) — drives the sim fast to the goal
             MPHub.HostTick();             // loan ledger: daily interest/payment drafts
             MPServer.TickFencePrune();    // excuse menu-bailed clients from the load fence
             TickRestBanner();

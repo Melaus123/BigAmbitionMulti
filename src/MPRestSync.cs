@@ -24,6 +24,10 @@ namespace BigAmbitionsMP
     public static class MPRestSync
     {
         public const float SkipMinutesPerRealSecond = 25f;
+        // Defensive ceiling on game-minutes simulated in a SINGLE frame during a skip: a frame-time spike
+        // (alt-tab, stall) must not dump many hours of economy into one frame (~70ms/simulated-hour). At the
+        // normal 25 min/s rate a frame advances <1 min, so this only ever caps a recovery frame after a spike.
+        public const float MaxSkipMinutesPerFrame = 60f;
 
         // Activities OUR system manages.  Anything else (the TAXI is an
         // activity too — auto-pressing its Start mid-destination-pick crashed
@@ -528,20 +532,28 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>Host clock executor — called every frame from MPCanvasUI so
-        /// the skip is smooth (Tick() itself is throttled to 0.5s).</summary>
-        public static void HostSkipFrame()
+        /// <summary>Per-frame skip executor — runs on HOST and CLIENTS while a consensus skip is active.
+        /// Instead of WRITING the clock forward (which silently bypassed the game's per-hour/per-day economy
+        /// tick → no business revenue for the skipped time), this DRIVES the game's own RunMainGameTick fast,
+        /// so the skipped hours are actually simulated on every machine — each owner earns their own income
+        /// locally (cash is self-reported per machine). The shared world stays consistent via the existing
+        /// client-suppressions + the post-skip re-broadcast, exactly as in normal (un-skipped) play.
+        /// Called every frame from MPCanvasUI for smoothness; Tick() itself is throttled to 0.5s.</summary>
+        public static void TickSkipFrame()
         {
-            if (!MPServer.IsRunning || !SkipActive) return;
+            if (!SkipActive) return;
             double now = NowMinutes();
-            if (now >= _skipGoalMinutes) return;   // HostTick will close it out
-            double next = Math.Min(now + SkipMinutesPerRealSecond * Time.unscaledDeltaTime, _skipGoalMinutes);
-            MPCanvasUI.WriteWorldClockMinutes(next);
+            if (now >= _skipGoalMinutes) return;   // reached the goal; HostTick / the state broadcast closes it out
+            double advance = Math.Min(_skipGoalMinutes - now,
+                                      Math.Min(SkipMinutesPerRealSecond * Time.unscaledDeltaTime, MaxSkipMinutesPerFrame));
+            if (advance <= 0d) return;
+            var gm = InstanceBehavior<GameManager>.Instance;
+            if (gm != null) gm.RunMainGameTick((float)advance);   // advances the clock AND runs the skipped economy
         }
 
         private static void HostBroadcastState()
         {
-            var st = new RestSkipStatePayload { Required = MPServer.LobbyPlayers?.Count ?? 1, SkipActive = SkipActive };
+            var st = new RestSkipStatePayload { Required = MPServer.LobbyPlayers?.Count ?? 1, SkipActive = SkipActive, GoalMinutes = _skipGoalMinutes };
             foreach (var v in _hostVotes.Values) st.Votes.Add(v);
             ApplyState(st);
             MPServer.BroadcastRestState(st);
@@ -553,7 +565,11 @@ namespace BigAmbitionsMP
             Votes.Clear();
             Votes.AddRange(st.Votes);
             RequiredVotes = st.Required;
-            if (!MPServer.IsRunning) SkipActive = st.SkipActive;
+            if (!MPServer.IsRunning)
+            {
+                SkipActive       = st.SkipActive;
+                _skipGoalMinutes = st.GoalMinutes;   // clients need the goal to fast-run their own sim to it
+            }
         }
 
         // ── Plumbing ──────────────────────────────────────────────────────────

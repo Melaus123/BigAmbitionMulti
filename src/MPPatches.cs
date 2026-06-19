@@ -1986,6 +1986,19 @@ namespace BigAmbitionsMP
             }
         }
 
+        // Phase 2 — AHEAD-of-host freeze (clock-only). While TimeSync.AheadHeld (and not mid-skip), zero the
+        // game-time tick's delta so the clock + economy HOLD until the host catches up. timeScale is untouched,
+        // so the player + NPCs + traffic keep moving — only the clock/accrual pause. Never rewinds.
+        [HarmonyPatch(typeof(GameManager), "RunMainGameTick")]
+        public static class Patch_GameManager_RunMainGameTick_AheadFreeze
+        {
+            static void Prefix(ref float deltaTimeWithMultiplier)
+            {
+                if (TimeSync.AheadHeld && !MPRestSync.SkipActive)
+                    deltaTimeWithMultiplier = 0f;
+            }
+        }
+
         // ── Patch: TaxiSystem.TravelTo — arms instant-arrival mode ────────────
         [HarmonyPatch]
         public static class Patch_TaxiSystem_TravelTo_Arm
