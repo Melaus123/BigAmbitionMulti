@@ -1522,6 +1522,39 @@ namespace BigAmbitionsMP
             }
         }
 
+        // Anti-exploit (2026-06-19): a player could keep an item ASSIGNED to a shelf (so its retail price isn't
+        // pruned by RemoveUnusedRetailPrices) while never actually stocking it, then set a phantom-low price. On
+        // OTHER clients GetShelfFillState defaults to "full" for a player-owned shop (no AI goods-source), so
+        // that price counted in GetLowestMarketPrice and dragged the neighbourhood price floor down for rivals
+        // at zero inventory cost. Fix: for another player's shop, report the REAL shelf fill from the synced item
+        // stock (InteriorSync Phase 2b rebuilds reg.itemInstances + cargo amounts). A priced-but-empty shelf now
+        // reads 0 → its price is skipped in GetLowestMarketPrice → moving the floor requires actually stocking +
+        // selling (legitimate competition). MP-only; own shops (return 1f earlier) + AI rivals are untouched.
+        [HarmonyPatch(typeof(Controllers.PlayerItemPurchaser), "GetShelfFillState")]
+        public static class Patch_PlayerItemPurchaser_GetShelfFillState_RealStockForPlayers
+        {
+            static void Postfix(string itemName, BuildingRegistration registration, ref float __result)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (registration == null || !GameStatePatcher.IsSessionPlayerBusiness(registration)) return;
+                try
+                {
+                    bool stocked = false;
+                    var items = registration.itemInstances;
+                    if (items != null)
+                        foreach (var ii in items.Values)
+                        {
+                            if (ii?.ItemCached == null) continue;
+                            if ((ii.ItemCached.type & (BigAmbitions.Items.ItemType.PointOfSale | BigAmbitions.Items.ItemType.ShowcaseShelf)) == 0) continue;
+                            var stock = ItemHelper.GetStockInstance(ii);
+                            if (stock != null && stock.itemName == itemName && stock.amount > 0) { stocked = true; break; }
+                        }
+                    __result = stocked ? 1f : 0f;
+                }
+                catch { /* on any doubt leave the game's value — fail open, never over-suppress competition */ }
+            }
+        }
+
         // ── Diagnostic: CityMapFilters.ApplyFilters ───────────────────────────
         // The map's "for rent" highlight discrepancy investigation.  Our snapshot
         // apply runs once at sync time and our diagnostic shows host/client state
