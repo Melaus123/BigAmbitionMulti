@@ -343,11 +343,27 @@ namespace BigAmbitionsMP
                 for (int i = 0; i < gi.productMarketEntries.Count; i++)
                 {
                     var e = gi.productMarketEntries[i];
-                    entries.Add(new MarketEntryDto
+                    var dto = new MarketEntryDto
                     {
                         ItemName         = e.itemName.ToString(),
                         ImportPriceIndex = e.importPriceIndex,
-                    });
+                    };
+                    if (e.demandValues != null)
+                        for (int d = 0; d < e.demandValues.Count; d++)
+                        {
+                            var nd = e.demandValues[d];
+                            if (nd == null) continue;
+                            dto.DemandValues.Add(new NeighborhoodDemandDto
+                            {
+                                Neighborhood             = nd.neighborhood ?? "",
+                                Demand                   = nd.demand,
+                                Providers                = nd.providers,
+                                LastDaySold              = nd.lastDaySold,
+                                LastDayProvidersExceeded = nd.lastDayProvidersExceeded,
+                                HasPlayerMonopoly        = nd.hasPlayerMonopoly,
+                            });
+                        }
+                    entries.Add(dto);
                 }
 
                 return Newtonsoft.Json.JsonConvert.SerializeObject(entries);
@@ -430,5 +446,18 @@ namespace BigAmbitionsMP
     {
         public string ItemName         { get; set; } = "";
         public float  ImportPriceIndex { get; set; }
+        /// <summary>Per-neighborhood demand state — the core sales driver. Synced so a client whose AI economy
+        /// is host-authoritative reads the host's demand instead of a stale/divergent local copy.</summary>
+        public List<NeighborhoodDemandDto> DemandValues { get; set; } = new();
+    }
+
+    public class NeighborhoodDemandDto
+    {
+        public string Neighborhood             { get; set; } = "";
+        public int    Demand                   { get; set; }
+        public int    Providers                { get; set; } = -1;
+        public int    LastDaySold              { get; set; }
+        public int    LastDayProvidersExceeded { get; set; }
+        public bool   HasPlayerMonopoly        { get; set; }
     }
 }

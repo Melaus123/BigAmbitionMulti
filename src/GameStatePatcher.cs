@@ -2191,12 +2191,24 @@ namespace BigAmbitionsMP
 
                     foreach (var dto in dtos)
                     {
-                        // Find matching entry and update prices
+                        // Find matching entry; update import price + per-neighborhood demand (host-authoritative).
                         foreach (var entry in gi.productMarketEntries)
                         {
                             if (entry.itemName == dto.ItemName)
                             {
                                 entry.importPriceIndex = dto.ImportPriceIndex;
+                                if (dto.DemandValues != null && entry.demandValues != null)
+                                    foreach (var ndDto in dto.DemandValues)
+                                        foreach (var nd in entry.demandValues)
+                                            if (nd != null && nd.neighborhood == ndDto.Neighborhood)
+                                            {
+                                                nd.demand                   = ndDto.Demand;
+                                                nd.providers                = ndDto.Providers;
+                                                nd.lastDaySold              = ndDto.LastDaySold;
+                                                nd.lastDayProvidersExceeded = ndDto.LastDayProvidersExceeded;
+                                                nd.hasPlayerMonopoly        = ndDto.HasPlayerMonopoly;
+                                                break;
+                                            }
                                 break;
                             }
                         }
