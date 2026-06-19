@@ -2435,6 +2435,115 @@ namespace BigAmbitionsMP
         }
 #endif
 
+#if BAMP_DEV
+        // DIAG:INVESTIGATION(checkout-freeze 2026-06-19) — AI-shop "stuck in the register queue".
+        //   [CheckoutProbe] OnPlaceOrder snapshots the register the instant the client places an order:
+        //   is the shop AI or a player's? is a cashier present? an employee instance? did the player join
+        //   the served queue (AI shops have NO self-purchase fallback, so joining = committed to a cashier).
+        //   The paired shiftLookup probe logs whether the synced schedule even carries a work-shift for the
+        //   register — distinguishing "no work-shift synced" from "no employee instance". Remove when resolved.
+        [HarmonyPatch]
+        public static class Patch_CashRegister_OnPlaceOrder_CheckoutProbe
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                try
+                {
+                    foreach (var m in typeof(Controllers.CashRegisterController).GetMethods(
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                        if (m.Name == "OnPlaceOrder" && m.DeclaringType == typeof(Controllers.CashRegisterController)) return m;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[CheckoutProbe] order target: {ex.Message}"); }
+                return null;
+            }
+
+            static void Postfix(Controllers.CashRegisterController __instance)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                try
+                {
+                    string owner = MPRegisterSync.CurrentShopOwner;
+                    bool ownerIsPlayer = !string.IsNullOrEmpty(owner) && MPRestSync.AllPlayers().Contains(owner);
+                    bool playerOwned = false;
+                    try { playerOwned = InstanceBehavior<BuildingManager>.Instance.IsPlayerOwnedBusiness; } catch { }
+                    bool cashier = false;     try { cashier = __instance.employee != null; } catch { }
+                    bool empInst = false;     try { empInst = __instance.employeeInstance != null; } catch { }
+                    bool joinedQueue = false; try { joinedQueue = __instance.playerCustomer != null; } catch { }
+                    Plugin.Logger.LogInfo(
+                        $"[CheckoutProbe] OnPlaceOrder shop='{MPRegisterSync.CurrentShopAddress}' owner='{owner}' ownerIsPlayer={ownerIsPlayer} " +
+                        $"playerOwnedBiz={playerOwned} cashierPresent={cashier} employeeInstance={empInst} joinedServedQueue={joinedQueue}.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[CheckoutProbe] order: {ex.Message}"); }
+            }
+        }
+
+        // [CheckoutProbe] shiftLookup — while inside a non-player-duty shop, log the register's synced
+        //   work-shift lookup (does scheduleDays carry a shift+employeeId for now?) + employee-instance /
+        //   cashier presence. Throttled 2s. Tells "no shift synced" apart from "no employee instance".
+        [HarmonyPatch]
+        public static class Patch_CashRegister_ShiftLookup_CheckoutProbe
+        {
+            private static float _next;
+
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                try
+                {
+                    foreach (var m in typeof(EmployeeStationController).GetMethods(
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                        if (m.Name == "GetEmployeeWorkShift" && m.DeclaringType == typeof(EmployeeStationController)) return m;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[CheckoutProbe] shift target: {ex.Message}"); }
+                return null;
+            }
+
+            static void Postfix(EmployeeStationController __instance, WorkShift? __result)
+            {
+                if (!MPClient.IsConnected) return;
+                try
+                {
+                    if (MPRegisterSync.IsEmployeeDutyStation(__instance.transform.position)) return;   // player-duty: covered by [StaffEval]
+                    if (string.IsNullOrEmpty(MPRegisterSync.CurrentShopAddress)) return;                // only while inside a shop
+                    if (UnityEngine.Time.unscaledTime < _next) return;
+                    _next = UnityEngine.Time.unscaledTime + 2f;
+                    bool empInst = false; try { empInst = __instance.employeeInstance != null; } catch { }
+                    bool cashier = false; try { cashier = __instance.employee != null; } catch { }
+                    Plugin.Logger.LogInfo(
+                        $"[CheckoutProbe] shiftLookup shop='{MPRegisterSync.CurrentShopAddress}' owner='{MPRegisterSync.CurrentShopOwner}' " +
+                        $"workShift={(__result == null ? "null" : $"emp='{__result.employeeId}' {__result.startingHour}-{__result.endingHour}")} employeeInstance={empInst} cashierPresent={cashier}.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[CheckoutProbe] shift: {ex.Message}"); }
+            }
+        }
+#endif
+
+        // ── Patch: VehicleParkingHelper.Start — neutralize on vehicle GHOSTS (2026-06-19).
+        // A synced/remote vehicle GHOST is a stripped clone: StripVehicleComponents removes its
+        // CarController (+ VariableCenterOfMass), but VehicleParkingHelper was left on it.  Native
+        // Start() then derefs the now-missing CarController, and Update() derefs the resulting null
+        // _carController EVERY FRAME the ghost is visible → a NullReferenceException per frame (heavy
+        // log spam + per-frame cost; Unity isolates it so no gameplay break, but it buries real events
+        // in the logs).  A real player vehicle ALWAYS has a CarController in its parents, so this fires
+        // ONLY on ghosts: disable the (vestigial — player auto-park only; mod references it nowhere)
+        // component so none of its methods run.  Real vehicles pass the check and Start runs unchanged.
+        [HarmonyPatch(typeof(VehicleParkingHelper), "Start")]
+        public static class Patch_VehicleParkingHelper_SkipOnGhost
+        {
+            static bool Prefix(VehicleParkingHelper __instance)
+            {
+                try
+                {
+                    if (__instance.GetComponentInParent<CarController>() == null)
+                    {
+                        __instance.enabled = false;
+                        return false;   // ghost — skip native Start (it would NRE on the stripped CarController)
+                    }
+                }
+                catch { }
+                return true;            // real vehicle — run native Start unchanged
+            }
+        }
+
         // ── [MPSale] MP order finalizer (2026-06-12, user-approved design).
         // The native OnPlaceOrder decrements LOCAL replica stock and books
         // revenue into a LOCAL ledger — and NREs on the replica's missing
@@ -2768,7 +2877,7 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── [RegGuard] queue-entry guard (2026-06-11).  In another player's
+        // ── [RegGuard] queue-entry guard (2026-06-11; extended to AI shops 2026-06-19).  In another player's
         // shop the native queue happily accepts a customer even when NO serving
         // entity exists locally → OnPlaceOrder NREs → hard lock (two runs).
         // Block CanOrder until the register actually has an employeeInstance
@@ -2797,15 +2906,22 @@ namespace BigAmbitionsMP
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                 try
                 {
-                    string owner = MPRegisterSync.CurrentShopOwner;
-                    if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return;
-                    if (!MPRestSync.AllPlayers().Contains(owner)) return;   // AI shops native
-                    // Duty-staffed → the Interact prefix routes to self-checkout;
-                    // CanOrder must stay native so the customer path engages.
+                    // Skip the receiver's OWN shop — guard EVERYTHING else (AI shops AND other
+                    // players' shops) the same way.  Key on IsPlayerOwnedBusiness, NOT the owner id:
+                    // an AI shop can carry an EMPTY businessOwnerRivalId on the client, so the old
+                    // owner-string gate let unstaffed AI registers through and the buyer hard-locked
+                    // (no self-purchase fallback exists for AI shops — bug 2026-06-18).
+                    var bm = InstanceBehavior<BuildingManager>.Instance;
+                    if (bm == null || bm.buildingRegistration == null) return;   // not inside a shop → native
+                    bool myShop = false;
+                    try { myShop = bm.IsPlayerOwnedBusiness; } catch { }
+                    if (myShop) return;                                          // my own shop → native
+                    // Another player actively working THIS register → the Interact prefix routes to
+                    // self-checkout; CanOrder must stay native so the customer path engages.
                     if (MPRegisterSync.IsStaffedByOtherPlayer(__instance.transform.position)) return;
                     bool staffed = false;
                     try { staffed = __instance.employeeInstance != null; } catch { }
-                    if (staffed) return;                                    // a real employee mans it — allow
+                    if (staffed) return;                                         // a real cashier mans it (AI via synced shift, or synthetic) — allow
                     __result = false;
                     if (UnityEngine.Time.unscaledTime >= _nextLog)
                     {
@@ -2816,7 +2932,7 @@ namespace BigAmbitionsMP
                         // no checkout, clearly said, nothing locks.
                         try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, "notification_cashregister_no_employee"); }
                         catch { }
-                        Plugin.Logger.LogInfo($"[RegGuard] blocked queue in '{owner}' shop — no cashier on duty (notified buyer).");
+                        Plugin.Logger.LogInfo($"[RegGuard] blocked queue at '{MPRegisterSync.CurrentShopAddress}' (owner='{MPRegisterSync.CurrentShopOwner}') — no cashier (notified buyer).");
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[RegGuard] {ex.Message}"); }
