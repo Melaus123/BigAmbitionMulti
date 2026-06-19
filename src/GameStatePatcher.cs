@@ -939,10 +939,16 @@ namespace BigAmbitionsMP
         /// sim re-prices it (CompetitionHelper) — both decompile-confirmed to
         /// validate NOTHING beyond RentedByPlayer/non-empty owner id.</summary>
         public static bool IsSessionPlayerBusiness(BuildingRegistration? reg)
+            => IsSessionPlayerRivalId(reg?.businessOwnerRivalId);
+
+        /// <summary>True if this rival-owner id actually belongs to a connected MP player (our own id,
+        /// a roster client, or any session player) — i.e. a "rival" that is really another player, NOT a
+        /// game AI rival. Used to shield player-owned shops from AI-economy administration (shutdown /
+        /// re-price / re-value / overtake) while leaving them in the world so competition still applies.</summary>
+        public static bool IsSessionPlayerRivalId(string? owner)
         {
             try
             {
-                var owner = reg?.businessOwnerRivalId;
                 if (string.IsNullOrEmpty(owner)) return false;
                 if (owner == MPConfig.PlayerId) return true;
                 if (ClientPlayerRoster.ContainsKey(owner!)) return true;

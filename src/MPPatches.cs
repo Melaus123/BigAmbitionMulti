@@ -1834,6 +1834,66 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── MP economy shields (2026-06-19) ───────────────────────────────────
+        // Other players' shops carry a businessOwnerRivalId locally, so the game's AI city-economy treats
+        // them as AI rivals — and it only spares RentedByPlayer (the LOCAL player's own). These guards stop
+        // the AI from ADMINISTERING another player's shop (closing / re-pricing / re-valuing it) and stop one
+        // player from BUYING OUT another's shop. Competition (customer split) is untouched — the shops stay
+        // in the world. All gated to an active MP session; single-player and real AI rivals are unaffected.
+
+        // (1) Never let the AI economy shut down another player's business.
+        [HarmonyPatch(typeof(BuildingRegistration), "ShutDownAIBusiness")]
+        public static class Patch_BuildingRegistration_ShutDownAIBusiness_ShieldPlayers
+        {
+            static bool Prefix(BuildingRegistration __instance)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                if (GameStatePatcher.IsSessionPlayerBusiness(__instance))
+                {
+                    Plugin.Logger.LogInfo("[EconShield] blocked AI shutdown of another player's business.");
+                    return false;
+                }
+                return true;
+            }
+        }
+
+        // (2) Don't let the AI rewrite another player's retail prices (the owner sets + syncs them).
+        [HarmonyPatch(typeof(Helpers.CompetitionHelper), "ShouldRecalculateRetailPrices")]
+        public static class Patch_CompetitionHelper_ShouldRecalculateRetailPrices_ShieldPlayers
+        {
+            static void Postfix(BuildingRegistration buildingRegistration, ref bool __result)
+            {
+                if (!__result) return;
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (GameStatePatcher.IsSessionPlayerBusiness(buildingRegistration)) __result = false;
+            }
+        }
+
+        // (3) Don't let the AI re-value another player's business daily.
+        [HarmonyPatch(typeof(Helpers.CompetitionHelper), "ShouldUpdateDailyValuation")]
+        public static class Patch_CompetitionHelper_ShouldUpdateDailyValuation_ShieldPlayers
+        {
+            static void Postfix(BuildingRegistration buildingRegistration, ref bool __result)
+            {
+                if (!__result) return;
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (GameStatePatcher.IsSessionPlayerBusiness(buildingRegistration)) __result = false;
+            }
+        }
+
+        // (4) Block buying out (overtaking) another PLAYER's shop — real AI rivals stay overtakeable.
+        // A buyout is accepted only if the offer >= valuation * acceptRate; forcing acceptRate huge for a
+        // player-owned shop makes every offer fall short BEFORE any money moves, so it can't be taken over.
+        [HarmonyPatch(typeof(BigAmbitions.Rivals.RivalsHelper), "GetOvertakeBusinessAcceptRate")]
+        public static class Patch_RivalsHelper_GetOvertakeBusinessAcceptRate_BlockVsPlayers
+        {
+            static void Postfix(string rivalId, ref float __result)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (GameStatePatcher.IsSessionPlayerRivalId(rivalId)) __result = float.MaxValue;
+            }
+        }
+
         // ── Patch: TaxiSystem.TravelTo — arms instant-arrival mode ────────────
         [HarmonyPatch]
         public static class Patch_TaxiSystem_TravelTo_Arm
