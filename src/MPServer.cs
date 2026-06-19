@@ -1193,6 +1193,16 @@ namespace BigAmbitionsMP
                 return false;
             }
             else
+            {
+                // RECONNECT-TAKEOVER (2026-06-19): the same identity bound to ANOTHER peer is a STALE ghost
+                // connection — the player dropped and is rejoining before LiteNetLib timed the old peer out.
+                // The old behavior (refuse the NEW peer) left them unable to rejoin until that timeout, which
+                // silently disabled ALL our MP suppression on the client (the vanilla-skip-after-reconnect bug).
+                // Instead: kick the stale peer and accept this one. Pre-remove the stale binding FIRST so its
+                // async OnPeerDisconnected runs only peer-level cleanup, NOT the player-level
+                // LobbyRemove/RemovePlayer that would clobber the reconnecting player — their StableId-keyed
+                // state (cash/ownership) persists and the existing reconnect path re-sends live world state.
+                int staleId = -1;
                 foreach (var kv in _peerNames)
                 {
                     if (kv.Key == peer.Id) continue;
@@ -1200,10 +1210,24 @@ namespace BigAmbitionsMP
                         || (!string.IsNullOrEmpty(hello.StableId)
                             && StableIdByPlayer.TryGetValue(kv.Value, out var st) && st == hello.StableId))
                     {
-                        refuse = $"identity already connected (peer {kv.Key})";
+                        staleId = kv.Key;
                         break;
                     }
                 }
+                if (staleId >= 0)
+                {
+                    _peerNames.TryRemove(staleId, out _);   // remove BEFORE disconnect → its cleanup skips player-level removal
+                    try
+                    {
+                        var mgr = _server;
+                        if (mgr != null)
+                            foreach (var p in mgr.ConnectedPeerList)
+                                if (p.Id == staleId) { p.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:takeover")); break; }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] takeover disconnect of stale peer {staleId}: {ex.Message}"); }
+                    Plugin.Logger.LogWarning($"[Server] '{hello.PlayerId}' reconnecting — dropped stale peer {staleId}, accepting new peer {peer.Id} (takeover).");
+                }
+            }
             if (refuse == "") return true;
             Plugin.Logger.LogWarning($"[Server] Hello from '{hello.PlayerId}' (peer {peer.Id}): {refuse} — disconnected.");
             try { peer.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:identity")); } catch { }

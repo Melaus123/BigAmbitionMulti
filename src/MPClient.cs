@@ -63,6 +63,15 @@ namespace BigAmbitionsMP
         /// overwrite this world on the next rejoin.  Cleared on dismissal /
         /// exit-to-menu / next Connect.</summary>
         public static volatile bool SessionEnded;
+
+        /// <summary>STICKY "the local player is in an MP game world" flag — the single source of truth for
+        /// native-time / skip SUPPRESSION (it replaces the live <see cref="IsConnected"/> at those gates).
+        /// Latched true every frame we're in the game scene and hosting or connected (MPCanvasUI.LateUpdate),
+        /// so it SURVIVES a transient drop+reconnect where IsConnected briefly reads false — that blip used to
+        /// switch off ALL native-skip suppression and let the vanilla skip UI run (reconnect bug, 2026-06-19).
+        /// Cleared ONLY on full exit-to-menu (scene unload) and the offline-fork dismiss, so a genuine solo
+        /// fork (host gone for good) still gets native time. NOT cleared on a mere disconnect.</summary>
+        public static volatile bool InMpGame;
         // Set by Disconnect() so a deliberate leave (Leave button, exit-to-menu
         // teardown, reconnect guard) never triggers the session-over lock.
         private static bool _voluntaryDisconnect;
@@ -115,6 +124,14 @@ namespace BigAmbitionsMP
         {
             Plugin.Logger.LogInfo("[Client] Connected to host.");
             _server   = peer;
+
+            // RECONNECT: the host's vote tally + any in-flight skip are gone on its side — clear our stale
+            // copy so a leftover SkipActive or phantom vote rows don't wedge the rest dock / world-clock
+            // detector after we rejoin (skip state used to reset only on scene LOAD, never on a same-scene
+            // reconnect → 2026-06-19 bug). Local seating is preserved. Harmless on the first connect
+            // (state already empty). Marshalled — it mutates lists the main thread reads.
+            GameStatePatcher.EnqueueOnMainThread(() => { try { MPRestSync.ClearVotesOnReconnect(); } catch { } });
+
             IsInLobby = true;
             _lobbyPlayers = new List<string>();
 

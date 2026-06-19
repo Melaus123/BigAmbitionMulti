@@ -1675,7 +1675,7 @@ namespace BigAmbitionsMP
 
             static void Postfix()
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning && !MPClient.InMpGame) return;   // sticky gate: survives reconnect
                 // Taxi ride machine → INSTANT ARRIVAL (overlay hidden, machine
                 // stopped a beat later — its end handler teleports the player,
                 // the clock never moves).
@@ -1766,7 +1766,7 @@ namespace BigAmbitionsMP
 
             static void Prefix(ref bool hide)
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning && !MPClient.InMpGame) return;   // sticky gate: survives reconnect
                 // Only OUR rest-class activities lose their panel — foreign
                 // activities (the taxi flow!) keep their native UI untouched.
                 if (!MPRestSync.IsCurrentActivityRestClass()) return;
@@ -1793,7 +1793,7 @@ namespace BigAmbitionsMP
             private static int _n;
             static bool Prefix(bool newPause)
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                if (!MPServer.IsRunning && !MPClient.InMpGame) return true;   // sticky gate: survives reconnect
                 if (GameStateReader.AllowNativePauseCall) return true;
                 if (!newPause) return true;                  // un-pausing is always fine
                 if (_n++ < 5 || _n % 100 == 0)
@@ -1816,7 +1816,7 @@ namespace BigAmbitionsMP
             private static int _n;
             static bool Prefix(bool disabled)
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                if (!MPServer.IsRunning && !MPClient.InMpGame) return true;   // sticky gate: survives reconnect
                 if (GameStateReader.AllowNativePauseCall) return true;
                 if (!disabled) return true;                  // re-enabling is always fine
                 if (_n++ < 5 || _n % 100 == 0)
@@ -1904,7 +1904,7 @@ namespace BigAmbitionsMP
 
             static bool Prefix()
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                if (!MPServer.IsRunning && !MPClient.InMpGame) return true;   // sticky gate: survives reconnect
                 // No taxi bypass: the ride machine is stopped instantly (taxi
                 // v2 = instant arrival), so it must never self-advance either.
                 return false;                                  // machine never self-advances in MP

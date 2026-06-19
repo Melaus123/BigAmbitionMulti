@@ -567,7 +567,22 @@ namespace BigAmbitionsMP
             // player's keyboard permanently (2026-06-10).
             MPChat.SuppressGameInput = _chatSuppress || _restUiHover || _hubUiHover || _joinPopHover;
 
-            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            // STICKY MP-game latch: keep native-time suppression engaged across a transient drop+reconnect.
+            // Set true whenever we're in the game scene and hosting or live-connected; NEVER cleared here —
+            // only on exit-to-menu (scene unload) and the offline-fork dismiss. The live IsConnected briefly
+            // reads false on a reconnect, which used to lapse the gate below and let the vanilla skip UI run.
+            if (IsInGame() && (MPServer.IsRunning || MPClient.IsConnected)) MPClient.InMpGame = true;
+
+            if (!MPServer.IsRunning && !MPClient.InMpGame) return;
+
+            // Self-check: surface (throttled) when the sticky flag is the ONLY thing holding suppression —
+            // we're in an MP game but momentarily disconnected (the reconnect window). Confirms the fix holds.
+            if (MPClient.InMpGame && !MPServer.IsRunning && !MPClient.IsConnected
+                && Time.unscaledTime >= _inMpGameHoldLogNext)
+            {
+                _inMpGameHoldLogNext = Time.unscaledTime + 3f;
+                Plugin.Logger.LogInfo("[Skip] InMpGame holding native-time suppression while disconnected (reconnect window).");
+            }
 
             // The startup hold freezes the game from the moment our loading overlay
             // clears (TickOverlayFreezeGate) until every player has truly entered.
@@ -636,6 +651,7 @@ namespace BigAmbitionsMP
         private static bool   _wcInTaxiClamp;
         private static double _wcTaxiAnchorHours;
         private static float  _wcTaxiAnchorReal;
+        private static float  _inMpGameHoldLogNext;   // throttle for the reconnect-window self-check log
 
         /// <summary>Resets the world-clock skip detector — call on game (re)load.</summary>
         private static void ResetWorldClock()
@@ -2239,6 +2255,7 @@ namespace BigAmbitionsMP
 
                 if (MPServer.IsRunning || MPClient.IsConnected)
                 {
+                    MPClient.InMpGame = true;   // sticky: entering an MP game world (survives transient drops)
                     _sceneLoadedPendingFreeze = true;
                     _pendingFreezeElapsed = 0f;
                     _freezeGateDiagNext = 0f;   // heartbeat restarts with the gate
@@ -2280,6 +2297,7 @@ namespace BigAmbitionsMP
                 // The session-over lock is for the in-game world only — back at
                 // the menu the player is free to host/join again.
                 MPClient.SessionEnded = false;
+                MPClient.InMpGame    = false;   // left the MP game world → native time allowed again (SP/menu)
 
                 // Leaving the game scene ends the MP session (exit to main menu).
                 // Tear the network down so the next Host/Join starts clean — a
@@ -5349,6 +5367,7 @@ namespace BigAmbitionsMP
                 if (Input.GetMouseButtonDown(0) || Input.GetKeyDown(KeyCode.Return))
                 {
                     MPClient.SessionEnded = false;                  // lifts the freeze clamp
+                    MPClient.InMpGame     = false;                  // committed to the offline solo fork → native time allowed
                     GameStateReader.SetNativePause(false);          // lift the true pause too
                     MPSaveCoordinator.AllowNativeAutosave();        // the suppress flag is sticky — re-enable SP autosave
                     _startupScreenGO.SetActive(false);

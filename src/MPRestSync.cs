@@ -111,6 +111,18 @@ namespace BigAmbitionsMP
             _hostVotes.Clear(); _skipGoalMinutes = 0;
         }
 
+        /// <summary>On RECONNECT, clear ONLY the consensus/skip state — the host's vote tally and any
+        /// in-flight skip are gone on its side, so a stale SkipActive or leftover vote rows would wedge the
+        /// dock or keep the world-clock detector standing down. LOCAL seating (Seated / ActivityName / the
+        /// live activity refs / DockButtons) is PRESERVED — the player is still in their activity after
+        /// rejoining. Harmless on the initial connect (state already empty).</summary>
+        public static void ClearVotesOnReconnect()
+        {
+            _localVoteActive = false; _localGoal = 0;
+            Votes.Clear(); RequiredVotes = 0; SkipActive = false;
+            _hostVotes.Clear(); _skipGoalMinutes = 0;
+        }
+
         // ── Taxi v2: INSTANT ARRIVAL (user-chosen, 2026-06-10) ───────────────
         // The ride's completion handler (TaxiSystem.OnTimeMachineEnded) is what
         // teleports the player — so: machine starts, we hide its misleading
