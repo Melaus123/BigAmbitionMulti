@@ -1874,7 +1874,17 @@ namespace BigAmbitionsMP
                         if (info.OwnerPlayerId == MPConfig.PlayerId)
                         { newRented = true; newBuildingOwner = ""; }                  // it's OURS — clear any stray rival-owner
                         else
-                        { newRented = false; newBuildingOwner = info.OwnerPlayerId; } // another player owns it — release our (stale) tenancy
+                        {
+                            // Another player owns the BUILDING — record that, but do NOT clear our
+                            // RentedByPlayer. Whether the LOCAL player RUNS a business here is the client's
+                            // OWN authority (you can run a business in a building someone else owns), and a
+                            // host delta must never take it away. The host can cross-attribute a player's OWN
+                            // building to a player-name-as-rival-id (no real rival record); clearing
+                            // RentedByPlayer here flipped receiverOwnsThis=false on the next apply and let the
+                            // host's blank replica overwrite the owner's schedule — bricking a client's own HQ
+                            // ("never open", can't schedule workers). 2026-06-19.
+                            newBuildingOwner = info.OwnerPlayerId;   // newRented stays = priorRented
+                        }
                     }
                     if (!string.IsNullOrEmpty(info.BusinessOwnerPlayerId)
                         && info.BusinessOwnerPlayerId != MPConfig.PlayerId)
@@ -1900,6 +1910,21 @@ namespace BigAmbitionsMP
                 {
                     Plugin.Logger.LogInfo($"[Patcher] Ownership for {info.AddressKey}: host[bldg='{info.BuildingOwnerRivalId}' biz='{info.BusinessOwnerRivalId}' rented={info.RentedByPlayer}] client-was[bldg='{priorBuildingOwner}' biz='{priorBusinessOwner}' rented={priorRented}].");
                 }
+
+                // HQ DIAGNOSTIC (2026-06-19, release-safe): a client's own HQ can be bricked if a host delta
+                // clears its RentedByPlayer (→ receiverOwnsThis false → schedule overwritten → "never open" +
+                // can't schedule workers). Log every HQ apply so an affected report shows whether ownership +
+                // schedule held. Fires only for HQ (rare); the fix above should keep rentedNow=rentedPrior and
+                // receiverOwns=true for an owned HQ. Remove once confirmed fixed in the wild.
+                try
+                {
+                    if (reg.businessTypeName == "ba:businesstype_headquarters"
+                        || info.BusinessTypeName == "ba:businesstype_headquarters")
+                    {
+                        Plugin.Logger.LogWarning($"[HQDiag] apply '{info.AddressKey}' receiverOwns={receiverOwnsThis} rentedPrior={priorRented} rentedNow={reg.RentedByPlayer} ownerPlayer='{info.OwnerPlayerId}' bizOwnerPlayer='{info.BusinessOwnerPlayerId}' infoSched={(info.Schedule?.Count ?? -1)} regSched={(reg.scheduleDays?.Count ?? -1)} tempClosed={reg.temporarilyClosed}");
+                    }
+                }
+                catch { }
 
                 // Writes above only update the DATA model.  The visible sign /
                 // logo / map marker are GameObjects that were initialised from
