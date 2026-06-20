@@ -678,6 +678,11 @@ namespace BigAmbitionsMP
         /// <summary>Business type id string (EA 0.11, e.g. "ba:businesstype_giftshop").</summary>
         public string BusinessTypeName   { get; set; } = "";
         public bool   TemporarilyClosed  { get; set; }
+        /// <summary>Owner-authoritative open/closed truth: 0 = unknown (AI shop / not provided),
+        /// 1 = open, 2 = closed. The machine that RUNS the business (RentedByPlayer) computes the game's
+        /// IsBusinessOpen and reports it; everyone else consumes it verbatim instead of re-deriving from a
+        /// possibly-incomplete schedule replica (2026-06-19 "can't enter friend's shop" bug).</summary>
+        public int    OwnerOpenState     { get; set; }
 
         // Rental marketplace state (Phase 1b).  Without these the client's
         // local AI economy can disagree with the host about which buildings

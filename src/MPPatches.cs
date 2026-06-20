@@ -1825,6 +1825,77 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: BusinessHelper.IsBusinessOpen — owner-authoritative open truth ──
+        // Open/closed used to be re-derived on every machine from a replicated schedule, so another player's
+        // shop could read "closed" on your client even while its owner had it open. (The owner never notices:
+        // CanEnterBuilding lets the OWNER in via RentedByPlayer, bypassing this check entirely.) Fix: the
+        // machine that RUNS a business reports its own computed IsBusinessOpen (BusinessSync.OwnerOpenByAddress),
+        // and here every OTHER machine returns that single synced truth instead of re-deriving. Scoped to shops
+        // you don't run that have a KNOWN synced state; your own shops + AI shops fall through to the real
+        // check. (2026-06-19, "can't enter friend's shop" bug)
+        [HarmonyPatch(typeof(BusinessHelper), nameof(BusinessHelper.IsBusinessOpen), new Type[] { typeof(BuildingRegistration), typeof(int) })]
+        public static class Patch_IsBusinessOpen_OwnerTruth
+        {
+            static bool Prefix(BuildingRegistration buildingRegistration, ref bool __result)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.InMpGame) return true;   // SP — real check
+                    if (buildingRegistration == null) return true;
+                    if (buildingRegistration.RentedByPlayer) return true;          // my own shop — I'm the authority
+                    string addr = GameStateReader.AddressKey(buildingRegistration);
+                    if (string.IsNullOrEmpty(addr)) return true;
+                    if (BusinessSync.OwnerOpenByAddress.TryGetValue(addr, out var st) && st != 0)
+                    {
+                        __result = (st == 1);   // 1 = open, 2 = closed — the owner's synced truth
+                        return false;           // skip the local re-derivation
+                    }
+                }
+                catch { }
+                return true;   // unknown (AI shop / not yet synced) — fall through to the real check
+            }
+        }
+
+        // ── Patch: BuildingHelper.CanEnterBuilding — DIAGNOSTIC for the shop-closed bug ──
+        // Release-safe: fires ONLY when entry is DENIED for a business you don't run, logging the exact
+        // open-check inputs on THIS client so an affected player's log pinpoints the cause (synced truth vs
+        // raw schedule). Throttled per shop. Remove once the bug is confirmed fixed in the wild.
+        [HarmonyPatch(typeof(BuildingHelper), nameof(BuildingHelper.CanEnterBuilding))]
+        public static class Patch_CanEnterBuilding_ClosedDiag
+        {
+            private static readonly System.Collections.Generic.Dictionary<string, float> _nextLogAt = new();
+            static void Postfix(Address address, bool __result)
+            {
+                try
+                {
+                    if (__result) return;                                   // entry allowed — nothing to diagnose
+                    if (!MPServer.IsRunning && !MPClient.InMpGame) return;  // SP
+                    var reg = BuildingHelper.GetBuildingRegistration(address);
+                    if (reg == null || reg.RentedByPlayer) return;          // my own shop shouldn't read closed
+                    string addr = GameStateReader.AddressKey(reg);
+                    if (string.IsNullOrEmpty(addr)) return;
+                    float now = UnityEngine.Time.unscaledTime;
+                    if (_nextLogAt.TryGetValue(addr, out var due) && now < due) return;
+                    _nextLogAt[addr] = now + 10f;                           // throttle per shop
+
+                    int ownerState = BusinessSync.OwnerOpenByAddress.TryGetValue(addr, out var os) ? os : 0;
+                    int dayCount   = reg.scheduleDays?.Count ?? -1;
+                    var today      = BuildingHelper.GetTodaySchedule(reg);
+                    string todayDesc;
+                    if (today == null) todayDesc = "today=NULL";
+                    else
+                    {
+                        string slots = "";
+                        if (today.openingHourSlots != null)
+                            foreach (var s in today.openingHourSlots) slots += $"[{s.startingHour}-{s.endingHour}]";
+                        todayDesc = $"today.isOpen={today.isOpen} slots={(slots.Length == 0 ? "none" : slots)}";
+                    }
+                    Plugin.Logger.LogWarning($"[ShopClosedDiag] DENIED '{addr}' biz='{reg.BusinessName}' ownerState={ownerState}(0=unk/1=open/2=closed) temporarilyClosed={reg.temporarilyClosed} scheduleDays={dayCount} {todayDesc} now=h{SaveGameManager.Current.Hour}/{TimeHelper.GetDayOfWeek()} bizOwnerRival='{reg.businessOwnerRivalId}'");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[ShopClosedDiag] {ex.Message}"); }
+            }
+        }
+
         // ── Patch: EntityController.UpdateNavMeshTargets NRE shield ───────────
         // Taxi boarding round 2 (2026-06-10): with the Gley storm silenced,
         // boarding still died — final exception before shutdown is an NRE in

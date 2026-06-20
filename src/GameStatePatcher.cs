@@ -1739,6 +1739,11 @@ namespace BigAmbitionsMP
                 }
                 catch { }
 
+                // Owner-authoritative open/closed truth: store verbatim (keyed by address) so the host can
+                // relay a client's value through its own Tick (ReadInfo reads it back) and the IsBusinessOpen
+                // patch can use it for shops we don't run. 0 = unknown → leave any prior known value intact.
+                try { if (info.OwnerOpenState != 0) BusinessSync.OwnerOpenByAddress[info.AddressKey] = info.OwnerOpenState; } catch { }
+
                 // Tier A (name/type/closed) + rental-marketplace state.  Owner-authored / host-AI-economy view —
                 // skip entirely for the receiver's OWN shop so a stale/blank host replica can't overwrite it.
                 if (!receiverOwnsThis)

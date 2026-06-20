@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Buildings;
+using Helpers;
 
 namespace BigAmbitionsMP
 {
@@ -28,6 +29,12 @@ namespace BigAmbitionsMP
         private const float PollIntervalSeconds = 2f;
 
         private static readonly Dictionary<string, BusinessInfo> _lastSent = new();
+
+        /// <summary>Owner-authoritative open/closed truth per business address (0 = unknown, 1 = open,
+        /// 2 = closed). Written when a BusinessInfo is received/relayed (GameStatePatcher apply) and read by
+        /// the IsBusinessOpen patch so non-owners use the OWNER's computed open-state instead of re-deriving
+        /// it from a replicated schedule. Cleared on session reset.</summary>
+        public static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> OwnerOpenByAddress = new();
 
         /// <summary>
         /// Build the full table — used by Hello/Welcome to bootstrap a connecting
@@ -529,6 +536,7 @@ namespace BigAmbitionsMP
         {
             _lastSent.Clear();
             _lastSentClient.Clear();
+            OwnerOpenByAddress.Clear();
             _lastClientPollAt = 0f;
             _logoCache.Clear();
             _scanInProgress = false;
@@ -669,6 +677,19 @@ namespace BigAmbitionsMP
                 // to its own equivalent directory.  AI businesses have no
                 // such directory (they use Addressables), so we just get
                 // an empty list.
+                // Owner-authoritative open/closed truth. The machine that RUNS this business has the real
+                // schedule + the live clock, so it computes the canonical IsBusinessOpen; everyone else (the
+                // host's relay included) passes through the last value received, so a client's truth travels
+                // owner→host→other-clients verbatim and nobody re-derives it (2026-06-19 shop-closed bug).
+                try
+                {
+                    if (reg.RentedByPlayer)
+                        info.OwnerOpenState = BusinessHelper.IsBusinessOpen(reg) ? 1 : 2;
+                    else if (OwnerOpenByAddress.TryGetValue(addr, out var ownerSt))
+                        info.OwnerOpenState = ownerSt;
+                }
+                catch { }
+
                 if (!string.IsNullOrEmpty(info.BusinessName))
                     info.LogoFiles = ReadLogoFilesCached(info.BusinessName, info.LogoShape);
                 return info;
@@ -746,7 +767,8 @@ namespace BigAmbitionsMP
                 && ScheduleEqual(a.Schedule, b.Schedule)
                 && a.BuildingOwnerRivalId     == b.BuildingOwnerRivalId
                 && a.BusinessOwnerRivalId     == b.BusinessOwnerRivalId
-                && a.RentedByPlayer           == b.RentedByPlayer;
+                && a.RentedByPlayer           == b.RentedByPlayer
+                && a.OwnerOpenState           == b.OwnerOpenState;
         }
 
         private static bool ScheduleEqual(System.Collections.Generic.List<ScheduleDayInfo> a, System.Collections.Generic.List<ScheduleDayInfo> b)
