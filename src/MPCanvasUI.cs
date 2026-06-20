@@ -4132,44 +4132,24 @@ namespace BigAmbitionsMP
 
         private void AttachFilesToBugReport()
         {
+            // Open a folder for the player to drop files into, instead of a native file dialog. The native
+            // dialog hard-crashed the game when shown over it (uncatchable native crash, 2026-06-19); opening
+            // Explorer on a folder is a separate process and can't take the game down.
             try
             {
-                foreach (var file in ShowAttachFileDialog())
-                {
-                    if (string.IsNullOrWhiteSpace(file) || !File.Exists(file)) continue;
-                    if (!_crashReportAttachments.Contains(file, StringComparer.OrdinalIgnoreCase))
-                        _crashReportAttachments.Add(file);
-                }
-                RefreshCrashReportText();
+                MPBugReport.OpenAttachmentDropFolder();
+                int n = MPBugReport.DropFolderFiles().Length;
+                if (_crashReportStatusLbl != null)
+                    _crashReportStatusLbl.text = n == 0
+                        ? "Opened a folder — drop screenshots/videos in it, then click Send. (Your logs are already included.)"
+                        : $"Opened the folder — {n} file(s) staged. Add/remove files, then click Send. (Logs are already included.)";
             }
             catch (Exception ex)
             {
-                Plugin.Logger.LogWarning($"[BugReport] attach file dialog failed: {ex.Message}");
+                Plugin.Logger.LogWarning($"[BugReport] open attach folder failed: {ex.Message}");
                 if (_crashReportStatusLbl != null)
-                    _crashReportStatusLbl.text = "Attach failed: " + ex.Message;
+                    _crashReportStatusLbl.text = "Couldn't open the folder: " + ex.Message;
             }
-        }
-
-        private static string[] ShowAttachFileDialog()
-        {
-            string[] files = Array.Empty<string>();
-            Exception? error = null;
-
-            var thread = new Thread(() =>
-            {
-                try
-                {
-                    files = NativeFilePicker.PickBugReportAttachments();
-                }
-                catch (Exception ex) { error = ex; }
-            });
-
-            thread.SetApartmentState(ApartmentState.STA);
-            thread.Start();
-            thread.Join();
-
-            if (error != null) throw error;
-            return files;
         }
 
         private void StyleCrashReportPopup()
@@ -4204,9 +4184,7 @@ namespace BigAmbitionsMP
             RefreshCrashReportTagText();
             if (_crashReportStatusLbl != null)
             {
-                string attach = _crashReportAttachments.Count == 0
-                    ? "No extra files selected."
-                    : $"{_crashReportAttachments.Count} file(s) selected for Discord upload. Files over 24 MB are skipped.";
+                string attach = "Optional: 'Attach files' opens a folder — drop screenshots/videos there before sending. Logs are always included.";
                 _crashReportStatusLbl.text = (MPConfig.BugReportDiscordWebhookUrlLive().Length > 0
                     ? "Uploads description, Player logs, bamp-ring.log and attachments. "
                     : "Discord upload is not configured. A local report folder will be saved. ") + attach;
@@ -4219,7 +4197,8 @@ namespace BigAmbitionsMP
             {
                 if (_crashReportInputField != null) _crashReportMessage = _crashReportInputField.text ?? "";
                 string prefix = _crashReportIsCrash ? "previous crash: " : "manual bug report: ";
-                MPBugReport.Create(prefix + _crashReportMessage, openFolder: false, attachments: _crashReportAttachments, discordTagIds: SelectedDiscordForumTagIds());
+                MPBugReport.Create(prefix + _crashReportMessage, openFolder: false, attachments: MPBugReport.DropFolderFiles(), discordTagIds: SelectedDiscordForumTagIds());
+                MPBugReport.ClearAttachmentDropFolder();   // bundled into the report — start the next one fresh
                 if (_crashReportIsCrash) MPBugReport.AcknowledgePendingCrash();
                 _crashReportPopupVisible = false;
                 if (_crashReportGO != null) _crashReportGO.SetActive(false);

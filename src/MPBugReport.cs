@@ -125,6 +125,44 @@ namespace BigAmbitionsMP
             return Path.Combine(Path.GetTempPath(), "BigAmbitionsMP-bug-reports");
         }
 
+        // ── Attachment "drop folder" (replaces the native file picker) ─────────
+        // The in-game "Attach files" button used to open a Win32 file dialog, which HARD-CRASHED the game
+        // when shown over it (a native modal dialog over the frozen/fullscreen game — uncatchable, 2026-06-19).
+        // Instead we open a stable folder in Explorer; the player drops screenshots/videos in, and Create()
+        // bundles whatever is in it. No modal dialog over the game = no crash.
+        private const string DropSubfolder = "attachments-dropbox";
+
+        /// <summary>Stable folder the player drops extra report files into. Created on demand.</summary>
+        public static string AttachmentDropDir()
+        {
+            string dir = Path.Combine(SafeRoot(), DropSubfolder);
+            Directory.CreateDirectory(dir);
+            return dir;
+        }
+
+        /// <summary>Open the drop folder in Explorer (a separate process — never a modal dialog over the
+        /// game). Returns its path.</summary>
+        public static string OpenAttachmentDropFolder()
+        {
+            string dir = AttachmentDropDir();
+            TryOpenFolder(dir);
+            return dir;
+        }
+
+        /// <summary>Files currently staged in the drop folder (passed to Create as attachments).</summary>
+        public static string[] DropFolderFiles()
+        {
+            try { return Directory.GetFiles(AttachmentDropDir()); }
+            catch { return Array.Empty<string>(); }
+        }
+
+        /// <summary>Empty the drop folder after a submit so the next report starts fresh.</summary>
+        public static void ClearAttachmentDropFolder()
+        {
+            try { foreach (var f in Directory.GetFiles(AttachmentDropDir())) { try { File.Delete(f); } catch { } } }
+            catch { }
+        }
+
         private static void WriteReport(string path, string reason)
         {
             var sb = new StringBuilder();
