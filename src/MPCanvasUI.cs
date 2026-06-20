@@ -4132,24 +4132,27 @@ namespace BigAmbitionsMP
 
         private void AttachFilesToBugReport()
         {
-            // Open a folder for the player to drop files into, instead of a native file dialog. The native
-            // dialog hard-crashed the game when shown over it (uncatchable native crash, 2026-06-19); opening
-            // Explorer on a folder is a separate process and can't take the game down.
-            try
+            // Show the OS file picker OUT OF PROCESS (NativeFilePicker → PowerShell) on a background
+            // thread, so it can never crash the game (the old in-process native dialog did, 2026-06-19).
+            // The main thread is never blocked; results are marshalled back when the user finishes picking.
+            if (_crashReportStatusLbl != null)
+                _crashReportStatusLbl.text = "Opening the file picker — choose your screenshots/videos there…";
+            var t = new Thread(() =>
             {
-                MPBugReport.OpenAttachmentDropFolder();
-                int n = MPBugReport.DropFolderFiles().Length;
-                if (_crashReportStatusLbl != null)
-                    _crashReportStatusLbl.text = n == 0
-                        ? "Opened a folder — drop screenshots/videos in it, then click Send. (Your logs are already included.)"
-                        : $"Opened the folder — {n} file(s) staged. Add/remove files, then click Send. (Logs are already included.)";
-            }
-            catch (Exception ex)
-            {
-                Plugin.Logger.LogWarning($"[BugReport] open attach folder failed: {ex.Message}");
-                if (_crashReportStatusLbl != null)
-                    _crashReportStatusLbl.text = "Couldn't open the folder: " + ex.Message;
-            }
+                string[] files;
+                try { files = NativeFilePicker.PickBugReportAttachments(); }
+                catch { files = Array.Empty<string>(); }
+                GameStatePatcher.EnqueueOnMainThread(() =>
+                {
+                    foreach (var f in files)
+                        if (!string.IsNullOrWhiteSpace(f) && File.Exists(f)
+                            && !_crashReportAttachments.Contains(f, StringComparer.OrdinalIgnoreCase))
+                            _crashReportAttachments.Add(f);
+                    RefreshCrashReportText();
+                });
+            });
+            t.IsBackground = true;
+            t.Start();
         }
 
         private void StyleCrashReportPopup()
@@ -4184,7 +4187,9 @@ namespace BigAmbitionsMP
             RefreshCrashReportTagText();
             if (_crashReportStatusLbl != null)
             {
-                string attach = "Optional: 'Attach files' opens a folder — drop screenshots/videos there before sending. Logs are always included.";
+                string attach = _crashReportAttachments.Count == 0
+                    ? "Optional: click 'Attach files' to add screenshots/videos. Your logs are always included."
+                    : $"{_crashReportAttachments.Count} file(s) attached. Files over 24 MB are skipped.";
                 _crashReportStatusLbl.text = (MPConfig.BugReportDiscordWebhookUrlLive().Length > 0
                     ? "Uploads description, Player logs, bamp-ring.log and attachments. "
                     : "Discord upload is not configured. A local report folder will be saved. ") + attach;
@@ -4197,8 +4202,7 @@ namespace BigAmbitionsMP
             {
                 if (_crashReportInputField != null) _crashReportMessage = _crashReportInputField.text ?? "";
                 string prefix = _crashReportIsCrash ? "previous crash: " : "manual bug report: ";
-                MPBugReport.Create(prefix + _crashReportMessage, openFolder: false, attachments: MPBugReport.DropFolderFiles(), discordTagIds: SelectedDiscordForumTagIds());
-                MPBugReport.ClearAttachmentDropFolder();   // bundled into the report — start the next one fresh
+                MPBugReport.Create(prefix + _crashReportMessage, openFolder: false, attachments: _crashReportAttachments, discordTagIds: SelectedDiscordForumTagIds());
                 if (_crashReportIsCrash) MPBugReport.AcknowledgePendingCrash();
                 _crashReportPopupVisible = false;
                 if (_crashReportGO != null) _crashReportGO.SetActive(false);
