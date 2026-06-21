@@ -1982,6 +1982,54 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Time-skip economy: simulate the shop the player is STANDING IN ────
+        // During our consensus skip the TimeMachine is stopped (isRunning=false), so the game's
+        // per-hour business sim (BusinessSimulatorHelper.RunHourly) EXCLUDES the customer-spawning
+        // shop the player is physically inside — natively it relies on live customers for that one,
+        // which can't keep pace with the fast clock, so it under-earns. Native fast-forward avoids
+        // this because isRunning=true. We restore that view of isRunning ONLY for the duration of
+        // RunHourly while a skip is active — tightly scoped so the ~two dozen OTHER isRunning
+        // consumers (activity Cancel, hospital faint, energy/UI/tutorials) keep seeing the REAL
+        // value (a global override would re-fire onTimeMachineEnded on the skip's abort path).
+        // Outside a skip the flag is never set, so there is zero effect on normal play.
+        public static bool ForceSimMachineRunning;
+
+        [HarmonyPatch]
+        public static class Patch_BusinessSimulator_RunHourly_SimOwnShop
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var t = VehicleManager.FindGameType("BusinessSimulatorHelper");
+                return t?.GetMethod("RunHourly",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+            }
+
+            static void Prefix()
+            {
+                if (MPRestSync.SkipActive) ForceSimMachineRunning = true;
+            }
+
+            // Finalizer (not Postfix) so the flag is cleared even if the sim throws.
+            static void Finalizer() { ForceSimMachineRunning = false; }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_TimeMachine_isRunning_SimScope
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var t = VehicleManager.FindGameType("Timemachine.TimeMachine")
+                     ?? VehicleManager.FindGameType("TimeMachine");
+                return t?.GetMethod("get_isRunning",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            }
+
+            static void Postfix(ref bool __result)
+            {
+                if (ForceSimMachineRunning) __result = true;
+            }
+        }
+
         // ── MP economy shields (2026-06-19) ───────────────────────────────────
         // Other players' shops carry a businessOwnerRivalId locally, so the game's AI city-economy treats them
         // as AI rivals — and it only spares RentedByPlayer (the LOCAL player's own). These guards stop the AI
@@ -2059,7 +2107,9 @@ namespace BigAmbitionsMP
         {
             static void Prefix(ref float deltaTimeWithMultiplier)
             {
-                if (TimeSync.AheadHeld && !MPRestSync.SkipActive)
+                // Gate on an active MP game: a stale AheadHeld must never freeze the clock/economy
+                // in single-player after a disconnect.
+                if ((MPServer.IsRunning || MPClient.InMpGame) && TimeSync.AheadHeld && !MPRestSync.SkipActive)
                     deltaTimeWithMultiplier = 0f;
             }
         }

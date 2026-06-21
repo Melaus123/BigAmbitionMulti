@@ -109,6 +109,7 @@ namespace BigAmbitionsMP
             _machine = null;
             Votes.Clear(); RequiredVotes = 0; SkipActive = false;
             _hostVotes.Clear(); _skipGoalMinutes = 0;
+            TimeSync.AheadHeld = false;   // drop any stale ahead-hold so it can't freeze the clock
         }
 
         /// <summary>On RECONNECT, clear ONLY the consensus/skip state — the host's vote tally and any
@@ -121,6 +122,7 @@ namespace BigAmbitionsMP
             _localVoteActive = false; _localGoal = 0;
             Votes.Clear(); RequiredVotes = 0; SkipActive = false;
             _hostVotes.Clear(); _skipGoalMinutes = 0;
+            TimeSync.AheadHeld = false;   // drop any stale ahead-hold so it can't freeze the clock post-reconnect
         }
 
         // ── Taxi v2: INSTANT ARRIVAL (user-chosen, 2026-06-10) ───────────────
