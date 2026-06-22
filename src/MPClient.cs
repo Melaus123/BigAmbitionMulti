@@ -1235,6 +1235,24 @@ namespace BigAmbitionsMP
             return true;
         }
 
+        /// <summary>Called from the unrent patch when the local client terminates a
+        /// building's lease.  The native unrent already ran locally; this asks the
+        /// host to release ownership so its authoritative state stops re-asserting
+        /// the rental back onto us (and so the other players see the building free).</summary>
+        public static bool RequestVacateBuilding(string addressKey)
+        {
+            if (!IsConnected) return false;
+
+            var payload = new BuildingOwnershipPayload
+            {
+                AddressKey    = addressKey,
+                OwnerPlayerId = MPConfig.PlayerId,
+            };
+            Send(MessageEnvelope.Create(MessageType.VacateRequest, MPConfig.PlayerId, payload));
+            Plugin.Logger.LogInfo($"[Client] Sent VacateRequest for {addressKey}");
+            return true;
+        }
+
         private static void Send(MessageEnvelope env)
         {
             if (_server == null) return;

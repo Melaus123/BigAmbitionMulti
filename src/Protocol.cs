@@ -25,6 +25,7 @@ namespace BigAmbitionsMP
         RentConfirm     = 11,  // Host → All: "This building is now rented by X"
         RentDeny        = 12,  // Host → Client: "Rent denied (already taken)"
         VacateNotify    = 13,  // Host → All: "This building is now available"
+        VacateRequest   = 16,  // Client → Host: "I terminated this building's lease — release it"
 
         // Market
         MarketSnapshot  = 20,  // Host → All: current product market entries

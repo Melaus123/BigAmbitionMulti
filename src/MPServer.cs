@@ -661,6 +661,10 @@ namespace BigAmbitionsMP
                     HandleRentRequest(peer, senderPid, env);
                     break;
 
+                case MessageType.VacateRequest:
+                    HandleVacateRequest(peer, senderPid, env);
+                    break;
+
                 case MessageType.PlayerMove:
                     HandlePlayerMove(peer, senderPid, env);
                     break;
@@ -2057,6 +2061,33 @@ namespace BigAmbitionsMP
             // (No event-driven save here: ownership is already tracked live on the
             //  host, and cash is live-streamed — so a crash right after a purchase
             //  loses neither.  Business internals ride the periodic autosave.)
+        }
+
+        // Symmetric to HandleRentRequest: a client terminated a building's lease on
+        // its own machine.  Release the host's authoritative ownership (so the host
+        // stops re-asserting the rental onto that client), reflect the vacate in the
+        // host's own game, and tell every client the building is free again.
+        private static void HandleVacateRequest(NetPeer peer, string senderPid, MessageEnvelope env)
+        {
+            var req = env.GetPayload<BuildingOwnershipPayload>();
+            if (req == null) return;
+            if (!SenderIs(req.OwnerPlayerId, senderPid, MessageType.VacateRequest, allowEmpty: true)) return;
+
+            // Only the building's current owner may vacate it.  Unknown owner ⇒ allow
+            // (the dict can be rebuilt across a reconnect; the client genuinely
+            // unrented on its own machine, so honour it).
+            if (BuildingOwners.TryGetValue(req.AddressKey, out var current) && current != "" && current != senderPid)
+            {
+                Plugin.Logger.LogWarning($"[Server] VacateRequest {req.AddressKey} from {senderPid} denied — owned by {current}.");
+                return;
+            }
+
+            Plugin.Logger.LogInfo($"[Server] VacateRequest: {req.AddressKey} by {senderPid} — releasing.");
+            BuildingOwners.TryRemove(req.AddressKey, out _);
+
+            string addr = req.AddressKey;
+            GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostReflectPlayerVacate(addr));
+            BroadcastVacate(req.AddressKey);   // tell every client it's available again
         }
 
         // ── Message handlers (cont.) ──────────────────────────────────────────

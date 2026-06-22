@@ -77,7 +77,28 @@ namespace BigAmbitionsMP
         {
             RunOnMainThread(() =>
             {
-                MarkBuildingAvailable(addressKey);
+                // Mirror the native terminate-lease so the building reads empty +
+                // rentable on THIS machine too: clear any synced business identity so
+                // it can't keep rendering as an occupied shop.  The !RentedByPlayer
+                // guard makes this safe — it never wipes a building the local player
+                // actively rents (only the owner vacates, and they already cleared it
+                // natively before this notify arrives).
+                var reg = FindRegistration(addressKey);
+                if (reg != null)
+                {
+                    try { reg.AvailableForRent = true; } catch { }
+                    try { reg.buildingOwnerRivalId = ""; } catch { }
+                    try
+                    {
+                        if (!reg.RentedByPlayer)
+                        {
+                            reg.BusinessName     = null;
+                            reg.businessTypeName = "ba:businesstype_empty";
+                        }
+                    }
+                    catch { }
+                }
+                else MarkBuildingAvailable(addressKey);
                 Plugin.Logger.LogInfo($"[Patcher] Building {addressKey} is now available.");
             });
         }
@@ -2295,6 +2316,22 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Patcher/Host] {addressKey} now owned by player '{playerId}' (removed from for-rent).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher/Host] HostReflectPlayerRent: {ex.Message}"); }
+        }
+
+        /// <summary>HOST: reverse HostReflectPlayerRent — a player vacated their
+        /// building, so clear the owner mark and put it back in the for-rent pool in
+        /// the host's OWN game.  MAIN THREAD.</summary>
+        public static void HostReflectPlayerVacate(string addressKey)
+        {
+            try
+            {
+                var reg = FindRegistration(addressKey);
+                if (reg == null) { Plugin.Logger.LogWarning($"[Patcher/Host] vacate reflect: no reg for '{addressKey}'."); return; }
+                reg.AvailableForRent = true;                       // back into the for-rent pool
+                try { reg.buildingOwnerRivalId = ""; } catch { }   // no longer that player's
+                Plugin.Logger.LogInfo($"[Patcher/Host] {addressKey} vacated — back on the for-rent market.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher/Host] HostReflectPlayerVacate: {ex.Message}"); }
         }
 
         private static void MarkBuildingAvailable(string addressKey)

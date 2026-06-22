@@ -91,6 +91,61 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: BizManPresentation.OnTerminateContractConfirm ──────────────
+        // The native "terminate lease / move out" runs entirely on the local
+        // SaveGameManager.Current (RentedByPlayer=false, business emptied, deposit
+        // refunded) and — unlike renting (Patch_RentBuilding above) — was NEVER
+        // routed to the host.  A CLIENT's unrent therefore stayed purely local while
+        // the host kept the building owned by that client, so the host's
+        // authoritative ownership/business sync re-asserted the rental → the reported
+        // "client can't unrent".  This postfix mirrors the rent path: the unrent has
+        // already run locally, so we just release ownership — the client asks the
+        // host (VacateRequest), the host releases directly.
+        [HarmonyPatch(typeof(BizManPresentation), "OnTerminateContractConfirm")]
+        public static class Patch_TerminateContract
+        {
+            static void Postfix(BizManPresentation __instance)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;   // single player — nothing to do
+
+                    var reg = RegOf(__instance);
+                    if (reg == null) { Plugin.Logger.LogWarning("[Patch] Unrent: could not resolve the building registration."); return; }
+                    string key = GameStateReader.AddressKey(reg);
+
+                    if (MPClient.IsConnected)
+                    {
+                        MPClient.RequestVacateBuilding(key);
+                        Plugin.Logger.LogInfo($"[Patch] Client unrented {key} locally + notifying host.");
+                        return;
+                    }
+                    // Host — released locally already; clear ownership + tell clients.
+                    MPServer.BuildingOwners.TryRemove(key, out _);
+                    MPServer.BroadcastVacate(key);
+                    Plugin.Logger.LogInfo($"[Patch] Host unrented {key}, broadcasted vacate to clients.");
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Patch] Patch_TerminateContract: {ex.Message}"); }
+            }
+
+            // bizManBusiness is a private field; buildingRegistration may be a field
+            // or property — resolve both reflectively (BuildingRegistration is a
+            // class, so reading it is safe on this runtime).
+            static BuildingRegistration? RegOf(BizManPresentation pres)
+            {
+                object? biz = ReadMember(pres, "bizManBusiness");
+                return biz == null ? null : ReadMember(biz, "buildingRegistration") as BuildingRegistration;
+            }
+            static object? ReadMember(object obj, string name)
+            {
+                var t = obj.GetType();
+                var f = AccessTools.Field(t, name);
+                if (f != null) return f.GetValue(obj);
+                var p = AccessTools.Property(t, name);
+                return p != null ? p.GetValue(obj) : null;
+            }
+        }
+
         // ── Patch: GameManager.Update ─────────────────────────────────────────
         // Postfix runs AFTER the game's own Update — used to drain our main-thread action queue each frame.
         // NESTED class — REQUIRED so Plugin.cs actually applies it (see the rent
