@@ -48,6 +48,13 @@ namespace BigAmbitionsMP
                         MarkBuildingUnavailable(kv.Key);
                 }
 
+                // Same for BOUGHT real estate owned by other players.
+                foreach (var kv in snap.BuildingRealEstateOwners)
+                {
+                    if (kv.Value != "" && kv.Value != MPConfig.PlayerId)
+                        MarkBuildingUnavailable(kv.Key);
+                }
+
                 // Apply market entries
                 if (!string.IsNullOrEmpty(snap.MarketEntriesJson))
                     ApplyMarketSnapshot(snap.MarketEntriesJson);
@@ -1601,6 +1608,96 @@ namespace BigAmbitionsMP
                 if (removed > 0) Plugin.Logger.LogInfo($"[Patcher/Host] {addressKey} removed from for-sale market (bought).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher/Host] HostRemoveFromForSale: {ex.Message}"); }
+        }
+
+        /// <summary>MAIN THREAD: read the for-sale market entry for an address into a
+        /// transferable BuildingForSaleInfo (the seller's chosen price/sqm/acceptRate),
+        /// or null if the address isn't currently listed.</summary>
+        public static BuildingForSaleInfo? GetForSaleInfo(string addressKey)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.buildingsForSale == null) return null;
+                foreach (var bfs in gi.buildingsForSale)
+                {
+                    if (GameStateReader.AddressKey(bfs.address) != addressKey) continue;
+                    return new BuildingForSaleInfo
+                    {
+                        AddressKey      = addressKey,
+                        BuildingPrice   = bfs.buildingPrice,
+                        SquareMeters    = bfs.squareMeters,
+                        AcceptOfferRate = bfs.acceptOfferRate,
+                    };
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] GetForSaleInfo: {ex.Message}"); }
+            return null;
+        }
+
+        /// <summary>HOST / MAIN THREAD: add (or refresh) a building in the authoritative
+        /// for-sale market from a client's listing, preserving the seller's price.  The
+        /// for-sale poll then broadcasts it so every player sees the listing.</summary>
+        public static void HostAddToForSale(BuildingForSaleInfo info)
+        {
+            try
+            {
+                if (info == null || string.IsNullOrEmpty(info.AddressKey)) return;
+                var gi = SaveGameManager.Current;
+                if (gi?.buildingsForSale == null) return;
+                var reg = FindRegistration(info.AddressKey);
+                if (reg == null) { Plugin.Logger.LogWarning($"[Patcher/Host] list-for-sale: no reg for {info.AddressKey}."); return; }
+                gi.buildingsForSale.RemoveAll(x => GameStateReader.AddressKey(x.address) == info.AddressKey);   // replace any prior listing
+                gi.buildingsForSale.Add(new BuildingForSale
+                {
+                    address         = reg.Address,
+                    buildingPrice   = info.BuildingPrice,
+                    squareMeters    = info.SquareMeters,
+                    acceptOfferRate = info.AcceptOfferRate,
+                });
+                Plugin.Logger.LogInfo($"[Patcher/Host] {info.AddressKey} listed for sale @ {info.BuildingPrice:F0}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher/Host] HostAddToForSale: {ex.Message}"); }
+        }
+
+        /// <summary>MAIN THREAD: the address keys of all currently-for-sale buildings the
+        /// local player OWNS — the set SimulateCompetitorBuyingPlayerBuildings may sell
+        /// this tick.  Captured before that method runs so the postfix can tell which
+        /// actually sold.</summary>
+        public static System.Collections.Generic.List<string> SnapshotOwnedForSale()
+        {
+            var result = new System.Collections.Generic.List<string>();
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.buildingsForSale == null) return result;
+                foreach (var bfs in gi.buildingsForSale)
+                {
+                    string key = GameStateReader.AddressKey(bfs.address);
+                    var reg = FindRegistration(key);
+                    if (reg != null && reg.BuildingOwnedByPlayer) result.Add(key);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] SnapshotOwnedForSale: {ex.Message}"); }
+            return result;
+        }
+
+        /// <summary>MAIN THREAD: of the previously-owned-for-sale addresses, those the
+        /// local player no longer owns — i.e. the AI just bought them.</summary>
+        public static System.Collections.Generic.List<string> DetectSold(System.Collections.Generic.List<string> before)
+        {
+            var sold = new System.Collections.Generic.List<string>();
+            try
+            {
+                if (before == null) return sold;
+                foreach (var key in before)
+                {
+                    var reg = FindRegistration(key);
+                    if (reg == null || !reg.BuildingOwnedByPlayer) sold.Add(key);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] DetectSold: {ex.Message}"); }
+            return sold;
         }
 
         /// <summary>MAIN THREAD: the host denied our optimistic buy (someone else already

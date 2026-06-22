@@ -47,6 +47,10 @@ namespace BigAmbitionsMP
         /// cross-machine ownership map, re-keyed from MPServer.BuildingOwners
         /// (which is keyed by the live, mutable PlayerId) to stable ids.</summary>
         public Dictionary<string, string> BuildingOwners { get; set; } = new();
+        /// <summary>addressKey → owner STABLE id for BOUGHT real estate (re-keyed from
+        /// MPServer.BuildingRealEstateOwners), so two players never own one building
+        /// across save/reload.</summary>
+        public Dictionary<string, string> BuildingRealEstateOwners { get; set; } = new();
     }
 
     public static class MPSaveManager

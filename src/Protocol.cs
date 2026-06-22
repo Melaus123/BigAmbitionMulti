@@ -280,6 +280,10 @@ namespace BigAmbitionsMP
         /// <summary>Street+number → owner player ID. Empty string = available.</summary>
         public Dictionary<string, string> BuildingOwners { get; set; } = new();
 
+        /// <summary>Street+number → owner player ID for BOUGHT real estate (distinct from
+        /// BuildingOwners, which is who RENTS/operates). Empty string = unowned.</summary>
+        public Dictionary<string, string> BuildingRealEstateOwners { get; set; } = new();
+
         /// <summary>Serialised List&lt;ProductMarketEntry&gt; as JSON string.</summary>
         public string MarketEntriesJson { get; set; } = "[]";
 

@@ -198,6 +198,115 @@ namespace BigAmbitionsMP
             }
         }
 
+        // Shared reflection helper (enclosing-class scope) for patches that don't carry
+        // their own copy.  BuildingRegistration is a class, so reading it is safe.
+        private static object? ReadMember(object obj, string name)
+        {
+            if (obj == null) return null;
+            var t = obj.GetType();
+            var f = AccessTools.Field(t, name);
+            if (f != null) return f.GetValue(obj);
+            var p = AccessTools.Property(t, name);
+            return p != null ? p.GetValue(obj) : null;
+        }
+
+        /// <summary>RealEstateSettings → its building's address key, via the private
+        /// _bizMan.business.buildingRegistration chain.</summary>
+        private static string? RealEstateSettingsKey(object settings)
+        {
+            var biz      = ReadMember(settings, "_bizMan");
+            var business = biz == null ? null : ReadMember(biz, "business");
+            var reg      = business == null ? null : ReadMember(business, "buildingRegistration") as BuildingRegistration;
+            return reg == null ? null : GameStateReader.AddressKey(reg);
+        }
+
+        // ── Patch: RealEstateSettings.SetForSale / CancelForSale ──────────────
+        // Listing/canceling a building for sale mutates only the LOCAL gi.buildingsForSale,
+        // which the host's authoritative for-sale broadcast then overwrites — so a client's
+        // listing or cancel never sticks.  Route both through the host so the authoritative
+        // market reflects them (and thus every player sees the change).  Host actions need
+        // no routing: the native change + the for-sale poll already propagate them.
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.RealEstateSettings), "SetForSale")]
+        public static class Patch_RealEstateSettings_SetForSale
+        {
+            static void Postfix(UI.Smartphone.Apps.BizMan.RealEstateSettings __instance)
+            {
+                try
+                {
+                    if (!MPClient.IsConnected) return;   // host/SP: native + for-sale poll handle it
+                    string? key = RealEstateSettingsKey(__instance);
+                    if (string.IsNullOrEmpty(key)) return;
+                    var info = GameStatePatcher.GetForSaleInfo(key);
+                    if (info == null) return;            // no price entered → native didn't list it
+                    MPClient.RequestListForSale(info);
+                    Plugin.Logger.LogInfo($"[Patch] Client listed {key} for sale + notifying host.");
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Patch] SetForSale: {ex.Message}"); }
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.RealEstateSettings), "CancelForSale")]
+        public static class Patch_RealEstateSettings_CancelForSale
+        {
+            static void Postfix(UI.Smartphone.Apps.BizMan.RealEstateSettings __instance)
+            {
+                try
+                {
+                    if (!MPClient.IsConnected) return;   // host/SP: native + for-sale poll handle it
+                    string? key = RealEstateSettingsKey(__instance);
+                    if (string.IsNullOrEmpty(key)) return;
+                    MPClient.RequestCancelSale(key);
+                    Plugin.Logger.LogInfo($"[Patch] Client canceled sale of {key} + notifying host.");
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Patch] CancelForSale: {ex.Message}"); }
+            }
+        }
+
+        // ── Patch: RealEstateHelper.SimulateCompetitorBuyingPlayerBuildings ───
+        // Runs in EVERY sim but only ever sells the LOCAL owner's listed buildings (the AI
+        // pays the owner natively in their own sim — correct + per-player).  We don't gate
+        // it; we route the RESULT: a prefix snapshots the owner's for-sale buildings, the
+        // postfix sees which the AI bought, and tells the host to drop them from the
+        // authoritative market + ownership registry (host clears its own directly).
+        [HarmonyPatch(typeof(Helpers.RealEstateHelper), "SimulateCompetitorBuyingPlayerBuildings")]
+        public static class Patch_SimulateCompetitorBuyingPlayerBuildings
+        {
+            static void Prefix(out System.Collections.Generic.List<string> __state)
+            {
+                __state = (MPServer.IsRunning || MPClient.IsConnected) ? GameStatePatcher.SnapshotOwnedForSale() : null;
+            }
+            static void Postfix(System.Collections.Generic.List<string> __state)
+            {
+                try
+                {
+                    if (__state == null || __state.Count == 0) return;
+                    foreach (var addr in GameStatePatcher.DetectSold(__state))
+                    {
+                        if (MPServer.IsRunning) MPServer.BuildingRealEstateOwners.TryRemove(addr, out _);
+                        else if (MPClient.IsConnected) MPClient.SendSaleCompleted(addr);
+                    }
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Patch] SimulateCompetitorBuyingPlayerBuildings: {ex.Message}"); }
+            }
+        }
+
+        // ── Patches: AI for-sale market generation → HOST-ONLY ────────────────
+        // UpdateBuildingsForSale (lists new AI buildings) and SimulateCompetitorBuyingAIBuildings
+        // (AI buys AI buildings) mutate the GLOBAL for-sale market with their own RNG.  The
+        // host's market is authoritative and replace-synced to clients, so running these on
+        // clients only causes transient divergence + wasted work — skip them client-side.
+        [HarmonyPatch(typeof(Helpers.RealEstateHelper), "UpdateBuildingsForSale")]
+        public static class Patch_UpdateBuildingsForSale_HostOnly
+        {
+            static bool Prefix() => !MPClient.IsConnected;   // host + single player run it; clients get the market via sync
+        }
+
+        [HarmonyPatch(typeof(Helpers.RealEstateHelper), "SimulateCompetitorBuyingAIBuildings")]
+        public static class Patch_SimulateCompetitorBuyingAIBuildings_HostOnly
+        {
+            static bool Prefix() => !MPClient.IsConnected;
+        }
+
         // ── Patch: GameManager.Update ─────────────────────────────────────────
         // Postfix runs AFTER the game's own Update — used to drain our main-thread action queue each frame.
         // NESTED class — REQUIRED so Plugin.cs actually applies it (see the rent

@@ -156,6 +156,16 @@ namespace BigAmbitionsMP
                     else if (reverse.TryGetValue(ownerStable, out var pid)) BuildingOwners[kv.Key] = pid;
                     else                                              BuildingOwners[kv.Key] = ownerStable; // reserved (absent owner)
                 }
+
+                BuildingRealEstateOwners.Clear();
+                foreach (var kv in m.BuildingRealEstateOwners)
+                {
+                    string ownerStable = kv.Value;
+                    if (string.IsNullOrEmpty(ownerStable)) continue;
+                    if (ownerStable == MPConfig.StableId)             BuildingRealEstateOwners[kv.Key] = "host";
+                    else if (reverse.TryGetValue(ownerStable, out var pid2)) BuildingRealEstateOwners[kv.Key] = pid2;
+                    else                                              BuildingRealEstateOwners[kv.Key] = ownerStable; // reserved (absent owner)
+                }
                 foreach (var slot in m.Slots)
                     if (slot.Money != 0f) CashByStableId[slot.StableId] = slot.Money;
 
@@ -673,6 +683,18 @@ namespace BigAmbitionsMP
 
                 case MessageType.BuyRequest:
                     HandleBuyRequest(peer, senderPid, env);
+                    break;
+
+                case MessageType.ListForSale:
+                    HandleListForSale(peer, senderPid, env);
+                    break;
+
+                case MessageType.CancelSale:
+                    HandleCancelSale(peer, senderPid, env);
+                    break;
+
+                case MessageType.SaleCompleted:
+                    HandleSaleCompleted(peer, senderPid, env);
                     break;
 
                 case MessageType.PlayerMove:
@@ -2125,6 +2147,38 @@ namespace BigAmbitionsMP
             GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostRemoveFromForSale(addr));
         }
 
+        // A client listed an owned building for sale.  Add it to the host's authoritative
+        // for-sale market (with the seller's price); the for-sale poll then broadcasts it.
+        private static void HandleListForSale(NetPeer peer, string senderPid, MessageEnvelope env)
+        {
+            var info = env.GetPayload<BuildingForSaleInfo>();
+            if (info == null || string.IsNullOrEmpty(info.AddressKey)) return;
+            Plugin.Logger.LogInfo($"[Server] ListForSale: {info.AddressKey} by {senderPid} @ {info.BuildingPrice:F0}.");
+            GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostAddToForSale(info));
+        }
+
+        // A client canceled its building's sale.  Remove it from the host's market.
+        private static void HandleCancelSale(NetPeer peer, string senderPid, MessageEnvelope env)
+        {
+            var req = env.GetPayload<BuildingOwnershipPayload>();
+            if (req == null || string.IsNullOrEmpty(req.AddressKey)) return;
+            Plugin.Logger.LogInfo($"[Server] CancelSale: {req.AddressKey} by {senderPid}.");
+            string addr = req.AddressKey;
+            GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostRemoveFromForSale(addr));
+        }
+
+        // The AI bought a client's listed building (completed in the client's own sim).
+        // Drop it from the host's authoritative market + clear the ownership registry.
+        private static void HandleSaleCompleted(NetPeer peer, string senderPid, MessageEnvelope env)
+        {
+            var req = env.GetPayload<BuildingOwnershipPayload>();
+            if (req == null || string.IsNullOrEmpty(req.AddressKey)) return;
+            Plugin.Logger.LogInfo($"[Server] SaleCompleted: {req.AddressKey} (AI bought {senderPid}'s building) — releasing.");
+            BuildingRealEstateOwners.TryRemove(req.AddressKey, out _);
+            string addr = req.AddressKey;
+            GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostRemoveFromForSale(addr));
+        }
+
         // ── Message handlers (cont.) ──────────────────────────────────────────
 
         // ── Appearance sync ───────────────────────────────────────────────────
@@ -3085,6 +3139,7 @@ namespace BigAmbitionsMP
             return new WorldSnapshotPayload
             {
                 BuildingOwners   = new Dictionary<string, string>(BuildingOwners),
+                BuildingRealEstateOwners = new Dictionary<string, string>(BuildingRealEstateOwners),
                 MarketEntriesJson = GameStateReader.GetMarketEntriesJson(),
                 SessionId         = MPLog.SessionId,
             };

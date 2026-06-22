@@ -820,9 +820,34 @@ namespace BigAmbitionsMP
                 m.WorldDay       = worldDay;
                 m.SavedAtUnix    = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
                 m.BuildingOwners = BuildOwnersStableKeyed();
+                m.BuildingRealEstateOwners = RealEstateOwnersStableKeyed();
                 RefreshSlotCash(m);
                 MPSaveManager.WriteManifest(sessionName, m);
             }
+        }
+
+        /// <summary>Re-key MPServer.BuildingRealEstateOwners (live PlayerId / "host") to
+        /// immutable stable ids for the manifest — mirrors BuildOwnersStableKeyed so
+        /// bought-building ownership survives save/reload.</summary>
+        private static Dictionary<string, string> RealEstateOwnersStableKeyed()
+        {
+            var result = new Dictionary<string, string>();
+            try
+            {
+                foreach (var kv in MPServer.BuildingRealEstateOwners)
+                {
+                    string owner = kv.Value;
+                    if (string.IsNullOrEmpty(owner)) continue;
+                    string stable;
+                    if (owner == "host")
+                        stable = MPConfig.StableId;
+                    else if (!MPServer.StableIdByPlayer.TryGetValue(owner, out stable) || string.IsNullOrEmpty(stable))
+                        stable = owner;
+                    result[kv.Key] = stable;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] RealEstateOwnersStableKeyed: {ex.Message}"); }
+            return result;
         }
 
         private static void MergeSlot(string sessionName, MpSlot slot)

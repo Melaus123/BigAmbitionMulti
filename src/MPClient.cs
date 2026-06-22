@@ -1283,6 +1283,40 @@ namespace BigAmbitionsMP
             return true;
         }
 
+        /// <summary>Client listed an owned building for sale; ask the host to add it to
+        /// the authoritative for-sale market (carrying the seller's chosen price/sqm) so
+        /// the listing survives the host's market broadcast and every player sees it.</summary>
+        public static bool RequestListForSale(BuildingForSaleInfo info)
+        {
+            if (!IsConnected || info == null) return false;
+            Send(MessageEnvelope.Create(MessageType.ListForSale, MPConfig.PlayerId, info));
+            Plugin.Logger.LogInfo($"[Client] Sent ListForSale for {info.AddressKey}");
+            return true;
+        }
+
+        /// <summary>Client canceled its building's sale; ask the host to remove it from
+        /// the authoritative market.</summary>
+        public static bool RequestCancelSale(string addressKey)
+        {
+            if (!IsConnected) return false;
+            var payload = new BuildingOwnershipPayload { AddressKey = addressKey, OwnerPlayerId = MPConfig.PlayerId };
+            Send(MessageEnvelope.Create(MessageType.CancelSale, MPConfig.PlayerId, payload));
+            Plugin.Logger.LogInfo($"[Client] Sent CancelSale for {addressKey}");
+            return true;
+        }
+
+        /// <summary>The AI bought one of this client's listed buildings (completed in our
+        /// own sim — we were paid natively).  Tell the host to drop it from the
+        /// authoritative for-sale market + ownership registry.</summary>
+        public static bool SendSaleCompleted(string addressKey)
+        {
+            if (!IsConnected) return false;
+            var payload = new BuildingOwnershipPayload { AddressKey = addressKey, OwnerPlayerId = MPConfig.PlayerId };
+            Send(MessageEnvelope.Create(MessageType.SaleCompleted, MPConfig.PlayerId, payload));
+            Plugin.Logger.LogInfo($"[Client] Sent SaleCompleted for {addressKey}");
+            return true;
+        }
+
         private static void Send(MessageEnvelope env)
         {
             if (_server == null) return;
