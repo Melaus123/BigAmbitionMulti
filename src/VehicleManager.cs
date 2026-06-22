@@ -151,6 +151,7 @@ namespace BigAmbitionsMP
         private sealed class RemoteVehicle
         {
             public string      OwnerId   = "";
+            public string      TypeName  = "";   // vehicle type id — needed to run the game's own block-cull around this ghost
             public GameObject? Go;
             public Transform?  Label;
             public Vector3     TargetPos;
@@ -179,6 +180,43 @@ namespace BigAmbitionsMP
 
         // Keyed by VehicleId (a player owns several vehicles).
         private static readonly Dictionary<string, RemoteVehicle> _remoteVehicles = new();
+
+        private static int _lastAmbientCullFrame = -1;
+
+        /// <summary>HOST-ONLY. For each PARKED (stationary) remote-vehicle ghost, run the game's OWN
+        /// VehicleHelper.DestroyBlockingVehicles — the identical routine it already runs for the host's own
+        /// cars (VehicleHelper.DestroyBlockingParkedVehicles over AllPlayerVehicles) — so an ambient parked
+        /// car overlapping a CLIENT's parked car is released. The release goes through the game's
+        /// ParkingSimulator.ReleaseParkedVehicle, so our parked-car sync propagates the removal to everyone
+        /// (one consistent world; the spot repopulates via normal lane regeneration when the car leaves).
+        ///
+        /// SAFETY: DestroyBlockingVehicles(onlyParkedVehicles:true) releases ONLY colliders on
+        /// ParkedVehiclesLayer (ambient decorations). A ghost is a CreateAndSpawnVehicle vehicle on
+        /// PlayerVehiclesLayer (we never reassign its layer), so it is only the overlap box's REFERENCE
+        /// POINT and can never itself be released — the same reason the host's own parked car is safe.
+        /// Moving (being-driven) ghosts are skipped via the velocity gate, mirroring the game's own
+        /// skipPlayerMountedVehicles.</summary>
+        public static void CullBlockingAmbientAroundParkedGhosts()
+        {
+            if (!MPServer.IsRunning) return;                         // host is authoritative for ambient cars
+            if (Time.frameCount == _lastAmbientCullFrame) return;    // once per frame even if many lanes regen at once
+            _lastAmbientCullFrame = Time.frameCount;
+            try
+            {
+                foreach (var rv in _remoteVehicles.Values)
+                {
+                    if (rv?.Go == null) continue;
+                    if (rv.Velocity.sqrMagnitude > 0.25f) continue;  // ~>0.5 m/s = being driven → skip (like skipPlayerMountedVehicles)
+                    try
+                    {
+                        var vt = Vehicles.VehicleTypes.VehicleTypeHelper.GetVehicleType(rv.TypeName);
+                        Helpers.VehicleHelper.DestroyBlockingVehicles(rv.Go, vt, onlyParkedVehicles: true);
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[ParkedSync] cull around ghost '{rv.TypeName}': {ex.Message}"); }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[ParkedSync] CullBlockingAmbientAroundParkedGhosts: {ex.Message}"); }
+        }
 
         /// <summary>Reads the local player's full vehicle fleet, or null if not ready.</summary>
         public static VehicleFleetPayload? ReadLocalFleet()
@@ -632,6 +670,7 @@ namespace BigAmbitionsMP
             return new RemoteVehicle
             {
                 OwnerId   = ownerId,
+                TypeName  = e.TypeName,
                 Go        = go,
                 Label     = label,
                 TargetPos = pos,

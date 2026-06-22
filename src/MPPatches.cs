@@ -531,6 +531,25 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Parked-car overlap: extend the game's ambient cleanup to CLIENT cars ──
+        // The game clears ambient parked cars overlapping the LOCAL player's cars
+        // (DestroyBlockingParkedVehicles → DestroyBlockingVehicles, iterating AllPlayerVehicles).
+        // In MP that only covers the HOST's own cars, so an ambient car (re)generated onto a
+        // CLIENT's parked car is never cleared → it syncs to the client as an overlap. Host-only
+        // Postfix: after the native cleanup, run the SAME routine for each parked client-car ghost,
+        // so the removal happens host-side and propagates to everyone via the parked-car sync.
+        // Only ambient cars (ParkedVehiclesLayer) are ever released; a ghost (PlayerVehiclesLayer)
+        // is just the reference point — see VehicleManager.CullBlockingAmbientAroundParkedGhosts.
+        [HarmonyPatch(typeof(Helpers.VehicleHelper), "DestroyBlockingParkedVehicles")]
+        public static class Patch_DestroyBlockingParkedVehicles_RemotePlayers
+        {
+            static void Postfix()
+            {
+                if (!MPServer.IsRunning) return;
+                VehicleManager.CullBlockingAmbientAroundParkedGhosts();
+            }
+        }
+
         // CLAUDE-DIAGNOSTIC — client-can't-exit-building investigation (2026-05-20).
         // Cpp2IL decompile revealed:
         //   * ExitZone.OnTriggerEnter only opens the door (animation) — NOT the
