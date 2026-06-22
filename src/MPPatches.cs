@@ -2314,6 +2314,66 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: EmployeeInstance.RunComplaintsHourly — guard + probe orphaned employees ──
+        // An employee whose assignedAddress doesn't resolve to a BuildingRegistration makes the
+        // native complaint message-build (UnfulfilledDemandsComplaint.GetComplaintMessageData →
+        // GetBuildingRegistration → deref) throw an NRE.  That NRE escapes EmployeeHelper.RunHourly
+        // and aborts the REST of the hourly economy tick — every employee AND every delivery step
+        // that runs after it — i.e. "everyone stopped working, no deliveries" (bug-20260621-181535).
+        // This is MP-ONLY (in single player an employee's workplace always exists), so it's a real
+        // multiplayer data gap: an employee is pointing at a building this machine can't resolve.
+        //
+        // This is a BANDAID, by design: we skip that one employee's complaint processing (it can't
+        // meaningfully complain about a missing workplace) so the tick survives — but we LOG IT LOUDLY
+        // as a release-safe WARNING, because the guard hides the player-facing symptom and the ROOT
+        // (why the building is unresolvable on the client) still needs fixing.  The [OrphanEmployee]
+        // tag is meant to jump out of any future log so we notice this is still happening.
+        [HarmonyPatch(typeof(Entities.EmployeeInstance), "RunComplaintsHourly")]
+        public static class Patch_EmployeeInstance_RunComplaintsHourly_GuardOrphanBuilding
+        {
+            // per-employee-id real-time throttle so it stays visible without flooding the log
+            private static readonly System.Collections.Generic.Dictionary<string, float> _lastLogged = new();
+
+            static bool Prefix(Entities.EmployeeInstance __instance)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return true;   // single player — run native
+                    if (__instance == null) return true;
+
+                    BuildingRegistration? reg = null;
+                    try { reg = Helpers.BuildingHelper.GetBuildingRegistration(__instance.assignedAddress); } catch { reg = null; }
+                    if (reg != null) return true;   // normal employee with a resolvable workplace — native runs
+
+                    LogOrphan(__instance);
+                    return false;   // skip this orphan's complaint processing → no NRE → the hourly tick lives
+                }
+                catch { return true; }   // the guard must never be the thing that breaks the tick
+            }
+
+            private static void LogOrphan(Entities.EmployeeInstance emp)
+            {
+                try
+                {
+                    string id = "?"; try { id = emp.id ?? "?"; } catch { }
+                    float now = UnityEngine.Time.unscaledTime;
+                    if (_lastLogged.TryGetValue(id, out var last) && now - last < 120f) return;   // ≤ once / 2 min / id
+                    _lastLogged[id] = now;
+
+                    string name = "?"; try { name = emp.characterData?.name ?? "?"; } catch { }
+                    string addr = "?";
+                    try { addr = $"{emp.assignedAddress.streetNumber} {emp.assignedAddress.streetName}"; } catch { }
+                    bool synth = false; try { synth = id.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix); } catch { }
+                    string role = MPServer.IsRunning ? "host" : "client";
+                    Plugin.Logger.LogWarning(
+                        $"[OrphanEmployee] GUARDED a complaint NRE on {role}: employee '{name}' (id={id}, synthetic={synth}) " +
+                        $"is assigned to '{addr}' which has NO building registration here — skipped its complaints to keep the " +
+                        $"hourly economy tick alive. ROOT DATA GAP TO FIX (not a real fix): an MP employee→building assignment is unresolvable.");
+                }
+                catch { }
+            }
+        }
+
         // (6) A disconnected player's RivalState lingers in gi.rivalStates, but GetRivalData refuses an
         // off-roster id → returns null → RivalsHelper.RunDaily dereferences it on the next day-roll (crash on
         // every machine). Pre-drop any rivalState whose RivalData no longer resolves: connected players resolve
