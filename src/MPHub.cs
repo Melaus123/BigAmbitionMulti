@@ -153,6 +153,24 @@ namespace BigAmbitionsMP
             else MPClient.SendHub(MessageType.LoanAnswer, a);
         }
 
+        /// <summary>BORROWER: pay back one of MY loans early. amount &lt;= 0 = pay off in full;
+        /// otherwise a partial payment (clamped to what's left). Host is authoritative.</summary>
+        public static void RequestRepay(string loanId, float amount)
+        {
+            var ln = Loans.Find(l => l.Id == loanId);
+            if (ln == null || ln.Borrower != MPConfig.PlayerId) return;
+            float pay = amount <= 0f ? ln.Remaining : Mathf.Min(amount, ln.Remaining);
+            if (pay <= 0f) return;
+            if (AvailableMoney() < pay)
+            {
+                MPChat.AddNotice($"not enough uncommitted money to repay ${pay:N0} (pending offers count)");
+                return;
+            }
+            var p = new LoanRepayPayload { Id = loanId, From = MPConfig.PlayerId, Amount = amount };
+            if (MPServer.IsRunning) HostHandleRepay(p);
+            else MPClient.SendHub(MessageType.LoanRepay, p);
+        }
+
         // Bank reference (dump-CONFIRMED consts): InterestRate=20 (a TOTAL
         // premium on the principal), YearsToPayLoan=4 → 244-day term (61-day
         // game year); dailies = ceil(P*0.20/244) and ceil(P/244) — matches the
@@ -286,6 +304,43 @@ namespace BigAmbitionsMP
                 HostBroadcastLoans();
                 SaveLedger();
             }
+        }
+
+        /// <summary>HOST: process a borrower's early repayment (full or partial). Mirrors the
+        /// daily-draft money path + closes/updates the ledger exactly like HostTick does.</summary>
+        public static void HostHandleRepay(LoanRepayPayload p)
+        {
+            if (p == null || string.IsNullOrEmpty(p.Id)) return;
+            var ln = _hostLoans.Find(l => l.Id == p.Id);
+            if (ln == null) return;
+            if (ln.Borrower != p.From) return;                       // only the borrower may repay
+            // Both parties must be present — the host can't credit an offline lender (cash is
+            // self-reported per machine), same rule the daily accrual uses.
+            var present = MPRestSync.AllPlayers();
+            if (!present.Contains(ln.Borrower) || !present.Contains(ln.Lender))
+            {
+                NotifyParty(ln.Borrower, $"can't repay yet — {ln.Lender} is offline.");
+                return;
+            }
+            float pay = p.Amount <= 0f ? ln.Remaining : Math.Min(p.Amount, ln.Remaining);
+            if (pay <= 0f) return;
+            DeliverMoney(ln.Borrower, -pay, $"early repayment to {ln.Lender}", silent: true);
+            DeliverMoney(ln.Lender, pay, $"early repayment from {ln.Borrower}", silent: true);
+            ln.Remaining -= pay;
+            if (ln.Remaining <= 0f)
+            {
+                NotifyParty(ln.Lender, $"{ln.Borrower} repaid your loan in full.");
+                NotifyParty(ln.Borrower, $"your loan from {ln.Lender} is fully repaid.");
+                _hostLoans.Remove(ln);
+            }
+            else
+            {
+                NotifyParty(ln.Borrower, $"you paid ${pay:N0} early — ${ln.Remaining:N0} left on your loan from {ln.Lender}.");
+                NotifyParty(ln.Lender, $"{ln.Borrower} paid ${pay:N0} early — ${ln.Remaining:N0} left.");
+            }
+            Plugin.Logger.LogInfo($"[Hub] early repay: {ln.Borrower} → {ln.Lender} ${pay:N0} (remaining ${ln.Remaining:N0}).");
+            HostBroadcastLoans();
+            SaveLedger();
         }
 
         /// <summary>PRIVATE notice to one player (gift/loan events are nobody

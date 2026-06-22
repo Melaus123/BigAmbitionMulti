@@ -89,6 +89,7 @@ namespace BigAmbitionsMP
         LoanAnswer           = 106, // Target → Host: accept/decline a loan offer.
         LoanState            = 107, // Host → All: the authoritative active-loan ledger (Business Hub display).
         MoneyAdjust          = 108, // Host → one player: credit/debit your wallet by Amount (transfer delivery, loan principal, daily loan payments).
+        LoanRepay            = 109, // Borrower → Host: repay a loan early (full or partial; Amount<=0 = full payoff).
         PhaseReport          = 110, // Client → Host: my lifecycle phase changed (load-fence visibility; lets the host excuse a client who bailed to the menu instead of loading).
         RegisterCashier      = 111, // Any → Host → All: player went on/off duty at the cash register near (X,Y,Z); others can F4-buy there (Wave-2 player-staffed registers).
         RemoteSale           = 112, // Buyer → Host: I bought items in another player's shop (buyer already paid locally); host validates and credits the owner.
@@ -894,6 +895,14 @@ namespace BigAmbitionsMP
     public class LoanStatePayload
     {
         public List<LoanEntry> Loans { get; set; } = new();
+    }
+
+    /// <summary>Borrower → Host (MessageType.LoanRepay): pay a loan back early.</summary>
+    public class LoanRepayPayload
+    {
+        public string Id     { get; set; } = "";   // loan id being repaid
+        public string From   { get; set; } = "";   // the borrower repaying
+        public float  Amount { get; set; }         // <= 0 = pay off in full; otherwise a partial amount
     }
 
     /// <summary>One lifecycle transition on a client (MessageType.PhaseReport).</summary>

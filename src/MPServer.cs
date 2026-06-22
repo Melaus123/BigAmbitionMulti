@@ -928,6 +928,14 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.LoanRepay:
+                {
+                    var lr = env.GetPayload<LoanRepayPayload>();
+                    if (lr == null || !SenderIs(lr.From, senderPid, env.Type)) break;
+                    GameStatePatcher.EnqueueOnMainThread(() => MPHub.HostHandleRepay(lr));
+                    break;
+                }
+
                 case MessageType.RestVote:
                 {
                     var rv = env.GetPayload<RestVotePayload>();

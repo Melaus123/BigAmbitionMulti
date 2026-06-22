@@ -1158,7 +1158,7 @@ namespace BigAmbitionsMP
         private bool _hubVisible;
         private bool _hubUiHover;
         private GameObject? _hub;            private RectTransform? _hubRT;
-        private TextMeshProUGUI? _hubAmountLbl, _hubTermsLbl, _hubLoans;
+        private TextMeshProUGUI? _hubAmountLbl, _hubTermsLbl;
         private RectTransform? _hubXRT, _hubSendRT, _hubLoanRT;
         private readonly RectTransform?[] _hubChipRT = new RectTransform?[4];
         private readonly Image?[] _hubChipImg = new Image?[4];
@@ -1170,9 +1170,10 @@ namespace BigAmbitionsMP
         // Row-scroll lists (incoming + outgoing offers) + active-loans scroll.
         // Buttons live INSIDE scrolled rows; clicks resolve via this registry,
         // gated on each row's viewport so masked-off rows can't be clicked.
-        private readonly List<(RectTransform rt, RectTransform vp, string id, byte act)> _hubRowBtns = new();   // act: 0=accept 1=decline 2=cancel
+        private readonly List<(RectTransform rt, RectTransform vp, string id, byte act)> _hubRowBtns = new();   // act: 0=accept 1=decline 2=cancel 3=repay-confirm 4=repay-partial 5=repay-full
         private RectTransform? _hubInVp, _hubInContent, _hubOutVp, _hubOutContent;
-        private RectTransform? _hubLoansContent;
+        private RectTransform? _hubLoansContent, _hubLoansVp;
+        private string _hubRepayArm = ""; private float _hubRepayArmAt; private float _hubRepayArmAmt;   // repay confirm: armed loan id, arm time, amount (0 = full)
         // Tabs.
         private int _hubTab;                                  // 0=Transfers 1=Loans
         private GameObject? _hubPageTransfers, _hubPageLoans;
@@ -1194,6 +1195,11 @@ namespace BigAmbitionsMP
         private string _hubTermStr = "244";
         private RectTransform? _hubAmountRT, _hubRateRT, _hubTermRT;
         private TextMeshProUGUI? _hubRateLbl, _hubTermLbl;
+        // Partial-repayment amount (Active-loans header) — mirrors the amount field above.
+        private bool _hubPartialFocus;
+        private string _hubPartialStr = "1000";
+        private double _hubPartialAmount = 1000;
+        private RectTransform? _hubPartialRT; private TextMeshProUGUI? _hubPartialLbl;
         // Native-template palette (tuneable in one place).
         private static readonly Color HubPageGrey   = new Color(0.145f, 0.155f, 0.175f, 0.99f);
         private static readonly Color HubStripeBlue = new Color(0.20f, 0.47f, 0.78f, 1f);
@@ -1598,6 +1604,10 @@ namespace BigAmbitionsMP
                     _hubTermLbl.text = _hubTermFocus
                         ? $"<b>{_hubTermStr}</b>{(caretOn ? "|" : "")} days"
                         : $"<b>{HubTerm()}</b> days";
+                if (_hubPartialLbl != null)
+                    _hubPartialLbl.text = _hubPartialFocus
+                        ? $"<b>${_hubPartialStr}</b>{(caretOn ? "|" : "")}"
+                        : $"<b>${_hubPartialAmount:N0}</b>";
                 if (_hubTermsLbl != null)
                 {
                     // Bank convention: rate = TOTAL premium over the term.
@@ -1676,31 +1686,55 @@ namespace BigAmbitionsMP
                         _hubOutContent.sizeDelta = new Vector2(0f, Mathf.Max(160f, outs.Count * OutRowH + 4f));
                     }
 
-                    // ACTIVE LOANS — full list, scrolled (with scrollbar).
-                    var mine = new List<LoanEntry>();
-                    foreach (var ln in MPHub.Loans)
-                        if (ln.Borrower == MPConfig.PlayerId || ln.Lender == MPConfig.PlayerId) mine.Add(ln);
-                    var sl = new System.Text.StringBuilder();
-                    foreach (var ln in mine)
+                    // ACTIVE LOANS — one row per loan; loans you OWE get a Pay off
+                    // button (two-click confirm), unless the lender is offline (the
+                    // host can't credit them). Loans owed TO you are display-only.
+                    if (_hubRepayArm != "" && Time.unscaledTime - _hubRepayArmAt > 6f) _hubRepayArm = "";
+                    ClearScrollContent(_hubLoansContent);
+                    const float LoanRowH = 44f;
+                    if (_hubLoansContent != null && _hubLoansVp != null)
                     {
-                        bool meB = ln.Borrower == MPConfig.PlayerId;
-                        sl.Append(meB
-                            ? $"you owe <color={_colOwe}>{ln.Lender}</color>: <b>${ln.Remaining:N0}</b> left (${ln.DailyInterest:N0}+${ln.DailyPayment:N0}/day · ~{Math.Ceiling(ln.Remaining / Math.Max(1f, ln.DailyPayment)):F0} days left)\n"
-                            : $"<color={_colGood}>{ln.Borrower}</color> owes you: <b>${ln.Remaining:N0}</b> left (${ln.DailyInterest:N0}+${ln.DailyPayment:N0}/day · ~{Math.Ceiling(ln.Remaining / Math.Max(1f, ln.DailyPayment)):F0} days left)\n");
-                    }
-                    if (MPHub.Loans.Count > 0 && mine.Count == 0)
-                        Plugin.Logger.LogWarning($"[Hub] {MPHub.Loans.Count} active loan(s) but none match my id '{MPConfig.PlayerId}' (loan0: lender='{MPHub.Loans[0].Lender}' borrower='{MPHub.Loans[0].Borrower}')");
-                    if (_hubLoans != null)
-                    {
-                        _hubLoans.text = sl.Length > 0 ? sl.ToString() : $"<color={_colMuted}>no active loans</color>";
-                        try
+                        var mine = new List<LoanEntry>();
+                        foreach (var ln in MPHub.Loans)
+                            if (ln.Borrower == MPConfig.PlayerId || ln.Lender == MPConfig.PlayerId) mine.Add(ln);
+                        if (MPHub.Loans.Count > 0 && mine.Count == 0)
+                            Plugin.Logger.LogWarning($"[Hub] {MPHub.Loans.Count} active loan(s) but none match my id '{MPConfig.PlayerId}'");
+                        var present = MPRestSync.AllPlayers();
+                        for (int i = 0; i < mine.Count; i++)
                         {
-                            _hubLoans.ForceMeshUpdate();
-                            float h = Mathf.Max(116f, _hubLoans.preferredHeight + 6f);
-                            if (_hubLoansContent != null) _hubLoansContent.sizeDelta = new Vector2(0f, h);
-                            _hubLoans.rectTransform.sizeDelta = new Vector2(880f, h);
+                            var ln = mine[i];
+                            int dleft = (int)Math.Ceiling(ln.Remaining / Math.Max(1f, ln.DailyPayment));
+                            if (ln.Borrower == MPConfig.PlayerId)
+                            {
+                                string txt = $"you owe <color={_colOwe}>{ln.Lender}</color>: <b>${ln.Remaining:N0}</b> left · ${ln.DailyInterest:N0}+${ln.DailyPayment:N0}/day · ~{dleft}d";
+                                if (!present.Contains(ln.Lender))
+                                    AddHubRow(_hubLoansContent, _hubLoansVp, i, LoanRowH, txt + $"  <color={_colMuted}>· lender offline</color>");
+                                else if (_hubRepayArm == ln.Id)   // armed → single confirm button showing the amount
+                                {
+                                    float amt = _hubRepayArmAmt <= 0f ? ln.Remaining : Math.Min(_hubRepayArmAmt, ln.Remaining);
+                                    AddHubRow(_hubLoansContent, _hubLoansVp, i, LoanRowH, txt,
+                                        ($"confirm ${amt:N0}", new Color(0.62f, 0.40f, 0.16f, 1f), ln.Id, (byte)3));
+                                }
+                                else
+                                {
+                                    float pAmt = Math.Min((float)_hubPartialAmount, ln.Remaining);
+                                    AddHubRow(_hubLoansContent, _hubLoansVp, i, LoanRowH, txt,
+                                        ($"partial ${pAmt:N0}", new Color(0.28f, 0.36f, 0.48f, 1f), ln.Id, (byte)4),
+                                        ($"full ${ln.Remaining:N0}", new Color(0.24f, 0.50f, 0.33f, 1f), ln.Id, (byte)5));
+                                }
+                            }
+                            else
+                            {
+                                string txt = $"<color={_colGood}>{ln.Borrower}</color> owes you: <b>${ln.Remaining:N0}</b> left · ${ln.DailyInterest:N0}+${ln.DailyPayment:N0}/day · ~{dleft}d";
+                                AddHubRow(_hubLoansContent, _hubLoansVp, i, LoanRowH, txt);
+                            }
                         }
-                        catch { }
+                        if (mine.Count == 0)
+                        {
+                            var none = MakeLabel(_hubLoansContent.transform, $"<color={_colMuted}>no active loans</color>", 12, _inkLo, 6f, -4f, 400f, 20f, TextAlignmentOptions.TopLeft);
+                            ApplyFont(none);
+                        }
+                        _hubLoansContent.sizeDelta = new Vector2(0f, Mathf.Max(118f, mine.Count * LoanRowH + 4f));
                     }
                 }
                 // Hover + clicks.  In the NATIVE page the menu itself already
@@ -1712,9 +1746,10 @@ namespace BigAmbitionsMP
                 if (!Input.GetMouseButtonDown(0)) return;
                 if (!HubHit(_hubRT, mp)) { CommitHubInputs(); return; }   // click-away commits typing
 
-                if (HubHit(_hubAmountRT, mp)) { _hubAmountFocus = true; _hubRateFocus = false; _hubTermFocus = false; _hubFreshFocus = true; _hubAmountStr = ((long)_hubAmount).ToString(); return; }
-                if (_hubTab == 1 && HubHit(_hubRateRT, mp)) { _hubRateFocus = true; _hubAmountFocus = false; _hubTermFocus = false; _hubFreshFocus = true; _hubRateStr = HubRate().ToString("F0"); return; }
-                if (_hubTab == 1 && HubHit(_hubTermRT, mp)) { _hubTermFocus = true; _hubAmountFocus = false; _hubRateFocus = false; _hubFreshFocus = true; _hubTermStr = HubTerm().ToString(); return; }
+                if (HubHit(_hubAmountRT, mp)) { _hubAmountFocus = true; _hubRateFocus = false; _hubTermFocus = false; _hubPartialFocus = false; _hubFreshFocus = true; _hubAmountStr = ((long)_hubAmount).ToString(); return; }
+                if (_hubTab == 1 && HubHit(_hubRateRT, mp)) { _hubRateFocus = true; _hubAmountFocus = false; _hubTermFocus = false; _hubPartialFocus = false; _hubFreshFocus = true; _hubRateStr = HubRate().ToString("F0"); return; }
+                if (_hubTab == 1 && HubHit(_hubTermRT, mp)) { _hubTermFocus = true; _hubAmountFocus = false; _hubRateFocus = false; _hubPartialFocus = false; _hubFreshFocus = true; _hubTermStr = HubTerm().ToString(); return; }
+                if (_hubTab == 1 && HubHit(_hubPartialRT, mp)) { _hubPartialFocus = true; _hubAmountFocus = false; _hubRateFocus = false; _hubTermFocus = false; _hubFreshFocus = true; _hubPartialStr = ((long)_hubPartialAmount).ToString(); return; }
                 CommitHubInputs();
 
                 if (HubHit(_hubXRT, mp))
@@ -1750,7 +1785,17 @@ namespace BigAmbitionsMP
                     if (!HubHit(vp, mp) || !HubHit(rt, mp)) continue;
                     if (act == 0) MPHub.AnswerOffer(id, true);
                     else if (act == 1) MPHub.AnswerOffer(id, false);
-                    else MPHub.CancelOffer(id);
+                    else if (act == 2) MPHub.CancelOffer(id);
+                    else if (act == 3)   // confirm (second click) → execute the armed repayment
+                    {
+                        if (_hubRepayArm == id && Time.unscaledTime - _hubRepayArmAt < 6f)
+                            MPHub.RequestRepay(id, _hubRepayArmAmt);
+                        _hubRepayArm = ""; _hubSeenVersion = -1;
+                    }
+                    else if (act == 4)   // partial → arm with the typed partial amount
+                    { _hubRepayArm = id; _hubRepayArmAmt = (float)_hubPartialAmount; _hubRepayArmAt = Time.unscaledTime; _hubSeenVersion = -1; }
+                    else if (act == 5)   // full → arm full payoff
+                    { _hubRepayArm = id; _hubRepayArmAmt = 0f; _hubRepayArmAt = Time.unscaledTime; _hubSeenVersion = -1; }
                     return;
                 }
             }
@@ -1896,13 +1941,12 @@ namespace BigAmbitionsMP
                 MakeHubBox(pl, 16f, -90f, 948f, 162f, sprite);
                 var loansHdr = MakeLabel(pl, "<b>ACTIVE LOANS</b>", 12, _inkLo, 28f, -98f, 220f, 18f, TextAlignmentOptions.Left);
                 ApplyFont(loansHdr);
+                var partialHint = MakeLabel(pl, "partial $", 12, _inkLo, 686f, -100f, 70f, 20f, TextAlignmentOptions.Right);
+                ApplyFont(partialHint);
+                (_hubPartialRT, _hubPartialLbl) = MakeHubInput(pl, 762f, -96f, 180f, 26f, 14, sprite);
                 var (lvp, lct) = MakeHubScroll(pl, 28f, -122f, 904f, 118f, sprite);
+                _hubLoansVp = lvp;
                 _hubLoansContent = lct;
-                _hubLoans = MakeLabel(lct.transform, "", 13, _inkHi, 0f, 0f, 880f, 118f, TextAlignmentOptions.TopLeft);
-                ApplyFont(_hubLoans);
-                var llrt = _hubLoans.rectTransform;
-                llrt.anchorMin = new Vector2(0f, 1f); llrt.anchorMax = new Vector2(0f, 1f);
-                llrt.pivot = new Vector2(0f, 1f); llrt.anchoredPosition = new Vector2(4f, 0f);
 
                 // ── Shared bottom: INCOMING (left) + OUTGOING (right). ───────
                 MakeHubBox(_hub.transform, 16f, T - 426f, 560f, 222f, sprite);
@@ -2008,7 +2052,7 @@ namespace BigAmbitionsMP
             rowRT.anchoredPosition = new Vector2(0f, -idx * rowH);
             rowRT.sizeDelta = new Vector2(0f, rowH - 4f);
             float btnW = 0f;
-            foreach (var b in btns) btnW += (b.label.Length > 2 ? 64f : 26f) + 6f;
+            foreach (var b in btns) btnW += (b.label.Length > 2 ? Mathf.Clamp(b.label.Length * 7.5f + 14f, 64f, 150f) : 26f) + 6f;
             var lbl = MakeLabel(rowGO.transform, text, 12, _inkHi, 4f, 0f, 10f, rowH - 4f, TextAlignmentOptions.TopLeft);
             ApplyFont(lbl);
             var lrt = lbl.rectTransform;
@@ -2018,7 +2062,7 @@ namespace BigAmbitionsMP
             var sprite = IsAlive(_panelSprite) ? _panelSprite : null;
             foreach (var b in btns)
             {
-                float w = b.label.Length > 2 ? 64f : 26f;
+                float w = b.label.Length > 2 ? Mathf.Clamp(b.label.Length * 7.5f + 14f, 64f, 150f) : 26f;
                 bx += w + 6f;
                 var (brt, blbl) = MakeHubButton(b.label, Vector2.zero, w, b.col, 24f, sprite);
                 brt.SetParent(rowGO.transform, false);
@@ -2086,11 +2130,16 @@ namespace BigAmbitionsMP
                 _hubTermFocus = false;
                 _hubTermStr = HubTerm().ToString();
             }
+            if (_hubPartialFocus)
+            {
+                _hubPartialFocus = false;
+                if (long.TryParse(_hubPartialStr, out var pv) && pv > 0) _hubPartialAmount = Math.Max(1, pv);
+            }
         }
 
         private void HandleHubTyping()
         {
-            if (!_hubAmountFocus && !_hubRateFocus && !_hubTermFocus) return;
+            if (!_hubAmountFocus && !_hubRateFocus && !_hubTermFocus && !_hubPartialFocus) return;
             foreach (char c in Input.inputString)
             {
                 // First keystroke after focusing REPLACES the value — the term
@@ -2101,6 +2150,7 @@ namespace BigAmbitionsMP
                     if (_hubAmountFocus) _hubAmountStr = "";
                     else if (_hubRateFocus) _hubRateStr = "";
                     else if (_hubTermFocus) _hubTermStr = "";
+                    else if (_hubPartialFocus) _hubPartialStr = "";
                 }
                 if (c != '\n' && c != '\r') _hubFreshFocus = false;
 
@@ -2109,13 +2159,15 @@ namespace BigAmbitionsMP
                     if (_hubAmountFocus && _hubAmountStr.Length > 0) _hubAmountStr = _hubAmountStr.Substring(0, _hubAmountStr.Length - 1);
                     else if (_hubRateFocus && _hubRateStr.Length > 0) _hubRateStr = _hubRateStr.Substring(0, _hubRateStr.Length - 1);
                     else if (_hubTermFocus && _hubTermStr.Length > 0) _hubTermStr = _hubTermStr.Substring(0, _hubTermStr.Length - 1);
+                    else if (_hubPartialFocus && _hubPartialStr.Length > 0) _hubPartialStr = _hubPartialStr.Substring(0, _hubPartialStr.Length - 1);
                 }
                 else if (c == '\n' || c == '\r') CommitHubInputs();
                 else if (_hubAmountFocus && char.IsDigit(c) && _hubAmountStr.Length < 9) _hubAmountStr += c;
                 else if (_hubRateFocus && (char.IsDigit(c) || (c == '.' && !_hubRateStr.Contains('.'))) && _hubRateStr.Length < 5) _hubRateStr += c;
                 else if (_hubTermFocus && char.IsDigit(c) && _hubTermStr.Length < 3) _hubTermStr += c;
+                else if (_hubPartialFocus && char.IsDigit(c) && _hubPartialStr.Length < 9) _hubPartialStr += c;
             }
-            if (Input.GetKeyDown(KeyCode.Escape)) { _hubAmountFocus = false; _hubRateFocus = false; _hubTermFocus = false; }
+            if (Input.GetKeyDown(KeyCode.Escape)) { _hubAmountFocus = false; _hubRateFocus = false; _hubTermFocus = false; _hubPartialFocus = false; }
         }
 
         private void SetTopLeft(RectTransform? rt, float x, float y)
