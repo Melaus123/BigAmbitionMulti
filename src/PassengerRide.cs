@@ -44,6 +44,18 @@ namespace BigAmbitionsMP
         /// "Exit Vehicle" button only appears after we're really aboard, not on board-approval.</summary>
         internal static bool IsSeated => _pinned && _localVeh != "";
 
+        /// <summary>While seated as a passenger the real character is parked invisibly at the
+        /// boarding door, so world-streaming (traffic + parked-ghost culling) must follow the
+        /// RIDDEN car instead — else only the cars seen at entry stay visible. Returns the
+        /// ridden ghost's transform when seated, null otherwise.</summary>
+        internal static Transform? RideAnchorTransform()
+            => IsSeated ? VehicleManager.GhostTransform(_localVeh) : null;
+
+        // Colliders + controller dropped while seated so the parked-at-door character can't be
+        // a phantom obstacle (traffic braking for it, players bumping it); restored in EndLocalRide.
+        private static readonly System.Collections.Generic.List<Collider> _seatedColliders = new();
+        private static CharacterController? _seatedController;
+
         // ── remote riders we've pinned (pid → vehicleId) ────────────────────
         private static readonly Dictionary<string, string> _remotePinned = new();
 
@@ -400,6 +412,23 @@ namespace BigAmbitionsMP
                 try { pc.Character?.ToggleVisibility(false); } catch { }   // avatar disappears (native)
                 SetVehicleNavBlocker(true);                                // movement locked (native)
                 SwitchToVehicleCamera(ghost);                              // camera → car view (native)
+                // The real character stays parked invisibly at the boarding door; drop its
+                // colliders + controller so it isn't a phantom obstacle there (passing traffic
+                // braking for it, players bumping it). Restored in EndLocalRide.
+                try
+                {
+                    var ch = pc.Character;
+                    if (ch != null)
+                    {
+                        _seatedColliders.Clear();
+                        foreach (var col in ch.GetComponentsInChildren<Collider>(true))
+                            if (col != null && col.enabled) { _seatedColliders.Add(col); col.enabled = false; }
+                        _seatedController = ch.GetComponentInChildren<CharacterController>(true);
+                        if (_seatedController != null && _seatedController.enabled) _seatedController.enabled = false;
+                        else _seatedController = null;
+                    }
+                }
+                catch { }
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] StartPin: {ex.Message}"); }
         }
@@ -463,6 +492,16 @@ namespace BigAmbitionsMP
                     try { ch?.ToggleVisibility(true); } catch { }   // re-activates the character
                     SetVehicleNavBlocker(false);
                     RestoreCamera();
+                }
+
+                // Restore the colliders/controller we dropped while seated — UNCONDITIONAL so we
+                // can never leave the player non-physical (falling through the world) even if the
+                // pin state got confused. No-op when nothing was dropped.
+                if (_seatedColliders.Count > 0 || _seatedController != null)
+                {
+                    try { foreach (var col in _seatedColliders) if (col != null) col.enabled = true; } catch { }
+                    try { if (_seatedController != null) _seatedController.enabled = true; } catch { }
+                    _seatedColliders.Clear(); _seatedController = null;
                 }
 
                 if (ch != null)

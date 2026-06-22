@@ -371,8 +371,15 @@ namespace BigAmbitionsMP
             _centerScratch.Clear();
             try
             {
-                var localChar = PlayerHelper.PlayerController?.Character;
-                if (localChar != null) _centerScratch.Add(localChar.transform.position);
+                // Passenger riding a ghost → use the ridden car as this player's center
+                // (the real character is parked at the boarding door).
+                var rideT = PassengerRide.RideAnchorTransform();
+                if (rideT != null) _centerScratch.Add(rideT.position);
+                else
+                {
+                    var localChar = PlayerHelper.PlayerController?.Character;
+                    if (localChar != null) _centerScratch.Add(localChar.transform.position);
+                }
             }
             catch { }
             try
@@ -527,9 +534,17 @@ namespace BigAmbitionsMP
             if (!ClientApplyEnabled) return;     // CLAUDE-DIAGNOSTIC F5 gate
             try
             {
-                var localChar = PlayerHelper.PlayerController?.Character;
-                if (localChar == null) return;
-                var p = localChar.transform.position;
+                // Passenger riding a ghost: cull parked cars around the RIDDEN car, not the
+                // character parked at the boarding door (else parked cars stop updating while riding).
+                Vector3 p;
+                var rideT = PassengerRide.RideAnchorTransform();
+                if (rideT != null) p = rideT.position;
+                else
+                {
+                    var localChar = PlayerHelper.PlayerController?.Character;
+                    if (localChar == null) return;
+                    p = localChar.transform.position;
+                }
 
                 // Iterate _clientKnown — for each, decide whether it should be
                 // an active ghost based on distance to local player.

@@ -554,7 +554,11 @@ namespace BigAmbitionsMP
                 // CullRadius — hysteresis so boundary cars don't flap).  Targets
                 // keep streaming, so a car pops back in the moment it's near.
                 Vector3 me = default; bool haveMe = false;
-                try { me = PlayerHelper.GetPosition(); haveMe = true; } catch { }
+                // Passenger riding a ghost: cull around the RIDDEN car (the real character is
+                // parked at the boarding door), else only entry-time traffic stays visible.
+                var rideT = PassengerRide.RideAnchorTransform();
+                if (rideT != null) { me = rideT.position; haveMe = true; }
+                else { try { me = PlayerHelper.GetPosition(); haveMe = true; } catch { } }
 
                 var seen = new HashSet<int>();
                 foreach (var car in snap.Cars)
@@ -908,8 +912,12 @@ namespace BigAmbitionsMP
                 var dm = tm.densityManager;
 
                 var anchors = new List<Transform>();
+                // Passenger riding a ghost: anchor traffic spawning on the RIDDEN car, and skip
+                // the frozen door-character anchor (so we don't also stream traffic back at the door).
+                var rideAnchor = PassengerRide.RideAnchorTransform();
+                if (rideAnchor != null) anchors.Add(rideAnchor);
                 var hostChar = PlayerHelper.PlayerController?.Character;
-                if (hostChar != null)
+                if (rideAnchor == null && hostChar != null)
                 {
                     // Inside/outside from the GAME's authoritative static, not
                     // just our enter/exit event flag — a session LOAD skips the
