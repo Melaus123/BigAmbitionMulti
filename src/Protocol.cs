@@ -26,6 +26,11 @@ namespace BigAmbitionsMP
         RentDeny        = 12,  // Host → Client: "Rent denied (already taken)"
         VacateNotify    = 13,  // Host → All: "This building is now available"
         VacateRequest   = 16,  // Client → Host: "I terminated this building's lease — release it"
+        BuyRequest      = 17,  // Client → Host: "I bought this for-sale building" — host arbitrates ownership
+        BuyDeny         = 18,  // Host → Client: "Buy denied (already owned)" — roll back the optimistic local purchase
+        ListForSale     = 19,  // Client → Host: "I listed my building for sale" — add to the authoritative market
+        CancelSale      = 21,  // Client → Host: "I canceled my building's sale" — remove from market, keep ownership
+        SaleCompleted   = 22,  // Client(owner) → Host: "the AI bought my listed building" — remove from market + clear ownership
 
         // Market
         MarketSnapshot  = 20,  // Host → All: current product market entries

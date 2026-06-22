@@ -309,6 +309,10 @@ namespace BigAmbitionsMP
                     HandleVacate(env);
                     break;
 
+                case MessageType.BuyDeny:
+                    HandleBuyDeny(env);
+                    break;
+
                 case MessageType.MarketSnapshot:
                     HandleMarketSnapshot(env);
                     break;
@@ -669,6 +673,15 @@ namespace BigAmbitionsMP
 
             Plugin.Logger.LogInfo($"[Client] Building vacated: {payload.AddressKey}");
             GameStatePatcher.ApplyBuildingVacated(payload.AddressKey);
+        }
+
+        private static void HandleBuyDeny(MessageEnvelope env)
+        {
+            var payload = env.GetPayload<BuildingOwnershipPayload>();
+            if (payload == null) return;
+
+            Plugin.Logger.LogWarning($"[Client] Buy DENIED for {payload.AddressKey} — already owned; rolling back.");
+            GameStatePatcher.RollbackBuy(payload.AddressKey);
         }
 
         private static void HandlePlayerMove(MessageEnvelope env)
@@ -1250,6 +1263,23 @@ namespace BigAmbitionsMP
             };
             Send(MessageEnvelope.Create(MessageType.VacateRequest, MPConfig.PlayerId, payload));
             Plugin.Logger.LogInfo($"[Client] Sent VacateRequest for {addressKey}");
+            return true;
+        }
+
+        /// <summary>Client bought a for-sale building locally; ask the host (the owner
+        /// registrar) to ratify it.  If the host denies (someone else already owns it),
+        /// HandleBuyDeny rolls back our optimistic purchase.</summary>
+        public static bool RequestBuyBuilding(string addressKey)
+        {
+            if (!IsConnected) return false;
+
+            var payload = new BuildingOwnershipPayload
+            {
+                AddressKey    = addressKey,
+                OwnerPlayerId = MPConfig.PlayerId,
+            };
+            Send(MessageEnvelope.Create(MessageType.BuyRequest, MPConfig.PlayerId, payload));
+            Plugin.Logger.LogInfo($"[Client] Sent BuyRequest for {addressKey}");
             return true;
         }
 

@@ -1588,6 +1588,46 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyBuildingsForSale: {ex.Message}"); }
         }
 
+        /// <summary>HOST / MAIN THREAD: remove a building from the authoritative for-sale
+        /// market after a player bought it.  BusinessSync.CheckBuildingsForSaleChange then
+        /// broadcasts the shorter list, so the building leaves every player's market.</summary>
+        public static void HostRemoveFromForSale(string addressKey)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.buildingsForSale == null) return;
+                int removed = gi.buildingsForSale.RemoveAll(x => GameStateReader.AddressKey(x.address) == addressKey);
+                if (removed > 0) Plugin.Logger.LogInfo($"[Patcher/Host] {addressKey} removed from for-sale market (bought).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher/Host] HostRemoveFromForSale: {ex.Message}"); }
+        }
+
+        /// <summary>MAIN THREAD: the host denied our optimistic buy (someone else already
+        /// owns it) — undo it: drop the real-estate entry and refund what we paid.  The
+        /// host's for-sale broadcast restores the building to our market.</summary>
+        public static void RollbackBuy(string addressKey)
+        {
+            RunOnMainThread(() =>
+            {
+                try
+                {
+                    var gi = SaveGameManager.Current;
+                    if (gi?.realEstate == null) return;
+                    float refund = 0f;
+                    foreach (var re in gi.realEstate)
+                        if (GameStateReader.AddressKey(re.address) == addressKey) refund += re.purchasePrice;
+                    int removed = gi.realEstate.RemoveAll(x => GameStateReader.AddressKey(x.address) == addressKey);
+                    if (removed > 0)
+                    {
+                        if (refund > 0f) { try { gi.Money += refund; } catch { } }
+                        Plugin.Logger.LogInfo($"[Patcher] Rolled back buy of {addressKey} (refunded {refund:F0}).");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] RollbackBuy: {ex.Message}"); }
+            });
+        }
+
         /// <summary>
         /// Walks gi.BuildingRegistrations and counts registrations whose state
         /// is NOT in the default "freshly-loaded, nothing assigned" baseline.

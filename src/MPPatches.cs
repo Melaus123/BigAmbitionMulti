@@ -146,6 +146,58 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: BizManPresentation.SendBuyBuildingOffer ────────────────────
+        // Buying real estate adds the building to the LOCAL gi.realEstate and removes it
+        // from the LOCAL gi.buildingsForSale — but the host owns the authoritative
+        // for-sale market + a real-estate ownership registry.  Unrouted, a client's buy
+        // never reaches the host, so the building stays for-sale for everyone else and a
+        // second player can buy the SAME building (two owners).  This postfix (the buy
+        // already ran locally) ratifies it: client → BuyRequest (host arbitrates + removes
+        // it from the market, or denies → we roll back); host → record ownership directly
+        // (its own native buy already updated its market, which the poll propagates).
+        [HarmonyPatch(typeof(BizManPresentation), "SendBuyBuildingOffer")]
+        public static class Patch_SendBuyBuildingOffer
+        {
+            static void Postfix(BizManPresentation __instance)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;   // single player — nothing to do
+
+                    var reg = RegOf(__instance);
+                    if (reg == null) return;
+                    // Only act if the purchase actually went through (enough money / valid offer).
+                    bool bought; try { bought = reg.BuildingOwnedByPlayer; } catch { bought = false; }
+                    if (!bought) return;
+                    string key = GameStateReader.AddressKey(reg);
+
+                    if (MPClient.IsConnected)
+                    {
+                        MPClient.RequestBuyBuilding(key);
+                        Plugin.Logger.LogInfo($"[Patch] Client bought {key} locally + notifying host.");
+                        return;
+                    }
+                    MPServer.BuildingRealEstateOwners[key] = "host";
+                    Plugin.Logger.LogInfo($"[Patch] Host bought {key} (recorded in ownership registry).");
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Patch] Patch_SendBuyBuildingOffer: {ex.Message}"); }
+            }
+
+            static BuildingRegistration? RegOf(BizManPresentation pres)
+            {
+                object? biz = ReadMember(pres, "bizManBusiness");
+                return biz == null ? null : ReadMember(biz, "buildingRegistration") as BuildingRegistration;
+            }
+            static object? ReadMember(object obj, string name)
+            {
+                var t = obj.GetType();
+                var f = AccessTools.Field(t, name);
+                if (f != null) return f.GetValue(obj);
+                var p = AccessTools.Property(t, name);
+                return p != null ? p.GetValue(obj) : null;
+            }
+        }
+
         // ── Patch: GameManager.Update ─────────────────────────────────────────
         // Postfix runs AFTER the game's own Update — used to drain our main-thread action queue each frame.
         // NESTED class — REQUIRED so Plugin.cs actually applies it (see the rent

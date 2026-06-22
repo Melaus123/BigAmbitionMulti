@@ -20,6 +20,12 @@ namespace BigAmbitionsMP
         /// A plain Dictionary here corrupts under that race → coreclr access
         /// violation, so this must be a ConcurrentDictionary.</summary>
         public static readonly ConcurrentDictionary<string, string> BuildingOwners = new();
+        /// <summary>addressKey → owner PlayerId (or "host") for BOUGHT real estate —
+        /// distinct from BuildingOwners, which tracks who RENTS/operates.  The host is
+        /// the single registrar of real-estate ownership, so two players can never own
+        /// the same building.  Concurrent (written on the poll thread + the main thread,
+        /// like BuildingOwners).</summary>
+        public static readonly ConcurrentDictionary<string, string> BuildingRealEstateOwners = new();
 
         /// <summary>Ordered list of player IDs currently in the lobby (host is always
         /// index 0).  CONCURRENT: mutated under _lobbyLock on the poll thread (Hello /
@@ -663,6 +669,10 @@ namespace BigAmbitionsMP
 
                 case MessageType.VacateRequest:
                     HandleVacateRequest(peer, senderPid, env);
+                    break;
+
+                case MessageType.BuyRequest:
+                    HandleBuyRequest(peer, senderPid, env);
                     break;
 
                 case MessageType.PlayerMove:
@@ -2088,6 +2098,31 @@ namespace BigAmbitionsMP
             string addr = req.AddressKey;
             GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostReflectPlayerVacate(addr));
             BroadcastVacate(req.AddressKey);   // tell every client it's available again
+        }
+
+        // Symmetric to HandleRentRequest, for BOUGHT real estate.  The client already
+        // bought optimistically on its own machine; the host is the single registrar of
+        // ownership, so it arbitrates: if someone else already owns this building, deny
+        // (the client rolls back).  Otherwise record the owner + remove the building from
+        // the host's authoritative for-sale market — the for-sale poll then broadcasts
+        // the removal, so no other player can buy it.
+        private static void HandleBuyRequest(NetPeer peer, string senderPid, MessageEnvelope env)
+        {
+            var req = env.GetPayload<BuildingOwnershipPayload>();
+            if (req == null) return;
+            if (!SenderIs(req.OwnerPlayerId, senderPid, MessageType.BuyRequest, allowEmpty: true)) return;
+
+            if (BuildingRealEstateOwners.TryGetValue(req.AddressKey, out var current) && current != "" && current != senderPid)
+            {
+                Plugin.Logger.LogWarning($"[Server] BuyRequest {req.AddressKey} from {senderPid} DENIED — already owned by {current}.");
+                Send(peer, MessageEnvelope.Create(MessageType.BuyDeny, "host", req));
+                return;
+            }
+
+            BuildingRealEstateOwners[req.AddressKey] = senderPid;
+            Plugin.Logger.LogInfo($"[Server] BuyRequest: {req.AddressKey} → owned by {senderPid}.");
+            string addr = req.AddressKey;
+            GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostRemoveFromForSale(addr));
         }
 
         // ── Message handlers (cont.) ──────────────────────────────────────────
