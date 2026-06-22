@@ -63,10 +63,16 @@ namespace BigAmbitionsMP
                 session = _activeSessionName;
             }
 
-            // Autosaves write a SIBLING session ('<name>-auto') so they never
-            // overwrite the manual save (user, 2026-06-12).  _activeSessionName
-            // keeps the manual base; '-auto' never stacks ('-auto-auto').
-            if (reason == "autosave" && !session.EndsWith("-auto"))
+            // AUTOMATIC saves write a SIBLING session ('<name>-auto') so they
+            // never overwrite the player's MANUAL save.  Two automatic triggers
+            // reach here: the periodic autosave ("autosave") and the on-drop
+            // checkpoint ("disconnect" from MPServer's disconnect handler).  Only
+            // genuinely user-initiated saves (pause-menu / quicksave, which arrive
+            // as "menu"/"menu-exit"/"client-menu"/…) land on the manual base.
+            // _activeSessionName keeps the manual base; '-auto' never stacks
+            // ('-auto-auto').  (user, 2026-06-12; disconnect folded in 2026-06-22.)
+            bool isAutomatic = reason == "autosave" || reason == "disconnect";
+            if (isAutomatic && !session.EndsWith("-auto"))
                 session += "-auto";
 
             Plugin.Logger.LogInfo($"[MPSave] HostSaveNow session='{session}' reason={reason} — broadcasting SaveNow.");
@@ -632,7 +638,7 @@ namespace BigAmbitionsMP
         /// <summary>Saves THIS player's full game into the MP session folder via
         /// the game's own SaveGameManager.Save, and returns the slot describing
         /// it.  Must be called on the Unity main thread.</summary>
-        public static MpSlot PerformLocalSave(string sessionName)
+        public static MpSlot PerformLocalSave(string sessionName, SaveGameManager.SaveType saveType = SaveGameManager.SaveType.Default)
         {
             DiagArm();
             DiagWrite($"PerformLocalSave START session='{sessionName}' host={MPServer.IsRunning}");
@@ -685,7 +691,7 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogWarning($"[MPSave] save attempt {attempt} failed — retrying in 1.2s.");
                         try { System.Threading.Thread.Sleep(1200); } catch { }
                     }
-                    try { ok = SaveGameManager.Save(SaveGameManager.SaveType.Default, SaveFileName, folder); }
+                    try { ok = SaveGameManager.Save(saveType, SaveFileName, folder); }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] SaveGameManager.Save: {ex.Message}"); }
                 }
                 DiagWrite($"returned from Save ok={ok}");
@@ -722,6 +728,30 @@ namespace BigAmbitionsMP
                 IsHost        = MPServer.IsRunning,
                 Day           = day,
             };
+        }
+
+        /// <summary>The native midnight autosave (GameManager.RunMidNightAutoSave)
+        /// fired while in an MP session.  Rather than let it drop a "Recover
+        /// Midnight.hsg" into the SINGLE-PLAYER folder (unstripped + untracked), we
+        /// write the SAME recover save into the MP area: a sibling
+        /// '&lt;session&gt;-recover' session that is MANIFEST-LESS, so it never shows
+        /// as a loadable session (ListSessions skips no-manifest folders) and never
+        /// collides with the per-player save.hsg selection (LoadOwnHsg/NewestHsg only
+        /// ever scan the base + '-auto' sessions).  Routed through PerformLocalSave
+        /// so the ghost/synthetic stripping + thread-join run exactly like every
+        /// other MP save.  MAIN THREAD.</summary>
+        public static void MidnightRecoverSave()
+        {
+            string baseSession;
+            lock (_lock) { baseSession = _activeSessionName; }
+            if (string.IsNullOrEmpty(baseSession)) return;   // no session yet — nothing to back up
+            string recoverSession = baseSession.EndsWith("-recover") ? baseSession : baseSession + "-recover";
+            try
+            {
+                PerformLocalSave(recoverSession, SaveGameManager.SaveType.MidnightSave);
+                Plugin.Logger.LogInfo($"[MPSave] Midnight recover → MP session '{recoverSession}'.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] MidnightRecoverSave: {ex.Message}"); }
         }
 
         // ── Native autosave suppression ─────────────────────────────────────────

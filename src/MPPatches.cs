@@ -2199,6 +2199,39 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: GameManager.RunMidNightAutoSave ────────────────────────────
+        // The game's midnight autosave (fired at in-game 23:00 from RunMainGameTick)
+        // calls SaveGameManager.Save(MidnightSave) and — unlike the periodic
+        // CheckAutoSave — is NOT gated by GameManager.preventAutoSave, so the mod's
+        // SuppressNativeAutosave does not cover it.  Left alone, in an MP session it
+        // writes a vanilla "Recover Midnight.hsg" into the SINGLE-PLAYER folder every
+        // in-game day (the path redirect above is only live around a Load, never a
+        // Save).  We don't SUPPRESS it — we RELOCATE it: skip the native save and
+        // enqueue MidnightRecoverSave, which writes the same recover save into the MP
+        // area (a manifest-less '<session>-recover' sibling), stripped + tracked like
+        // every other MP save.  The gate matches the SuppressNativeAutosave lifecycle
+        // (IsRunning || IsConnected), so a host-loss OFFLINE FORK (both false) lets
+        // the native midnight save run unchanged.  Single player: prefix returns true.
+        [HarmonyPatch(typeof(GameManager), "RunMidNightAutoSave")]
+        public static class Patch_GameManager_RunMidNightAutoSave_RedirectInMp
+        {
+            static bool Prefix()
+            {
+                try
+                {
+                    if (MPServer.IsRunning || MPClient.IsConnected)
+                    {
+                        // Relocate the recover save into the MP area; defer to a clean
+                        // frame so the strip+save+join doesn't run mid-hourly-tick.
+                        GameStatePatcher.EnqueueOnMainThread(() => MPSaveCoordinator.MidnightRecoverSave());
+                        return false;   // skip the native SP-folder midnight save
+                    }
+                }
+                catch { }
+                return true;             // single player / offline fork — native save runs
+            }
+        }
+
         // ── In-game pause menu (UI.MiniMenu.MiniMenu) ─────────────────────────
         // The Escape pause menu's "Save" and "Save and Exit to Desktop" buttons
         // call SaveGameManager into the SINGLE-PLAYER folder.  In an MP session
