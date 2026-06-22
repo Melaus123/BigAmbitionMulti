@@ -163,9 +163,73 @@ namespace BigAmbitionsMP
             public float       TargetAt;   // receiver clock at arrival (extrapolation base)
             public float       SenderT;    // sender's sample clock (velocity measurement)
             public string      AppliedCargo = "";   // manifest|carried sig the ghost was built with
+            public Transform   LoadingPos;          // vehicleLoadingPosition (cargo-load spot), captured pre-strip
         }
         private const float MaxVehicleExtrapolateSeconds = 0.3f;
         private const float VehicleSnapDistance          = 15f;
+
+        // ── Shared-storage accessors (a ghost's owner + synced cargo, for the storage panel) ──
+        /// <summary>The owner of a ghost vehicle (empty if unknown).</summary>
+        public static string OwnerIdFor(string vid)
+            => _remoteVehicles.TryGetValue(vid, out var rv) && rv != null ? rv.OwnerId : "";
+
+        /// <summary>The vehicle-type id of a ghost (empty if unknown).</summary>
+        public static string TypeNameFor(string vid)
+            => _remoteVehicles.TryGetValue(vid, out var rv) && rv != null ? rv.TypeName : "";
+
+        /// <summary>The ghost's synced loose cargo as (itemName, amount) rows, parsed from the manifest the
+        /// ghost was built with (AppliedCargo = "item=amt;...|carried"). EA0.11 stores ALL loose vehicle
+        /// cargo — car trunks AND flatbed/hand-trucks — in cargoInstances, which this manifest captures;
+        /// the legacy cargoIds path is migrated away (UpdateItemInstancesToNewSystem). Manifest caps at 24
+        /// stacks (ReadLocalFleet), so deeper storages list their first 24.</summary>
+        public static System.Collections.Generic.List<(string item, int amount)> GhostCargoFor(string vid)
+        {
+            var rows = new System.Collections.Generic.List<(string, int)>();
+            if (!_remoteVehicles.TryGetValue(vid, out var rv) || rv == null) return rows;
+            string sig = rv.AppliedCargo ?? "";
+            int bar = sig.IndexOf('|');
+            string cargo = bar >= 0 ? sig.Substring(0, bar) : sig;
+            foreach (var entry in cargo.Split(';'))
+            {
+                if (string.IsNullOrEmpty(entry)) continue;
+                int eq = entry.LastIndexOf('=');   // '=' separator: EA 0.11 item ids contain ':'
+                if (eq <= 0) continue;
+                if (int.TryParse(entry.Substring(eq + 1), out int amt) && amt > 0)
+                    rows.Add((entry.Substring(0, eq), amt));
+            }
+            return rows;
+        }
+
+        /// <summary>Vehicle cargo capacity (VehicleType.maxCargoCapacity) for the "Boxes: used/max" header;
+        /// 0 if unknown. Resolved locally from the ghost's type — clients hold all VehicleType definitions.</summary>
+        public static int MaxCargoFor(string vid)
+        {
+            try
+            {
+                var tn = TypeNameFor(vid);
+                if (string.IsNullOrEmpty(tn)) return 0;
+                var vt = Vehicles.VehicleTypes.VehicleTypeHelper.GetVehicleType(tn);
+                return vt != null ? vt.maxCargoCapacity : 0;
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>World spot the owner walks to when loading cargo (vehicleLoadingPosition); the ghost's own
+        /// position if that wasn't captured; Vector3.zero if the ghost is unknown. Lets a non-owner deposit from
+        /// the same place the owner would.</summary>
+        public static Vector3 LoadingSpotFor(string vid)
+        {
+            try
+            {
+                if (_remoteVehicles.TryGetValue(vid, out var rv) && rv != null)
+                {
+                    if (rv.LoadingPos != null) return rv.LoadingPos.position;
+                    if (rv.Go != null) return rv.Go.transform.position;
+                }
+            }
+            catch { }
+            return Vector3.zero;
+        }
 
         // Gameplay components destroyed on a ghost so the game stops treating it
         // as a vehicle anyone owns — no map icon, no tickets, not enterable.
@@ -639,6 +703,21 @@ namespace BigAmbitionsMP
             // riding this ghost can't reach the real VehicleController, so this is their only handle
             // on it (PassengerHud's Sleep button uses it). Best-effort; null if not yet populated.
             try { if (vc.sleepEnvironment != null) _sleepEnvByVehicleId[e.VehicleId] = vc.sleepEnvironment; } catch { }
+            // Capture the cargo-loading spot (where the owner walks to load cargo) BEFORE stripping the
+            // controller, so a non-owner depositing into this ghost walks to the SAME place (PassengerRide).
+            // Reflected up the type hierarchy (the field lives on the VehicleController base, vc may be CarController).
+            Transform loadingPos = null;
+            try
+            {
+                for (var t = vc.GetType(); t != null && loadingPos == null; t = t.BaseType)
+                {
+                    var f = t.GetField("vehicleLoadingPosition",
+                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public |
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly);
+                    if (f != null) loadingPos = f.GetValue(vc) as Transform;
+                }
+            }
+            catch { }
             int killed = StripVehicleComponents(go);
             // Freeze physics — we drive the ghost purely by the synced transform.
             // EVERY rigidbody in the hierarchy, same as SpawnVisualGhost: this
@@ -669,12 +748,13 @@ namespace BigAmbitionsMP
             var label = CreateOwnerLabel(go, ownerId);
             return new RemoteVehicle
             {
-                OwnerId   = ownerId,
-                TypeName  = e.TypeName,
-                Go        = go,
-                Label     = label,
-                TargetPos = pos,
-                TargetRot = rot,
+                OwnerId    = ownerId,
+                TypeName   = e.TypeName,
+                Go         = go,
+                LoadingPos = loadingPos,
+                Label      = label,
+                TargetPos  = pos,
+                TargetRot  = rot,
             };
         }
 
@@ -824,17 +904,25 @@ namespace BigAmbitionsMP
             StripCameras(go);
             try
             {
+                // VehicleController has [RequireComponent] dependents (Fuel/SpeedLimiter/FlipOver wrappers +
+                // DamageHandler). Deferred Destroy doesn't guarantee those go first, so the controller SURVIVED
+                // ("Can't remove VehicleController …") — leaving the ghost a LIVE native vehicle whose own
+                // click-interaction (walk-to-door to enter) fought our deposit-walk. Remove with DestroyImmediate
+                // in dependency order: every other kill-listed component first, the controllers LAST.
+                var controllers = new System.Collections.Generic.List<Component>();
+                var others      = new System.Collections.Generic.List<Component>();
                 var comps = go.GetComponents(typeof(Component));
                 for (int i = 0; i < comps.Length; i++)
                 {
                     var c = comps[i];
                     if (c == null) continue;
-                    if (System.Array.IndexOf(_killVehicleComponents, c.GetType().Name) >= 0)
-                    {
-                        UnityEngine.Object.Destroy(c);
-                        n++;
-                    }
+                    var tn = c.GetType().Name;
+                    if (System.Array.IndexOf(_killVehicleComponents, tn) < 0) continue;
+                    if (tn == "VehicleController" || tn == "CarController") controllers.Add(c);
+                    else                                                    others.Add(c);
                 }
+                foreach (var c in others)      if (c != null) { UnityEngine.Object.DestroyImmediate(c); n++; }
+                foreach (var c in controllers) if (c != null) { UnityEngine.Object.DestroyImmediate(c); n++; }
             }
             catch (Exception ex)
             {

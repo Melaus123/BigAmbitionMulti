@@ -1059,6 +1059,20 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.VehicleCargoReq:
+                {
+                    var vq = env.GetPayload<VehicleCargoReqPayload>();
+                    if (vq != null) HandleVehicleCargoReq(vq, senderPid);
+                    break;
+                }
+
+                case MessageType.VehicleCargoRes:
+                {
+                    var vr = env.GetPayload<VehicleCargoResPayload>();
+                    if (vr != null) HandleVehicleCargoRes(vr, senderPid);
+                    break;
+                }
+
                 case MessageType.CashSync:
                 {
                     var c = env.GetPayload<CashSyncPayload>();
@@ -1662,6 +1676,48 @@ namespace BigAmbitionsMP
                 });
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[RemoteSale] {ex.Message}"); }
+        }
+
+        /// <summary>Broker for shared vehicle storage: an accessor wants to take/put in another player's
+        /// UNLOCKED vehicle. Route it to the OWNER's machine (the authority on its own cargo). If the host
+        /// owns the vehicle, apply here on the main thread and answer the accessor directly.</summary>
+        public static void HandleVehicleCargoReq(VehicleCargoReqPayload req, string senderPid)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrEmpty(req.OwnerId)) return;
+                if (!SenderIs(req.PlayerId, senderPid, MessageType.VehicleCargoReq)) return;   // accessor reports its OWN action
+                if (req.OwnerId == MPConfig.PlayerId)
+                {
+                    GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        var res = VehicleStorageSync.OwnerApply(req);
+                        if (res.PlayerId == MPConfig.PlayerId) VehicleStorageSync.OnResult(res);   // host is also the accessor
+                        else SendHubTo(res.PlayerId, MessageType.VehicleCargoRes, res);
+                    });
+                }
+                else
+                {
+                    SendHubTo(req.OwnerId, MessageType.VehicleCargoReq, req);   // forward to the owner's machine
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] HandleVehicleCargoReq: {ex.Message}"); }
+        }
+
+        /// <summary>A vehicle owner answered a cargo request — relay the verdict to the accessor.
+        /// (Co-op trust model: the result is relayed as-is; a pending-request table could be added later
+        /// to reject forged grants — out of scope for friends-only play.)</summary>
+        public static void HandleVehicleCargoRes(VehicleCargoResPayload res, string senderPid)
+        {
+            try
+            {
+                if (res == null || string.IsNullOrEmpty(res.PlayerId)) return;
+                if (res.PlayerId == MPConfig.PlayerId)
+                    GameStatePatcher.EnqueueOnMainThread(() => VehicleStorageSync.OnResult(res));   // host is the accessor
+                else
+                    SendHubTo(res.PlayerId, MessageType.VehicleCargoRes, res);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] HandleVehicleCargoRes: {ex.Message}"); }
         }
 
         public static void RecordPhaseReport(PhaseReportPayload? p)

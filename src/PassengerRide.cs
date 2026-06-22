@@ -6,6 +6,16 @@ using Helpers;
 
 namespace BigAmbitionsMP
 {
+    // A vehicle ghost has no EntityController (we strip it), so MouseController sees currentTargetEntity==null
+    // and treats a click on it as plain click-to-move (SetNewDestination, removeGoal:true) — walking the player
+    // to the clicked car body and fighting our directed walk. An interactive entity click suppresses
+    // click-to-move; this does the same for a ghost click. Our SetGoal uses removeGoal:false, so it's untouched.
+    [HarmonyPatch(typeof(PlayerController), nameof(PlayerController.SetNewDestination))]
+    public static class Patch_PlayerController_SetNewDestination_GhostClick
+    {
+        static bool Prefix(bool removeGoal) => !(removeGoal && PassengerRide.IsHoveringGhost);
+    }
+
     /// <summary>
     /// Passenger ("ride shotgun") gameplay layer. Consumes the host-authoritative occupancy +
     /// locks in <see cref="PassengerSync"/> and turns them into the visible ride: the LOCAL
@@ -23,6 +33,10 @@ namespace BigAmbitionsMP
         private static int    _localSeat = -1;
         private static bool   _pinned;            // arrived at the seat and locked to it
         private static float  _pinFallback;       // unscaled-time deadline to pin if the walk never arrives
+        // walk-to-deposit: pending deposit while the player walks to the vehicle's loading spot
+        private static string _depVid = "", _depOwner = "";
+        private static Vector3 _depSpot;
+        private static float  _depDeadline;
         private static bool   _exitRequested;     // already asked the host to release us (car vanished)
         private static float  _ghostGoneSince = -1f;   // when our ridden ghost first went missing (-1 = present)
 
@@ -46,6 +60,7 @@ namespace BigAmbitionsMP
             {
                 TickHoverHighlight();   // cursor over an unlocked ghost → outline + board on click
                 TickLocalRide();
+                TickDeposit();          // walk-to-deposit: deposit on arrival (proximity/timeout poll)
                 TickRemoteRiders();
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] Update: {ex.Message}"); }
@@ -53,6 +68,9 @@ namespace BigAmbitionsMP
 
         // ── click-to-board + hover outline (mirrors a driver entering: hover → click) ──
         private static string _hovered = "";
+        /// <summary>Cursor is currently over one of our vehicle ghosts — suppresses native click-to-move so a
+        /// ghost click behaves like an interactive-entity click (the mod handles it) instead of walking there.</summary>
+        public static bool IsHoveringGhost => _hovered != "";
         private static readonly List<(GameObject go, int layer)> _hiLayers = new();
         private static int _outlineLayer = -2;   // -2 = unresolved
         private static int _pickMask;   // 0 = unresolved; the game's hover-layer mask (built once)
@@ -74,6 +92,7 @@ namespace BigAmbitionsMP
         private static void TickHoverHighlight()
         {
             if (PassengerSync.IsRiding(MPConfig.PlayerId)) { ClearHighlight(); return; }
+            if (VehicleStoragePanel.IsOpen) { ClearHighlight(); return; }   // storage panel up — don't world-click behind it
 
             var cam = Camera.main;
             string hit = "";
@@ -127,7 +146,7 @@ namespace BigAmbitionsMP
             if (_hovered != "" && Input.GetMouseButtonDown(0))
             {
                 if (PassengerSync.IsLocked(_hovered)) PassengerHud.Toast("Vehicle locked.");
-                else RequestBoard(_hovered);
+                else HandleUnlockedClick(_hovered);
             }
         }
 
@@ -193,6 +212,98 @@ namespace BigAmbitionsMP
         {
             if (MPServer.IsRunning) MPServer.HostBoardRequest(vehicleId);
             else                    MPClient.SendBoardRequest(vehicleId);
+        }
+
+        // A non-owner clicked an UNLOCKED vehicle. Routing mirrors the native CTA:
+        //   • Genuinely controlling a flatbed/hand-truck → LOOT the target into it.
+        //   • Genuinely driving a car / on a scooter → no interaction (can't board or loot from there).
+        //   • On foot, flatbed/hand-truck (0 passenger seats) → its storage list.
+        //   • On foot, CAR with trunk items → the host-style menu (Enter Vehicle / Manage Storage).
+        //   • On foot, empty car → board straight away.
+        // We key off GetCurrentVehicle() (resolves ActiveVehicleId against the LOCAL vehicle list, so it's
+        // null on foot AND for a stale/unresolvable id) rather than raw IsUsingVehicle — the latter is just
+        // "ActiveVehicleId set", which a stale ghost id makes wrongly true and false-blocked an on-foot
+        // player with "Not while driving". Seat count is from the ghost's type + authored table (client-safe).
+        private static void HandleUnlockedClick(string vid)
+        {
+            string owner = VehicleManager.OwnerIdFor(vid);
+
+            // Holding an item on foot → walk to the vehicle's cargo-loading spot (the same place the owner
+            // goes) and deposit on arrival — mirrors VehicleController.MoveAndAddHeldItemToStorage. Cars AND carts.
+            if (VehicleHelper.GetCurrentVehicle() == null && PlayerHelper.ItemInstanceInHands != null)
+            {
+                WalkAndDeposit(vid, owner);
+                return;
+            }
+
+            bool hasCargo = VehicleManager.GhostCargoFor(vid).Count > 0;
+
+            var cur = VehicleHelper.GetCurrentVehicle();
+            if (cur != null)
+            {
+                bool canStore = cur.VehicleType != null && cur.VehicleType.spawnInPlayerObject && cur.VehicleType.maxCargoCapacity > 0;
+                if (canStore)   // pushing a flatbed/hand-truck → loot the target into it
+                {
+                    if (hasCargo) VehicleStoragePanel.Open(vid, owner);
+                    else          PassengerHud.Toast("Nothing to take.");
+                }
+                // else: driving a car / on a scooter — nothing to do here; stay silent rather than nag.
+                return;
+            }
+
+            // On foot.
+            int seats = PassengerSync.PassengerSeatsForType(VehicleManager.TypeNameFor(vid));
+            if (seats <= 0)
+            {
+                if (hasCargo) VehicleStoragePanel.Open(vid, owner);
+                else          PassengerHud.Toast("Nothing to take.");
+                return;
+            }
+            if (hasCargo) VehicleStoragePanel.OpenChoice(vid, owner, () => RequestBoard(vid));
+            else          RequestBoard(vid);
+        }
+
+        // Walk to the vehicle's cargo-loading spot (the same place the owner would) and deposit the held item
+        // on arrival — mirrors VehicleController.MoveAndAddHeldItemToStorage. Falls back to depositing in place
+        // if we can't resolve a spot or the walk can't be issued.
+        private static void WalkAndDeposit(string vid, string owner)
+        {
+            try
+            {
+                var pc = PlayerHelper.PlayerController;
+                var ghost = VehicleManager.GhostTransform(vid);
+                Vector3 spot = VehicleManager.LoadingSpotFor(vid);
+                if (pc == null || ghost == null || spot == Vector3.zero)
+                {
+                    VehicleStorageSync.RequestDeposit(vid, owner);   // can't walk → deposit in place
+                    return;
+                }
+                // Walk to the loading spot; deposit when we ARRIVE — polled by proximity/timeout in TickDeposit.
+                // (SetGoal's arrival callback is unreliable for ghosts; boarding uses the same atCar/timeout poll.)
+                _depVid = vid; _depOwner = owner; _depSpot = spot; _depDeadline = Time.unscaledTime + 10f;
+                pc.SetGoal(spot, new UnityEngine.Events.UnityAction(() => { }));
+            }
+            catch { VehicleStorageSync.RequestDeposit(vid, owner); }
+        }
+
+        // Deposit when the player reaches the loading spot (proximity) or after a timeout backstop — mirrors the
+        // boarding atCar/_pinFallback poll instead of SetGoal's unreliable arrival callback.
+        private static void TickDeposit()
+        {
+            if (_depVid == "") return;
+            bool arrived = false;
+            try
+            {
+                var ch = PlayerHelper.PlayerController?.Character;
+                if (ch != null) arrived = Vector3.Distance(ch.transform.position, _depSpot) < 1.5f;
+            }
+            catch { }
+            if (arrived || Time.unscaledTime >= _depDeadline)
+            {
+                string vid = _depVid, owner = _depOwner;
+                _depVid = ""; _depOwner = "";   // clear first so the deposit fires exactly once
+                VehicleStorageSync.RequestDeposit(vid, owner);
+            }
         }
 
         /// <summary>Leave the current ride (called by the passenger HUD's Exit Vehicle button).</summary>

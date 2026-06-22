@@ -369,6 +369,7 @@ namespace BigAmbitionsMP
             MPHub.TickSalePopups();      // rising +$ worker feedback (per-frame: smooth rise/fade)
             PassengerRide.Update();      // passenger ride: click-to-board → pin-to-seat → exit + remote riders
             PassengerHud.Tick();         // passenger's in-ride "Exit Vehicle" panel
+            VehicleStoragePanel.Tick();  // non-owner shared-storage panel (refresh on cargo change / auto-close)
             RemotePlayerManager.TickVehicleCollisionIgnores();   // remote avatars must not shove vehicles
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
             MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion

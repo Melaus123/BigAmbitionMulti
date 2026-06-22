@@ -465,6 +465,24 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.VehicleCargoReq:   // host forwarded an accessor's request — I'm the vehicle owner
+                {
+                    var vq = env.GetPayload<VehicleCargoReqPayload>();
+                    if (vq != null) GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        var res = VehicleStorageSync.OwnerApply(vq);
+                        MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.VehicleCargoRes, MPConfig.PlayerId, res));
+                    });
+                    break;
+                }
+
+                case MessageType.VehicleCargoRes:   // the owner's verdict on my take/put — I'm the accessor
+                {
+                    var vr = env.GetPayload<VehicleCargoResPayload>();
+                    if (vr != null) GameStatePatcher.EnqueueOnMainThread(() => VehicleStorageSync.OnResult(vr));
+                    break;
+                }
+
                 default:
                     Plugin.Logger.LogWarning($"[Client] Unknown message type: {env.Type}");
                     break;

@@ -55,9 +55,20 @@ namespace BigAmbitionsMP
             string vid = vehicle.vehicleInstance.id;
             if (string.IsNullOrEmpty(vid)) { Hide(panel); return; }
 
+            // A scooter has no passenger seats AND no shareable storage, so the lock/unlock toggle only
+            // confuses. (Flatbed/hand-truck are also 0-seat but KEEP the toggle — it gates shared storage.)
+            string tn = vehicle.vehicleInstance.vehicleTypeName ?? "";
+            if (tn.IndexOf("scooter", System.StringComparison.OrdinalIgnoreCase) >= 0) { Hide(panel); return; }
+
             var btn = GetOrCreate(panel);
             if (btn == null) return;
             btn.gameObject.SetActive(true);
+            // The clone inherits parkButton's interactable state — and Park is greyed/non-interactable when you
+            // can't park where you are, which left our toggle greyed AND click-dead (a non-interactable Button
+            // suppresses onClick). Lock/unlock is always valid, so force it on (+ clear any inherited CanvasGroup
+            // gating) every time we show it.
+            btn.interactable = true;
+            try { var cg = btn.GetComponent<CanvasGroup>(); if (cg != null) { cg.interactable = true; cg.blocksRaycasts = true; cg.alpha = 1f; } } catch { }
             SetLabel(btn, PassengerSync.IsLocked(vid));
             btn.onClick.RemoveAllListeners();
             btn.onClick.AddListener(() =>
@@ -100,6 +111,7 @@ namespace BigAmbitionsMP
                     UnityEngine.Object.Destroy(comp);
 
             _btn[panel] = btn;
+            Plugin.Logger.LogInfo("[LockBtn] toggle created (cloned parkButton; onClick + interactable reset).");
             return btn;
         }
 

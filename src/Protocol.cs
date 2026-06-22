@@ -103,6 +103,10 @@ namespace BigAmbitionsMP
         PassengerExit         = 122, // Any → Host → All: player P left vehicle V (rider exit OR host kick).
         VehicleLockSet        = 123, // Owner → Host → All: vehicle V passenger-lock = Locked.
         PassengerSnapshot     = 124, // Host → joiner: full passenger lock + seat state (join replay).
+
+        // Shared vehicle storage (take/put from another player's UNLOCKED vehicle — host-authoritative request/grant).
+        VehicleCargoReq       = 125, // Accessor → Host → owner: take (Op=0) / put (Op=1) an item in vehicle V's storage.
+        VehicleCargoRes       = 126, // Owner → Host → accessor: result (Ok = applied to real cargo; else Reason = gone/full).
     }
 
     // ── Passenger payloads (ride shotgun) ───────────────────────────────────────
@@ -157,6 +161,39 @@ namespace BigAmbitionsMP
         public string VehicleId { get; set; } = "";
         public int    Seat      { get; set; }
         public string PlayerId  { get; set; } = "";
+    }
+
+    // ── Shared vehicle storage payloads ──────────────────────────────────────────
+
+    /// <summary>Accessor → host → owner: take (Op=0) or put (Op=1) an item in another player's UNLOCKED
+    /// vehicle storage. Host-authoritative: the owner validates against the real cargo (first request wins,
+    /// so there is no optimistic local edit to roll back).</summary>
+    public class VehicleCargoReqPayload
+    {
+        public string VehicleId    { get; set; } = "";   // the REAL vehicle id (no BAMP_ ghost prefix)
+        public string OwnerId      { get; set; } = "";   // the vehicle's owner (accessor reads it off the ghost) — host forwards here
+        public string PlayerId     { get; set; } = "";   // the accessor (who takes / puts)
+        public byte   Op           { get; set; }          // 0 = take (remove from vehicle), 1 = put (add to vehicle)
+        public string ItemName     { get; set; } = "";
+        public int    Amount       { get; set; }
+        public bool   Paid         { get; set; } = true;
+        public float  PricePerUnit { get; set; }
+    }
+
+    /// <summary>Owner → host → accessor: result of a VehicleCargoReq. Ok=true means the real cargo changed
+    /// (take = the accessor may now place ItemName×Amount via the game's own logic; put = it was stored).
+    /// Ok=false → Reason ("gone" / "full") and the accessor places nothing / keeps the item.</summary>
+    public class VehicleCargoResPayload
+    {
+        public string VehicleId    { get; set; } = "";
+        public string PlayerId     { get; set; } = "";
+        public byte   Op           { get; set; }
+        public string ItemName     { get; set; } = "";
+        public int    Amount       { get; set; }
+        public bool   Paid         { get; set; } = true;
+        public float  PricePerUnit { get; set; }
+        public bool   Ok           { get; set; }
+        public string Reason       { get; set; } = "";
     }
 
     // ── Envelope ───────────────────────────────────────────────────────────────
