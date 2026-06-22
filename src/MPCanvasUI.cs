@@ -1199,7 +1199,7 @@ namespace BigAmbitionsMP
         private bool _hubPartialFocus;
         private string _hubPartialStr = "1000";
         private double _hubPartialAmount = 1000;
-        private RectTransform? _hubPartialRT; private TextMeshProUGUI? _hubPartialLbl;
+        private RectTransform? _hubPartialRT; private TextMeshProUGUI? _hubPartialLbl, _hubPartialHint;
         // Native-template palette (tuneable in one place).
         private static readonly Color HubPageGrey   = new Color(0.145f, 0.155f, 0.175f, 0.99f);
         private static readonly Color HubStripeBlue = new Color(0.20f, 0.47f, 0.78f, 1f);
@@ -1700,6 +1700,9 @@ namespace BigAmbitionsMP
                         if (MPHub.Loans.Count > 0 && mine.Count == 0)
                             Plugin.Logger.LogWarning($"[Hub] {MPHub.Loans.Count} active loan(s) but none match my id '{MPConfig.PlayerId}'");
                         var present = MPRestSync.AllPlayers();
+                        bool anyRepayable = false;
+                        // While the partial field is focused, show the LIVE typed value on the buttons; else the committed one.
+                        float pShow = (_hubPartialFocus && long.TryParse(_hubPartialStr, out var pParse) && pParse > 0) ? pParse : (float)_hubPartialAmount;
                         for (int i = 0; i < mine.Count; i++)
                         {
                             var ln = mine[i];
@@ -1711,16 +1714,19 @@ namespace BigAmbitionsMP
                                     AddHubRow(_hubLoansContent, _hubLoansVp, i, LoanRowH, txt + $"  <color={_colMuted}>· lender offline</color>");
                                 else if (_hubRepayArm == ln.Id)   // armed → single confirm button showing the amount
                                 {
+                                    anyRepayable = true;
                                     float amt = _hubRepayArmAmt <= 0f ? ln.Remaining : Math.Min(_hubRepayArmAmt, ln.Remaining);
                                     AddHubRow(_hubLoansContent, _hubLoansVp, i, LoanRowH, txt,
                                         ($"confirm ${amt:N0}", new Color(0.62f, 0.40f, 0.16f, 1f), ln.Id, (byte)3));
                                 }
                                 else
                                 {
-                                    float pAmt = Math.Min((float)_hubPartialAmount, ln.Remaining);
+                                    anyRepayable = true;
+                                    float pAmt = Math.Min(pShow, ln.Remaining);
+                                    // full on the RIGHT (first tuple = rightmost in AddHubRow), partial on the LEFT
                                     AddHubRow(_hubLoansContent, _hubLoansVp, i, LoanRowH, txt,
-                                        ($"partial ${pAmt:N0}", new Color(0.28f, 0.36f, 0.48f, 1f), ln.Id, (byte)4),
-                                        ($"full ${ln.Remaining:N0}", new Color(0.24f, 0.50f, 0.33f, 1f), ln.Id, (byte)5));
+                                        ($"full ${ln.Remaining:N0}", new Color(0.24f, 0.50f, 0.33f, 1f), ln.Id, (byte)5),
+                                        ($"partial ${pAmt:N0}", new Color(0.28f, 0.36f, 0.48f, 1f), ln.Id, (byte)4));
                                 }
                             }
                             else
@@ -1729,6 +1735,9 @@ namespace BigAmbitionsMP
                                 AddHubRow(_hubLoansContent, _hubLoansVp, i, LoanRowH, txt);
                             }
                         }
+                        // The "partial $" field only matters when you have a loan you can actually repay.
+                        if (_hubPartialRT != null) _hubPartialRT.gameObject.SetActive(anyRepayable);
+                        if (_hubPartialHint != null) _hubPartialHint.gameObject.SetActive(anyRepayable);
                         if (mine.Count == 0)
                         {
                             var none = MakeLabel(_hubLoansContent.transform, $"<color={_colMuted}>no active loans</color>", 12, _inkLo, 6f, -4f, 400f, 20f, TextAlignmentOptions.TopLeft);
@@ -1941,8 +1950,8 @@ namespace BigAmbitionsMP
                 MakeHubBox(pl, 16f, -90f, 948f, 162f, sprite);
                 var loansHdr = MakeLabel(pl, "<b>ACTIVE LOANS</b>", 12, _inkLo, 28f, -98f, 220f, 18f, TextAlignmentOptions.Left);
                 ApplyFont(loansHdr);
-                var partialHint = MakeLabel(pl, "partial $", 12, _inkLo, 686f, -100f, 70f, 20f, TextAlignmentOptions.Right);
-                ApplyFont(partialHint);
+                _hubPartialHint = MakeLabel(pl, "partial $", 12, _inkLo, 686f, -100f, 70f, 20f, TextAlignmentOptions.Right);
+                ApplyFont(_hubPartialHint);
                 (_hubPartialRT, _hubPartialLbl) = MakeHubInput(pl, 762f, -96f, 180f, 26f, 14, sprite);
                 var (lvp, lct) = MakeHubScroll(pl, 28f, -122f, 904f, 118f, sprite);
                 _hubLoansVp = lvp;
@@ -2134,6 +2143,7 @@ namespace BigAmbitionsMP
             {
                 _hubPartialFocus = false;
                 if (long.TryParse(_hubPartialStr, out var pv) && pv > 0) _hubPartialAmount = Math.Max(1, pv);
+                _hubSeenVersion = -1;   // re-render rows so the "partial $X" buttons reflect the committed amount
             }
         }
 
@@ -2167,6 +2177,7 @@ namespace BigAmbitionsMP
                 else if (_hubTermFocus && char.IsDigit(c) && _hubTermStr.Length < 3) _hubTermStr += c;
                 else if (_hubPartialFocus && char.IsDigit(c) && _hubPartialStr.Length < 9) _hubPartialStr += c;
             }
+            if (_hubPartialFocus && !string.IsNullOrEmpty(Input.inputString)) _hubSeenVersion = -1;   // live-update the partial buttons as you type
             if (Input.GetKeyDown(KeyCode.Escape)) { _hubAmountFocus = false; _hubRateFocus = false; _hubTermFocus = false; _hubPartialFocus = false; }
         }
 
