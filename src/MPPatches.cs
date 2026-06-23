@@ -585,20 +585,22 @@ namespace BigAmbitionsMP
         {
             static void Postfix(CityBuildingController cbc, bool __result)
             {
-                if (!__result || !MPServer.IsRunning) return;   // only when the host actually drove in
+                if (!__result) return;                                    // only when we actually drove in
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return; // only in an MP game
                 try
                 {
                     string vehicleId = VehicleManager.CurrentDrivenVehicleId();
-                    if (string.IsNullOrEmpty(vehicleId)) return;
-                    var riders = PassengerSync.RidersOf(vehicleId);
-                    if (riders == null || riders.Count == 0) return;
+                    if (string.IsNullOrEmpty(vehicleId)) return;          // we're not the one driving
                     string addressKey = GameStateReader.AddressKey(cbc.building);
-                    foreach (var kv in riders)
-                    {
-                        string pid = kv.Value;
-                        if (string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId) continue;
-                        MPServer.SendPassengerFollowEnter(pid, addressKey, vehicleId);
-                        Plugin.Logger.LogInfo($"[PassFollow] host drove into '{addressKey}' with rider '{pid}' aboard '{vehicleId}' → sent FollowEnter.");
+                    if (MPServer.IsRunning)
+                    {   // host is the driver → resolve riders + notify directly
+                        MPServer.RouteFollowEnterToRiders(vehicleId, addressKey, MPConfig.PlayerId);
+                        Plugin.Logger.LogInfo($"[PassFollow] host drove into '{addressKey}' aboard '{vehicleId}' → routing FollowEnter to riders.");
+                    }
+                    else
+                    {   // client is the driver → can't reach the riders directly; let the host fan out
+                        MPClient.SendPassengerFollowRelayEnter(vehicleId, addressKey);
+                        Plugin.Logger.LogInfo($"[PassFollow] client drove into '{addressKey}' aboard '{vehicleId}' → relayed to host.");
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[PassFollow] EnterBuildingWithVehicle: {ex.Message}"); }
@@ -616,19 +618,20 @@ namespace BigAmbitionsMP
         {
             static void Postfix(int targetExitId)
             {
-                if (!MPServer.IsRunning) return;   // only the host drives the shared vehicle
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return; // only in an MP game
                 try
                 {
                     string vehicleId = VehicleManager.CurrentDrivenVehicleId();
-                    if (string.IsNullOrEmpty(vehicleId)) return;   // host on foot → no ridden vehicle leaving
-                    var riders = PassengerSync.RidersOf(vehicleId);
-                    if (riders == null || riders.Count == 0) return;
-                    foreach (var kv in riders)
-                    {
-                        string pid = kv.Value;
-                        if (string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId) continue;
-                        MPServer.SendPassengerFollowExit(pid, vehicleId, targetExitId);
-                        Plugin.Logger.LogInfo($"[PassFollow] host drove out (exit {targetExitId}) with rider '{pid}' aboard '{vehicleId}' → sent FollowExit.");
+                    if (string.IsNullOrEmpty(vehicleId)) return;   // on foot / not the driver (incl. a rider's own FollowDriverOut)
+                    if (MPServer.IsRunning)
+                    {   // host is the driver → resolve riders + notify directly
+                        MPServer.RouteFollowExitToRiders(vehicleId, targetExitId, MPConfig.PlayerId);
+                        Plugin.Logger.LogInfo($"[PassFollow] host drove out (exit {targetExitId}) aboard '{vehicleId}' → routing FollowExit to riders.");
+                    }
+                    else
+                    {   // client is the driver → let the host fan out
+                        MPClient.SendPassengerFollowRelayExit(vehicleId, targetExitId);
+                        Plugin.Logger.LogInfo($"[PassFollow] client drove out (exit {targetExitId}) aboard '{vehicleId}' → relayed to host.");
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[PassFollow] ExitFromBuilding: {ex.Message}"); }

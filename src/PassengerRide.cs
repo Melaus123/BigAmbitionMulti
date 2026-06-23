@@ -583,6 +583,25 @@ namespace BigAmbitionsMP
             _pinFallback = Time.unscaledTime + 10f;  // backstop only
         }
 
+        /// <summary>[PassFollow] Resolve a building by its AddressKey (CityManager lookup) then follow the
+        /// driver into it. Shared by the client rider (FollowEnter message) and the host rider (relay route)
+        /// so both resolve the building identically.</summary>
+        public static void FollowDriverIntoByAddress(string addressKey)
+        {
+            if (_localVeh == "" || string.IsNullOrEmpty(addressKey)) return;
+            try
+            {
+                var cm = InstanceBehavior<CityManager>.Instance;
+                CityBuildingController? target = null;
+                if (cm != null && cm.cityBuildingControllers != null)
+                    foreach (var c in cm.cityBuildingControllers)
+                        if (c != null && c.building != null && GameStateReader.AddressKey(c.building) == addressKey) { target = c; break; }
+                if (target == null) { Plugin.Logger.LogWarning($"[PassFollow] FollowEnter: could not resolve building '{addressKey}'."); return; }
+                FollowDriverInto(target.building);
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] FollowDriverIntoByAddress: {ex.Message}"); }
+        }
+
         /// <summary>[PassFollow] The driver drove our ridden vehicle through a building entrance — follow
         /// them in: soft un-pin, enter the building so its interior loads on our client, and let
         /// TickLocalRide re-pin to the ghost (already at the right world coords inside) — so we ride in the

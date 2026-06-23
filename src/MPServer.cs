@@ -717,6 +717,14 @@ namespace BigAmbitionsMP
                     HandlePassengerExit(senderPid, env);
                     break;
 
+                case MessageType.PassengerFollowRelayEnter:
+                    HandlePassengerFollowRelayEnter(senderPid, env);
+                    break;
+
+                case MessageType.PassengerFollowRelayExit:
+                    HandlePassengerFollowRelayExit(senderPid, env);
+                    break;
+
                 case MessageType.VehicleLockSet:
                     HandleVehicleLockSet(senderPid, env);
                     break;
@@ -2388,6 +2396,58 @@ namespace BigAmbitionsMP
             if (!_running) return;
             Broadcast(MessageEnvelope.Create(MessageType.PassengerFollowExit, MPConfig.PlayerId,
                 new PassengerFollowPayload { TargetPlayerId = targetPid, VehicleId = vehicleId, ExitId = exitId }));
+        }
+
+        /// <summary>Host: resolve vehicle V's riders and tell each (except the driver) to follow the driver
+        /// INTO a building — broadcast to client riders, or act locally when the host itself is the rider.
+        /// One path for both the host-as-driver hook and the client-as-driver relay.</summary>
+        public static void RouteFollowEnterToRiders(string vehicleId, string addressKey, string driverPid)
+        {
+            if (!_running || string.IsNullOrEmpty(vehicleId)) return;
+            var riders = PassengerSync.RidersOf(vehicleId);
+            if (riders == null || riders.Count == 0) return;
+            foreach (var kv in riders)
+            {
+                string pid = kv.Value;
+                if (string.IsNullOrEmpty(pid) || pid == driverPid) continue;   // the driver isn't a passenger
+                if (pid == MPConfig.PlayerId)
+                    GameStatePatcher.EnqueueOnMainThread(() => PassengerRide.FollowDriverIntoByAddress(addressKey));   // host is the rider
+                else
+                    SendPassengerFollowEnter(pid, addressKey, vehicleId);   // client rider → broadcast; it acts
+            }
+        }
+
+        /// <summary>Host: tell vehicle V's riders (except the driver) to follow the driver back OUT.</summary>
+        public static void RouteFollowExitToRiders(string vehicleId, int exitId, string driverPid)
+        {
+            if (!_running || string.IsNullOrEmpty(vehicleId)) return;
+            var riders = PassengerSync.RidersOf(vehicleId);
+            if (riders == null || riders.Count == 0) return;
+            foreach (var kv in riders)
+            {
+                string pid = kv.Value;
+                if (string.IsNullOrEmpty(pid) || pid == driverPid) continue;
+                if (pid == MPConfig.PlayerId)
+                    GameStatePatcher.EnqueueOnMainThread(() => PassengerRide.FollowDriverOut(exitId));   // host is the rider
+                else
+                    SendPassengerFollowExit(pid, vehicleId, exitId);
+            }
+        }
+
+        /// <summary>Client(driver) → host relay: the sender drove V into a building; fan out to V's riders.</summary>
+        private static void HandlePassengerFollowRelayEnter(string senderPid, MessageEnvelope env)
+        {
+            var p = env.GetPayload<PassengerFollowPayload>();
+            if (p == null) return;
+            RouteFollowEnterToRiders(p.VehicleId, p.AddressKey, senderPid);
+        }
+
+        /// <summary>Client(driver) → host relay: the sender drove V out of a building; fan out to V's riders.</summary>
+        private static void HandlePassengerFollowRelayExit(string senderPid, MessageEnvelope env)
+        {
+            var p = env.GetPayload<PassengerFollowPayload>();
+            if (p == null) return;
+            RouteFollowExitToRiders(p.VehicleId, p.ExitId, senderPid);
         }
 
         private static void HandleVehicleLockSet(string senderPid, MessageEnvelope env)

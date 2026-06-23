@@ -117,6 +117,11 @@ namespace BigAmbitionsMP
         // Passenger follows the driver through a building entrance (host-authoritative).
         PassengerFollowEnter  = 127, // Host → rider P: vehicle V drove into a building (AddressKey); rider should enter it too.
         PassengerFollowExit   = 128, // Host → rider P: vehicle V left the building; rider should follow back out.
+        // Client-as-driver relay: a CLIENT driver can't reach the riders directly, so it tells the host,
+        // which resolves V's riders and fans out the Follow{Enter,Exit} above (or acts locally if the host
+        // itself is the rider). Driver pid = the message sender.
+        PassengerFollowRelayEnter = 129, // Client(driver) → Host: I drove V into a building (AddressKey).
+        PassengerFollowRelayExit  = 130, // Client(driver) → Host: I drove V out (ExitId).
     }
 
     // ── Passenger payloads (ride shotgun) ───────────────────────────────────────
