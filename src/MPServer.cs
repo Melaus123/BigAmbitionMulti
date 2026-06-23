@@ -169,7 +169,27 @@ namespace BigAmbitionsMP
                 foreach (var slot in m.Slots)
                     if (slot.Money != 0f) CashByStableId[slot.StableId] = slot.Money;
 
-                Plugin.Logger.LogInfo($"[Server] Restored {BuildingOwners.Count} owned building(s) from manifest.");
+                Plugin.Logger.LogInfo($"[Server] Restored {BuildingOwners.Count} owned building(s) from manifest ({m.Slots?.Count ?? 0} save slot(s)).");
+
+                // 4a diagnostic (read-only): a building owned by a stableId with NO save slot is an ORPHAN —
+                // the owner has no character on the host (legacy save, or a lost/corrupt .hsg). Surfaced at
+                // WARN so it shows up in a submitted bug report instead of silently locking a building to a
+                // ghost. Does NOT touch the data — diagnosis only.
+                var slotIds = new HashSet<string>();
+                if (m.Slots != null) foreach (var s in m.Slots) if (!string.IsNullOrEmpty(s.StableId)) slotIds.Add(s.StableId);
+                int orphans = 0;
+                foreach (var kv in m.BuildingOwners)
+                {
+                    string owner = kv.Value;
+                    if (string.IsNullOrEmpty(owner) || owner == MPConfig.StableId) continue;   // host-owned is fine
+                    if (!slotIds.Contains(owner))
+                    {
+                        orphans++;
+                        Plugin.Logger.LogWarning($"[Server] ORPHAN ownership: building '{kv.Key}' owned by '{owner}' with NO save slot this session — owner character missing (legacy/lost save?).");
+                    }
+                }
+                if (orphans > 0)
+                    Plugin.Logger.LogWarning($"[Server] {orphans} orphan-owned building(s) on load (owner has no save). Not auto-changed — diagnostic only.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RestoreOwnershipFromManifest: {ex.Message}"); }
         }
@@ -2495,7 +2515,15 @@ namespace BigAmbitionsMP
             float kc = GetKnownCash(pid);
             Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
             { SessionName = session, HsgGzipBase64 = "", Money = Math.Max(0f, kc), FallbackSettings = LastStartSettings }));
-            Plugin.Logger.LogInfo($"[Server] Mid-session join by '{pid}': no save slot — sent fresh-character fallback.");
+            // 4a diagnostic: fresh-starting someone who OWNS property is the "lost character" smoking gun —
+            // they had a session presence but no save survived. Loud ERROR so a bug report pinpoints it;
+            // genuinely-new joiners stay at INFO.
+            bool ownsProperty = BuildingOwners.Values.Any(v => v == stable || v == pid)
+                             || BuildingRealEstateOwners.Values.Any(v => v == stable || v == pid);
+            if (ownsProperty)
+                Plugin.Logger.LogError($"[Server] DATA-LOSS SUSPECT: fresh-starting '{pid}' (stable={stable}) who OWNS building(s) but has NO save on the host — character likely lost. Sent fresh-character fallback.");
+            else
+                Plugin.Logger.LogInfo($"[Server] Mid-session join by '{pid}': no save slot — sent fresh-character fallback.");
             return true;
         }
 

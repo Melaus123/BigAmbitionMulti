@@ -742,6 +742,9 @@ namespace BigAmbitionsMP
             }
 
             Plugin.Logger.LogInfo($"[MPSave] Local save '{sessionName}': ok={ok} char='{charName}' day={day} → {folder}");
+            // 4a diagnostic: a failed save is the upstream cause of most "lost progress" reports — make it
+            // LOUD so it stands out in a submitted log (the routine line above is INFO).
+            if (!ok) Plugin.Logger.LogError($"[MPSave] SAVE FAILED for '{sessionName}' (char='{charName}', day={day}) — .hsg not written; a later load may fall back to an older copy.");
 
             return new MpSlot
             {
@@ -1058,8 +1061,18 @@ namespace BigAmbitionsMP
             }
             if (minutes <= 0) minutes = 5;
             float secs = minutes * 60f;
-            return secs < 60f ? 60f : secs;
+            if (secs < 60f) secs = 60f;
+            // 4b: surface the active cadence (and any change) once, so a bug report shows how much a crash
+            // could cost between autosaves. Configurable via the 'AutosaveMinutes' key (0 = mirror the SP
+            // setting); the floor is 60s.
+            if (secs != _lastLoggedAutosaveSecs)
+            {
+                _lastLoggedAutosaveSecs = secs;
+                Plugin.Logger.LogInfo($"[MPSave] Coordinated autosave interval: {secs / 60f:0.#} min (AutosaveMinutes={MPConfig.AutosaveMinutesLive()}; 0=mirror SP, 60s floor).");
+            }
+            return secs;
         }
+        private static float _lastLoggedAutosaveSecs = -1f;
 
         // ── Manifest assembly (thread-safe, pure C#) ─────────────────────────────
 
