@@ -29,31 +29,6 @@ namespace BigAmbitionsMP
         // normal 25 min/s rate a frame advances <1 min, so this only ever caps a recovery frame after a spike.
         public const float MaxSkipMinutesPerFrame = 60f;
 
-        // Activities OUR system manages.  Anything else (the TAXI is an
-        // activity too — auto-pressing its Start mid-destination-pick crashed
-        // the game) is invisible to us and stays fully native.
-        private static readonly string[] RestClassNames =
-            { "Rest", "Sleep", "Work", "Workout", "Hygiene", "Entertain", "Swimming", "Study" };
-
-        public static bool IsRestClassName(string name)
-        {
-            foreach (var r in RestClassNames)
-                if (string.Equals(name, r, StringComparison.OrdinalIgnoreCase)) return true;
-            return false;
-        }
-
-        /// <summary>Live check for the HidePanel patch: is the CURRENT activity
-        /// one of ours?  Uses the cached UI wrapper (no scene walk).</summary>
-        public static bool IsCurrentActivityRestClass()
-        {
-            try
-            {
-                var (act, nm) = GetCurrentActivity();
-                return act != null && IsRestClassName(nm);
-            }
-            catch { return false; }
-        }
-
         // ── Local state ───────────────────────────────────────────────────────
         public static bool   Seated       { get; private set; }
 
@@ -64,6 +39,26 @@ namespace BigAmbitionsMP
         public static bool SeatedForUi => Seated && !ReferenceEquals(_curActRef, _suppressedActRef);
         private static object? _suppressedActRef;
         private static object? _curActRef;
+
+        /// <summary>True once the avatar has physically ARRIVED in the activity (sitting / performing) —
+        /// NOT while still choosing or walking over (MovingTowardsActivity).  This DELAYS the dock until
+        /// the player is seated; it gates NOTHING else (the activity, the auto-start, and the vanilla-panel
+        /// suppression all run regardless), and it can't gate the dock OUT — it reads the game's own LIVE
+        /// state (HasNavigationDisabled && not moving-towards), so once seated it reliably shows.</summary>
+        public static bool AvatarInActivity()
+        {
+            try
+            {
+                var (ui, uiType) = GetActivityUiCached();
+                if (ui == null || uiType == null) return false;
+                bool navDisabled = (bool)(uiType.GetMethod("HasNavigationDisabled",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.Invoke(null, null) ?? false);
+                bool moving = (bool)(uiType.GetProperty("IsMovingTowardsActivity",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null) ?? false);
+                return navDisabled && !moving;
+            }
+            catch { return false; }
+        }
 
         public static string ActivityName { get; private set; } = "";
         public static int    ActivityState { get; private set; } = -1;   // PlayerActivityState; -1 = none
@@ -90,7 +85,7 @@ namespace BigAmbitionsMP
         /// <summary>Index of the Stop/Cancel button in DockButtons (-1 = none) —
         /// rendered as the dock's header X.</summary>
         public static int CancelButtonIndex { get; private set; } = -1;
-        private static float _lastAutoStartAt;
+        private static object? _lastAutoStartedActRef;   // activity instance we last auto-pressed Start on — fire once per instance, no time gate
 
         // ── Shared state (host-broadcast; banner + detector stand-down) ──────
         public static readonly List<RestVoteEntry> Votes = new();
@@ -205,7 +200,6 @@ namespace BigAmbitionsMP
         /// The exit must never depend on a button existing.</summary>
         private static float _suppressAutoStartUntil;
         private static float _navHealNext;
-        private static string _lastForeignActivity = "";
 
         public static void StandUp()
         {
@@ -423,13 +417,10 @@ namespace BigAmbitionsMP
             try
             {
                 var (act, nm) = GetCurrentActivity();
-                // NON-rest activities (taxi!) are none of our business.
-                bool seated = act != null && IsRestClassName(nm);
-                if (act != null && !IsRestClassName(nm) && nm != _lastForeignActivity)
-                {
-                    _lastForeignActivity = nm;
-                    Plugin.Logger.LogInfo($"[Rest] foreign activity '{nm}' — fully native, ignored.");
-                }
+                // ANY PlayerActivityUI activity is ours — the vanilla panel is dead, so we replace it for
+                // every activity (Rest/Sleep/Work/Workout/Hygiene/Entertain/Study/Swimming/Paid). The taxi
+                // is NOT an IPlayerActivity, so it never reaches here — there is nothing to exclude.
+                bool seated = act != null;
                 if (seated != Seated)
                     Plugin.Logger.LogInfo($"[Rest] seated → {seated}{(seated ? $" ({nm})" : "")}");
                 Seated = seated;
@@ -489,10 +480,16 @@ namespace BigAmbitionsMP
                     if (startIdx < 0 && l.Contains("start")) startIdx = i;
                     else if (CancelButtonIndex < 0 && (l.Contains("stop") || l.Contains("cancel"))) CancelButtonIndex = i;
                 }
-                if (startIdx >= 0 && Time.unscaledTime - _lastAutoStartAt > 1.5f
-                    && Time.unscaledTime >= _suppressAutoStartUntil)
+                // Auto-press Start so clicking a bench walks you over and sits — no redundant native Start
+                // button. Fire ONCE per activity INSTANCE (tracked by ref), IMMEDIATELY: the old 1.5s
+                // re-fire gate was a time-based stand-in for "don't press the same activity twice" and it
+                // stalled every click. The post-StandUp window still guards the re-sit, but ONLY for the
+                // instance we stood up from — so a NEW bench starts walking instantly (user 2026-06-22).
+                bool alreadyAutoStarted = ReferenceEquals(_curActRef, _lastAutoStartedActRef);
+                bool suppressedNow = ReferenceEquals(_curActRef, _suppressedActRef) && Time.unscaledTime < _suppressAutoStartUntil;
+                if (startIdx >= 0 && !alreadyAutoStarted && !suppressedNow)
                 {
-                    _lastAutoStartAt = Time.unscaledTime;
+                    _lastAutoStartedActRef = _curActRef;
                     InvokeDockButton(startIdx);
                     Plugin.Logger.LogInfo("[Rest] auto-start invoked — sit immediately, no Start button.");
                 }
@@ -594,11 +591,10 @@ namespace BigAmbitionsMP
             else if (MPClient.IsConnected) MPClient.SendRestVote(p);
         }
 
-        // Cached PlayerActivityUI wrapper + current activity.  FindObjectsOfType
-        // is a full scene walk — doing it 3× per 0.5s poll caused rhythmic ghost
-        // pulsing while the dock was open (same disease as the old traffic
-        // hitch).  Find once, reuse; re-find only when the cached wrapper dies.
-        private static object? _uiWrap;
+        // The live PlayerActivityUI + current activity.  Read the instance FRESH every call from the plain
+        // UIs.playerActivityUI field (cheap) — caching the instance let a stale wrapper report
+        // GetCurrentActivity==null while the game's current panel had a live activity, which made the
+        // vanilla panel leak and the dock never appear (2026-06-22).  Only the Type is cached.
         private static Type?   _uiType;
         private static object? _curAct;
 
@@ -606,22 +602,10 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (_uiWrap != null && _uiType != null)
-                {
-                    try { _uiType.GetProperty("GetCurrentActivity")?.GetValue(_uiWrap); return (_uiWrap, _uiType); }
-                    catch { _uiWrap = null; }   // died with its scene — re-find
-                }
-                // Direct singleton (perf pass 2026-06-12): the FindObjectsOfType
-                // scan here was the single biggest mod frame cost on BOTH
-                // machines (~50-100ms per call) — the panel object is INACTIVE
-                // while not seated, the find misses inactive objects, so the
-                // cache never primed and every 0.5s poll walked the whole
-                // object table.  UIs.playerActivityUI is a plain field.
                 var ui = UI.UIs.Instance?.playerActivityUI;
                 if (ui == null) return (null, null);
-                _uiWrap = ui;
-                _uiType = ui.GetType();
-                return (_uiWrap, _uiType);
+                _uiType ??= ui.GetType();
+                return (ui, _uiType);
             }
             catch { return (null, null); }
         }

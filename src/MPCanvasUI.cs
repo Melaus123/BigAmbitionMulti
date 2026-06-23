@@ -865,12 +865,18 @@ namespace BigAmbitionsMP
             {
                 // SeatedForUi (not Seated): a half-cancelled bench approach
                 // wedged the dock open with no X (user, 2026-06-11).
-                bool show = MPRestSync.SeatedForUi;
+                // inActivity = in ANY activity state — drives the escape hatch (always available).
+                // show = the dock's VISIBILITY, DELAYED until the avatar has physically sat down
+                // (AvatarInActivity), so clicking a bench walks you over first instead of popping the
+                // dock instantly. The delay never PREVENTS the dock — AvatarInActivity reads the game's
+                // live state, so once seated it reliably shows.
+                bool inActivity = MPRestSync.SeatedForUi;
+                bool show = inActivity && MPRestSync.AvatarInActivity();
                 _restUiHover = false;   // recomputed below; EVERY early return must leave it false
 
                 // ESCAPE HATCH — independent of any UI existing: movement keys
                 // always stand you up (a half-built dock once trapped a player).
-                if (show && !_mpChatFocus &&
+                if (inActivity && !_mpChatFocus &&
                     (Input.GetKeyDown(KeyCode.W) || Input.GetKeyDown(KeyCode.A) ||
                      Input.GetKeyDown(KeyCode.S) || Input.GetKeyDown(KeyCode.D)))
                 {

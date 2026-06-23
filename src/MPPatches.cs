@@ -1980,12 +1980,15 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── Patch: PlayerActivityUI.HidePanel — native rest panel never shows ──
-        // Rest v4 (user-designed): clicking a bench/bed must NOT open the
-        // game's rest dialog; our own dock (MPCanvasUI.TickRestUI) replaces it.
-        // The UI component keeps running (it drives the activity state machine)
-        // — only its VISIBILITY is forced off: every HidePanel call becomes
-        // HidePanel(true) in MP.
+        // ── Patch: PlayerActivityUI.HidePanel — the vanilla time-skip panel NEVER shows ──
+        // Rest v5 (user-designed 2026-06-22): the vanilla PlayerActivityUI is a DEAD UI in MP — it must
+        // never be visible under ANY condition; our dock (MPCanvasUI.TickRestUI) replaces it for EVERY
+        // activity. The component keeps running (it drives the activity state machine) — only its
+        // VISIBILITY is forced off: every HidePanel call becomes HidePanel(true) in MP, unconditionally.
+        // This panel is used ONLY by IPlayerActivity types (Rest/Sleep/Work/Workout/Hygiene/Entertain/
+        // Study/Swimming/Paid) — all time-skips our dock handles. The TAXI is a SEPARATE system
+        // (TaxiSystem, not an IPlayerActivity) and never touches this panel, so there is nothing to
+        // exempt. The old per-activity gate is exactly what let Paid + stale-detection states leak it.
         [HarmonyPatch]
         public static class Patch_PlayerActivityUI_HidePanel
         {
@@ -2002,10 +2005,7 @@ namespace BigAmbitionsMP
             static void Prefix(ref bool hide)
             {
                 if (!MPServer.IsRunning && !MPClient.InMpGame) return;   // sticky gate: survives reconnect
-                // Only OUR rest-class activities lose their panel — foreign
-                // activities (the taxi flow!) keep their native UI untouched.
-                if (!MPRestSync.IsCurrentActivityRestClass()) return;
-                hide = true;   // the native panel is replaced by our dock
+                hide = true;   // vanilla time-skip panel is dead in MP — always hidden; our dock replaces it
             }
         }
 
