@@ -3148,15 +3148,20 @@ namespace BigAmbitionsMP
         private GameObject? _lwShowIp; private RectTransform? _rtShowIp;
         private bool _showIp;   // IP hidden by default (streamer-safe); toggle to reveal
 
-        // ── "Host Saved Game" save picker ─────────────────────────────────────
+        // ── "Host Saved Game" save picker — grouped by playthrough, scrollable ──
         private GameObject? _savePicker;
         private TextMeshProUGUI? _spInfo;
-        private RectTransform[]   _spRowRT  = new RectTransform[6];
-        private TextMeshProUGUI[] _spRowLbl = new TextMeshProUGUI[6];
-        private Image?[]          _spRowImg = new Image?[6];
-        private string[]          _spRowName = new string[6];
-        private int _spCount; private int _spSelected = -1;
         private RectTransform? _rtSpLoad, _rtSpBack;
+        private RectTransform? _spViewport, _spContent, _spTrack, _spThumb;
+        private float  _spScroll, _spContentH;
+        private string _spExpanded   = "";   // base name of the expanded playthrough (accordion)
+        private string _spSelSession = "";   // session selected to host
+        // Plain ref type (NOT a [Serializable] ValueTuple) — a List<ValueTuple<RectTransform,string>>
+        // field on a MonoBehaviour trips Unity's type processing at load and the whole mod assembly
+        // fails to load.  A non-serializable class field is skipped cleanly.
+        private sealed class SpHit { public readonly RectTransform Rt; public readonly string Key; public SpHit(RectTransform rt, string key) { Rt = rt; Key = key; } }
+        private readonly System.Collections.Generic.List<SpHit> _spHeaderHits = new();
+        private readonly System.Collections.Generic.List<SpHit> _spVarHits   = new();
         private TextMeshProUGUI? _lwLoadInfo;   // "Resuming save: …" line in the lobby (load mode)
 
         private static readonly Color MpPurple = new Color(0.64f, 0.36f, 0.95f, 1f);   // brighter, more saturated violet
@@ -3485,6 +3490,196 @@ namespace BigAmbitionsMP
             if (_savePicker != null) { try { _savePicker.SetActive(show); } catch { } }
         }
 
+        private static Sprite? _triSprite;
+        /// <summary>A small right-pointing white triangle sprite, generated once — the playthrough
+        /// expand/collapse chevron (the game font lacks ▾/▸ glyphs, so a font glyph renders as "?").</summary>
+        private static Sprite TriangleSprite()
+        {
+            if (_triSprite != null) return _triSprite;
+            const int s = 32;
+            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp };
+            var px = new Color32[s * s];
+            float mid = (s - 1) / 2f;
+            for (int yy = 0; yy < s; yy++)
+                for (int xx = 0; xx < s; xx++)
+                {
+                    float t = (float)xx / (s - 1);          // 0 left .. 1 right
+                    float halfH = (1f - t) * (s / 2f);      // base at the left edge, apex at the right
+                    px[yy * s + xx] = (Mathf.Abs(yy - mid) <= halfH) ? new Color32(255, 255, 255, 255)
+                                                                     : new Color32(255, 255, 255, 0);
+                }
+            tex.SetPixels32(px); tex.Apply();
+            _triSprite = Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), 100f);
+            return _triSprite;
+        }
+
+        // ── Load-picker palette ──
+        // Solid, PRE-COMPOSITED equivalents of the mockup's translucent layers.  The alpha versions
+        // muddied/over-brightened in-game (glossy button sprite + alpha stacking), losing the layer
+        // differentiation, so these flat colours reproduce the mockup's APPEARANCE exactly.
+        private static readonly Color C_LD_PANEL = new Color(0.078f, 0.098f, 0.149f, 0.98f); // #141926 dialog (darkest)
+        private static readonly Color C_LD_LIST  = new Color(0.133f, 0.165f, 0.247f, 1f);    // #222a3f list container
+        private static readonly Color C_LD_CARD  = new Color(0.184f, 0.212f, 0.282f, 1f);    // #2f3648 playthrough card (lighter float)
+        private static readonly Color C_LD_VAR   = new Color(0.149f, 0.169f, 0.227f, 1f);    // #262b3a variant row (recessed, darker)
+        private static readonly Color C_LD_SEL   = new Color(0.192f, 0.278f, 0.400f, 1f);    // #314766 selected variant (muted blue)
+        private static readonly Color C_LD_ACC   = new Color(0.373f, 0.627f, 0.902f, 1f);    // #5fa0e6 accent
+        private static readonly Color C_LD_TXT   = new Color(0.933f, 0.945f, 0.965f, 1f);    // #eef1f6 text
+        private static readonly Color C_LD_MUT   = new Color(0.545f, 0.592f, 0.643f, 1f);    // #8b97a4 muted
+        private static readonly Color C_LD_SBTRK = new Color(0.208f, 0.227f, 0.275f, 1f);    // scrollbar track (subtle)
+        private static readonly Color C_LD_SBTHB = new Color(0.49f,  0.506f, 0.525f, 0.90f); // #7d8186 scrollbar thumb
+
+        /// <summary>Friendly playthrough title: the auto MP name "MP 2026-06-23 1614" → "MP Jun 23, 4:14 PM"
+        /// (the time disambiguates same-day runs); custom names (hqtest, …) pass through unchanged.</summary>
+        private static string FriendlyName(string b)
+        {
+            try {
+                if (!string.IsNullOrEmpty(b) && b.StartsWith("MP ") && b.Length >= 18)
+                {
+                    var rest = b.Substring(3).Trim();   // "2026-06-23 1614"
+                    if (DateTime.TryParseExact(rest, "yyyy-MM-dd HHmm", System.Globalization.CultureInfo.InvariantCulture,
+                                               System.Globalization.DateTimeStyles.None, out var dt))
+                        return "MP " + dt.ToString("MMM d, h:mm tt", System.Globalization.CultureInfo.InvariantCulture);
+                }
+            } catch { }
+            return b ?? "";
+        }
+
+        /// <summary>Recolour a cloned native button to an accent fill with a contrasting label (the mockup's
+        /// primary "Host this save").  normalColor stays white so Image.color shows through.</summary>
+        private static void TintButton(GameObject go, Color bg, Color fg)
+        {
+            if (go == null) return;
+            try {
+                var img = go.GetComponent<Image>() ?? go.GetComponentInChildren<Image>(true);
+                if (img != null) img.color = bg;
+                var btn = go.GetComponent<Button>();
+                if (btn != null) { var cb = btn.colors; cb.normalColor = Color.white; cb.highlightedColor = new Color(1f, 1f, 1f, 0.92f); cb.pressedColor = new Color(0.88f, 0.88f, 0.88f, 1f); cb.selectedColor = Color.white; btn.colors = cb; }
+                var txt = go.GetComponentInChildren<TMP_Text>(true); if (txt != null) txt.color = fg;
+            } catch { }
+        }
+
+        private static readonly System.Collections.Generic.Dictionary<string, Sprite> _iconCache = new();
+        /// <summary>A small monochrome icon per variant kind, drawn as a sprite (the game font has no icon glyphs):
+        /// Main=disk, Autosave=clock, Disconnect=X, Recover=alert triangle.  Caller tints via Image.color.</summary>
+        private static Sprite IconSprite(string kind)
+        {
+            string key = kind ?? "";
+            if (_iconCache.TryGetValue(key, out var cached)) return cached;
+            const int s = 28;
+            var px = new Color32[s * s];
+            var ON = new Color32(255, 255, 255, 255); var OFF = new Color32(255, 255, 255, 0);
+            float c = (s - 1) / 2f;
+            for (int yy = 0; yy < s; yy++)
+                for (int xx = 0; xx < s; xx++)
+                {
+                    float dx = xx - c, dy = yy - c;
+                    float r = Mathf.Sqrt(dx * dx + dy * dy);
+                    bool on;
+                    switch (kind)
+                    {
+                        case "Autosave":   // clock: ring + minute/hour hands
+                            on = (r <= c * 0.92f && r >= c * 0.60f)
+                                 || (Mathf.Abs(dx) <= 1.3f && dy >= 0f && dy <= c * 0.62f)
+                                 || (Mathf.Abs(dy) <= 1.3f && dx >= 0f && dx <= c * 0.42f);
+                            break;
+                        case "Disconnect": // X
+                            on = (Mathf.Abs(dx - dy) <= 2.0f || Mathf.Abs(dx + dy) <= 2.0f) && r <= c * 0.95f;
+                            break;
+                        case "Recover":    // up-pointing alert triangle
+                        {
+                            float t = yy / (float)(s - 1);        // 0 bottom .. 1 top (texture y is up)
+                            float half = (1f - t) * (c * 0.95f);  // wide base at bottom, apex at top
+                            on = Mathf.Abs(dx) <= half && yy >= 3;
+                            break;
+                        }
+                        default:           // "Main" — disk/floppy: rounded square, clipped top-right, label slot
+                        {
+                            float hs = c * 0.80f;
+                            bool inSq = Mathf.Abs(dx) <= hs && Mathf.Abs(dy) <= hs;
+                            bool notch = dx > hs - c * 0.36f && dy > hs - c * 0.36f;
+                            on = inSq && !notch;
+                            if (on && dy < -c * 0.10f && Mathf.Abs(dx) <= hs * 0.60f) on = false;
+                            break;
+                        }
+                    }
+                    px[yy * s + xx] = on ? ON : OFF;
+                }
+            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp };
+            tex.SetPixels32(px); tex.Apply();
+            var sp = Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), 100f);
+            _iconCache[key] = sp; return sp;
+        }
+
+        // ── Flat, rounded 9-slice sprite — gives FLAT colour fills with rounded corners (the mockup look).
+        // The game's own button sprite has a gloss/gradient that muddied the flat shading. ──
+        private static Sprite _roundSprite;
+        private static Sprite RoundedRectSprite()
+        {
+            if (_roundSprite != null) return _roundSprite;
+            const int s = 40; const float rad = 10f;
+            var px = new Color32[s * s];
+            for (int y = 0; y < s; y++)
+                for (int x = 0; x < s; x++)
+                {
+                    float dx = Mathf.Max(rad - x, x - (s - 1 - rad), 0f);
+                    float dy = Mathf.Max(rad - y, y - (s - 1 - rad), 0f);
+                    float dist = Mathf.Sqrt(dx * dx + dy * dy);
+                    byte a = (byte)(Mathf.Clamp01(rad - dist + 0.5f) * 255f);
+                    px[y * s + x] = new Color32(255, 255, 255, a);
+                }
+            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp };
+            tex.SetPixels32(px); tex.Apply();
+            _roundSprite = Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), 100f, 0, SpriteMeshType.FullRect, new Vector4(rad, rad, rad, rad));
+            return _roundSprite;
+        }
+
+        private static float SegDist(Vector2 p, Vector2 a, Vector2 b)
+        {
+            var ab = b - a; var ap = p - a;
+            float t = Mathf.Clamp01(Vector2.Dot(ap, ab) / Mathf.Max(Vector2.Dot(ab, ab), 0.0001f));
+            return Vector2.Distance(p, a + ab * t);
+        }
+
+        // Thin ">" chevron (matches the mockup's ti-chevron) — rotated to point down when expanded.
+        private static Sprite _chevSprite;
+        private static Sprite ChevronSprite()
+        {
+            if (_chevSprite != null) return _chevSprite;
+            const int s = 32; const float th = 2.6f;
+            var px = new Color32[s * s];
+            Vector2 a1 = new Vector2(s * 0.36f, s * 0.24f), a2 = new Vector2(s * 0.36f, s * 0.76f), b = new Vector2(s * 0.66f, s * 0.5f);
+            for (int y = 0; y < s; y++)
+                for (int x = 0; x < s; x++)
+                {
+                    var p = new Vector2(x, y);
+                    float d = Mathf.Min(SegDist(p, a1, b), SegDist(p, a2, b));
+                    byte a = (byte)(Mathf.Clamp01(th - d + 0.5f) * 255f);
+                    px[y * s + x] = new Color32(255, 255, 255, a);
+                }
+            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp };
+            tex.SetPixels32(px); tex.Apply();
+            _chevSprite = Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), 100f);
+            return _chevSprite;
+        }
+
+        private static Image AddRoundedBG(GameObject go, Color c)
+        {
+            var img = go.AddComponent<Image>();
+            img.sprite = RoundedRectSprite(); img.type = Image.Type.Sliced; img.color = c;
+            return img;
+        }
+
+        private RectTransform MakeFlatButton(Transform parent, string name, string label, float x, float y, float w, float h, Color bg, Color fg, int fontSize, bool bold)
+        {
+            var go = MakeGO(name, parent); var rt = go.GetComponent<RectTransform>();
+            SetAnchored(rt, x, y, w, h);
+            AddRoundedBG(go, bg);
+            var lbl = MakeLabel(go.transform, label, fontSize, fg, 0f, 0f, w, h, TextAlignmentOptions.Center);
+            if (bold) lbl.fontStyle = FontStyles.Bold;
+            ApplyFont(lbl);
+            return rt;
+        }
+
         private void BuildSavePicker()
         {
             if (_savePicker != null || _canvasGO == null) return;
@@ -3493,88 +3688,198 @@ namespace BigAmbitionsMP
             prt.anchorMin = prt.anchorMax = prt.pivot = new Vector2(0.5f, 0.5f);
             prt.sizeDelta = new Vector2(640f, 540f);
             prt.anchoredPosition = Vector2.zero;
-            var bg = _savePicker.AddComponent<Image>();
-            bg.color = new Color(0.10f, 0.10f, 0.13f, 0.98f);
-            if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }
+            prt.localScale = new Vector3(1.5f, 1.5f, 1f);   // 50% bigger all around (uniform — keeps layout + hit-testing correct)
+            AddRoundedBG(_savePicker, C_LD_PANEL);
 
-            var grey = C_LBLGREY;
-            ApplyFont(MakeLabel(_savePicker.transform, "Load Multiplayer Save", 26, C_WHITE, 0f, -16f, 640f, 36f, TextAlignmentOptions.Center));
-            _spInfo = MakeLabel(_savePicker.transform, "Choose a saved game to host.", SZ_FLD, grey, 0f, -52f, 640f, 22f, TextAlignmentOptions.Center); ApplyFont(_spInfo);
+            // Title + subtitle — LEFT-aligned at the top-left (mockup), not centered.
+            var spTitle = MakeLabel(_savePicker.transform, "Load multiplayer save", 19, C_LD_TXT, 20f, -16f, 600f, 26f, TextAlignmentOptions.Left);
+            spTitle.fontStyle = FontStyles.Bold; ApplyFont(spTitle);
+            _spInfo = MakeLabel(_savePicker.transform, "Choose a playthrough to host.", 12, C_LD_MUT, 20f, -44f, 600f, 18f, TextAlignmentOptions.Left); ApplyFont(_spInfo);
 
-            for (int i = 0; i < _spRowRT.Length; i++)
-            {
-                float ry = -84f - i * 56f;
-                var rowGO = MakeGO("SpRow" + i, _savePicker.transform);
-                var rrt = rowGO.GetComponent<RectTransform>();
-                SetAnchored(rrt, 24f, ry, 592f, 50f);
-                var img = rowGO.AddComponent<Image>();
-                img.color = C_FIELD;
-                if (_panelSprite != null) { try { img.sprite = _panelSprite; img.type = Image.Type.Sliced; } catch { } }
-                _spRowRT[i] = rrt; _spRowImg[i] = img;
-                _spRowLbl[i] = MakeLabel(rowGO.transform, "", SZ_LBL, C_WHITE, 14f, 0f, 564f, 50f, TextAlignmentOptions.Left);
-                ApplyFont(_spRowLbl[i]); _spRowLbl[i].enableWordWrapping = false;
-                rowGO.SetActive(false);
-            }
+            // List container — FLAT #222a3f, rounded, clipped.
+            var vp = MakeGO("SpViewport", _savePicker.transform);
+            _spViewport = vp.GetComponent<RectTransform>();
+            SetAnchored(_spViewport, 18f, -72f, 604f, 410f);
+            AddRoundedBG(vp, C_LD_LIST);
+            vp.AddComponent<RectMask2D>();
 
-            _rtSpLoad = CloneButtonInto(_savePicker.transform, "BAMP_SpLoad", "Host This Save", OnSpLoad, 150f, -476f, 200f, 44f)?.GetComponent<RectTransform>();
-            _rtSpBack = CloneButtonInto(_savePicker.transform, "BAMP_SpBack", "Back",           OnSpBack, 370f, -476f, 140f, 44f)?.GetComponent<RectTransform>();
+            var ct = MakeGO("SpContent", vp.transform);
+            _spContent = ct.GetComponent<RectTransform>();
+            SetAnchored(_spContent, 0f, 0f, 604f, 410f);
+
+            // Scrollbar (thin flat pills).
+            var tk = MakeGO("SpTrack", _savePicker.transform);
+            _spTrack = tk.GetComponent<RectTransform>();
+            SetAnchored(_spTrack, 609f, -80f, 6f, 394f);
+            tk.AddComponent<Image>().color = C_LD_SBTRK;
+            var th = MakeGO("SpThumb", tk.transform);
+            _spThumb = th.GetComponent<RectTransform>();
+            SetAnchored(_spThumb, 0f, 0f, 6f, 80f);
+            th.AddComponent<Image>().color = C_LD_SBTHB;
+
+            // Buttons — right-aligned at the bottom: [Back] [Host this save], Host rightmost (mockup).
+            _rtSpLoad = MakeFlatButton(_savePicker.transform, "BAMP_SpLoad", "Host this save", 462f, -498f, 160f, 34f, C_LD_ACC, new Color(0.04f, 0.086f, 0.149f, 1f), 13, true);
+            _rtSpBack = MakeFlatButton(_savePicker.transform, "BAMP_SpBack", "Back", 362f, -498f, 88f, 34f, new Color(0.196f, 0.227f, 0.298f, 1f), C_LD_MUT, 13, false);
             _savePicker.SetActive(false);
         }
 
         private void RefreshSavePicker()
         {
-            List<(string Name, MpManifest Manifest)> sessions;
-            try { sessions = MPSaveManager.ListSessions(); }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] ListSessions: {ex.Message}"); sessions = new(); }
-            sessions.Sort((a, b) => b.Manifest.SavedAtUnix.CompareTo(a.Manifest.SavedAtUnix));   // newest first
+            if (_spContent == null) return;
+            _spHeaderHits.Clear(); _spVarHits.Clear();
+            for (int i = _spContent.childCount - 1; i >= 0; i--)
+            { try { var c = _spContent.GetChild(i).gameObject; c.SetActive(false); Destroy(c); } catch { } }
 
-            _spCount = Math.Min(sessions.Count, _spRowRT.Length);
-            if (_spInfo != null) _spInfo.text = _spCount == 0 ? "No multiplayer saves found." : "Choose a saved game to host.";
+            List<MPSaveManager.MpPlaythrough> runs;
+            try { runs = MPSaveManager.ListPlaythroughs(); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] ListPlaythroughs: {ex.Message}"); runs = new(); }
 
-            for (int i = 0; i < _spRowRT.Length; i++)
+            if (_spInfo != null)
+                _spInfo.text = runs.Count == 0 ? "No multiplayer saves found."
+                                               : "Choose a playthrough to host — expand for autosaves and recovery points.";
+
+            if (runs.Count > 0)
             {
-                bool show = i < _spCount;
-                if (_spRowRT[i] != null) _spRowRT[i].gameObject.SetActive(show);
-                if (!show) { _spRowName[i] = ""; continue; }
-
-                var (name, m) = sessions[i];
-                _spRowName[i] = name;
-                string players;
-                try
-                {
-                    var names = new List<string>();
-                    foreach (var s in m.Slots) names.Add(string.IsNullOrEmpty(s.CharacterName) ? s.DisplayName : s.CharacterName);
-                    players = names.Count > 0 ? string.Join(", ", names) : "—";
-                }
-                catch { players = "—"; }
-                string date = ""; try { date = DateTimeOffset.FromUnixTimeSeconds(m.SavedAtUnix).LocalDateTime.ToString("g"); } catch { }
-                try { _spRowLbl[i].text = $"<b>{name}</b>\n<size=85%>Players: {players}     Day {m.WorldDay}     {date}</size>"; } catch { }
+                if (string.IsNullOrEmpty(_spExpanded) || !runs.Exists(r => r.Base == _spExpanded)) _spExpanded = runs[0].Base;
+                if (string.IsNullOrEmpty(_spSelSession) || !SessionListed(runs, _spSelSession)) _spSelSession = FirstVariantOf(runs, _spExpanded);
             }
-            SelectSpRow(_spCount > 0 ? 0 : -1);   // default to the newest
+            else { _spExpanded = ""; _spSelSession = ""; }
+
+            const float CARD_X = 8f, CARD_W = 576f, HROW = 52f, VINDENT = 28f, VROW = 36f, VGAP = 5f, VPAD_TOP = 4f, VPAD_BOT = 8f, CARD_GAP = 8f;
+            float rowW = CARD_W - VINDENT - 12f;
+            float y = -8f;   // top inset inside the list
+            foreach (var run in runs)
+            {
+                bool expanded = run.Base == _spExpanded;
+                int nv = expanded ? run.Variants.Count : 0;
+                float cardH = HROW + (nv > 0 ? VPAD_TOP + nv * VROW + (nv - 1) * VGAP + VPAD_BOT : 0f);
+
+                // Playthrough card — a FLAT, lighter float on the darker list (the mockup's hierarchy).
+                var cardGO = MakeGO("SpCard", _spContent); var cardRT = cardGO.GetComponent<RectTransform>();
+                SetAnchored(cardRT, CARD_X, y, CARD_W, cardH);
+                AddRoundedBG(cardGO, C_LD_CARD);
+
+                // Header — the click target that expands/collapses this playthrough.
+                var hgo = MakeGO("SpHdr", cardGO.transform); var hrt = hgo.GetComponent<RectTransform>();
+                SetAnchored(hrt, 0f, 0f, CARD_W, HROW);
+                var chGO = MakeGO("SpChev", hgo.transform); var chRT = chGO.GetComponent<RectTransform>();
+                chRT.anchorMin = chRT.anchorMax = new Vector2(0f, 1f); chRT.pivot = new Vector2(0.5f, 0.5f);
+                chRT.sizeDelta = new Vector2(16f, 16f); chRT.anchoredPosition = new Vector2(22f, -HROW / 2f);
+                chRT.localRotation = Quaternion.Euler(0f, 0f, expanded ? -90f : 0f);
+                var chImg = chGO.AddComponent<Image>(); chImg.sprite = ChevronSprite(); chImg.color = C_LD_MUT;
+                string players = (run.Players ?? "").Replace("—", "-"); if (string.IsNullOrEmpty(players)) players = "-";
+                var hlbl = MakeLabel(hgo.transform,
+                    $"<b>{FriendlyName(run.Base)}</b>\n<size=80%><color=#8B97A4>{players}</color></size>",
+                    15, C_LD_TXT, 44f, 0f, CARD_W - 200f, HROW, TextAlignmentOptions.Left);
+                ApplyFont(hlbl); hlbl.enableWordWrapping = false;
+                string dayPart = run.NewestDay >= 1 ? $"Day {run.NewestDay} · " : "";
+                ApplyFont(MakeLabel(hgo.transform, $"{dayPart}{run.Variants.Count} save{(run.Variants.Count == 1 ? "" : "s")}",
+                    12, C_LD_MUT, CARD_W - 152f, 0f, 140f, HROW, TextAlignmentOptions.Right));
+                _spHeaderHits.Add(new SpHit(hrt, run.Base));
+
+                if (expanded)
+                {
+                    float vy = HROW + VPAD_TOP;
+                    foreach (var v in run.Variants)
+                    {
+                        bool sel = v.SessionName == _spSelSession;
+                        var vgo = MakeGO("SpVar", cardGO.transform); var vrt = vgo.GetComponent<RectTransform>();
+                        SetAnchored(vrt, VINDENT, -vy, rowW, VROW);
+                        AddRoundedBG(vgo, sel ? C_LD_SEL : C_LD_VAR);
+                        if (sel)   // 3px accent bar on the selected row's left edge (mockup)
+                        {
+                            var barGO = MakeGO("SpSelBar", vgo.transform); var barRT = barGO.GetComponent<RectTransform>();
+                            SetAnchored(barRT, 0f, 0f, 3f, VROW); barGO.AddComponent<Image>().color = C_LD_ACC;
+                        }
+                        var icGO = MakeGO("SpIcon", vgo.transform); var icRT = icGO.GetComponent<RectTransform>();
+                        icRT.anchorMin = icRT.anchorMax = new Vector2(0f, 1f); icRT.pivot = new Vector2(0.5f, 0.5f);
+                        icRT.sizeDelta = new Vector2(16f, 16f); icRT.anchoredPosition = new Vector2(18f, -VROW / 2f);
+                        var icImg = icGO.AddComponent<Image>(); icImg.sprite = IconSprite(v.Kind); icImg.color = sel ? C_LD_ACC : C_LD_MUT;
+                        ApplyFont(MakeLabel(vgo.transform, VariantLabel(v.Kind), 14, C_LD_TXT, 38f, 0f, rowW - 210f, VROW, TextAlignmentOptions.Left));
+                        ApplyFont(MakeLabel(vgo.transform, VariantMeta(v), 12, C_LD_MUT, rowW - 172f, 0f, 162f, VROW, TextAlignmentOptions.Right));
+                        _spVarHits.Add(new SpHit(vrt, v.SessionName));
+                        vy += VROW + VGAP;
+                    }
+                }
+                y -= cardH + CARD_GAP;
+            }
+
+            _spContentH = -y + 8f;
+            float vh = _spViewport != null ? _spViewport.rect.height : 410f;
+            _spContent.sizeDelta = new Vector2(604f, Mathf.Max(_spContentH, vh));
+            ClampScroll(); UpdateSpScrollVisual();
         }
 
-        private void SelectSpRow(int idx)
+        private static string VariantLabel(string kind)
         {
-            _spSelected = idx;
-            for (int i = 0; i < _spRowRT.Length; i++)
-                if (_spRowImg[i] != null) _spRowImg[i]!.color = (i == idx) ? C_FIELDFOC : C_FIELD;
+            if (kind == "Autosave")   return "Autosave";
+            if (kind == "Disconnect") return "Disconnect checkpoint";
+            if (kind == "Recover")    return "Recover (crash)";
+            return "Main save";
+        }
+
+        private static string VariantMeta(MPSaveManager.MpVariant v)
+        {
+            try {
+                var lt = DateTimeOffset.FromUnixTimeSeconds(v.SavedAtUnix).LocalDateTime;
+                return v.Day >= 1 ? $"Day {v.Day} · {lt.ToString("h:mm tt")}" : lt.ToString("MMM d, h:mm tt");
+            } catch { return v.Day >= 1 ? $"Day {v.Day}" : ""; }
+        }
+
+        private static string FirstVariantOf(List<MPSaveManager.MpPlaythrough> runs, string baseName)
+        {
+            foreach (var r in runs) if (r.Base == baseName && r.Variants.Count > 0) return r.Variants[0].SessionName;
+            return runs.Count > 0 && runs[0].Variants.Count > 0 ? runs[0].Variants[0].SessionName : "";
+        }
+
+        private static bool SessionListed(List<MPSaveManager.MpPlaythrough> runs, string session)
+        {
+            foreach (var r in runs) foreach (var v in r.Variants) if (v.SessionName == session) return true;
+            return false;
+        }
+
+        private float MaxScroll() => Mathf.Max(0f, _spContentH - (_spViewport != null ? _spViewport.rect.height : 388f));
+        private void  ClampScroll() => _spScroll = Mathf.Clamp(_spScroll, 0f, MaxScroll());
+
+        private void UpdateSpScrollVisual()
+        {
+            if (_spContent != null) _spContent.anchoredPosition = new Vector2(0f, _spScroll);
+            if (_spThumb == null) return;
+            float vh  = _spViewport != null ? _spViewport.rect.height : 388f;
+            float th  = _spTrack != null ? _spTrack.rect.height : 388f;
+            float max = MaxScroll();
+            if (_spContentH <= vh + 1f || max <= 0f) { _spThumb.gameObject.SetActive(false); return; }
+            _spThumb.gameObject.SetActive(true);
+            float thumbH = Mathf.Clamp(vh / _spContentH * th, 28f, th);
+            SetAnchored(_spThumb, 0f, -(_spScroll / max) * (th - thumbH), 6f, thumbH);
         }
 
         private void TickSavePicker()
         {
             if (_savePicker == null || !_savePicker.activeSelf) return;
-            if (!Input.GetMouseButtonDown(0)) return;
             var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+
+            // Mouse-wheel scroll while the cursor is over the list.
+            if (_spViewport != null && RectHit(_spViewport, mp))
+            {
+                float sw = Input.mouseScrollDelta.y;
+                if (sw != 0f) { _spScroll = Mathf.Clamp(_spScroll - sw * 42f, 0f, MaxScroll()); UpdateSpScrollVisual(); }
+            }
+
+            if (!Input.GetMouseButtonDown(0)) return;
             if (RectHit(_rtSpBack, mp)) { OnSpBack(); return; }
             if (RectHit(_rtSpLoad, mp)) { OnSpLoad(); return; }
-            for (int i = 0; i < _spCount; i++)
-                if (_spRowRT[i] != null && RectHit(_spRowRT[i], mp)) { SelectSpRow(i); return; }
+            if (_spViewport == null || !RectHit(_spViewport, mp)) return;   // list clicks only count inside the viewport
+            foreach (var h in _spHeaderHits)
+                if (RectHit(h.Rt, mp)) { _spExpanded = (_spExpanded == h.Key) ? "" : h.Key; RefreshSavePicker(); return; }
+            foreach (var v in _spVarHits)
+                if (RectHit(v.Rt, mp)) { _spSelSession = v.Key; RefreshSavePicker(); return; }
         }
 
         private void OnSpLoad()
         {
-            if (_spSelected < 0 || _spSelected >= _spCount) { SetStatus("Pick a save first.", true); return; }
-            string name = _spRowName[_spSelected];
+            if (string.IsNullOrEmpty(_spSelSession)) { SetStatus("Pick a save first.", true); return; }
+            string name = _spSelSession;
             Plugin.Logger.LogInfo($"[MenuUI] Save picker → host session '{name}'.");
             ShowSavePicker(false);
             _lobbyLoadMode = true;

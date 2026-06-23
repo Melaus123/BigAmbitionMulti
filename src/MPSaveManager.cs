@@ -211,6 +211,103 @@ namespace BigAmbitionsMP
             return result;
         }
 
+        // ── Playthrough grouping (load-screen model) ───────────────────────────
+
+        /// <summary>One playthrough = a base session + its variant saves (Main / Autosave / Disconnect /
+        /// Recover), for the grouped load screen.</summary>
+        public class MpPlaythrough
+        {
+            public string Base = "";
+            public List<MpVariant> Variants = new();
+            public long   NewestUnix;
+            public int    NewestDay = -1;
+            public string Players   = "—";
+        }
+        public class MpVariant
+        {
+            public string SessionName = "";   // the actual session folder to load
+            public string Kind        = "";   // Main / Autosave / Disconnect / Recover
+            public int    Day         = -1;
+            public long   SavedAtUnix;
+            public string Players     = "";
+        }
+
+        /// <summary>Group MP saves into PLAYTHROUGHS for the load screen: one entry per base session, each
+        /// holding its variants newest-playthrough-first; variants ordered Main→Autosave→Disconnect→Recover.
+        /// Includes manifest-LESS recover saves (dated by folder mtime, players borrowed from siblings).
+        /// Pure file/JSON IO (no IL2CPP) — same off-thread safety as ListSessions.</summary>
+        public static List<MpPlaythrough> ListPlaythroughs()
+        {
+            var byBase = new Dictionary<string, MpPlaythrough>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                string root = MpVersionFolder();
+                if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return new List<MpPlaythrough>();
+                foreach (var dir in Directory.GetDirectories(root))
+                {
+                    string name = Path.GetFileName(dir);
+                    if (name.StartsWith("_")) continue;   // internal/staging folders (_dcstage_*, etc.)
+                    var v = new MpVariant { SessionName = name, Kind = ClassifyVariant(name) };
+                    var m = ReadManifest(name);
+                    if (m != null)
+                    {
+                        v.Day = m.WorldDay; v.SavedAtUnix = m.SavedAtUnix;
+                        var names = new List<string>();
+                        if (m.Slots != null) foreach (var s in m.Slots) names.Add(string.IsNullOrEmpty(s.CharacterName) ? s.DisplayName : s.CharacterName);
+                        v.Players = names.Count > 0 ? string.Join(", ", names) : "";
+                    }
+                    else { try { v.SavedAtUnix = new DateTimeOffset(Directory.GetLastWriteTimeUtc(dir)).ToUnixTimeSeconds(); } catch { } }
+
+                    string baseName = StripToBase(name);
+                    if (!byBase.TryGetValue(baseName, out var pt)) { pt = new MpPlaythrough { Base = baseName }; byBase[baseName] = pt; }
+                    pt.Variants.Add(v);
+                }
+                foreach (var pt in byBase.Values)
+                {
+                    MpVariant newestNamed = null;
+                    foreach (var v in pt.Variants)
+                    {
+                        if (v.SavedAtUnix > pt.NewestUnix) pt.NewestUnix = v.SavedAtUnix;
+                        if (v.Day > pt.NewestDay) pt.NewestDay = v.Day;
+                        if (!string.IsNullOrEmpty(v.Players) && (newestNamed == null || v.SavedAtUnix > newestNamed.SavedAtUnix)) newestNamed = v;
+                    }
+                    pt.Players = newestNamed != null ? newestNamed.Players : "—";
+                    foreach (var v in pt.Variants) if (string.IsNullOrEmpty(v.Players)) v.Players = pt.Players;   // recover borrows the run's roster
+                    pt.Variants.Sort((a, b) => VariantOrder(a.Kind).CompareTo(VariantOrder(b.Kind)));
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ListPlaythroughs: {ex.Message}"); }
+            var result = new List<MpPlaythrough>(byBase.Values);
+            result.Sort((a, b) => b.NewestUnix.CompareTo(a.NewestUnix));   // newest playthrough first
+            return result;
+        }
+
+        private static string ClassifyVariant(string name)
+        {
+            if (name.EndsWith("-recover"))    return "Recover";      // covers -recover / -auto-recover / -disconnect-recover
+            if (name.EndsWith("-disconnect")) return "Disconnect";
+            if (name.EndsWith("-auto"))       return "Autosave";
+            return "Main";
+        }
+
+        /// <summary>Strip every automatic-save suffix to the playthrough base name.</summary>
+        public static string StripToBase(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return name ?? "";
+            foreach (var suf in new[] { "-auto-recover", "-disconnect-recover", "-recover", "-disconnect", "-auto" })
+                if (name.EndsWith(suf)) return name.Substring(0, name.Length - suf.Length);
+            return name;
+        }
+
+        private static int VariantOrder(string kind)
+        {
+            if (kind == "Main")       return 0;
+            if (kind == "Autosave")   return 1;
+            if (kind == "Disconnect") return 2;
+            if (kind == "Recover")    return 3;
+            return 4;
+        }
+
         // ── Helpers ───────────────────────────────────────────────────────────
 
         /// <summary>Make a network- or user-supplied string safe as a single
