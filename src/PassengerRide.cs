@@ -362,6 +362,8 @@ namespace BigAmbitionsMP
             }
             _ghostGoneSince = -1f;
 
+            TickFollowGoal();   // [PassFollow] reconcile toward the driver's latest building transition (survives fast cycles)
+
             // Become "seated" (which is what shows the Exit HUD) only once we've actually REACHED the
             // car — not on a short timer while still walking up, and not if we never make it. The
             // timeout is just a backstop for a failed walk path (then we warp into the seat).
@@ -390,7 +392,7 @@ namespace BigAmbitionsMP
         private static void BeginLocalRide(string vehicleId, int seat)
         {
             _localVeh = vehicleId; _localSeat = seat; _pinned = false; _following = false;
-            _exitRequested = false; _ghostGoneSince = -1f; _camSaved = false;
+            _exitRequested = false; _ghostGoneSince = -1f; _camSaved = false; _goal = FollowGoal.None;
             _pinFallback = Time.unscaledTime + 10f;   // backstop only: warp into the seat if the walk fails
 
             var pc = PlayerHelper.PlayerController;
@@ -557,7 +559,7 @@ namespace BigAmbitionsMP
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] EndLocalRide: {ex.Message}"); }
             _localVeh = ""; _localSeat = -1; _pinned = false; _following = false;
-            _exitRequested = false; _ghostGoneSince = -1f;
+            _exitRequested = false; _ghostGoneSince = -1f; _goal = FollowGoal.None;
         }
 
         /// <summary>[PassFollow] Reverse StartPin WITHOUT ending the ride, so we stay "riding" across a
@@ -583,68 +585,77 @@ namespace BigAmbitionsMP
             _pinFallback = Time.unscaledTime + 10f;  // backstop only
         }
 
-        /// <summary>[PassFollow] Resolve a building by its AddressKey (CityManager lookup) then follow the
-        /// driver into it. Shared by the client rider (FollowEnter message) and the host rider (relay route)
-        /// so both resolve the building identically.</summary>
+        // ── [PassFollow] follow reconciler: latest-wins desired location, applied only when settled ──
+        // The driver can transition buildings faster than our own enter/exit coroutine finishes. Instead of
+        // acting on each Follow message immediately (which drops or garbles overlapping ones — the fast
+        // enter/exit/enter case), we record the LATEST desired location and let TickFollowGoal drive toward
+        // it whenever no transition is in flight. A newer goal overwrites the older — only the vehicle's
+        // final location matters. (Aligns with "sync toward the target, don't gate on event timing".)
+        private enum FollowGoal { None, Enter, Exit }
+        private static FollowGoal _goal = FollowGoal.None;
+        private static string     _goalAddr = "";    // Enter: AddressKey of the building to reach
+        private static int        _goalExitId;       // Exit: door to leave by
+
+        /// <summary>[PassFollow] Client rider (FollowEnter msg) / host rider (relay route): the driver took
+        /// our ridden vehicle INTO building AddressKey. Record it as the goal; TickFollowGoal reconciles.</summary>
         public static void FollowDriverIntoByAddress(string addressKey)
         {
             if (_localVeh == "" || string.IsNullOrEmpty(addressKey)) return;
-            try
-            {
-                var cm = InstanceBehavior<CityManager>.Instance;
-                CityBuildingController? target = null;
-                if (cm != null && cm.cityBuildingControllers != null)
-                    foreach (var c in cm.cityBuildingControllers)
-                        if (c != null && c.building != null && GameStateReader.AddressKey(c.building) == addressKey) { target = c; break; }
-                if (target == null) { Plugin.Logger.LogWarning($"[PassFollow] FollowEnter: could not resolve building '{addressKey}'."); return; }
-                FollowDriverInto(target.building);
-            }
-            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] FollowDriverIntoByAddress: {ex.Message}"); }
+            _goal = FollowGoal.Enter; _goalAddr = addressKey;
+            Plugin.Logger.LogInfo($"[PassFollow] goal = Enter '{addressKey}' (riding '{_localVeh}').");
         }
 
-        /// <summary>[PassFollow] The driver drove our ridden vehicle through a building entrance — follow
-        /// them in: soft un-pin, enter the building so its interior loads on our client, and let
-        /// TickLocalRide re-pin to the ghost (already at the right world coords inside) — so we ride in the
-        /// interior instead of staring at unloaded space.</summary>
-        public static void FollowDriverInto(Buildings.Building building)
-        {
-            if (_localVeh == "" || building == null) return;   // not riding / unresolved → ignore
-            // Defensive backstop: if we're somehow already inside a building (a FollowExit was missed or
-            // arrived late), DON'T enter again — a second EnterBuilding loads an interior on top of the
-            // first → "grey void" (user 2026-06-23). Skip; the next exit/enter cycle recovers. With slice 2
-            // (FollowExit) working we should always be outside when this fires.
-            if (BuildingManager.IsInsideBuilding)
-            {
-                Plugin.Logger.LogInfo($"[PassFollow] FollowEnter ignored — already inside a building (riding '{_localVeh}'); avoiding double-enter.");
-                return;
-            }
-            try
-            {
-                SoftUnpin();
-                InstanceBehavior<BuildingManager>.Instance?.EnterBuilding(building, false, false, 0, -1, true);
-                Plugin.Logger.LogInfo($"[PassFollow] following driver into building (riding '{_localVeh}') — entering; will re-pin inside.");
-            }
-            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] FollowDriverInto: {ex.Message}"); }
-        }
-
-        /// <summary>[PassFollow] The driver drove our ridden vehicle back OUT of a building — follow them
-        /// out: soft un-pin, exit the building on our client (back to the street), and let TickLocalRide
-        /// re-pin to the ghost once we're co-located outside. Mirror of FollowDriverInto.</summary>
+        /// <summary>[PassFollow] The driver took our ridden vehicle back OUT — record "outside" as the goal.</summary>
         public static void FollowDriverOut(int targetExitId)
         {
-            if (_localVeh == "") return;                       // not riding → ignore
-            if (!BuildingManager.IsInsideBuilding)
-            {
-                Plugin.Logger.LogInfo($"[PassFollow] FollowExit ignored — not inside a building (riding '{_localVeh}').");
-                return;
-            }
+            if (_localVeh == "") return;
+            _goal = FollowGoal.Exit; _goalExitId = targetExitId;
+            Plugin.Logger.LogInfo($"[PassFollow] goal = Exit (door {targetExitId}, riding '{_localVeh}').");
+        }
+
+        private static Buildings.Building? ResolveBuilding(string addressKey)
+        {
+            var cm = InstanceBehavior<CityManager>.Instance;
+            if (cm != null && cm.cityBuildingControllers != null)
+                foreach (var c in cm.cityBuildingControllers)
+                    if (c != null && c.building != null && GameStateReader.AddressKey(c.building) == addressKey) return c.building;
+            return null;
+        }
+
+        /// <summary>[PassFollow] Drive the passenger one step toward _goal (a building, or outside), only
+        /// while no building transition is running (enteringBuilding/exitingBuilding both clear — the game
+        /// guards re-entrant Enter/Exit anyway). Soft un-pins before each step so TickLocalRide re-pins to
+        /// the ghost once co-located in the new scene. If we're inside the WRONG building we step out first,
+        /// then enter the goal on a later tick. Clears the goal once reached.</summary>
+        private static void TickFollowGoal()
+        {
+            if (_goal == FollowGoal.None || _localVeh == "") return;
+            var bm = InstanceBehavior<BuildingManager>.Instance;
+            if (bm == null || bm.enteringBuilding || bm.exitingBuilding) return;   // wait for any transition to settle
             try
             {
+                if (_goal == FollowGoal.Exit)
+                {
+                    if (!BuildingManager.IsInsideBuilding) { _goal = FollowGoal.None; return; }   // already outside → done
+                    SoftUnpin();
+                    bm.ExitFromBuilding(_goalExitId);
+                    return;
+                }
+                // _goal == Enter
+                if (BuildingManager.IsInsideBuilding)
+                {
+                    string here = bm.buildingRegistration != null ? GameStateReader.AddressKey(bm.buildingRegistration) : "";
+                    if (here == _goalAddr) { _goal = FollowGoal.None; return; }   // in the goal building → done
+                    SoftUnpin();
+                    bm.ExitFromBuilding(0);   // inside the WRONG building → step out first; enter on a later tick
+                    return;
+                }
+                var target = ResolveBuilding(_goalAddr);
+                if (target == null) { Plugin.Logger.LogWarning($"[PassFollow] goal Enter: can't resolve '{_goalAddr}' — dropping."); _goal = FollowGoal.None; return; }
                 SoftUnpin();
-                InstanceBehavior<BuildingManager>.Instance?.ExitFromBuilding(targetExitId);
-                Plugin.Logger.LogInfo($"[PassFollow] following driver out of building (riding '{_localVeh}', exit {targetExitId}) — exiting; will re-pin outside.");
+                bm.EnterBuilding(target, false, false, 0, -1, true);   // keep the goal until we confirm inside next tick
             }
-            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] FollowDriverOut: {ex.Message}"); }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] TickFollowGoal: {ex.Message}"); }
         }
 
         // ── remote riders rendering ──────────────────────────────────────────
