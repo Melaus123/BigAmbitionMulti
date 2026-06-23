@@ -71,9 +71,18 @@ namespace BigAmbitionsMP
             // as "menu"/"menu-exit"/"client-menu"/…) land on the manual base.
             // _activeSessionName keeps the manual base; '-auto' never stacks
             // ('-auto-auto').  (user, 2026-06-12; disconnect folded in 2026-06-22.)
-            bool isAutomatic = reason == "autosave" || reason == "disconnect";
-            if (isAutomatic && !session.EndsWith("-auto"))
-                session += "-auto";
+            // Periodic autosave → '<base>-auto'.  A member-left checkpoint → '<base>-disconnect', kept
+            // DISTINCT from periodic autosaves: it's a roster checkpoint (not a traditional autosave), so
+            // it reads clearly in the load list AND it always carries the member who just left (see the
+            // carry-forward below).  _activeSessionName stays on the manual base; suffixes never stack.
+            // (user, 2026-06-12; disconnect split out 2026-06-23.)
+            string autoSuffix = reason == "disconnect" ? "-disconnect" : (reason == "autosave" ? "-auto" : "");
+            bool isAutomatic = autoSuffix.Length > 0;
+            // Always derive from the CLEAN base (strip any drifted sibling suffix) before appending this
+            // save's suffix, so names never stack ('-auto-disconnect', '-disconnect-recover') if
+            // _activeSessionName drifted to a sibling (EnsureManifest sets it to whatever it last wrote),
+            // and so base/-auto/-disconnect stay one lineage that carry-forward + load resolve together.
+            session = StripAutoSuffix(session) + autoSuffix;
 
             Plugin.Logger.LogInfo($"[MPSave] HostSaveNow session='{session}' reason={reason} — broadcasting SaveNow.");
 
@@ -96,6 +105,10 @@ namespace BigAmbitionsMP
                     SetSessionMetadata(session, slot.Day);   // owners + day + timestamp
                     DiagPhase("host lambda: SetSessionMetadata done → MergeSlot");
                     MergeSlot(session, slot);                 // host's own slot
+                    // Carry forward anyone who isn't here to save themselves (a member who just left, or
+                    // was offline) so an auto/disconnect checkpoint never silently drops them → a load that
+                    // would otherwise fresh-start them as a brand-new player. (2026-06-23)
+                    if (isAutomatic) CarryForwardAbsentMembers(session);
                     // Loan ledger rides every session save — loans created
                     // BEFORE the session's first save (no folder yet) would
                     // otherwise never persist unless the ledger changed again.
@@ -728,6 +741,77 @@ namespace BigAmbitionsMP
                 IsHost        = MPServer.IsRunning,
                 Day           = day,
             };
+        }
+
+        /// <summary>Strip a trailing automatic-save suffix ('-auto' / '-disconnect') to get the base
+        /// session name shared by a session and its automatic siblings.</summary>
+        private static string StripAutoSuffix(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s ?? "";
+            if (s.EndsWith("-disconnect")) return s.Substring(0, s.Length - "-disconnect".Length);
+            if (s.EndsWith("-auto"))       return s.Substring(0, s.Length - "-auto".Length);
+            return s;
+        }
+
+        /// <summary>HOST: make an automatic checkpoint (autosave / disconnect) a COMPLETE roster snapshot.
+        /// For every player who has a save in this session lineage (base / -auto / -disconnect) but is NOT
+        /// currently connected (so they won't upload fresh this round — e.g. the member who just left), copy
+        /// their NEWEST save into <paramref name="targetSession"/> and merge their slot. Each member resumes
+        /// their OWN latest within-session save — manifest-reconciled, no cross-session desync. Connected
+        /// members are skipped (they save themselves fresh; skipping also avoids racing their incoming
+        /// upload). Pure file/JSON IO — safe off the main thread.</summary>
+        public static void CarryForwardAbsentMembers(string targetSession)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(targetSession)) return;
+                var connected = MPServer.ConnectedStableIds();
+                string baseName = StripAutoSuffix(targetSession);
+                string[] lineage = { baseName, baseName + "-auto", baseName + "-disconnect" };
+
+                // Newest save per member across the lineage. Scan the character FOLDERS (not just manifest
+                // slots) so a manifest-less self-save (OnApplicationQuit) is still found; remember which
+                // session it came from so we can pull that session's slot (day/money) for the member.
+                var newest = new Dictionary<string, (string srcSession, string srcDir, DateTime when)>();
+                foreach (var s in lineage)
+                {
+                    string sessionFolder = MPSaveManager.MpSessionFolder(s);
+                    if (string.IsNullOrEmpty(sessionFolder) || !Directory.Exists(sessionFolder)) continue;
+                    foreach (var dir in Directory.GetDirectories(sessionFolder))
+                    {
+                        string stable = Path.GetFileName(dir);
+                        if (!stable.StartsWith("guid-")) continue;   // character folders only
+                        string? hsg = NewestHsg(dir);
+                        if (hsg == null) continue;
+                        DateTime when;
+                        try { when = File.GetLastWriteTimeUtc(hsg); } catch { continue; }
+                        if (!newest.TryGetValue(stable, out var cur) || when > cur.when)
+                            newest[stable] = (s, dir, when);
+                    }
+                }
+
+                foreach (var kv in newest)
+                {
+                    string stable = kv.Key;
+                    if (connected.Contains(stable)) continue;   // saves itself fresh — don't touch (no race)
+                    var (srcSession, srcDir, _) = kv.Value;
+                    if (srcSession == targetSession) continue;   // already its own newest
+                    // Already captured in the target this round? (check WITHOUT creating the dir)
+                    string targetMemberDir = Path.Combine(MPSaveManager.MpSessionFolder(targetSession), stable);
+                    if (Directory.Exists(targetMemberDir) && NewestHsg(targetMemberDir) != null) continue;
+                    try
+                    {
+                        string dstDir = MPSaveManager.MpCharacterFolder(targetSession, stable);
+                        foreach (var f in Directory.GetFiles(srcDir))
+                            File.Copy(f, Path.Combine(dstDir, Path.GetFileName(f)), overwrite: true);
+                        var slot = MPSaveManager.ReadManifest(srcSession)?.Slots?.Find(x => x.StableId == stable);
+                        if (slot != null) MergeSlot(targetSession, slot);
+                        Plugin.Logger.LogInfo($"[MPSave] Carried forward absent member (stable={stable}) from '{srcSession}' → '{targetSession}'.");
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] Carry-forward '{stable}': {ex.Message}"); }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] CarryForwardAbsentMembers '{targetSession}': {ex.Message}"); }
         }
 
         /// <summary>The native midnight autosave (GameManager.RunMidNightAutoSave)

@@ -301,6 +301,25 @@ namespace BigAmbitionsMP
         private void OnApplicationQuit()
         {
             MPBugReport.MarkCleanShutdown();
+            // Persist the local player's CURRENT character on a raw window-close (X / quit-to-desktop), the
+            // same as the Save-and-Exit button — otherwise a window-close ships NOTHING and the session
+            // keeps only what the last periodic autosave (or the host's host-only disconnect checkpoint)
+            // captured, so a member can return as a brand-new player. PerformLocalSave is synchronous
+            // (JoinSaveGameThreads blocks), so the .hsg is on disk before we exit; on one machine it lands
+            // in the shared session folder the host's disconnect carry-forward then reads.
+            try
+            {
+                if ((MPServer.IsRunning || MPClient.IsConnected) && IsInGame())
+                {
+                    string session = MPSaveCoordinator.ActiveSessionName;
+                    if (!string.IsNullOrEmpty(session))
+                    {
+                        Plugin.Logger.LogInfo($"[MPSave] OnApplicationQuit — self-saving '{session}' before exit.");
+                        MPSaveCoordinator.PerformLocalSave(session);
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] OnApplicationQuit save: {ex.Message}"); }
         }
 
         private void OnLifecyclePhase(MPLifecycle.MPPhase prev, MPLifecycle.MPPhase next)

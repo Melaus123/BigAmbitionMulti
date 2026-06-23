@@ -176,6 +176,22 @@ namespace BigAmbitionsMP
 
         /// <summary>Host: send each connected client its own stored .hsg for the
         /// session so it can load in.  Phase 4 load.</summary>
+        /// <summary>Stable ids that are connected RIGHT NOW (the host itself + every current peer).
+        /// These save themselves through the SaveNow round-trip, so the save carry-forward must NOT touch
+        /// them (avoids racing their fresh upload); it only carries members who are absent.</summary>
+        public static System.Collections.Generic.HashSet<string> ConnectedStableIds()
+        {
+            var set = new System.Collections.Generic.HashSet<string>();
+            try
+            {
+                set.Add(MPConfig.StableId);   // the host
+                foreach (var pid in _peerNames.Values)
+                    if (StableIdByPlayer.TryGetValue(pid, out var s) && !string.IsNullOrEmpty(s)) set.Add(s);
+            }
+            catch { }
+            return set;
+        }
+
         public static void SendLoadDataToEachClient(string session, MpManifest m)
         {
             foreach (var peer in _clients.Keys)
@@ -1852,6 +1868,12 @@ namespace BigAmbitionsMP
             var payload = env.GetPayload<PlayerInGamePayload>();
             if (payload != null && !SenderIs(payload.PlayerId, senderPid, MessageType.WorldReady, allowEmpty: true)) return;
             MarkWorldReady(senderPid);
+            // Baseline capture: the moment a client is fully in-game, snapshot the session so EVERY member
+            // has a save from the start — even in a short session that never reaches a periodic autosave.
+            // Without this the disconnect carry-forward has nothing to copy and the member loads as a new
+            // player (2026-06-23). Coordinated save → the base session; the joiner uploads its own .hsg.
+            try { MPSaveCoordinator.HostSaveNow("join"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] World-ready baseline save: {ex.Message}"); }
             // A player whose world just loaded missed any earlier loan-state
             // broadcast (session-load ledger, joins mid-loan) — re-broadcast.
             GameStatePatcher.EnqueueOnMainThread(MPHub.BroadcastLoansIfAny);
