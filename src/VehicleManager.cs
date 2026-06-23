@@ -1044,6 +1044,69 @@ namespace BigAmbitionsMP
             return result;
         }
 
+        // ===== FIX(flatbed-push 2026-06-22): neutralize the carving NavMeshObstacle on hand-cart GHOSTS =====
+        // A flatbed/handtruck GHOST is a kinematic copy driven by the synced transform, and it keeps a
+        // CARVING NavMeshObstacle (carve=true, en=true). On the non-owner's machine that obstacle displaces
+        // the host's nav-driven traffic as the cart moves — so a player pushing a cart appears to shove cars.
+        // The OWNER's own machine disables the cart's NavMeshObstacle while carrying it (v3 probe: en=False);
+        // we replicate that on the ghost. The SOLID COLLIDER IS LEFT ENABLED — click-to-loot/board raycasts
+        // it (PassengerRide pick + GhostIdFor, solid-only), so disabling it would break looting. Scooter is
+        // excluded (ridden, not a carried cart).
+        internal static bool IsHandCartType(string typeName) =>
+            typeName != null && (typeName.IndexOf("flatbed", System.StringComparison.OrdinalIgnoreCase) >= 0
+                              || typeName.IndexOf("handtruck", System.StringComparison.OrdinalIgnoreCase) >= 0);
+
+        private static readonly Collider[] _cartIgnoreBuf = new Collider[256];
+        internal static void NeutralizeHandCartGhostObstacle(UnityEngine.GameObject go)
+        {
+            if (go == null) return;
+            try
+            {
+                // Match the owner's carried state: drop the carving NavMeshObstacle. It isn't the pusher, but
+                // the owner disables it while carrying — left on, it would make traffic reroute around an
+                // invisible carried cart.
+                foreach (var o in go.GetComponentsInChildren<UnityEngine.AI.NavMeshObstacle>(true))
+                    if (o != null && (o.enabled || o.carving)) { o.carving = false; o.enabled = false; }
+
+                // THE PUSH (confirmed by test 2026-06-22): the ghost's SOLID collider displaces nearby
+                // vehicles as the cart is carried. Keep the collider ENABLED so click-to-loot still raycasts
+                // it (IgnoreCollision doesn't affect raycasts), and instead ignore collisions with every nearby
+                // vehicle — anything carrying a Rigidbody (cars/traffic; walls/ground have none). Machine-
+                // agnostic: host vs real Gley traffic and client vs ghost cars alike. Re-applied each tick so a
+                // vehicle entering range is ignored before it reaches the cart.
+                foreach (var cc in go.GetComponentsInChildren<Collider>(true))
+                {
+                    if (cc == null || cc.isTrigger || !cc.enabled) continue;
+                    int n = UnityEngine.Physics.OverlapSphereNonAlloc(cc.bounds.center, 6f, _cartIgnoreBuf, ~0, UnityEngine.QueryTriggerInteraction.Ignore);
+                    for (int i = 0; i < n; i++)
+                    {
+                        var other = _cartIgnoreBuf[i];
+                        if (other == null || other.attachedRigidbody == null) continue;   // vehicles only
+                        if (other.transform.IsChildOf(go.transform)) continue;            // not the cart itself
+                        UnityEngine.Physics.IgnoreCollision(cc, other, true);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>Disable the carving NavMeshObstacle on every flatbed/handtruck ghost (host AND client —
+        /// the ghost lives on whichever machine isn't the owner). Called every frame from the collision-ignore
+        /// refresh, because the ghost keeps its HandTruck controller which can switch the obstacle back on.</summary>
+        internal static void NeutralizeHandCartGhostObstacles()
+        {
+            try
+            {
+                foreach (var kv in _remoteVehicles)
+                {
+                    if (kv.Value?.Go == null) continue;
+                    string tn = null; try { tn = TypeNameFor(kv.Key); } catch { }
+                    if (IsHandCartType(tn)) NeutralizeHandCartGhostObstacle(kv.Value.Go);
+                }
+            }
+            catch { }
+        }
+
         /// <summary>The ghost vehicleId a (collider) transform belongs to, walking up parents,
         /// or "" if it isn't part of a ghost. Used by click-to-board cursor picking.</summary>
         public static string GhostIdFor(Transform t)

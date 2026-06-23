@@ -623,6 +623,7 @@ namespace BigAmbitionsMP
         public static void TickVehicleCollisionIgnores()
         {
             if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            VehicleManager.NeutralizeHandCartGhostObstacles();   // FIX(flatbed-push): hand-cart ghosts must not carve+shove traffic; every frame so the HandTruck controller can't re-enable it
 #if BAMP_DEV
             TickAvatarSenseProbe();   // host-side Option-B diagnostic (self-gated host-only + 1 Hz)
 #endif
