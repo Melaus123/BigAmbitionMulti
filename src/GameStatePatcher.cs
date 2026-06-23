@@ -722,9 +722,16 @@ namespace BigAmbitionsMP
                         return;
                     }
 
-                    // Layout (string; controls which BusinessLayoutSet is used)
+                    // Layout (string; controls which BusinessLayoutSet is used).
+                    // Capture whether it ACTUALLY changes — the visual refresh below re-calls
+                    // LoadBuilding only when it did.  Re-calling LoadBuilding on a building that already
+                    // shows the right layout (the IRS; or a 2nd/Nth snapshot for the same shop) spawns a
+                    // DUPLICATE set of stations on top → the "8 booths vs 4 / 30 stations" duplication
+                    // (user 2026-06-23) plus malformed duplicates that NRE on staffing.
+                    string _layoutBefore = reg.Layout;
                     if (!string.IsNullOrEmpty(payload.Layout))
                         reg.Layout = payload.Layout;
+                    bool _layoutChanged = !string.Equals(_layoutBefore, reg.Layout, StringComparison.Ordinal);
 
                     // Interior designs (wall/floor/ceiling material+color).
                     // Diffed like items: only elements whose serialized form
@@ -900,7 +907,7 @@ namespace BigAmbitionsMP
                     // when LoadBuilding ran on entry.  Calling LoadBuilding
                     // again re-runs the full pipeline (layout, designs, items)
                     // against the now-fresh fields.
-                    TryRefreshActiveInteriorIfMatches(payload.AddressKey, changedIds, removedIds, changedDesignUuids);
+                    TryRefreshActiveInteriorIfMatches(payload.AddressKey, changedIds, removedIds, changedDesignUuids, _layoutChanged);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorSnapshot: {ex.Message}"); }
             });
@@ -993,7 +1000,7 @@ namespace BigAmbitionsMP
 
         private static void TryRefreshActiveInteriorIfMatches(string addressKey,
             HashSet<string>? changedIds = null, HashSet<string>? removedIds = null,
-            HashSet<string>? changedDesignUuids = null)
+            HashSet<string>? changedDesignUuids = null, bool layoutChanged = true)
         {
             try
             {
@@ -1023,8 +1030,26 @@ namespace BigAmbitionsMP
                 // snapshot has set reg.Layout, re-call LoadBuilding so the
                 // template spawns its furniture/shelves.  Idempotent for
                 // already-loaded layouts.
-                try { matched.LoadBuilding(false); }
+                // DE-DUP (2026-06-23): only re-spawn the layout when it actually changed.  Re-calling
+                // LoadBuilding when the layout is already correct stacks a DUPLICATE set of stations
+                // (the IRS 8-vs-4 / 30-station duplication + malformed duplicates that NRE on staffing).
+                try { if (layoutChanged) matched.LoadBuilding(false); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] LoadBuilding re-trigger for layout '{reg.Layout}': {ex.Message}"); }
+
+                // MP STAFFING FIX (2026-06-23): native AI staffing (BuildingManager.SetupAiEmployeeStations)
+                // runs on building ENTRY — but for AI businesses the layout is Phase-1b-suppressed on the
+                // client and only just spawned its stations via the re-load ABOVE, AFTER that staffing
+                // already ran.  So the stations are UNSTAFFED on the client (e.g. hairdresser chairs / IRS
+                // booths → a customer joins an unservable queue and the cancel path NREs on the null employee
+                // → hard lock; user 2026-06-23: client hairdresser had 0 staffed vs host's 5).  Re-run the
+                // native staffing now that the stations exist: AssignEmployee self-skips already-staffed
+                // stations (idempotent) and SetupAiEmployeeStations self-skips player-owned shops.
+                // Re-staff the (possibly freshly-spawned) stations — DEFERRED a couple frames so their Start
+                // has run.  Staffing them the SAME frame the re-load spawns them NREs inside the game's
+                // AssignEmployee (uninitialised item data — Braids and Blowouts, 2026-06-23).  Run on the
+                // building's own MonoBehaviour; ReStaffStationsNow is idempotent (skips already-staffed).
+                try { matched.StartCoroutine(ReStaffAfterInit(matched, addressKey)); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] schedule re-staff for '{addressKey}': {ex.Message}"); }
 
                 // UUID → SerializedInteriorDesign dict from the fresh data we just wrote.
                 var dict = new System.Collections.Generic.Dictionary<string, SerializedInteriorDesign>();
@@ -1069,6 +1094,54 @@ namespace BigAmbitionsMP
                 RefreshItemsForActiveBuilding(matched, reg, changedIds, removedIds);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] TryRefreshActiveInteriorIfMatches: {ex.Message}"); }
+        }
+
+        // Deferred re-staff: wait a couple frames so freshly-spawned stations' Start has initialised them
+        // (item data, employeeType) before staffing.  Staffing the same frame the re-load spawns them NREs
+        // inside the game's AssignEmployee (Braids and Blowouts: all 7 stations failed, 2026-06-23).
+        private static System.Collections.IEnumerator ReStaffAfterInit(BuildingManager bm, string addressKey)
+        {
+            yield return null;
+            yield return null;
+            ReStaffStationsNow(bm, addressKey);
+        }
+
+        // Staff every unstaffed customer-serve station in the building individually (robust — one bad
+        // station can't abort the rest), reusing the game's public AssignAiToEmployeeStation.  Idempotent
+        // (skips already-staffed); self-skips player shops are handled upstream.  Logs the real cause + stack
+        // per failure so a genuine (non-timing) NRE is still localizable.
+        private static void ReStaffStationsNow(BuildingManager bm, string addressKey)
+        {
+            try
+            {
+                if (bm == null || bm.buildingRegistration == null) return;
+                if (GameStateReader.AddressKey(bm.buildingRegistration) != addressKey) return;   // player left this building → skip
+                var stations = new System.Collections.Generic.List<EmployeeStationController>(
+                    bm.indoorItemContainer.GetComponentsInChildren<EmployeeStationController>(true));
+                if (bm.currentLayout != null)
+                    stations.AddRange(bm.currentLayout.GetComponentsInChildren<EmployeeStationController>(true));
+                int staffed = 0, skipped = 0, failed = 0;
+                foreach (var st in stations)
+                {
+                    try
+                    {
+                        if (st == null || st.employee != null) { skipped++; continue; }                 // already staffed
+                        if (st.parentItemController is BusinessEmployeeController) { skipped++; continue; } // game routes these via the worker roster
+                        if (st.GetType().Name == "ComputerController") { skipped++; continue; }           // IKA-style, not customer-serve
+                        if (st.playerItemPurchaserSettings != null && st.playerItemPurchaserSettings.enabled) { skipped++; continue; } // purchaser shelf, not a serve station
+                        bm.AssignAiToEmployeeStation(st);
+                        staffed++;
+                    }
+                    catch (Exception sx)
+                    {
+                        failed++;
+                        Plugin.Logger.LogWarning($"[Patcher] AI re-staff of {st?.GetType().Name} failed: {sx.Message}");
+                    }
+                }
+                if (staffed > 0 || failed > 0)
+                    Plugin.Logger.LogInfo($"[Patcher] AI-staffed {staffed} station(s) for '{addressKey}'" + (failed > 0 ? $" ({failed} failed)" : "") + ".");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] re-staff loop for '{addressKey}': {ex.Message}"); }
         }
 
         /// <summary>

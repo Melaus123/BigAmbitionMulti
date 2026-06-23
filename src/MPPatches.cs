@@ -3388,6 +3388,38 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── [StationLock] IRS tax counter — never hard-lock at an unstaffed counter (2026-06-23) ──
+        // IRSStationController.OnOrderCancel does `if (employee.customer == playerCustomer)`; on a client
+        // where the counter is unstaffed (employee == null) that NREs → the cancel fails → the player is
+        // stuck (can't escape, ALT+F4 — the reported bug).  PRIMARY fix is reliable staffing (GameStatePatcher
+        // re-runs AI staffing after the interior re-load).  This is the BACKSTOP: if a counter is somehow
+        // still unstaffed, do the safe cleanup ourselves (dequeue + close the modal) so the player always
+        // escapes.  Staffed (employee != null) → native runs unchanged.  (Hairdresser/coat-check/cinema
+        // cancels are already null-safe; the cash register is covered by RegGuard.  IRS is the gap.)
+        [HarmonyPatch(typeof(Controllers.IRSStationController), "OnOrderCancel")]
+        public static class Patch_IRSCancel_NeverHardLock
+        {
+            static bool Prefix(Controllers.IRSStationController __instance)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;   // single player / offline → native
+                try
+                {
+                    if (__instance.employee != null) return true;               // staffed → native cancel is safe
+                    // Unstaffed: native would NRE on employee.customer.  Replicate the safe tail ourselves.
+                    if (__instance.playerCustomer != null)
+                    {
+                        try { __instance.GetWaitingLine().customersManagement.RemoveCustomer(__instance.playerCustomer); } catch { }
+                        try { __instance.playerCustomer.UnsubscribeToGlobalEvents(); } catch { }
+                        try { UnityEngine.Object.Destroy(__instance.playerCustomer); } catch { }
+                    }
+                    try { InstanceBehavior<UI.UIs>.Instance.playerHUD.purchaseUI.Close(); } catch { }
+                    Plugin.Logger.LogInfo("[StationLock] IRS cancel at an UNSTAFFED counter — safe-dequeued + closed UI (prevented hard-lock).");
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StationLock] IRS cancel guard: {ex.Message}"); return true; }
+            }
+        }
+
         // ── Honorary-degree training (user spec 2026-06-12) ───────────────────
         // In MP nobody sits at a desk for tens of game-hours: the school door
         // opens OUR confirm dialog (course + FULL cost); Accept charges the

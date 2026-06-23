@@ -360,8 +360,7 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo("[VehProbe] F6 pressed — spawning the next uncollected vehicle batch.");
                 VehicleManager.DevProbeUncollected(5);
             }
-            // (F8 owner-unlock stand-in REMOVED 2026-06-15 — replaced by the real in-car
-            //  Lock/Unlock toggle on ItemPanelUI; see PassengerLockButton.cs.)
+            // (F8 free for dev use — 2026-06-23.)
 #endif
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
