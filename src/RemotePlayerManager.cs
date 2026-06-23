@@ -885,6 +885,7 @@ namespace BigAmbitionsMP
                             // we broadcast a box the player wasn't holding.
                             if (ch == null || !ch.gameObject.activeInHierarchy) continue;
                             p.Held = CleanPropName(ch.name);
+                            CaptureLocalHeldTemplate(p.Held, ch.gameObject);   // capture the correct single-item model straight from the local hand — no scene-search ambiguity for remotes
                             // Exact local placement — baskets hang off-axis.
                             var lp = ch.localPosition; var le = ch.localEulerAngles;
                             p.HeldT.Add(lp.x); p.HeldT.Add(lp.y); p.HeldT.Add(lp.z);
@@ -910,6 +911,31 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<string, GameObject> _heldTemplates = new();
         private static readonly Dictionary<string, string> _heldApplied = new();   // playerId → prop name
         private static readonly Dictionary<string, GameObject> _heldProps = new(); // playerId → live prop clone
+        private static readonly HashSet<string> _localCaptured = new();             // item names captured from the LOCAL player's own hand
+
+        /// <summary>Capture the LOCAL player's ACTUAL held prop as the canonical template for this item —
+        /// it is unambiguously the correct single-item model (literally what they hold on their own screen).
+        /// Remotes holding the same item then clone THIS instead of guessing via a scene search, which is
+        /// what let a stocked shelf get cloned into a hand. Captured once per item; the clone is an inactive,
+        /// visual-only, scene-persistent template. (The held model is per-ITEM, so the local copy is the
+        /// right model for whoever holds it.)</summary>
+        private static void CaptureLocalHeldTemplate(string name, GameObject source)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(name) || source == null || _localCaptured.Contains(name)) return;
+                var clone = UnityEngine.Object.Instantiate(source);
+                clone.name = "BAMP_HeldTemplate_" + name;
+                StripToVisual(clone);
+                clone.transform.SetParent(null, false);
+                clone.SetActive(false);
+                UnityEngine.Object.DontDestroyOnLoad(clone);
+                _heldTemplates[name] = clone;     // the local-captured model wins over any scene match
+                _localCaptured.Add(name);
+                Plugin.Logger.LogInfo($"[Carry] captured local held template for '{name}' — canonical single-item model.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Carry] capture template: {ex.Message}"); }
+        }
 
         private static string CleanPropName(string n)
         {
@@ -979,8 +1005,14 @@ namespace BigAmbitionsMP
             if (_heldTemplates.TryGetValue(name, out var t) && t != null) return t;
             try
             {
-                // Inactive instances included — the scene keeps placeholder
-                // copies (e.g. vehicle-bed boxes) of the same prefabs.
+                // Inactive instances included — the scene keeps placeholder copies (e.g. vehicle-bed
+                // boxes) of the same prefabs.  Pick the SIMPLEST match (fewest renderers), NOT the first:
+                // the same item also exists STOCKED on store shelves as a 4x4 group of ~16 boxes under one
+                // object, and Instantiate clones the whole hierarchy — cloning that put an entire shelf in
+                // the avatar's hand (user 2026-06-22, non-deterministic scan order = intermittent + both
+                // directions).  A single held box has only a handful of renderers; a shelf stack has ~16x.
+                GameObject? best = null;
+                int bestCount = int.MaxValue;
                 var all = Resources.FindObjectsOfTypeAll(typeof(Transform));
                 if (all != null)
                     foreach (var o in all)
@@ -989,9 +1021,14 @@ namespace BigAmbitionsMP
                         if (tr == null) continue;
                         if (CleanPropName(tr.name) != name) continue;
                         if (tr.name.StartsWith("BAMP_Held_")) continue;   // never template off our own clones
-                        _heldTemplates[name] = tr.gameObject;
-                        return tr.gameObject;
+                        int rc = tr.GetComponentsInChildren<Renderer>(true).Length;
+                        if (rc > 0 && rc < bestCount) { bestCount = rc; best = tr.gameObject; }
                     }
+                if (best != null)
+                {
+                    _heldTemplates[name] = best;
+                    return best;
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Carry] template scan: {ex.Message}"); }
             return null;
