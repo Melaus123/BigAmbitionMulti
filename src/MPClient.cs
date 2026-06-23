@@ -289,6 +289,14 @@ namespace BigAmbitionsMP
                     HandlePassengerBoardResultMsg(env);
                     break;
 
+                case MessageType.PassengerFollowEnter:
+                    HandlePassengerFollowEnterMsg(env);
+                    break;
+
+                case MessageType.PassengerFollowExit:
+                    HandlePassengerFollowExitMsg(env);
+                    break;
+
                 case MessageType.PassengerExit:
                     HandlePassengerExitMsg(env);
                     break;
@@ -974,6 +982,44 @@ namespace BigAmbitionsMP
             if (!IsConnected || string.IsNullOrEmpty(vehicleId)) return;
             Send(MessageEnvelope.Create(MessageType.VehicleLockSet, MPConfig.PlayerId,
                 new VehicleLockPayload { OwnerId = MPConfig.PlayerId, VehicleId = vehicleId, Locked = locked }));
+        }
+
+        // [PassFollow] SLICE 1a — confirm the rider receives the follow-signal and can resolve the
+        // building (the actual EnterBuilding lands in 1b).  Only the targeted rider acts.
+        private static void HandlePassengerFollowEnterMsg(MessageEnvelope env)
+        {
+            var p = env.GetPayload<PassengerFollowPayload>();
+            if (p == null || p.TargetPlayerId != MPConfig.PlayerId) return;   // not for me
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                try
+                {
+                    var cm = InstanceBehavior<CityManager>.Instance;
+                    CityBuildingController? target = null;
+                    if (cm != null && cm.cityBuildingControllers != null)
+                        foreach (var c in cm.cityBuildingControllers)
+                            if (c != null && c.building != null && GameStateReader.AddressKey(c.building) == p.AddressKey) { target = c; break; }
+                    if (target == null) { Plugin.Logger.LogWarning($"[PassFollow] FollowEnter: could not resolve building '{p.AddressKey}'."); return; }
+                    Plugin.Logger.LogInfo($"[PassFollow] FollowEnter for '{p.AddressKey}' (riding '{p.VehicleId}') → following driver inside.");
+                    PassengerRide.FollowDriverInto(target.building);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[PassFollow] FollowEnter handle: {ex.Message}"); }
+            });
+        }
+
+        private static void HandlePassengerFollowExitMsg(MessageEnvelope env)
+        {
+            var p = env.GetPayload<PassengerFollowPayload>();
+            if (p == null || p.TargetPlayerId != MPConfig.PlayerId) return;   // not for me
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                try
+                {
+                    Plugin.Logger.LogInfo($"[PassFollow] FollowExit (riding '{p.VehicleId}', exit {p.ExitId}) → following driver out.");
+                    PassengerRide.FollowDriverOut(p.ExitId);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[PassFollow] FollowExit handle: {ex.Message}"); }
+            });
         }
 
         private static void HandlePassengerBoardResultMsg(MessageEnvelope env)

@@ -2374,6 +2374,22 @@ namespace BigAmbitionsMP
             });
         }
 
+        /// <summary>Host → a rider: follow the driver into a building (the vehicle they're riding drove in).</summary>
+        public static void SendPassengerFollowEnter(string targetPid, string addressKey, string vehicleId)
+        {
+            if (!_running) return;
+            Broadcast(MessageEnvelope.Create(MessageType.PassengerFollowEnter, MPConfig.PlayerId,
+                new PassengerFollowPayload { TargetPlayerId = targetPid, AddressKey = addressKey, VehicleId = vehicleId }));
+        }
+
+        /// <summary>Host → a rider: follow the driver back OUT of a building (the vehicle they're riding drove out).</summary>
+        public static void SendPassengerFollowExit(string targetPid, string vehicleId, int exitId)
+        {
+            if (!_running) return;
+            Broadcast(MessageEnvelope.Create(MessageType.PassengerFollowExit, MPConfig.PlayerId,
+                new PassengerFollowPayload { TargetPlayerId = targetPid, VehicleId = vehicleId, ExitId = exitId }));
+        }
+
         private static void HandleVehicleLockSet(string senderPid, MessageEnvelope env)
         {
             var p = env.GetPayload<VehicleLockPayload>();

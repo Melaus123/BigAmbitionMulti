@@ -113,6 +113,10 @@ namespace BigAmbitionsMP
         // Shared vehicle storage (take/put from another player's UNLOCKED vehicle — host-authoritative request/grant).
         VehicleCargoReq       = 125, // Accessor → Host → owner: take (Op=0) / put (Op=1) an item in vehicle V's storage.
         VehicleCargoRes       = 126, // Owner → Host → accessor: result (Ok = applied to real cargo; else Reason = gone/full).
+
+        // Passenger follows the driver through a building entrance (host-authoritative).
+        PassengerFollowEnter  = 127, // Host → rider P: vehicle V drove into a building (AddressKey); rider should enter it too.
+        PassengerFollowExit   = 128, // Host → rider P: vehicle V left the building; rider should follow back out.
     }
 
     // ── Passenger payloads (ride shotgun) ───────────────────────────────────────
@@ -146,6 +150,16 @@ namespace BigAmbitionsMP
         public string OwnerId   { get; set; } = "";
         public string VehicleId { get; set; } = "";
         public bool   Locked    { get; set; }
+    }
+
+    /// <summary>Host → a specific rider: the vehicle they're riding entered/left a building, so the
+    /// rider should follow the driver in/out (AddressKey is the building for the enter case).</summary>
+    public class PassengerFollowPayload
+    {
+        public string TargetPlayerId { get; set; } = "";
+        public string AddressKey     { get; set; } = "";
+        public string VehicleId      { get; set; } = "";
+        public int    ExitId         { get; set; }       // [PassFollow] exit-door id (FollowExit only; ignored on enter)
     }
 
     /// <summary>Host → joiner: the full passenger lock + seat state (join replay), so a

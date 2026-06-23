@@ -574,6 +574,67 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── [PassFollow] passenger follows the driver through a building entrance (2026-06-23) ──
+        // When the HOST drives a vehicle that has passengers through a building entrance, each rider
+        // otherwise ends up staring at unloaded interior coords ("grey nothingness", user 2026-06-23):
+        // the ghost is at the right WORLD spot but the rider's client never entered the building.  Tell
+        // each rider to follow the driver inside.  SLICE 1a: detect + signal only (the rider logs +
+        // resolves the building; the actual EnterBuilding lands in 1b).  Host-as-driver for now.
+        [HarmonyPatch(typeof(BuildingManager), nameof(BuildingManager.EnterBuildingWithVehicle))]
+        public static class Patch_EnterBuildingWithVehicle_PassengerFollow
+        {
+            static void Postfix(CityBuildingController cbc, bool __result)
+            {
+                if (!__result || !MPServer.IsRunning) return;   // only when the host actually drove in
+                try
+                {
+                    string vehicleId = VehicleManager.CurrentDrivenVehicleId();
+                    if (string.IsNullOrEmpty(vehicleId)) return;
+                    var riders = PassengerSync.RidersOf(vehicleId);
+                    if (riders == null || riders.Count == 0) return;
+                    string addressKey = GameStateReader.AddressKey(cbc.building);
+                    foreach (var kv in riders)
+                    {
+                        string pid = kv.Value;
+                        if (string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId) continue;
+                        MPServer.SendPassengerFollowEnter(pid, addressKey, vehicleId);
+                        Plugin.Logger.LogInfo($"[PassFollow] host drove into '{addressKey}' with rider '{pid}' aboard '{vehicleId}' → sent FollowEnter.");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[PassFollow] EnterBuildingWithVehicle: {ex.Message}"); }
+            }
+        }
+
+        // ── [PassFollow] passenger follows the driver back OUT (2026-06-23) ──
+        // Mirror of the enter hook. When the HOST drives a vehicle with riders out of a building, tell each
+        // rider to exit too. Without this the rider keeps stale "inside" state, so the host's NEXT entrance
+        // calls EnterBuilding while the rider is still inside → a second interior loads on top → "grey void"
+        // (user 2026-06-23). targetExitId is forwarded so the rider leaves the same door (re-pin to the
+        // ghost outside fixes the exact spot regardless). Host-as-driver; selectedVehicle is still set here.
+        [HarmonyPatch(typeof(BuildingManager), nameof(BuildingManager.ExitFromBuilding))]
+        public static class Patch_ExitFromBuilding_PassengerFollow
+        {
+            static void Postfix(int targetExitId)
+            {
+                if (!MPServer.IsRunning) return;   // only the host drives the shared vehicle
+                try
+                {
+                    string vehicleId = VehicleManager.CurrentDrivenVehicleId();
+                    if (string.IsNullOrEmpty(vehicleId)) return;   // host on foot → no ridden vehicle leaving
+                    var riders = PassengerSync.RidersOf(vehicleId);
+                    if (riders == null || riders.Count == 0) return;
+                    foreach (var kv in riders)
+                    {
+                        string pid = kv.Value;
+                        if (string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId) continue;
+                        MPServer.SendPassengerFollowExit(pid, vehicleId, targetExitId);
+                        Plugin.Logger.LogInfo($"[PassFollow] host drove out (exit {targetExitId}) with rider '{pid}' aboard '{vehicleId}' → sent FollowExit.");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[PassFollow] ExitFromBuilding: {ex.Message}"); }
+            }
+        }
+
         // ── Patch: BuildingManager.ExitFromBuilding (Phase 2 unsubscribe) ─────
         // Fires when the player leaves a building (either on foot via the exit
         // zone or via "exit to street").  We capture the registration BEFORE

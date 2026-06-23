@@ -33,6 +33,7 @@ namespace BigAmbitionsMP
         private static int    _localSeat = -1;
         private static bool   _pinned;            // arrived at the seat and locked to it
         private static float  _pinFallback;       // unscaled-time deadline to pin if the walk never arrives
+        private static bool   _following;         // [PassFollow] mid building enter/exit — re-pin once co-located with the ghost
         // walk-to-deposit: pending deposit while the player walks to the vehicle's loading spot
         private static string _depVid = "", _depOwner = "";
         private static Vector3 _depSpot;
@@ -369,16 +370,27 @@ namespace BigAmbitionsMP
                 var ch = PlayerHelper.PlayerController?.Character;
                 bool atCar = ch != null &&
                              Vector3.Distance(ch.transform.position, ghost.TransformPoint(DoorLocal(_localSeat))) < 2.5f;
-                if (atCar || Time.unscaledTime >= _pinFallback) StartPin();
+                // [PassFollow] after following the driver through a building transition, re-pin as soon as
+                // we and the ghost are co-located again (same scene — the ghost teleports to the new scene
+                // a beat after we transition), without waiting for the 2.5 m walk or the fallback timeout.
+                bool followReady = _following && ch != null && Vector3.Distance(ch.transform.position, ghost.position) < 30f;
+                if (atCar || followReady || Time.unscaledTime >= _pinFallback) { _following = false; StartPin(); }
             }
-            // Once "in" (StartPin), nothing per-frame: ToggleVisibility deactivated the avatar and the
-            // vehicle camera follows the ghost directly, so the ride continues on its own.
+            else
+            {
+                // [PassFollow] Host-modeled camera, re-asserted every frame while pinned. The host's live
+                // cam stays IndoorVehicleCam (inside) / VehicleCam (outside) following the driven car; we
+                // mirror that, pointing Follow at the ghost. The building-entry transition switches the live
+                // cam to the on-foot IndoorCam (one-shot), so a single assignment at StartPin gets stranded
+                // — re-asserting wins it back the next frame. Idempotent (see EnsureRideCamera), so no flicker.
+                EnsureRideCamera(ghost);
+            }
         }
 
         private static void BeginLocalRide(string vehicleId, int seat)
         {
-            _localVeh = vehicleId; _localSeat = seat; _pinned = false;
-            _exitRequested = false; _ghostGoneSince = -1f;
+            _localVeh = vehicleId; _localSeat = seat; _pinned = false; _following = false;
+            _exitRequested = false; _ghostGoneSince = -1f; _camSaved = false;
             _pinFallback = Time.unscaledTime + 10f;   // backstop only: warp into the seat if the walk fails
 
             var pc = PlayerHelper.PlayerController;
@@ -393,8 +405,10 @@ namespace BigAmbitionsMP
         }
 
         // ── the "in the car" transition — the EXACT native enter calls (minus ownership/drive) ──
-        private static Transform? _savedCamFollow;
-        private static Transform? _savedCamLookAt;
+        private static Transform? _savedVcFollow,  _savedVcLook;    // [PassFollow] vehicleCamera originals (restored on exit)
+        private static Transform? _savedIvcFollow, _savedIvcLook;   // [PassFollow] indoorVehicleCamera originals (restored on exit)
+        private static bool       _camSaved;         // [PassFollow] captured both vehicle cams' pre-ride Follow yet?
+        private static bool       _camIndoor;        // [PassFollow] last asserted vehicle cam (true=indoorVehicleCamera)
 
         private static void StartPin()
         {
@@ -411,7 +425,7 @@ namespace BigAmbitionsMP
                 // another player's car. The camera is pointed at the ghost since it isn't our own.
                 try { pc.Character?.ToggleVisibility(false); } catch { }   // avatar disappears (native)
                 SetVehicleNavBlocker(true);                                // movement locked (native)
-                SwitchToVehicleCamera(ghost);                              // camera → car view (native)
+                EnsureRideCamera(ghost);                                   // camera → car view (host-modeled; re-asserted each frame by TickLocalRide)
                 // The real character stays parked invisibly at the boarding door; drop its
                 // colliders + controller so it isn't a phantom obstacle there (passing traffic
                 // braking for it, players bumping it). Restored in EndLocalRide.
@@ -450,18 +464,39 @@ namespace BigAmbitionsMP
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] navblock: {ex.Message}"); }
         }
 
-        private static void SwitchToVehicleCamera(Transform? ghost)
+        // Capture both vehicle cams' pre-ride Follow/LookAt once, so EndLocalRide can fully restore them.
+        // The game leaves these bound to the local player; if we leave one chasing our ghost, the
+        // passenger's OWN future driving camera would track the wrong (possibly destroyed) transform.
+        private static void SaveCamsOnce(GameManager gm)
         {
+            if (_camSaved) return;
+            _camSaved = true;
+            if (gm.vehicleCamera != null)       { _savedVcFollow  = gm.vehicleCamera.Follow;       _savedVcLook  = gm.vehicleCamera.LookAt; }
+            if (gm.indoorVehicleCamera != null) { _savedIvcFollow = gm.indoorVehicleCamera.Follow; _savedIvcLook = gm.indoorVehicleCamera.LookAt; }
+        }
+
+        // Host-modeled live camera while riding. Confirmed by probe: the HOST's live cam is IndoorVehicleCam
+        // (inside) / VehicleCam (outside), prio=1, following the driven car. We mirror that exactly, but
+        // point Follow at the synced ghost (we're not the driver) and pick indoor vs outdoor by
+        // BuildingManager.IsInsideBuilding (CarController.UpdateCamera does the same). Idempotent and
+        // re-asserted every frame by TickLocalRide: the building-entry transition switches the live cam to
+        // the on-foot IndoorCam (BuildingManager.cs:517), so we just re-claim Priority the next frame. The
+        // GetCurrentCamera()!=cam guard means we only call SetCamera when not already live → no flicker.
+        private static void EnsureRideCamera(Transform? ghost)
+        {
+            if (ghost == null) return;
             try
             {
                 var gm = InstanceBehavior<GameManager>.Instance;
-                var cam = gm != null ? gm.vehicleCamera : null;
+                if (gm == null) return;
+                SaveCamsOnce(gm);
+                _camIndoor = BuildingManager.IsInsideBuilding;
+                var cam = _camIndoor ? gm.indoorVehicleCamera : gm.vehicleCamera;
                 if (cam == null) return;
-                _savedCamFollow = cam.Follow; _savedCamLookAt = cam.LookAt;   // restore for the driver later
-                if (ghost != null) { cam.Follow = ghost; cam.LookAt = ghost; }
-                CameraHelper.SetCamera(cam);
+                if (cam.Follow != ghost) { cam.Follow = ghost; cam.LookAt = ghost; }
+                if (CameraHelper.GetCurrentCamera() != cam) CameraHelper.SetCamera(cam);
             }
-            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] camera enter: {ex.Message}"); }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] camera assert: {ex.Message}"); }
         }
 
         private static void RestoreCamera()
@@ -470,8 +505,17 @@ namespace BigAmbitionsMP
             {
                 var gm = InstanceBehavior<GameManager>.Instance;
                 if (gm == null) return;
-                if (gm.vehicleCamera != null) { gm.vehicleCamera.Follow = _savedCamFollow; gm.vehicleCamera.LookAt = _savedCamLookAt; }
-                if (gm.pedestrianCamera != null) CameraHelper.SetCamera(gm.pedestrianCamera);
+                // Restore BOTH vehicle cams to their pre-ride Follow (so the player's own future driving
+                // camera doesn't chase our ghost), then hand back to the matching on-foot cam — indoorCamera
+                // inside, pedestrianCamera outside (mirrors BuildingManager.cs:517 / CarController.cs:502).
+                if (_camSaved)
+                {
+                    if (gm.vehicleCamera != null)       { gm.vehicleCamera.Follow = _savedVcFollow;       gm.vehicleCamera.LookAt = _savedVcLook; }
+                    if (gm.indoorVehicleCamera != null) { gm.indoorVehicleCamera.Follow = _savedIvcFollow; gm.indoorVehicleCamera.LookAt = _savedIvcLook; }
+                    _camSaved = false;
+                }
+                var footCam = BuildingManager.IsInsideBuilding ? gm.indoorCamera : gm.pedestrianCamera;
+                if (footCam != null) CameraHelper.SetCamera(footCam);
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] camera exit: {ex.Message}"); }
         }
@@ -512,8 +556,76 @@ namespace BigAmbitionsMP
                 try { pc?.ResetNavigation(); } catch { }
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] EndLocalRide: {ex.Message}"); }
-            _localVeh = ""; _localSeat = -1; _pinned = false;
+            _localVeh = ""; _localSeat = -1; _pinned = false; _following = false;
             _exitRequested = false; _ghostGoneSince = -1f;
+        }
+
+        /// <summary>[PassFollow] Reverse StartPin WITHOUT ending the ride, so we stay "riding" across a
+        /// building transition: re-activate the avatar, unlock movement, restore the camera, re-enable the
+        /// colliders we dropped while seated. Leaves _localVeh intact + arms _following so TickLocalRide
+        /// re-pins to the ghost once we're co-located again in the new scene.</summary>
+        private static void SoftUnpin()
+        {
+            if (_pinned)
+            {
+                try { PlayerHelper.PlayerController?.Character?.ToggleVisibility(true); } catch { }
+                SetVehicleNavBlocker(false);
+                RestoreCamera();
+            }
+            if (_seatedColliders.Count > 0 || _seatedController != null)
+            {
+                try { foreach (var col in _seatedColliders) if (col != null) col.enabled = true; } catch { }
+                try { if (_seatedController != null) _seatedController.enabled = true; } catch { }
+                _seatedColliders.Clear(); _seatedController = null;
+            }
+            _pinned = false;
+            _following = true;                       // re-pin promptly once co-located with the ghost
+            _pinFallback = Time.unscaledTime + 10f;  // backstop only
+        }
+
+        /// <summary>[PassFollow] The driver drove our ridden vehicle through a building entrance — follow
+        /// them in: soft un-pin, enter the building so its interior loads on our client, and let
+        /// TickLocalRide re-pin to the ghost (already at the right world coords inside) — so we ride in the
+        /// interior instead of staring at unloaded space.</summary>
+        public static void FollowDriverInto(Buildings.Building building)
+        {
+            if (_localVeh == "" || building == null) return;   // not riding / unresolved → ignore
+            // Defensive backstop: if we're somehow already inside a building (a FollowExit was missed or
+            // arrived late), DON'T enter again — a second EnterBuilding loads an interior on top of the
+            // first → "grey void" (user 2026-06-23). Skip; the next exit/enter cycle recovers. With slice 2
+            // (FollowExit) working we should always be outside when this fires.
+            if (BuildingManager.IsInsideBuilding)
+            {
+                Plugin.Logger.LogInfo($"[PassFollow] FollowEnter ignored — already inside a building (riding '{_localVeh}'); avoiding double-enter.");
+                return;
+            }
+            try
+            {
+                SoftUnpin();
+                InstanceBehavior<BuildingManager>.Instance?.EnterBuilding(building, false, false, 0, -1, true);
+                Plugin.Logger.LogInfo($"[PassFollow] following driver into building (riding '{_localVeh}') — entering; will re-pin inside.");
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] FollowDriverInto: {ex.Message}"); }
+        }
+
+        /// <summary>[PassFollow] The driver drove our ridden vehicle back OUT of a building — follow them
+        /// out: soft un-pin, exit the building on our client (back to the street), and let TickLocalRide
+        /// re-pin to the ghost once we're co-located outside. Mirror of FollowDriverInto.</summary>
+        public static void FollowDriverOut(int targetExitId)
+        {
+            if (_localVeh == "") return;                       // not riding → ignore
+            if (!BuildingManager.IsInsideBuilding)
+            {
+                Plugin.Logger.LogInfo($"[PassFollow] FollowExit ignored — not inside a building (riding '{_localVeh}').");
+                return;
+            }
+            try
+            {
+                SoftUnpin();
+                InstanceBehavior<BuildingManager>.Instance?.ExitFromBuilding(targetExitId);
+                Plugin.Logger.LogInfo($"[PassFollow] following driver out of building (riding '{_localVeh}', exit {targetExitId}) — exiting; will re-pin outside.");
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] FollowDriverOut: {ex.Message}"); }
         }
 
         // ── remote riders rendering ──────────────────────────────────────────
