@@ -386,6 +386,16 @@ namespace BigAmbitionsMP
                 MPClient.Disconnect();
                 return;
             }
+            // Phase 3: the host wants our pending disconnect save before deciding what to load. Upload it
+            // (the host validates its ACTUAL in-game day) and WAIT for the follow-up LoadData — do NOT load
+            // anything now.
+            if (p.AwaitClientDisconnectUpload)
+            {
+                if (!string.IsNullOrEmpty(p.SessionName)) lock (_lock) { _activeSessionName = p.SessionName; }
+                Plugin.Logger.LogInfo($"[MPSave] Host requested our disconnect save for '{p.SessionName}' — uploading, awaiting load.");
+                GameStatePatcher.EnqueueOnMainThread(() => UploadClientDisconnectSave(p.SessionName));
+                return;
+            }
             // Mid-join fallback (empty .hsg): the host has no stored save for
             // us — start a fresh character with the host's settings.  (The
             // "load your own local copy" variant was REMOVED 2026-06-10: a
@@ -396,6 +406,7 @@ namespace BigAmbitionsMP
                 if (!string.IsNullOrEmpty(p.SessionName))
                     lock (_lock) { _activeSessionName = p.SessionName; }
                 Plugin.Logger.LogInfo("[MPSave] Mid-join: no host-stored save — fresh character with host settings.");
+                ClearClientDisconnectMarker();   // host resolved our join — pending disconnect offer consumed
                 MPClient.StartFreshFromHost(p.FallbackSettings);
                 return;
             }
@@ -410,6 +421,7 @@ namespace BigAmbitionsMP
                 string folder = MPSaveManager.MpCharacterFolder(session, MPConfig.StableId);
                 File.WriteAllBytes(Path.Combine(folder, SaveFileName + ".hsg"), raw);
                 Plugin.Logger.LogInfo($"[MPSave] Received .hsg ({raw.Length}B) for session '{session}' — loading.");
+                ClearClientDisconnectMarker();   // host resolved our join (incl. any validated disconnect save) — offer consumed
             }
             catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] ClientHandleLoadData write: {ex}"); return; }
 
@@ -743,9 +755,14 @@ namespace BigAmbitionsMP
             };
         }
 
+        /// <summary>Phase 3 tamper tolerance: a disconnect save may be at most this many in-game days past
+        /// the host's CURRENT world day before it's rejected as edited (a small window absorbs a legit
+        /// midnight crossing in the un-synced final minutes without false-positives).</summary>
+        public const int DisconnectDayWindow = 2;
+
         /// <summary>Strip a trailing automatic-save suffix ('-auto' / '-disconnect') to get the base
         /// session name shared by a session and its automatic siblings.</summary>
-        private static string StripAutoSuffix(string s)
+        public static string StripAutoSuffix(string s)
         {
             if (string.IsNullOrEmpty(s)) return s ?? "";
             if (s.EndsWith("-disconnect")) return s.Substring(0, s.Length - "-disconnect".Length);
@@ -812,6 +829,174 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] CarryForwardAbsentMembers '{targetSession}': {ex.Message}"); }
+        }
+
+        // ── Phase 2: client-side disconnect save (the designated trusted-newer file) ──────────────
+        // On a clean close or an in-game host-loss, the CLIENT snapshots its CURRENT game into its own
+        // '<base>-disconnect' session + drops a marker. This is the ONLY client file Phase 3 will accept as
+        // "newer than the host's record" on rejoin (never hard/auto saves), and only if it passes a
+        // day-consistency tamper check. On separate machines it's the only way the client's final
+        // pre-disconnect minutes (never uploaded) survive.
+        [Serializable]
+        public class ClientDisconnectMarker
+        {
+            public string SessionBase = "";
+            public string StableId    = "";
+            public int    Day;
+            public long   SavedAtUnix;
+        }
+
+        private static string ClientDisconnectMarkerPath()
+            => Path.Combine(MPSaveManager.MpVersionFolder(), "clientDisconnect.json");
+
+        /// <summary>CLIENT: snapshot the current game into '&lt;base&gt;-disconnect' + write the marker.
+        /// Called on a clean close and on an in-game host-loss. MAIN THREAD (PerformLocalSave touches IL2CPP).</summary>
+        public static void WriteClientDisconnectSave()
+        {
+            if (!MPClient.IsConnected && !MPClient.SessionEnded) return;   // client-side only
+            try
+            {
+                string baseName = StripAutoSuffix(ActiveSessionName);
+                if (string.IsNullOrEmpty(baseName)) return;
+                var slot = PerformLocalSave(baseName + "-disconnect");   // current game → <base>-disconnect/<ourStable>/
+                long nowUnix = 0;
+                try { nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds(); } catch { }
+                var marker = new ClientDisconnectMarker
+                {
+                    SessionBase = baseName,
+                    StableId    = MPConfig.StableId,
+                    Day         = slot.Day,
+                    SavedAtUnix = nowUnix,
+                };
+                File.WriteAllText(ClientDisconnectMarkerPath(),
+                    Newtonsoft.Json.JsonConvert.SerializeObject(marker, Newtonsoft.Json.Formatting.Indented));
+                Plugin.Logger.LogInfo($"[MPSave] Client disconnect save written: '{baseName}-disconnect' day={slot.Day}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] WriteClientDisconnectSave: {ex.Message}"); }
+        }
+
+        /// <summary>CLIENT: the pending disconnect-save marker, if any (Phase 3 offers it on rejoin).</summary>
+        public static ClientDisconnectMarker? ReadClientDisconnectMarker()
+        {
+            try
+            {
+                string p = ClientDisconnectMarkerPath();
+                if (!File.Exists(p)) return null;
+                return Newtonsoft.Json.JsonConvert.DeserializeObject<ClientDisconnectMarker>(File.ReadAllText(p));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ReadClientDisconnectMarker: {ex.Message}"); return null; }
+        }
+
+        /// <summary>CLIENT: clear the disconnect marker once consumed / superseded.</summary>
+        public static void ClearClientDisconnectMarker()
+        {
+            try { string p = ClientDisconnectMarkerPath(); if (File.Exists(p)) File.Delete(p); }
+            catch { }
+        }
+
+        /// <summary>CLIENT: upload our pending disconnect save to the host (Phase 3) when it requests one.
+        /// The host validates the save's ACTUAL in-game day before accepting it over its own copy. The
+        /// Slot.Day here is just the CLAIMED day — the host re-reads the real day from the uploaded bytes.</summary>
+        public static void UploadClientDisconnectSave(string hostSession)
+        {
+            try
+            {
+                string baseName = StripAutoSuffix(hostSession);
+                var marker = ReadClientDisconnectMarker();
+                if (marker == null || marker.SessionBase != baseName)
+                { Plugin.Logger.LogWarning($"[MPSave] UploadClientDisconnectSave: no marker for '{baseName}'."); return; }
+                string folder = MPSaveManager.MpCharacterFolder(baseName + "-disconnect", MPConfig.StableId);
+                string? file  = NewestHsg(folder);
+                if (file == null) { Plugin.Logger.LogWarning($"[MPSave] UploadClientDisconnectSave: no .hsg in '{folder}'."); return; }
+                byte[] raw = File.ReadAllBytes(file);
+                if (raw.Length == 0) return;
+                var slot = new MpSlot
+                {
+                    StableId = MPConfig.StableId, DisplayName = MPConfig.PlayerId, CharacterId = MPConfig.StableId,
+                    SaveName = Path.GetFileNameWithoutExtension(file), Day = marker.Day, IsHost = false,
+                };
+                MPClient.SendClientDisconnectUpload(new SaveDataPayload
+                {
+                    SessionName = baseName, Success = true, Slot = slot,
+                    HsgGzipBase64 = GzipBase64(raw), RawLength = raw.Length,
+                });
+                Plugin.Logger.LogInfo($"[MPSave] Uploaded disconnect save for '{baseName}' (claimed day={marker.Day}, {raw.Length}B).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] UploadClientDisconnectSave: {ex.Message}"); }
+        }
+
+        /// <summary>HOST (MAIN THREAD — uses the IL2CPP save scanner): validate an uploaded client disconnect
+        /// save by its ACTUAL in-game day and, if it passes, commit it as that player's save in the active
+        /// session (overwriting the host's older copy). Accepted only when the real day is in
+        /// [host's stored day for this player .. host's current world day + window] — newer than we hold, but
+        /// not edited ahead of where the world actually is. Returns true if committed.</summary>
+        /// <summary>Read the in-game day of a player's save in a session folder via the game's save scanner
+        /// (the canonical day for a .hsg — distinct from a manifest slot's GameTime-based Day). -1 if none.</summary>
+        private static int ReadSaveDay(string sessionFolder, string stable)
+        {
+            try
+            {
+                var saves = SaveGamePathHelper.GetAllSaveGamesFromVersion(sessionFolder);
+                if (saves != null)
+                    for (int i = 0; i < saves.Count; i++)
+                    {
+                        var s = saves[i];
+                        string seg = Path.GetFileName((s?.CharacterPath ?? "").TrimEnd('\\', '/'));
+                        if (string.Equals(seg, MPSaveManager.Sanitize(stable), StringComparison.OrdinalIgnoreCase)) return s.day;
+                    }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ReadSaveDay: {ex.Message}"); }
+            return -1;
+        }
+
+        public static bool TryCommitClientDisconnectSave(SaveDataPayload p, string stable)
+        {
+            if (p == null || string.IsNullOrEmpty(stable) || string.IsNullOrEmpty(p.HsgGzipBase64)) return false;
+            string session     = ActiveSessionName;
+            string baseName    = StripAutoSuffix(session);
+            string stageSession = "_dcstage_" + MPSaveManager.Sanitize(stable);
+            try
+            {
+                if (!string.Equals(p.SessionName, baseName, StringComparison.Ordinal))
+                { Plugin.Logger.LogWarning($"[MPSave] Disconnect upload session mismatch (got '{p.SessionName}', active base '{baseName}') — ignoring."); return false; }
+
+                byte[] raw = UnGzipBase64(p.HsgGzipBase64);
+                if (raw == null || raw.Length == 0) return false;
+
+                // Stage into a throwaway session so we can read the save's ACTUAL day via the game scanner
+                // before deciding — never disturb the real session unless we accept it.
+                string stageDir = MPSaveManager.MpCharacterFolder(stageSession, stable);
+                try { foreach (var f in Directory.GetFiles(stageDir)) File.Delete(f); } catch { }
+                string name = MPSaveManager.Sanitize(string.IsNullOrEmpty(p.Slot?.SaveName) ? SaveFileName : p.Slot.SaveName);
+                File.WriteAllBytes(Path.Combine(stageDir, name + ".hsg"), raw);
+
+                int actualDay = ReadSaveDay(MPSaveManager.MpSessionFolder(stageSession), stable);
+                int storedDay = ReadSaveDay(MPSaveManager.MpSessionFolder(session), stable);   // our current copy
+                // Accept iff the uploaded save is at least as new as our copy and at most a small window past
+                // it (the client only played a little before disconnecting). BOTH days come from the SAME
+                // scanner so there's no numbering mismatch, and bounding against OUR stored copy (not the live
+                // world clock) also avoids the save-info-vs-GameTime day-index difference that caused a false
+                // reject. If we have no copy at all (storedDay<0), accept any readable save (it's all we have).
+                bool accept = actualDay >= 0 && (storedDay < 0 || (actualDay >= storedDay && actualDay <= storedDay + DisconnectDayWindow));
+                if (accept)
+                {
+                    string dstDir = MPSaveManager.MpCharacterFolder(session, stable);
+                    File.WriteAllBytes(Path.Combine(dstDir, name + ".hsg"), raw);
+                    MergeSlot(session, new MpSlot
+                    {
+                        StableId = stable, DisplayName = p.Slot?.DisplayName ?? stable, CharacterId = stable,
+                        SaveName = name, Day = actualDay, IsHost = false,
+                    });
+                    Plugin.Logger.LogInfo($"[MPSave] ACCEPTED client disconnect save (stable={stable}, actualDay={actualDay}, storedDay={storedDay}, window={DisconnectDayWindow}) → committed to '{session}'.");
+                }
+                else
+                {
+                    Plugin.Logger.LogWarning($"[MPSave] REJECTED client disconnect save (stable={stable}, actualDay={actualDay}; allowed [{storedDay}..{storedDay + DisconnectDayWindow}]) — keeping host copy.");
+                }
+                return accept;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] TryCommitClientDisconnectSave: {ex.Message}"); return false; }
+            finally { try { Directory.Delete(MPSaveManager.MpSessionFolder(stageSession), true); } catch { } }
         }
 
         /// <summary>The native midnight autosave (GameManager.RunMidNightAutoSave)

@@ -144,6 +144,20 @@ namespace BigAmbitionsMP
                 Protocol = ProtocolInfo.Version,
                 Game     = MPSaveManager.GameVersionNameCached()
             };
+            // Phase 3: offer any pending disconnect save (un-uploaded progress from our last leave). The
+            // host decides whether to request it; it never auto-overrides a host save.
+            try
+            {
+                var dc = MPSaveCoordinator.ReadClientDisconnectMarker();
+                if (dc != null && !string.IsNullOrEmpty(dc.SessionBase))
+                {
+                    hello.HasDisconnectSave     = true;
+                    hello.DisconnectSessionBase = dc.SessionBase;
+                    hello.DisconnectDay         = dc.Day;
+                    hello.DisconnectSavedAtUnix = dc.SavedAtUnix;
+                }
+            }
+            catch { }
             Send(MessageEnvelope.Create(MessageType.Hello, MPConfig.PlayerId, hello));
         }
 
@@ -207,6 +221,9 @@ namespace BigAmbitionsMP
                         GameStateReader.SetNativePause(true);   // true pause (red border) under the notice
                         Plugin.Logger.LogWarning("[Client] Host connection lost in-game — session ended; notice shown (dismiss to continue offline as a single-player fork).");
                         MPLog.Dump("client: host connection lost in-game");
+                        // Phase 2: snapshot our CURRENT state into the disconnect save (+marker) at the drop
+                        // moment, so a rejoin can restore the minutes the host never received. (Main thread.)
+                        MPSaveCoordinator.WriteClientDisconnectSave();
                     }
                 }
                 catch { }
@@ -999,6 +1016,14 @@ namespace BigAmbitionsMP
             if (!IsConnected || string.IsNullOrEmpty(vehicleId)) return;
             Send(MessageEnvelope.Create(MessageType.PassengerFollowRelayExit, MPConfig.PlayerId,
                 new PassengerFollowPayload { VehicleId = vehicleId, ExitId = exitId }));
+        }
+
+        /// <summary>Client → host: upload our pending disconnect save (Phase 3); the host validates its
+        /// actual in-game day, then sends back the real load.</summary>
+        public static void SendClientDisconnectUpload(SaveDataPayload p)
+        {
+            if (!IsConnected || p == null) return;
+            Send(MessageEnvelope.Create(MessageType.ClientDisconnectUpload, MPConfig.PlayerId, p));
         }
 
         // [PassFollow] SLICE 1a — confirm the rider receives the follow-signal and can resolve the

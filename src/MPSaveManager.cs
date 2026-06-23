@@ -58,6 +58,29 @@ namespace BigAmbitionsMP
         private const string MpRootName  = "_BAMP_MP";
         private const string ManifestName = "manifest.bamp.json";
 
+#if BAMP_DEV
+        // Dev separate-machine SIMULATION: when the client instance is launched with
+        // BAMP_SIM_SEPARATE_SAVES=1, it redirects its ENTIRE MP save tree to a sibling root
+        // ('_BAMP_MP_SIMCLIENT') so host+client on ONE machine no longer share save files — the host only
+        // ever sees what the client UPLOADS over the network, exactly like real separate machines. Lets us
+        // validate the separate-machine save/recovery paths (Phases 1-3) solo. Resolved once, cached.
+        private const string MpRootNameSim = "_BAMP_MP_SIMCLIENT";
+        private static int _simRoot = -1;   // -1 unresolved, 0 off, 1 on
+        private static bool SimSeparateRoot()
+        {
+            if (_simRoot < 0)
+            {
+                try { _simRoot = string.Equals(Environment.GetEnvironmentVariable("BAMP_SIM_SEPARATE_SAVES"), "1", StringComparison.Ordinal) ? 1 : 0; }
+                catch { _simRoot = 0; }
+                if (_simRoot == 1) Plugin.Logger.LogWarning("[MPSave] SIM: separate-client save root ENABLED ('_BAMP_MP_SIMCLIENT') — dev separate-machine simulation.");
+            }
+            return _simRoot == 1;
+        }
+        private static string RootName => SimSeparateRoot() ? MpRootNameSim : MpRootName;
+#else
+        private static string RootName => MpRootName;
+#endif
+
         // ── Folder layout ─────────────────────────────────────────────────────
 
         // The SP version folder path, resolved ONCE on the main thread and cached.
@@ -121,7 +144,7 @@ namespace BigAmbitionsMP
             if (string.IsNullOrEmpty(sp)) return "";
             string root = Directory.GetParent(sp.TrimEnd('/', '\\'))?.FullName ?? sp;
             string version = Path.GetFileName(sp.TrimEnd('/', '\\'));
-            return Path.Combine(root, MpRootName, version);
+            return Path.Combine(root, RootName, version);
         }
 
         /// <summary>Folder for one named MP save session.</summary>

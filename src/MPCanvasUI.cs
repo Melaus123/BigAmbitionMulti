@@ -309,13 +309,22 @@ namespace BigAmbitionsMP
             // in the shared session folder the host's disconnect carry-forward then reads.
             try
             {
-                if ((MPServer.IsRunning || MPClient.IsConnected) && IsInGame())
+                if (IsInGame())
                 {
-                    string session = MPSaveCoordinator.ActiveSessionName;
-                    if (!string.IsNullOrEmpty(session))
+                    if (MPServer.IsRunning)
                     {
-                        Plugin.Logger.LogInfo($"[MPSave] OnApplicationQuit — self-saving '{session}' before exit.");
-                        MPSaveCoordinator.PerformLocalSave(session);
+                        string session = MPSaveCoordinator.ActiveSessionName;
+                        if (!string.IsNullOrEmpty(session))
+                        {
+                            Plugin.Logger.LogInfo($"[MPSave] OnApplicationQuit — host self-saving '{session}' before exit.");
+                            MPSaveCoordinator.PerformLocalSave(session);
+                        }
+                    }
+                    else if (MPClient.IsConnected || MPClient.SessionEnded)
+                    {
+                        // Client: write the designated disconnect save (+ marker) — the trusted-newer file
+                        // Phase 3 may restore on rejoin if the host's stored copy is older.
+                        MPSaveCoordinator.WriteClientDisconnectSave();
                     }
                 }
             }

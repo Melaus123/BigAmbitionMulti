@@ -741,6 +741,10 @@ namespace BigAmbitionsMP
                     HandlePassengerFollowRelayExit(senderPid, env);
                     break;
 
+                case MessageType.ClientDisconnectUpload:
+                    HandleClientDisconnectUpload(senderPid, env);
+                    break;
+
                 case MessageType.VehicleLockSet:
                     HandleVehicleLockSet(senderPid, env);
                     break;
@@ -1409,65 +1413,20 @@ namespace BigAmbitionsMP
                     string stable  = hello.StableId ?? "";
                     if (!string.IsNullOrEmpty(session) && !string.IsNullOrEmpty(stable))
                     {
-                        var data = MPSaveCoordinator.ReadSaveBytesGzip(session, stable);
-                        if (data != null)
+                        // Phase 3: if the joiner offers a pending disconnect save for THIS session, request it
+                        // first — we validate its ACTUAL in-game day on upload (HandleClientDisconnectUpload)
+                        // before deciding, then send the real load. Only the disconnect file is eligible.
+                        if (hello.HasDisconnectSave &&
+                            string.Equals(hello.DisconnectSessionBase, MPSaveCoordinator.StripAutoSuffix(session), StringComparison.Ordinal))
                         {
-                            // Reclaim: ownership reserved under the absent owner's
-                            // stableId (manifest load) re-keys to their live playerId.
-                            int rekeyed = 0;
-                            foreach (var kv in BuildingOwners)
-                                if (kv.Value == stable) { BuildingOwners[kv.Key] = hello.PlayerId; rekeyed++; }
-                            if (rekeyed > 0)
-                                Plugin.Logger.LogInfo($"[Server] Re-keyed {rekeyed} reserved building(s) to '{hello.PlayerId}'.");
-
-                            var m = MPSaveManager.ReadManifest(session);
-                            float cash = m != null ? MPSaveCoordinator.BestCashFor(m, stable)
-                                                   : (CashByStableId.TryGetValue(stable, out var c) ? c : 0f);
                             Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
-                            {
-                                SessionName   = session,
-                                HsgGzipBase64 = data.Value.b64,
-                                RawLength     = data.Value.raw,
-                                Money         = cash,
-                            }));
+                            { SessionName = session, AwaitClientDisconnectUpload = true }));
                             sentLoad = true;
-                            Plugin.Logger.LogInfo($"[Server] Mid-session join: sent LoadData to '{hello.PlayerId}' (session='{session}', {data.Value.raw}B, ${cash:F0}); world state follows once their scene loads.");
+                            Plugin.Logger.LogInfo($"[Server] Mid-session join by '{hello.PlayerId}': disconnect save offered (claimed day={hello.DisconnectDay}) — requesting upload for validation.");
                         }
                         else
                         {
-                            // Proposal 2 (2026-06-17): a manifest slot exists once this player has been saved
-                            // this session, so slot-present + null .hsg means their real character exists but
-                            // the file is missing/locked/corrupt. Fresh-starting would abandon it — refuse and
-                            // tell the client so the player can reconnect to retry / the host can recover. A
-                            // brand-new joiner (no slot) still gets the normal fresh-character fallback.
-                            var mm = MPSaveManager.ReadManifest(session);
-                            bool hasSavedCharacter = mm?.Slots != null && mm.Slots.Exists(s => s.StableId == stable);
-                            if (hasSavedCharacter)
-                            {
-                                Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
-                                {
-                                    SessionName      = session,
-                                    HsgGzipBase64    = "",
-                                    SaveUnavailable  = true,
-                                    FallbackSettings = LastStartSettings,
-                                }));
-                                sentLoad = true;
-                                Plugin.Logger.LogError($"[Server] Mid-session join by '{hello.PlayerId}' (stable={stable}): has a save slot but its .hsg is unreadable — REFUSING to fresh-start. Sent save-unavailable.");
-                            }
-                            else
-                            {
-                                // Genuinely new joiner — no slot to protect.
-                                float kc = GetKnownCash(hello.PlayerId);
-                                Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
-                                {
-                                    SessionName = session,
-                                    HsgGzipBase64 = "",
-                                    Money = Math.Max(0f, kc),
-                                    FallbackSettings = LastStartSettings,
-                                }));
-                                sentLoad = true;
-                                Plugin.Logger.LogInfo($"[Server] Mid-session join by '{hello.PlayerId}': no save slot — sent fresh-character fallback.");
-                            }
+                            sentLoad = SendMidJoinLoadData(peer, hello.PlayerId, stable, session);
                         }
                     }
                 }
@@ -2470,6 +2429,74 @@ namespace BigAmbitionsMP
             var p = env.GetPayload<PassengerFollowPayload>();
             if (p == null) return;
             RouteFollowExitToRiders(p.VehicleId, p.ExitId, senderPid);
+        }
+
+        /// <summary>Phase 3: a client uploaded its pending disconnect save. Validate its ACTUAL in-game day
+        /// on the main thread (TryCommitClientDisconnectSave commits it iff valid), then send the real
+        /// LoadData — the validated disconnect save if accepted, else our stored copy / fallback.</summary>
+        private static void HandleClientDisconnectUpload(string senderPid, MessageEnvelope env)
+        {
+            var p = env.GetPayload<SaveDataPayload>();
+            if (p == null) return;
+            if (!StableIdByPlayer.TryGetValue(senderPid, out var stable) || string.IsNullOrEmpty(stable)) return;
+            string session = MPSaveCoordinator.ActiveSessionName;
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                try
+                {
+                    MPSaveCoordinator.TryCommitClientDisconnectSave(p, stable);   // validates (game scanner) + stores iff valid
+                    var peer = PeerForPid(senderPid);
+                    if (peer != null) SendMidJoinLoadData(peer, senderPid, stable, session);
+                    else Plugin.Logger.LogWarning($"[Server] ClientDisconnectUpload: no peer for '{senderPid}' — can't send load.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] HandleClientDisconnectUpload: {ex.Message}"); }
+            });
+        }
+
+        /// <summary>Resolve the live NetPeer for a player id (null if not connected).</summary>
+        private static NetPeer? PeerForPid(string pid)
+        {
+            foreach (var peer in _clients.Keys)
+                if (_peerNames.TryGetValue(peer.Id, out var nm) && nm == pid) return peer;
+            return null;
+        }
+
+        /// <summary>Send a joining/rejoining client its resolved session save: their stored .hsg if present,
+        /// 'save-unavailable' if a slot exists but the file can't be read, else a fresh-character fallback.
+        /// Used by the mid-join Hello path and after a validated disconnect-save upload.</summary>
+        private static bool SendMidJoinLoadData(NetPeer peer, string pid, string stable, string session)
+        {
+            if (peer == null || string.IsNullOrEmpty(session) || string.IsNullOrEmpty(stable)) return false;
+            var data = MPSaveCoordinator.ReadSaveBytesGzip(session, stable);
+            if (data != null)
+            {
+                // Reclaim: ownership reserved under the absent owner's stableId re-keys to their live pid.
+                int rekeyed = 0;
+                foreach (var kv in BuildingOwners)
+                    if (kv.Value == stable) { BuildingOwners[kv.Key] = pid; rekeyed++; }
+                if (rekeyed > 0) Plugin.Logger.LogInfo($"[Server] Re-keyed {rekeyed} reserved building(s) to '{pid}'.");
+                var m = MPSaveManager.ReadManifest(session);
+                float cash = m != null ? MPSaveCoordinator.BestCashFor(m, stable)
+                                       : (CashByStableId.TryGetValue(stable, out var c) ? c : 0f);
+                Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
+                { SessionName = session, HsgGzipBase64 = data.Value.b64, RawLength = data.Value.raw, Money = cash }));
+                Plugin.Logger.LogInfo($"[Server] Mid-session join: sent LoadData to '{pid}' (session='{session}', {data.Value.raw}B, ${cash:F0}); world state follows once their scene loads.");
+                return true;
+            }
+            var mm = MPSaveManager.ReadManifest(session);
+            bool hasSavedCharacter = mm?.Slots != null && mm.Slots.Exists(s => s.StableId == stable);
+            if (hasSavedCharacter)
+            {
+                Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
+                { SessionName = session, HsgGzipBase64 = "", SaveUnavailable = true, FallbackSettings = LastStartSettings }));
+                Plugin.Logger.LogError($"[Server] Mid-session join by '{pid}' (stable={stable}): has a save slot but its .hsg is unreadable — REFUSING to fresh-start. Sent save-unavailable.");
+                return true;
+            }
+            float kc = GetKnownCash(pid);
+            Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
+            { SessionName = session, HsgGzipBase64 = "", Money = Math.Max(0f, kc), FallbackSettings = LastStartSettings }));
+            Plugin.Logger.LogInfo($"[Server] Mid-session join by '{pid}': no save slot — sent fresh-character fallback.");
+            return true;
         }
 
         private static void HandleVehicleLockSet(string senderPid, MessageEnvelope env)

@@ -122,6 +122,10 @@ namespace BigAmbitionsMP
         // itself is the rider). Driver pid = the message sender.
         PassengerFollowRelayEnter = 129, // Client(driver) → Host: I drove V into a building (AddressKey).
         PassengerFollowRelayExit  = 130, // Client(driver) → Host: I drove V out (ExitId).
+        // Phase 3 save-recovery: on rejoin the host may ask the client to upload its DISCONNECT save (the
+        // only client file allowed to override the host's record), which the host then validates by the
+        // save's ACTUAL in-game day before accepting. Reuses SaveDataPayload.
+        ClientDisconnectUpload = 131,    // Client → Host: here is my pending disconnect save for the session.
     }
 
     // ── Passenger payloads (ride shotgun) ───────────────────────────────────────
@@ -288,6 +292,13 @@ namespace BigAmbitionsMP
         /// <summary>Game version name (e.g. "EA 0.11") — the host refuses a mismatch
         /// so two players on different game builds can't desync.</summary>
         public string Game     { get; set; } = "";
+        // Phase 3 rejoin offer: set when the client holds a pending DISCONNECT save (un-uploaded progress
+        // from its last leave). The host may request it (LoadDataPayload.AwaitClientDisconnectUpload) and,
+        // after validating the uploaded save's ACTUAL day, restore it instead of the host's older copy.
+        public bool   HasDisconnectSave     { get; set; }
+        public string DisconnectSessionBase { get; set; } = "";
+        public int    DisconnectDay         { get; set; }
+        public long   DisconnectSavedAtUnix { get; set; }
     }
 
     /// <summary>
@@ -1395,6 +1406,10 @@ namespace BigAmbitionsMP
         /// client loads its own LOCAL session save if present, else starts a
         /// fresh character with these host settings (null → Normal preset).</summary>
         public GameVariablesDto? FallbackSettings { get; set; }
+        /// <summary>Phase 3: host → client "hold — upload your pending disconnect save first
+        /// (ClientDisconnectUpload); I'll validate its actual day and send your real load after." The client
+        /// must NOT load on this message; it uploads and waits for the follow-up LoadData.</summary>
+        public bool   AwaitClientDisconnectUpload { get; set; } = false;
     }
 
     /// <summary>
