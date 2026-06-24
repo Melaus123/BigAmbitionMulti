@@ -1829,7 +1829,7 @@ namespace BigAmbitionsMP
             static void Postfix(string itemName, BuildingRegistration registration, ref float __result)
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                if (registration == null || !GameStatePatcher.IsSessionPlayerBusiness(registration)) return;
+                if (registration == null || !GameStatePatcher.IsAnyPlayerBusiness(registration)) return;
                 try
                 {
                     bool stocked = false;
@@ -2343,7 +2343,7 @@ namespace BigAmbitionsMP
             static bool Prefix(BuildingRegistration __instance)
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
-                if (GameStatePatcher.IsSessionPlayerBusiness(__instance))
+                if (GameStatePatcher.IsAnyPlayerBusiness(__instance))
                 {
                     Plugin.Logger.LogInfo("[EconShield] blocked AI shutdown of another player's business.");
                     return false;
@@ -3528,7 +3528,7 @@ namespace BigAmbitionsMP
                 try
                 {
                     var reg = __instance.buildingRegistration;
-                    if (!GameStatePatcher.IsSessionPlayerBusiness(reg)) return true;
+                    if (!GameStatePatcher.IsAnyPlayerBusiness(reg)) return true;
                     Plugin.Logger.LogInfo($"[Patcher] AI-staff spawn suppressed in session player's shop '{GameStateReader.AddressKey(reg)}' (owner='{reg.businessOwnerRivalId}').");
                     return false;   // skip native AI staffing — MPRegisterSync owns staffing visuals
                 }
@@ -3544,7 +3544,7 @@ namespace BigAmbitionsMP
                 if (!__result || (!MPServer.IsRunning && !MPClient.IsConnected)) return;
                 try
                 {
-                    if (GameStatePatcher.IsSessionPlayerBusiness(buildingRegistration))
+                    if (GameStatePatcher.IsAnyPlayerBusiness(buildingRegistration))
                     {
                         __result = false;   // owner's synced price table is the only truth
                         Plugin.Logger.LogInfo($"[Patcher] rival re-price suppressed for session player's shop '{GameStateReader.AddressKey(buildingRegistration)}'.");
@@ -3562,7 +3562,7 @@ namespace BigAmbitionsMP
                 if (!__result || (!MPServer.IsRunning && !MPClient.IsConnected)) return;
                 try
                 {
-                    if (GameStatePatcher.IsSessionPlayerBusiness(buildingRegistration))
+                    if (GameStatePatcher.IsAnyPlayerBusiness(buildingRegistration))
                         __result = false;
                 }
                 catch { }

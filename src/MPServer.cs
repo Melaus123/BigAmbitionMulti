@@ -1065,13 +1065,13 @@ namespace BigAmbitionsMP
 
                 case MessageType.AuditReport:
                 {
-#if BAMP_DEV
                     // Client's periodic state-hash audit — compare to OUR state
                     // on the main thread (BuildReport walks game objects).
+                    // Release-enabled 2026-06-24: divergence now surfaces in users'
+                    // bug-report logs, not just Dev testing.
                     var ar = env.GetPayload<AuditReportPayload>();
                     if (ar != null && SenderIs(ar.PlayerId, senderPid, env.Type))
                         GameStatePatcher.EnqueueOnMainThread(() => MPAudit.HostHandle(ar));
-#endif
                     break;
                 }
 
@@ -1494,19 +1494,7 @@ namespace BigAmbitionsMP
                             var snapshot = BuildWorldSnapshot();
                             Send(joinPeer, MessageEnvelope.Create(MessageType.Welcome, "host", snapshot));
                             Plugin.Logger.LogInfo($"[Server] Late join by '{joinName}', sent world snapshot.");
-                            // Rival roster BEFORE BusinessSnapshot so building-owner
-                            // ID strings have name entries to resolve to.
-                            SendRivalsSnapshotTo(joinPeer);
-                            // Business table — sent once, then deltas as they change.
-                            SendBusinessSnapshotTo(joinPeer);
-                            // Who's currently on the registers (event-tracked; not in any snapshot).
-                            SendRegisterDutyTo(joinPeer);
-                            // Passenger locks + who's already riding (event-tracked; join replay).
-                            SendPassengerSnapshotTo(joinPeer);
-                            // Active market events (change-broadcast only; a hot-joiner would otherwise miss them).
-                            SendMarketEventsTo(joinPeer);
-                            // Player-run shop prices (change-broadcast only; a hot-joiner would otherwise miss them).
-                            SendPlayerShopPricesTo(joinPeer);
+                            SendJoinReplayTo(joinPeer);   // rivals, businesses, register duty, passengers, market, shop prices
                             // Parked cars near the joiner — resync as soon as their position is known.
                             ParkedVehicleSync.ForgetPeer(joinName);
                         }
@@ -1525,6 +1513,24 @@ namespace BigAmbitionsMP
             MarkPlayerInGame(senderPid);
         }
 
+        /// <summary>The on-connect JOIN REPLAY — every host-authoritative state a joiner needs that is
+        /// otherwise only sent as an incremental/change broadcast (so a fresh joiner would miss it).
+        /// SINGLE SOURCE OF TRUTH: both on-connect paths (late-join below and the startup-hold
+        /// SendWorldStateTo) call this, so a NEW authoritative state is added in exactly ONE place
+        /// (guards anti-pattern Class 4 — "new host-authoritative state not replayed to joiners").
+        /// The caller sends the Welcome/WorldSnapshot first; path-specific extras (host profile,
+        /// parked-car reset) stay at the call site.</summary>
+        private static void SendJoinReplayTo(NetPeer peer)
+        {
+            // Rival roster BEFORE businesses so building-owner ID strings resolve to names.
+            SendRivalsSnapshotTo(peer);
+            SendBusinessSnapshotTo(peer);    // business table (then deltas as they change)
+            SendRegisterDutyTo(peer);        // who's currently on the registers (event-tracked)
+            SendPassengerSnapshotTo(peer);   // passenger locks + who's riding (event-tracked)
+            SendMarketEventsTo(peer);        // active market events (change-broadcast only)
+            SendPlayerShopPricesTo(peer);    // player-run shop prices (change-broadcast only)
+        }
+
         /// <summary>Send a peer the full world state (owners+market, host profile,
         /// rivals, businesses) — on the main thread (IL2CPP).  Used for both late-join
         /// and the frozen-until-synced startup hold (sent while the client is frozen on
@@ -1539,12 +1545,7 @@ namespace BigAmbitionsMP
                     var snapshot = BuildWorldSnapshot();
                     Send(peer, MessageEnvelope.Create(MessageType.Welcome, "host", snapshot));
                     BroadcastHostProfile();
-                    SendRivalsSnapshotTo(peer);
-                    SendBusinessSnapshotTo(peer);
-                    SendRegisterDutyTo(peer);   // event-tracked duty is wiped by the peer's world reload — re-sync it
-                    SendPassengerSnapshotTo(peer);   // passenger locks + seats (event-tracked; join replay)
-                    SendMarketEventsTo(peer);        // active market events (change-broadcast only; join replay)
-                    SendPlayerShopPricesTo(peer);    // player-run shop prices (change-broadcast only; join replay)
+                    SendJoinReplayTo(peer);
                     MPLoadProfiler.Mark($"HOST sent full world state to peer {peer.Id}");
                     Plugin.Logger.LogInfo($"[Server] Sent full world state to peer {peer.Id}.");
                 }

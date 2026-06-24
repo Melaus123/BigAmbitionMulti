@@ -236,6 +236,13 @@ namespace BigAmbitionsMP
         // "playerId/field" → consecutive mismatch count.
         private static readonly Dictionary<string, int> _streaks = new();
 
+        // "playerId" → next Time.unscaledTime the routine all-OK summary may log.
+        // Release noise control (2026-06-24): when everything matches, the summary
+        // logs only as a ~5-min heartbeat so it doesn't dilute the bug-report ring
+        // buffer; a streak-confirmed divergence bypasses this and logs every cycle.
+        private static readonly Dictionary<string, float> _nextSummaryAt = new();
+        private const float SummaryHeartbeatSeconds = 300f;
+
         private static bool Check(string player, string field, bool match, string detail)
         {
             string key = player + "/" + field;
@@ -296,14 +303,29 @@ namespace BigAmbitionsMP
                               $"client 0x{ci.Hash:X8} vs host 0x{mh.Value:X8}")) intOk++;
                 }
 
-                Plugin.Logger.LogInfo(
-                    $"[Audit] '{p.PlayerId}': clock {(clockOk ? "OK" : "DRIFT")} biz {(bizOk ? "OK" : "DIVERGED")} " +
-                    $"roster {(rosterOk ? "OK" : "DIVERGED")} events {(eventsOk ? "OK" : "DIVERGED")} interiors {intOk}/{intChecked} OK " +
-                    $"(${p.Money:F0}, veh {p.VehicleCount}).");
+                // Throttle the routine summary (see _nextSummaryAt): log every cycle
+                // while a divergence is streak-confirmed, otherwise only as a periodic
+                // heartbeat so normal play doesn't crowd the bug-report ring buffer.
+                bool alarmed = false;
+                string streakPrefix = p.PlayerId + "/";
+                foreach (var kv in _streaks)
+                    if (kv.Value >= StreakToReport && kv.Key.StartsWith(streakPrefix, StringComparison.Ordinal)) { alarmed = true; break; }
+                bool logSummary = alarmed;
+                if (!logSummary)
+                {
+                    float now = Time.unscaledTime;
+                    if (!_nextSummaryAt.TryGetValue(p.PlayerId, out var nextAt) || now >= nextAt)
+                    { _nextSummaryAt[p.PlayerId] = now + SummaryHeartbeatSeconds; logSummary = true; }
+                }
+                if (logSummary)
+                    Plugin.Logger.LogInfo(
+                        $"[Audit] '{p.PlayerId}': clock {(clockOk ? "OK" : "DRIFT")} biz {(bizOk ? "OK" : "DIVERGED")} " +
+                        $"roster {(rosterOk ? "OK" : "DIVERGED")} events {(eventsOk ? "OK" : "DIVERGED")} interiors {intOk}/{intChecked} OK " +
+                        $"(${p.Money:F0}, veh {p.VehicleCount}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Audit] HostHandle: {ex.Message}"); }
         }
 
-        public static void Reset() { _streaks.Clear(); _nextAt = 0f; }
+        public static void Reset() { _streaks.Clear(); _nextSummaryAt.Clear(); _nextAt = 0f; }
     }
 }

@@ -587,7 +587,7 @@ namespace BigAmbitionsMP
                 // MPPriceSync channel — never carried here.
                 try
                 {
-                    if (!reg.RentedByPlayer && !GameStatePatcher.IsSessionPlayerBusiness(reg)
+                    if (!reg.RentedByPlayer && !GameStatePatcher.IsAnyPlayerBusiness(reg)
                         && reg.retailPrices != null && reg.retailPrices.Count > 0)
                     {
                         for (int i = 0; i < reg.retailPrices.Count; i++)

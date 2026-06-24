@@ -714,7 +714,7 @@ namespace BigAmbitionsMP
                     // touch the owner's real interior — only the owner's OWN authoritative push may. This one
                     // gate protects EVERY collection below (designs / prices / dirt / items + any added later).
                     bool isPlayerBusiness = false;
-                    try { isPlayerBusiness = IsSessionPlayerBusiness(reg) || reg.RentedByPlayer || !string.IsNullOrEmpty(payload.OwnerPlayerId); }
+                    try { isPlayerBusiness = IsAnyPlayerBusiness(reg) || reg.RentedByPlayer || !string.IsNullOrEmpty(payload.OwnerPlayerId); }
                     catch { }
                     if (isPlayerBusiness && !payload.Authoritative)
                     {
@@ -817,7 +817,7 @@ namespace BigAmbitionsMP
                             bool protectPlayerBusiness = false;
                             try
                             {
-                                protectPlayerBusiness = IsSessionPlayerBusiness(reg)
+                                protectPlayerBusiness = IsAnyPlayerBusiness(reg)
                                                         || reg.RentedByPlayer
                                                         || !string.IsNullOrEmpty(payload.OwnerPlayerId);
                             }
@@ -972,20 +972,41 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyMarketEvents: {ex.Message}"); }
         }
 
-        /// <summary>True when this registration's business belongs to a SESSION
-        /// PLAYER (after the rival-translation, businessOwnerRivalId carries the
-        /// owning player's id).  The game has NO such concept — to it a replica
-        /// is just "not rented by me" and its AI systems adopt it: cashiers
-        /// auto-spawn on entry (SetupAiEmployeeStations) and the daily rival
-        /// sim re-prices it (CompetitionHelper) — both decompile-confirmed to
-        /// validate NOTHING beyond RentedByPlayer/non-empty owner id.</summary>
-        public static bool IsSessionPlayerBusiness(BuildingRegistration? reg)
+        /// <summary>True when this registration's business belongs to ANY session
+        /// player — YOU **or** another connected player.  This is NOT "is this mine?"
+        /// (after the rival-translation, businessOwnerRivalId carries the owning
+        /// player's id; this delegates to IsSessionPlayerRivalId).  Its only job is
+        /// shielding EVERY player's shop from the local AI economy, which otherwise
+        /// adopts any replica: cashiers auto-spawn on entry (SetupAiEmployeeStations)
+        /// and the daily rival sim re-prices it (CompetitionHelper) — both
+        /// decompile-confirmed to validate NOTHING beyond RentedByPlayer/non-empty
+        /// owner id.
+        ///
+        /// FOOTGUN — do NOT use this to ask "is this MY shop?":
+        ///   • it is true for EVERY player's shop, not just yours; and
+        ///   • it is FALSE for your own freshly-loaded shop (businessOwnerRivalId is
+        ///     empty until the rival-translation stamps it).
+        /// For "is this the local player's own shop?" use IsReceiversOwnBusiness.</summary>
+        public static bool IsAnyPlayerBusiness(BuildingRegistration? reg)
             => IsSessionPlayerRivalId(reg?.businessOwnerRivalId);
 
-        /// <summary>True if this rival-owner id actually belongs to a connected MP player (our own id,
+        /// <summary>True for the LOCAL player's OWN business — the correct "is this
+        /// mine?" test (contrast IsAnyPlayerBusiness, which is true for everyone's
+        /// shop and false for your own fresh shop).  RentedByPlayer is the reliable
+        /// local flag (the game sets it for buildings this player rents/owns); where a
+        /// business payload is available, callers also OR in OwnerPlayerId ==
+        /// MPConfig.PlayerId for positive attribution (see ApplyBusinessInfoLocal's
+        /// receiverOwnsThis).</summary>
+        public static bool IsReceiversOwnBusiness(BuildingRegistration? reg)
+            => reg != null && reg.RentedByPlayer;
+
+        /// <summary>True if this rival-owner id actually belongs to a session MP player (our own id,
         /// a roster client, or any session player) — i.e. a "rival" that is really another player, NOT a
         /// game AI rival. Used to shield player-owned shops from AI-economy administration (shutdown /
-        /// re-price / re-value / overtake) while leaving them in the world so competition still applies.</summary>
+        /// re-price / re-value / overtake) while leaving them in the world so competition still applies.
+        /// NOTE: a disconnected player STAYS in ClientPlayerRoster for the host session (their buildings
+        /// are held for reconnect), so this keeps returning true while they're away — the shield does not
+        /// lapse on a drop, only on a full host restart.</summary>
         public static bool IsSessionPlayerRivalId(string? owner)
         {
             try
@@ -1960,12 +1981,12 @@ namespace BigAmbitionsMP
                 // replica and must NOT overwrite those here.  RentedByPlayer is the reliable "mine" flag (the
                 // game sets it for buildings THIS player rents); OwnerPlayerId==self is the host's positive
                 // attribution.  Other players' shops + AI businesses are NOT "mine" → the host's relay applies
-                // normally.  (NOTE: IsSessionPlayerBusiness is the WRONG test here — it's true for ANY player's
+                // normally.  (NOTE: IsAnyPlayerBusiness is the WRONG test here — it's true for ANY player's
                 // shop and false for your OWN freshly-loaded shop, because it keys on the empty businessOwnerRivalId.)
                 bool receiverOwnsThis = false;
                 try
                 {
-                    receiverOwnsThis = reg.RentedByPlayer
+                    receiverOwnsThis = IsReceiversOwnBusiness(reg)
                                      || (!string.IsNullOrEmpty(info.OwnerPlayerId) && info.OwnerPlayerId == MPConfig.PlayerId);
                 }
                 catch { }
@@ -1999,7 +2020,7 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (info.Prices != null && info.Prices.Count > 0 && reg.retailPrices != null
-                        && !IsSessionPlayerBusiness(reg))
+                        && !IsAnyPlayerBusiness(reg))
                     {
                         reg.retailPrices.Clear();
                         foreach (var rp in info.Prices)

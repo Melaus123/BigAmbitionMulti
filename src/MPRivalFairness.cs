@@ -45,7 +45,7 @@ namespace BigAmbitionsMP
                     try
                     {
                         if (reg.Neighborhood != neighborhood) continue;
-                        if (!GameStatePatcher.IsSessionPlayerBusiness(reg)) continue;
+                        if (!GameStatePatcher.IsAnyPlayerBusiness(reg)) continue;
                         outList.Add(reg);
                     }
                     catch { }
