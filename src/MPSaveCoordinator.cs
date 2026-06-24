@@ -800,7 +800,7 @@ namespace BigAmbitionsMP
                     foreach (var dir in Directory.GetDirectories(sessionFolder))
                     {
                         string stable = Path.GetFileName(dir);
-                        if (!stable.StartsWith("guid-")) continue;   // character folders only
+                        if (!stable.StartsWith("guid-") && !stable.StartsWith("steam-")) continue;   // character folders only — steam-<id> is the normal id (MPConfig:379), guid- only the fallback; was excluding every Steam player
                         string? hsg = NewestHsg(dir);
                         if (hsg == null) continue;
                         DateTime when;

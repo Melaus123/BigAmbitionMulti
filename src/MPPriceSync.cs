@@ -31,8 +31,10 @@ namespace BigAmbitionsMP
         public static bool Enabled = true;
 
         private const float ScanSeconds = 5f;
+        private const float ReassertSeconds = 30f;   // re-send an UNCHANGED price list at least this often → a dropped update (e.g. the just-rented window) self-heals on the next pass
 
         private static readonly Dictionary<string, int> _lastHash = new();
+        private static readonly Dictionary<string, float> _lastSentAt = new();   // addr → last send time (changed or heartbeat); drives the re-assert
         // Addresses whose prices arrived from another player — never rebroadcast
         // those as our own (guards against ownership-flag ambiguity on synced
         // foreign businesses).
@@ -49,6 +51,7 @@ namespace BigAmbitionsMP
         public static void Reset()
         {
             _lastHash.Clear();
+            _lastSentAt.Clear();
             _foreignAddrs.Clear();
             _hostCache.Clear();
             _nextScanAt = 0f;
@@ -88,8 +91,11 @@ namespace BigAmbitionsMP
                             h = h * 31 + rp.price.GetHashCode();
                         }
                     }
-                    if (_lastHash.TryGetValue(addr, out var prev) && prev == h) continue;
+                    bool changed = !(_lastHash.TryGetValue(addr, out var prev) && prev == h);
+                    bool reassertDue = !_lastSentAt.TryGetValue(addr, out var sentAt) || (Time.unscaledTime - sentAt) >= ReassertSeconds;
+                    if (!changed && !reassertDue) continue;   // unchanged AND sent recently → skip; otherwise (re)send so a dropped update self-heals
                     _lastHash[addr] = h;
+                    _lastSentAt[addr] = Time.unscaledTime;
 
                     var p = new RetailPricesPayload { AddressKey = addr, OwnerId = MPConfig.PlayerId };
                     for (int i = 0; i < prices.Count; i++)
@@ -101,7 +107,7 @@ namespace BigAmbitionsMP
 
                     if (MPServer.IsRunning)        MPServer.BroadcastRetailPrices(p);
                     else if (MPClient.IsConnected) MPClient.SendRetailPrices(p);
-                    Plugin.Logger.LogInfo($"[PriceSync] sent {p.Prices.Count} price(s) for '{addr}'.");
+                    if (changed) Plugin.Logger.LogInfo($"[PriceSync] sent {p.Prices.Count} price(s) for '{addr}'.");   // quiet on heartbeat re-asserts
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[PriceSync] Tick: {ex.Message}"); }

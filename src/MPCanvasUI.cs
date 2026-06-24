@@ -2343,6 +2343,7 @@ namespace BigAmbitionsMP
                 ParkedVehicleSync.Reset();
                 MPRegisterSync.Reset();   // duty posts die with the scene
                 PassengerSync.Reset();    // passenger seats/locks die with the scene
+                InteriorSync.Reset();     // interior subs + owner-snapshot caches die with the scene — a prior session's Authoritative=true snapshot must not bleed into a new world (was never wired up)
                 _appearanceSig = ""; _appearanceNextAt = 0f;
                 _blackOverlayCanvas = null;     // re-scan on fresh game load (#6)
                 _blackOverlayFindTimer = 0f;

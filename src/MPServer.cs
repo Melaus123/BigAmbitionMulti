@@ -376,6 +376,7 @@ namespace BigAmbitionsMP
             MPLog.BeginSession(System.Guid.NewGuid().ToString("N").Substring(0, 8), "host");
             _clients.Clear();         // stale peers from a torn-down session
             BuildingOwners.Clear();   // per-session state — a new game must not inherit
+            BuildingRealEstateOwners.Clear(); // bought-real-estate ledger — same per-session lifecycle (the load path re-seeds it from the manifest); was leaking across a new game and locking fresh-world buildings un-buyable
             CashByStableId.Clear();   // owners/cash; the load path re-seeds from the manifest
             _listener = new EventBasedNetListener();
             _server   = new NetManager(_listener)
@@ -942,17 +943,17 @@ namespace BigAmbitionsMP
                 {
                     // A client built/changed a business in a building it owns.  Apply it
                     // to the host's world so the host sees it; the host's BusinessSync.Tick
-                    // then relays it to the other clients.  Ownership rule: a building
-                    // owned by SOMEONE ELSE can't be changed by this sender; an address
-                    // with no recorded owner passes (rent registration may still be in
-                    // flight for a building the sender just took).
+                    // then relays it to the other clients.  Ownership rule: the sender must
+                    // OWN this address in a ledger (rented or bought); AI/unowned addresses are
+                    // rejected too (closes the forge-onto-AI-shop hole).  A change that lands in
+                    // the brief just-rented window before ownership is recorded is re-sent by the
+                    // owner's periodic re-assert (BusinessSync.TickClient) and accepted then.
                     var bc = env.GetPayload<BusinessChangePayload>();
                     if (bc?.Info == null) break;
                     if (!SenderIs(bc.Info.OwnerPlayerId, senderPid, env.Type, allowEmpty: true)) break;
-                    if (BuildingOwners.TryGetValue(bc.Info.AddressKey ?? "", out var bcOwner)
-                        && !string.IsNullOrEmpty(bcOwner) && bcOwner != senderPid)
+                    if (!SenderOwns(bc.Info.AddressKey ?? "", senderPid))
                     {
-                        Plugin.Logger.LogWarning($"[Server] BusinessChange for '{bc.Info.AddressKey}' from '{senderPid}' but it's owned by '{bcOwner}' — dropped.");
+                        Plugin.Logger.LogWarning($"[Server] BusinessChange for '{bc.Info.AddressKey}' from '{senderPid}' — sender doesn't own it (incl. AI/unowned) — dropped.");
                         break;
                     }
                     GameStatePatcher.ApplyClientBusinessChange(bc.Info);
@@ -1041,15 +1042,16 @@ namespace BigAmbitionsMP
                     // A client's business changed its retail prices: apply to the
                     // host's local registration copy (main thread) + relay to all
                     // (the sender's own echo is dropped by the OwnerId guard).
-                    // Same ownership rule as BusinessChange: another player's
-                    // building can't be repriced; unowned addresses pass.
+                    // Ownership rule (same as BusinessChange): the sender must OWN this
+                    // address in a ledger (rented or bought); AI/unowned addresses are rejected
+                    // too.  A reprice that lands in the brief just-rented window before ownership
+                    // is recorded is re-sent by the owner's periodic re-assert (MPPriceSync.Tick).
                     var rp = env.GetPayload<RetailPricesPayload>();
                     if (rp == null || string.IsNullOrEmpty(rp.AddressKey)) break;
                     if (!SenderIs(rp.OwnerId, senderPid, env.Type)) break;
-                    if (BuildingOwners.TryGetValue(rp.AddressKey, out var rpOwner)
-                        && !string.IsNullOrEmpty(rpOwner) && rpOwner != senderPid)
+                    if (!SenderOwns(rp.AddressKey, senderPid))
                     {
-                        Plugin.Logger.LogWarning($"[Server] RetailPrices for '{rp.AddressKey}' from '{senderPid}' but it's owned by '{rpOwner}' — dropped.");
+                        Plugin.Logger.LogWarning($"[Server] RetailPrices for '{rp.AddressKey}' from '{senderPid}' — sender doesn't own it (incl. AI/unowned) — dropped.");
                         break;
                     }
                     if (rp.Prices.Count > 500
@@ -1131,6 +1133,11 @@ namespace BigAmbitionsMP
                 {
                     var rc = env.GetPayload<RegisterCashierPayload>();
                     if (rc == null || !SenderIs(rc.PlayerId, senderPid, env.Type)) break;
+                    if (!SenderOwns(rc.Address, senderPid))
+                    {
+                        Plugin.Logger.LogWarning($"[Server] RegisterCashier for '{rc.Address}' from '{senderPid}' — sender doesn't own/rent it — dropped.");
+                        break;
+                    }
                     MPRegisterSync.Apply(rc);
                     Broadcast(env);   // relay duty state to everyone (idempotent at sender)
                     break;
@@ -2157,12 +2164,31 @@ namespace BigAmbitionsMP
             GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostRemoveFromForSale(addr));
         }
 
+        /// <summary>True iff senderPid is the recorded owner of this address in EITHER ownership ledger
+        /// (BuildingOwners = rents/operates, BuildingRealEstateOwners = bought).  The gate for inbound
+        /// mutations that must come from the building's owner; empty / "host" / a different owner → false.
+        /// Clients only ever send for shops they run, so requiring positive ownership rejects nothing
+        /// legitimate: owner-push is self-healing (periodic re-assert), so a mutation that lands in the
+        /// brief just-rented window before ownership is recorded is simply re-sent and accepted then.</summary>
+        private static bool SenderOwns(string addr, string senderPid)
+        {
+            if (string.IsNullOrEmpty(addr) || string.IsNullOrEmpty(senderPid)) return false;
+            if (BuildingOwners.TryGetValue(addr, out var o) && o == senderPid) return true;
+            if (BuildingRealEstateOwners.TryGetValue(addr, out var r) && r == senderPid) return true;
+            return false;
+        }
+
         // A client listed an owned building for sale.  Add it to the host's authoritative
         // for-sale market (with the seller's price); the for-sale poll then broadcasts it.
         private static void HandleListForSale(NetPeer peer, string senderPid, MessageEnvelope env)
         {
             var info = env.GetPayload<BuildingForSaleInfo>();
             if (info == null || string.IsNullOrEmpty(info.AddressKey)) return;
+            if (!SenderOwns(info.AddressKey, senderPid))
+            {
+                Plugin.Logger.LogWarning($"[Server] ListForSale for '{info.AddressKey}' from '{senderPid}' but the sender doesn't own it — dropped.");
+                return;
+            }
             Plugin.Logger.LogInfo($"[Server] ListForSale: {info.AddressKey} by {senderPid} @ {info.BuildingPrice:F0}.");
             GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostAddToForSale(info));
         }
@@ -2172,6 +2198,11 @@ namespace BigAmbitionsMP
         {
             var req = env.GetPayload<BuildingOwnershipPayload>();
             if (req == null || string.IsNullOrEmpty(req.AddressKey)) return;
+            if (!SenderOwns(req.AddressKey, senderPid))
+            {
+                Plugin.Logger.LogWarning($"[Server] CancelSale for '{req.AddressKey}' from '{senderPid}' but the sender doesn't own it — dropped.");
+                return;
+            }
             Plugin.Logger.LogInfo($"[Server] CancelSale: {req.AddressKey} by {senderPid}.");
             string addr = req.AddressKey;
             GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostRemoveFromForSale(addr));
@@ -2183,6 +2214,11 @@ namespace BigAmbitionsMP
         {
             var req = env.GetPayload<BuildingOwnershipPayload>();
             if (req == null || string.IsNullOrEmpty(req.AddressKey)) return;
+            if (!SenderOwns(req.AddressKey, senderPid))
+            {
+                Plugin.Logger.LogWarning($"[Server] SaleCompleted for '{req.AddressKey}' from '{senderPid}' but the sender doesn't own it — dropped.");
+                return;
+            }
             Plugin.Logger.LogInfo($"[Server] SaleCompleted: {req.AddressKey} (AI bought {senderPid}'s building) — releasing.");
             BuildingRealEstateOwners.TryRemove(req.AddressKey, out _);
             string addr = req.AddressKey;
@@ -2495,6 +2531,8 @@ namespace BigAmbitionsMP
                 int rekeyed = 0;
                 foreach (var kv in BuildingOwners)
                     if (kv.Value == stable) { BuildingOwners[kv.Key] = pid; rekeyed++; }
+                foreach (var kv in BuildingRealEstateOwners)   // symmetric: bought real estate reserved under the absent owner's stableId must also re-key to their live pid
+                    if (kv.Value == stable) { BuildingRealEstateOwners[kv.Key] = pid; rekeyed++; }
                 if (rekeyed > 0) Plugin.Logger.LogInfo($"[Server] Re-keyed {rekeyed} reserved building(s) to '{pid}'.");
                 var m = MPSaveManager.ReadManifest(session);
                 float cash = m != null ? MPSaveCoordinator.BestCashFor(m, stable)

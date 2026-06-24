@@ -27,6 +27,7 @@ namespace BigAmbitionsMP
     public static class BusinessSync
     {
         private const float PollIntervalSeconds = 2f;
+        private const float ClientReassertSeconds = 30f;   // re-send an UNCHANGED owned-business state at least this often → a dropped update (e.g. the just-rented window) self-heals
 
         private static readonly Dictionary<string, BusinessInfo> _lastSent = new();
 
@@ -486,6 +487,7 @@ namespace BigAmbitionsMP
 
         // ── Client → host: push THIS player's owned-business changes up ───────
         private static readonly Dictionary<string, BusinessInfo> _lastSentClient = new();
+        private static readonly Dictionary<string, float> _lastSentClientAt = new();   // addr → last send time (changed or heartbeat); drives the re-assert
         private static float _lastClientPollAt;
 
         /// <summary>CLIENT: change-driven sync of the businesses THIS player runs (rented
@@ -518,13 +520,18 @@ namespace BigAmbitionsMP
                     info.OwnerPlayerId         = MPConfig.PlayerId;   // it's ours — the host attributes it to us
                     info.BusinessOwnerPlayerId = MPConfig.PlayerId;
 
-                    if (_lastSentClient.TryGetValue(info.AddressKey, out var prev) && EqualInfo(prev, info))
-                        continue;                              // unchanged — don't send
+                    bool unchanged = _lastSentClient.TryGetValue(info.AddressKey, out var prev) && EqualInfo(prev, info);
+                    bool reassertDue = !_lastSentClientAt.TryGetValue(info.AddressKey, out var sentAt) || (now - sentAt) >= ClientReassertSeconds;
+                    if (unchanged && !reassertDue) continue;   // unchanged AND sent recently → skip; otherwise (re)send so a dropped update self-heals
 
                     _lastSentClient[info.AddressKey] = info;
+                    _lastSentClientAt[info.AddressKey] = now;
                     MPClient.SendBusinessChange(info);
-                    changes++;
-                    Plugin.Logger.LogInfo($"[BusinessSync/Client] → host {info.AddressKey}: name='{info.BusinessName}' type={info.BusinessTypeName} sign=type{info.SignType}/light0x{info.SignLightPacked:X8}/lamp0x{info.LampPacked:X8}");
+                    if (!unchanged)   // quiet on heartbeat re-asserts
+                    {
+                        changes++;
+                        Plugin.Logger.LogInfo($"[BusinessSync/Client] → host {info.AddressKey}: name='{info.BusinessName}' type={info.BusinessTypeName} sign=type{info.SignType}/light0x{info.SignLightPacked:X8}/lamp0x{info.LampPacked:X8}");
+                    }
                 }
                 if (changes > 0) Plugin.Logger.LogInfo($"[BusinessSync/Client] Pushed {changes} owned-business change(s) to host.");
             }
@@ -536,6 +543,7 @@ namespace BigAmbitionsMP
         {
             _lastSent.Clear();
             _lastSentClient.Clear();
+            _lastSentClientAt.Clear();
             OwnerOpenByAddress.Clear();
             _lastClientPollAt = 0f;
             _logoCache.Clear();
