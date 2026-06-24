@@ -118,6 +118,25 @@ namespace BigAmbitionsMP
             catch { return ""; }
         }
 
+        /// <summary>The bug-report RELAY endpoint — a Cloudflare Worker that holds the Discord
+        /// webhook server-side, so the webhook is NEVER shipped in the mod.  Public URL, safe to
+        /// bake in; override with "BugReportRelayUrl" in config.  Reports POST here by default;
+        /// a direct "BugReportDiscordWebhookUrl" (maintainer testing) takes precedence when set.</summary>
+        public const string DefaultBugReportRelayUrl = "https://bamp-bug-relay.allscott16.workers.dev";
+        public static string BugReportRelayUrlLive()
+        {
+            try { var v = GetLiveString("BugReportRelayUrl").Trim(); return v.Length > 0 ? v : DefaultBugReportRelayUrl; }
+            catch { return DefaultBugReportRelayUrl; }
+        }
+
+        /// <summary>Optional shared key sent as the X-BAMP-Key header to the relay (matches the
+        /// Worker's RELAY_KEY secret).  Obfuscation only — it ships in the mod.</summary>
+        public static string BugReportRelayKeyLive()
+        {
+            try { return GetLiveString("BugReportRelayKey").Trim(); }
+            catch { return ""; }
+        }
+
         public static string BugReportDiscordCrashTagIdLive()
         {
             try { return CleanDiscordTagId(GetLiveString("BugReportDiscordCrashTagId")); }

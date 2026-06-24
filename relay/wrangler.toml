@@ -1,0 +1,18 @@
+# Cloudflare Worker config for the BigAmbitionsMP bug-report relay.
+# Deploy with the Wrangler CLI (`wrangler deploy`) from this folder, OR skip
+# the CLI entirely and paste worker.js into the Cloudflare dashboard (see README).
+
+name = "bamp-bug-relay"
+main = "worker.js"
+compatibility_date = "2024-09-01"
+
+# Secrets are NOT set here (they'd be committed). Set them after deploy:
+#   wrangler secret put DISCORD_WEBHOOK_URL      # your forum webhook (required)
+#   wrangler secret put RELAY_KEY                # optional shared key
+#
+# Optional per-IP rate limit: create a KV namespace and bind it as RL.
+#   wrangler kv namespace create RL
+# then uncomment, filling in the printed id:
+# [[kv_namespaces]]
+# binding = "RL"
+# id = "<paste-kv-namespace-id-here>"

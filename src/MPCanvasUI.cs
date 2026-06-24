@@ -4592,7 +4592,8 @@ namespace BigAmbitionsMP
                 string attach = _crashReportAttachments.Count == 0
                     ? "Optional: click 'Attach files' to add screenshots/videos. Your logs are always included."
                     : $"{_crashReportAttachments.Count} file(s) attached. Files over 24 MB are skipped.";
-                _crashReportStatusLbl.text = (MPConfig.BugReportDiscordWebhookUrlLive().Length > 0
+                bool uploadOn = MPConfig.BugReportRelayUrlLive().Length > 0 || MPConfig.BugReportDiscordWebhookUrlLive().Length > 0;
+                _crashReportStatusLbl.text = (uploadOn
                     ? "Uploads description, Player logs, bamp-ring.log and attachments. "
                     : "Discord upload is not configured. A local report folder will be saved. ") + attach;
             }

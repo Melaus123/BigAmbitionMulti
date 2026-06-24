@@ -101,12 +101,16 @@ namespace BigAmbitionsMP
             WriteSubmitNotes(Path.Combine(dir, "README-submit.txt"));
 
             var result = new BugReportResult { DirectoryPath = dir };
-            string webhook = MPConfig.BugReportDiscordWebhookUrlLive();
-            if (!string.IsNullOrWhiteSpace(webhook))
+            // Submit to the RELAY by default (it holds the Discord webhook server-side).  A direct
+            // webhook in config overrides it (maintainer local testing) and posts straight to Discord.
+            string directWebhook = MPConfig.BugReportDiscordWebhookUrlLive();
+            string target = !string.IsNullOrWhiteSpace(directWebhook) ? directWebhook : MPConfig.BugReportRelayUrlLive();
+            bool direct = !string.IsNullOrWhiteSpace(directWebhook);
+            if (!string.IsNullOrWhiteSpace(target))
             {
                 result.DiscordUploadQueued = true;
                 string[] tags = CleanDiscordTagIds(discordTagIds);
-                Task.Run(() => UploadToDiscord(webhook, dir, reason, tags));
+                Task.Run(() => UploadReport(target, direct, dir, reason, tags));
             }
 
             Plugin.Logger.LogInfo($"[BugReport] Created report at {dir}");
@@ -398,24 +402,29 @@ namespace BigAmbitionsMP
             catch { }
         }
 
-        private static void UploadToDiscord(string webhookUrl, string dir, string reason, string[] discordTagIds)
+        private static void UploadReport(string url, bool direct, string dir, string reason, string[] discordTagIds)
         {
             try
             {
-                if (!LooksLikeDiscordWebhook(webhookUrl))
+                if (direct && !LooksLikeDiscordWebhook(url))
                 {
-                    Plugin.Logger.LogWarning("[BugReport] Discord webhook URL is not a Discord webhook; upload skipped.");
+                    Plugin.Logger.LogWarning("[BugReport] Direct webhook URL is not a Discord webhook; upload skipped.");
                     return;
                 }
 
                 try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
                 string boundary = "----BAMPBugReport" + Guid.NewGuid().ToString("N");
-                var req = (HttpWebRequest)WebRequest.Create(webhookUrl);
+                var req = (HttpWebRequest)WebRequest.Create(url);
                 req.Method = "POST";
                 req.UserAgent = "BigAmbitionsMP";
                 req.Timeout = 15000;
                 req.ReadWriteTimeout = 15000;
                 req.ContentType = "multipart/form-data; boundary=" + boundary;
+                if (!direct)   // relay path — optional shared-key header (matches the Worker's RELAY_KEY)
+                {
+                    string relayKey = MPConfig.BugReportRelayKeyLive();
+                    if (relayKey.Length > 0) req.Headers["X-BAMP-Key"] = relayKey;
+                }
 
                 using (var stream = req.GetRequestStream())
                 {
