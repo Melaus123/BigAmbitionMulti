@@ -2339,6 +2339,7 @@ namespace BigAmbitionsMP
 
                 // Fresh world-clock skip detector + appearance state for this session.
                 ResetWorldClock();
+                TimeSync.ResetClockState();   // drop any leftover MP clock catch-up / ahead-hold so a fresh game (SP or a new MP session) doesn't inherit it
                 TrafficSync.Reset();
                 ParkedVehicleSync.Reset();
                 MPRegisterSync.Reset();   // duty posts die with the scene

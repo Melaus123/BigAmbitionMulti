@@ -175,12 +175,21 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>Clear pending clock-correction state at a session/scene boundary so a fresh
+        /// game (single-player, or a new MP session) never inherits leftover catch-up / ahead-hold.</summary>
+        public static void ResetClockState()
+        {
+            _correctionHours = 0f;
+            AheadHeld        = false;
+        }
+
         /// <summary>
         /// Call every Update frame (even when paused, but skip if timeScale == 0).
         /// Drips the scheduled clock correction into the game time.
         /// </summary>
         public static void TickClockCorrection()
         {
+            if (!MPServer.IsRunning && !MPClient.InMpGame) return;   // never drain MP catch-up outside an MP game (e.g. a disconnect dropped us to single-player) — mirrors the AheadFreeze gate
             if (_correctionHours <= 0f) return;   // only the BEHIND catch-up runs here; AHEAD = the freeze flag
             if (Time.timeScale   == 0f) return;   // paused — hold
 

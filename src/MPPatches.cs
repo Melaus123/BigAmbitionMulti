@@ -2451,8 +2451,15 @@ namespace BigAmbitionsMP
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                 var states = SaveGameManager.Current?.rivalStates;
                 if (states == null) return;
-                int removed = states.RemoveAll(rs => rs == null
-                    || BigAmbitions.Rivals.RivalsHelper.GetRivalData(rs.rivalId) == null);
+                int removed = states.RemoveAll(rs =>
+                {
+                    if (rs == null) return true;
+                    // Guard the lookup like the sibling at Patch_GetAllRivalData: a throw here would abort the
+                    // whole RemoveAll and escape the Prefix, disrupting the day-roll economy step. On error,
+                    // KEEP the entry (never delete a rival on a transient lookup failure).
+                    try { return BigAmbitions.Rivals.RivalsHelper.GetRivalData(rs.rivalId) == null; }
+                    catch { return false; }
+                });
                 if (removed > 0)
                     Plugin.Logger.LogInfo($"[RivalGuard] dropped {removed} stale/orphan rivalState(s) before RunDaily.");
             }
