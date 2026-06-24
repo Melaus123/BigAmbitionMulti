@@ -593,7 +593,10 @@ namespace BigAmbitionsMP
             // SOLE OWNER of the input-suppression flag: computed fresh every
             // frame from live contributions — a stale latch once locked a
             // player's keyboard permanently (2026-06-10).
-            MPChat.SuppressGameInput = _chatSuppress || _restUiHover || _hubUiHover || _joinPopHover;
+            MPChat.SuppressGameInput = _chatSuppress || _restUiHover || _hubUiHover || _joinPopHover || _crashReportPopupVisible;
+            // Player-movement / click-to-move block — owned here (LateUpdate runs every frame, even
+            // when the MP window is closed) so the bug-report/crash popup blocks input like the chat does.
+            SyncChatNavBlock(_chatSuppress || _crashReportPopupVisible);
 
             // STICKY MP-game latch: keep native-time suppression engaged across a transient drop+reconnect.
             // Set true whenever we're in the game scene and hosting or live-connected; NEVER cleared here —
@@ -5210,9 +5213,8 @@ namespace BigAmbitionsMP
                 _mpChatFocus = false;
             }
 
-            // While the chat box is focused, block player movement so typing WASD
-            // (etc.) doesn't walk the character around.
-            SyncChatNavBlock(_mpChatFocus);
+            // Player-movement block (typing WASD shouldn't walk the character) is owned by
+            // LateUpdate now — it folds in both chat focus and the bug-report/crash popup.
         }
 
         /// <summary>Toggles the game's own navigation blocker so typing in chat

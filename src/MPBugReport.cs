@@ -506,23 +506,21 @@ namespace BigAmbitionsMP
 
         private static string DiscordThreadName(string reason)
         {
+            // Keep only what's useful in a forum-list title: [role] + the player's own words
+            // (crash-tagged).  The date / session / "manual bug report:" noise lives in the body.
             string role = Role();
-            string session = string.IsNullOrWhiteSpace(MPLog.SessionId) ? "nosession" : MPLog.SessionId;
-            string raw = $"BAMP {DateTime.Now:yyyy-MM-dd HH-mm-ss} {role} {session}";
-            if (!string.IsNullOrWhiteSpace(reason))
-                raw += " " + reason.Trim();
+            string desc = (reason ?? "").Trim();
+            bool crash = desc.StartsWith("previous crash", StringComparison.OrdinalIgnoreCase);
+            foreach (var p in new[] { "previous crash:", "manual bug report:", "manual report:", "bug report:" })
+                if (desc.StartsWith(p, StringComparison.OrdinalIgnoreCase)) { desc = desc.Substring(p.Length).Trim(); break; }
+            if (desc.Length == 0) desc = crash ? "crash" : "bug report";
 
+            string title = "[" + role + "] " + (crash ? "CRASH — " : "") + desc;
             var sb = new StringBuilder();
-            foreach (char c in raw)
-            {
-                if (char.IsControl(c)) continue;
-                if (c == '`' || c == '@' || c == '#' || c == ':') sb.Append('-');
-                else sb.Append(c);
-            }
-
+            foreach (char c in title) sb.Append(char.IsControl(c) ? ' ' : c);
             string name = sb.ToString().Trim();
-            if (name.Length > 100) name = name.Substring(0, 100).Trim();
-            return string.IsNullOrWhiteSpace(name) ? "BAMP bug report" : name;
+            if (name.Length > 90) name = name.Substring(0, 90).TrimEnd() + "…";
+            return name.Length == 0 ? "BAMP bug report" : name;
         }
 
         private static IEnumerable<string> UploadFiles(string dir)
