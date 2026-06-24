@@ -359,7 +359,7 @@ namespace BigAmbitionsMP
                 // pause state and share it so the world pauses/resumes for everyone.
                 bool paused = GameStateReader.GetGSCPaused();
                 TimeSync.SetManualPause(paused);
-                if (MPServer.IsRunning)        MPServer.BroadcastManualPause(paused);
+                if (MPServer.IsRunning)        MPServer.SetDeliberatePause(paused);
                 else if (MPClient.IsConnected) MPClient.SendManualPause(paused);
                 Plugin.Logger.LogInfo($"[Patch] TogglePause → manual pause = {paused}");
             }

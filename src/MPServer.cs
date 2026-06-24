@@ -328,6 +328,11 @@ namespace BigAmbitionsMP
         // disconnect pause from a deliberate manual pause so the reconnect path
         // only lifts the former.
         private static volatile bool _pausedByDisconnect;
+        // Set ONLY by the deliberate pause button (host TogglePause patch + a client's
+        // ManualPause), NEVER by the disconnect pause.  ResumeFromDisconnectPause restores
+        // the shared pause to THIS, so lifting a disconnect pause can't cancel a pause a
+        // player set on purpose (M6, 2026-06-24).
+        private static bool _deliberatePause;
         /// <summary>Who dropped (for the host's pause overlay).</summary>
         public static volatile string DisconnectPauseWho = "";
         public static bool PausedByDisconnect => _pausedByDisconnect;
@@ -339,9 +344,9 @@ namespace BigAmbitionsMP
             if (!_pausedByDisconnect) return;
             _pausedByDisconnect = false;
             DisconnectPauseWho  = "";
-            BroadcastManualPause(false);
-            GameStatePatcher.EnqueueOnMainThread(() => TimeSync.SetManualPause(false));
-            Plugin.Logger.LogInfo("[Server] Disconnect pause lifted.");
+            BroadcastManualPause(_deliberatePause);   // restore to the deliberate-pause state, not blindly unpaused — a deliberate pause survives the reconnect (M6)
+            GameStatePatcher.EnqueueOnMainThread(() => TimeSync.SetManualPause(_deliberatePause));
+            Plugin.Logger.LogInfo($"[Server] Disconnect pause lifted (deliberate pause still {(_deliberatePause ? "ON" : "off")}).");
         }
 
         public static bool IsRunning      => _running;
@@ -429,7 +434,7 @@ namespace BigAmbitionsMP
             LobbyClear();
             _peerNames.Clear();
             _clients.Clear();
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
         }
 
         /// <summary>Host clicked "Start New Game" in the lobby.</summary>
@@ -445,7 +450,7 @@ namespace BigAmbitionsMP
             IsInLobby = false;
 
             // Re-arm the startup pause hold for this new game.
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
 
             // Per-player starting cash: each client gets the host-designated amount
             // (their override, else the difficulty base).  The host now designates
@@ -507,7 +512,7 @@ namespace BigAmbitionsMP
             IsInLobby = false;
 
             // Re-arm the startup pause hold for this new game.
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
 
             // Phase 4: if a multiplayer session exists, resume it — the host holds
             // every player's .hsg, so it ships each connected client its own and
@@ -1536,6 +1541,8 @@ namespace BigAmbitionsMP
             SendPassengerSnapshotTo(peer);   // passenger locks + who's riding (event-tracked)
             SendMarketEventsTo(peer);        // active market events (change-broadcast only)
             SendPlayerShopPricesTo(peer);    // player-run shop prices (change-broadcast only)
+            if (TimeSync.ManualPaused)       // shared pause is STATE, not an event — a joiner during a pause must be told, else it runs at 1x while everyone else is frozen (covers fresh join + clean-drop reconnect)
+                Send(peer, MessageEnvelope.Create(MessageType.ManualPause, "host", new ManualPausePayload { Paused = true }));
         }
 
         /// <summary>Send a peer the full world state (owners+market, host profile,
@@ -1945,6 +1952,14 @@ namespace BigAmbitionsMP
 
         // ── Manual pause ──────────────────────────────────────────────────────
 
+        /// <summary>Record + broadcast a DELIBERATE pause (the pause button), tracked
+        /// separately from the disconnect pause so ResumeFromDisconnectPause can restore it.</summary>
+        public static void SetDeliberatePause(bool paused)
+        {
+            _deliberatePause = paused;
+            BroadcastManualPause(paused);
+        }
+
         /// <summary>Broadcasts the shared manual-pause state to all clients.</summary>
         public static void BroadcastManualPause(bool paused)
         {
@@ -1959,7 +1974,9 @@ namespace BigAmbitionsMP
             var payload = env.GetPayload<ManualPausePayload>();
             if (payload == null) return;
 
-            // Apply on the host, then relay to every other client.
+            // Apply on the host, then relay to every other client.  Track the deliberate
+            // intent (NOT the disconnect pause) so a later reconnect restores it (M6).
+            _deliberatePause = payload.Paused;
             TimeSync.SetManualPause(payload.Paused);
             foreach (var peer in _clients.Keys)
                 if (peer.Id != sender.Id)
