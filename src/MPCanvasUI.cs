@@ -245,6 +245,9 @@ namespace BigAmbitionsMP
         private RectTransform? _crashReportSendRT;
         private RectTransform? _crashReportDismissRT;
         private TMP_InputField? _crashReportInputField;
+        private bool   _crashReportSending;       // an upload is in flight: block re-send + hold the status line
+        private string _crashReportResult = "";   // "" = none; else the status line to display (submit/sent/failed)
+        private float  _crashReportAutoCloseAt;    // >0 = unscaled time to auto-close the popup after a success
         private TextMeshProUGUI? _crashReportTitleLbl;
         private TextMeshProUGUI? _crashReportBodyLbl;
         private TextMeshProUGUI? _crashReportTagLbl;
@@ -4505,6 +4508,7 @@ namespace BigAmbitionsMP
                 _crashReportAutoFocusPending = false;
             }
 
+            if (_crashReportAutoCloseAt > 0f && Time.unscaledTime >= _crashReportAutoCloseAt) { DismissCrashReportPopup(); return; }
             RefreshCrashReportText();
 
             var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
@@ -4527,6 +4531,7 @@ namespace BigAmbitionsMP
             _crashReportMessage = "";
             _crashReportAttachments.Clear();
             _bugReportTagIndex = 0;
+            _crashReportSending = false; _crashReportResult = ""; _crashReportAutoCloseAt = 0f;
             _crashReportPopupVisible = true;
             _crashReportFocus = true;
             _crashReportAutoFocusPending = true;
@@ -4592,37 +4597,72 @@ namespace BigAmbitionsMP
             RefreshCrashReportTagText();
             if (_crashReportStatusLbl != null)
             {
-                string attach = _crashReportAttachments.Count == 0
-                    ? "Optional: click 'Attach files' to add screenshots/videos. Your logs are always included."
-                    : $"{_crashReportAttachments.Count} file(s) attached. Files over 24 MB are skipped.";
-                bool uploadOn = MPConfig.BugReportRelayUrlLive().Length > 0 || MPConfig.BugReportDiscordWebhookUrlLive().Length > 0;
-                _crashReportStatusLbl.text = (uploadOn
-                    ? "Uploads description, Player logs, bamp-ring.log and attachments. "
-                    : "Discord upload is not configured. A local report folder will be saved. ") + attach;
+                if (!string.IsNullOrEmpty(_crashReportResult))
+                {
+                    _crashReportStatusLbl.text = _crashReportResult;   // submit/sent/failed — hold it, don't overwrite
+                }
+                else
+                {
+                    string attach = _crashReportAttachments.Count == 0
+                        ? "Optional: click 'Attach files' to add screenshots/videos. Your logs are always included."
+                        : $"{_crashReportAttachments.Count} file(s) attached. Files over 24 MB are skipped.";
+                    bool uploadOn = MPConfig.BugReportRelayUrlLive().Length > 0 || MPConfig.BugReportDiscordWebhookUrlLive().Length > 0;
+                    _crashReportStatusLbl.text = (uploadOn
+                        ? "Uploads description, Player logs, bamp-ring.log and attachments. "
+                        : "Discord upload is not configured. A local report folder will be saved. ") + attach;
+                }
             }
         }
 
         private void SendCrashReportPopup()
         {
+            if (_crashReportSending) return;   // already in flight — ignore double-clicks
             try
             {
                 if (_crashReportInputField != null) _crashReportMessage = _crashReportInputField.text ?? "";
                 string prefix = _crashReportIsCrash ? "previous crash: " : "manual bug report: ";
-                MPBugReport.Create(prefix + _crashReportMessage, openFolder: false, attachments: _crashReportAttachments, discordTagIds: SelectedDiscordForumTagIds());
+                _crashReportSending = true;
+                _crashReportResult = "Submitting report...";   // shown by RefreshCrashReportText; popup stays open
+                var result = MPBugReport.Create(prefix + _crashReportMessage, openFolder: false,
+                    attachments: _crashReportAttachments, discordTagIds: SelectedDiscordForumTagIds(),
+                    onUploadComplete: (ok, folder) => GameStatePatcher.EnqueueOnMainThread(() => OnReportUploadDone(ok)));
                 if (_crashReportIsCrash) MPBugReport.AcknowledgePendingCrash();
-                _crashReportPopupVisible = false;
-                if (_crashReportGO != null) _crashReportGO.SetActive(false);
+                if (!result.DiscordUploadQueued)   // nothing to upload — report saved locally, done
+                {
+                    _crashReportSending = false;
+                    _crashReportResult = "Saved locally (Discord upload not configured).";
+                    _crashReportAutoCloseAt = Time.unscaledTime + 2.5f;
+                }
             }
             catch (Exception ex)
             {
+                _crashReportSending = false;
+                _crashReportResult = "Report failed: " + ex.Message;
                 Plugin.Logger.LogWarning($"[BugReport] crash popup send failed: {ex.Message}");
-                if (_crashReportStatusLbl != null) _crashReportStatusLbl.text = "Report failed: " + ex.Message;
+            }
+        }
+
+        // Main-thread callback when the async upload finishes (relay/Discord result).
+        private void OnReportUploadDone(bool ok)
+        {
+            if (!_crashReportPopupVisible) return;   // user already closed the popup
+            _crashReportSending = false;
+            if (ok)
+            {
+                _crashReportResult = "Report sent. You can close this window.";
+                _crashReportAutoCloseAt = Time.unscaledTime + 2f;   // let them see it, then auto-close
+            }
+            else
+            {
+                _crashReportResult = "Upload failed - saved locally. You can attach the report folder manually.";
+                // keep the popup open so they see it; no auto-close
             }
         }
 
         private void DismissCrashReportPopup()
         {
             if (_crashReportIsCrash) MPBugReport.AcknowledgePendingCrash();
+            _crashReportSending = false; _crashReportResult = ""; _crashReportAutoCloseAt = 0f;
             _crashReportPopupVisible = false;
             if (_crashReportGO != null) _crashReportGO.SetActive(false);
         }

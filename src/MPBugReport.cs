@@ -80,7 +80,7 @@ namespace BigAmbitionsMP
         }
 #endif
 
-        public static BugReportResult Create(string reason, bool openFolder = true, IEnumerable<string>? attachments = null, IEnumerable<string>? discordTagIds = null)
+        public static BugReportResult Create(string reason, bool openFolder = true, IEnumerable<string>? attachments = null, IEnumerable<string>? discordTagIds = null, Action<bool, string>? onUploadComplete = null)
         {
             reason = string.IsNullOrWhiteSpace(reason) ? "manual report" : reason.Trim();
 
@@ -101,6 +101,7 @@ namespace BigAmbitionsMP
             WriteSubmitNotes(Path.Combine(dir, "README-submit.txt"));
 
             var result = new BugReportResult { DirectoryPath = dir };
+
             // Submit to the RELAY by default (it holds the Discord webhook server-side).  A direct
             // webhook in config overrides it (maintainer local testing) and posts straight to Discord.
             string directWebhook = MPConfig.BugReportDiscordWebhookUrlLive();
@@ -110,7 +111,11 @@ namespace BigAmbitionsMP
             {
                 result.DiscordUploadQueued = true;
                 string[] tags = CleanDiscordTagIds(discordTagIds);
-                Task.Run(() => UploadReport(target, direct, dir, reason, tags));
+                Task.Run(() =>
+                {
+                    bool ok = UploadReport(target, direct, dir, reason, tags);
+                    try { onUploadComplete?.Invoke(ok, dir); } catch { }
+                });
             }
 
             Plugin.Logger.LogInfo($"[BugReport] Created report at {dir}");
@@ -402,14 +407,14 @@ namespace BigAmbitionsMP
             catch { }
         }
 
-        private static void UploadReport(string url, bool direct, string dir, string reason, string[] discordTagIds)
+        private static bool UploadReport(string url, bool direct, string dir, string reason, string[] discordTagIds)
         {
             try
             {
                 if (direct && !LooksLikeDiscordWebhook(url))
                 {
                     Plugin.Logger.LogWarning("[BugReport] Direct webhook URL is not a Discord webhook; upload skipped.");
-                    return;
+                    return false;
                 }
 
                 try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
@@ -451,10 +456,12 @@ namespace BigAmbitionsMP
 
                 using var resp = (HttpWebResponse)req.GetResponse();
                 Plugin.Logger.LogInfo($"[BugReport] Discord upload completed: {(int)resp.StatusCode} {resp.StatusCode}");
+                return true;
             }
             catch (Exception ex)
             {
                 Plugin.Logger.LogWarning($"[BugReport] Discord upload failed: {DiscordError(ex)}");
+                return false;
             }
         }
 
