@@ -988,7 +988,38 @@ namespace BigAmbitionsMP
         ///     empty until the rival-translation stamps it).
         /// For "is this the local player's own shop?" use IsReceiversOwnBusiness.</summary>
         public static bool IsAnyPlayerBusiness(BuildingRegistration? reg)
-            => IsSessionPlayerRivalId(reg?.businessOwnerRivalId);
+        {
+            if (reg == null) return false;
+            if (IsSessionPlayerRivalId(reg.businessOwnerRivalId)) return true;
+            // Re-host durability (2026-06-24): the live roster forgets a player who is
+            // disconnected, but the host's ownership LEDGER (restored from the manifest)
+            // still reserves their building to them.  A building reserved to a player —
+            // even one currently absent — is a player's shop and must stay shielded from
+            // the local AI economy, exactly as it is while the owner is online.  Host-only
+            // (clients keep no ledger); correct, since the AI economy runs on the host.
+            return IsLedgerReservedToPlayer(reg);
+        }
+
+        /// <summary>HOST-only: true when this building is reserved in the ownership
+        /// ledger — BuildingOwners (rents/operates) or BuildingRealEstateOwners (bought)
+        /// — to a player: a connected player's pid OR an absent owner's stable id held
+        /// for reconnect.  "host" and empty are excluded (the host's own buildings are
+        /// already native via RentedByPlayer; empty = unowned/AI).</summary>
+        private static bool IsLedgerReservedToPlayer(BuildingRegistration reg)
+        {
+            try
+            {
+                if (!MPServer.IsRunning) return false;
+                string addr = GameStateReader.AddressKey(reg);
+                if (string.IsNullOrEmpty(addr)) return false;
+                if (MPServer.BuildingOwners.TryGetValue(addr, out var o)
+                    && !string.IsNullOrEmpty(o) && o != "host") return true;
+                if (MPServer.BuildingRealEstateOwners.TryGetValue(addr, out var r)
+                    && !string.IsNullOrEmpty(r) && r != "host") return true;
+                return false;
+            }
+            catch { return false; }
+        }
 
         /// <summary>True for the LOCAL player's OWN business — the correct "is this
         /// mine?" test (contrast IsAnyPlayerBusiness, which is true for everyone's
