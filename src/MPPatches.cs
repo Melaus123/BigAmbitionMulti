@@ -731,6 +731,39 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: stop the CLIENT's Gley traffic from re-spawning ────────────
+        // TrafficSync.SuppressLocalTraffic disables TrafficManager, but the GAME re-enables it whenever the
+        // client crosses into a freshly-activated grid area — Gley then spawns a batch of local cars whose
+        // sensors hit our ghosts (the swallowed-NRE storm) before suppression clears them on the next tick.
+        // Disabling the manager is reactive and loses that race; this is the source fix: no-op the manager's
+        // own Update/FixedUpdate on a pure client so the sim/spawner never runs no matter how often the game
+        // flips it back on. In MP-client steady state the manager is already disabled (Update already not
+        // running), so this only makes that known-good state permanent — behaviour-neutral. The <5s grace
+        // lets Gley finish pre-instantiating its vehicle pool (which TrafficSync clones ghosts from) before
+        // we freeze it. Host runs normally; honors the F11 suppression toggle for diagnostics.
+        [HarmonyPatch]
+        public static class Patch_TM_UpdateSkip
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var t = typeof(TrafficManager);
+                int n = 0;
+                foreach (var name in new[] { "Update", "FixedUpdate" })
+                {
+                    var m = t.GetMethod(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    if (m != null) { n++; yield return m; }
+                }
+                Plugin.Logger.LogInfo($"[TrafficSync] client traffic-update skip: targets={n}");
+            }
+
+            static bool Prefix()
+            {
+                if (UnityEngine.Time.timeSinceLevelLoad <= 5f) return true;     // let the pool init first
+                // false = skip Gley's update (no spawn, no sim) on a pure client while suppression is on.
+                return !(MPClient.IsConnected && !MPServer.IsRunning && TrafficSync.ClientTrafficSuppressionEnabled);
+            }
+        }
+
         // ── Patch: GameManager.ClickSleep ─────────────────────────────────────
         // ClickSleep is the public handler for the in-game "sleep" button.
         // We allow the sleep to START (character enters bed) but suppress the
@@ -2265,6 +2298,17 @@ namespace BigAmbitionsMP
                         if (m != null) { n++; yield return m; }
                     }
                 Plugin.Logger.LogInfo($"[Gley] NRE shield: type={(t != null ? "ok" : "NOT FOUND")} targets={n}");
+            }
+
+            // On a pure CLIENT all local Gley traffic is suppressed, so any sensor callback that lands here
+            // is a transient car (about to be cleared) touching one of our ghosts — there is no legitimate
+            // traffic AI to run. Skip the handler so the NRE is never THROWN: the Finalizer below only
+            // catches it after the full stack unwind (~7,500×/session in the physics path). The HOST keeps
+            // the real handler (its live traffic needs the sensors) and relies on the Finalizer for the
+            // low-volume real-traffic-vs-remote-vehicle-ghost contacts.
+            static bool Prefix()
+            {
+                return !(MPClient.IsConnected && !MPServer.IsRunning);   // false = skip original (client only)
             }
 
             private static int _swallowed;

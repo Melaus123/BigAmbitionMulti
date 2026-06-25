@@ -751,6 +751,14 @@ namespace BigAmbitionsMP
             bool isTaxi = model.Equals("Taxi", StringComparison.OrdinalIgnoreCase);
             try
             {
+                // DestroyImmediate in dependency order — mirrors VehicleManager.StripVehicleComponents.
+                // AudioSource is the target of EngineSoundComponent's [RequireComponent]; deferred Destroy
+                // validates that dependency at the CALL (execution is end-of-frame), so destroying the
+                // AudioSource while EngineSoundComponent was still attached was REFUSED every time
+                // ("Can't remove AudioSource because EngineSoundComponent depends on it" — 5,855× in one
+                // client session). Remove every other kill-listed component FIRST, the AudioSource LAST.
+                Component? audio = null;
+                var others = new System.Collections.Generic.List<Component>();
                 var comps = go.GetComponents(typeof(Component));
                 for (int i = 0; i < comps.Length; i++)
                 {
@@ -766,9 +774,14 @@ namespace BigAmbitionsMP
                         if (beh != null) beh.enabled = false;
                         continue;
                     }
-                    if (System.Array.IndexOf(_killTrafficComponents, cn) >= 0)
-                        UnityEngine.Object.Destroy(c);
+                    if (System.Array.IndexOf(_killTrafficComponents, cn) < 0) continue;
+
+                    // Taxi keeps a (disabled) VehicleComponent that may require the AudioSource — leave it inert.
+                    if (cn == "AudioSource") { if (!isTaxi) audio = c; continue; }
+                    others.Add(c);
                 }
+                foreach (var c in others) if (c != null) UnityEngine.Object.DestroyImmediate(c);
+                if (audio != null) UnityEngine.Object.DestroyImmediate(audio);
             }
             catch (Exception ex)
             {
