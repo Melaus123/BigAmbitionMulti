@@ -206,6 +206,7 @@ namespace BigAmbitionsMP
                 TickEmployeeDuty();                               // employee-staffed stations (data-driven, 5s)
                 TickStaffEvaluator();                             // spawn the visible staff NPC (5s)
                 MPPatches.Patch_MPOrderFinalizer.TickPending();   // service-moment completion
+                LogStaffDiagOwner();                              // [StaffDiag] owner-side staffing snapshot (60s self-throttle; removable)
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] duty: {ex.Message}"); }
         }
@@ -324,6 +325,150 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] employee duty: {ex.Message}"); }
+        }
+
+        // ── [StaffDiag] comprehensive staffing diagnostic (2026-06-25) ──────────────────────────────────
+        // Bug: a visitor entering another player's shop sees NO workers. The chain (TickEmployeeDuty detects a
+        // staffed till → broadcasts duty → visitor's Apply injects a BAMP_DUTY_ synthetic) logged ZERO activity
+        // in a report, so the OWNER's detection never fired — but the existing logs only fire on a successful
+        // ON-transition, so a "detected nothing" pass is invisible. This dumps the FULL staffing picture on
+        // BOTH sides so ONE report (with the partner's log, which the report tool already requests) pins the
+        // break whichever link failed. Release-safe + throttled. REMOVE once the no-workers root is found.
+        private static float _nextStaffDiagAt = -999f;
+
+        // One-line full snapshot of a shop's staffing — used by both the owner scan and the visitor entry dump.
+        // Covers every candidate root: ownership, recognized-vs-unrecognized checkout items, the game's
+        // IsEmployeeStationEmployedAtHour verdict per till, and the work-shift roster (synthetic vs real-present
+        // vs real-MISSING vs real-ORPHANED employees) + the current hour.
+        private static void DumpShopStaffing(BuildingRegistration reg, string addr, string tag)
+        {
+            try
+            {
+                if (reg == null) return;
+                bool mine = false; try { mine = reg.RentedByPlayer; } catch { }
+                string bldgOwner = ""; string bizOwner = "";
+                try { bldgOwner = reg.buildingOwnerRivalId?.ToString() ?? ""; } catch { }
+                try { bizOwner  = reg.businessOwnerRivalId?.ToString() ?? ""; } catch { }
+                int hour = -1; try { hour = (int)GameStateReader.GetGameTime().hourOfDay; } catch { }
+
+                int nTills = 0, unrecognized = 0;
+                var tills = new System.Text.StringBuilder();
+                try
+                {
+                    if (reg.itemInstances != null)
+                        foreach (var kv in reg.itemInstances)
+                        {
+                            var ii = kv.Value; if (ii == null) continue;
+                            string n = ii.itemName ?? "";
+                            if (n == "ba:itemname_checkoutcounterright" || n == "ba:itemname_checkoutcounterleft" || n == "ba:itemname_cashregister")
+                            {
+                                nTills++;
+                                string sid = ii.id?.ToString() ?? "";
+                                bool staffed = false; try { staffed = Helpers.EmployeeHelper.IsEmployeeStationEmployedAtHour(reg, sid, -1); } catch { }
+                                tills.Append($"{n.Replace("ba:itemname_", "")}={(staffed ? "STAFFED" : "unstaffed")} ");
+                            }
+                            else if (n.IndexOf("register", StringComparison.OrdinalIgnoreCase) >= 0
+                                  || n.IndexOf("checkout", StringComparison.OrdinalIgnoreCase) >= 0
+                                  || n.IndexOf("counter",  StringComparison.OrdinalIgnoreCase) >= 0)
+                                unrecognized++;   // a till-like item NOT in the recognized set (root b)
+                        }
+                }
+                catch { }
+
+                int shifts = 0, synth = 0, present = 0, missing = 0, orphan = 0;
+                try
+                {
+                    if (reg.scheduleDays != null)
+                        foreach (var sd in reg.scheduleDays)
+                        {
+                            if (sd?.workShifts == null) continue;
+                            foreach (var w in sd.workShifts)
+                            {
+                                if (w == null) continue;
+                                shifts++;
+                                string eid = w.employeeId ?? "";
+                                if (eid.StartsWith(SyntheticDutyEmployeeIdPrefix, StringComparison.Ordinal)) { synth++; continue; }
+                                if (!Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(eid, out var e) || e == null) { missing++; continue; }
+                                bool resolvable = false;
+                                try { resolvable = Helpers.BuildingHelper.GetBuildingRegistration(e.assignedAddress) != null; } catch { }
+                                if (resolvable) present++; else orphan++;
+                            }
+                        }
+                }
+                catch { }
+
+                Plugin.Logger.LogWarning(
+                    $"{tag} '{addr}' mine={mine} bldgOwner='{bldgOwner}' bizOwner='{bizOwner}' h{hour} | tills={nTills} [{tills.ToString().Trim()}]"
+                    + (unrecognized > 0 ? $" +{unrecognized} UNRECOGNIZED-till-like" : "")
+                    + $" | shifts={shifts} (synthetic={synth} realPresent={present} realMISSING={missing} realORPHAN={orphan})");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{tag} dump '{addr}': {ex.Message}"); }
+        }
+
+        // OWNER side: every 60s, snapshot every shop the local player owns (the source of the duty broadcast).
+        // The SUMMARY line ALWAYS logs (even ownedShops=0) so its presence confirms the tick runs at all, and
+        // ownedShops=0 while the player owns shops = an ownership/RentedByPlayer gap (root c).
+        public static void LogStaffDiagOwner()
+        {
+            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            if (Time.unscaledTime - _nextStaffDiagAt < 60f) return;
+            _nextStaffDiagAt = Time.unscaledTime;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return;
+                int owned = 0, ownedWithTill = 0;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null) continue;
+                    bool mine = false; try { mine = reg.RentedByPlayer; } catch { }
+                    if (!mine) continue;
+                    owned++;
+                    bool hasTill = false;
+                    try
+                    {
+                        if (reg.itemInstances != null)
+                            foreach (var kv in reg.itemInstances)
+                            {
+                                var n = kv.Value?.itemName ?? "";
+                                if (n == "ba:itemname_checkoutcounterright" || n == "ba:itemname_checkoutcounterleft" || n == "ba:itemname_cashregister") { hasTill = true; break; }
+                            }
+                    }
+                    catch { }
+                    if (!hasTill) continue;
+                    ownedWithTill++;
+                    DumpShopStaffing(reg, GameStateReader.AddressKey(reg), "[StaffDiag/own]");
+                }
+                Plugin.Logger.LogWarning($"[StaffDiag/own] SUMMARY ownedShops={owned} withCheckout={ownedWithTill} synthetics={_synthetics.Count} dutyToggles={_cashiers.Count}");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffDiag/own] {ex.Message}"); }
+        }
+
+        // VISITOR side: on entering a shop (with a till) — dump what THIS machine has for it: the synced
+        // work-shifts + whether a duty toggle / synthetic arrived. Pairs with the owner dump to span the chain.
+        public static void LogStaffDiagOnEntry(BuildingRegistration reg, string addr)
+        {
+            try
+            {
+                if ((!MPServer.IsRunning && !MPClient.IsConnected) || reg == null || string.IsNullOrEmpty(addr)) return;
+                bool hasTill = false;
+                try
+                {
+                    if (reg.itemInstances != null)
+                        foreach (var kv in reg.itemInstances)
+                        {
+                            var n = kv.Value?.itemName ?? "";
+                            if (n == "ba:itemname_checkoutcounterright" || n == "ba:itemname_checkoutcounterleft" || n == "ba:itemname_cashregister") { hasTill = true; break; }
+                        }
+                }
+                catch { }
+                if (!hasTill) return;   // not a till shop — irrelevant to the no-workers bug
+                bool synthHere = false; try { synthHere = _synthetics.ContainsKey(addr); } catch { }
+                int togglesHere = 0; try { foreach (var kv in _cashiers) if (kv.Value.address == addr) togglesHere++; } catch { }
+                DumpShopStaffing(reg, addr, "[StaffDiag/visit]");
+                Plugin.Logger.LogWarning($"[StaffDiag/visit] '{addr}' synthetic-here={synthHere} duty-toggles-here={togglesHere}");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffDiag/visit] '{addr}': {ex.Message}"); }
         }
 
         /// <summary>The CURRENT shop's set price for an item (synced store

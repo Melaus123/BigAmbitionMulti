@@ -551,6 +551,7 @@ namespace BigAmbitionsMP
                         MPRegisterSync.SetCurrentShop(
                             reg != null ? reg.businessOwnerRivalId : "",
                             reg != null ? GameStateReader.AddressKey(reg) : "");
+                        try { if (reg != null) MPRegisterSync.LogStaffDiagOnEntry(reg, GameStateReader.AddressKey(reg)); } catch { }   // [StaffDiag] visitor-side dump (removable)
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] shop context: {ex.Message}"); }
