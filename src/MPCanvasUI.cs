@@ -506,8 +506,6 @@ namespace BigAmbitionsMP
             // (F7 test-row removed 2026-06-10 — capture complete: offsets are
             //  zero for all open types; passive RideProbe sampling remains.)
 
-            TickCameraAudit();
-
             // BizPhone Chat button: inject once per game scene while MP active;
             // its click requests an MP-window toggle (same as F9).  The icon
             // pulses while chat lines are unread (window closed).
@@ -2447,33 +2445,6 @@ namespace BigAmbitionsMP
         // enabled camera into the scene, picking happens from the wrong eye and
         // highlights land on buildings away from the cursor.  Log the enabled-
         // camera set whenever it changes.
-        private float _camAuditNext;
-        private string _camAuditSig = "";
-        private void TickCameraAudit()
-        {
-            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-            float now = Time.unscaledTime;
-            if (now < _camAuditNext) return;
-            _camAuditNext = now + 5f;
-            try
-            {
-                var cams = Camera.allCameras;   // enabled cameras only
-                var sb = new System.Text.StringBuilder();
-                for (int i = 0; i < cams.Length; i++)
-                {
-                    var c = cams[i];
-                    if (c == null) continue;
-                    sb.Append($"'{c.name}'(tag={c.tag},depth={c.depth}) ");
-                }
-                string sig = sb.ToString();
-                if (sig != _camAuditSig)
-                {
-                    _camAuditSig = sig;
-                    Plugin.Logger.LogInfo($"[CamAudit] enabled cameras ({cams.Length}): {sig}| Camera.main='{Camera.main?.name}'");
-                }
-            }
-            catch { }
-        }
 
         // ── Overlay-aware freeze gate ─────────────────────────────────────────
         // Our scene has loaded (PlayerController exists) but the native loading

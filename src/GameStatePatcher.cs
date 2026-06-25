@@ -2184,15 +2184,13 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ownership apply for {info.AddressKey}: {ex.Message}"); }
 
-                // Diagnostic for Wave 2 planning: log when the host claims to
-                // own a building so we can see exactly how host's reg represents
-                // player-ownership.  Only logs interesting cases (host or AI
-                // changes), not every default-empty record.
-                if (info.RentedByPlayer || !string.IsNullOrEmpty(info.BuildingOwnerRivalId)
-                                       || !string.IsNullOrEmpty(info.BusinessOwnerRivalId)
-                                       || !string.IsNullOrEmpty(priorBuildingOwner)
-                                       || !string.IsNullOrEmpty(priorBusinessOwner)
-                                       || priorRented)
+                // Diagnostic: log only when ownership actually CHANGES (host's reported state vs the
+                // client's prior state). Logging every sync, including unchanged owned records, was
+                // ~270 no-op repeats/session; a transition (rent/unrent, owner A→B, AI↔player) is the
+                // part worth seeing.
+                if (info.BuildingOwnerRivalId != priorBuildingOwner
+                    || info.BusinessOwnerRivalId != priorBusinessOwner
+                    || info.RentedByPlayer != priorRented)
                 {
                     Plugin.Logger.LogInfo($"[Patcher] Ownership for {info.AddressKey}: host[bldg='{info.BuildingOwnerRivalId}' biz='{info.BusinessOwnerRivalId}' rented={info.RentedByPlayer}] client-was[bldg='{priorBuildingOwner}' biz='{priorBusinessOwner}' rented={priorRented}].");
                 }
@@ -2207,6 +2205,15 @@ namespace BigAmbitionsMP
                     if (reg.businessTypeName == "ba:businesstype_headquarters"
                         || info.BusinessTypeName == "ba:businesstype_headquarters")
                     {
+                        // THE BRICK TRIGGER (2026-06-25): the host delta carries an EMPTY OwnerPlayerId for an
+                        // HQ this client RENTS. That is the exact upstream condition that bricked HQs before the
+                        // 2026-06-19 guard (old default newRented=false → receiverOwns=false → schedule wiped).
+                        // The guard now PRESERVES tenancy, so there may be NO visible brick — but this is the
+                        // moment to capture. Log it loudly + distinctly so a bug report pins the exact apply
+                        // (and the surrounding host deltas) even on a near-miss, regardless of the guard saving it.
+                        if (priorRented && string.IsNullOrEmpty(info.OwnerPlayerId))
+                            Plugin.Logger.LogWarning($"[HQDiag] *** BRICK TRIGGER *** host delta has EMPTY OwnerPlayerId for owned HQ '{info.AddressKey}' — guard preserved tenancy (rentedNow={reg.RentedByPlayer}). bizOwnerPlayer='{info.BusinessOwnerPlayerId}' bldgRival='{info.BuildingOwnerRivalId}' bizRival='{info.BusinessOwnerRivalId}' infoSched={(info.Schedule?.Count ?? -1)} regSched={(reg.scheduleDays?.Count ?? -1)} tempClosed={reg.temporarilyClosed}");
+
                         Plugin.Logger.LogWarning($"[HQDiag] apply '{info.AddressKey}' receiverOwns={receiverOwnsThis} rentedPrior={priorRented} rentedNow={reg.RentedByPlayer} ownerPlayer='{info.OwnerPlayerId}' bizOwnerPlayer='{info.BusinessOwnerPlayerId}' infoSched={(info.Schedule?.Count ?? -1)} regSched={(reg.scheduleDays?.Count ?? -1)} tempClosed={reg.temporarilyClosed}");
                     }
                 }

@@ -470,8 +470,11 @@ namespace BigAmbitionsMP
             if (_diagTimer >= 30f)
             {
                 _diagTimer = 0f;
+#if BAMP_DEV
+                // Release: redundant with the Perf line's parkedGhosts=N.
                 Plugin.Logger.LogInfo(
                     $"[ParkedSync] CLIENT known={_clientKnown.Count} active ghosts={_clientGhosts.Count}.");
+#endif
             }
         }
 

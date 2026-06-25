@@ -266,7 +266,11 @@ namespace BigAmbitionsMP
                     return true;
                 _lastLocalOwnerHashByAddr[addressKey] = hash;
                 MPClient.SendInteriorOwnerSnapshot(snap);
+#if BAMP_DEV
+                // Change-gated already (hash-skip above), but still ~290 lines/session in one capture —
+                // DEV-only in Release. (Worth a later look at why one HQ's interior changes that often.)
                 Plugin.Logger.LogInfo($"[InteriorSync] Sent owner snapshot ({reason}) addr='{addressKey}': {SnapshotSummary(snap)}.");
+#endif
                 return true;
             }
             catch (Exception ex)

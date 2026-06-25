@@ -796,12 +796,18 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Client] Sent appearance: {RemotePlayerManager.Summary(dto)}");
         }
 
+        private static int _lastLoggedGtsDay = int.MinValue;
         private static void HandleGameTimeSync(MessageEnvelope env)
         {
             var payload = env.GetPayload<GameTimeSyncPayload>();
             if (payload == null) return;
-            Plugin.Logger.LogInfo(
-                $"[Client] GameTimeSync: day={payload.Day} hour={payload.TimeOfDay:F1}");
+            // Log once per in-game DAY, not every ~3s packet (was ~2,100 lines/session). The day
+            // progression is what we actually diagnose with (e.g. the save-storm day range).
+            if (payload.Day != _lastLoggedGtsDay)
+            {
+                _lastLoggedGtsDay = payload.Day;
+                Plugin.Logger.LogInfo($"[Client] GameTimeSync: day={payload.Day} hour={payload.TimeOfDay:F1}");
+            }
 
             // Applies clock-drift correction toward the host's authoritative clock.
             GameStatePatcher.ApplyGameTime(payload);

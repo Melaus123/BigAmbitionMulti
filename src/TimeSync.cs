@@ -23,11 +23,18 @@ namespace BigAmbitionsMP
         // ── timeScale application ─────────────────────────────────────────────
 
         /// <summary>Applies a Time.timeScale value (network sync / startup hold).</summary>
+        private static float _lastLoggedScale = -999f;
         public static void ApplyNetwork(float scale)
         {
             Time.timeScale = scale;
-            string label = scale == 0f ? " (PAUSED)" : $" ({scale:F2}×)";
-            Plugin.Logger.LogInfo($"[TimeSync] Network speed applied:{label}");
+            // Log only on an ACTUAL speed change. The unchanged 1.00× reprint every ~3s was ~2,100
+            // lines/session of pure noise; the diagnostic value is the transitions (pause/skip/catch-up).
+            if (scale != _lastLoggedScale)
+            {
+                _lastLoggedScale = scale;
+                string label = scale == 0f ? " (PAUSED)" : $" ({scale:F2}×)";
+                Plugin.Logger.LogInfo($"[TimeSync] Network speed applied:{label}");
+            }
         }
 
         // ── Drift alignment thresholds ────────────────────────────────────────

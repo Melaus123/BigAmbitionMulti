@@ -532,7 +532,10 @@ namespace BigAmbitionsMP
                     if (!unchanged)   // quiet on heartbeat re-asserts
                     {
                         changes++;
+#if BAMP_DEV
+                        // Per-shop detail is DEV-only; the "Pushed N change(s)" summary below covers Release.
                         Plugin.Logger.LogInfo($"[BusinessSync/Client] → host {info.AddressKey}: name='{info.BusinessName}' type={info.BusinessTypeName} sign=type{info.SignType}/light0x{info.SignLightPacked:X8}/lamp0x{info.LampPacked:X8}");
+#endif
                     }
                 }
                 if (changes > 0) Plugin.Logger.LogInfo($"[BusinessSync/Client] Pushed {changes} owned-business change(s) to host.");
@@ -744,7 +747,23 @@ namespace BigAmbitionsMP
                     return o;   // a client rented this building
             }
             catch { }
-            return SafeBuildingOwnedByPlayer(reg) ? MPConfig.PlayerId : "";
+            if (SafeBuildingOwnedByPlayer(reg)) return MPConfig.PlayerId;
+
+            // About to attribute an EMPTY owner. For an HQ that is the upstream half of the brick (the
+            // receiver then sees ownerPlayer='' → would clear tenancy → schedule wipe). Log WHY on the
+            // host so a bug report pins the cause — it should show BuildingOwners is <missing>, i.e. the
+            // ledger entry for this owned HQ is absent (reclaim / re-host sync gap), NOT an employee event
+            // (the ledger is only cleared by explicit lease-terminate, sale, re-host rebuild, or session start).
+            try
+            {
+                if (MPServer.IsRunning && reg != null && reg.businessTypeName == "ba:businesstype_headquarters")
+                {
+                    MPServer.BuildingOwners.TryGetValue(addr, out var led);
+                    Plugin.Logger.LogWarning($"[HQDiag/Host] EMPTY owner attribution for HQ '{addr}' — BuildingOwners='{(string.IsNullOrEmpty(led) ? "<missing>" : led)}'. Receiver will see ownerPlayer='' (brick trigger).");
+                }
+            }
+            catch { }
+            return "";
         }
 
         private static bool PricesEqual(System.Collections.Generic.List<RetailPriceInfo> a, System.Collections.Generic.List<RetailPriceInfo> b)
