@@ -3126,6 +3126,33 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: VehicleParkingHelper trigger callbacks — skip on GHOSTS (2026-06-25).
+        // The Start-skip above disables the component on ghosts, but Unity still delivers collider
+        // TRIGGER callbacks regardless of Behaviour.enabled, and they deref the same stripped
+        // CarController → an UNHANDLED NullReferenceException per ghost-vs-parking-trigger contact
+        // (~28× in one client session, raw 2-line stack each, buries real events). Same ghost test as
+        // the Start patch: no CarController in parents ⇒ ghost ⇒ skip the handler so the NRE is never
+        // thrown. Real vehicles (CarController present) run unchanged.
+        [HarmonyPatch]
+        public static class Patch_VehicleParkingHelper_TriggerSkipOnGhost
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var t = typeof(VehicleParkingHelper);
+                foreach (var name in new[] { "OnTriggerEnter", "OnTriggerExit", "OnTriggerStay" })
+                {
+                    var m = t.GetMethod(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    if (m != null) yield return m;
+                }
+            }
+
+            static bool Prefix(VehicleParkingHelper __instance)
+            {
+                try { return __instance.GetComponentInParent<CarController>() != null; }   // ghost (no CarController) → skip
+                catch { return true; }
+            }
+        }
+
         // ── [MPSale] MP order finalizer (2026-06-12, user-approved design).
         // The native OnPlaceOrder decrements LOCAL replica stock and books
         // revenue into a LOCAL ledger — and NREs on the replica's missing

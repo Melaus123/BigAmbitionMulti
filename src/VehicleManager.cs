@@ -240,6 +240,12 @@ namespace BigAmbitionsMP
             "VehicleDeformationController", "WheelControllerManager",
             "FuelModuleWrapper", "SpeedLimiterModuleWrapper",
             "FlipOverModuleWrapper", "VariableCenterOfMass",
+            // Bike-only [RequireComponent(VehicleController)] wrappers — without these the
+            // VehicleController couldn't be removed on motorcycle/scooter ghosts ("Can't remove
+            // VehicleController because ArcadeModuleWrapper/MotorcycleModuleWrapper depends on it"),
+            // leaving the ghost a LIVE native vehicle. StripVehicleComponents destroys these (in
+            // "others") before the controller, so the controller removal now succeeds.
+            "ArcadeModuleWrapper", "MotorcycleModuleWrapper",
         };
 
         // Keyed by VehicleId (a player owns several vehicles).
