@@ -2614,13 +2614,17 @@ namespace BigAmbitionsMP
         // CheckAutoSave — is NOT gated by GameManager.preventAutoSave, so the mod's
         // SuppressNativeAutosave does not cover it.  Left alone, in an MP session it
         // writes a vanilla "Recover Midnight.hsg" into the SINGLE-PLAYER folder every
-        // in-game day (the path redirect above is only live around a Load, never a
-        // Save).  We don't SUPPRESS it — we RELOCATE it: skip the native save and
-        // enqueue MidnightRecoverSave, which writes the same recover save into the MP
-        // area (a manifest-less '<session>-recover' sibling), stripped + tracked like
-        // every other MP save.  The gate matches the SuppressNativeAutosave lifecycle
-        // (IsRunning || IsConnected), so a host-loss OFFLINE FORK (both false) lets
-        // the native midnight save run unchanged.  Single player: prefix returns true.
+        // in-game day.  In MP we replace it with a HOST-COORDINATED recover checkpoint
+        // so it behaves like every other save (paired across machines, loadable):
+        //   HOST   → MidnightRecoverSave() → HostSaveNow("midnight") → '<base>-recover'
+        //            (broadcasts SaveNow so every client uploads its own .hsg, writes a
+        //            manifest with all slots + carries forward absent members), deduped
+        //            to once per in-game day.  Loadable on a separate host PC.
+        //   CLIENT → do NOTHING; it saves only on the host's SaveNow, so a client can
+        //            never make an orphan recover save the host didn't coordinate (the
+        //            old per-machine path produced 505 client vs 72 host).
+        //   OFFLINE FORK / single player (neither IsRunning nor IsConnected) → let the
+        //            native midnight save run unchanged.
         [HarmonyPatch(typeof(GameManager), "RunMidNightAutoSave")]
         public static class Patch_GameManager_RunMidNightAutoSave_RedirectInMp
         {
@@ -2628,13 +2632,15 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (MPServer.IsRunning || MPClient.IsConnected)
+                    if (MPServer.IsRunning)
                     {
-                        // Relocate the recover save into the MP area; defer to a clean
-                        // frame so the strip+save+join doesn't run mid-hourly-tick.
+                        // Host's authoritative midnight → one coordinated recover checkpoint; defer to a
+                        // clean frame so the broadcast+save doesn't run mid-hourly-tick.
                         GameStatePatcher.EnqueueOnMainThread(() => MPSaveCoordinator.MidnightRecoverSave());
-                        return false;   // skip the native SP-folder midnight save
+                        return false;
                     }
+                    if (MPClient.IsConnected)
+                        return false;   // pure client: never self-saves the recover point (the host coordinates it)
                 }
                 catch { }
                 return true;             // single player / offline fork — native save runs

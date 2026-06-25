@@ -76,7 +76,10 @@ namespace BigAmbitionsMP
             // it reads clearly in the load list AND it always carries the member who just left (see the
             // carry-forward below).  _activeSessionName stays on the manual base; suffixes never stack.
             // (user, 2026-06-12; disconnect split out 2026-06-23.)
-            string autoSuffix = reason == "disconnect" ? "-disconnect" : (reason == "autosave" ? "-auto" : "");
+            string autoSuffix = reason == "disconnect" ? "-disconnect"
+                              : reason == "autosave"   ? "-auto"
+                              : reason == "midnight"   ? "-recover"   // daily coordinated rollback checkpoint (lower frequency than -auto)
+                              : "";
             bool isAutomatic = autoSuffix.Length > 0;
             // Always derive from the CLEAN base (strip any drifted sibling suffix) before appending this
             // save's suffix, so names never stack ('-auto-disconnect', '-disconnect-recover') if
@@ -227,11 +230,14 @@ namespace BigAmbitionsMP
             string session = payload.SessionName;   // where THIS save goes (may be "<base>-auto")
             // Keep the client's durable session pointer on the manual BASE, mirroring
             // the host (HostSaveNow leaves _activeSessionName on the base and only
-            // suffixes the per-save copy).  If an autosave's "-auto" name stuck here,
-            // a later client Save-and-Exit with an empty name would ship its final
-            // .hsg into the -auto sibling while the host coordinates the base session,
-            // so a base-session resume would load the client's stale save.
-            string canonical = session.EndsWith("-auto") ? session.Substring(0, session.Length - "-auto".Length) : session;
+            // suffixes the per-save copy).  If an automatic sibling name ("-auto",
+            // "-disconnect", "-recover") stuck here, a later client Save-and-Exit with
+            // an empty name would ship its final .hsg into that sibling while the host
+            // coordinates the base session, so a base-session resume would load the
+            // client's stale save.  Strip EVERY auto-suffix (not just "-auto"): the
+            // coordinated "-recover" checkpoint and the "-disconnect" checkpoint now
+            // reach clients too, and both must leave the pointer on the base.
+            string canonical = StripAutoSuffix(session);
             lock (_lock) { _activeSessionName = canonical; }
 
             GameStatePatcher.EnqueueOnMainThread(() =>
@@ -772,6 +778,7 @@ namespace BigAmbitionsMP
             if (string.IsNullOrEmpty(s)) return s ?? "";
             if (s.EndsWith("-disconnect")) return s.Substring(0, s.Length - "-disconnect".Length);
             if (s.EndsWith("-auto"))       return s.Substring(0, s.Length - "-auto".Length);
+            if (s.EndsWith("-recover"))    return s.Substring(0, s.Length - "-recover".Length);   // coordinated midnight checkpoint sibling
             return s;
         }
 
@@ -1008,24 +1015,54 @@ namespace BigAmbitionsMP
         /// fired while in an MP session.  Rather than let it drop a "Recover
         /// Midnight.hsg" into the SINGLE-PLAYER folder (unstripped + untracked), we
         /// write the SAME recover save into the MP area: a sibling
-        /// '&lt;session&gt;-recover' session that is MANIFEST-LESS, so it never shows
-        /// as a loadable session (ListSessions skips no-manifest folders) and never
-        /// collides with the per-player save.hsg selection (LoadOwnHsg/NewestHsg only
-        /// ever scan the base + '-auto' sessions).  Routed through PerformLocalSave
-        /// so the ghost/synthetic stripping + thread-join run exactly like every
-        /// other MP save.  MAIN THREAD.</summary>
+        /// '&lt;session&gt;-recover' session.  It is MANIFEST-LESS, so it doesn't
+        /// collide with the normal per-player save selection (LoadOwnHsg/NewestHsg scan
+        /// only the base + '-auto' sessions during a normal load).  It IS loadable: the
+        /// grouped load screen (MPSaveManager.ListPlaythroughs) surfaces '-recover'
+        /// folders as "Recover (crash)" points (roster borrowed from a sibling save),
+        /// and selecting one reads each player's Recover Midnight.hsg via NewestHsg.
+        /// Routed through PerformLocalSave like every other MP save.  MAIN THREAD.
+        /// KNOWN DEFECT (2026-06-25): this is a per-machine LOCAL snapshot, NOT a
+        /// host↔client coordinated save — on SEPARATE machines the host's '-recover'
+        /// holds only the host's copy (the client's lives on the client's disk, never
+        /// uploaded), and host/client write independently so a client can produce more
+        /// of them than the host (orphans).  Fix in flight: route through the
+        /// coordinated HostSaveNow path (host-triggered, clients upload, manifest +
+        /// carry-forward) so every member is paired — see context log.</summary>
+        // One recover save per (session, in-game day) — see _recoverSavedDays below.
+        private static readonly HashSet<string> _recoverSavedDays = new();
+
         public static void MidnightRecoverSave()
         {
+            // HOST-AUTHORITATIVE: only the host's midnight drives the recover checkpoint. A client never
+            // self-saves here — it saves only when the host's coordinated SaveNow arrives — so it is now
+            // structurally impossible for a client to produce more recover saves than the host (the old
+            // per-machine path made orphans: 505 client vs 72 host in one capture).
+            if (!MPServer.IsRunning) return;
+
             string baseSession;
             lock (_lock) { baseSession = _activeSessionName; }
             if (string.IsNullOrEmpty(baseSession)) return;   // no session yet — nothing to back up
-            string recoverSession = baseSession.EndsWith("-recover") ? baseSession : baseSession + "-recover";
-            try
-            {
-                PerformLocalSave(recoverSession, SaveGameManager.SaveType.MidnightSave);
-                Plugin.Logger.LogInfo($"[MPSave] Midnight recover → MP session '{recoverSession}'.");
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] MidnightRecoverSave: {ex.Message}"); }
+            string recoverSession = StripAutoSuffix(baseSession) + "-recover";   // matches HostSaveNow("midnight")
+
+            // Dedupe to once per (session, in-game day). The native RunMidNightAutoSave re-fires many
+            // times per in-game midnight (host log showed 72 over the session; a behind client replaying
+            // its catch-up hour drove 505) — without this the coordinated save would broadcast repeatedly.
+            // Keyed by session so a fresh load (even at a lower day) saves again, no reset wiring needed.
+            // A failed clock read (day<0) falls through and saves rather than poisoning the guard.
+            int day = -1;
+            try { day = GameStateReader.GetGameTime().day; } catch { }
+            if (day >= 0 && !_recoverSavedDays.Add(recoverSession + "|" + day))
+                return;   // already wrote this session's recover checkpoint for this in-game day
+
+            // Coordinated, exactly like the autosave/disconnect saves: HostSaveNow("midnight") broadcasts
+            // SaveNow (every client uploads its own .hsg), writes the host's slot + a manifest listing
+            // everyone, and CarryForwardAbsentMembers copies forward anyone absent. So '-recover' is a
+            // PAIRED, loadable checkpoint on a separate host PC — not a per-machine orphan. A lower-
+            // frequency rollback point than '-auto' (once per in-game day), mirroring vanilla's daily
+            // Recover save, so a bug captured by the latest autosave can still be reverted past.
+            Plugin.Logger.LogInfo($"[MPSave] Midnight recover checkpoint (day {day}) → coordinated save '{recoverSession}'.");
+            HostSaveNow("midnight");
         }
 
         // ── Native autosave suppression ─────────────────────────────────────────
