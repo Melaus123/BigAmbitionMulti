@@ -246,6 +246,12 @@ namespace BigAmbitionsMP
             // leaving the ghost a LIVE native vehicle. StripVehicleComponents destroys these (in
             // "others") before the controller, so the controller removal now succeeds.
             "ArcadeModuleWrapper", "MotorcycleModuleWrapper",
+            // Scooter drive controller. Its Start() launches a WaitForStationary coroutine that derefs
+            // the (stripped) CarController/VehicleController on a scooter GHOST → an unhandled
+            // NullReferenceException (~5×/session). Stripping it before its Start runs (the strip is
+            // synchronous at spawn; Start fires next frame) stops the coroutine ever launching. Only
+            // ghosts go through StripVehicleComponents, so real ridable scooters keep it.
+            "ScooterController",
         };
 
         // Keyed by VehicleId (a player owns several vehicles).
