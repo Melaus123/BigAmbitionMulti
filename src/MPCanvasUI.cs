@@ -2345,6 +2345,7 @@ namespace BigAmbitionsMP
                 MPRegisterSync.Reset();   // duty posts die with the scene
                 PassengerSync.Reset();    // passenger seats/locks die with the scene
                 InteriorSync.Reset();     // interior subs + owner-snapshot caches die with the scene — a prior session's Authoritative=true snapshot must not bleed into a new world (was never wired up)
+                MPAudit.Reset();          // divergence streaks/throttle die with the session (else stale [Audit] state pollutes the bug-report log across same-process sessions)
                 _appearanceSig = ""; _appearanceNextAt = 0f;
                 _blackOverlayCanvas = null;     // re-scan on fresh game load (#6)
                 _blackOverlayFindTimer = 0f;

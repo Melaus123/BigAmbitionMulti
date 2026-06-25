@@ -383,6 +383,8 @@ namespace BigAmbitionsMP
             BuildingOwners.Clear();   // per-session state — a new game must not inherit
             BuildingRealEstateOwners.Clear(); // bought-real-estate ledger — same per-session lifecycle (the load path re-seeds it from the manifest); was leaking across a new game and locking fresh-world buildings un-buyable
             CashByStableId.Clear();   // owners/cash; the load path re-seeds from the manifest
+            _characterNamesByPlayerId.Clear();   // per-session: a returning player must not collide with a stale name
+            _clientSelfStats.Clear();            // …or stale self-reported stats (feeds rival-fairness targeting)
             _listener = new EventBasedNetListener();
             _server   = new NetManager(_listener)
             {
@@ -1555,6 +1557,7 @@ namespace BigAmbitionsMP
             SendPassengerSnapshotTo(peer);   // passenger locks + who's riding (event-tracked)
             SendMarketEventsTo(peer);        // active market events (change-broadcast only)
             SendPlayerShopPricesTo(peer);    // player-run shop prices (change-broadcast only)
+            SendAppearanceSyncTo(peer);      // every player's appearance (else a joiner sees default avatars — broadcast-on-change only)
             if (TimeSync.ManualPaused)       // shared pause is STATE, not an event — a joiner during a pause must be told, else it runs at 1x while everyone else is frozen (covers fresh join + clean-drop reconnect)
                 Send(peer, MessageEnvelope.Create(MessageType.ManualPause, "host", new ManualPausePayload { Paused = true }));
         }
@@ -2280,6 +2283,15 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Broadcasts every known player appearance to all clients.</summary>
+        /// <summary>Peer-targeted appearance replay for a (re)joiner — appearances are host-authoritative
+        /// but only broadcast on change, so a joiner would otherwise see default avatars until someone re-dresses.</summary>
+        public static void SendAppearanceSyncTo(NetPeer peer)
+        {
+            if (peer == null) return;
+            Send(peer, MessageEnvelope.Create(MessageType.AppearanceSync, "host",
+                new AppearanceSyncPayload { Players = RemotePlayerManager.GetAllAppearances() }));
+        }
+
         public static void BroadcastAppearanceSync()
         {
             if (!_running) return;

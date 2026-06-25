@@ -93,14 +93,17 @@ namespace BigAmbitionsMP
                 var reg = FindRegistration(addressKey);
                 if (reg != null)
                 {
-                    try { reg.AvailableForRent = true; } catch { }
-                    try { reg.buildingOwnerRivalId = ""; } catch { }
                     try
                     {
+                        // Gate ALL the vacate writes on !RentedByPlayer (was: only the name wipe) — a
+                        // stale/misrouted VacateNotify must not flip a building the LOCAL player actively
+                        // rents to "available" or clear its owner mark.
                         if (!reg.RentedByPlayer)
                         {
-                            reg.BusinessName     = null;
-                            reg.businessTypeName = "ba:businesstype_empty";
+                            reg.AvailableForRent      = true;
+                            reg.buildingOwnerRivalId  = "";
+                            reg.BusinessName          = null;
+                            reg.businessTypeName      = "ba:businesstype_empty";
                         }
                     }
                     catch { }

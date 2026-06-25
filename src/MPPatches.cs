@@ -1830,6 +1830,10 @@ namespace BigAmbitionsMP
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                 if (registration == null || !GameStatePatcher.IsAnyPlayerBusiness(registration)) return;
+                // Only override once this shop's real stock has actually synced here — an un-entered remote
+                // shop has no replicated interior, so leave the game's native value (else its shelves read
+                // empty forever and drop its prices from the local market floor). Mirrors the sibling shelf patch.
+                if (!GameStatePatcher.IsReplicatedInterior(GameStateReader.AddressKey(registration))) return;
                 try
                 {
                     bool stocked = false;
