@@ -3301,6 +3301,16 @@ namespace BigAmbitionsMP
                         return;
                     }
 
+                    // If we're a CLIENT and the host link is down, the RemoteSale below would no-op on a dead
+                    // socket — the owner would never be credited nor the stock decremented, yet the local debit
+                    // would still run (cash destroyed, no rollback). Abort and charge nothing; the buyer retries
+                    // once reconnected. (Mirrors the "buyer cancelled" branch above.)
+                    if (!MPServer.IsRunning && !MPClient.IsConnected)
+                    {
+                        Plugin.Logger.LogWarning("[MPSale] host link down at ring-up — sale aborted, nothing charged (retry after reconnect).");
+                        return;
+                    }
+
                     MPHub.ApplyMoneyDelta(-_pendingTotal, $"Purchase at {_pendingAddress}");
 
                     var sale = new RemoteSalePayload

@@ -66,7 +66,9 @@ namespace BigAmbitionsMP
                     var info = ReadInfo(reg);
                     if (info == null) continue;
                     snap.Businesses.Add(info);
-                    _lastSent[info.AddressKey] = info;
+                    // Seed a brand-new shop only — leave an existing record so a pending unswept edit still
+                    // fires on the next Tick (else a join landing mid-edit swallows that edit for other clients).
+                    if (!_lastSent.ContainsKey(info.AddressKey)) _lastSent[info.AddressKey] = info;
                     stats.Accumulate(reg, info);
                 }
 
