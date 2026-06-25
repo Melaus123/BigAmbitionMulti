@@ -178,6 +178,50 @@ namespace BigAmbitionsMP
             SendLocalOwnerSnapshot(_localOwnerAddress, force: false, reason: "tick");
         }
 
+        // ── [DirtWatch] diagnostic (2026-06-25): does a shop's dirt ever DECREASE, or only climb? ─────────
+        // Player report: owned shops accumulate hundreds-to-~1000 dirt spots (a healthy shop should be <10).
+        // The mod only SYNCS dirt — it never generates or cleans it — so this just samples each OWNED shop's
+        // dirt count over time and logs the delta, to show whether dirt ever goes DOWN (something is cleaning)
+        // or only UP / stays flat. Deliberately tracks NOTHING about employees/janitors — raw dirt only. Runs
+        // on each owner's own machine (RentedByPlayer). Release-safe but anomaly-gated (only shops over the
+        // threshold) + throttled, so a healthy game logs nothing. REMOVE once the question is answered.
+        private static float _lastDirtWatchAt = -999f;
+        private static readonly Dictionary<string, int> _lastDirtWatch = new(StringComparer.Ordinal);
+        private const int   DirtWatchThreshold       = 25;     // a healthy shop should be well under 10
+        private const float DirtWatchIntervalSeconds = 60f;
+
+        public static void TickDirtWatch()
+        {
+            if (!MPServer.IsRunning && !MPClient.IsConnected) return;   // MP only
+            float now = UnityEngine.Time.realtimeSinceStartup;
+            if (now - _lastDirtWatchAt < DirtWatchIntervalSeconds) return;
+            _lastDirtWatchAt = now;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return;
+
+                int day = -1; float hod = -1f;
+                try { var gt = GameStateReader.GetGameTime(); day = gt.day; hod = gt.hourOfDay; } catch { }
+
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null) continue;
+                    bool mine = false; try { mine = reg.RentedByPlayer; } catch { }
+                    if (!mine) continue;
+                    int dirt = 0; try { dirt = reg.dirtSpots?.Count ?? 0; } catch { }
+                    if (dirt < DirtWatchThreshold) continue;   // only anomalous shops — healthy ones stay silent
+                    string addr = GameStateReader.AddressKey(reg);
+                    if (string.IsNullOrEmpty(addr)) continue;
+                    int delta = _lastDirtWatch.TryGetValue(addr, out var last) ? dirt - last : 0;
+                    _lastDirtWatch[addr] = dirt;
+                    Plugin.Logger.LogWarning(
+                        $"[DirtWatch] '{addr}' dirt={dirt} delta={delta:+0;-0;0} since last (~{(int)DirtWatchIntervalSeconds}s) | day {day} h{hod:F1}");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[DirtWatch]: {ex.Message}"); }
+        }
+
         public static bool TrySendOwnerSnapshotOnEntry(BuildingRegistration reg, string addressKey)
         {
             if (!MPClient.IsConnected || MPServer.IsRunning) return false;

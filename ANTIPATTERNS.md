@@ -381,5 +381,53 @@ for unconditional `reg.<field> = info.<field>` writes onto a player-owned reg.
 
 ---
 
+## Class 9 — Injected synthetic / data-gapped game entity deref'd by the game's own per-entity logic
+
+**Pattern.** To make the game "see" MP state, we inject a synthetic instance of a GAME entity
+(today: a fabricated `EmployeeInstance` for remote-player register staffing) into a collection the
+game **iterates every tick** (`gi.EmployeeInstances`) — or a real entity ends up pointing at data
+that only resolves on another machine. The game then runs its **full per-entity logic** on it (UI
+lookups, hourly satisfaction / complaint / retirement processing) and **dereferences a field our
+synthetic never populated, or a workplace this machine can't resolve**. The object is structurally
+valid (not destroyed — that's Class 2), just under-populated / data-gapped vs. what the game assumes.
+
+**Why it bites.** The synthetic looks fine where WE use it (the staffing shows). The crash lands in
+the GAME's own code, on a field WE never set, far from the injection site. Worst case it's inside a
+per-hour/per-tick loop, so the unhandled NRE **aborts the whole tick** — every employee AND every
+delivery step after it stop ("everyone stopped working / HQ stopped working"), not just one entity.
+Intermittent (only when the game exercises that path — e.g. an unhappy employee files a complaint),
+and **whack-a-mole**: each newly-exercised field is a fresh crash.
+
+**Detection grep.**
+```
+rg -n "CreateAIEmployeeInstance|EmployeeInstances\.Add|EmployeeInstancesDictionary\[" src/
+```
+For each injected synthetic, list every GAME per-entity method that runs over that collection
+(`UpdateSatisfaction`, `RunComplaintsHourly`, `RunHourly`, daily ticks, Contacts/tooltip lookups) —
+each is a candidate deref of a field we left unset.
+
+**Safe fixes (in order of preference).**
+1. **Exclude the synthetic from the game's per-entity logic wholesale** — a Prefix that skips the
+   game's `RunHourly` for our injected ids (`id.StartsWith(SyntheticDutyEmployeeIdPrefix)`). ONE
+   exclusion beats guarding each sub-method as it crashes (avoids the whack-a-mole).
+2. **Guard the specific failing method** (Prefix returns false on the bad condition) + **log loudly**
+   so the ROOT (why the data is missing) stays visible — the bandaid pattern (`[OrphanEmployee]`).
+3. **Fully populate** every field the game reads (least preferred — whack-a-mole; only viable for a
+   small known set, like the name fix).
+
+**Known instances (all guarded).**
+- Synthetic on-duty `EmployeeInstance` with null `characterData.name` → crashed the phone Contacts app
+  (`ContactScrollerController` name lookup + `EmployeeTooltip.Localize`). Fixed 2026-06-19, set a
+  non-empty name (`MPRegisterSync.cs:398`).
+- Synthetic on-duty employee has zero demands → `EmployeeInstance.UpdateSatisfaction` did 0/0 = NaN →
+  skip the synthetic (`Patch_EmployeeInstance_UpdateSatisfaction_SkipSynthetic`). 2026-06-19.
+- An employee whose `assignedAddress` doesn't resolve on this machine → `UnfulfilledDemandsComplaint.
+  GetComplaintMessageData` NRE escaped `EmployeeHelper.RunHourly` and **aborted the hourly economy
+  tick** ("HQ stopped working", bug-20260621-181535). Guarded by skipping the orphan's complaint +
+  loud `[OrphanEmployee]` warning (`Patch_EmployeeInstance_RunComplaintsHourly_GuardOrphanBuilding`).
+  ROOT (why the workplace is unresolvable in MP) **still open** — the warning is the tracer.
+
+---
+
 *Registry seeded from real fix history (git log + investigation notes); it is not
 exhaustive — add a class the moment a second instance of any pattern shows up.*

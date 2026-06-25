@@ -2849,6 +2849,7 @@ namespace BigAmbitionsMP
             TickHubWindow();
             _pt = MPPerf.Begin(); InteriorSync.Tick();         MPPerf.End("Interior", _pt);   // diff-push to subscribed clients
             _pt = MPPerf.Begin(); InteriorSync.TickClientOwner(); MPPerf.End("InteriorOwner", _pt);   // owner pushes their own shop interior to host
+            InteriorSync.TickDirtWatch();   // [DirtWatch] diagnostic — does a shop's dirt ever go down, or only up? (throttled 60s, anomaly-gated, removable)
             _pt = MPPerf.Begin(); GameStatePatcher.DrainPendingLogoRefreshes(); MPPerf.End("LogoRefresh", _pt);
 
             // Send our character appearance once the character is ready.
