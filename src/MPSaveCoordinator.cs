@@ -537,24 +537,26 @@ namespace BigAmbitionsMP
         // Deferred cash overlay — applied a couple of seconds after the loaded
         // game goes live (so the load doesn't overwrite it).
         private static float _pendingCashApply;
+        private static bool  _hasPendingCash;   // explicit sentinel — a legitimate $0 / negative (overdraft) is a real authoritative balance, not "nothing pending"
         private static int   _cashApplyDwell;
 
-        public static void QueueCashApply(float money) { if (money > 0f) { _pendingCashApply = money; _cashApplyDwell = 0; } }
+        public static void QueueCashApply(float money) { _pendingCashApply = money; _hasPendingCash = true; _cashApplyDwell = 0; }
 
         /// <summary>MAIN THREAD, per-frame while in an MP game: overlay the host's
         /// restored cash once the loaded game has settled.</summary>
         public static void TickCashApply()
         {
-            if (_pendingCashApply <= 0f) return;
+            if (!_hasPendingCash) return;
             if (_cashApplyDwell++ < 120) return;   // ~2s dwell past entering the game
             try
             {
                 var gi = SaveGameManager.Current;
                 if (gi == null) return;
-                gi.Money = _pendingCashApply;
+                gi.Money = _pendingCashApply;   // apply verbatim — $0 and overdraft are legitimate authoritative balances
                 Plugin.Logger.LogInfo($"[MPSave] Applied restored cash ${_pendingCashApply:F0}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] TickCashApply: {ex.Message}"); }
+            _hasPendingCash   = false;
             _pendingCashApply = 0f;
         }
 
