@@ -2346,6 +2346,7 @@ namespace BigAmbitionsMP
                 PassengerSync.Reset();    // passenger seats/locks die with the scene
                 InteriorSync.Reset();     // interior subs + owner-snapshot caches die with the scene — a prior session's Authoritative=true snapshot must not bleed into a new world (was never wired up)
                 MPAudit.Reset();          // divergence streaks/throttle die with the session (else stale [Audit] state pollutes the bug-report log across same-process sessions)
+                MPStockSync.Reset();      // per-shop stock digests die with the session
                 _appearanceSig = ""; _appearanceNextAt = 0f;
                 _blackOverlayCanvas = null;     // re-scan on fresh game load (#6)
                 _blackOverlayFindTimer = 0f;
@@ -2862,6 +2863,7 @@ namespace BigAmbitionsMP
             _pt = MPPerf.Begin(); BusinessSync.Tick();         MPPerf.End("BizHost",  _pt);   // host change detection (time-boxed sweep)
             _pt = MPPerf.Begin(); BusinessSync.TickClient();   MPPerf.End("BizClient",_pt);   // client pushes own businesses up
             _pt = MPPerf.Begin(); MPPriceSync.Tick();          MPPerf.End("Price",    _pt);   // live retail prices of own businesses (both roles)
+            _pt = MPPerf.Begin(); MPStockSync.Tick();          MPPerf.End("Stock",    _pt);   // own shops' stocked-shelf digest (so un-entered shops aren't judged "full")
             _pt = MPPerf.Begin(); MPAudit.Tick();              MPPerf.End("Audit",    _pt);   // client → host state-hash audit (30s); host logs [Audit] MISMATCH on divergence (Release-enabled 2026-06-24 for bug-report evidence)
             _pt = MPPerf.Begin(); MPRestSync.Tick();           MPPerf.End("Rest",     _pt);   // votes, seated state, watchdog (0.5s)
             MPRestSync.TickSkipFrame();   // per-frame skip executor (host + clients) — drives the sim fast to the goal

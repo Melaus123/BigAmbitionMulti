@@ -437,6 +437,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.ShopStockDigest:
+                {
+                    var sd = env.GetPayload<ShopStockDigestPayload>();
+                    if (sd != null) GameStatePatcher.EnqueueOnMainThread(() => MPStockSync.Apply(sd));
+                    break;
+                }
+
                 case MessageType.AuditDrill:
                 {
                     // Host localized a biz divergence to bucket(s) — log our
@@ -1223,6 +1230,12 @@ namespace BigAmbitionsMP
         {
             if (!IsConnected || p == null) return;
             Send(MessageEnvelope.Create(MessageType.RetailPrices, MPConfig.PlayerId, p));
+        }
+
+        public static void SendStockDigest(ShopStockDigestPayload p)
+        {
+            if (!IsConnected || p == null) return;
+            Send(MessageEnvelope.Create(MessageType.ShopStockDigest, MPConfig.PlayerId, p));
         }
 
         /// <summary>Periodic state-hash audit → host (silent-divergence detector).</summary>

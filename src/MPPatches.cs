@@ -1815,6 +1815,29 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>The set of goods item-names actually STOCKED on a shop's priced shelves — the single
+        /// source of truth for "is this shelf stocked" (a PointOfSale/ShowcaseShelf item whose stock
+        /// instance has amount &gt; 0). Used by GetShelfFillState (live, entered shops) AND the MPStockSync
+        /// digest (un-entered shops), so the two can't drift.</summary>
+        public static System.Collections.Generic.HashSet<string> StockedGoodsOf(BuildingRegistration reg)
+        {
+            var set = new System.Collections.Generic.HashSet<string>();
+            try
+            {
+                var items = reg?.itemInstances;
+                if (items == null) return set;
+                foreach (var ii in items.Values)
+                {
+                    if (ii?.ItemCached == null) continue;
+                    if ((ii.ItemCached.type & (BigAmbitions.Items.ItemType.PointOfSale | BigAmbitions.Items.ItemType.ShowcaseShelf)) == 0) continue;
+                    var stock = ItemHelper.GetStockInstance(ii);
+                    if (stock != null && !string.IsNullOrEmpty(stock.itemName) && stock.amount > 0) set.Add(stock.itemName);
+                }
+            }
+            catch { }
+            return set;
+        }
+
         // Anti-exploit (2026-06-19): a player could keep an item ASSIGNED to a shelf (so its retail price isn't
         // pruned by RemoveUnusedRetailPrices) while never actually stocking it, then set a phantom-low price. On
         // OTHER clients GetShelfFillState defaults to "full" for a player-owned shop (no AI goods-source), so
@@ -1830,23 +1853,14 @@ namespace BigAmbitionsMP
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                 if (registration == null || !GameStatePatcher.IsAnyPlayerBusiness(registration)) return;
-                // Only override once this shop's real stock has actually synced here — an un-entered remote
-                // shop has no replicated interior, so leave the game's native value (else its shelves read
-                // empty forever and drop its prices from the local market floor). Mirrors the sibling shelf patch.
-                if (!GameStatePatcher.IsReplicatedInterior(GameStateReader.AddressKey(registration))) return;
                 try
                 {
-                    bool stocked = false;
-                    var items = registration.itemInstances;
-                    if (items != null)
-                        foreach (var ii in items.Values)
-                        {
-                            if (ii?.ItemCached == null) continue;
-                            if ((ii.ItemCached.type & (BigAmbitions.Items.ItemType.PointOfSale | BigAmbitions.Items.ItemType.ShowcaseShelf)) == 0) continue;
-                            var stock = ItemHelper.GetStockInstance(ii);
-                            if (stock != null && stock.itemName == itemName && stock.amount > 0) { stocked = true; break; }
-                        }
-                    __result = stocked ? 1f : 0f;
+                    string addr = GameStateReader.AddressKey(registration);
+                    if (GameStatePatcher.IsReplicatedInterior(addr))
+                        __result = StockedGoodsOf(registration).Contains(itemName) ? 1f : 0f;   // live: this shop's interior is loaded here
+                    else if (MPStockSync.HasDigest(addr))
+                        __result = MPStockSync.IsStocked(addr, itemName) ? 1f : 0f;              // un-entered: owner's last-known stock digest
+                    // else: no live data AND no digest → leave the game's native value (fail open)
                 }
                 catch { /* on any doubt leave the game's value — fail open, never over-suppress competition */ }
             }

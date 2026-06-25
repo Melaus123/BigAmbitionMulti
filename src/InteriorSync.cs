@@ -209,6 +209,22 @@ namespace BigAmbitionsMP
                     return;
                 }
 
+                // Sanity-gate the owner's pushed prices + item graph the SAME way the dedicated RetailPrices
+                // channel does (this path bypassed it) — reject rather than write NaN/insane/negative prices or
+                // an unbounded item list into the host reg and rebroadcast it to every subscriber.
+                if (payload.RetailPrices != null &&
+                    (payload.RetailPrices.Count > 500 ||
+                     payload.RetailPrices.Exists(x => x == null || !MPServer.IsSaneMoney(x.Price, 1_000_000f) || x.Price < 0f)))
+                {
+                    Plugin.Logger.LogWarning($"[InteriorSync] OwnerSnapshot rejected: implausible price table ({payload.RetailPrices.Count}) from '{playerId}' addr='{payload.AddressKey}'.");
+                    return;
+                }
+                if (payload.ItemInstances != null && payload.ItemInstances.Count > 5000)
+                {
+                    Plugin.Logger.LogWarning($"[InteriorSync] OwnerSnapshot rejected: implausible item count ({payload.ItemInstances.Count}) from '{playerId}' addr='{payload.AddressKey}'.");
+                    return;
+                }
+
                 payload.OwnerPlayerId = playerId;
                 payload.ItemInstancesAuthoritative = true;
                 payload.Authoritative = true;   // owner's own push — authoritative for the whole interior

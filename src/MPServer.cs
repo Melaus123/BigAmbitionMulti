@@ -1086,6 +1086,17 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.ShopStockDigest:
+                {
+                    var sd = env.GetPayload<ShopStockDigestPayload>();
+                    if (sd != null && SenderOwns(sd.AddressKey, senderPid))   // only the shop's owner may report its stock
+                    {
+                        GameStatePatcher.EnqueueOnMainThread(() => MPStockSync.Apply(sd));
+                        BroadcastStockDigest(sd);   // relay to everyone (the owner's own echo is idempotent)
+                    }
+                    break;
+                }
+
                 case MessageType.AuditReport:
                 {
                     // Client's periodic state-hash audit — compare to OUR state
@@ -1224,7 +1235,7 @@ namespace BigAmbitionsMP
         /// <summary>Finite and within a sanity cap — NaN/Infinity break every
         /// comparison and aggregate they touch, so no money figure from the
         /// network gets past this.</summary>
-        private static bool IsSaneMoney(float v, float cap = 1_000_000_000f)
+        internal static bool IsSaneMoney(float v, float cap = 1_000_000_000f)   // internal: also used by InteriorSync's owner-snapshot price gate
             => !float.IsNaN(v) && !float.IsInfinity(v) && Math.Abs(v) <= cap;
 
         // ── Join control: bans (kick/reject — stand until the host re-hosts)
@@ -1558,6 +1569,8 @@ namespace BigAmbitionsMP
             SendMarketEventsTo(peer);        // active market events (change-broadcast only)
             SendPlayerShopPricesTo(peer);    // player-run shop prices (change-broadcast only)
             SendAppearanceSyncTo(peer);      // every player's appearance (else a joiner sees default avatars — broadcast-on-change only)
+            foreach (var d in MPStockSync.AllDigests())   // un-entered shops' stocked-shelf sets, so the joiner's market floor is right from the start
+                Send(peer, MessageEnvelope.Create(MessageType.ShopStockDigest, "host", d));
             if (TimeSync.ManualPaused)       // shared pause is STATE, not an event — a joiner during a pause must be told, else it runs at 1x while everyone else is frozen (covers fresh join + clean-drop reconnect)
                 Send(peer, MessageEnvelope.Create(MessageType.ManualPause, "host", new ManualPausePayload { Paused = true }));
         }
@@ -2290,6 +2303,13 @@ namespace BigAmbitionsMP
             if (peer == null) return;
             Send(peer, MessageEnvelope.Create(MessageType.AppearanceSync, "host",
                 new AppearanceSyncPayload { Players = RemotePlayerManager.GetAllAppearances() }));
+        }
+
+        /// <summary>Relay a shop's stock digest to every client (own shop digest, or a validated client one).</summary>
+        public static void BroadcastStockDigest(ShopStockDigestPayload p)
+        {
+            if (!_running || p == null) return;
+            Broadcast(MessageEnvelope.Create(MessageType.ShopStockDigest, "host", p));
         }
 
         public static void BroadcastAppearanceSync()

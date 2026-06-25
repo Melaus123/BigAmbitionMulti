@@ -126,6 +126,21 @@ namespace BigAmbitionsMP
         // only client file allowed to override the host's record), which the host then validates by the
         // save's ACTUAL in-game day before accepting. Reuses SaveDataPayload.
         ClientDisconnectUpload = 131,    // Client → Host: here is my pending disconnect save for the session.
+
+        // Stock digest (2026-06-24): a shop's owner broadcasts which of its PRICED shelves are actually
+        // STOCKED, so every machine (esp. the host's economy floor) can judge an un-entered shop's real
+        // stock without loading its interior. Last-known-while-inside; the set persists otherwise.
+        ShopStockDigest = 132,           // Owner → Host → All: addressKey + the set of stocked goods item names.
+    }
+
+    /// <summary>Owner → host → all: which of a shop's PRICED shelves are actually stocked (goods item
+    /// names with amount &gt; 0). Lets every machine judge an un-entered shop's real stock for the market
+    /// floor without loading its interior — closes the priced-but-empty-shelf exploit on un-entered shops.</summary>
+    public class ShopStockDigestPayload
+    {
+        public string       AddressKey   { get; set; } = "";
+        public string       OwnerId      { get; set; } = "";
+        public List<string> StockedItems { get; set; } = new();
     }
 
     // ── Passenger payloads (ride shotgun) ───────────────────────────────────────
