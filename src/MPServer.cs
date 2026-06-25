@@ -597,7 +597,7 @@ namespace BigAmbitionsMP
                 // Host's own duty map: a departed worker must not leave a
                 // phantom "staffed" register (see HandlePlayerLeft client-side).
                 var lp = leftPlayer;
-                GameStatePatcher.EnqueueOnMainThread(() => MPRegisterSync.RemovePlayer(lp));
+                GameStatePatcher.EnqueueOnMainThread(() => { MPRegisterSync.RemovePlayer(lp); MPRestSync.RemovePlayer(lp); });   // duty + time-skip vote both die with the player
             }
 
             // If a player disconnected during the startup hold, drop them from the
@@ -639,6 +639,20 @@ namespace BigAmbitionsMP
             // Remove the player's capsule from the host's own game
             if (leftPlayer != null)
                 GameStatePatcher.EnqueueOnMainThread(() => RemotePlayerManager.Remove(leftPlayer));
+
+            // Free the departed player's passenger seat AND eject anyone riding in a vehicle they owned
+            // (else a phantom seat blocks boarding on an empty car + leaks into the join snapshot).
+            // Broadcast a PassengerExit per freed rider so every client clears it too.
+            if (leftPlayer != null)
+            {
+                string lpPass = leftPlayer;
+                GameStatePatcher.EnqueueOnMainThread(() =>
+                {
+                    foreach (var fp in PassengerSync.HandlePlayerGone(lpPass))
+                        Broadcast(MessageEnvelope.Create(MessageType.PassengerExit, MPConfig.PlayerId,
+                            new PassengerExitPayload { PlayerId = fp, VehicleId = "" }));
+                });
+            }
 
             // In-game drop → always announce WHO left (the silent pause looked
             // like a freeze), save their state, and pause ONLY for timeout-style

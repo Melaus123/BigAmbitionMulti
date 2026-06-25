@@ -145,6 +145,27 @@ namespace BigAmbitionsMP
             if (playerId == MPConfig.PlayerId) { LocalRidingVehicleId = ""; LocalSeat = -1; }
         }
 
+        /// <summary>A player disconnected: free their own seat AND eject everyone riding in a vehicle
+        /// they OWN (the owner's car despawns on drop). Returns every freed rider id so the host can
+        /// broadcast a PassengerExit for each. Main thread (mutates _seatsOf/_rideOf).</summary>
+        public static List<string> HandlePlayerGone(string playerId)
+        {
+            var freed = new List<string>();
+            if (string.IsNullOrEmpty(playerId)) return freed;
+            // Riders of vehicles this player owns (snapshot the ids first — ApplyExit mutates _seatsOf).
+            foreach (var vid in OccupiedVehicleIds())
+            {
+                if (OwnerOf(vid) != playerId) continue;
+                var riders = RidersOf(vid);
+                if (riders == null) continue;
+                foreach (var kv in riders) if (!freed.Contains(kv.Value)) freed.Add(kv.Value);
+            }
+            // The departing player's own seat (they may be riding in someone else's car).
+            if (IsRiding(playerId) && !freed.Contains(playerId)) freed.Add(playerId);
+            foreach (var p in freed) ApplyExit(p);
+            return freed;
+        }
+
         // ── Join replay (full snapshot — see ANTIPATTERNS Class 4) ────────────
         /// <summary>HOST: build the full lock + seat state for a connecting peer.</summary>
         public static PassengerSnapshotPayload BuildSnapshot()

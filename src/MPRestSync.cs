@@ -570,6 +570,15 @@ namespace BigAmbitionsMP
             MPServer.BroadcastRestState(st);
         }
 
+        /// <summary>Host: a player disconnected — drop their time-skip vote so consensus is re-evaluated
+        /// against who's actually present (a lingering ghost vote would keep a skip running, and a lone
+        /// remaining player couldn't stop it). HostTick re-checks consensus on the next tick.</summary>
+        public static void RemovePlayer(string playerId)
+        {
+            if (string.IsNullOrEmpty(playerId)) return;
+            if (_hostVotes.Remove(playerId)) HostBroadcastState();
+        }
+
         public static void ApplyState(RestSkipStatePayload? st)
         {
             if (st == null) return;
