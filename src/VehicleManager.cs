@@ -167,6 +167,9 @@ namespace BigAmbitionsMP
         }
         private const float MaxVehicleExtrapolateSeconds = 0.3f;
         private const float VehicleSnapDistance          = 15f;
+        // Last-seen signature of the owners who grant the local player a key — when it changes, ghosts
+        // are respawned so their drivability updates (see OnGrantsChanged).
+        private static string _lastGrantorSig = "";
 
         // ── Shared-storage accessors (a ghost's owner + synced cargo, for the storage panel) ──
         /// <summary>The owner of a ghost vehicle (empty if unknown).</summary>
@@ -314,9 +317,12 @@ namespace BigAmbitionsMP
                     // ghosts that slipped into someone's VehicleInstances across
                     // a save/load (run-16 evidence: triple-prefixed rig id).
                     // Never re-broadcast them — that snowballs prefix-per-cycle.
-                    if (inst.id.Contains("BAMP_BAMP"))
+                    // Never re-broadcast a ghost/proxy as our OWN vehicle. A GRANTED drivable proxy stays in
+                    // AllPlayerVehicles (so the game can drive it) but must not be broadcast as ours; a
+                    // 'BAMP_BAMP…' id is additionally a save-cycle leak (warn once).
+                    if (inst.id.StartsWith("BAMP_"))
                     {
-                        if (!_lastManifestLogged.ContainsKey(inst.id))
+                        if (inst.id.Contains("BAMP_BAMP") && !_lastManifestLogged.ContainsKey(inst.id))
                         {
                             _lastManifestLogged[inst.id] = "LEAKED";
                             Plugin.Logger.LogWarning($"[Vehicle] leaked ghost in local fleet skipped: '{inst.id}' (save-cycle leak — root cause backlogged).");
@@ -379,12 +385,17 @@ namespace BigAmbitionsMP
                     catch { }
                     _lastVehicleBldg[inst.id] = bldg;
 
+                    // Live fuel (CarController.fuelModule) if it's a car, else the persisted instance value.
+                    float fuel = inst.fuel;
+                    try { var cc = vc as CarController; if (cc != null && cc.fuelModule != null) fuel = cc.fuelModule.amount; } catch { }
+
                     fleet.Vehicles.Add(new VehicleEntry
                     {
                         VehicleId = inst.id,
                         TypeName  = tn,
                         ColorName = inst.vehicleColorName ?? "",
                         Driving   = vc.controlledByPlayer,
+                        Fuel      = fuel,
                         X = t.position.x, Y = t.position.y, Z = t.position.z,
                         Qx = t.rotation.x, Qy = t.rotation.y, Qz = t.rotation.z, Qw = t.rotation.w,
                         Cargo = cargo,
@@ -500,6 +511,10 @@ namespace BigAmbitionsMP
                     rv.TargetRot = rot;
                     rv.TargetAt  = Time.unscaledTime;
                     rv.SenderT   = p.T;
+
+                    // Keep a drivable (granted) proxy fueled from the owner's car so it isn't stuck at 0%.
+                    // Skipped while WE drive it (controlledByPlayer) so local consumption isn't clobbered.
+                    if (rv.Go != null) ApplyFuelToGhost(rv.Go, e.Fuel);
 
                     // Cross-interior mask v2 (per-vehicle building tag — fixes the
                     // vehicle-LEFT-inside case): show the ghost only when its tag
@@ -697,7 +712,7 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning("[Vehicle] CreateAndSpawnVehicle returned null.");
                 return null;
             }
-            DeregisterGhostFromSave(inst);   // remote ghost: visual-only, never save data
+            DeregisterGhostFromSave(inst);   // remote ghost: never save data → off the borrower's books (no tickets/tax)
 
             var go  = vc.gameObject;
             int ownedAfterSpawn = SafeCount(() => VehicleHelper.AllPlayerVehicles?.Count ?? -1);
@@ -705,10 +720,20 @@ namespace BigAmbitionsMP
             try { poiName = vc.poi != null ? vc.poi.gameObject.name : "(null)"; }
             catch { poiName = "(error)"; }
 
-            // De-register from the player vehicle system.
-            try { VehicleHelper.UnregisterPlayerVehicle(vc); } catch { }
-            // Destroy the point-of-interest (map/world "owned" icon).
-            try { if (vc.poi != null) UnityEngine.Object.Destroy(vc.poi.gameObject); } catch { }
+            // A car whose owner has GRANTED the local player a key stays a real, DRIVABLE vehicle: keep the
+            // controller AND keep it in AllPlayerVehicles, so VehicleHelper.GetCurrentVehicle() finds it and the
+            // game's enter/drive flow works (GetCurrentVehicle scanning AllPlayerVehicles is exactly what NRE'd
+            // when we unregistered it). It's still off the save (above) + off our fleet broadcast (ReadLocalFleet
+            // skips BAMP_ ids), so the borrower takes no charges and never re-broadcasts it as their own.
+            bool drivable = !string.IsNullOrEmpty(ownerId) && GrantSync.IsGranted(ownerId, MPConfig.PlayerId);
+
+            // De-register from the player vehicle system — but NOT a drivable (granted) proxy.
+            if (!drivable) { try { VehicleHelper.UnregisterPlayerVehicle(vc); } catch { } }
+            // Destroy the point-of-interest (map/world "owned" icon) AND null the field. EnterVehicle calls
+            // poi?.SetHidden(true); a DESTROYED-but-non-null Unity object slips past the C# null-conditional
+            // and NREs inside SetHidden (this aborted entry when driving a granted proxy). Nulling makes the
+            // poi?.  and  if (poi != null)  checks in EnterVehicle skip cleanly.
+            try { if (vc.poi != null) { UnityEngine.Object.Destroy(vc.poi.gameObject); vc.poi = null; } } catch { }
             // Destroy every gameplay component — after this the game no longer
             // sees a vehicle here, just a prop: no ownership, no ticket, no entry.
             // Capture the vehicle's sleep environment BEFORE stripping the controller — a passenger
@@ -730,7 +755,13 @@ namespace BigAmbitionsMP
                 }
             }
             catch { }
-            int killed = StripVehicleComponents(go);
+            int killed;
+            if (drivable)
+            {
+                killed = 0;   // keep the controller → drivable (see the comment above).
+                Plugin.Logger.LogInfo($"[Drive] ghost '{e.TypeName}' for '{ownerId}' spawned DRIVABLE (granted — controller kept, registered).");
+            }
+            else killed = StripVehicleComponents(go);
             // Freeze physics — we drive the ghost purely by the synced transform.
             // EVERY rigidbody in the hierarchy, same as SpawnVisualGhost: this
             // path froze only the ROOT, and the 0.11 prefabs carry dynamic
@@ -979,10 +1010,15 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>The transform of a spawned remote ghost vehicle, or null.</summary>
+        /// <summary>The transform of a spawned remote ghost vehicle, or — for the OWNER riding their own car
+        /// while a borrower drives it — the owner's real followed car (so the passenger pin has a target).</summary>
         public static Transform? GhostTransform(string vehicleId)
-            => (vehicleId != null && _remoteVehicles.TryGetValue(vehicleId, out var rv) && rv.Go != null)
-               ? rv.Go.transform : null;
+        {
+            if (string.IsNullOrEmpty(vehicleId)) return null;
+            if (_remoteVehicles.TryGetValue(vehicleId, out var rv) && rv.Go != null) return rv.Go.transform;
+            if (_ownedFollowing.ContainsKey(vehicleId)) { var go = FindOwnedGo(vehicleId); if (go != null) return go.transform; }
+            return null;
+        }
 
         /// <summary>Every spawned ghost vehicle as (vehicleId, transform).</summary>
         public static System.Collections.Generic.IEnumerable<(string, Transform)> AllGhosts()
@@ -1160,10 +1196,203 @@ namespace BigAmbitionsMP
             _remoteVehicles.Clear();
         }
 
+        private static bool IsGhostBeingDriven(GameObject go)
+        {
+            try { var vc = go.GetComponentInChildren<VehicleController>(); return vc != null && vc.controlledByPlayer; }
+            catch { return false; }
+        }
+
+        /// <summary>Write the owner's synced fuel onto a drivable proxy's FuelModule (so it's not stuck at 0%).
+        /// No-op for a stripped ghost (no controller) or while the local player drives it (don't clobber).</summary>
+        private static void ApplyFuelToGhost(GameObject go, float fuel)
+        {
+            try
+            {
+                var vc = go.GetComponentInChildren<VehicleController>();
+                if (vc == null || vc.controlledByPlayer) return;
+                var cc = vc as CarController;
+                if (cc != null && cc.fuelModule != null) cc.fuelModule.amount = fuel;
+                if (vc.vehicleInstance != null) vc.vehicleInstance.fuel = fuel;
+            }
+            catch { }
+        }
+
+        // ── Driving handoff (Phase 2 B) ───────────────────────────────────────
+        // While a granted borrower drives owner O's car, the BORROWER broadcasts its pose; the OWNER's real
+        // car becomes a kinematic follower of that (the owner's own fleet broadcast then carries the position
+        // to everyone else). Reverts on exit (Released) or a ~1.5 s timeout (driver disconnect).
+        private static string _drivingRealVid = "";   // REAL id of the proxy I'm currently driving ("" = none)
+        private static string _drivingOwner   = "";
+        private sealed class DrivenFollow { public Vector3 Pos; public Quaternion Rot = Quaternion.identity; public float Until; public float LastDamage = -1f; }
+        private static readonly Dictionary<string, DrivenFollow> _ownedFollowing = new();   // MY cars driven remotely
+        private const float DriveSyncTimeout = 1.5f;
+
+        /// <summary>True if vid (one of MY cars) is currently driven remotely — used to redirect the owner's
+        /// enter to a passenger seat (Phase 2 C).</summary>
+        public static bool IsDrivenRemotely(string vid) => !string.IsNullOrEmpty(vid) && _ownedFollowing.ContainsKey(vid);
+
+        /// <summary>Per-tick (TickPositionSync): broadcast the pose of a proxy I'm driving; on exit send a
+        /// final Released; time out stale follows.</summary>
+        public static void TickDriveSync()
+        {
+            try
+            {
+                string realVid = "", owner = ""; Transform pose = null; float fuel = 0f, dmg = 0f;
+                var list = VehicleHelper.AllPlayerVehicles;
+                if (list != null)
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        var vc = list[i]; if (vc == null) continue;
+                        var inst = vc.vehicleInstance; if (inst == null || string.IsNullOrEmpty(inst.id)) continue;
+                        if (vc.controlledByPlayer && inst.id.StartsWith("BAMP_"))
+                        {
+                            realVid = inst.id.Substring(5); owner = OwnerIdFor(realVid); pose = vc.transform;
+                            try { var cc = vc as CarController; if (cc != null) { if (cc.fuelModule != null) fuel = cc.fuelModule.amount; if (cc.damageHandler != null) dmg = cc.damageHandler.Damage; } } catch { }
+                            break;
+                        }
+                    }
+
+                if (!string.IsNullOrEmpty(realVid) && pose != null && !string.IsNullOrEmpty(owner))
+                {
+                    _drivingRealVid = realVid; _drivingOwner = owner;
+                    SendDrive(new VehicleDrivePayload {
+                        VehicleId = realVid, OwnerId = owner, DriverId = MPConfig.PlayerId,
+                        X = pose.position.x, Y = pose.position.y, Z = pose.position.z,
+                        Qx = pose.rotation.x, Qy = pose.rotation.y, Qz = pose.rotation.z, Qw = pose.rotation.w,
+                        Fuel = fuel, Damage = dmg, Released = false, T = Time.unscaledTime });
+                }
+                else if (!string.IsNullOrEmpty(_drivingRealVid))
+                {
+                    SendDrive(new VehicleDrivePayload { VehicleId = _drivingRealVid, OwnerId = _drivingOwner, DriverId = MPConfig.PlayerId, Released = true, T = Time.unscaledTime });
+                    Plugin.Logger.LogInfo($"[Drive] exited borrowed '{_drivingRealVid}' — sent release.");
+                    _drivingRealVid = ""; _drivingOwner = "";
+                }
+
+                if (_ownedFollowing.Count > 0)
+                {
+                    float now = Time.unscaledTime; List<string> expired = null;
+                    foreach (var kv in _ownedFollowing) if (now > kv.Value.Until) (expired ??= new List<string>()).Add(kv.Key);
+                    if (expired != null) foreach (var v in expired) ReleaseOwnedFollow(v);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Drive] TickDriveSync: {ex.Message}"); }
+        }
+
+        private static void SendDrive(VehicleDrivePayload p)
+        {
+            if (MPServer.IsRunning) MPServer.BroadcastVehicleDrive(p);
+            else if (MPClient.IsConnected) MPClient.SendVehicleDrive(p);
+        }
+
+        /// <summary>Recipient: only the OWNER of the car acts — their real car follows the driver's pose.
+        /// Everyone else sees it move via the owner's normal fleet broadcast. The driver itself ignores it.</summary>
+        public static void ApplyDriveSync(VehicleDrivePayload p)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.VehicleId) || p.DriverId == MPConfig.PlayerId) return;
+                var ownedGo = FindOwnedGo(p.VehicleId);
+                if (ownedGo == null) return;   // not my car — I'll see it move via the owner's normal broadcast
+                if (p.Released) { ReleaseOwnedFollow(p.VehicleId); return; }
+                if (!_ownedFollowing.TryGetValue(p.VehicleId, out var f))
+                { f = new DrivenFollow(); _ownedFollowing[p.VehicleId] = f; BeginOwnedFollow(ownedGo, p.VehicleId); }
+                f.Pos = new Vector3(p.X, p.Y, p.Z); f.Rot = new Quaternion(p.Qx, p.Qy, p.Qz, p.Qw);
+                f.Until = Time.unscaledTime + DriveSyncTimeout;
+                // State back-prop (item D): the borrower's fuel + damage → my real car so my save reflects use.
+                try
+                {
+                    var cc = ownedGo.GetComponentInChildren<VehicleController>() as CarController;
+                    if (cc != null)
+                    {
+                        if (cc.fuelModule != null) cc.fuelModule.amount = p.Fuel;
+                        if (cc.vehicleInstance != null) cc.vehicleInstance.fuel = p.Fuel;
+                        if (System.Math.Abs(p.Damage - f.LastDamage) > 0.001f) { cc.SetDamage(p.Damage); f.LastDamage = p.Damage; }
+                    }
+                }
+                catch { }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Drive] ApplyDriveSync: {ex.Message}"); }
+        }
+
+        private static GameObject? FindOwnedGo(string vid)
+        {
+            var list = VehicleHelper.AllPlayerVehicles; if (list == null) return null;
+            for (int i = 0; i < list.Count; i++) { var vc = list[i]; if (vc?.vehicleInstance != null && vc.vehicleInstance.id == vid) return vc.gameObject; }
+            return null;
+        }
+
+        private static void BeginOwnedFollow(GameObject go, string vid)
+        {
+            try { foreach (var rb in go.GetComponentsInChildren<Rigidbody>(true)) if (rb != null) rb.isKinematic = true; } catch { }
+            Plugin.Logger.LogInfo($"[Drive] my car '{vid}' is being driven remotely → following the driver.");
+        }
+
+        private static void ReleaseOwnedFollow(string vid)
+        {
+            if (!_ownedFollowing.Remove(vid)) return;
+            var go = FindOwnedGo(vid);
+            if (go != null) { try { foreach (var rb in go.GetComponentsInChildren<Rigidbody>(true)) if (rb != null) rb.isKinematic = false; } catch { } }
+            Plugin.Logger.LogInfo($"[Drive] my car '{vid}' released → resuming local control.");
+        }
+
+        /// <summary>Lerp my cars that are being driven remotely toward the driver's synced pose (+ apply fuel).
+        /// Called from TickSmoothing.</summary>
+        private static void TickOwnedFollow(float k)
+        {
+            if (_ownedFollowing.Count == 0) return;
+            foreach (var kv in _ownedFollowing)
+            {
+                var go = FindOwnedGo(kv.Key); if (go == null) continue;
+                var t = go.transform;
+                t.position = Vector3.Lerp(t.position, kv.Value.Pos, k);
+                t.rotation = Quaternion.Slerp(t.rotation, kv.Value.Rot, k);
+            }
+        }
+
+        /// <summary>A granted player clicked a ghost: if it's a DRIVABLE car they hold a key to and they're
+        /// on foot, drop them into the driver's seat (the game's normal EnterVehicle). Returns true if it
+        /// took the wheel, false to fall through to ride / cargo.</summary>
+        public static bool TryDriveGhost(string vid)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(vid) || !_remoteVehicles.TryGetValue(vid, out var rv) || rv?.Go == null) return false;
+                if (!GrantSync.IsGranted(rv.OwnerId, MPConfig.PlayerId)) return false;   // not my key
+                if (VehicleHelper.GetCurrentVehicle() != null) return false;             // already in a vehicle
+                var vc = rv.Go.GetComponentInChildren<VehicleController>();
+                if (vc == null) return false;                                            // not drivable (stripped — granted after spawn; OnGrantsChanged respawns it)
+                // EnterVehicle's HUD hookup calls VehicleHelper.GetCurrentVehicle(), which resolves the active
+                // car from SaveGameManager.VehicleInstances — the proxy is kept OUT of that list to dodge
+                // tickets/tax, so the lookup NRE'd. But GetCurrentVehicle checks VehiclesCache FIRST; seed the
+                // proxy there so every GetCurrentVehicle() caller resolves it. Charges still skip it (they
+                // iterate VehicleInstances, not this cache).
+                try { if (vc.vehicleInstance != null) VehicleHelper.VehiclesCache[vc.vehicleInstance.id] = vc.vehicleInstance; } catch (Exception ce) { Plugin.Logger.LogWarning($"[Drive] cache seed: {ce.Message}"); }
+                Plugin.Logger.LogInfo($"[Drive] driving granted vehicle '{vid}' (owner '{rv.OwnerId}') — DriveVehicle() (walk to door + enter, like the owner).");
+                vc.DriveVehicle();   // native walk-to-door-then-EnterVehicle (not a teleport)
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogError($"[Drive] TryDriveGhost '{vid}': {ex}"); return false; }
+        }
+
+        /// <summary>The grant table changed: if the set of owners who grant ME a key changed, respawn ghosts
+        /// so a newly-granted car becomes drivable (or a revoked one inert) without a rejoin. MAIN THREAD.</summary>
+        public static void OnGrantsChanged()
+        {
+            try
+            {
+                string sig = GrantSync.GrantorSig(MPConfig.PlayerId);
+                if (sig == _lastGrantorSig) return;
+                _lastGrantorSig = sig;
+                Plugin.Logger.LogInfo($"[Drive] granted-by set changed → respawning ghosts (drivable owners: '{sig}').");
+                DespawnAll();   // re-sync from the next fleet broadcast, drivable-or-not per current grants
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Drive] OnGrantsChanged: {ex.Message}"); }
+        }
+
         /// <summary>Smooths ghost vehicles toward their networked transform; billboards labels.</summary>
         public static void TickSmoothing()
         {
-            if (_remoteVehicles.Count == 0) return;
+            if (_remoteVehicles.Count == 0 && _ownedFollowing.Count == 0) return;   // still run the owned-follow lerp even with no ghosts
             // Capped so packet corrections blend over frames at low FPS.
             float k   = Mathf.Min(Time.deltaTime * 12f, 0.5f);
             float now = Time.unscaledTime;
@@ -1171,6 +1400,8 @@ namespace BigAmbitionsMP
             foreach (var rv in _remoteVehicles.Values)
             {
                 if (rv.Go == null) continue;
+                // A granted ghost the local player is DRIVING owns its own position — don't yank it back.
+                if (IsGhostBeingDriven(rv.Go)) continue;
                 var t = rv.Go.transform;
                 // Chase the dead-reckoned point (target + velocity·elapsed) so
                 // motion stays continuous between packets even at low FPS.
@@ -1181,6 +1412,7 @@ namespace BigAmbitionsMP
                 if (rv.Label != null && cam != null)
                     rv.Label.rotation = cam.transform.rotation;
             }
+            TickOwnedFollow(k);   // handoff: my cars driven remotely follow the driver's synced pose
         }
 
         // ── AI traffic discovery probe ────────────────────────────────────────

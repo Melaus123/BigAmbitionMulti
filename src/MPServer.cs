@@ -190,6 +190,22 @@ namespace BigAmbitionsMP
                 }
                 if (orphans > 0)
                     Plugin.Logger.LogWarning($"[Server] {orphans} orphan-owned building(s) on load (owner has no save). Not auto-changed — diagnostic only.");
+
+                // Access grants ("keys") — StableId-keyed, so no re-keying needed (the runtime
+                // PlayerId table is rebuilt from this on every join). Restore + refresh.
+                if (m.Grants != null && m.Grants.Count > 0)
+                {
+                    int gn = 0;
+                    foreach (var g in m.Grants)
+                    {
+                        if (string.IsNullOrEmpty(g.Owner) || string.IsNullOrEmpty(g.Grantee)) continue;
+                        GrantSync.StoreSet(g.Owner, g.Grantee, true);
+                        if (!string.IsNullOrEmpty(g.GranteeName)) GrantSync.NoteName(g.Grantee, g.GranteeName);
+                        gn++;
+                    }
+                    RefreshGrantsAndBroadcast();
+                    Plugin.Logger.LogInfo($"[Server] Restored {gn} access grant(s) from manifest.");
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RestoreOwnershipFromManifest: {ex.Message}"); }
         }
@@ -602,6 +618,11 @@ namespace BigAmbitionsMP
                 GameStatePatcher.EnqueueOnMainThread(() => { MPRegisterSync.RemovePlayer(lp); MPRestSync.RemovePlayer(lp); });   // duty + time-skip vote both die with the player
             }
 
+            // A departed player drops out of every runtime grant relationship (their durable grants in
+            // the store stay, to reactivate if they return).
+            if (leftPlayer != null && _running)
+                GameStatePatcher.EnqueueOnMainThread(RefreshGrantsAndBroadcast);
+
             // If a player disconnected during the startup hold, drop them from the
             // in-game set and re-check — the remaining players may now all be loaded.
             if (leftPlayer != null)
@@ -767,6 +788,10 @@ namespace BigAmbitionsMP
                     HandleVehicleSync(peer, senderPid, env);
                     break;
 
+                case MessageType.VehicleDrive:
+                    HandleVehicleDrive(senderPid, env);
+                    break;
+
                 case MessageType.PassengerBoardRequest:
                     HandlePassengerBoardRequest(senderPid, env);
                     break;
@@ -789,6 +814,10 @@ namespace BigAmbitionsMP
 
                 case MessageType.VehicleLockSet:
                     HandleVehicleLockSet(senderPid, env);
+                    break;
+
+                case MessageType.PermissionGrantSet:
+                    HandlePermissionGrantSet(senderPid, env);
                     break;
 
                 case MessageType.TaxiHail:
@@ -1429,7 +1458,10 @@ namespace BigAmbitionsMP
             _clients[peer] = 0;
             _peerNames[peer.Id] = hello.PlayerId;
             if (!string.IsNullOrEmpty(hello.StableId))
+            {
                 StableIdByPlayer[hello.PlayerId] = hello.StableId;
+                GrantSync.NoteName(hello.StableId, hello.PlayerId);   // remember the name for owners' grantee lists
+            }
 
             // Add to lobby and tell everyone
             LobbyAdd(hello.PlayerId);
@@ -1448,7 +1480,10 @@ namespace BigAmbitionsMP
                 _clients[peer] = 0;
                 _peerNames[peer.Id] = hello.PlayerId;
                 if (!string.IsNullOrEmpty(hello.StableId))
+                {
                     StableIdByPlayer[hello.PlayerId] = hello.StableId;
+                    GrantSync.NoteName(hello.StableId, hello.PlayerId);
+                }
                 // Late join — keep the roster current for everyone (the in-game F9
                 // window reads LobbyPlayers) by adding + re-broadcasting it.
                 LobbyAdd(hello.PlayerId);
@@ -1566,6 +1601,11 @@ namespace BigAmbitionsMP
             SendBusinessSnapshotTo(peer);    // business table (then deltas as they change)
             SendRegisterDutyTo(peer);        // who's currently on the registers (event-tracked)
             SendPassengerSnapshotTo(peer);   // passenger locks + who's riding (event-tracked)
+            // Access grants: refresh the runtime table for the new roster + tell everyone, then hand the
+            // joiner their OWN grantee list (incl. offline grantees) for the Permissions UI.
+            RefreshGrantsAndBroadcast();
+            if (_peerNames.TryGetValue(peer.Id, out var grantJoinerPid) && StableIdByPlayer.TryGetValue(grantJoinerPid, out var grantJoinerStable))
+                SendOwnGrantsTo(peer, grantJoinerStable);
             SendMarketEventsTo(peer);        // active market events (change-broadcast only)
             SendPlayerShopPricesTo(peer);    // player-run shop prices (change-broadcast only)
             SendAppearanceSyncTo(peer);      // every player's appearance (else a joiner sees default avatars — broadcast-on-change only)
@@ -2440,6 +2480,32 @@ namespace BigAmbitionsMP
             Broadcast(MessageEnvelope.Create(MessageType.VehicleSync, MPConfig.PlayerId, payload));
         }
 
+        // Cars currently being driven by a borrower (vehicleId → last VehicleDrive time) so HostCanBoard lets
+        // the OWNER ride their own car as a passenger while it's borrowed.
+        private static readonly System.Collections.Generic.Dictionary<string, float> _drivenCars = new();
+        public static bool IsCarDriven(string vid)
+            => !string.IsNullOrEmpty(vid) && _drivenCars.TryGetValue(vid, out var t) && (UnityEngine.Time.unscaledTime - t) < 2f;
+
+        private static void HandleVehicleDrive(string senderPid, MessageEnvelope env)
+        {
+            var p = env.GetPayload<VehicleDrivePayload>();
+            if (p == null || !SenderIs(p.DriverId, senderPid, MessageType.VehicleDrive)) return;
+            if (!GrantSync.IsGranted(p.OwnerId, senderPid)) return;   // only a granted borrower may move someone's car
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                if (p.Released) _drivenCars.Remove(p.VehicleId); else _drivenCars[p.VehicleId] = UnityEngine.Time.unscaledTime;
+                VehicleManager.ApplyDriveSync(p);   // host applies (it may be the owner)
+            });
+            Broadcast(MessageEnvelope.Create(MessageType.VehicleDrive, MPConfig.PlayerId, p));   // to all (the driver ignores its echo)
+        }
+
+        /// <summary>Host-as-driver: broadcast the pose of a borrowed car the host is driving.</summary>
+        public static void BroadcastVehicleDrive(VehicleDrivePayload p)
+        {
+            if (!_running || p == null) return;
+            Broadcast(MessageEnvelope.Create(MessageType.VehicleDrive, MPConfig.PlayerId, p));
+        }
+
         // ── Passenger (ride shotgun) — host-authoritative ─────────────────────
         private static void HandlePassengerBoardRequest(string senderPid, MessageEnvelope env)
         {
@@ -2665,6 +2731,105 @@ namespace BigAmbitionsMP
                 new VehicleLockPayload { OwnerId = MPConfig.PlayerId, VehicleId = vehicleId, Locked = locked }));
         }
 
+        private static NetPeer? PeerForPlayer(string pid)
+        {
+            if (!string.IsNullOrEmpty(pid))
+                foreach (var peer in _clients.Keys)
+                    if (_peerNames.TryGetValue(peer.Id, out var name) && name == pid) return peer;
+            return null;
+        }
+
+        /// <summary>Online StableId → live PlayerId (every connected peer + the host itself).</summary>
+        private static Dictionary<string, string> OnlinePidByStable()
+        {
+            var map = new Dictionary<string, string>();
+            foreach (var pid in _peerNames.Values)
+                if (StableIdByPlayer.TryGetValue(pid, out var st) && !string.IsNullOrEmpty(st)) map[st] = pid;
+            if (!string.IsNullOrEmpty(MPConfig.StableId)) map[MPConfig.StableId] = MPConfig.PlayerId;   // host is online but not a peer
+            return map;
+        }
+
+        /// <summary>HOST: rebuild the runtime (PlayerId-space) grant table from the durable StableId
+        /// store for the CURRENT roster — only relationships where BOTH owner and grantee are online
+        /// survive (which is all the enforcement checks ever need).</summary>
+        private static void RebuildRuntimeGrants()
+        {
+            GrantSync.ClearRuntime();
+            var pidOf = OnlinePidByStable();
+            foreach (var e in GrantSync.AllStoreEntries())
+                if (pidOf.TryGetValue(e.Key, out var ownerPid) && pidOf.TryGetValue(e.Value, out var granteePid))
+                    GrantSync.SetGrant(ownerPid, granteePid, true);
+        }
+
+        /// <summary>HOST: build an owner's grantee list (incl. OFFLINE grantees) for the Permissions UI.</summary>
+        private static PermissionOwnGrantsPayload BuildOwnGrants(string ownerStable)
+        {
+            var pay = new PermissionOwnGrantsPayload();
+            if (string.IsNullOrEmpty(ownerStable)) return pay;
+            var online = new HashSet<string>(OnlinePidByStable().Keys);
+            foreach (var gs in GrantSync.StoreGrantees(ownerStable))
+                pay.Grantees.Add(new OwnGrantEntry { Handle = gs, Name = GrantSync.NameOf(gs), Online = online.Contains(gs) });
+            return pay;
+        }
+
+        /// <summary>HOST: rebuild the runtime table, broadcast it to everyone, and refresh the host's
+        /// OWN grantee list. Call after any grant change and on every roster change.</summary>
+        private static void RefreshGrantsAndBroadcast()
+        {
+            RebuildRuntimeGrants();
+            Broadcast(MessageEnvelope.Create(MessageType.PermissionSnapshot, "host", GrantSync.BuildSnapshot()));
+            GrantSync.SetMyGrantees(BuildOwnGrants(MPConfig.StableId).Grantees);
+            VehicleManager.OnGrantsChanged();   // host is also a borrower: respawn its ghosts if its drivability changed
+        }
+
+        private static void SendOwnGrantsTo(NetPeer peer, string ownerStable)
+        {
+            if (peer == null) return;
+            try { Send(peer, MessageEnvelope.Create(MessageType.PermissionOwnGrants, "host", BuildOwnGrants(ownerStable))); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendOwnGrantsTo: {ex.Message}"); }
+        }
+
+        private static void HandlePermissionGrantSet(string senderPid, MessageEnvelope env)
+        {
+            var p = env.GetPayload<PermissionGrantPayload>();
+            if (p == null || !SenderIs(p.OwnerId, senderPid, MessageType.PermissionGrantSet)) return;   // only the real owner may grant
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                if (!StableIdByPlayer.TryGetValue(senderPid, out var ownerStable) || string.IsNullOrEmpty(ownerStable)) return;
+                string granteeStable;
+                if (!string.IsNullOrEmpty(p.GranteeStable)) granteeStable = p.GranteeStable;                  // offline revoke by handle
+                else if (!string.IsNullOrEmpty(p.GranteeId)                                                   // online grant by pid
+                         && StableIdByPlayer.TryGetValue(p.GranteeId, out var gs) && !string.IsNullOrEmpty(gs))
+                { granteeStable = gs; GrantSync.NoteName(granteeStable, p.GranteeId); }
+                else return;
+                GrantSync.StoreSet(ownerStable, granteeStable, p.Granted);
+                RefreshGrantsAndBroadcast();
+                var ownerPeer = PeerForPlayer(senderPid);
+                if (ownerPeer != null) SendOwnGrantsTo(ownerPeer, ownerStable);   // hand the owner back their list (with handles)
+                // (Durable: written to the session manifest at the next coordinated save.)
+            });
+        }
+
+        /// <summary>Host-local (the HOST is the owner): grant/revoke an ONLINE player by PlayerId.</summary>
+        public static void HostSetGrant(string granteePid, bool granted)
+        {
+            if (!_running || string.IsNullOrEmpty(granteePid)) return;
+            if (!StableIdByPlayer.TryGetValue(granteePid, out var gs) || string.IsNullOrEmpty(gs)) return;
+            GrantSync.NoteName(gs, granteePid);
+            GrantSync.StoreSet(MPConfig.StableId, gs, granted);
+            RefreshGrantsAndBroadcast();
+            // (Durable: written to the session manifest at the next coordinated save.)
+        }
+
+        /// <summary>Host-local: revoke (or re-grant) a grantee by StableId handle — covers OFFLINE grantees.</summary>
+        public static void HostSetGrantOffline(string granteeStable, bool granted)
+        {
+            if (!_running || string.IsNullOrEmpty(granteeStable)) return;
+            GrantSync.StoreSet(MPConfig.StableId, granteeStable, granted);
+            RefreshGrantsAndBroadcast();
+            // (Durable: written to the session manifest at the next coordinated save.)
+        }
+
         private static void HandleTaxiHail(MessageEnvelope env)
         {
             var payload = env.GetPayload<TaxiHailPayload>();
@@ -2727,6 +2892,17 @@ namespace BigAmbitionsMP
                 Send(peer, MessageEnvelope.Create(MessageType.PassengerSnapshot, "host", PassengerSync.BuildSnapshot()));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendPassengerSnapshotTo: {ex.Message}"); }
+        }
+
+        /// <summary>Send the full access-grant table to a single peer (join replay).</summary>
+        public static void SendPermissionSnapshotTo(LiteNetLib.NetPeer peer)
+        {
+            if (peer == null) return;
+            try
+            {
+                Send(peer, MessageEnvelope.Create(MessageType.PermissionSnapshot, "host", GrantSync.BuildSnapshot()));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendPermissionSnapshotTo: {ex.Message}"); }
         }
 
         public static void SendInteriorSnapshotTo(LiteNetLib.NetPeer peer, InteriorSnapshotPayload snap)

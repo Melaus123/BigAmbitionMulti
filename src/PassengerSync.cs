@@ -207,8 +207,10 @@ namespace BigAmbitionsMP
             reason = "";
             string owner = OwnerOf(vehicleId);
             if (string.IsNullOrEmpty(owner))   { reason = "vehicle unknown"; return false; }
-            if (owner == requesterPid)         { reason = "your own vehicle"; return false; }
-            if (IsLocked(vehicleId))            { reason = "door locked"; return false; }
+            // The OWNER may board their OWN car only while a borrower is driving it (else they'd just drive it).
+            bool ownerRidingDriven = (owner == requesterPid) && MPServer.IsCarDriven(vehicleId);
+            if (owner == requesterPid && !ownerRidingDriven) { reason = "your own vehicle"; return false; }
+            if (IsLocked(vehicleId) && !GrantSync.IsGranted(owner, requesterPid) && !ownerRidingDriven) { reason = "door locked"; return false; }   // a granted player (or the owner of a driven car) holds a key
 
             int count = SeatCount(vehicleId);
             _seatsOf.TryGetValue(vehicleId, out var seats);

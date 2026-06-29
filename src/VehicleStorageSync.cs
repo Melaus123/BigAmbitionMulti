@@ -114,7 +114,7 @@ namespace BigAmbitionsMP
             };
             try
             {
-                if (PassengerSync.IsLocked(req.VehicleId)) { res.Reason = "locked"; return res; }   // only UNLOCKED storage is shareable (authoritative backstop)
+                if (PassengerSync.IsLocked(req.VehicleId) && !GrantSync.IsGranted(MPConfig.PlayerId, req.PlayerId)) { res.Reason = "locked"; return res; }   // locked storage opens only to a granted key-holder (authoritative backstop)
                 var list = VehicleHelper.AllPlayerVehicles;
                 if (list == null) return res;
 

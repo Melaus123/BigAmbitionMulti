@@ -25,6 +25,55 @@ namespace BigAmbitionsMP
         }
     }
 
+    /// <summary>Phase 2 C: when the OWNER tries to enter their own car while a granted borrower is driving it,
+    /// route them into the PASSENGER seat (ride along) instead of letting them hijack the wheel. The board runs
+    /// through the host-authoritative path (HostCanBoard permits the owner only while the car is driven); the
+    /// passenger pin targets the owner's real followed car via VehicleManager.GhostTransform's fallback.</summary>
+    [HarmonyPatch(typeof(CarController), nameof(CarController.EnterVehicle))]
+    public static class Patch_CarController_EnterVehicle_BlockHijack
+    {
+        static bool Prefix(CarController __instance)
+        {
+            try
+            {
+                var inst = __instance != null ? __instance.vehicleInstance : null;
+                if (inst != null && VehicleManager.IsDrivenRemotely(inst.id))
+                {
+                    Plugin.Logger.LogInfo($"[Drive] owner enter on driven car '{inst.id}' → boarding as a passenger (ride along).");
+                    PassengerRide.RequestBoard(inst.id);   // ride along as a passenger instead of hijacking the wheel
+                    return false;   // skip native drive
+                }
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Drive] hijack-guard: {ex.Message}"); }
+            return true;
+        }
+    }
+
+    /// <summary>Phase 2 C (owner ride): intercept the owner's "drive my car" click BEFORE the native
+    /// walk-to-DRIVER-door (VehicleController.DriveVehicle → SetGoal(drivingEntrance, EnterVehicle)). While a
+    /// borrower is driving it, board the owner as a PASSENGER instead, so they walk straight to the passenger
+    /// door (not the driver door, then redirect). The EnterVehicle guard above is the safety net for any
+    /// direct-enter path that bypasses DriveVehicle.</summary>
+    [HarmonyPatch(typeof(VehicleController), nameof(VehicleController.DriveVehicle))]
+    public static class Patch_VehicleController_DriveVehicle_OwnerRide
+    {
+        static bool Prefix(VehicleController __instance)
+        {
+            try
+            {
+                var inst = __instance != null ? __instance.vehicleInstance : null;
+                if (inst != null && VehicleManager.IsDrivenRemotely(inst.id))
+                {
+                    Plugin.Logger.LogInfo($"[Drive] owner DriveVehicle on driven car '{inst.id}' → passenger board (walk to passenger door).");
+                    PassengerRide.RequestBoard(inst.id);
+                    return false;   // skip the native walk-to-driver-door + enter
+                }
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Drive] owner-ride guard: {ex.Message}"); }
+            return true;
+        }
+    }
+
     // Cache the live ItemPanelUI so the passenger HUD can clone its Park/Sleep buttons for the
     // native look (the passenger rides a ghost, so it never gets its own SetVehicle call).
     [HarmonyPatch(typeof(ItemPanelUI), "Start")]

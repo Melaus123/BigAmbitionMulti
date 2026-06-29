@@ -326,6 +326,14 @@ namespace BigAmbitionsMP
                     HandlePassengerSnapshotMsg(env);
                     break;
 
+                case MessageType.PermissionSnapshot:
+                    HandlePermissionSnapshotMsg(env);
+                    break;
+
+                case MessageType.PermissionOwnGrants:
+                    HandlePermissionOwnGrantsMsg(env);
+                    break;
+
                 case MessageType.RentDeny:
                     HandleRentDeny(env);
                     break;
@@ -352,6 +360,10 @@ namespace BigAmbitionsMP
 
                 case MessageType.VehicleSync:
                     HandleVehicleSync(env);
+                    break;
+
+                case MessageType.VehicleDrive:
+                    HandleVehicleDriveMsg(env);
                     break;
 
                 case MessageType.TrafficSnapshot:
@@ -1014,6 +1026,25 @@ namespace BigAmbitionsMP
                 new VehicleLockPayload { OwnerId = MPConfig.PlayerId, VehicleId = vehicleId, Locked = locked }));
         }
 
+        /// <summary>Owner-client → host: grant/revoke a key for an ONLINE player (by PlayerId).
+        /// Optimistic local apply for a snappy UI; the host's snapshot + grantee-list confirm.</summary>
+        public static void SendPermissionGrant(string granteeId, bool granted)
+        {
+            if (!IsConnected || string.IsNullOrEmpty(granteeId)) return;
+            GrantSync.SetGrant(MPConfig.PlayerId, granteeId, granted);
+            Send(MessageEnvelope.Create(MessageType.PermissionGrantSet, MPConfig.PlayerId,
+                new PermissionGrantPayload { OwnerId = MPConfig.PlayerId, GranteeId = granteeId, Granted = granted }));
+        }
+
+        /// <summary>Owner-client → host: revoke an OFFLINE grantee by their StableId handle (taken from
+        /// the owner's grantee list). The host updates the durable store + rebroadcasts.</summary>
+        public static void SendPermissionRevokeOffline(string granteeStable)
+        {
+            if (!IsConnected || string.IsNullOrEmpty(granteeStable)) return;
+            Send(MessageEnvelope.Create(MessageType.PermissionGrantSet, MPConfig.PlayerId,
+                new PermissionGrantPayload { OwnerId = MPConfig.PlayerId, GranteeStable = granteeStable, Granted = false }));
+        }
+
         /// <summary>Client(driver) → host: I drove vehicle V into a building. The host resolves V's riders
         /// and tells each to follow (a client can't reach the other riders directly).</summary>
         public static void SendPassengerFollowRelayEnter(string vehicleId, string addressKey)
@@ -1090,6 +1121,20 @@ namespace BigAmbitionsMP
             var p = env.GetPayload<VehicleLockPayload>();
             if (p == null) return;
             GameStatePatcher.EnqueueOnMainThread(() => PassengerSync.SetLock(p.VehicleId, p.Locked));
+        }
+
+        private static void HandlePermissionOwnGrantsMsg(MessageEnvelope env)
+        {
+            var p = env.GetPayload<PermissionOwnGrantsPayload>();
+            if (p == null) return;
+            GameStatePatcher.EnqueueOnMainThread(() => GrantSync.SetMyGrantees(p.Grantees));
+        }
+
+        private static void HandlePermissionSnapshotMsg(MessageEnvelope env)
+        {
+            var p = env.GetPayload<PermissionSnapshotPayload>();
+            if (p == null) return;
+            GameStatePatcher.EnqueueOnMainThread(() => { GrantSync.ApplySnapshot(p); VehicleManager.OnGrantsChanged(); });
         }
 
         private static void HandlePassengerSnapshotMsg(MessageEnvelope env)
@@ -1308,6 +1353,20 @@ namespace BigAmbitionsMP
         {
             if (!IsConnected) return;
             Send(MessageEnvelope.Create(MessageType.VehicleSync, MPConfig.PlayerId, payload));
+        }
+
+        /// <summary>Driver(borrower) → host → all: the pose of a borrowed car I'm driving (handoff).</summary>
+        public static void SendVehicleDrive(VehicleDrivePayload p)
+        {
+            if (!IsConnected || p == null) return;
+            Send(MessageEnvelope.Create(MessageType.VehicleDrive, MPConfig.PlayerId, p));
+        }
+
+        private static void HandleVehicleDriveMsg(MessageEnvelope env)
+        {
+            var p = env.GetPayload<VehicleDrivePayload>();
+            if (p == null) return;
+            GameStatePatcher.EnqueueOnMainThread(() => VehicleManager.ApplyDriveSync(p));
         }
 
         /// <summary>

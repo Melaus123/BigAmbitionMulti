@@ -131,6 +131,13 @@ namespace BigAmbitionsMP
         // STOCKED, so every machine (esp. the host's economy floor) can judge an un-entered shop's real
         // stock without loading its interior. Last-known-while-inside; the set persists otherwise.
         ShopStockDigest = 132,           // Owner → Host → All: addressKey + the set of stocked goods item names.
+
+        // Player-to-player permission GRANTS (Phase 1: vehicle "keys" — a granted player bypasses
+        // the owner's vehicle lock for ride + cargo).  See docs/PERMISSIONS-SYSTEM.md.
+        PermissionGrantSet  = 133,       // Owner → Host: grant/revoke a key for grantee G (by pid if online, else by StableId handle).
+        PermissionSnapshot  = 134,       // Host → All: the full runtime (online) access-grant table (join replay + after every change).
+        PermissionOwnGrants = 135,       // Host → one owner: your grantee list incl. OFFLINE ones (handle + name + online), for the UI.
+        VehicleDrive        = 136,       // Driver(borrower) → Host → All: live pose + fuel of owner O's car V while the borrower drives it (Released on exit).
     }
 
     /// <summary>Owner → host → all: which of a shop's PRICED shelves are actually stocked (goods item
@@ -205,6 +212,70 @@ namespace BigAmbitionsMP
         public string VehicleId { get; set; } = "";
         public int    Seat      { get; set; }
         public string PlayerId  { get; set; } = "";
+    }
+
+    // ── Player-to-player permission grants ("keys") ──────────────────────────────
+
+    /// <summary>Owner → host: grant (or revoke) a player a key to the owner's vehicles. The grantee
+    /// is named EITHER by GranteeId (a live PlayerId, for granting someone in the lobby) OR by
+    /// GranteeStable (a StableId handle from the owner's grantee list, for revoking an OFFLINE
+    /// grantee). Phase 1 of the permissions system (docs/PERMISSIONS-SYSTEM.md).</summary>
+    public class PermissionGrantPayload
+    {
+        public string OwnerId       { get; set; } = "";   // the owner (= the sender)
+        public string GranteeId     { get; set; } = "";   // live PlayerId of the grantee (online grant), or ""
+        public string GranteeStable { get; set; } = "";   // StableId handle of the grantee (offline revoke), or ""
+        public bool   Granted       { get; set; }
+    }
+
+    /// <summary>Host → All: the full runtime (online) access-grant table (join replay + after every
+    /// change), so every machine has the current grants for the borrower-side access checks.</summary>
+    public class PermissionSnapshotPayload
+    {
+        public System.Collections.Generic.List<PermissionGrantEntry> Grants { get; set; } = new();
+    }
+
+    public class PermissionGrantEntry
+    {
+        public string OwnerId   { get; set; } = "";
+        public string GranteeId { get; set; } = "";
+    }
+
+    /// <summary>Host → one owner: the owner's full grantee list, INCLUDING offline grantees, so the
+    /// Permissions UI can show + revoke them. Handle is the grantee's StableId — sent ONLY to the
+    /// granting owner, never broadcast (clients don't learn each other's StableIds).</summary>
+    public class PermissionOwnGrantsPayload
+    {
+        public System.Collections.Generic.List<OwnGrantEntry> Grantees { get; set; } = new();
+    }
+
+    public class OwnGrantEntry
+    {
+        public string Handle { get; set; } = "";   // grantee StableId (used to revoke an offline grantee)
+        public string Name   { get; set; } = "";   // last-known display name
+        public bool   Online { get; set; }         // currently connected?
+    }
+
+    /// <summary>Driver (a granted borrower) → host → all: the live pose of owner O's car V while the borrower
+    /// drives it (Phase 2 handoff). The OWNER's real car becomes a kinematic follower of this; the owner's
+    /// own normal fleet broadcast then carries the position to everyone else. Released=true is the final
+    /// message on exit, so the owner reverts to local control.</summary>
+    public class VehicleDrivePayload
+    {
+        public string VehicleId { get; set; } = "";   // the REAL vehicle id (no BAMP_ prefix)
+        public string OwnerId   { get; set; } = "";   // the car's owner
+        public string DriverId  { get; set; } = "";   // the borrower driving it (= sender)
+        public float  X { get; set; }
+        public float  Y { get; set; }
+        public float  Z { get; set; }
+        public float  Qx { get; set; }
+        public float  Qy { get; set; }
+        public float  Qz { get; set; }
+        public float  Qw { get; set; }
+        public float  Fuel { get; set; }
+        public float  Damage { get; set; }   // 0..1 — the borrower's accrued damage, applied to the owner's real car
+        public bool   Released { get; set; }
+        public float  T { get; set; }
     }
 
     // ── Shared vehicle storage payloads ──────────────────────────────────────────
@@ -543,6 +614,9 @@ namespace BigAmbitionsMP
         public string ColorName { get; set; } = "";
         /// <summary>True if the owner is currently driving this vehicle.</summary>
         public bool   Driving   { get; set; }
+        /// <summary>Owner's current fuel (liters). Synced so a granted DRIVABLE proxy isn't stuck at 0%
+        /// (its local instance spawns empty) — applied to the proxy's FuelModule when not driven locally.</summary>
+        public float  Fuel      { get; set; }
         public float  X { get; set; }
         public float  Y { get; set; }
         public float  Z { get; set; }

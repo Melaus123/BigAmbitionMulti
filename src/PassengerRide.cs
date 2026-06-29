@@ -158,7 +158,9 @@ namespace BigAmbitionsMP
             }
             if (_hovered != "" && Input.GetMouseButtonDown(0))
             {
-                if (PassengerSync.IsLocked(_hovered)) PassengerHud.Toast("Vehicle locked.");
+                // A granted player holds a "key": the lock doesn't apply to them (ride + cargo).
+                if (PassengerSync.IsLocked(_hovered) && !GrantSync.IsGranted(VehicleManager.OwnerIdFor(_hovered), MPConfig.PlayerId))
+                    PassengerHud.Toast("Vehicle locked.");
                 else HandleUnlockedClick(_hovered);
             }
         }
@@ -221,7 +223,7 @@ namespace BigAmbitionsMP
             return _outlineLayer;
         }
 
-        private static void RequestBoard(string vehicleId)
+        internal static void RequestBoard(string vehicleId)
         {
             if (MPServer.IsRunning) MPServer.HostBoardRequest(vehicleId);
             else                    MPClient.SendBoardRequest(vehicleId);
@@ -239,6 +241,9 @@ namespace BigAmbitionsMP
         // player with "Not while driving". Seat count is from the ghost's type + authored table (client-safe).
         private static void HandleUnlockedClick(string vid)
         {
+            // A granted player clicking a car they hold a key to drives it (on foot → take the wheel).
+            if (VehicleManager.TryDriveGhost(vid)) return;
+
             string owner = VehicleManager.OwnerIdFor(vid);
 
             // Holding an item on foot → walk to the vehicle's cargo-loading spot (the same place the owner
@@ -328,6 +333,15 @@ namespace BigAmbitionsMP
             else                    MPClient.SendPassengerExit(vid);
         }
 
+        /// <summary>The transform of the car we're riding: the spawned ghost normally, OR — when WE own the
+        /// car (on our screen it's the real native vehicle, not a ghost) — our real vehicle by id. Lets the
+        /// OWNER ride their own car (driven by a borrower) and keep resolving it AFTER the borrower releases
+        /// the drive — so the ride doesn't false-trip "car gone" and the exit lands at the car's CURRENT door,
+        /// not the door we boarded from (the body stays parked there all ride, see StartPin). For a normal
+        /// passenger riding someone else's ghost the fallback is null (not our car), so behavior is unchanged.</summary>
+        private static Transform? RideCar(string vid)
+            => VehicleManager.GhostTransform(vid) ?? VehicleManager.LocalVehicleTransform(vid);
+
         // ── local ride state machine (driven by PassengerSync.LocalRidingVehicleId) ──
         private static void TickLocalRide()
         {
@@ -341,7 +355,7 @@ namespace BigAmbitionsMP
 
             if (_localVeh == "") return;
 
-            var ghost = VehicleManager.GhostTransform(_localVeh);
+            var ghost = RideCar(_localVeh);
             if (ghost == null)
             {
                 // Our ridden car isn't here — either still spawning (board just approved) or it drove
@@ -529,7 +543,7 @@ namespace BigAmbitionsMP
             {
                 var pc = PlayerHelper.PlayerController;
                 var ch = pc?.Character;
-                var ghost = VehicleManager.GhostTransform(_localVeh);
+                var ghost = RideCar(_localVeh);   // ghost, or our own real car by id once the borrower released it
 
                 // Reverse the native enter (only if we actually got in): avatar back, movement
                 // unlocked, camera restored — then teleport to the exit door (current car position).

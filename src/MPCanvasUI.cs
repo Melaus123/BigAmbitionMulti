@@ -391,7 +391,12 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo("[VehProbe] F6 pressed — spawning the next uncollected vehicle batch.");
                 VehicleManager.DevProbeUncollected(5);
             }
-            // (F8 free for dev use — 2026-06-23.)
+            // F8: dev money cheat — add $1,000,000 to the local wallet (notice + log).
+            if (Input.GetKeyDown(KeyCode.F8))
+            {
+                MPHub.ApplyMoneyDelta(1_000_000f, "DEV cheat (F8)", true);
+                Plugin.Logger.LogInfo("[DevCheat] F8 — +$1,000,000.");
+            }
 #endif
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
@@ -1213,11 +1218,16 @@ namespace BigAmbitionsMP
         private RectTransform? _hubLoansContent, _hubLoansVp;
         private string _hubRepayArm = ""; private float _hubRepayArmAt; private float _hubRepayArmAmt;   // repay confirm: armed loan id, arm time, amount (0 = full)
         // Tabs.
-        private int _hubTab;                                  // 0=Transfers 1=Loans
-        private GameObject? _hubPageTransfers, _hubPageLoans;
-        private readonly RectTransform?[] _hubTabRT = new RectTransform?[2];
-        private readonly Image?[] _hubTabImg = new Image?[2];
-        private readonly TextMeshProUGUI?[] _hubTabLbl = new TextMeshProUGUI?[2];
+        private int _hubTab;                                  // 0=Transfers 1=Loans 2=Permissions
+        private GameObject? _hubPageTransfers, _hubPageLoans, _hubPagePermissions;
+        private readonly RectTransform?[] _hubTabRT = new RectTransform?[3];
+        private readonly Image?[] _hubTabImg = new Image?[3];
+        private readonly TextMeshProUGUI?[] _hubTabLbl = new TextMeshProUGUI?[3];
+        // Permissions tab: scrollable per-player VEHICLE-key list. Its own button registry so the
+        // offers rebuild (which Clears _hubRowBtns) can't wipe it.
+        private RectTransform? _hubPermVp, _hubPermContent;
+        private readonly List<(RectTransform rt, RectTransform vp, string id, byte act)> _hubPermBtns = new();
+        private string _hubPermSig = "";
         private string _hubTarget = "";
         private double _hubAmount = 10000;
         private int _hubSeenVersion = -1;
@@ -1662,11 +1672,13 @@ namespace BigAmbitionsMP
                 // Tab pages + active-tab styling.
                 if (_hubPageTransfers != null && _hubPageTransfers.activeSelf != (_hubTab == 0)) _hubPageTransfers.SetActive(_hubTab == 0);
                 if (_hubPageLoans != null && _hubPageLoans.activeSelf != (_hubTab == 1)) _hubPageLoans.SetActive(_hubTab == 1);
-                for (int i = 0; i < 2; i++)
+                if (_hubPagePermissions != null && _hubPagePermissions.activeSelf != (_hubTab == 2)) _hubPagePermissions.SetActive(_hubTab == 2);
+                for (int i = 0; i < 3; i++)
                 {
                     if (_hubTabImg[i] != null) _hubTabImg[i]!.color = _hubTab == i ? HubTabOn : HubTabOff;
                     if (_hubTabLbl[i] != null) _hubTabLbl[i]!.color = _hubTab == i ? C_WHITE : C_LBLGREY;
                 }
+                if (_hubTab == 2) RefreshPermissionsList();
 
                 // Offer lists (rebuild on Version change).
                 if (MPHub.Version != _hubSeenVersion)
@@ -1805,8 +1817,8 @@ namespace BigAmbitionsMP
                     if (_hubNative) MPHubNativePage.CloseMenu();
                     return;
                 }
-                for (int i = 0; i < 2; i++)
-                    if (HubHit(_hubTabRT[i], mp)) { _hubTab = i; _hubSeenVersion = -1; return; }
+                for (int i = 0; i < 3; i++)
+                    if (HubHit(_hubTabRT[i], mp)) { _hubTab = i; _hubSeenVersion = -1; _hubPermSig = ""; return; }
                 for (int i = 0; i < 3; i++)
                     if (HubHit(_hubFilterRT[i], mp)) { _hubFilter = i; _hubSeenVersion = -1; RefreshHubFilterChips(); return; }
                 for (int i = 0; i < 4; i++)
@@ -1825,6 +1837,29 @@ namespace BigAmbitionsMP
                     MPHub.OfferLoan(_hubTarget, (float)_hubAmount, (float)di, (float)dp);
                     return;
                 }
+                // Permissions tab: per-player key toggles (separate registry from the offers rows).
+                foreach (var (rt, vp, id, act) in _hubPermBtns)
+                {
+                    if (id == "" || rt == null || !rt.gameObject.activeInHierarchy) continue;
+                    if (!HubHit(vp, mp) || !HubHit(rt, mp)) continue;
+                    if (act == 6 && id.StartsWith("pid:"))            // toggle an ONLINE player's vehicle key
+                    {
+                        string pid = id.Substring(4);
+                        bool now = !GrantSync.IsGranted(MPConfig.PlayerId, pid);
+                        if (MPServer.IsRunning) MPServer.HostSetGrant(pid, now);
+                        else                    MPClient.SendPermissionGrant(pid, now);
+                        _hubPermSig = "";   // force the list to rebuild with the new state
+                    }
+                    else if (act == 7 && id.StartsWith("stable:"))    // revoke an OFFLINE grantee by handle
+                    {
+                        string handle = id.Substring(7);
+                        if (MPServer.IsRunning) MPServer.HostSetGrantOffline(handle, false);
+                        else                    MPClient.SendPermissionRevokeOffline(handle);
+                        _hubPermSig = "";
+                    }
+                    return;
+                }
+
                 // Scrolled-row buttons: viewport gate keeps masked rows inert.
                 foreach (var (rt, vp, id, act) in _hubRowBtns)
                 {
@@ -1942,8 +1977,8 @@ namespace BigAmbitionsMP
                 (_hubAmountRT, _hubAmountLbl) = MakeHubInput(_hub.transform, 724f, T - 68f, 232f, 34f, 20, sprite);
 
                 // Category tab row.
-                string[] tabNames = { "Transfers", "Loans" };
-                for (int i = 0; i < 2; i++)
+                string[] tabNames = { "Transfers", "Loans", "Permissions" };
+                for (int i = 0; i < 3; i++)
                 {
                     var (trt, tlbl) = MakeHubButton(tabNames[i], new Vector2(0f, 0f), 170f, HubTabOff, 38f, sprite);
                     SetTopLeft(trt, 24f + i * 178f, T - 118f);
@@ -1995,6 +2030,20 @@ namespace BigAmbitionsMP
                 _hubLoansVp = lvp;
                 _hubLoansContent = lct;
 
+                // ── Page: Permissions (per-player VEHICLE keys; scrolls for a full lobby). ───
+                _hubPagePermissions = MakeGO("PagePermissions", _hub.transform);
+                var pprt = _hubPagePermissions.GetComponent<RectTransform>();
+                pprt.anchorMin = new Vector2(0f, 0f); pprt.anchorMax = new Vector2(1f, 1f);
+                pprt.offsetMin = new Vector2(0f, 248f); pprt.offsetMax = new Vector2(0f, T - 164f);
+                var pp = _hubPagePermissions.transform;
+                MakeHubBox(pp, 16f, -2f, 948f, 200f, sprite);
+                var permHdr = MakeLabel(pp, "<b>VEHICLE KEYS</b>  <color=" + (_hubNative ? "#8795A0" : "#9AA3B2") + ">— who can use your vehicles as their own (housing + business coming)</color>",
+                                        12, _inkLo, 28f, -10f, 900f, 18f, TextAlignmentOptions.Left);
+                ApplyFont(permHdr);
+                var (pvp, pct) = MakeHubScroll(pp, 28f, -36f, 908f, 156f, sprite);
+                _hubPermVp = pvp;
+                _hubPermContent = pct;
+
                 // ── Shared bottom: INCOMING (left) + OUTGOING (right). ───────
                 MakeHubBox(_hub.transform, 16f, T - 426f, 560f, 222f, sprite);
                 var inHdr = MakeLabel(_hub.transform, "<b>INCOMING OFFERS</b>", 12, _inkLo, 28f, T - 434f, 180f, 18f, TextAlignmentOptions.Left);
@@ -2016,6 +2065,7 @@ namespace BigAmbitionsMP
                 (_hubOutVp, _hubOutContent) = MakeHubScroll(_hub.transform, 596f, T - 460f, 356f, 178f, sprite);
                 RefreshHubFilterChips();
                 _hubPageLoans.SetActive(false);
+                _hubPagePermissions.SetActive(false);
                 _hubSeenVersion = -1;
                 _hub.SetActive(false);
                 Plugin.Logger.LogInfo("[Hub] full-page window built OK.");
@@ -2118,6 +2168,83 @@ namespace BigAmbitionsMP
                 brt.sizeDelta = new Vector2(w, 24f);
                 blbl.fontSize = 11;
                 _hubRowBtns.Add((brt, vp, b.id, b.act));
+            }
+        }
+
+        /// <summary>Permissions tab: rebuild the per-player VEHICLE-key list (online players + my
+        /// offline grantees), gated by a signature so it only rebuilds on a real change.</summary>
+        private void RefreshPermissionsList()
+        {
+            if (_hubPermContent == null || _hubPermVp == null) return;
+            string me = MPConfig.PlayerId;
+            var players = MPRestSync.AllPlayers();
+            var mine = GrantSync.MyGrantees();   // my grantees incl. offline (handle + name + online)
+
+            var sb = new System.Text.StringBuilder();
+            foreach (var pl in players) if (pl != me) sb.Append(pl).Append(GrantSync.IsGranted(me, pl) ? '1' : '0').Append(';');
+            sb.Append('|');
+            foreach (var g in mine) if (!g.Online) sb.Append(g.Handle).Append(g.Name).Append(';');
+            string sig = sb.ToString();
+            if (sig == _hubPermSig) return;
+            _hubPermSig = sig;
+
+            _hubPermBtns.Clear();
+            ClearScrollContent(_hubPermContent);
+            const float RowH = 34f;
+            int idx = 0;
+            var purple = new Color(0.35f, 0.31f, 0.81f, 1f);
+            var grey   = new Color(0.20f, 0.22f, 0.30f, 1f);
+            string muted = _hubNative ? "#8795A0" : "#9AA3B2";
+
+            var onlineNames = new HashSet<string>(players);
+            foreach (var pl in players)
+            {
+                if (pl == me) continue;
+                bool granted = GrantSync.IsGranted(me, pl);
+                AddPermRow(idx++, RowH, pl, (granted ? "Granted" : "Grant", granted ? purple : grey, "pid:" + pl, (byte)6));
+            }
+            // Offline grantees (not in the live roster) — revoke-only.
+            foreach (var g in mine)
+            {
+                if (g.Online || onlineNames.Contains(g.Name)) continue;
+                string nm = string.IsNullOrEmpty(g.Name) ? "(unknown)" : g.Name;
+                AddPermRow(idx++, RowH, $"{nm}  <color={muted}>(offline)</color>", ("Granted", purple, "stable:" + g.Handle, (byte)7));
+            }
+
+            _hubPermContent.sizeDelta = new Vector2(_hubPermContent.sizeDelta.x, Mathf.Max(idx * RowH, _hubPermVp.rect.height));
+        }
+
+        /// <summary>One Permissions-tab row: name label + a key toggle, registered in _hubPermBtns.</summary>
+        private void AddPermRow(int idx, float rowH, string text,
+                                params (string label, Color col, string id, byte act)[] btns)
+        {
+            if (_hubPermContent == null || _hubPermVp == null) return;
+            var rowGO = MakeGO("PermRow", _hubPermContent.transform);
+            var rowRT = rowGO.GetComponent<RectTransform>();
+            rowRT.anchorMin = new Vector2(0f, 1f); rowRT.anchorMax = new Vector2(1f, 1f);
+            rowRT.pivot = new Vector2(0.5f, 1f);
+            rowRT.anchoredPosition = new Vector2(0f, -idx * rowH);
+            rowRT.sizeDelta = new Vector2(0f, rowH - 4f);
+            float btnW = 0f;
+            foreach (var b in btns) btnW += Mathf.Clamp(b.label.Length * 7.5f + 14f, 64f, 150f) + 6f;
+            var lbl = MakeLabel(rowGO.transform, text, 12, _inkHi, 4f, 0f, 10f, rowH - 4f, TextAlignmentOptions.Left);
+            ApplyFont(lbl);
+            var lrt = lbl.rectTransform;
+            lrt.anchorMin = new Vector2(0f, 0f); lrt.anchorMax = new Vector2(1f, 1f);
+            lrt.offsetMin = new Vector2(4f, 0f); lrt.offsetMax = new Vector2(-(btnW + 6f), 0f);
+            float bx = 0f;
+            var sprite = IsAlive(_panelSprite) ? _panelSprite : null;
+            foreach (var b in btns)
+            {
+                float w = Mathf.Clamp(b.label.Length * 7.5f + 14f, 64f, 150f);
+                bx += w + 6f;
+                var (brt, blbl) = MakeHubButton(b.label, Vector2.zero, w, b.col, 24f, sprite);
+                brt.SetParent(rowGO.transform, false);
+                brt.anchorMin = brt.anchorMax = brt.pivot = new Vector2(1f, 0.5f);
+                brt.anchoredPosition = new Vector2(-(bx - w) - 2f, 0f);
+                brt.sizeDelta = new Vector2(w, 24f);
+                blbl.fontSize = 11;
+                _hubPermBtns.Add((brt, _hubPermVp, b.id, b.act));
             }
         }
 
@@ -2342,6 +2469,7 @@ namespace BigAmbitionsMP
                 ParkedVehicleSync.Reset();
                 MPRegisterSync.Reset();   // duty posts die with the scene
                 PassengerSync.Reset();    // passenger seats/locks die with the scene
+                GrantSync.Reset();        // access grants die with the scene (persistent copy restored separately — Phase 1c)
                 InteriorSync.Reset();     // interior subs + owner-snapshot caches die with the scene — a prior session's Authoritative=true snapshot must not bleed into a new world (was never wired up)
                 MPAudit.Reset();          // divergence streaks/throttle die with the session (else stale [Audit] state pollutes the bug-report log across same-process sessions)
                 MPStockSync.Reset();      // per-shop stock digests die with the session
@@ -2904,6 +3032,7 @@ namespace BigAmbitionsMP
                     if (MPServer.IsRunning)        MPServer.BroadcastVehicleSync(vp);
                     else if (MPClient.IsConnected) MPClient.SendVehicleSync(vp);
                 }
+                VehicleManager.TickDriveSync();   // handoff: broadcast the pose of a borrowed car I'm driving
             }
             catch (Exception ex)
             {

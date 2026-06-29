@@ -1142,6 +1142,9 @@ namespace BigAmbitionsMP
                 m.SavedAtUnix    = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
                 m.BuildingOwners = BuildOwnersStableKeyed();
                 m.BuildingRealEstateOwners = RealEstateOwnersStableKeyed();
+                m.Grants = new List<MpGrant>();
+                foreach (var e in GrantSync.AllStoreEntries())
+                    m.Grants.Add(new MpGrant { Owner = e.Key, Grantee = e.Value, GranteeName = GrantSync.NameOf(e.Value) });
                 RefreshSlotCash(m);
                 MPSaveManager.WriteManifest(sessionName, m);
             }
