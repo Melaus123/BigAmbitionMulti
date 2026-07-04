@@ -59,9 +59,10 @@ namespace BigAmbitionsMP
     /// <summary>One durable access grant: an owner gave a grantee a key (StableId space).</summary>
     public class MpGrant
     {
-        public string Owner       { get; set; } = "";   // owner StableId
-        public string Grantee     { get; set; } = "";   // grantee StableId
-        public string GranteeName { get; set; } = "";   // last-known display name (for the owner's UI)
+        public string    Owner       { get; set; } = "";                 // owner StableId
+        public string    Grantee     { get; set; } = "";                 // grantee StableId
+        public string    GranteeName { get; set; } = "";                 // last-known display name (for the owner's UI)
+        public GrantKind Kind        { get; set; } = GrantKind.Vehicle;  // which asset kind (old manifests => Vehicle)
     }
 
     public static class MPSaveManager

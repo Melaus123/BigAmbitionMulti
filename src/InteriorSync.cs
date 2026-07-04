@@ -324,6 +324,91 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>Owner-side: re-sync a building's interior to everyone inside it (after a guest's edit was
+        /// applied to reg). COALESCED to one push per address per main-thread flush: a single guest action can
+        /// apply many same-frame mutations (a 6-food fridge deposit = 6 BStore PUTs → 6 pushes → the guest
+        /// applied 6 full snapshots in one frame, and the per-apply destroy/respawn of the changed fridge with
+        /// DEFERRED Destroys left a broken controller — the "fridge menu never opens" bug, round-12 #2). All
+        /// same-flush mutations now ride ONE snapshot, so the receiver refreshes each changed item exactly once.</summary>
+        public static void PushOwnedBuildingNow(string addressKey)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return;
+            lock (_pendingOwnedPushes)
+            {
+                _pendingOwnedPushes[addressKey] = _pendingOwnedPushes.TryGetValue(addressKey, out var n) ? n + 1 : 1;
+                if (_ownedPushFlushQueued) return;
+                _ownedPushFlushQueued = true;
+            }
+            GameStatePatcher.EnqueueOnMainThread(FlushOwnedPushes);
+        }
+
+        // addressKey → number of coalesced mutations awaiting the flush (count is for the log only).
+        private static readonly System.Collections.Generic.Dictionary<string, int> _pendingOwnedPushes = new();
+        private static bool _ownedPushFlushQueued;
+
+        private static void FlushOwnedPushes()
+        {
+            System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string, int>> pushes;
+            lock (_pendingOwnedPushes)
+            {
+                pushes = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string, int>>(_pendingOwnedPushes);
+                _pendingOwnedPushes.Clear();
+                _ownedPushFlushQueued = false;
+            }
+            foreach (var p in pushes)
+            {
+                if (p.Value > 1) Plugin.Logger.LogInfo($"[InteriorSync] coalesced {p.Value} mutations → 1 push for '{p.Key}'.");
+                PushOwnedBuildingImmediate(p.Key);
+            }
+        }
+
+        /// <summary>The actual push. Works regardless of where the owner's avatar is — BuildSnapshot reads the
+        /// SAVE data, not loaded objects. Host owner → broadcast to that building's subscribers; client owner →
+        /// push to the host, which rebroadcasts.</summary>
+        private static void PushOwnedBuildingImmediate(string addressKey)
+        {
+            try
+            {
+                if (MPServer.IsRunning)
+                {
+                    var snap = BuildSnapshotForHostSend(addressKey);
+                    if (snap != null && _subsByBuilding.TryGetValue(addressKey, out var set))
+                    {
+                        _lastHashByAddr[addressKey] = ComputeHash(snap);
+                        MPServer.BroadcastInteriorSnapshotTo(set, snap);
+                    }
+                }
+                else
+                {
+                    SendLocalOwnerSnapshot(addressKey, force: true, reason: "guest-edit");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] PushOwnedBuildingImmediate: {ex.Message}"); }
+        }
+
+        /// <summary>GUEST: forward our just-edited LOCAL interior for this building to the owner, who ADOPTS it
+        /// (ApplyInteriorSnapshot) + re-syncs. Called when the interior designer closes (HandleOnClose). Flagged
+        /// Authoritative so the owner's apply accepts it as the new truth.</summary>
+        public static void ForwardGuestInteriorEdit(string addressKey)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return;
+            try
+            {
+                HousingDesign.CommitLocalDesigns(addressKey);   // bug #5: flush the guest's live floor/wall edits → reg before snapshotting
+                var snap = BuildSnapshot(addressKey);
+                if (snap == null) return;
+                snap.Authoritative = true;
+                snap.ItemInstancesAuthoritative = true;
+                snap.OwnerPlayerId = "";   // a guest edit — the owner adopts it as the new truth
+                GameStatePatcher.NoteLocalItemState(addressKey, snap.ItemInstances);   // echo-suppression: our own
+                                           // edit coming back must ser-match and keep live objects (round-14 #3)
+                if (MPServer.IsRunning) MPServer.HandleBuildingInteriorEdit(snap, MPConfig.PlayerId);
+                else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BuildingInteriorEdit, MPConfig.PlayerId, snap));
+                Plugin.Logger.LogInfo($"[Housing] guest forwarded interior edit for '{addressKey}' ({SnapshotSummary(snap)}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] ForwardGuestInteriorEdit: {ex.Message}"); }
+        }
+
         private static InteriorSnapshotPayload? BuildSnapshotForHostSend(string addressKey)
         {
             if (_ownerSnapshotsByAddr.TryGetValue(addressKey, out var ownerState))

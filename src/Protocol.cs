@@ -138,6 +138,10 @@ namespace BigAmbitionsMP
         PermissionSnapshot  = 134,       // Host → All: the full runtime (online) access-grant table (join replay + after every change).
         PermissionOwnGrants = 135,       // Host → one owner: your grantee list incl. OFFLINE ones (handle + name + online), for the UI.
         VehicleDrive        = 136,       // Driver(borrower) → Host → All: live pose + fuel of owner O's car V while the borrower drives it (Released on exit).
+        PermissionBuildingAccess = 137,  // Host → one client: the building addressKeys it may ENTER as a granted housing guest (clients lack a building→owner map).
+        BuildingCargoReq    = 138,       // Guest → Host → building owner: take/put on a home interior item's cargo (the fridge). Owner applies to reg.itemInstances.
+        BuildingCargoRes    = 139,       // Owner → Host → guest: the verdict (mirrors VehicleCargoRes).
+        BuildingInteriorEdit = 140,      // Guest → Host → building owner: my edited interior snapshot (furniture/flooring from the designer). Owner ADOPTS it (ApplyInteriorSnapshot).
     }
 
     /// <summary>Owner → host → all: which of a shop's PRICED shelves are actually stocked (goods item
@@ -222,10 +226,11 @@ namespace BigAmbitionsMP
     /// grantee). Phase 1 of the permissions system (docs/PERMISSIONS-SYSTEM.md).</summary>
     public class PermissionGrantPayload
     {
-        public string OwnerId       { get; set; } = "";   // the owner (= the sender)
-        public string GranteeId     { get; set; } = "";   // live PlayerId of the grantee (online grant), or ""
-        public string GranteeStable { get; set; } = "";   // StableId handle of the grantee (offline revoke), or ""
-        public bool   Granted       { get; set; }
+        public string    OwnerId       { get; set; } = "";   // the owner (= the sender)
+        public string    GranteeId     { get; set; } = "";   // live PlayerId of the grantee (online grant), or ""
+        public string    GranteeStable { get; set; } = "";   // StableId handle of the grantee (offline revoke), or ""
+        public bool      Granted       { get; set; }
+        public GrantKind Kind          { get; set; } = GrantKind.Vehicle;   // which asset kind this grant covers
     }
 
     /// <summary>Host → All: the full runtime (online) access-grant table (join replay + after every
@@ -237,8 +242,9 @@ namespace BigAmbitionsMP
 
     public class PermissionGrantEntry
     {
-        public string OwnerId   { get; set; } = "";
-        public string GranteeId { get; set; } = "";
+        public string    OwnerId   { get; set; } = "";
+        public string    GranteeId { get; set; } = "";
+        public GrantKind Kind      { get; set; } = GrantKind.Vehicle;
     }
 
     /// <summary>Host → one owner: the owner's full grantee list, INCLUDING offline grantees, so the
@@ -254,6 +260,50 @@ namespace BigAmbitionsMP
         public string Handle { get; set; } = "";   // grantee StableId (used to revoke an offline grantee)
         public string Name   { get; set; } = "";   // last-known display name
         public bool   Online { get; set; }         // currently connected?
+        // Which kinds this grantee currently holds from the owner (Vehicle and/or Housing) — the UI shows a
+        // per-kind toggle per row, lit from this set.
+        public System.Collections.Generic.List<GrantKind> Kinds { get; set; } = new System.Collections.Generic.List<GrantKind>();
+    }
+
+    /// <summary>Host → one client: the building addressKeys it may ENTER as a granted housing guest. The host
+    /// computes this (clients don't keep a building→owner map); it replaces the client's set wholesale.</summary>
+    public class PermissionBuildingAccessPayload
+    {
+        public System.Collections.Generic.List<string> AddressKeys { get; set; } = new System.Collections.Generic.List<string>();
+    }
+
+    /// <summary>Guest → host → building owner: take/put on a home INTERIOR item's cargo (the fridge — the same
+    /// ICargoHolder / cargoInstances model as a vehicle). The host resolves the building owner from AddressKey
+    /// and routes to them; the owner applies to reg.itemInstances[ItemId] (always present in their save) and
+    /// pushes that building's snapshot. Mirrors VehicleCargoReq. Op: 0 = take, 1 = put.</summary>
+    public class BuildingCargoReqPayload
+    {
+        public string AddressKey   { get; set; } = "";   // which building's interior
+        public string ItemId       { get; set; } = "";   // the interior item instance (the fridge) within it
+        public string PlayerId     { get; set; } = "";   // the accessor (guest)
+        public byte   Op           { get; set; }          // 0 = take, 1 = put
+        public string ItemName     { get; set; } = "";
+        public int    Amount       { get; set; }
+        public bool   Paid         { get; set; }
+        public float  PricePerUnit { get; set; }
+        public string Ctx          { get; set; } = "";   // put-source context ("wornHead"/"wornHand"/"") so the
+                                                         // accessor's confirm handler knows what to consume locally —
+                                                         // explicit beats inferring the source by item name (round-12 A)
+    }
+
+    public class BuildingCargoResPayload
+    {
+        public string AddressKey   { get; set; } = "";
+        public string ItemId       { get; set; } = "";
+        public string PlayerId     { get; set; } = "";   // the accessor this verdict is for
+        public byte   Op           { get; set; }
+        public string ItemName     { get; set; } = "";
+        public int    Amount       { get; set; }
+        public bool   Paid         { get; set; }
+        public float  PricePerUnit { get; set; }
+        public bool   Ok           { get; set; }
+        public string Reason       { get; set; } = "";
+        public string Ctx          { get; set; } = "";   // echoed from the request (see req)
     }
 
     /// <summary>Driver (a granted borrower) → host → all: the live pose of owner O's car V while the borrower
@@ -1373,6 +1423,8 @@ namespace BigAmbitionsMP
         public int    SelfOwnedBuildingsCount  { get; set; }
         public int    SelfOwnedBusinessesCount { get; set; }
         public float  SelfWeeklyIncome         { get; set; }
+        /// <summary>Primary neighborhood, computed the native self-sheet way (round-25 parity).</summary>
+        public string SelfNeighborhood         { get; set; } = "";
         /// <summary>Per-business breakdown (AddressKey + WeeklyIncome) — feeds
         /// the host's fair-rival patches: the host's replicas have no order
         /// history, so "is this player business succeeding" reads this.</summary>

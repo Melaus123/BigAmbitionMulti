@@ -1144,10 +1144,34 @@ namespace BigAmbitionsMP
                 m.BuildingRealEstateOwners = RealEstateOwnersStableKeyed();
                 m.Grants = new List<MpGrant>();
                 foreach (var e in GrantSync.AllStoreEntries())
-                    m.Grants.Add(new MpGrant { Owner = e.Key, Grantee = e.Value, GranteeName = GrantSync.NameOf(e.Value) });
+                    m.Grants.Add(new MpGrant { Kind = e.Kind, Owner = e.Owner, Grantee = e.Grantee, GranteeName = GrantSync.NameOf(e.Grantee) });
                 RefreshSlotCash(m);
                 MPSaveManager.WriteManifest(sessionName, m);
             }
+        }
+
+        /// <summary>Host: persist the CURRENT grant set to the active session's manifest immediately. The grant
+        /// store used to be written only at the "next coordinated save" — so a grant set after the last save (or
+        /// before one happened) never reached the manifest and was lost on load (Grants=[], user 2026-06-30). This
+        /// is called on every grant change. No-op until a session name exists (the first coordinated save covers
+        /// pre-save grants). Cheap: writes only the small manifest, under the same lock as the coordinated save.</summary>
+        public static void PersistGrantsNow()
+        {
+            try
+            {
+                lock (_lock)
+                {
+                    if (string.IsNullOrEmpty(_activeSessionName)) return;
+                    var m = EnsureManifest(_activeSessionName);
+                    m.Grants = new List<MpGrant>();
+                    foreach (var e in GrantSync.AllStoreEntries())
+                        m.Grants.Add(new MpGrant { Kind = e.Kind, Owner = e.Owner, Grantee = e.Grantee, GranteeName = GrantSync.NameOf(e.Grantee) });
+                    m.SavedAtUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                    MPSaveManager.WriteManifest(_activeSessionName, m);
+                    Plugin.Logger.LogInfo($"[MPSave] Persisted {m.Grants.Count} grant(s) to '{_activeSessionName}' on change.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] PersistGrantsNow: {ex.Message}"); }
         }
 
         /// <summary>Re-key MPServer.BuildingRealEstateOwners (live PlayerId / "host") to

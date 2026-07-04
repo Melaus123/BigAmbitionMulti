@@ -62,7 +62,11 @@ namespace BigAmbitionsMP
                     var added = _harmony.GetPatchedMethods().Count() - before;
                     okClasses++;
                     totalPatched += added;
-                    Plugin.Logger.LogInfo($"[Plugin] Patched {t.Name}: {added} method(s)");
+                    // "0 method(s)" is NOT necessarily a failure: `added` counts NEWLY-patched methods, so a
+                    // class whose target an earlier class already patched reports 0 (cost a round-15 goose
+                    // chase concluding two live wraps were dead). Say so explicitly.
+                    Plugin.Logger.LogInfo($"[Plugin] Patched {t.Name}: {added} method(s)"
+                        + (added == 0 ? " (0 NEW — target may already be patched by an earlier class; not necessarily a failure)" : ""));
                 }
                 catch (Exception ex)
                 {

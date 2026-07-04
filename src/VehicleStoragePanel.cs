@@ -3,6 +3,7 @@ using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 using Helpers;             // PlayerHelper (held item for Deposit; player position for auto-close)
+using Entities;            // InstanceBehavior<GameManager> (de-select the borrowed proxy on close)
 using BigAmbitions.Items;  // CargoInstance (item icon via ItemCached)
 using Player.HUD.ItemInfoOverlays;  // VehicleOverlay (clone the native Enter/Manage menu)
 using HarmonyLib;                   // AccessTools (read the native UI's private serialized fields)
@@ -367,17 +368,40 @@ namespace BigAmbitionsMP
 
         public static void Close()
         {
+            string vidWas = _vid;   // capture before clearing — used for the highlight reset below (round-12 #3)
             _vid = ""; _owner = ""; _enterCb = null;
             if (_menuClone != null) { UnityEngine.Object.Destroy(_menuClone); _menuClone = null; }
             if (_cargoClone != null) { UnityEngine.Object.Destroy(_cargoClone); _cargoClone = null; _cargoContent = null; _cargoTemplate = null; _cargoBoxesTmp = null; _cargoSellAll = null; }
             if (_root != null) _root.SetActive(false);
+            // Bug (2026-06-30): clicking a borrowed car to open its trunk SELECTS it (GameManager.selectedVehicle =
+            // the proxy). The game then refuses to let you walk into a building "while in a vehicle", and that
+            // selection is normally cleared by the native deselect — which our trunk redirect bypasses. We're on
+            // FOOT (just looked in the trunk), so de-select the borrowed proxy here. A real DRIVEN vehicle
+            // (GetCurrentVehicle != null) is left alone.
+            try
+            {
+                var gm = InstanceBehavior<GameManager>.Instance;
+                var sel = gm?.selectedVehicle;
+                var cur = VehicleHelper.GetCurrentVehicle();
+                Plugin.Logger.LogInfo($"[VStore] close: selVeh='{(sel?.vehicleInstance?.id ?? "null")}' curVeh='{(cur?.id ?? "null")}'.");   // diag: remove once re-entry settled
+                if (sel != null && sel.vehicleInstance?.id != null && sel.vehicleInstance.id.StartsWith("BAMP_") && cur == null)
+                { gm.selectedVehicle = null; Plugin.Logger.LogInfo("[VStore] de-selected borrowed proxy on close."); }
+            }
+            catch { }
+            // Round-12 #3: the panel opened from a click on the ghost (hover → outline ON); closing it is the
+            // end of OUR flow, and no native hover-exit follows — clear the stuck outline explicitly.
+            if (!string.IsNullOrEmpty(vidWas)) VehicleManager.ClearGhostHighlight(vidWas);
         }
 
         public static void Tick()
         {
             if (_vid == "") return;
-            if (string.IsNullOrEmpty(VehicleManager.OwnerIdFor(_vid)) || PassengerSync.IsLocked(_vid)) { Close(); return; }
-            if (WalkedAway()) { Close(); return; }   // mirror the native panel closing when you leave
+            // Owner vanished → close. LOCKED storage stays open to a granted key-holder (mirrors
+            // VehicleStorageSync.OwnerApply's lock bypass): without this a shared-but-LOCKED car's panel closed
+            // the instant it opened (user 2026-06-30). Diagnostics name the auto-close reason — remove once settled.
+            if (string.IsNullOrEmpty(VehicleManager.OwnerIdFor(_vid))) { Plugin.Logger.LogInfo("[VStore] auto-close: owner gone"); Close(); return; }
+            if (PassengerSync.IsLocked(_vid) && !GrantSync.IsGranted(_owner, MPConfig.PlayerId)) { Plugin.Logger.LogInfo("[VStore] auto-close: locked + not a key-holder"); Close(); return; }
+            if (WalkedAway()) { Plugin.Logger.LogInfo("[VStore] auto-close: walked away"); Close(); return; }   // mirror the native panel closing when you leave
             if (_mode == Mode.List && Sig() != _sig) { if (_cargoClone != null) PopulateCargo(); else RenderList(); }
         }
 
@@ -626,6 +650,31 @@ namespace BigAmbitionsMP
             bool cap = true;
             foreach (char c in s) { sb.Append(cap ? char.ToUpper(c) : c); cap = c == ' '; }
             return sb.ToString();
+        }
+    }
+
+    /// <summary>Shared vehicles — DUPLICATION FIX (2026-06-30). A borrowed car is a registered proxy in the
+    /// borrower's fleet with a "BAMP_"+realId vehicleInstance.id; the game's native "Manage Storage" opens
+    /// ManageCargoUi on that LOCAL copy, so a take (VehicleInstance.RemoveFromCargo) mutates only the copy —
+    /// the owner's real cargo is untouched and the next fleet sync re-adds the item → the taken item DUPLICATES.
+    /// Redirect the native storage-open for a borrowed proxy into our own panel, whose Take/Put route through
+    /// VehicleStorageSync (owner-authoritative). The borrower's own cars (no BAMP_ prefix) keep the native UI.</summary>
+    [HarmonyPatch(typeof(VehicleController), "ManageStorage")]
+    public static class Patch_VehicleController_ManageStorage_Borrowed
+    {
+        static bool Prefix(VehicleController __instance)
+        {
+            try
+            {
+                var inst = __instance?.vehicleInstance;
+                if (inst == null || string.IsNullOrEmpty(inst.id) || !inst.id.StartsWith("BAMP_")) return true;   // my own car → native
+                string realId = inst.id.Substring(5);
+                string owner = VehicleManager.OwnerIdFor(realId);
+                if (string.IsNullOrEmpty(owner)) return true;   // can't resolve the owner → fall back to native
+                VehicleStoragePanel.Open(realId, owner);         // owner-authoritative take/put, no local-copy mutation
+                return false;
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[VStore] ManageStorage redirect: {ex.Message}"); return true; }
         }
     }
 }

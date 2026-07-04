@@ -180,6 +180,25 @@ namespace BigAmbitionsMP
         public static string TypeNameFor(string vid)
             => _remoteVehicles.TryGetValue(vid, out var rv) && rv != null ? rv.TypeName : "";
 
+        /// <summary>Clear the hover OUTLINE on a ghost (round-12 #3). The game's only off-switch is
+        /// EntityController.OnIoExit — the hover-exit resets the renderers back to the vehicles layer —
+        /// but our redirected borrower flows (storage panel, deposit) end without a hover-exit, leaving
+        /// the outline stuck on the ghost. Mirror OnIoExit's layer reset directly on the renderers.</summary>
+        public static void ClearGhostHighlight(string vid)
+        {
+            try
+            {
+                var t = GhostTransform(vid);
+                if (t == null) return;
+                int outlined = LayerHelper.InteractiveItemsOutlinedLayerIndex;
+                int normal   = LayerHelper.VehiclesLayerIndex;
+                var rs = t.GetComponentsInChildren<Renderer>(true);
+                for (int i = 0; i < rs.Length; i++)
+                    if (rs[i] != null && rs[i].gameObject.layer == outlined) rs[i].gameObject.layer = normal;
+            }
+            catch { }
+        }
+
         /// <summary>The ghost's synced loose cargo as (itemName, amount) rows, parsed from the manifest the
         /// ghost was built with (AppliedCargo = "item=amt;...|carried"). EA0.11 stores ALL loose vehicle
         /// cargo — car trunks AND flatbed/hand-trucks — in cargoInstances, which this manifest captures;
@@ -480,17 +499,25 @@ namespace BigAmbitionsMP
                     }
                     else if (rv.AppliedCargo != cargoSig)
                     {
-                        // Owner loaded/unloaded — ghost cargo visuals are baked
-                        // at spawn, so rebuild the ghost (cheap; cargo changes
-                        // are infrequent).  Fixes stale bed boxes (run-16).
-                        DespawnByVehicleId(e.VehicleId);
-                        var fresh = SpawnRemoteVehicle(p.OwnerId, e, pos, rot);
-                        if (fresh == null) continue;
-                        rv = fresh;
-                        rv.TargetAt = Time.unscaledTime;
+                        // DATA: GhostCargoFor reads AppliedCargo, so the trunk panel shows current contents to
+                        // whoever opens it (driver or not) the instant cargo changes.
                         rv.AppliedCargo = cargoSig;
-                        _remoteVehicles[e.VehicleId] = rv;
-                        Plugin.Logger.LogInfo($"[Vehicle] ghost '{e.TypeName}' ({e.VehicleId}) rebuilt — cargo changed ({cargoSig}).");
+
+                        // VISUAL: refresh IN PLACE, exactly as single-player does — re-apply the cargo to the
+                        // ghost's instance, then call the controller's own UpdateCargoCount (HandTruck →
+                        // UpdateCardboardBoxes toggles its box placeholders by count; cars show no loose cargo
+                        // → harmless no-op). NO despawn — despawning a ghost the borrower is driving/riding
+                        // destroyed their parented character: the OOM crash (run-2026-06-29). Works while driven.
+                        try
+                        {
+                            var vc = rv.Go.GetComponentInChildren<VehicleController>();
+                            if (vc != null && vc.vehicleInstance != null)
+                            {
+                                RefreshGhostCargo(vc.vehicleInstance, e);
+                                vc.UpdateCargoCount();
+                            }
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] in-place cargo refresh '{e.VehicleId}': {ex.Message}"); }
                     }
                     if (rv.Go != null && Vector3.Distance(rv.Go.transform.position, pos) > VehicleSnapDistance)
                     {
@@ -661,6 +688,23 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] cargo manifest: {ex.Message}"); }
         }
 
+        /// <summary>(Re)build a ghost's cargo DATA from a fleet entry — the manifest stacks + one stand-in per
+        /// carried item. Clears first, so it's safe to call IN-PLACE on a cargo change (no despawn); the caller
+        /// then refreshes the visual via the controller's UpdateCargoCount (HandTruck.UpdateCardboardBoxes
+        /// toggles the box placeholders by count — exactly how single-player updates a flatbed in place).</summary>
+        private static void RefreshGhostCargo(VehicleInstance inst, VehicleEntry e)
+        {
+            try
+            {
+                if (inst?.cargoInstances == null) return;
+                inst.cargoInstances.Clear();
+                ApplyCargoManifest(inst, e.Cargo);
+                for (int ci = 0; ci < e.CarriedItems && ci < 12; ci++)
+                    inst.cargoInstances.Add(new BigAmbitions.Items.CargoInstance("ba:itemname_cheapgift", 1, 0f, true));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] RefreshGhostCargo: {ex.Message}"); }
+        }
+
         private static RemoteVehicle? SpawnRemoteVehicle(string ownerId, VehicleEntry e,
                                                          Vector3 pos, Quaternion rot)
         {
@@ -683,17 +727,7 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogWarning($"[Vehicle] VehicleInstance setup ('{e.TypeName}'): {ex.Message}");
             }
-            ApplyCargoManifest(inst, e.Cargo);   // bed/handtruck boxes derive from cargo
-            // Carried ITEM instances (hand-truck channel): we can't replicate
-            // another machine's loose items, so render generic stand-in cargo —
-            // one unit per carried item (ghost-only; flatbed-proven renderer).
-            try
-            {
-                for (int ci = 0; ci < e.CarriedItems && ci < 12; ci++)
-                    inst.cargoInstances?.Add(new BigAmbitions.Items.CargoInstance(
-                        "ba:itemname_cheapgift", 1, 0f, true));
-            }
-            catch { }
+            RefreshGhostCargo(inst, e);   // manifest stacks + a stand-in per carried item (flatbed boxes derive from cargo)
 
             int ownedBefore = SafeCount(() => VehicleHelper.AllPlayerVehicles?.Count ?? -1);
 
@@ -1223,7 +1257,7 @@ namespace BigAmbitionsMP
         // to everyone else). Reverts on exit (Released) or a ~1.5 s timeout (driver disconnect).
         private static string _drivingRealVid = "";   // REAL id of the proxy I'm currently driving ("" = none)
         private static string _drivingOwner   = "";
-        private sealed class DrivenFollow { public Vector3 Pos; public Quaternion Rot = Quaternion.identity; public float Until; public float LastDamage = -1f; }
+        private sealed class DrivenFollow { public Vector3 Pos; public Quaternion Rot = Quaternion.identity; public float Until; public float LastDamage = -1f; public string Driver = ""; public bool Hide; public Vector3 RideOff; }
         private static readonly Dictionary<string, DrivenFollow> _ownedFollowing = new();   // MY cars driven remotely
         private const float DriveSyncTimeout = 1.5f;
 
@@ -1295,7 +1329,17 @@ namespace BigAmbitionsMP
                 if (ownedGo == null) return;   // not my car — I'll see it move via the owner's normal broadcast
                 if (p.Released) { ReleaseOwnedFollow(p.VehicleId); return; }
                 if (!_ownedFollowing.TryGetValue(p.VehicleId, out var f))
-                { f = new DrivenFollow(); _ownedFollowing[p.VehicleId] = f; BeginOwnedFollow(ownedGo, p.VehicleId); }
+                {
+                    f = new DrivenFollow(); _ownedFollowing[p.VehicleId] = f; BeginOwnedFollow(ownedGo, p.VehicleId);
+                    // Bug #1: depict the borrower in the seat the same way the fleet path depicts any remote driver
+                    // (560-585) — enclosed car → hide the walk model; open vehicle (borrowed flatbed/cart) → keep it
+                    // visible + pinned. The owner's own fleet broadcast never runs on the owner's machine, so the
+                    // follow path is the ONLY place to set this for a car being driven by someone else.
+                    string tn = ""; try { var vc0 = ownedGo.GetComponentInChildren<VehicleController>(); if (vc0?.vehicleInstance != null) tn = vc0.vehicleInstance.vehicleTypeName.ToString(); } catch { }
+                    f.Hide = !IsOpenVehicle(tn);
+                    f.RideOff = f.Hide ? Vector3.zero : RideOffsetFor(tn);
+                }
+                f.Driver = p.DriverId;
                 f.Pos = new Vector3(p.X, p.Y, p.Z); f.Rot = new Quaternion(p.Qx, p.Qy, p.Qz, p.Qw);
                 f.Until = Time.unscaledTime + DriveSyncTimeout;
                 // State back-prop (item D): the borrower's fuel + damage → my real car so my save reflects use.
@@ -1329,7 +1373,11 @@ namespace BigAmbitionsMP
 
         private static void ReleaseOwnedFollow(string vid)
         {
-            if (!_ownedFollowing.Remove(vid)) return;
+            if (!_ownedFollowing.TryGetValue(vid, out var f)) return;
+            _ownedFollowing.Remove(vid);
+            // Bug #1: restore the borrower's walk model + release the ride pin now they've stopped driving my car.
+            if (!string.IsNullOrEmpty(f.Driver))
+                try { RemotePlayerManager.SetRide(f.Driver, null, Vector3.zero); RemotePlayerManager.SetDriving(f.Driver, false); } catch { }
             var go = FindOwnedGo(vid);
             if (go != null) { try { foreach (var rb in go.GetComponentsInChildren<Rigidbody>(true)) if (rb != null) rb.isKinematic = false; } catch { } }
             Plugin.Logger.LogInfo($"[Drive] my car '{vid}' released → resuming local control.");
@@ -1346,7 +1394,30 @@ namespace BigAmbitionsMP
                 var t = go.transform;
                 t.position = Vector3.Lerp(t.position, kv.Value.Pos, k);
                 t.rotation = Quaternion.Slerp(t.rotation, kv.Value.Rot, k);
+                // Bug #1: keep the borrower depicted as the driver every frame (re-asserts against avatar respawn /
+                // appearance reapply). Enclosed → hidden + unpinned (nametag rides their synced pose, like the fleet
+                // path); open → visible + pinned to the cart so it doesn't drift off.
+                var f = kv.Value;
+                if (!string.IsNullOrEmpty(f.Driver))
+                {
+                    RemotePlayerManager.SetDriving(f.Driver, f.Hide);
+                    RemotePlayerManager.SetRide(f.Driver, f.Hide ? null : t, f.RideOff);
+                }
             }
+        }
+
+        /// <summary>Can a granted on-foot key-holder take the wheel of this ghost right now? (The check half of
+        /// TryDriveGhost, so the click handler can offer a Drive/Storage choice without driving yet — bug #3.)</summary>
+        public static bool CanDriveGhost(string vid)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(vid) || !_remoteVehicles.TryGetValue(vid, out var rv) || rv?.Go == null) return false;
+                if (!GrantSync.IsGranted(rv.OwnerId, MPConfig.PlayerId)) return false;   // not my key
+                if (VehicleHelper.GetCurrentVehicle() != null) return false;             // already in a vehicle
+                return rv.Go.GetComponentInChildren<VehicleController>() != null;        // drivable (controller kept)
+            }
+            catch { return false; }
         }
 
         /// <summary>A granted player clicked a ghost: if it's a DRIVABLE car they hold a key to and they're
@@ -1356,9 +1427,8 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (string.IsNullOrEmpty(vid) || !_remoteVehicles.TryGetValue(vid, out var rv) || rv?.Go == null) return false;
-                if (!GrantSync.IsGranted(rv.OwnerId, MPConfig.PlayerId)) return false;   // not my key
-                if (VehicleHelper.GetCurrentVehicle() != null) return false;             // already in a vehicle
+                if (!CanDriveGhost(vid)) return false;
+                var rv = _remoteVehicles[vid];
                 var vc = rv.Go.GetComponentInChildren<VehicleController>();
                 if (vc == null) return false;                                            // not drivable (stripped — granted after spawn; OnGrantsChanged respawns it)
                 // EnterVehicle's HUD hookup calls VehicleHelper.GetCurrentVehicle(), which resolves the active
@@ -1400,6 +1470,10 @@ namespace BigAmbitionsMP
             foreach (var rv in _remoteVehicles.Values)
             {
                 if (rv.Go == null) continue;
+                // Keep the owner-name label facing the camera ALWAYS — even while the ghost is being driven.
+                // (Must run before the position-skip below, or a driven/shared car's label freezes — bug 1,
+                // run-2026-06-29.)
+                if (rv.Label != null && cam != null) rv.Label.rotation = cam.transform.rotation;
                 // A granted ghost the local player is DRIVING owns its own position — don't yank it back.
                 if (IsGhostBeingDriven(rv.Go)) continue;
                 var t = rv.Go.transform;
@@ -1409,8 +1483,6 @@ namespace BigAmbitionsMP
                 var predicted = rv.TargetPos + rv.Velocity * ahead;
                 t.position = Vector3.Lerp(t.position, predicted, k);
                 t.rotation = Quaternion.Slerp(t.rotation, rv.TargetRot, k);
-                if (rv.Label != null && cam != null)
-                    rv.Label.rotation = cam.transform.rotation;
             }
             TickOwnedFollow(k);   // handoff: my cars driven remotely follow the driver's synced pose
         }

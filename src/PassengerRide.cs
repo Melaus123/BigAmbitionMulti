@@ -175,7 +175,13 @@ namespace BigAmbitionsMP
             foreach (var r in t.GetComponentsInChildren<Renderer>(true))
             {
                 if (r == null) continue;
-                _hiLayers.Add((r.gameObject, r.gameObject.layer));
+                // NEVER capture the outlined layer as the "original" (round-14 #2): a GRANTED proxy is a
+                // REGISTERED vehicle, so the game's own hover (MouseController → OnIoEnter → SetOutline)
+                // outlines it too — capturing that as the restore target made ClearHighlight faithfully
+                // "restore" the outline = a highlight that never goes away. Restore to the vehicles layer.
+                int orig = r.gameObject.layer;
+                if (orig == layer) orig = LayerHelper.VehiclesLayerIndex;
+                _hiLayers.Add((r.gameObject, orig));
                 r.gameObject.layer = layer;
                 n++;
             }
@@ -192,6 +198,9 @@ namespace BigAmbitionsMP
             for (int i = 0; i < _hiLayers.Count; i++)
                 if (_hiLayers[i].go != null) _hiLayers[i].go.layer = _hiLayers[i].layer;
             _hiLayers.Clear();
+            // Belt (round-14 #2): whatever the native hover did in parallel, no renderer on the ghost we
+            // just left may stay outlined — force any stragglers back to the vehicles layer.
+            if (_hovered != "") VehicleManager.ClearGhostHighlight(_hovered);
             _hovered = "";
         }
 
@@ -241,9 +250,6 @@ namespace BigAmbitionsMP
         // player with "Not while driving". Seat count is from the ghost's type + authored table (client-safe).
         private static void HandleUnlockedClick(string vid)
         {
-            // A granted player clicking a car they hold a key to drives it (on foot → take the wheel).
-            if (VehicleManager.TryDriveGhost(vid)) return;
-
             string owner = VehicleManager.OwnerIdFor(vid);
 
             // Holding an item on foot → walk to the vehicle's cargo-loading spot (the same place the owner
@@ -260,16 +266,33 @@ namespace BigAmbitionsMP
             if (cur != null)
             {
                 bool canStore = cur.VehicleType != null && cur.VehicleType.spawnInPlayerObject && cur.VehicleType.maxCargoCapacity > 0;
-                if (canStore)   // pushing a flatbed/hand-truck → loot the target into it
+                if (canStore)   // pushing a flatbed/hand-truck
                 {
-                    if (hasCargo) VehicleStoragePanel.Open(vid, owner);
-                    else          PassengerHud.Toast("Nothing to take.");
+                    // Parity with the owner (round-14 #1, refining round-12 #1a): the registered proxy already
+                    // opens the NATIVE vehicle menu on this same click, and the owner only deposits when its
+                    // "add items to storage" BUTTON is pressed — round-12's click-time auto-deposit beat the
+                    // menu to the choice. A LOADED truck now does nothing here (the button routes through the
+                    // MoveAndAddHandTruckItems redirect in VehicleProxyCargoGuard); an empty one keeps the
+                    // pre-round-12 take flow.
+                    bool truckLoaded = cur.cargoInstances != null && cur.cargoInstances.Count > 0;
+                    if (truckLoaded)   { /* the native menu owns the choice */ }
+                    else if (hasCargo) VehicleStoragePanel.Open(vid, owner);
+                    else               PassengerHud.Toast("Nothing to take.");
                 }
                 // else: driving a car / on a scooter — nothing to do here; stay silent rather than nag.
                 return;
             }
 
-            // On foot.
+            // On foot. A granted key-holder DRIVES — but a vehicle WITH cargo offers the same Drive-vs-Storage
+            // choice the owner gets (was: drove immediately, ignoring the choice popup — bug #3, run-2026-06-29).
+            if (VehicleManager.CanDriveGhost(vid))
+            {
+                if (hasCargo) VehicleStoragePanel.OpenChoice(vid, owner, () => VehicleManager.TryDriveGhost(vid));
+                else          VehicleManager.TryDriveGhost(vid);
+                return;
+            }
+
+            // Not a key-holder → ride as a passenger (with the same cargo choice).
             int seats = PassengerSync.PassengerSeatsForType(VehicleManager.TypeNameFor(vid));
             if (seats <= 0)
             {
@@ -281,10 +304,11 @@ namespace BigAmbitionsMP
             else          RequestBoard(vid);
         }
 
-        // Walk to the vehicle's cargo-loading spot (the same place the owner would) and deposit the held item
-        // on arrival — mirrors VehicleController.MoveAndAddHeldItemToStorage. Falls back to depositing in place
-        // if we can't resolve a spot or the walk can't be issued.
-        private static void WalkAndDeposit(string vid, string owner)
+        // Walk to the vehicle's cargo-loading spot (the same place the owner would) and deposit what the
+        // accessor carries (hands or pushed hand-truck — RequestDeposit resolves the source) on arrival —
+        // mirrors VehicleController.MoveAndAddHeldItemToStorage. Falls back to depositing in place if we
+        // can't resolve a spot or the walk can't be issued.
+        internal static void WalkAndDeposit(string vid, string owner)
         {
             try
             {
@@ -294,6 +318,7 @@ namespace BigAmbitionsMP
                 if (pc == null || ghost == null || spot == Vector3.zero)
                 {
                     VehicleStorageSync.RequestDeposit(vid, owner);   // can't walk → deposit in place
+                    VehicleManager.ClearGhostHighlight(vid);         // round-12 #3: our flow ends without a hover-exit
                     return;
                 }
                 // Walk to the loading spot; deposit when we ARRIVE — polled by proximity/timeout in TickDeposit.
@@ -301,7 +326,7 @@ namespace BigAmbitionsMP
                 _depVid = vid; _depOwner = owner; _depSpot = spot; _depDeadline = Time.unscaledTime + 10f;
                 pc.SetGoal(spot, new UnityEngine.Events.UnityAction(() => { }));
             }
-            catch { VehicleStorageSync.RequestDeposit(vid, owner); }
+            catch { VehicleStorageSync.RequestDeposit(vid, owner); VehicleManager.ClearGhostHighlight(vid); }
         }
 
         // Deposit when the player reaches the loading spot (proximity) or after a timeout backstop — mirrors the
@@ -321,6 +346,7 @@ namespace BigAmbitionsMP
                 string vid = _depVid, owner = _depOwner;
                 _depVid = ""; _depOwner = "";   // clear first so the deposit fires exactly once
                 VehicleStorageSync.RequestDeposit(vid, owner);
+                VehicleManager.ClearGhostHighlight(vid);   // round-12 #3: our flow ends without a hover-exit
             }
         }
 
@@ -501,6 +527,11 @@ namespace BigAmbitionsMP
         private static void EnsureRideCamera(Transform? ghost)
         {
             if (ghost == null) return;
+            // Bug (2026-06-30): while the city map is open, YIELD the camera to the game's map view. We re-claim
+            // Priority every frame, which was stealing the camera straight back from the map (the owner-passenger's
+            // map opened but the view stayed on the car). CityMap.IsOpen is the game's own map-state flag; we
+            // re-assert the ride cam the frame the map closes.
+            if (CityMap.IsOpen) return;
             try
             {
                 var gm = InstanceBehavior<GameManager>.Instance;

@@ -424,6 +424,12 @@ namespace BigAmbitionsMP
             // Startup pause screen — full-screen "waiting for players" overlay
             TickStartupScreen();
 
+            // Rival-stats freshness (round-25): each machine re-publishes its self-stats every couple of
+            // minutes (client push → host re-broadcasts the merged snapshot to everyone; host pushes its own
+            // directly). Before this, another player's rival sheet only updated when THAT player opened
+            // their own rivals app — arbitrarily stale for every viewer.
+            TickRivalStatsPush();
+
             // Settings panel — hover tooltips + click-to-type field cursor
             TickSettingsPanel();
 
@@ -1226,7 +1232,7 @@ namespace BigAmbitionsMP
         // Permissions tab: scrollable per-player VEHICLE-key list. Its own button registry so the
         // offers rebuild (which Clears _hubRowBtns) can't wipe it.
         private RectTransform? _hubPermVp, _hubPermContent;
-        private readonly List<(RectTransform rt, RectTransform vp, string id, byte act)> _hubPermBtns = new();
+        private readonly List<(RectTransform rt, RectTransform vp, string id, byte act, GrantKind kind)> _hubPermBtns = new();
         private string _hubPermSig = "";
         private string _hubTarget = "";
         private double _hubAmount = 10000;
@@ -1838,23 +1844,25 @@ namespace BigAmbitionsMP
                     return;
                 }
                 // Permissions tab: per-player key toggles (separate registry from the offers rows).
-                foreach (var (rt, vp, id, act) in _hubPermBtns)
+                foreach (var (rt, vp, id, act, kind) in _hubPermBtns)
                 {
                     if (id == "" || rt == null || !rt.gameObject.activeInHierarchy) continue;
                     if (!HubHit(vp, mp) || !HubHit(rt, mp)) continue;
-                    if (act == 6 && id.StartsWith("pid:"))            // toggle an ONLINE player's vehicle key
+                    if (act == 6 && id.StartsWith("pid:"))            // toggle an ONLINE player's key (per kind)
                     {
                         string pid = id.Substring(4);
-                        bool now = !GrantSync.IsGranted(MPConfig.PlayerId, pid);
-                        if (MPServer.IsRunning) MPServer.HostSetGrant(pid, now);
-                        else                    MPClient.SendPermissionGrant(pid, now);
+                        bool now = !GrantSync.IsGranted(kind, MPConfig.PlayerId, pid);
+                        if (MPServer.IsRunning) MPServer.HostSetGrant(kind, pid, now);
+                        else                    MPClient.SendPermissionGrant(kind, pid, now);
                         _hubPermSig = "";   // force the list to rebuild with the new state
                     }
-                    else if (act == 7 && id.StartsWith("stable:"))    // revoke an OFFLINE grantee by handle
+                    else if (act == 7 && id.StartsWith("stable:"))    // toggle an OFFLINE grantee's key (per kind)
                     {
                         string handle = id.Substring(7);
-                        if (MPServer.IsRunning) MPServer.HostSetGrantOffline(handle, false);
-                        else                    MPClient.SendPermissionRevokeOffline(handle);
+                        bool cur = false;
+                        foreach (var g in GrantSync.MyGrantees()) if (g.Handle == handle) { cur = g.Kinds.Contains(kind); break; }
+                        if (MPServer.IsRunning) MPServer.HostSetGrantOffline(kind, handle, !cur);
+                        else                    MPClient.SendPermissionSetOffline(kind, handle, !cur);
                         _hubPermSig = "";
                     }
                     return;
@@ -2181,9 +2189,13 @@ namespace BigAmbitionsMP
             var mine = GrantSync.MyGrantees();   // my grantees incl. offline (handle + name + online)
 
             var sb = new System.Text.StringBuilder();
-            foreach (var pl in players) if (pl != me) sb.Append(pl).Append(GrantSync.IsGranted(me, pl) ? '1' : '0').Append(';');
+            foreach (var pl in players)
+                if (pl != me) sb.Append(pl)
+                    .Append(GrantSync.IsGranted(GrantKind.Vehicle, me, pl) ? '1' : '0')
+                    .Append(GrantSync.IsGranted(GrantKind.Housing, me, pl) ? '1' : '0').Append(';');
             sb.Append('|');
-            foreach (var g in mine) if (!g.Online) sb.Append(g.Handle).Append(g.Name).Append(';');
+            foreach (var g in mine)
+                if (!g.Online) { sb.Append(g.Handle).Append(g.Name); foreach (var k in g.Kinds) sb.Append((int)k); sb.Append(';'); }
             string sig = sb.ToString();
             if (sig == _hubPermSig) return;
             _hubPermSig = sig;
@@ -2196,19 +2208,25 @@ namespace BigAmbitionsMP
             var grey   = new Color(0.20f, 0.22f, 0.30f, 1f);
             string muted = _hubNative ? "#8795A0" : "#9AA3B2";
 
+            // Each row: the player + a Vehicle key toggle and a Housing key toggle (purple = granted).
             var onlineNames = new HashSet<string>(players);
             foreach (var pl in players)
             {
                 if (pl == me) continue;
-                bool granted = GrantSync.IsGranted(me, pl);
-                AddPermRow(idx++, RowH, pl, (granted ? "Granted" : "Grant", granted ? purple : grey, "pid:" + pl, (byte)6));
+                bool gv = GrantSync.IsGranted(GrantKind.Vehicle, me, pl);
+                bool gh = GrantSync.IsGranted(GrantKind.Housing, me, pl);
+                AddPermRow(idx++, RowH, pl,
+                    ("Vehicle", gv ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Vehicle),
+                    ("Housing", gh ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Housing));
             }
-            // Offline grantees (not in the live roster) — revoke-only.
+            // Offline grantees (not in the live roster) — same two toggles, by StableId handle.
             foreach (var g in mine)
             {
                 if (g.Online || onlineNames.Contains(g.Name)) continue;
                 string nm = string.IsNullOrEmpty(g.Name) ? "(unknown)" : g.Name;
-                AddPermRow(idx++, RowH, $"{nm}  <color={muted}>(offline)</color>", ("Granted", purple, "stable:" + g.Handle, (byte)7));
+                AddPermRow(idx++, RowH, $"{nm}  <color={muted}>(offline)</color>",
+                    ("Vehicle", g.Kinds.Contains(GrantKind.Vehicle) ? purple : grey, "stable:" + g.Handle, (byte)7, GrantKind.Vehicle),
+                    ("Housing", g.Kinds.Contains(GrantKind.Housing) ? purple : grey, "stable:" + g.Handle, (byte)7, GrantKind.Housing));
             }
 
             _hubPermContent.sizeDelta = new Vector2(_hubPermContent.sizeDelta.x, Mathf.Max(idx * RowH, _hubPermVp.rect.height));
@@ -2216,7 +2234,7 @@ namespace BigAmbitionsMP
 
         /// <summary>One Permissions-tab row: name label + a key toggle, registered in _hubPermBtns.</summary>
         private void AddPermRow(int idx, float rowH, string text,
-                                params (string label, Color col, string id, byte act)[] btns)
+                                params (string label, Color col, string id, byte act, GrantKind kind)[] btns)
         {
             if (_hubPermContent == null || _hubPermVp == null) return;
             var rowGO = MakeGO("PermRow", _hubPermContent.transform);
@@ -2244,7 +2262,7 @@ namespace BigAmbitionsMP
                 brt.anchoredPosition = new Vector2(-(bx - w) - 2f, 0f);
                 brt.sizeDelta = new Vector2(w, 24f);
                 blbl.fontSize = 11;
-                _hubPermBtns.Add((brt, _hubPermVp, b.id, b.act));
+                _hubPermBtns.Add((brt, _hubPermVp, b.id, b.act, b.kind));
             }
         }
 
@@ -2451,6 +2469,20 @@ namespace BigAmbitionsMP
         }
 #endif
 
+        private static float _rivalStatsNextPush;
+        private void TickRivalStatsPush()
+        {
+            if (Time.unscaledTime < _rivalStatsNextPush) return;
+            _rivalStatsNextPush = Time.unscaledTime + 120f;
+            if (!IsInGame()) return;
+            try
+            {
+                if (MPClient.IsConnected)     MPClient.SendRivalsStatsRequest();       // self-report; host broadcasts merged snapshot on receipt
+                else if (MPServer.IsRunning)  MPServer.BroadcastRivalsStatsSnapshot(); // host-only session: push host stats to any joiners
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[UI] TickRivalStatsPush: {ex.Message}"); }
+        }
+
         private void TickGameLoadDetect()
         {
             bool inGame = IsInGame();
@@ -2469,7 +2501,13 @@ namespace BigAmbitionsMP
                 ParkedVehicleSync.Reset();
                 MPRegisterSync.Reset();   // duty posts die with the scene
                 PassengerSync.Reset();    // passenger seats/locks die with the scene
-                GrantSync.Reset();        // access grants die with the scene (persistent copy restored separately — Phase 1c)
+                GrantSync.ResetSceneState();  // runtime grants + local caches die with the scene; the DURABLE store
+                                              // survives — its lifecycle is session boundaries (StartNewGame /
+                                              // manifest restore), NOT scene loads. The old full Reset() here fired
+                                              // after the load-time restore and wiped every restored grant → "shares
+                                              // lost on load" + the join-refresh persisted 0 over the manifest (2026-06-30).
+                MPServer.RebuildGrantsAfterSceneReset();  // host: immediate store→runtime rebuild + re-broadcast, so
+                                              // enforcement never depends on which machine's scene finishes first
                 InteriorSync.Reset();     // interior subs + owner-snapshot caches die with the scene — a prior session's Authoritative=true snapshot must not bleed into a new world (was never wired up)
                 MPAudit.Reset();          // divergence streaks/throttle die with the session (else stale [Audit] state pollutes the bug-report log across same-process sessions)
                 MPStockSync.Reset();      // per-shop stock digests die with the session

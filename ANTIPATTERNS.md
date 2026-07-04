@@ -429,5 +429,53 @@ each is a candidate deref of a field we left unset.
 
 ---
 
+## Class 10 — Locally mutating a replica that's owner-authoritative and sync-overwritten
+
+**Pattern.** Gameplay code mutates a collection that is a LOCAL REPLICA of state owned and
+broadcast by another machine — e.g. a borrowed vehicle's `cargoInstances` on the BORROWER (the
+car is a registered proxy with a `BAMP_` id; its real cargo lives on the owner and is re-pushed
+every fleet broadcast). The replica exists only to DISPLAY the owner's truth; the sync overwrites
+it. Any local add/remove diverges from the owner and is then clobbered (or re-instated) by the
+next sync.
+
+**Why it bites.** A local **remove** re-appears on the next sync → **duplication**; a local
+**add** is overwritten on the next sync → **deletion**. Same root, two masks — so fixing one
+direction (take) leaves its mirror (put) broken and the symptom just changes shape. And the
+collection usually has MANY UI entry points (take, deposit-held-item, enter-with-item, sell,
+hand-truck transfer) all funneling through a FEW data methods. Patching the one UI path you
+happened to test (the "Manage Storage" screen) is a **half-measure**: every other entry
+re-introduces the same class. Invisible to the owner (their copy is the truth). This is the
+inverse of Class 8 (there the RECEIVER clobbers local state on *apply*; here local gameplay
+*mutates* a replica the sync then overwrites).
+
+**Detection grep.**
+```
+rg -n "TryToAddToCargo|AddToCargo|RemoveFromCargo|ReduceFromCargo|cargoInstances\.(Add|Remove|Insert)" src/
+```
+When an object is a REPLICA synced from elsewhere, guard the data-mutation chokepoints, not the
+UI. If a UI path is patched but the underlying data method isn't, the unpatched siblings bite.
+
+**Safe fixes (in order of preference).**
+1. **Guard at the lowest data-mutation chokepoint, not per-UI-action.** One Prefix on each data
+   method (guarded by the replica test, e.g. `id.StartsWith("BAMP_")`) covers EVERY UI path —
+   present and future — at once (`VehicleProxyCargoGuard`).
+2. **Route legitimate operations to the owner** (request → owner applies → re-sync), never to the
+   local replica (`VehicleStorageSync.RequestTake/Put/Deposit`).
+3. **When you fix one direction of a symmetric pair, immediately do its mirror.** Take and put
+   share the root; a take-only fix is incomplete by construction.
+4. Note any path that mutates the collection RAW (bypassing the chokepoint). The mod's own display
+   refresh does (`RefreshGhostCargo` → `cargoInstances.Clear/Add`); that's correct (it IS the sync
+   writing the truth) and is intentionally NOT caught by a chokepoint Prefix — but verify it.
+
+**Known instances (all fixed).**
+- Borrowed-vehicle proxy cargo. TAKE duplicated (2026-06-30) — first "fixed" by redirecting ONE
+  UI path (`VehicleController.ManageStorage` → our panel): a half-measure. PUT then DELETED
+  because the on-foot deposit (`VehicleController.AddHeldItemToStorage`) wrote straight to the
+  proxy's local cargo → overwritten on the next sync. COMPLETE fix: Prefix guards on all three
+  `VehicleInstance` cargo chokepoints (`TryToAddToCargo` / `RemoveFromCargo` / `ReduceFromCargo`)
+  + route the deposit to the owner (`VehicleProxyCargoGuard.cs`). 2026-06-30.
+
+---
+
 *Registry seeded from real fix history (git log + investigation notes); it is not
 exhaustive — add a class the moment a second instance of any pattern shows up.*

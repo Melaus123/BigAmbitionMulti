@@ -712,6 +712,10 @@ namespace BigAmbitionsMP
                         return;
                     }
 
+                    // Housing: a guest editing this interior holds in-progress LOCAL edits they forward on close;
+                    // don't let an incoming snapshot clobber them mid-session.
+                    if (HousingDesign.GuestIsDesigning(payload.AddressKey)) return;
+
                     // CATCH-ALL (2026-06-17): the host's own replica of a PLAYER-owned business is flagged
                     // non-authoritative (InteriorSync.BuildSnapshotForHostSend). Such a snapshot must NEVER
                     // touch the owner's real interior — only the owner's OWN authoritative push may. This one
@@ -750,22 +754,24 @@ namespace BigAmbitionsMP
                             reg.interiorDesigns.Clear();
                             foreach (var d in payload.InteriorDesigns)
                             {
-                                var sd = new SerializedInteriorDesign { UUID = d.UUID };
-                                if (d.Materials != null && d.Materials.Count > 0)
+                                // `materials` MUST be a non-null array: the game's InteriorElement.Deserialize does
+                                // `materials.Length` with NO null-check, so a null here NRE's inside LoadBuilding →
+                                // aborts the building-enter coroutine → the player is stuck on a BLACK SCREEN on load
+                                // (user 2026-06-30). The game's own Serialize() always uses an array (empty, never
+                                // null) — match that. (The old `if (Count>0)` left it null for empty designs.)
+                                int mcount = d.Materials?.Count ?? 0;
+                                var arr = new SerializedInteriorDesign.SerializableInteriorMaterial[mcount];
+                                for (int i = 0; i < mcount; i++)
                                 {
-                                    var arr = new SerializedInteriorDesign.SerializableInteriorMaterial[d.Materials.Count];
-                                    for (int i = 0; i < d.Materials.Count; i++)
+                                    var m = d.Materials[i];
+                                    arr[i] = new SerializedInteriorDesign.SerializableInteriorMaterial
                                     {
-                                        var m = d.Materials[i];
-                                        arr[i] = new SerializedInteriorDesign.SerializableInteriorMaterial
-                                        {
-                                            MaterialID    = m.MaterialID,
-                                            MaterialIndex = m.MaterialIndex,
-                                            ColorIndex    = m.ColorIndex,
-                                        };
-                                    }
-                                    sd.materials = arr;
+                                        MaterialID    = m.MaterialID,
+                                        MaterialIndex = m.MaterialIndex,
+                                        ColorIndex    = m.ColorIndex,
+                                    };
                                 }
+                                var sd = new SerializedInteriorDesign { UUID = d.UUID, materials = arr };
                                 reg.interiorDesigns.Add(sd);
 
                                 string uuid = d.UUID ?? "";
@@ -813,6 +819,7 @@ namespace BigAmbitionsMP
                     // ItemController (and its shuffled look) survives untouched.
                     var changedIds = new HashSet<string>();
                     var removedIds = new HashSet<string>();
+                    var movedIds   = new HashSet<string>();   // transform-only deltas → move in place (round-22)
                     try
                     {
                         if (reg.itemInstances != null)
@@ -850,7 +857,19 @@ namespace BigAmbitionsMP
                                     continue;
                                 }
                                 var ii = DeserializeItemInstance(i);
-                                if (ii != null) { newDict[i.Id] = ii; changedIds.Add(i.Id); }
+                                if (ii == null) continue;
+                                newDict[i.Id] = ii;
+                                // MOVE vs CHANGE (round-22): the owner adopting a guest's placement echoes it
+                                // back with a settled/snapped POSITION — a real delta, but destroy+respawning
+                                // the just-placed item made the guest's next click land on the dying zombie
+                                // (StartPlacementMode NRE → refused; the round-14 byte-ser echo-suppression
+                                // can't help because the position genuinely changed). A TRANSFORM-ONLY delta
+                                // (same name/cargo/state) now keeps the live GameObject and moves it in place;
+                                // identity changes (fridge cargo etc.) keep the respawn path.
+                                if (reg.itemInstances.TryGetValue(i.Id, out var prevLive) && prevLive != null
+                                    && IdentitySig(i) == IdentitySig(prevLive))
+                                    movedIds.Add(i.Id);
+                                else changedIds.Add(i.Id);
                             }
                             foreach (var k in reg.itemInstances.Keys)
                                 if (!newDict.ContainsKey(k)) removedIds.Add(k);
@@ -863,6 +882,14 @@ namespace BigAmbitionsMP
                             // on cargo shelves so this machine can shop natively.  Price
                             // display reads reg.retailPrices = the synced store table.
                             int purchasable = 0;
+                            // RESIDENCE GUARD (round-15): fresh food etc. are RetailProducts, so a guest's stocked
+                            // FRIDGE qualified for shop-shelf purchaser settings — and the game then treats it as a
+                            // SHOP SHELF for NON-owners: ItemController.Interact (:492) buys instead of opening the
+                            // menu, and OverlayHelper.GetRelevantEntity's non-owner branch (:178) remaps the entity.
+                            // Buyer-purchasing only makes sense in a building that RUNS A BUSINESS — skip the rest.
+                            bool hasBusiness = false;
+                            try { hasBusiness = !string.IsNullOrEmpty(reg.businessTypeName?.ToString()); } catch { }
+                            if (hasBusiness)
                             foreach (var kv in newDict)
                             {
                                 var ii = kv.Value;
@@ -910,7 +937,7 @@ namespace BigAmbitionsMP
                     // when LoadBuilding ran on entry.  Calling LoadBuilding
                     // again re-runs the full pipeline (layout, designs, items)
                     // against the now-fresh fields.
-                    TryRefreshActiveInteriorIfMatches(payload.AddressKey, changedIds, removedIds, changedDesignUuids, _layoutChanged);
+                    TryRefreshActiveInteriorIfMatches(payload.AddressKey, changedIds, removedIds, changedDesignUuids, _layoutChanged, movedIds);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorSnapshot: {ex.Message}"); }
             });
@@ -1053,9 +1080,31 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
+        /// <summary>GUEST: record the item state we just FORWARDED as already-applied, so the owner's echo of
+        /// our own edit ser-matches (`prev == ser` keep-branch above) and the live objects stay put. Without
+        /// this, every guest placement echoed back as "changed" and destroy+respawned the just-placed
+        /// ItemController — a same-frame click on the dying zombie then NRE'd inside StartPlacementMode with
+        /// the PlacementMode navigation blocker stranded = the guest locked in place (round-14 #3,
+        /// client log :1232+). The echo must match byte-for-byte: both sides build the DTO with the same
+        /// SerializeItemInstance and the diff key is the same JsonConvert of it.</summary>
+        public static void NoteLocalItemState(string addressKey, System.Collections.Generic.List<ItemInstanceInfo> items)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey) || items == null) return;
+                var ser = new Dictionary<string, string>();
+                foreach (var i in items)
+                    if (i != null && !string.IsNullOrEmpty(i.Id))
+                        ser[i.Id] = Newtonsoft.Json.JsonConvert.SerializeObject(i);
+                _lastItemSer[addressKey] = ser;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] NoteLocalItemState: {ex.Message}"); }
+        }
+
         private static void TryRefreshActiveInteriorIfMatches(string addressKey,
             HashSet<string>? changedIds = null, HashSet<string>? removedIds = null,
-            HashSet<string>? changedDesignUuids = null, bool layoutChanged = true)
+            HashSet<string>? changedDesignUuids = null, bool layoutChanged = true,
+            HashSet<string>? movedIds = null)
         {
             try
             {
@@ -1146,7 +1195,7 @@ namespace BigAmbitionsMP
                 // actually changed (or vanished); unchanged shelves keep their
                 // GameObjects — and with them the game's random stock-visual
                 // shuffle (full rebuilds re-rolled it = flicker, 2026-06-12).
-                RefreshItemsForActiveBuilding(matched, reg, changedIds, removedIds);
+                RefreshItemsForActiveBuilding(matched, reg, changedIds, removedIds, movedIds);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] TryRefreshActiveInteriorIfMatches: {ex.Message}"); }
         }
@@ -1216,7 +1265,8 @@ namespace BigAmbitionsMP
         /// spawn and don't touch the scene.
         /// </summary>
         private static void RefreshItemsForActiveBuilding(BuildingManager bm, BuildingRegistration reg,
-            HashSet<string>? changedIds = null, HashSet<string>? removedIds = null)
+            HashSet<string>? changedIds = null, HashSet<string>? removedIds = null,
+            HashSet<string>? movedIds = null)
         {
             try
             {
@@ -1289,7 +1339,30 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] item spawn pass: {ex.Message}"); }
 
-                Plugin.Logger.LogInfo($"[Patcher] Items refresh: destroyed={destroyed} spawned={spawned} kept={liveById.Count} failed={failed} (dict size {dictCount}{(fullRebuild ? ", FULL rebuild" : "")}).");
+                // MOVE pass (round-22): transform-only deltas keep their live GameObject — re-bind it to the
+                // fresh instance and move it to the owner-authoritative pose. No destroy/respawn → no zombie
+                // window for the guest's next click on a just-placed item.
+                int moved = 0;
+                try
+                {
+                    if (movedIds != null && reg.itemInstances != null)
+                        foreach (var id in movedIds)
+                        {
+                            if (!liveById.TryGetValue(id, out var ic) || ic == null) continue;   // no survivor → spawn pass covered it
+                            if (!reg.itemInstances.TryGetValue(id, out var ni) || ni == null) continue;
+                            try
+                            {
+                                ic.ItemInstance = ni;
+                                ic.transform.position = ni.position;
+                                ic.transform.rotation = ni.Rotation;
+                                moved++;
+                            }
+                            catch { }
+                        }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] item move pass: {ex.Message}"); }
+
+                Plugin.Logger.LogInfo($"[Patcher] Items refresh: destroyed={destroyed} spawned={spawned} moved={moved} kept={liveById.Count} failed={failed} (dict size {dictCount}{(fullRebuild ? ", FULL rebuild" : "")}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] RefreshItemsForActiveBuilding: {ex.Message}"); }
         }
@@ -1454,6 +1527,57 @@ namespace BigAmbitionsMP
         /// populates all the fields we serialize.  Cargo + stacked + colors +
         /// purchaser-settings are rebuilt as fresh IL2CPP objects.
         /// </summary>
+        // ── Move-vs-change identity (round-22) ────────────────────────────────
+        // What an item IS, minus where it sits: two sigs equal ⇒ the delta is transform/location-only ⇒ the
+        // live GameObject is moved in place instead of destroy+respawned (the new instance is adopted into
+        // reg and the controller in BOTH paths, so excluding volatile metadata here only trades respawns for
+        // moves — never loses data). Any mismatch (cargo, state, attachments…) keeps the respawn path.
+        private static string IdentitySig(ItemInstanceInfo i)
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            var sb = new System.Text.StringBuilder();
+            sb.Append(i.ItemName ?? "").Append('|').Append(i.ParentId ?? "").Append('|')
+              .Append(i.LinkedItemName ?? "").Append('|').Append(i.IsSecured).Append('|')
+              .Append(i.StateIndex).Append('|').Append(i.Alias ?? "").Append('|')
+              .Append(i.CustomValue ?? "").Append('|').Append(i.WorldSpaceTextValue ?? "").Append('|')
+              .Append(i.PriceOnPurchase.ToString(inv)).Append('#');
+            if (i.CargoInstances != null)
+                foreach (var c in i.CargoInstances)
+                    if (c != null) sb.Append(c.ItemName ?? "").Append(':').Append(c.Amount).Append(':')
+                                     .Append(c.Paid).Append(':').Append(c.PricePerUnit.ToString(inv)).Append(':')
+                                     .Append(c.CustomColors?.Count ?? 0).Append(':')
+                                     .Append(c.NestedCargoInstances?.Count ?? 0).Append(';');
+            sb.Append('#');
+            if (i.StackedItems != null)
+                foreach (var s in i.StackedItems)
+                    if (s != null) sb.Append(s.ChildId ?? "").Append(':').Append(s.ChildItemName ?? "").Append(':')
+                                     .Append(s.AttachmentIndex).Append(';');
+            return sb.ToString();
+        }
+
+        private static string IdentitySig(BigAmbitions.Items.ItemInstance ii)
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            var sb = new System.Text.StringBuilder();
+            sb.Append(ii.itemName ?? "").Append('|').Append(ii.parentId?.ToString() ?? "").Append('|')
+              .Append(ii.linkedItemName ?? "").Append('|').Append(ii.isSecured).Append('|')
+              .Append(ii.stateIndex).Append('|').Append(ii.alias?.ToString() ?? "").Append('|')
+              .Append(ii.customValue?.ToString() ?? "").Append('|').Append(ii.worldSpaceTextValue?.ToString() ?? "").Append('|')
+              .Append(ii.priceOnPurchase.ToString(inv)).Append('#');
+            if (ii.cargoInstances != null)
+                foreach (var c in ii.cargoInstances)
+                    if (c != null) sb.Append(c.itemName ?? "").Append(':').Append(c.amount).Append(':')
+                                     .Append(c.paid).Append(':').Append(c.pricePerUnit.ToString(inv)).Append(':')
+                                     .Append(c.customColors?.Count ?? 0).Append(':')
+                                     .Append(c.nestedCargoInstances?.Count ?? 0).Append(';');
+            sb.Append('#');
+            if (ii.stackedItems != null)
+                foreach (var s in ii.stackedItems)
+                    if (s != null) sb.Append(s.childId?.ToString() ?? "").Append(':').Append(s.childItemName ?? "").Append(':')
+                                     .Append(s.attachmentIndex).Append(';');
+            return sb.ToString();
+        }
+
         private static BigAmbitions.Items.ItemInstance? DeserializeItemInstance(ItemInstanceInfo i)
         {
             try

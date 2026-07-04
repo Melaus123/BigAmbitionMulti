@@ -87,6 +87,7 @@ namespace BigAmbitionsMP
                 var key = GameStateReader.AddressKey(building);
                 MPServer.BuildingOwners[key] = "host";
                 MPServer.BroadcastRentConfirmToClients(key, dailyRent, lastDeposit);
+                MPServer.RefreshBuildingAccess();   // housing: guests granted housing can now enter this newly-rented building
                 Plugin.Logger.LogInfo($"[Patch] Host rented {key}, broadcasted to clients.");
             }
         }
@@ -123,6 +124,7 @@ namespace BigAmbitionsMP
                     // Host — released locally already; clear ownership + tell clients.
                     MPServer.BuildingOwners.TryRemove(key, out _);
                     MPServer.BroadcastVacate(key);
+                    MPServer.RefreshBuildingAccess();   // housing: drop guests' access to this now-vacated building
                     Plugin.Logger.LogInfo($"[Patch] Host unrented {key}, broadcasted vacate to clients.");
                 }
                 catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Patch] Patch_TerminateContract: {ex.Message}"); }
@@ -178,6 +180,7 @@ namespace BigAmbitionsMP
                         return;
                     }
                     MPServer.BuildingRealEstateOwners[key] = "host";
+                    MPServer.RefreshBuildingAccess();   // housing: guests granted housing can now enter this newly-bought building
                     Plugin.Logger.LogInfo($"[Patch] Host bought {key} (recorded in ownership registry).");
                 }
                 catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Patch] Patch_SendBuyBuildingOffer: {ex.Message}"); }
@@ -568,7 +571,13 @@ namespace BigAmbitionsMP
                     if (reg == null) return;
                     var addr = GameStateReader.AddressKey(reg);
                     if (string.IsNullOrEmpty(addr)) return;
-                    if (InteriorSync.TrySendOwnerSnapshotOnEntry(reg, addr)) return;
+                    // A GUEST of a shared residence must ALWAYS request the interior (subscribe to VIEW it), never be
+                    // treated as its owner: if their RentedByPlayer momentarily reads true (e.g. right after a design
+                    // edit), the owner-snapshot path fired and NO InteriorRequest was sent → re-entry showed no interior
+                    // (user 2026-06-30 "couldn't re-enter"). Diagnostic logs the entry state — remove once settled.
+                    bool guestHere = GrantSync.CanEnterGranted(addr);
+                    Plugin.Logger.LogInfo($"[Housing] enter-hook addr='{addr}' rented={reg.RentedByPlayer} guest={guestHere}.");
+                    if (!guestHere && InteriorSync.TrySendOwnerSnapshotOnEntry(reg, addr)) return;
                     MPClient.SendInteriorRequest(addr);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] DelayedEnterBuilding interior-req: {ex.Message}"); }
@@ -1279,6 +1288,10 @@ namespace BigAmbitionsMP
                             {
                                 if (!string.IsNullOrEmpty(ps.Name)) lb.entryName = ps.Name;
                                 lb.weeklyIncome = ps.WeeklyIncome;   // even 0 — drives income-sort ranking
+                                // Round-25 parity: primary neighborhood is now published for players —
+                                // render it (was blank/arbitrary: the native calc groups the synthetic
+                                // rd's replica regs whose dailyIncomes are empty here).
+                                try { if (!string.IsNullOrEmpty(ps.MostActiveNeighborhood)) lb.mostActiveNeighborhood = ps.MostActiveNeighborhood; } catch { }
                             }
                         }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_GetRivalLeaderboardData] player row '{id}': {ex.Message}"); }
@@ -1576,11 +1589,12 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    // CLIENT only: override each breakdown cell's income with the
-                    // host's authoritative value (synced from MPServer's exact
-                    // WeeklyIncomeForBusiness calc).  Host computes it natively, so
-                    // it needs no override here.
-                    if (!MPClient.IsConnected || __0 == null) return;
+                    // BOTH roles (round-25): the map holds synced authoritative incomes — on the CLIENT
+                    // that's AI + other players (from the host snapshot); on the HOST that's other players'
+                    // self-reported rows (its replicas have no order history → native calc showed $0 for a
+                    // client's businesses). Addresses NOT in the map (own businesses; AI on the host)
+                    // render natively as before.
+                    if ((!MPClient.IsConnected && !MPServer.IsRunning) || __0 == null) return;
                     string key = GameStateReader.AddressKey(__0.Address);
                     if (string.IsNullOrEmpty(key)) return;
                     if (GameStatePatcher.ClientBusinessIncomeByAddress.TryGetValue(key, out var inc))

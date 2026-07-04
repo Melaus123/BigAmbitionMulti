@@ -192,20 +192,23 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogWarning($"[Server] {orphans} orphan-owned building(s) on load (owner has no save). Not auto-changed — diagnostic only.");
 
                 // Access grants ("keys") — StableId-keyed, so no re-keying needed (the runtime
-                // PlayerId table is rebuilt from this on every join). Restore + refresh.
-                if (m.Grants != null && m.Grants.Count > 0)
-                {
-                    int gn = 0;
+                // PlayerId table is rebuilt from this on every join). CLEAR-then-apply, and refresh + log
+                // UNCONDITIONALLY: a save with no grants must still flush whatever a previously-loaded
+                // session left in the store (cross-session leak guard), and a "0 grant(s)" line at load is
+                // the definitive "this save carries none" signal — the old silent skip is exactly what made
+                // the shares-lost-on-load rounds ambiguous (2026-06-30).
+                GrantSync.ResetStore();
+                int gn = 0;
+                if (m.Grants != null)
                     foreach (var g in m.Grants)
                     {
                         if (string.IsNullOrEmpty(g.Owner) || string.IsNullOrEmpty(g.Grantee)) continue;
-                        GrantSync.StoreSet(g.Owner, g.Grantee, true);
+                        GrantSync.StoreSet(g.Kind, g.Owner, g.Grantee, true);
                         if (!string.IsNullOrEmpty(g.GranteeName)) GrantSync.NoteName(g.Grantee, g.GranteeName);
                         gn++;
                     }
-                    RefreshGrantsAndBroadcast();
-                    Plugin.Logger.LogInfo($"[Server] Restored {gn} access grant(s) from manifest.");
-                }
+                RefreshGrantsAndBroadcast();
+                Plugin.Logger.LogInfo($"[Server] Restored {gn} access grant(s) from manifest ({(m.Grants?.Count ?? 0)} in file).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RestoreOwnershipFromManifest: {ex.Message}"); }
         }
@@ -466,6 +469,8 @@ namespace BigAmbitionsMP
             LastStartSettings = settings;
             MPLoadProfiler.Mark($"HOST StartNewGame ({settings.Difficulty}) — {_clients.Count} client(s)");
             IsInLobby = false;
+            GrantSync.ResetStore();   // fresh world — no grants; flush any store left by a previously loaded
+                                      // session (the scene reset no longer wipes the store, 2026-06-30)
 
             // Re-arm the startup pause hold for this new game.
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
@@ -884,20 +889,39 @@ namespace BigAmbitionsMP
                     {
                         _clientSelfStats[req.PlayerId] = req;
                         string nameForClient = _characterNamesByPlayerId.TryGetValue(req.PlayerId, out var nm) && !string.IsNullOrWhiteSpace(nm) ? nm : req.PlayerId;
-                        GameStatePatcher.ClientRivalStats[req.PlayerId] = new RivalStatsInfo
+                        var selfInfo = new RivalStatsInfo
                         {
-                            Id                   = req.PlayerId,
-                            Name                 = nameForClient,
-                            OwnedBuildingsCount  = req.SelfOwnedBuildingsCount,
-                            OwnedBusinessesCount = req.SelfOwnedBusinessesCount,
-                            WeeklyIncome         = req.SelfWeeklyIncome,
+                            Id                     = req.PlayerId,
+                            Name                   = nameForClient,
+                            OwnedBuildingsCount    = req.SelfOwnedBuildingsCount,
+                            OwnedBusinessesCount   = req.SelfOwnedBusinessesCount,
+                            WeeklyIncome           = req.SelfWeeklyIncome,
+                            MostActiveNeighborhood = req.SelfNeighborhood ?? "",
                         };
-                        Plugin.Logger.LogInfo($"[Server] Stored self-stats from '{req.PlayerId}': bldgs={req.SelfOwnedBuildingsCount} biz={req.SelfOwnedBusinessesCount} income=${req.SelfWeeklyIncome:F0}.");
+                        // Round-25: carry the rows + series into the HOST's OWN UI caches too — without them
+                        // the host's detail view of this player fell back to replica regs (no order history)
+                        // and showed $0 per-business rows.
+                        if (req.Businesses      != null && req.Businesses.Count      > 0) selfInfo.Businesses      = req.Businesses;
+                        if (req.IncomeHistory   != null && req.IncomeHistory.Count   > 0) selfInfo.IncomeHistory   = req.IncomeHistory;
+                        if (req.BizCountHistory != null && req.BizCountHistory.Count > 0) selfInfo.BizCountHistory = req.BizCountHistory;
+                        GameStatePatcher.ClientRivalStats[req.PlayerId] = selfInfo;
+                        Plugin.Logger.LogInfo($"[Server] Stored self-stats from '{req.PlayerId}': bldgs={req.SelfOwnedBuildingsCount} biz={req.SelfOwnedBusinessesCount} income=${req.SelfWeeklyIncome:F0} hood='{req.SelfNeighborhood}'.");
                     }
-                    var peerCapture = peer;
+                    var reqCapture = req;
                     GameStatePatcher.EnqueueOnMainThread(() =>
                     {
-                        try { SendRivalsStatsSnapshotTo(peerCapture); }
+                        try
+                        {
+                            // Plain-Dictionary — main-thread writes only. Feeds the host's breakdown-cell
+                            // override so the host renders this player's per-business income (round-25).
+                            if (reqCapture?.Businesses != null)
+                                foreach (var b in reqCapture.Businesses)
+                                    if (b != null && !string.IsNullOrEmpty(b.AddressKey))
+                                        GameStatePatcher.ClientBusinessIncomeByAddress[b.AddressKey] = b.WeeklyIncome;
+                            // Round-25 freshness: a self-report changes what EVERY viewer should see —
+                            // broadcast the merged snapshot to all peers, not just the requester.
+                            BroadcastRivalsStatsSnapshot();
+                        }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RivalsStatsRequest main-thread dispatch: {ex.Message}"); }
                     });
                     break;
@@ -1222,6 +1246,27 @@ namespace BigAmbitionsMP
                 {
                     var vr = env.GetPayload<VehicleCargoResPayload>();
                     if (vr != null) HandleVehicleCargoRes(vr, senderPid);
+                    break;
+                }
+
+                case MessageType.BuildingCargoReq:
+                {
+                    var bq = env.GetPayload<BuildingCargoReqPayload>();
+                    if (bq != null) HandleBuildingCargoReq(bq, senderPid);
+                    break;
+                }
+
+                case MessageType.BuildingCargoRes:
+                {
+                    var br = env.GetPayload<BuildingCargoResPayload>();
+                    if (br != null) HandleBuildingCargoRes(br, senderPid);
+                    break;
+                }
+
+                case MessageType.BuildingInteriorEdit:
+                {
+                    var bie = env.GetPayload<InteriorSnapshotPayload>();
+                    if (bie != null) HandleBuildingInteriorEdit(bie, senderPid);
                     break;
                 }
 
@@ -1844,6 +1889,72 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] HandleVehicleCargoRes: {ex.Message}"); }
         }
 
+        /// <summary>HOST: a guest wants to take/put on a home interior item (the fridge). Resolve the building
+        /// owner from the addressKey (clients don't keep a building→owner map), gate on the Housing grant, then
+        /// route to the owner's machine to apply (or apply here if the host owns it). Mirrors the vehicle path.</summary>
+        public static void HandleBuildingCargoReq(BuildingCargoReqPayload req, string senderPid)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrEmpty(req.AddressKey)) return;
+                if (!SenderIs(req.PlayerId, senderPid, MessageType.BuildingCargoReq)) return;   // guest reports its OWN action
+                string owner = (BuildingOwners.TryGetValue(req.AddressKey, out var o) && !string.IsNullOrEmpty(o)) ? o
+                             : (BuildingRealEstateOwners.TryGetValue(req.AddressKey, out var r) ? r : "");
+                if (string.IsNullOrEmpty(owner)) return;
+                string ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;   // resolve the host sentinel
+                if (ownerPid != req.PlayerId && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, req.PlayerId)) return;   // grant gate
+                if (ownerPid == MPConfig.PlayerId)
+                {
+                    GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        var res = BuildingStorageSync.OwnerApply(req);
+                        if (res.PlayerId == MPConfig.PlayerId) BuildingStorageSync.OnResult(res);   // host is also the guest
+                        else SendHubTo(res.PlayerId, MessageType.BuildingCargoRes, res);
+                    });
+                }
+                else
+                {
+                    SendHubTo(ownerPid, MessageType.BuildingCargoReq, req);   // forward to the owner's machine to apply
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] HandleBuildingCargoReq: {ex.Message}"); }
+        }
+
+        /// <summary>A building owner answered a guest's interior-cargo request — relay the verdict to the guest.</summary>
+        public static void HandleBuildingCargoRes(BuildingCargoResPayload res, string senderPid)
+        {
+            try
+            {
+                if (res == null || string.IsNullOrEmpty(res.PlayerId)) return;
+                if (res.PlayerId == MPConfig.PlayerId)
+                    GameStatePatcher.EnqueueOnMainThread(() => BuildingStorageSync.OnResult(res));   // host is the guest
+                else
+                    SendHubTo(res.PlayerId, MessageType.BuildingCargoRes, res);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] HandleBuildingCargoRes: {ex.Message}"); }
+        }
+
+        /// <summary>HOST: a guest forwarded an interior edit (furniture/flooring) for a home. Resolve the owner
+        /// from the addressKey, grant-gate, then route to the owner (or apply if the host owns it) — the owner
+        /// ADOPTS the snapshot (ApplyInteriorSnapshot, flagged Authoritative) + re-syncs.</summary>
+        public static void HandleBuildingInteriorEdit(InteriorSnapshotPayload snap, string senderPid)
+        {
+            try
+            {
+                if (snap == null || string.IsNullOrEmpty(snap.AddressKey)) return;
+                string owner = (BuildingOwners.TryGetValue(snap.AddressKey, out var o) && !string.IsNullOrEmpty(o)) ? o
+                             : (BuildingRealEstateOwners.TryGetValue(snap.AddressKey, out var r) ? r : "");
+                if (string.IsNullOrEmpty(owner)) return;
+                string ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;
+                if (ownerPid != senderPid && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, senderPid)) return;   // grant gate
+                if (ownerPid == MPConfig.PlayerId)
+                    GameStatePatcher.EnqueueOnMainThread(() => { GameStatePatcher.ApplyInteriorSnapshot(snap); InteriorSync.PushOwnedBuildingNow(snap.AddressKey); });
+                else
+                    SendHubTo(ownerPid, MessageType.BuildingInteriorEdit, snap);   // forward to the owner's machine to adopt
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] HandleBuildingInteriorEdit: {ex.Message}"); }
+        }
+
         public static void RecordPhaseReport(PhaseReportPayload? p)
         {
             if (p == null || string.IsNullOrEmpty(p.PlayerId)) return;
@@ -2187,6 +2298,7 @@ namespace BigAmbitionsMP
             foreach (var p in _clients.Keys)
                 if (p != peer) Send(p, confirm);
             Plugin.Logger.LogInfo($"[Server] Rent confirmed: {req.AddressKey} → {senderPid} (relayed to {_clients.Count - 1} other client(s)).");
+            RefreshBuildingAccess();   // housing: a guest granted housing can now enter this newly-rented building
 
             // Reflect it in the HOST's own game (main thread — IL2CPP): take the
             // building off the for-rent pool + mark it owned by that player, so the
@@ -2224,6 +2336,7 @@ namespace BigAmbitionsMP
             string addr = req.AddressKey;
             GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostReflectPlayerVacate(addr));
             BroadcastVacate(req.AddressKey);   // tell every client it's available again
+            RefreshBuildingAccess();           // housing: drop guests' access to this now-vacated building
         }
 
         // Symmetric to HandleRentRequest, for BOUGHT real estate.  The client already
@@ -2249,6 +2362,7 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Server] BuyRequest: {req.AddressKey} → owned by {senderPid}.");
             string addr = req.AddressKey;
             GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostRemoveFromForSale(addr));
+            RefreshBuildingAccess();   // housing: a guest granted housing can now enter this newly-bought building
         }
 
         /// <summary>True iff senderPid is the recorded owner of this address in EITHER ownership ledger
@@ -2757,8 +2871,8 @@ namespace BigAmbitionsMP
             GrantSync.ClearRuntime();
             var pidOf = OnlinePidByStable();
             foreach (var e in GrantSync.AllStoreEntries())
-                if (pidOf.TryGetValue(e.Key, out var ownerPid) && pidOf.TryGetValue(e.Value, out var granteePid))
-                    GrantSync.SetGrant(ownerPid, granteePid, true);
+                if (pidOf.TryGetValue(e.Owner, out var ownerPid) && pidOf.TryGetValue(e.Grantee, out var granteePid))
+                    GrantSync.SetGrant(e.Kind, ownerPid, granteePid, true);
         }
 
         /// <summary>HOST: build an owner's grantee list (incl. OFFLINE grantees) for the Permissions UI.</summary>
@@ -2767,9 +2881,22 @@ namespace BigAmbitionsMP
             var pay = new PermissionOwnGrantsPayload();
             if (string.IsNullOrEmpty(ownerStable)) return pay;
             var online = new HashSet<string>(OnlinePidByStable().Keys);
-            foreach (var gs in GrantSync.StoreGrantees(ownerStable))
-                pay.Grantees.Add(new OwnGrantEntry { Handle = gs, Name = GrantSync.NameOf(gs), Online = online.Contains(gs) });
+            foreach (var gs in GrantSync.AllGranteesOf(ownerStable))
+                pay.Grantees.Add(new OwnGrantEntry {
+                    Handle = gs, Name = GrantSync.NameOf(gs), Online = online.Contains(gs),
+                    Kinds = GrantSync.StoreKindsFor(ownerStable, gs),
+                });
             return pay;
+        }
+
+        /// <summary>Called from the scene-ready reset (MPCanvasUI): the scene wipe clears the RUNTIME grant
+        /// table, so immediately rebuild it from the surviving store + roster and re-broadcast. Keeps
+        /// enforcement correct regardless of scene-ready ordering across machines (no timing races).</summary>
+        public static void RebuildGrantsAfterSceneReset()
+        {
+            if (!IsRunning) return;
+            try { RefreshGrantsAndBroadcast(); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RebuildGrantsAfterSceneReset: {ex.Message}"); }
         }
 
         /// <summary>HOST: rebuild the runtime table, broadcast it to everyone, and refresh the host's
@@ -2779,7 +2906,55 @@ namespace BigAmbitionsMP
             RebuildRuntimeGrants();
             Broadcast(MessageEnvelope.Create(MessageType.PermissionSnapshot, "host", GrantSync.BuildSnapshot()));
             GrantSync.SetMyGrantees(BuildOwnGrants(MPConfig.StableId).Grantees);
+            RefreshBuildingAccess();            // housing: push each guest the buildings they may now enter
             VehicleManager.OnGrantsChanged();   // host is also a borrower: respawn its ghosts if its drivability changed
+            MPSaveCoordinator.PersistGrantsNow();   // durably save grants the instant they change (a late grant was lost on load — manifest Grants=[], 2026-06-30)
+        }
+
+        /// <summary>HOST: the building addressKeys <paramref name="clientPid"/> may ENTER as a granted housing
+        /// guest — every player-owned building whose owner granted them Housing. Clients can't compute this
+        /// (no building→owner map), so the host pushes it.</summary>
+        private static PermissionBuildingAccessPayload BuildBuildingAccessFor(string clientPid)
+        {
+            var pay = new PermissionBuildingAccessPayload();
+            if (string.IsNullOrEmpty(clientPid)) return pay;
+            var keys = new HashSet<string>();
+            void Consider(string addr, string owner)
+            {
+                if (string.IsNullOrEmpty(addr) || string.IsNullOrEmpty(owner)) return;
+                string ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;   // resolve the host sentinel to its real pid
+                if (ownerPid == clientPid) return;                                  // the owner enters their own home natively
+                if (GrantSync.IsGranted(GrantKind.Housing, ownerPid, clientPid)) keys.Add(addr);
+            }
+            foreach (var kv in BuildingOwners)           Consider(kv.Key, kv.Value);
+            foreach (var kv in BuildingRealEstateOwners) Consider(kv.Key, kv.Value);
+            pay.AddressKeys.AddRange(keys);
+            return pay;
+        }
+
+        private static void SendBuildingAccessTo(NetPeer peer, string clientPid)
+        {
+            if (peer == null) return;
+            try { Send(peer, MessageEnvelope.Create(MessageType.PermissionBuildingAccess, "host", BuildBuildingAccessFor(clientPid))); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendBuildingAccessTo: {ex.Message}"); }
+        }
+
+        /// <summary>HOST: push every connected client (and set the host's own) which buildings they may enter
+        /// as a granted guest. Call after any grant or building-ownership change.</summary>
+        public static void RefreshBuildingAccess()
+        {
+            if (!_running) return;
+            try
+            {
+                foreach (var pid in new List<string>(_peerNames.Values))
+                {
+                    var pr = PeerForPlayer(pid);
+                    if (pr != null) SendBuildingAccessTo(pr, pid);
+                }
+                GrantSync.SetEnterableBuildings(BuildBuildingAccessFor(MPConfig.PlayerId).AddressKeys);
+                GameStatePatcher.EnqueueOnMainThread(HousingMapCues.RefreshSharedPois);   // recolour the host's own shared-residence POIs (reciprocal sharing)
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RefreshBuildingAccess: {ex.Message}"); }
         }
 
         private static void SendOwnGrantsTo(NetPeer peer, string ownerStable)
@@ -2802,7 +2977,7 @@ namespace BigAmbitionsMP
                          && StableIdByPlayer.TryGetValue(p.GranteeId, out var gs) && !string.IsNullOrEmpty(gs))
                 { granteeStable = gs; GrantSync.NoteName(granteeStable, p.GranteeId); }
                 else return;
-                GrantSync.StoreSet(ownerStable, granteeStable, p.Granted);
+                GrantSync.StoreSet(p.Kind, ownerStable, granteeStable, p.Granted);
                 RefreshGrantsAndBroadcast();
                 var ownerPeer = PeerForPlayer(senderPid);
                 if (ownerPeer != null) SendOwnGrantsTo(ownerPeer, ownerStable);   // hand the owner back their list (with handles)
@@ -2811,21 +2986,21 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Host-local (the HOST is the owner): grant/revoke an ONLINE player by PlayerId.</summary>
-        public static void HostSetGrant(string granteePid, bool granted)
+        public static void HostSetGrant(GrantKind kind, string granteePid, bool granted)
         {
             if (!_running || string.IsNullOrEmpty(granteePid)) return;
             if (!StableIdByPlayer.TryGetValue(granteePid, out var gs) || string.IsNullOrEmpty(gs)) return;
             GrantSync.NoteName(gs, granteePid);
-            GrantSync.StoreSet(MPConfig.StableId, gs, granted);
+            GrantSync.StoreSet(kind, MPConfig.StableId, gs, granted);
             RefreshGrantsAndBroadcast();
             // (Durable: written to the session manifest at the next coordinated save.)
         }
 
         /// <summary>Host-local: revoke (or re-grant) a grantee by StableId handle — covers OFFLINE grantees.</summary>
-        public static void HostSetGrantOffline(string granteeStable, bool granted)
+        public static void HostSetGrantOffline(GrantKind kind, string granteeStable, bool granted)
         {
             if (!_running || string.IsNullOrEmpty(granteeStable)) return;
-            GrantSync.StoreSet(MPConfig.StableId, granteeStable, granted);
+            GrantSync.StoreSet(kind, MPConfig.StableId, granteeStable, granted);
             RefreshGrantsAndBroadcast();
             // (Durable: written to the session manifest at the next coordinated save.)
         }
@@ -3219,6 +3394,7 @@ namespace BigAmbitionsMP
                     entry.OwnedBuildingsCount  = req.SelfOwnedBuildingsCount;
                     entry.OwnedBusinessesCount = req.SelfOwnedBusinessesCount;
                     entry.WeeklyIncome         = req.SelfWeeklyIncome;
+                    entry.MostActiveNeighborhood = req.SelfNeighborhood ?? "";   // round-25 parity
                     // Per-business rows + real per-day series ride through to
                     // every machine (detail breakdown, dailyIncomes feed, graphs).
                     if (req.Businesses      != null && req.Businesses.Count      > 0) entry.Businesses      = req.Businesses;
@@ -3233,34 +3409,16 @@ namespace BigAmbitionsMP
                 // RivalData numbers and corrupted AI income).
                 if (byId.TryGetValue(MPConfig.PlayerId, out var hostStat) && gi.BuildingRegistrations != null)
                 {
-                    foreach (var reg in gi.BuildingRegistrations)
-                    {
-                        if (reg == null) continue;
-                        try
-                        {
-                            if (reg.BuildingOwnedByPlayer) hostStat.OwnedBuildingsCount++;
-                            // Residential rentals are HOMES, not businesses.
-                            bool isResidential = false;
-                            try { isResidential = reg.BuildingCached != null && reg.BuildingCached.BuildingType == "ba:buildingtype_residential"; } catch { }
-                            if (reg.RentedByPlayer && !isResidential)
-                            {
-                                hostStat.OwnedBusinessesCount++;
-                                try { hostStat.WeeklyIncome += reg.RentPerDay * 7f; } catch { }
-                                // Per-business row (real GetAvgWeeklyIncome — this
-                                // IS the owning machine) for client-side breakdown
-                                // + dailyIncomes feed of the host's shops.
-                                float hwk = 0f; try { hwk = reg.GetAvgWeeklyIncome(); } catch { }
-                                hostStat.Businesses.Add(new RivalBusinessInfo
-                                {
-                                    AddressKey   = GameStateReader.AddressKey(reg),
-                                    BusinessName = reg.BusinessName?.ToString() ?? "",
-                                    BusinessType = reg.businessTypeName ?? "",
-                                    WeeklyIncome = hwk,
-                                });
-                            }
-                        }
-                        catch { }
-                    }
+                    // Round-25 parity: publish EXACTLY what the host's own native self-sheet shows (shared
+                    // builder with the client self-report). Replaces the RentPerDay×7 "income" (rent EXPENSE,
+                    // not income — the header couldn't even match the sum of its own rows) and adds the
+                    // primary neighborhood, which was never published for players.
+                    RivalSelfStats.Build(out int hBldgs, out float hIncome, out string hHood, out var hRows);
+                    hostStat.OwnedBuildingsCount    = hBldgs;
+                    hostStat.OwnedBusinessesCount   = hRows.Count;
+                    hostStat.WeeklyIncome           = hIncome;
+                    hostStat.MostActiveNeighborhood = hHood;
+                    hostStat.Businesses             = hRows;
                     // Host's own real per-day series (same source clients send).
                     try
                     {
@@ -3292,6 +3450,21 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Server] Sent rivals stats snapshot to peer={peer.Id}: {snap.Stats.Count} stat block(s).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendRivalsStatsSnapshotTo: {ex.Message}"); }
+        }
+
+        /// <summary>Round-25 freshness: build the merged rivals stats snapshot ONCE and broadcast it to every
+        /// peer — a self-report changes what all viewers should see, and the old request-reply-only flow left
+        /// every other machine stale until IT happened to open its own rivals app. MAIN THREAD ONLY.</summary>
+        public static void BroadcastRivalsStatsSnapshot()
+        {
+            if (!_running) return;
+            try
+            {
+                var snap = BuildRivalsStatsSnapshot();
+                Broadcast(MessageEnvelope.Create(MessageType.RivalsStatsSnapshot, "host", snap));
+                Plugin.Logger.LogInfo($"[Server] Broadcast rivals stats snapshot: {snap.Stats.Count} stat block(s).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BroadcastRivalsStatsSnapshot: {ex.Message}"); }
         }
 
         // Collapse bursts: at go-live the release path AND the first for-sale check

@@ -57,6 +57,15 @@ namespace BigAmbitionsMP
 
         private static bool _startupHold;
 
+        // Round-18 ("client stuck paused after menu→reload"): the client's hold begins only when ITS loading
+        // overlay clears (TickOverlayFreezeGate), but the host's release can arrive EARLIER — e.g. the fence
+        // excused this client off a stale "Menu" phase report during the menu detour, or the host simply
+        // finished first on a fast reload. EndStartupHold's not-held early-return silently swallowed that
+        // release; the hold then began and froze forever (nothing left to release it). Remember an early
+        // release and skip the pending hold — ordering-proof, no protocol change. Cleared per load cycle
+        // (ResetClockState runs in the scene-ready reset block) so a stale marker can't skip a future hold.
+        private static bool _releasedBeforeHold;
+
         /// <summary>True while the game is frozen waiting for all players to load.</summary>
         public static bool IsStartupHeld => _startupHold;
 
@@ -65,6 +74,12 @@ namespace BigAmbitionsMP
         public static void BeginStartupHold()
         {
             if (_startupHold) return;
+            if (_releasedBeforeHold)
+            {
+                _releasedBeforeHold = false;
+                Plugin.Logger.LogInfo("[TimeSync] Startup hold SKIPPED — the release for this load already arrived (fast host / menu-reload ordering).");
+                return;
+            }
             _startupHold = true;
             ApplyNetwork(0f);
             GameStatePatcher.EnqueueOnMainThread(() => GameStateReader.SetNativePause(true));
@@ -75,7 +90,12 @@ namespace BigAmbitionsMP
         /// <summary>Release the startup hold — resumes the game at normal speed.</summary>
         public static void EndStartupHold()
         {
-            if (!_startupHold) return;
+            if (!_startupHold)
+            {
+                _releasedBeforeHold = true;   // arrived before our hold began — remember it (round-18)
+                Plugin.Logger.LogInfo("[TimeSync] Startup release received BEFORE the hold began — remembered; the pending hold will be skipped.");
+                return;
+            }
             _startupHold = false;
             ApplyNetwork(1f);
             GameStatePatcher.EnqueueOnMainThread(() => GameStateReader.SetNativePause(false));
@@ -188,6 +208,7 @@ namespace BigAmbitionsMP
         {
             _correctionHours = 0f;
             AheadHeld        = false;
+            _releasedBeforeHold = false;   // early-release marker is per load cycle (round-18)
         }
 
         /// <summary>

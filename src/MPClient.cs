@@ -334,6 +334,10 @@ namespace BigAmbitionsMP
                     HandlePermissionOwnGrantsMsg(env);
                     break;
 
+                case MessageType.PermissionBuildingAccess:
+                    HandlePermissionBuildingAccessMsg(env);
+                    break;
+
                 case MessageType.RentDeny:
                     HandleRentDeny(env);
                     break;
@@ -528,6 +532,31 @@ namespace BigAmbitionsMP
                 {
                     var vr = env.GetPayload<VehicleCargoResPayload>();
                     if (vr != null) GameStatePatcher.EnqueueOnMainThread(() => VehicleStorageSync.OnResult(vr));
+                    break;
+                }
+
+                case MessageType.BuildingCargoReq:   // host forwarded a guest's request — I'm the building owner
+                {
+                    var bq = env.GetPayload<BuildingCargoReqPayload>();
+                    if (bq != null) GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        var res = BuildingStorageSync.OwnerApply(bq);
+                        MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BuildingCargoRes, MPConfig.PlayerId, res));
+                    });
+                    break;
+                }
+
+                case MessageType.BuildingCargoRes:   // the owner's verdict on my take/put — I'm the guest
+                {
+                    var br = env.GetPayload<BuildingCargoResPayload>();
+                    if (br != null) GameStatePatcher.EnqueueOnMainThread(() => BuildingStorageSync.OnResult(br));
+                    break;
+                }
+
+                case MessageType.BuildingInteriorEdit:   // host forwarded a guest's interior edit — I'm the owner: adopt it
+                {
+                    var bie = env.GetPayload<InteriorSnapshotPayload>();
+                    if (bie != null) GameStatePatcher.EnqueueOnMainThread(() => { GameStatePatcher.ApplyInteriorSnapshot(bie); InteriorSync.PushOwnedBuildingNow(bie.AddressKey); });
                     break;
                 }
 
@@ -900,61 +929,23 @@ namespace BigAmbitionsMP
         public static void SendRivalsStatsRequest()
         {
             if (!IsConnected) return;
-            int bldgCount = 0, bizCount = 0;
-            float weeklyIncome = 0f;
-            try
-            {
-                var gi = SaveGameManager.Current;
-                if (gi != null && gi.BuildingRegistrations != null)
-                {
-                    foreach (var reg in gi.BuildingRegistrations)
-                    {
-                        if (reg == null) continue;
-                        try
-                        {
-                            if (reg.BuildingOwnedByPlayer) bldgCount++;
-                            // Don't count residential rentals as businesses —
-                            // they're player HOMES, not revenue operations.
-                            bool isResidential = false;
-                            try { isResidential = reg.BuildingCached != null && reg.BuildingCached.BuildingType == "ba:buildingtype_residential"; } catch { }
-                            if (reg.RentedByPlayer && !isResidential)
-                            {
-                                bizCount++;
-                                weeklyIncome += reg.RentPerDay * 7f;
-                            }
-                        }
-                        catch { }
-                    }
-                }
-            }
-            catch { }
+            // Self-stats the NATIVE self-sheet way (round-25 parity: what others see for me = what I see
+            // for myself) — one shared builder with the host's own-stats block. Replaces the RentPerDay×7
+            // "income" (that's rent EXPENSE, not income) and the unfiltered row list (the HOME leaked in
+            // as a business row); also publishes the primary neighborhood for the first time.
+            RivalSelfStats.Build(out int bldgCount, out float weeklyIncome, out string hood, out var rows);
             var p = new RivalsStatsRequestPayload
             {
                 PlayerId = MPConfig.PlayerId,
                 SelfOwnedBuildingsCount  = bldgCount,
-                SelfOwnedBusinessesCount = bizCount,
+                SelfOwnedBusinessesCount = rows.Count,
                 SelfWeeklyIncome         = weeklyIncome,
+                SelfNeighborhood         = hood,
             };
-            // Per-business breakdown for the host's fair-rival patches (real
-            // GetAvgWeeklyIncome — only computable here, where the order
-            // history lives).
+            p.Businesses.AddRange(rows);
             try
             {
                 var gi = SaveGameManager.Current;
-                if (gi?.BuildingRegistrations != null)
-                    foreach (var reg in gi.BuildingRegistrations)
-                    {
-                        if (reg == null || !reg.RentedByPlayer) continue;
-                        float wk = 0f;
-                        try { wk = reg.GetAvgWeeklyIncome(); } catch { }
-                        p.Businesses.Add(new RivalBusinessInfo
-                        {
-                            AddressKey   = GameStateReader.AddressKey(reg),
-                            BusinessName = reg.BusinessName?.ToString() ?? "",
-                            BusinessType = reg.businessTypeName ?? "",
-                            WeeklyIncome = wk,
-                        });
-                    }
                 // The game's own per-day series → real detail-view graphs on
                 // other machines (last 10 points is plenty; the UI plots 7).
                 if (gi?.playerWeeklyIncomeHistory != null)
@@ -968,7 +959,7 @@ namespace BigAmbitionsMP
             }
             catch { }
             Send(MessageEnvelope.Create(MessageType.RivalsStatsRequest, MPConfig.PlayerId, p));
-            Plugin.Logger.LogInfo($"[Client] Sent RivalsStatsRequest with self-stats: bldgs={bldgCount} biz={bizCount} income=${weeklyIncome:F0} ({p.Businesses.Count} business rows).");
+            Plugin.Logger.LogInfo($"[Client] Sent RivalsStatsRequest with self-stats: bldgs={bldgCount} biz={rows.Count} income=${weeklyIncome:F0} hood='{hood}' ({p.Businesses.Count} business rows).");
         }
 
         // ── Outbound ──────────────────────────────────────────────────────────
@@ -1028,21 +1019,23 @@ namespace BigAmbitionsMP
 
         /// <summary>Owner-client → host: grant/revoke a key for an ONLINE player (by PlayerId).
         /// Optimistic local apply for a snappy UI; the host's snapshot + grantee-list confirm.</summary>
-        public static void SendPermissionGrant(string granteeId, bool granted)
+        public static void SendPermissionGrant(GrantKind kind, string granteeId, bool granted)
         {
             if (!IsConnected || string.IsNullOrEmpty(granteeId)) return;
-            GrantSync.SetGrant(MPConfig.PlayerId, granteeId, granted);
+            GrantSync.SetGrant(kind, MPConfig.PlayerId, granteeId, granted);
             Send(MessageEnvelope.Create(MessageType.PermissionGrantSet, MPConfig.PlayerId,
-                new PermissionGrantPayload { OwnerId = MPConfig.PlayerId, GranteeId = granteeId, Granted = granted }));
+                new PermissionGrantPayload { OwnerId = MPConfig.PlayerId, GranteeId = granteeId, Granted = granted, Kind = kind }));
         }
 
         /// <summary>Owner-client → host: revoke an OFFLINE grantee by their StableId handle (taken from
         /// the owner's grantee list). The host updates the durable store + rebroadcasts.</summary>
-        public static void SendPermissionRevokeOffline(string granteeStable)
+        /// <summary>Owner-client → host: grant/revoke a kind for an OFFLINE grantee by their StableId handle
+        /// (taken from the owner's grantee list). The host updates the durable store + rebroadcasts.</summary>
+        public static void SendPermissionSetOffline(GrantKind kind, string granteeStable, bool granted)
         {
             if (!IsConnected || string.IsNullOrEmpty(granteeStable)) return;
             Send(MessageEnvelope.Create(MessageType.PermissionGrantSet, MPConfig.PlayerId,
-                new PermissionGrantPayload { OwnerId = MPConfig.PlayerId, GranteeStable = granteeStable, Granted = false }));
+                new PermissionGrantPayload { OwnerId = MPConfig.PlayerId, GranteeStable = granteeStable, Granted = granted, Kind = kind }));
         }
 
         /// <summary>Client(driver) → host: I drove vehicle V into a building. The host resolves V's riders
@@ -1135,6 +1128,13 @@ namespace BigAmbitionsMP
             var p = env.GetPayload<PermissionSnapshotPayload>();
             if (p == null) return;
             GameStatePatcher.EnqueueOnMainThread(() => { GrantSync.ApplySnapshot(p); VehicleManager.OnGrantsChanged(); });
+        }
+
+        private static void HandlePermissionBuildingAccessMsg(MessageEnvelope env)
+        {
+            var p = env.GetPayload<PermissionBuildingAccessPayload>();
+            if (p == null) return;
+            GameStatePatcher.EnqueueOnMainThread(() => { GrantSync.SetEnterableBuildings(p.AddressKeys); HousingMapCues.RefreshSharedPois(); });
         }
 
         private static void HandlePassengerSnapshotMsg(MessageEnvelope env)

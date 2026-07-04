@@ -53,6 +53,7 @@
     <Publicize Include="BigAmbitions.Items" />
     <Publicize Include="BigAmbitions.Characters" />
     <Publicize Include="BigAmbitions.InteriorDesigner" />
+    <Publicize Include="BigAmbitions.PlacementSystem" />
     <Publicize Include="BigAmbitions.AI" />
     <Publicize Include="BigAmbitions.Neighborhoods" />
     <Publicize Include="DayNightCycle" />
@@ -66,6 +67,7 @@
     <Reference Include="BigAmbitions.Items"><HintPath>$(ManagedDir)BigAmbitions.Items.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="BigAmbitions.Characters"><HintPath>$(ManagedDir)BigAmbitions.Characters.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="BigAmbitions.InteriorDesigner"><HintPath>$(ManagedDir)BigAmbitions.InteriorDesigner.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="BigAmbitions.PlacementSystem"><HintPath>$(ManagedDir)BigAmbitions.PlacementSystem.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="BigAmbitions.AI"><HintPath>$(ManagedDir)BigAmbitions.AI.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="BigAmbitions.Neighborhoods"><HintPath>$(ManagedDir)BigAmbitions.Neighborhoods.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="BigAmbitions.ModAPI"><HintPath>$(ManagedDir)BigAmbitions.ModAPI.dll</HintPath><Private>false</Private></Reference>

@@ -40,29 +40,47 @@ namespace BigAmbitionsMP
         public static void RequestPut(string realVehicleId, string ownerId, string itemName, int amount, bool paid, float price)
             => Send(OpPut, realVehicleId, ownerId, itemName, amount, paid, price);
 
-        // Deposit what's IN THE PLAYER'S HANDS into the vehicle. A carried item is wrapped in a
-        // closedcardboardbox (ItemHelper.InitializeItemInHandsWithCargo), so we deposit the box's CONTENTS
-        // (the real item), not the wrapper — otherwise the trunk would show "closed cardboard box".
+        // Deposit what the accessor is CARRYING into the vehicle — hands first, else a pushed hand-truck/
+        // flatbed (round-12 #1b: parity with the owner's "add to storage", which merges the CURRENT vehicle's
+        // cargo into the car; the old hands-only read silently no-opped for a hand-truck). A carried item is
+        // wrapped in a closedcardboardbox (ItemHelper.InitializeItemInHandsWithCargo), so we deposit the box's
+        // CONTENTS (the real item), not the wrapper — otherwise the trunk would show "closed cardboard box".
+        // NOTHING is removed locally on send — the source stack leaves hands/hand-truck only when the owner
+        // CONFIRMS (OnResult), so a full trunk can never eat items.
         public static void RequestDeposit(string realVehicleId, string ownerId)
         {
             try
             {
                 var held = PlayerHelper.ItemInstanceInHands;
-                if (held == null) return;
-                var contents = held.cargoInstances;
-                if (contents != null && contents.Count > 0)
+                if (held != null)
                 {
-                    var snapshot = new System.Collections.Generic.List<CargoInstance>(contents);
-                    foreach (var c in snapshot)
+                    var contents = held.cargoInstances;
+                    if (contents != null && contents.Count > 0)
+                    {
+                        var snapshot = new System.Collections.Generic.List<CargoInstance>(contents);
+                        foreach (var c in snapshot)
+                            if (c != null && !string.IsNullOrEmpty(c.itemName) && c.amount > 0)
+                                Send(OpPut, realVehicleId, ownerId, c.itemName, c.amount, c.paid, c.pricePerUnit);
+                    }
+                    else   // not a container — deposit the held item itself
+                    {
+                        var c = held.ConvertToCargoInstance();
                         if (c != null && !string.IsNullOrEmpty(c.itemName) && c.amount > 0)
                             Send(OpPut, realVehicleId, ownerId, c.itemName, c.amount, c.paid, c.pricePerUnit);
+                    }
+                    return;
                 }
-                else   // not a container — deposit the held item itself
-                {
-                    var c = held.ConvertToCargoInstance();
-                    if (c != null && !string.IsNullOrEmpty(c.itemName) && c.amount > 0)
+
+                // Hands empty → pushed hand-vehicle as the source. Sealed stacks stay on the truck: our wire
+                // has no Sealed flag, so routing one through would silently UNSEAL it owner-side.
+                var cur = VehicleHelper.GetCurrentVehicle();
+                if (cur == null || cur.VehicleType == null || !cur.VehicleType.spawnInPlayerObject) return;
+                var src = cur.cargoInstances;
+                if (src == null || src.Count == 0) { PassengerHud.Toast("Nothing to store."); return; }
+                var snap2 = new System.Collections.Generic.List<CargoInstance>(src);
+                foreach (var c in snap2)
+                    if (c != null && !c.IsSealed && !string.IsNullOrEmpty(c.itemName) && c.amount > 0)
                         Send(OpPut, realVehicleId, ownerId, c.itemName, c.amount, c.paid, c.pricePerUnit);
-                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] RequestDeposit: {ex.Message}"); }
         }
@@ -187,7 +205,7 @@ namespace BigAmbitionsMP
                     try
                     {
                         var held = PlayerHelper.ItemInstanceInHands;
-                        if (held == null) return;
+                        if (held == null) { RemoveFromHandVehicle(res); return; }   // hand-truck-sourced deposit (round-12 #1b)
                         if (held.itemName == res.ItemName) { PlayerHelper.ItemInstanceInHands = null; return; }   // held the item directly
                         // Remove ONLY the content that actually went in; keep anything a near-full trunk refused
                         // (its OpPut comes back !Ok and never reaches here), so partial deposits never drop items.
@@ -203,6 +221,30 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] OnResult: {ex.Message}"); }
+        }
+
+        // The owner confirmed a PUT that was sourced from the accessor's pushed hand-truck/flatbed (hands
+        // were empty at send AND at confirm) — now, and only now, remove that stack from the truck. Uses the
+        // native chokepoints (RemoveFromCargo invokes onItemsInCargoUpdated → the truck's box visuals update);
+        // the truck is the accessor's OWN vehicle (no BAMP_ prefix), so the proxy guard passes it. (round-12 #1b)
+        private static void RemoveFromHandVehicle(VehicleCargoResPayload res)
+        {
+            try
+            {
+                var cur = VehicleHelper.GetCurrentVehicle();
+                if (cur == null || cur.VehicleType == null || !cur.VehicleType.spawnInPlayerObject) return;
+                var src = cur.cargoInstances;
+                if (src == null) return;
+                for (int i = 0; i < src.Count; i++)
+                {
+                    var ci = src[i];
+                    if (ci == null || ci.IsSealed || ci.itemName != res.ItemName) continue;
+                    if (ci.amount <= res.Amount) cur.RemoveFromCargo(ci);
+                    else                         cur.ReduceFromCargo(ci, res.Amount);
+                    return;
+                }
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[VStore] truck-consume: {ex.Message}"); }
         }
 
         // Place a taken item exactly like single-player: into the pushed hand-truck/flatbed if the accessor
@@ -229,6 +271,7 @@ namespace BigAmbitionsMP
                 if (PlayerHelper.ItemInstanceInHands == null)   // EMPTY hands only — never clobber what's held
                 {
                     PlayerHelper.ItemInstanceInHands = ItemHelper.InitializeItemInHandsWithCargo(ci);
+                    VehicleStoragePanel.Close();   // into HANDS → close the panel (mirrors the owner's native UI: you carry one, so it closes). A cart-take returned above and keeps the panel open.
                     return;
                 }
             }
