@@ -237,7 +237,15 @@ namespace BigAmbitionsMP
         // protected by the startup hold; this is the mid-join equivalent.
         private static volatile bool _joinQuiesce;
         public static void BeginJoinQuiesce() { _joinQuiesce = true;  Plugin.Logger.LogInfo("[Client] join quiesce ON — world stream deferred until loaded."); }
-        public static void EndJoinQuiesce()   { if (_joinQuiesce) { _joinQuiesce = false; Plugin.Logger.LogInfo("[Client] join quiesce OFF — world stream live."); } }
+        public static void EndJoinQuiesce()
+        {
+            if (!_joinQuiesce) return;
+            _joinQuiesce = false;
+            Plugin.Logger.LogInfo("[Client] join quiesce OFF — world stream live.");
+            // WS1 (round-30): the world is live — publish every interior this machine owns so other
+            // players never depend on this owner ENTERING each building first.
+            try { InteriorSync.PublishAllOwnedInteriors("world live"); } catch { }
+        }
 
         private static void OnReceive(NetPeer peer, NetPacketReader reader, byte channel, DeliveryMethod delivery)
         {
@@ -514,6 +522,12 @@ namespace BigAmbitionsMP
                 case MessageType.RegisterCashier:
                 {
                     MPRegisterSync.Apply(env.GetPayload<RegisterCashierPayload>());
+                    break;
+                }
+
+                case MessageType.PlayerStaffRoster:
+                {
+                    MPRegisterSync.ApplyRoster(env.GetPayload<PlayerStaffRosterPayload>());
                     break;
                 }
 

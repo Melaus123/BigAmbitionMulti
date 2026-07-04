@@ -1228,6 +1228,21 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.PlayerStaffRoster:
+                {
+                    var sr = env.GetPayload<PlayerStaffRosterPayload>();
+                    if (sr == null || !SenderIs(sr.PlayerId, senderPid, env.Type)) break;
+                    if (!SenderOwns(sr.AddressKey, senderPid))
+                    {
+                        Plugin.Logger.LogWarning($"[Server] PlayerStaffRoster for '{sr.AddressKey}' from '{senderPid}' — sender doesn't own/rent it — dropped.");
+                        break;
+                    }
+                    if ((sr.Staff?.Count ?? 0) > 200) { Plugin.Logger.LogWarning($"[Server] PlayerStaffRoster '{sr.AddressKey}': implausible staff count — dropped."); break; }
+                    MPRegisterSync.ApplyRoster(sr);
+                    Broadcast(env);   // relay to everyone (idempotent at sender)
+                    break;
+                }
+
                 case MessageType.RemoteSale:
                 {
                     var rs = env.GetPayload<RemoteSalePayload>();
@@ -1702,6 +1717,12 @@ namespace BigAmbitionsMP
                         Send(peer, MessageEnvelope.Create(MessageType.RegisterCashier, d.PlayerId, d));
                     if (duties.Count > 0)
                         Plugin.Logger.LogInfo($"[Server] Re-sent {duties.Count} register-duty post(s) to peer {peer.Id}.");
+                    // WS3: replay known staff rosters too (and nudge a fresh publish sweep for the host's own).
+                    var rosters = MPRegisterSync.SnapshotRosters();
+                    foreach (var r in rosters)
+                        Send(peer, MessageEnvelope.Create(MessageType.PlayerStaffRoster, r.PlayerId, r));
+                    if (rosters.Count > 0)
+                        Plugin.Logger.LogInfo($"[Server] Re-sent {rosters.Count} staff roster(s) to peer {peer.Id}.");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendRegisterDutyTo: {ex.Message}"); }
             });

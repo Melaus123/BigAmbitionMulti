@@ -142,6 +142,7 @@ namespace BigAmbitionsMP
         BuildingCargoReq    = 138,       // Guest → Host → building owner: take/put on a home interior item's cargo (the fridge). Owner applies to reg.itemInstances.
         BuildingCargoRes    = 139,       // Owner → Host → guest: the verdict (mirrors VehicleCargoRes).
         BuildingInteriorEdit = 140,      // Guest → Host → building owner: my edited interior snapshot (furniture/flooring from the designer). Owner ADOPTS it (ApplyInteriorSnapshot).
+        PlayerStaffRoster   = 141,       // Owner → Host → All: the staff roster of one player business (round-30 WS3 — visitors inject these records so the game's own staffing engine can spawn EVERY scheduled worker, not just a synthetic cashier).
     }
 
     /// <summary>Owner → host → all: which of a shop's PRICED shelves are actually stocked (goods item
@@ -289,6 +290,26 @@ namespace BigAmbitionsMP
         public string Ctx          { get; set; } = "";   // put-source context ("wornHead"/"wornHand"/"") so the
                                                          // accessor's confirm handler knows what to consume locally —
                                                          // explicit beats inferring the source by item name (round-12 A)
+    }
+
+    /// <summary>One player business's staff roster (round-30 WS3). The synced work shifts
+    /// (BusinessSync ScheduleDayInfo.WorkShifts) already carry the REAL employee ids per station+hour;
+    /// the only thing other machines lack is the employee RECORDS those ids point to. Receivers inject a
+    /// lightweight record per entry (real id → the synced shifts match natively) so the game's own
+    /// staffing engine spawns every scheduled worker. Runtime-only on receivers (save-boundary stripped).</summary>
+    public class PlayerStaffRosterPayload
+    {
+        public string AddressKey { get; set; } = "";
+        public string PlayerId   { get; set; } = "";   // the owner publishing
+        public List<StaffInfo> Staff { get; set; } = new();
+    }
+
+    public class StaffInfo
+    {
+        public string Id        { get; set; } = "";   // REAL employee id — must match the synced shifts
+        public string Name      { get; set; } = "";
+        public int    Gender    { get; set; } = -1;
+        public bool   Available { get; set; } = true; // IsEmployeeAvailable on the owner (sick/replaced → false)
     }
 
     public class BuildingCargoResPayload

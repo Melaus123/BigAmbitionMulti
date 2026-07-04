@@ -4267,12 +4267,16 @@ namespace BigAmbitionsMP
                     {
                         int port = MPConfig.Port;
                         string pub = MPNet.PublicIp;
+                        // LAN line (user request 2026-07-04): same-network players join with the LAN ip —
+                        // no port-forwarding needed for them. Shown alongside whatever internet line applies.
+                        string lan = MPNet.LanIp;
+                        string lanLine = string.IsNullOrEmpty(lan) ? "" : $"\nSame network (LAN):   {lan} : {port}";
                         if (!string.IsNullOrEmpty(pub))
-                            info = $"Others join at:   {pub} : {port}\n<size=15><color=#AAAAAA>(forward UDP {port} to this PC on your router)</color></size>";
+                            info = $"Internet:   {pub} : {port}{lanLine}\n<size=15><color=#AAAAAA>(internet friends need UDP {port} forwarded on your router; LAN friends join the LAN line directly)</color></size>";
                         else if (!MPNet.PublicIpTried)
-                            info = "Others join at:   (looking up your IP…)";
+                            info = $"Internet:   (looking up your IP…){lanLine}";
                         else
-                            info = $"Others join at:   {MPConfig.HostIP} : {port}";
+                            info = $"Others join at:   {MPConfig.HostIP} : {port}{lanLine}";
                     }
                 }
                 else if (MPClient.IsConnected)   info = "Connected to host";

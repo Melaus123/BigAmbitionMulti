@@ -622,7 +622,14 @@ namespace BigAmbitionsMP
                     var t = go.transform;
                     t.position = new Vector3(dto.X, dto.Y, dto.Z);
                     t.rotation = new Quaternion(dto.Qx, dto.Qy, dto.Qz, dto.Qw);
-                    if (dto.Colors != null && dto.Colors.Count >= 6)
+                    // Round-31 (user: the one-color delivery truck showed up GREEN, a color it can't be):
+                    // RandomVehicleColor's presence is the game's own marker for "this model wears palette
+                    // colors" — GetRandomVehicleColor has NO other caller, so prefabs without the component
+                    // (delivery truck, police car, ambulance…) are never painted natively and every machine
+                    // already shows their authored material look. Exact sync for them = paint NOTHING.
+                    // Snapping their factory tint to the nearest palette entry is what greened the truck
+                    // (probe: NEAR-AUDIT deliverytruck expected(0.11,0.10,0.08) body=(0.18,0.34,0.18)).
+                    if (rvc != null && dto.Colors != null && dto.Colors.Count >= 6)
                     {
                         // Prefer the game's own paint API (CarFeatures.SetColor: tint + fresnel color +
                         // fresnel POWER on the curated bodyMeshes) with the nearest palette entry — the

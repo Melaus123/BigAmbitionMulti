@@ -324,6 +324,36 @@ namespace BigAmbitionsMP
             }
         }
 
+        // WS1 (round-30): once per session, when the world goes live.
+        private static bool _publishedAllOwned;
+
+        /// <summary>Publish interior snapshots for ALL businesses/homes this machine owns — once per session,
+        /// at world-live. Without this, a client-owned shop's furniture (stations, tills, shelves) only
+        /// reached other machines after the owner physically ENTERED it (the pushes were entry-driven) — a
+        /// visitor arriving first found an empty shop with nowhere to seat staff, and the host's persisted
+        /// replica stayed stale until then. BuildSnapshot reads SAVE data, so no entry is needed. The HOST
+        /// skips this: its world IS the source and visitors get it on entry.</summary>
+        public static void PublishAllOwnedInteriors(string reason)
+        {
+            if (_publishedAllOwned) return;
+            _publishedAllOwned = true;
+            try
+            {
+                if (MPServer.IsRunning) return;
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return;
+                int n = 0;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null || !IsLocalOwnerBusiness(reg)) continue;
+                    PushOwnedBuildingNow(GameStateReader.AddressKey(reg));
+                    n++;
+                }
+                if (n > 0) Plugin.Logger.LogInfo($"[InteriorSync] published ALL {n} owned interior(s) ({reason}) — visitors no longer wait for the owner to enter first.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] PublishAllOwnedInteriors: {ex.Message}"); }
+        }
+
         /// <summary>Owner-side: re-sync a building's interior to everyone inside it (after a guest's edit was
         /// applied to reg). COALESCED to one push per address per main-thread flush: a single guest action can
         /// apply many same-frame mutations (a 6-food fridge deposit = 6 BStore PUTs → 6 pushes → the guest

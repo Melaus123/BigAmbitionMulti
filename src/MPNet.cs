@@ -54,6 +54,48 @@ namespace BigAmbitionsMP
         private static bool IsIpv4(string s)
             => IPAddress.TryParse(s, out var a) && a.AddressFamily == AddressFamily.InterNetwork;
 
+        // ── LAN IP (for same-network play; user request 2026-07-04) ───────────
+        private static string _lanIp = "";
+        /// <summary>The host's LAN IPv4 — the address same-network players join with, shown alongside the
+        /// public IP. Resolved once via the UDP-connect trick (connect() on a UDP socket sends NOTHING; it
+        /// only makes the OS pick the outbound interface, whose local address is the LAN ip), with a
+        /// NIC-enumeration fallback for machines without a default route. Local-only — instant and safe on
+        /// the main thread. Empty when the machine has no usable IPv4.</summary>
+        public static string LanIp
+        {
+            get
+            {
+                if (!string.IsNullOrEmpty(_lanIp)) return _lanIp;
+                try
+                {
+                    using (var s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+                    {
+                        s.Connect("8.8.8.8", 65530);   // no packet — routing decision only
+                        if (s.LocalEndPoint is IPEndPoint ep && !IPAddress.IsLoopback(ep.Address))
+                            _lanIp = ep.Address.ToString();
+                    }
+                }
+                catch { }
+                if (string.IsNullOrEmpty(_lanIp))
+                {
+                    try
+                    {
+                        foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+                        {
+                            if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                            if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback) continue;
+                            foreach (var ua in ni.GetIPProperties().UnicastAddresses)
+                                if (ua.Address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ua.Address))
+                                { _lanIp = ua.Address.ToString(); break; }
+                            if (!string.IsNullOrEmpty(_lanIp)) break;
+                        }
+                    }
+                    catch { }
+                }
+                return _lanIp;
+            }
+        }
+
         // ── UPnP port-forward (best-effort) ───────────────────────────────────
         public enum UpnpState { Idle, Trying, Mapped, Unsupported, Failed }
         private static volatile UpnpState _upnp = UpnpState.Idle;

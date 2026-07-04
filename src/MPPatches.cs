@@ -3074,18 +3074,28 @@ namespace BigAmbitionsMP
                 return null;
             }
 
+            private static float _nextGateLogAt;
             static void Postfix(EmployeeStationController __instance, ref bool __result)
             {
                 if (__result) return;
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                 try
                 {
-                    if (!MPRegisterSync.IsEmployeeDutyStation(__instance.transform.position)) return;
+                    // Round-30 (WS3): the override now also admits ANY station inside a shop we hold a synced
+                    // staff roster for — the injected real-id records + the synced shifts let the game's own
+                    // engine staff every station, not just duty-broadcast tills.
+                    bool duty = MPRegisterSync.IsEmployeeDutyStation(__instance.transform.position);
+                    bool roster = !duty && MPRegisterSync.HasRosterFor(MPRegisterSync.CurrentShopAddress);
+                    if (!duty && !roster) return;
                     bool unstaffed = false;
                     try { unstaffed = __instance.employeeInstance == null; } catch { }
                     if (!unstaffed) return;
                     __result = true;
-                    Plugin.Logger.LogInfo("[StaffEval] ShouldUpdateEmployee FORCED TRUE (employee-duty station, unstaffed).");
+                    if (UnityEngine.Time.unscaledTime >= _nextGateLogAt)
+                    {
+                        _nextGateLogAt = UnityEngine.Time.unscaledTime + 5f;   // roster shops re-evaluate often — keep the log sane
+                        Plugin.Logger.LogInfo($"[StaffEval] ShouldUpdateEmployee FORCED TRUE ({(duty ? "employee-duty station" : "roster shop")}, unstaffed).");
+                    }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] gate: {ex.Message}"); }
             }

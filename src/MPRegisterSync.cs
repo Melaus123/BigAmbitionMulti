@@ -53,6 +53,10 @@ namespace BigAmbitionsMP
             // each from gi + the dictionary + its work shifts; iterate a key copy
             // because it mutates _synthetics.
             foreach (var key in new List<string>(_synthetics.Keys)) RemoveSynthetic(key);
+            // WS3: injected roster records die with the scene too (runtime-only, like the synthetics).
+            foreach (var id in new List<string>(_injectedStaff.Keys)) RemoveInjectedStaff(id);
+            lock (_rosterByAddr) { _rosterByAddr.Clear(); }
+            _rosterApplied.Clear(); _rosterSigSent.Clear();
             _cashiers.Clear(); _empDuty.Clear(); _synthetics.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = "";
         }
 
@@ -205,6 +209,8 @@ namespace BigAmbitionsMP
 
                 TickEmployeeDuty();                               // employee-staffed stations (data-driven, 5s)
                 TickStaffEvaluator();                             // spawn the visible staff NPC (5s)
+                TickRosterPublish();                              // WS3: publish my businesses' staff rosters (30s, sig-gated)
+                TickRosterApply();                                // WS3: inject/update/remove received rosters (10s + on receipt)
                 MPPatches.Patch_MPOrderFinalizer.TickPending();   // service-moment completion
                 LogStaffDiagOwner();                              // [StaffDiag] owner-side staffing snapshot (60s self-throttle; removable)
             }
@@ -284,16 +290,29 @@ namespace BigAmbitionsMP
                     bool mine; try { mine = reg.RentedByPlayer; } catch { continue; }
                     if (!mine || reg.itemInstances == null) continue;
                     string addr = GameStateReader.AddressKey(reg);
-                    foreach (var kv in reg.itemInstances)
+                    // Round-30 (WS2): stations are derived STRUCTURALLY from the schedule — any item
+                    // instance a work shift references IS a workstation. The old 3-name checkout whitelist
+                    // (checkoutcounterright/left, cashregister) silently missed every other station type —
+                    // shops staffed at non-checkout stations broadcast nothing and visitors saw no one
+                    // (StaffDiag's UNRECOGNIZED-till-like counter existed for exactly this suspicion).
+                    var stationIds = new HashSet<string>();
+                    try
                     {
-                        var ii = kv.Value;
+                        if (reg.scheduleDays != null)
+                            foreach (var sd in reg.scheduleDays)
+                                if (sd?.workShifts != null)
+                                    foreach (var w in sd.workShifts)
+                                        if (w != null && !string.IsNullOrEmpty(w.itemInstanceId)
+                                            && !string.IsNullOrEmpty(w.employeeId))
+                                            stationIds.Add(w.itemInstanceId);
+                    }
+                    catch { }
+                    foreach (var stationId in stationIds)
+                    {
+                        BigAmbitions.Items.ItemInstance? ii = null;
+                        try { reg.itemInstances.TryGetValue(stationId, out ii); } catch { }
                         if (ii == null) continue;
-                        var iname = ii.itemName;
-                        if (iname != "ba:itemname_checkoutcounterright"
-                            && iname != "ba:itemname_checkoutcounterleft"
-                            && iname != "ba:itemname_cashregister") continue;
                         bool staffed = false;
-                        string stationId = ii.id?.ToString() ?? "";
                         try { staffed = Helpers.EmployeeHelper.IsEmployeeStationEmployedAtHour(reg, stationId, -1); }
                         catch { }
                         if (!staffed) continue;
@@ -651,10 +670,36 @@ namespace BigAmbitionsMP
                 var live = new HashSet<string>();
                 foreach (var kv in _synthetics)
                     if (kv.Value.inst != null && !string.IsNullOrEmpty(kv.Value.inst.id)) live.Add(kv.Value.inst.id);
+                // WS3: injected roster records that leaked into a save have REAL ids (no prefix). Post-load
+                // the registry is empty, so detect them structurally: an employee assigned to a building the
+                // LOCAL player does not rent is not the local player's hire — the game never creates that.
+                // (Unresolvable addresses are SKIPPED — never strip on uncertainty.)
+                bool NotMyBuilding(EmployeeInstance? e)
+                {
+                    try
+                    {
+                        if (e?.assignedAddress == null) return false;
+                        var r = Helpers.BuildingHelper.GetBuildingRegistration(e.assignedAddress);
+                        return r != null && !r.RentedByPlayer;
+                    }
+                    catch { return false; }
+                }
+                var liveInjected = new HashSet<string>(_injectedStaff.Keys);
                 for (int i = list.Count - 1; i >= 0; i--)
                 {
                     string id = list[i]?.id ?? "";
-                    if (!id.StartsWith(SyntheticDutyEmployeeIdPrefix) || live.Contains(id)) continue;
+                    bool synthetic = id.StartsWith(SyntheticDutyEmployeeIdPrefix);
+                    bool orphanInjected = !synthetic && !liveInjected.Contains(id) && NotMyBuilding(list[i]);
+                    if (orphanInjected)
+                    {
+                        // Records only — their shifts are the SYNCED schedule, not ours to strip.
+                        try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(id); } catch { }
+                        list.RemoveAt(i);
+                        removed++;
+                        Plugin.Logger.LogInfo($"[StaffRoster] orphan injected staff stripped ({when}): '{id}'.");
+                        continue;
+                    }
+                    if (!synthetic || live.Contains(id)) continue;
                     // Strip this employee's work shifts from every registration first.
                     try
                     {
@@ -704,6 +749,16 @@ namespace BigAmbitionsMP
                 {
                     var emp = list[i];
                     string id = emp?.id ?? "";
+                    // WS3: injected roster records (REAL ids, registry-tracked) are runtime-only exactly like
+                    // the synthetics — strip the RECORDS from the save (their shifts are the synced schedule
+                    // and stay; the ids simply read as missing to a single-player load, which is native-shaped).
+                    if (_injectedStaff.ContainsKey(id))
+                    {
+                        removedEmployees.Add(emp!);
+                        list.RemoveAt(i);
+                        try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(id); } catch { }
+                        continue;
+                    }
                     if (!id.StartsWith(SyntheticDutyEmployeeIdPrefix)) continue;
                     // Capture + strip this synthetic's work shifts from every registration.
                     try
@@ -765,6 +820,209 @@ namespace BigAmbitionsMP
             };
         }
 
+        // ── WS3 (round-30): FULL STAFF-ROSTER SYNC ─────────────────────────────────────────────────────
+        // The synced schedule (BusinessSync) already names REAL employee ids per station+hour; the only
+        // thing other machines lack is the employee RECORDS those ids point to (gi.EmployeeInstances is
+        // per-save). Owners publish a compact roster per business (30s heartbeat, signature-gated, so any
+        // hire/fire/sickness reaches every machine within ~30s); receivers inject lightweight records with
+        // the REAL ids so the game's OWN staffing engine — with the [StaffEval] gate override extended to
+        // roster shops — spawns EVERY scheduled worker at the right station at the right hour, natively.
+        // Injected records are runtime-only: registry-tracked, removed on Reset, stripped at the save
+        // boundary, and orphan-swept after load via the not-my-building rule.
+
+        // received rosters: addr → (publisher, staff list, sig, appliedSig)
+        private static readonly Dictionary<string, (string pid, List<StaffInfo> staff, string sig)> _rosterByAddr = new();
+        private static readonly Dictionary<string, string> _rosterApplied = new();            // addr → sig actually injected
+        private static readonly Dictionary<string, (string addr, EmployeeInstance inst)> _injectedStaff = new();   // real-id records we injected
+        private static readonly Dictionary<string, string> _rosterSigSent = new();            // owner side: addr → last published sig
+        private static float _nextRosterPublishAt, _nextRosterApplyAt;
+
+        /// <summary>Does this machine hold a synced staff roster for the address? (Gate-override consumer.)</summary>
+        public static bool HasRosterFor(string addressKey)
+            => !string.IsNullOrEmpty(addressKey) && _rosterByAddr.ContainsKey(addressKey);
+
+        private static string RosterSig(List<StaffInfo> staff)
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var s in staff) sb.Append(s.Id).Append('|').Append(s.Name).Append('|').Append(s.Gender).Append('|').Append(s.Available).Append(';');
+            return sb.ToString();
+        }
+
+        // OWNER: publish each owned business's roster when it changes (and once at session start — the sig
+        // cache starts empty). An emptied roster (everyone fired) publishes too: empty sig ≠ old sig.
+        private static void TickRosterPublish()
+        {
+            if (Time.unscaledTime < _nextRosterPublishAt) return;
+            _nextRosterPublishAt = Time.unscaledTime + 30f;
+            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null || gi.EmployeeInstances == null) return;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    bool mine; try { mine = reg != null && reg.RentedByPlayer; } catch { continue; }
+                    if (!mine) continue;
+                    string addr = GameStateReader.AddressKey(reg);
+                    var staff = new List<StaffInfo>();
+                    foreach (var e in gi.EmployeeInstances)
+                    {
+                        if (e == null || string.IsNullOrEmpty(e.id)) continue;
+                        if (e.id.StartsWith(SyntheticDutyEmployeeIdPrefix, StringComparison.Ordinal)) continue;   // stand-ins aren't staff
+                        if (_injectedStaff.ContainsKey(e.id)) continue;                                            // never republish others' staff
+                        bool here = false;
+                        try { here = e.assignedAddress != null && e.assignedAddress.streetName == reg.StreetName && e.assignedAddress.streetNumber == reg.StreetNumber; } catch { }
+                        if (!here) continue;
+                        bool avail = true; try { avail = e.IsEmployeeAvailable(); } catch { }
+                        int gender = -1;   try { gender = (int)e.characterData.gender; } catch { }
+                        string nm = "";    try { nm = e.characterData?.name ?? ""; } catch { }
+                        staff.Add(new StaffInfo { Id = e.id, Name = nm, Gender = gender, Available = avail });
+                    }
+                    staff.Sort((a, b) => string.CompareOrdinal(a.Id, b.Id));
+                    string sig = RosterSig(staff);
+                    if (_rosterSigSent.TryGetValue(addr, out var prev) && prev == sig) continue;
+                    if (staff.Count == 0 && !_rosterSigSent.ContainsKey(addr)) continue;   // never had staff — nothing to say
+                    _rosterSigSent[addr] = sig;
+                    var p = new PlayerStaffRosterPayload { PlayerId = MPConfig.PlayerId, AddressKey = addr, Staff = staff };
+                    var env = MessageEnvelope.Create(MessageType.PlayerStaffRoster, MPConfig.PlayerId, p);
+                    if (MPServer.IsRunning) MPServer.BroadcastAny(env); else MPClient.SendEnvelope(env);
+                    Plugin.Logger.LogInfo($"[StaffRoster] published '{addr}': {staff.Count} staff.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] publish: {ex.Message}"); }
+        }
+
+        /// <summary>Receiver: store an incoming roster (any thread) — injection happens on the main-thread
+        /// apply tick, which also retries addresses whose registration hasn't synced yet.</summary>
+        public static void ApplyRoster(PlayerStaffRosterPayload? p)
+        {
+            if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(p.PlayerId)) return;
+            if (p.PlayerId == MPConfig.PlayerId) return;   // own echo
+            var staff = p.Staff ?? new List<StaffInfo>();
+            staff.Sort((a, b) => string.CompareOrdinal(a.Id, b.Id));
+            lock (_rosterByAddr) { _rosterByAddr[p.AddressKey] = (p.PlayerId, staff, RosterSig(staff)); }
+            _nextRosterApplyAt = 0f;   // apply promptly
+        }
+
+        /// <summary>All rosters this machine knows (host: for the join replay).</summary>
+        public static List<PlayerStaffRosterPayload> SnapshotRosters()
+        {
+            var list = new List<PlayerStaffRosterPayload>();
+            try
+            {
+                lock (_rosterByAddr)
+                    foreach (var kv in _rosterByAddr)
+                        list.Add(new PlayerStaffRosterPayload { PlayerId = kv.Value.pid, AddressKey = kv.Key, Staff = kv.Value.staff });
+                // The host's OWN rosters aren't in _rosterByAddr — force a fresh publish sweep instead
+                // (cheap; the joiner gets them within the next 30s heartbeat, or instantly via this nudge).
+                _rosterSigSent.Clear();
+                _nextRosterPublishAt = 0f;
+            }
+            catch { }
+            return list;
+        }
+
+        // Receiver main-thread apply: inject/update/remove records so gi matches the synced rosters.
+        private static void TickRosterApply()
+        {
+            if (Time.unscaledTime < _nextRosterApplyAt) return;
+            _nextRosterApplyAt = Time.unscaledTime + 10f;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.EmployeeInstances == null || gi.BuildingRegistrations == null) return;
+                List<(string addr, (string pid, List<StaffInfo> staff, string sig) v)> pending = new();
+                lock (_rosterByAddr)
+                    foreach (var kv in _rosterByAddr)
+                        if (!_rosterApplied.TryGetValue(kv.Key, out var applied) || applied != kv.Value.sig)
+                            pending.Add((kv.Key, kv.Value));
+                foreach (var (addr, v) in pending)
+                {
+                    BuildingRegistration? reg = null;
+                    foreach (var r in gi.BuildingRegistrations)
+                        if (r != null && GameStateReader.AddressKey(r) == addr) { reg = r; break; }
+                    if (reg == null) continue;   // building not synced yet — retried next tick
+
+                    var want = new Dictionary<string, StaffInfo>();
+                    foreach (var s in v.staff) if (s != null && !string.IsNullOrEmpty(s.Id)) want[s.Id] = s;
+
+                    // Remove injected records for this address that left the roster (fired/moved). Shifts are
+                    // NOT touched — they're the synced schedule; a dangling id there just reads as missing.
+                    var gone = new List<string>();
+                    foreach (var kv in _injectedStaff)
+                        if (kv.Value.addr == addr && !want.ContainsKey(kv.Key)) gone.Add(kv.Key);
+                    foreach (var id in gone) RemoveInjectedStaff(id);
+
+                    int added = 0, updated = 0;
+                    foreach (var s in want.Values)
+                    {
+                        if (_injectedStaff.TryGetValue(s.Id, out var have))
+                        {
+                            try
+                            {
+                                if (!string.IsNullOrEmpty(s.Name)) have.inst.characterData.name = s.Name;
+                                have.inst.isAbsent = !s.Available; have.inst.isReplaced = false;
+                            }
+                            catch { }
+                            updated++;
+                            continue;
+                        }
+                        bool existsLocally = false;
+                        try { existsLocally = Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(s.Id); } catch { }
+                        if (existsLocally) continue;   // defensive: never shadow a local record
+                        var inst = Helpers.EmployeeHelper.CreateAIEmployeeInstance("ba:skill_customerservice");
+                        if (inst == null) continue;
+                        inst.id = s.Id;                       // REAL id — the synced shifts match it natively
+                        inst.hourlyWage = 0f;
+                        inst.satisfaction = 100f;
+                        inst.assignedAddress = new Address(reg.StreetName, reg.StreetNumber);
+                        inst.characterData.name = string.IsNullOrEmpty(s.Name) ? "Staff" : s.Name;
+                        inst.characterData.ageInDays = Helpers.RecruitmentHelper.GetRandomEmployeeAgeInDays();
+                        try { if (s.Gender >= 0) inst.characterData.gender = (BigAmbitions.Characters.Gender)s.Gender; } catch { }
+                        inst.isAbsent = !s.Available; inst.isReplaced = false;
+                        for (int i = gi.EmployeeInstances.Count - 1; i >= 0; i--)
+                            if (gi.EmployeeInstances[i]?.id == inst.id) gi.EmployeeInstances.RemoveAt(i);
+                        gi.EmployeeInstances.Add(inst);
+                        try { Helpers.EmployeeHelper.EmployeeInstancesDictionary[inst.id] = inst; } catch { }
+                        _injectedStaff[inst.id] = (addr, inst);
+                        added++;
+                    }
+                    _rosterApplied[addr] = v.sig;
+                    if (added + updated + gone.Count > 0)
+                        Plugin.Logger.LogInfo($"[StaffRoster] applied '{addr}': +{added} ~{updated} -{gone.Count} (total injected {_injectedStaff.Count}).");
+
+                    // If the local player is INSIDE this shop, prod every station to re-evaluate now
+                    // (otherwise the native hourly re-evaluation picks the changes up).
+                    try
+                    {
+                        if (CurrentShopAddress == addr)
+                        {
+                            var arr = UnityEngine.Object.FindObjectsOfType(typeof(EmployeeStationController));
+                            if (arr != null)
+                                foreach (var o in arr)
+                                    (o as EmployeeStationController)?.UpdateEmployee(false);
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] apply: {ex.Message}"); }
+        }
+
+        private static void RemoveInjectedStaff(string id)
+        {
+            try
+            {
+                if (!_injectedStaff.TryGetValue(id, out var have)) return;
+                _injectedStaff.Remove(id);
+                var gi = SaveGameManager.Current;
+                if (gi?.EmployeeInstances != null) gi.EmployeeInstances.Remove(have.inst);
+                try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(id); } catch { }
+                Plugin.Logger.LogInfo($"[StaffRoster] removed injected staff '{id}' ({have.addr}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] remove '{id}': {ex.Message}"); }
+        }
+
         /// <summary>Invoke the game's staffing evaluator (UpdateEmployee — the
         /// disasm-mapped spawner) on unstaffed synthetic stations every 5s;
         /// nothing calls it for rival-translated shops natively.</summary>
@@ -777,14 +1035,32 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    var reg = FindNearestRegister(kv.Value.pos, 2f);
-                    if (reg == null) continue;                    // interior not loaded here
-                    if (reg.employeeInstance != null) continue;   // already staffed
-                    Plugin.Logger.LogInfo($"[SynthStaff] invoking UpdateEmployee(false) on register at '{kv.Key}'.");
-                    reg.UpdateEmployee(false);
+                    // Round-30 (WS2): any EmployeeStationController counts — the old CashRegisterController-
+                    // only search was the visitor-side twin of the owner-side checkout whitelist.
+                    var st = FindNearestStation(kv.Value.pos, 2f);
+                    if (st == null) continue;                    // interior not loaded here
+                    if (st.employeeInstance != null) continue;   // already staffed
+                    Plugin.Logger.LogInfo($"[SynthStaff] invoking UpdateEmployee(false) on station at '{kv.Key}'.");
+                    st.UpdateEmployee(false);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] evaluator: {ex.Message}"); }
             }
+        }
+
+        private static EmployeeStationController? FindNearestStation(Vector3 from, float maxDist)
+        {
+            EmployeeStationController? best = null;
+            float bestD2 = maxDist * maxDist;
+            var arr = UnityEngine.Object.FindObjectsOfType(typeof(EmployeeStationController));
+            if (arr != null)
+                foreach (var o in arr)
+                {
+                    var c = o as EmployeeStationController;
+                    if (c == null) continue;
+                    float d2 = (c.transform.position - from).sqrMagnitude;
+                    if (d2 < bestD2) { bestD2 = d2; best = c; }
+                }
+            return best;
         }
 
         /// <summary>Dump the shop's SET price table (the only price source that
