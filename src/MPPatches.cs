@@ -2190,6 +2190,95 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: menu-close ambience restore (round-27 — THE ambient-sound fix) ─────────────────────
+        // Menus (FullMenu:208, MiniMenu:259, Feedback:88) duck city ambience DIRECTLY on open via
+        // SfxManager.SetSoundSnapshotCityMap(true) — unconditional (:344). On close they call it with
+        // false, whose restore branch only runs when the CITY MAP is open (:346-349, the back-to-map
+        // case); closing a menu anywhere else is a native NO-OP. Vanilla still restores because those
+        // menus also pause/unpause, and the close-side unpause fires onPause(false) →
+        // SetSoundSnapshot(false) — the exact pipeline our MP design suppresses ("nothing pauses outside
+        // the vote"). So in MP: duck always ran, restore never did — city ambience dead until a manual
+        // pause+unpause (TogglePause's own direct restore, GameSpeedController:81). Round-26 guarded the
+        // event pipeline; this supplies the missing HALF of the direct pair: on a no-map menu close, run
+        // the restore vanilla's unpause would have done (SetSoundSnapshot picks indoor/outdoor itself).
+        [HarmonyPatch(typeof(SfxManager), nameof(SfxManager.SetSoundSnapshotCityMap))]
+        public static class Patch_Sfx_MenuCloseRestore
+        {
+            static void Postfix(SfxManager __instance, bool onlyUISound, float transitionTime)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.InMpGame) return;   // sticky gate: survives reconnect
+                    if (onlyUISound) return;                                 // menu OPEN duck — native, correct
+                    if (CityMap.IsOpen && !UI.BuildingPreview.isPreviewing) return;   // native branch restored map ambience
+                    // A REAL sanctioned pause keeps the duck, exactly like vanilla's paused state would.
+                    if (TimeSync.ManualPaused || TimeSync.IsStartupHeld) return;
+                    __instance.SetSoundSnapshot(false, transitionTime);
+                    Plugin.Logger.LogInfo("[Sfx] menu-close ambience restore (MP suppresses the pause pipeline vanilla used for this).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Sfx] menu-close restore: {ex.Message}"); }
+            }
+        }
+
+        // ── Patch: SetPauseState-level suppression (round-26 — the ambient-sound fix) ─────────────────
+        // The SetPause/DisableTimeControl suppressions above stop the MENU pause calls, but the game has
+        // callers that BYPASS SetPause entirely: TimeMachine starts a skip via gameSpeed.Set(paused:true)
+        // directly (TimeMachine.cs:126), and Reset() re-dispatches whenever its state compare sees a
+        // mismatch — which our suppression itself desyncs. Any such path reaching the private
+        // SetPauseState fires GlobalEvents.onPause(true) → SfxManager transitions to the UI-only mixer
+        // snapshot (ambience MUTED, SfxManager:176→322) + AudioZones Pause() their sources — while our
+        // timescale monitor keeps the game visibly running. The balanced onPause(false) then never comes
+        // (the close-side Reset sees "no change"), so ambience stays dead until a manual pause+unpause —
+        // whose TogglePause also restores the snapshot DIRECTLY (GameSpeedController:81), which is exactly
+        // the user's observed workaround (2026-07-04). Gate the dispatch itself: in MP, a paused=true
+        // SetPauseState runs ONLY for our sanctioned pauses (AllowNativePauseCall — the vote system and
+        // the startup hold both drive TogglePause under that key). paused=false ALWAYS passes, so an
+        // already-stuck duck self-heals at the next unpause opportunity.
+        [HarmonyPatch]
+        public static class Patch_GSC_SetPauseState_Suppress
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var t = VehicleManager.FindGameType("GameSpeedController");
+                var m = t?.GetMethod("SetPauseState", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Plugin.Logger.LogInfo($"[Pause] SetPauseState suppression: {(m != null ? "patched" : "NOT FOUND")}");
+                return m;
+            }
+
+            private static int _n;
+            static bool Prefix(GameSpeed newGameSpeed)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.InMpGame) return true;   // sticky gate: survives reconnect
+                    if (GameStateReader.AllowNativePauseCall) return true;        // sanctioned pause → real duck, like vanilla
+                    if (newGameSpeed == null || !newGameSpeed.paused) return true; // the un-pause dispatch (audio RESTORE) always runs
+                    if (_n++ < 8 || _n % 100 == 0)
+                    {
+                        // DIAG: name the caller so the log converts "which menu path pulls the trigger"
+                        // from inference to fact (skip Harmony trampoline frames — best-effort).
+                        string trig = "?";
+                        try
+                        {
+                            var st = new System.Diagnostics.StackTrace(false);
+                            for (int i = 2; i < st.FrameCount && i < 8; i++)
+                            {
+                                var mth = st.GetFrame(i)?.GetMethod();
+                                var tn  = mth?.DeclaringType?.Name ?? "";
+                                if (tn.Length == 0 || tn.Contains("Patch") || tn.Contains("Harmony") || tn.Contains("MonoMethod")) continue;
+                                trig = $"{tn}.{mth?.Name}";
+                                break;
+                            }
+                        }
+                        catch { }
+                        Plugin.Logger.LogInfo($"[Pause] SetPauseState(paused) suppressed (#{_n}) — ambience duck blocked; trigger≈{trig}.");
+                    }
+                    return false;
+                }
+                catch { return true; }
+            }
+        }
+
         // ── Patch: BusinessHelper.IsBusinessOpen — owner-authoritative open truth ──
         // Open/closed used to be re-derived on every machine from a replicated schedule, so another player's
         // shop could read "closed" on your client even while its owner had it open. (The owner never notices:
