@@ -3101,6 +3101,26 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>Round-32 belt-and-braces: roster-injected staff records (another player's employees,
+        /// mirrored locally so visitors see them work) must NEVER enter the local payroll. They carry wage 0,
+        /// so the charge would be $0 anyway — but a $0 salary line for someone else's cashier in the local
+        /// player's finances is wrong on its face. PayWage is the single native charge point.</summary>
+        [HarmonyPatch(typeof(Entities.EmployeeInstance), nameof(Entities.EmployeeInstance.PayWage))]
+        public static class Patch_EmployeeInstance_PayWage_SkipInjected
+        {
+            static bool Prefix(Entities.EmployeeInstance __instance)
+            {
+                try
+                {
+                    if ((MPServer.IsRunning || MPClient.IsConnected)
+                        && __instance != null && MPRegisterSync.IsInjectedStaff(__instance.id))
+                        return false;
+                }
+                catch { }
+                return true;
+            }
+        }
+
         // DIAG:INVESTIGATION(staff-spawn) — observe-only probe; logs the work-shift lookup to
         //   name the next gate if the employee spawn chain refuses. Remove when concluded.
 #if BAMP_DEV

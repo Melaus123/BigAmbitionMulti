@@ -20,8 +20,9 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class BuildingStorageSync
     {
-        public const byte OpTake = 0;   // remove Amount of ItemName from the interior item (guest receives it)
-        public const byte OpPut  = 1;   // add Amount of ItemName to the interior item (from the guest)
+        public const byte OpTake     = 0;   // remove Amount of ItemName from the interior item (guest receives it)
+        public const byte OpPut      = 1;   // add Amount of ItemName to the interior item (from the guest)
+        public const byte OpSetStock = 2;   // round-32: set the item's STOCK type (display shelf / producer) — ItemName = new stock name ("" = clear)
 
         // ── Guest side: start a take / put ───────────────────────────────────────
         public static void RequestTake(string addressKey, string itemId, string itemName, int amount, bool paid, float price, string ctx = "")
@@ -30,9 +31,17 @@ namespace BigAmbitionsMP
         public static void RequestPut(string addressKey, string itemId, string itemName, int amount, bool paid, float price, string ctx = "")
             => Send(OpPut, addressKey, itemId, itemName, amount, paid, price, ctx);
 
+        /// <summary>Round-32 (business helpers): ask the owner to change what a display/showcase item — or a
+        /// producer (ctx="producerset") — stocks. The owner runs the same moves the native dropdown does.</summary>
+        public static void RequestSetStock(string addressKey, string itemId, string newStockName, string ctx = "setstock")
+            => Send(OpSetStock, addressKey, itemId, newStockName ?? "", 1, paid: false, price: 0f, ctx);
+
         private static void Send(byte op, string addressKey, string itemId, string itemName, int amount, bool paid, float price, string ctx = "")
         {
-            if (string.IsNullOrEmpty(addressKey) || string.IsNullOrEmpty(itemId) || string.IsNullOrEmpty(itemName) || amount <= 0)
+            // SetStock legitimately carries an EMPTY ItemName ("clear the stock type" = the native
+            // "undefined" dropdown choice); take/put never do.
+            if (string.IsNullOrEmpty(addressKey) || string.IsNullOrEmpty(itemId) || amount <= 0
+                || (string.IsNullOrEmpty(itemName) && op != OpSetStock))
                 return;
             var req = new BuildingCargoReqPayload
             {
@@ -55,7 +64,12 @@ namespace BigAmbitionsMP
             try
             {
                 // Grant backstop (the host already gated; re-verify on the authoritative machine).
-                if (req.PlayerId != MPConfig.PlayerId && !GrantSync.IsGranted(GrantKind.Housing, MPConfig.PlayerId, req.PlayerId))
+                // Housing OR Business (round-32): the gates only ever OFFER these ops in buildings the
+                // requester holds the matching grant for, so kind-precision here buys nothing — either
+                // key from this owner authorizes cargo ops on this owner's buildings.
+                if (req.PlayerId != MPConfig.PlayerId
+                    && !GrantSync.IsGranted(GrantKind.Housing, MPConfig.PlayerId, req.PlayerId)
+                    && !GrantSync.IsGranted(GrantKind.Business, MPConfig.PlayerId, req.PlayerId))
                 { res.Reason = "denied"; return res; }
 
                 var gi = SaveGameManager.Current;
@@ -86,11 +100,45 @@ namespace BigAmbitionsMP
                             break;
                         }
                 }
-                else // OpPut
+                else if (req.Op == OpPut)
                 {
+                    // Producer refills may ONLY merge into the machine's single existing stock slot — a
+                    // producer with two cargo instances breaks the game's GetStockInstance invariant. If a
+                    // race loaded a different ingredient between the helper's request and now, refuse.
+                    if (req.Ctx == "producer"
+                        && !(item.cargoInstances != null && item.cargoInstances.Count == 1
+                             && item.cargoInstances[0].itemName == req.ItemName))
+                    { res.Reason = "full"; return res; }
                     var ci = new CargoInstance(req.ItemName, req.Amount, req.PricePerUnit, req.Paid);
                     if (item.TryToAddToCargo(ci)) { res.Ok = true; res.Reason = ""; }
-                    else res.Reason = "full";
+                    else
+                    {
+                        // Round-32 (decompile ItemInstance.cs:198-231): TryToAddToCargo PARTIALLY merges
+                        // before returning false when the holder can't take the whole stack — without a
+                        // rollback the absorbed part stays here while the guest keeps the full stack = DUP.
+                        // Roll it back so "full" is all-or-nothing.
+                        int absorbed = req.Amount - ci.amount;
+                        if (absorbed > 0)
+                        {
+                            var src = item.cargoInstances;
+                            if (src != null)
+                                for (int c = src.Count - 1; c >= 0 && absorbed > 0; c--)
+                                {
+                                    var s = src[c];
+                                    if (s == null || s.IsSealed || s.itemName != req.ItemName || s.paid != req.Paid) continue;
+                                    int take = Math.Min(absorbed, s.amount);
+                                    if (take >= s.amount) item.RemoveFromCargo(s); else item.ReduceFromCargo(s, take);
+                                    absorbed -= take;
+                                }
+                            Plugin.Logger.LogInfo($"[BStore] put of {req.Amount}×{req.ItemName} didn't fully fit '{req.AddressKey}'/{req.ItemId} — partial merge rolled back.");
+                        }
+                        res.Reason = "full";
+                    }
+                }
+                else if (req.Op == OpSetStock)
+                {
+                    res.Ok = ApplySetStock(reg, item, req, out var reason);
+                    res.Reason = reason;
                 }
 
                 if (res.Ok)
@@ -101,6 +149,46 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] OwnerApply: {ex.Message}"); res.Ok = false; res.Reason = "error"; }
             return res;
+        }
+
+        /// <summary>Round-32, OWNER side: change what an item stocks — the native dropdown's moves minus its
+        /// UI (ItemController.OnStockOptionSelected, decompile :918-976): return the old stock to a shelf,
+        /// set the new name, refill from storage, refresh the business numbers. ctx="producerset" is the
+        /// bare variant for PRODUCERS (ingredient name only — no shelf return, no auto-fill: the native
+        /// producer flow never does those, and a producer's single cargo slot must stay single).</summary>
+        private static bool ApplySetStock(BuildingRegistration reg, ItemInstance item, BuildingCargoReqPayload req, out string reason)
+        {
+            reason = "";
+            var cargo = item.cargoInstances;
+            if (cargo == null || cargo.Count != 1) { reason = "gone"; return false; }   // stock carriers hold exactly one stock instance
+            var stock = cargo[0];
+            string newName = req.ItemName ?? "";
+            if (stock.itemName == newName) return true;   // idempotent (duplicate click / re-send)
+
+            if (req.Ctx == "producerset")
+            {
+                if (stock.amount > 0 && !string.IsNullOrEmpty(stock.itemName)) { reason = "occupied"; return false; }
+                stock.itemName = newName;
+                stock.ResetItemCached();
+                return true;
+            }
+
+            if (stock.amount > 0 && !string.IsNullOrEmpty(stock.itemName))
+            {
+                var old = new CargoInstance(stock.itemName, stock.amount, stock.pricePerUnit);
+                if (!old.ReturnToAShelf(item.AddressCached, item))
+                { stock.amount = old.amount; reason = "full"; return false; }   // native: "no storage available"
+                stock.amount = 0;
+            }
+            stock.itemName = newName;
+            stock.ResetItemCached();
+            if (!string.IsNullOrEmpty(newName))
+                try { item.FillUpShowcaseShelfOrPointOfSale(); } catch { }
+            // The native tail's business refreshers — each independently non-critical.
+            try { BusinessHelper.UpdateCustomerCapacity(reg); } catch { }
+            try { if (reg.HasValidAddress) { BusinessHelper.UpdatePromotion(reg); reg.UpdateSecurityLevel(); } } catch { }
+            try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
+            return true;
         }
 
         // ── Guest side: the owner's verdict came back ── MAIN THREAD.
@@ -132,9 +220,20 @@ namespace BigAmbitionsMP
                         PassengerHud.Toast("No room to carry that.");
                     }
                 }
+                else if (res.Op == OpSetStock)
+                {
+                    // Success needs no local action — the owner's interior push re-renders the shelf.
+                    if (!res.Ok)
+                        PassengerHud.Toast(res.Reason == "full" ? "No storage room for the current stock."
+                                         : res.Reason == "occupied" ? "That machine is already loaded."
+                                         : res.Reason == "denied" ? "No access." : "Couldn't change the stock.");
+                }
                 else // OpPut
                 {
                     if (!res.Ok) { PassengerHud.Toast(res.Reason == "full" ? "Storage full." : "Couldn't store."); return; }
+                    // Round-32: producer refills are AMOUNT-CLAMPED (partial stacks) — reduce exactly
+                    // res.Amount from the source stack instead of the whole-stack consume below.
+                    if (res.Ctx == "producer") { ReducePutSourceByAmount(res); return; }
                     // Stored OK → consume the deposited item from wherever it came from, and ONLY now:
                     // hands (held directly or as box content) → pushed hand-vehicle → worn accessory (Ctx).
                     // The worn case is Ctx-tagged rather than name-inferred so it can never be confused with
@@ -153,6 +252,51 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] OnResult: {ex.Message}"); }
+        }
+
+        // Round-32: amount-aware put consume for producer refills — reduce exactly res.Amount of
+        // res.ItemName from the helper's source (held box contents, held single, or hand-vehicle).
+        private static void ReducePutSourceByAmount(BuildingCargoResPayload res)
+        {
+            try
+            {
+                int remaining = res.Amount;
+                var held = PlayerHelper.ItemInstanceInHands;
+                var contents = held?.cargoInstances;
+                if (contents != null && contents.Count > 0)
+                {
+                    for (int i = contents.Count - 1; i >= 0 && remaining > 0; i--)
+                    {
+                        var c = contents[i];
+                        if (c == null || c.IsSealed || c.itemName != res.ItemName) continue;
+                        int take = Math.Min(remaining, c.amount);
+                        if (take >= c.amount) contents.RemoveAt(i); else c.amount -= take;
+                        remaining -= take;
+                    }
+                    if (contents.Count == 0) PlayerHelper.ItemInstanceInHands = null;
+                }
+                else if (held != null && held.itemName == res.ItemName)
+                {
+                    PlayerHelper.ItemInstanceInHands = null;   // held single unit
+                    remaining = 0;
+                }
+                if (remaining > 0)
+                {
+                    var cur = VehicleHelper.GetCurrentVehicle();
+                    var src = (cur != null && cur.VehicleType != null && cur.VehicleType.spawnInPlayerObject) ? cur.cargoInstances : null;
+                    if (src != null)
+                        for (int i = src.Count - 1; i >= 0 && remaining > 0; i--)
+                        {
+                            var c = src[i];
+                            if (c == null || c.IsSealed || c.itemName != res.ItemName) continue;
+                            int take = Math.Min(remaining, c.amount);
+                            if (take >= c.amount) cur.RemoveFromCargo(c); else cur.ReduceFromCargo(c, take);
+                            remaining -= take;
+                        }
+                }
+                if (remaining > 0) Plugin.Logger.LogWarning($"[BStore] producer consume: {remaining}×{res.ItemName} not found locally (source changed mid-request).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] producer consume: {ex.Message}"); }
         }
 
         // The owner confirmed a PUT sourced from the guest's pushed hand-truck/flatbed — remove that stack

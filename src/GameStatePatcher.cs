@@ -895,8 +895,30 @@ namespace BigAmbitionsMP
                                 var ii = kv.Value;
                                 try
                                 {
-                                    var cargo = ii?.cargoInstances;
-                                    if (ii == null || cargo == null || cargo.Count == 0) continue;
+                                    if (ii == null) continue;
+                                    // Round-34 (supersedes round-33's storage-shelf skip): buyer-purchasability
+                                    // belongs ONLY on retail DISPLAY surfaces — the game's own stock-carrier set
+                                    // (PointOfSale | ShowcaseShelf, ItemHelper.IsStockCarrier). It was landing on
+                                    // ANY cargo item holding retail products: backroom STORAGE shelves (no box
+                                    // visuals) and guest-placed BOXES — and because the OWNER adopts guest edits
+                                    // through this same apply, the flags hit the owner's machine and SAVE too
+                                    // (owner couldn't grab the box or manage the shelf; user 2026-07-04).
+                                    // Whitelist display types, skip on the owner's own machine, heal the rest.
+                                    bool qualifies = false;
+                                    try
+                                    {
+                                        qualifies = !reg.RentedByPlayer
+                                            && ii.ItemCached != null
+                                            && (ii.ItemCached.type & (BigAmbitions.Items.ItemType.PointOfSale | BigAmbitions.Items.ItemType.ShowcaseShelf)) != 0;
+                                    }
+                                    catch { }
+                                    if (!qualifies)
+                                    {
+                                        try { if (ii.playerItemPurchaserSettings != null && ii.playerItemPurchaserSettings.enabled) ii.playerItemPurchaserSettings.enabled = false; } catch { }
+                                        continue;
+                                    }
+                                    var cargo = ii.cargoInstances;
+                                    if (cargo == null || cargo.Count == 0) continue;
                                     if (ii.playerItemPurchaserSettings != null && ii.playerItemPurchaserSettings.enabled) continue;
                                     string? product = null;
                                     foreach (var c in cargo)
@@ -1196,8 +1218,101 @@ namespace BigAmbitionsMP
                 // GameObjects — and with them the game's random stock-visual
                 // shuffle (full rebuilds re-rolled it = flicker, 2026-06-12).
                 RefreshItemsForActiveBuilding(matched, reg, changedIds, removedIds, movedIds);
+
+                // Round-34 (user: a guest-placed register must warn the OWNER about paper bags exactly like
+                // an owner-placed one): adoption skips the native placement tail, so refresh warning icons +
+                // the without-stock todo tasks for the adopted items on the OWNER's machine. Deferred like
+                // the re-staff so the respawned controllers' Start has run.
+                try
+                {
+                    if (reg.RentedByPlayer)
+                        matched.StartCoroutine(OwnerWarningRefreshAfterInit(matched, addressKey, changedIds, movedIds));
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] schedule owner warning refresh: {ex.Message}"); }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] TryRefreshActiveInteriorIfMatches: {ex.Message}"); }
+        }
+
+        private static System.Collections.IEnumerator OwnerWarningRefreshAfterInit(
+            BuildingManager bm, string addressKey,
+            System.Collections.Generic.HashSet<string>? changed, System.Collections.Generic.HashSet<string>? moved)
+        {
+            yield return null;
+            yield return null;
+            OwnerWarningRefreshNow(bm, addressKey, changed, moved);
+        }
+
+        private static void OwnerWarningRefreshNow(
+            BuildingManager bm, string addressKey,
+            System.Collections.Generic.HashSet<string>? changed, System.Collections.Generic.HashSet<string>? moved)
+        {
+            try
+            {
+                var reg = bm?.buildingRegistration;
+                if (reg == null || !reg.RentedByPlayer) return;
+                if (GameStateReader.AddressKey(reg) != addressKey) return;   // owner left this building → skip
+                var ids = new System.Collections.Generic.HashSet<string>();
+                if (changed != null) foreach (var i in changed) ids.Add(i);
+                if (moved   != null) foreach (var i in moved)   ids.Add(i);
+                if (ids.Count == 0) return;
+                // The game's own "items changed" hub (designer close funnels here too): available producers,
+                // customer capacity from seating, promotion, employee↔work-station assignments, and the
+                // onBuildingRegistrationChange listeners. Self-gates on owner-inside.
+                try { bm.OnItemChanged(forced: true); } catch { }
+                try { InstanceBehavior<Player.HUD.ItemWarningIcons.ItemWarningIconManager>.Instance?.UpdateWarningIconByIds(ids); } catch { }
+                try { Helpers.BusinessHelper.GenerateItemsWithoutStockTasks(reg); } catch { }
+                // Security devices are the one family the hub skips (native placement covers them in
+                // OnItemPositionUpdated :1387): recompute per-panel coverage + the registration's level.
+                try
+                {
+                    bool anySecurity = false;
+                    foreach (var id in ids)
+                        if (reg.itemInstances != null && reg.itemInstances.TryGetValue(id, out var ii) && ii?.ItemCached != null
+                            && ii.ItemCached.HasTag(BigAmbitions.Tags.TagRef.Itemtag.issecuritypanel))
+                        { try { ii.UpdateSecurityPanelCoverage(); anySecurity = true; } catch { } }
+                    if (anySecurity) try { reg.UpdateSecurityLevel(); } catch { }
+                }
+                catch { }
+                Plugin.Logger.LogInfo($"[Patcher] owner edit-tail refresh for '{addressKey}': {ids.Count} adopted item(s).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] owner warning refresh: {ex.Message}"); }
+        }
+
+        /// <summary>Round-34: pre-fix sessions PERSISTED injected buyer-purchaser flags into saves (the owner
+        /// adopts guest edits through the same interior apply that used to inject on any cargo item, and
+        /// owners save their own buildings) — a flagged item then boots its controller in SHOP mode (owner
+        /// couldn't grab a guest-placed box or manage their storage shelf). One pass at scene-ready heals
+        /// the loaded world: purchaser stays only on retail DISPLAY types (PointOfSale | ShowcaseShelf —
+        /// the game's stock-carrier set) on buildings the local player does NOT own. The apply-time
+        /// whitelist prevents re-pollution; native saves never carry enabled purchaser flags (owners
+        /// manage, not buy), so everything cleared here is ours.</summary>
+        public static void SweepPurchaserPollution(string reason)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return;
+                int healed = 0;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    var items = reg?.itemInstances;
+                    if (items == null) continue;
+                    foreach (var kv in items)
+                    {
+                        var ii = kv.Value;
+                        try
+                        {
+                            if (ii?.playerItemPurchaserSettings == null || !ii.playerItemPurchaserSettings.enabled) continue;
+                            bool display = ii.ItemCached != null
+                                && (ii.ItemCached.type & (BigAmbitions.Items.ItemType.PointOfSale | BigAmbitions.Items.ItemType.ShowcaseShelf)) != 0;
+                            if (!display || reg.RentedByPlayer) { ii.playerItemPurchaserSettings.enabled = false; healed++; }
+                        }
+                        catch { }
+                    }
+                }
+                if (healed > 0) Plugin.Logger.LogInfo($"[Patcher] purchaser-pollution sweep ({reason}): healed {healed} item(s).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] purchaser sweep: {ex.Message}"); }
         }
 
         // Deferred re-staff: wait a couple frames so freshly-spawned stations' Start has initialised them
@@ -1220,6 +1335,12 @@ namespace BigAmbitionsMP
             {
                 if (bm == null || bm.buildingRegistration == null) return;
                 if (GameStateReader.AddressKey(bm.buildingRegistration) != addressKey) return;   // player left this building → skip
+                // Round-33: NEVER AI-staff a SESSION-PLAYER business. This pass exists for AI businesses whose
+                // layout-suppressed stations spawn late; AssignAiToEmployeeStation has NO player-shop self-skip
+                // (that lives in SetupAiEmployeeStations, which this per-station loop bypasses) — so a helper
+                // placing a register forwarded the interior and the apply spawned a ghost AI cashier in the
+                // player shop on BOTH machines (user + logs 2026-07-04: "AI-staffed 1 station(s)").
+                try { if (bm.buildingRegistration.RentedByPlayer || IsAnyPlayerBusiness(bm.buildingRegistration)) return; } catch { }
                 var stations = new System.Collections.Generic.List<EmployeeStationController>(
                     bm.indoorItemContainer.GetComponentsInChildren<EmployeeStationController>(true));
                 if (bm.currentLayout != null)

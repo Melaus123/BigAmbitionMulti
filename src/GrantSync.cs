@@ -3,8 +3,9 @@ using System.Collections.Generic;
 namespace BigAmbitionsMP
 {
     /// <summary>The kind of asset an access grant covers. A grant is per-person and GLOBAL within its
-    /// kind: "I gave player P a key to all my VEHICLES" is independent of "...to all my HOMES."</summary>
-    public enum GrantKind { Vehicle = 0, Housing = 1 }
+    /// kind: "I gave player P a key to all my VEHICLES" is independent of "...to all my HOMES" and
+    /// "...helper access to all my BUSINESSES."</summary>
+    public enum GrantKind { Vehicle = 0, Housing = 1, Business = 2 }
 
     /// <summary>
     /// Host-authoritative player-to-player ACCESS GRANTS — "I gave player P a key to my stuff," tracked
@@ -30,13 +31,15 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<string, string> _nameByStable = new();   // kind-independent display-name cache
 
         /// <summary>Every kind a grant can have — single source of truth for iteration.</summary>
-        public static readonly GrantKind[] AllKinds = { GrantKind.Vehicle, GrantKind.Housing };
+        public static readonly GrantKind[] AllKinds = { GrantKind.Vehicle, GrantKind.Housing, GrantKind.Business };
 
         private static Dictionary<GrantKind, Dictionary<string, HashSet<string>>> NewKindMap()
         {
+            // NOTE: runs during static field init, BEFORE AllKinds exists — enumerate explicitly.
             var m = new Dictionary<GrantKind, Dictionary<string, HashSet<string>>>();
-            m[GrantKind.Vehicle] = new Dictionary<string, HashSet<string>>();
-            m[GrantKind.Housing] = new Dictionary<string, HashSet<string>>();
+            m[GrantKind.Vehicle]  = new Dictionary<string, HashSet<string>>();
+            m[GrantKind.Housing]  = new Dictionary<string, HashSet<string>>();
+            m[GrantKind.Business] = new Dictionary<string, HashSet<string>>();
             return m;
         }
 
@@ -56,6 +59,7 @@ namespace BigAmbitionsMP
             foreach (var k in AllKinds) _grants[k].Clear();
             _myGrantees = new List<OwnGrantEntry>();
             _enterable = new HashSet<string>();
+            _helperBiz = new HashSet<string>();
         }
 
         /// <summary>HOST, session boundary only (fresh new-game world, or clear-before-apply at manifest
@@ -213,5 +217,15 @@ namespace BigAmbitionsMP
             => _enterable = addressKeys != null ? new HashSet<string>(addressKeys) : new HashSet<string>();
         public static bool CanEnterGranted(string addressKey)
             => !string.IsNullOrEmpty(addressKey) && _enterable.Contains(addressKey);
+
+        // ── Business-helper access (round-32): which buildings the LOCAL player may WORK IN as a granted
+        // helper (addr keys, host-pushed alongside _enterable). A SEPARATE set on purpose: residence-guest
+        // behavior (fridge routing, furniture ownership flips) must not light up in businesses, and helper
+        // behavior must not light up in homes — each gate opts into exactly one.
+        private static HashSet<string> _helperBiz = new();
+        public static void SetHelperBusinesses(IEnumerable<string> addressKeys)
+            => _helperBiz = addressKeys != null ? new HashSet<string>(addressKeys) : new HashSet<string>();
+        public static bool IsHelperBusiness(string addressKey)
+            => !string.IsNullOrEmpty(addressKey) && _helperBiz.Contains(addressKey);
     }
 }

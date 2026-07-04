@@ -1203,11 +1203,46 @@ namespace BigAmbitionsMP
             return "";
         }
 
+        /// <summary>Round-34, THE STALE-VEHICLE-STATE CLASS (user: "do we have a larger bug?" — yes, this):
+        /// destroying a ghost/proxy the LOCAL player is currently driving or pushing skips the game's exit
+        /// bookkeeping (VehicleController.ExitVehicle :327 clears ActiveVehicleId + controlledByPlayer +
+        /// camera). The save then says "in a vehicle" that no longer exists — IsUsingVehicle true,
+        /// GetCurrentVehicle() null — and every native path that trusts it breaks downstream (ItemPanel NRE
+        /// on take-to-hands, "can't enter building while in a vehicle", on-foot false-blocks). Every despawn
+        /// runs this first: native exit when possible, manual field-clear as fallback.</summary>
+        private static void ExitIfLocallyDriven(GameObject? go, string vid)
+        {
+            try
+            {
+                var vc = go != null ? go.GetComponentInChildren<VehicleController>() : null;
+                bool driven = vc != null && vc.controlledByPlayer;
+                string active = "";
+                try { active = SaveGameManager.Current?.ActiveVehicleId ?? ""; } catch { }
+                bool activeHere = vc != null && !string.IsNullOrEmpty(active) && vc.vehicleInstance?.id == active;
+                if (!driven && !activeHere) return;
+                Plugin.Logger.LogWarning($"[Vehicle] despawning '{vid}' while the local player is USING it (driven={driven}, activeId={activeHere}) — running native exit first.");
+                try { vc!.ExitVehicle(); }
+                catch
+                {
+                    try { SaveGameManager.Current.ActiveVehicleId = null; } catch { }
+                    try { if (vc != null) vc.controlledByPlayer = false; } catch { }
+                }
+                try
+                {
+                    var gm = InstanceBehavior<GameManager>.Instance;
+                    if (gm != null && gm.selectedVehicle == vc) gm.selectedVehicle = null;
+                }
+                catch { }
+            }
+            catch { }
+        }
+
         /// <summary>Despawns one ghost by vehicle id.</summary>
         public static void DespawnByVehicleId(string vehicleId)
         {
             if (_remoteVehicles.TryGetValue(vehicleId, out var rv))
             {
+                ExitIfLocallyDriven(rv.Go, vehicleId);
                 if (rv.Go != null) { try { UnityEngine.Object.Destroy(rv.Go); } catch { } }
                 _remoteVehicles.Remove(vehicleId);
                 Plugin.Logger.LogInfo($"[Vehicle] Despawned ghost '{vehicleId}'");
@@ -1225,8 +1260,12 @@ namespace BigAmbitionsMP
         /// <summary>Despawns every ghost vehicle (disconnect / scene unload).</summary>
         public static void DespawnAll()
         {
-            foreach (var rv in _remoteVehicles.Values)
-                if (rv.Go != null) { try { UnityEngine.Object.Destroy(rv.Go); } catch { } }
+            foreach (var kv in _remoteVehicles)
+                if (kv.Value.Go != null)
+                {
+                    ExitIfLocallyDriven(kv.Value.Go, kv.Key);
+                    try { UnityEngine.Object.Destroy(kv.Value.Go); } catch { }
+                }
             _remoteVehicles.Clear();
         }
 

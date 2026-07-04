@@ -283,6 +283,24 @@ namespace BigAmbitionsMP
                 return;
             }
 
+            // Round-33: pushed hand-vehicles (flatbed / hand truck) mirror the OWNER's interaction — click =
+            // take the handle and push, NO Enter/Manage window (that overlay is a car thing; user 2026-07-04).
+            // Once pushing, the proxy is a real local vehicle: its cargo shows and routes through the native
+            // flows (VehicleProxyCargoGuard redirects the mutations to the owner). Non-key-holders keep the
+            // storage panel below — unlocked-cart storage access is deliberate existing design.
+            bool pushedType = false;
+            try
+            {
+                var vt = Vehicles.VehicleTypes.VehicleTypeHelper.GetVehicleType(VehicleManager.TypeNameFor(vid));
+                pushedType = vt != null && vt.spawnInPlayerObject;
+            }
+            catch { }
+            if (pushedType && VehicleManager.CanDriveGhost(vid))
+            {
+                VehicleManager.TryDriveGhost(vid);
+                return;
+            }
+
             // On foot. A granted key-holder DRIVES — but a vehicle WITH cargo offers the same Drive-vs-Storage
             // choice the owner gets (was: drove immediately, ignoring the choice popup — bug #3, run-2026-06-29).
             if (VehicleManager.CanDriveGhost(vid))

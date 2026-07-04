@@ -271,6 +271,9 @@ namespace BigAmbitionsMP
     public class PermissionBuildingAccessPayload
     {
         public System.Collections.Generic.List<string> AddressKeys { get; set; } = new System.Collections.Generic.List<string>();
+        // Businesses this player may work in as a granted HELPER (round-32). Separate from AddressKeys
+        // (residence-guest access) — the two unlock different behavior sets. JSON-tolerant default.
+        public System.Collections.Generic.List<string> HelperAddressKeys { get; set; } = new System.Collections.Generic.List<string>();
     }
 
     /// <summary>Guest → host → building owner: take/put on a home INTERIOR item's cargo (the fridge — the same

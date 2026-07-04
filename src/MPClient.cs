@@ -1148,7 +1148,12 @@ namespace BigAmbitionsMP
         {
             var p = env.GetPayload<PermissionBuildingAccessPayload>();
             if (p == null) return;
-            GameStatePatcher.EnqueueOnMainThread(() => { GrantSync.SetEnterableBuildings(p.AddressKeys); HousingMapCues.RefreshSharedPois(); });
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                GrantSync.SetEnterableBuildings(p.AddressKeys);
+                GrantSync.SetHelperBusinesses(p.HelperAddressKeys);
+                HousingMapCues.RefreshSharedPois();
+            });
         }
 
         private static void HandlePassengerSnapshotMsg(MessageEnvelope env)

@@ -258,4 +258,52 @@ The interior designer is a **batched editor with a revert system + a debit-on-cl
 
 ## Business Permissions
 
-**TBD** — to design after vehicle permissions. Foundations seen in code: `BusinessInfo.RentedByPlayer` / `OwnerPlayerId` / `BusinessOwnerPlayerId`; existing **owner-authority checks** already gate business edits, sale, listing, and cashier registration — that's the enforcement pattern to extend. **[code]**
+### Contract — "helper apron, not the office keys" (user-approved 2026-07-04)
+One `GrantKind.Business` grant per grantee covers **all** the owner's businesses (matches the kind-wide
+model). Helpers get the *floor work*: enter even while closed, stock shelves, put/take storage, place/move
+furniture, (Phase 3) work the register. Owner-only stays owner-only: scheduling, hiring, prices, signs/logos,
+the management computer, marketing/contracts — "menu-driven config" in general. **Helping is donating:**
+goods a helper stocks become the business's; no payment mechanism.
+
+### The economy firewall (Phase 0 findings, decompile-verified 2026-07-04)
+Every native business-economy path keys on `reg.RentedByPlayer` / `IsPlayerOwnedBusiness`, and the mod
+**translates** that flag (GameStatePatcher ownership apply) so it is true only on the true owner's machine:
+hourly sim (`BusinessSimulatorHelper.RunHourly`), rent (`BusinessHelper` :43), revenue deposit (:140), theft
+(:330), NPC order recording (`Customer.CompleteOrder` :387). **Binding rule: grants are a mod-side overlay —
+never touch reg ownership fields outside call-scoped flips that cannot span an economy tick.** That makes
+double-counting and helper-charged expenses structurally impossible.
+
+- NPC `Order.Pay(isPlayer:false)` moves **no** money — revenue rides completed orders processed owner-side.
+- **Phase-3 anchor:** `CustomerEntriesCalculator` subtracts live completed orders from the simulated hourly
+  customer quota — forwarded helper-served orders injected into `reg.unprocessedCompletedOrders` on the
+  owner's machine get native anti-double-count for free.
+- Overstocking impossible: helper puts route through owner-side `TryToAddToCargo` (capacity + whitelist +
+  stack limits); "full" bounces back as a toast.
+
+### Phase 1 — SHIPPED 2026-07-04 (uncommitted)
+`GrantKind.Business` + UI toggle; host classifies addresses (businessTypeName ≠ empty ⇒ Business grant key,
+else Housing) and pushes a separate `HelperAddressKeys` set (`GrantSync.IsHelperBusiness`); helper entry
+while closed; furniture place/move (CanBuild + SecondaryInteract `Enter(includeHelper:true)` + placement/
+removal/designer forwards). Helpers deliberately do NOT get the residence CTA/overlay flips — those would
+bypass the native owner-gates (shelf stock, register, computer) with no routing behind them. Injected roster
+staff are skipped in `PayWage` (belt-and-braces).
+
+### Phase 2 — logistics — SHIPPED 2026-07-04 (uncommitted)
+- **Stock dropdown**: helper picks route to the owner as an OPERATION (`OpSetStock`); the owner runs the
+  native moves (return old stock to a shelf, set name, auto-fill from storage, business refreshers).
+- **Producer refill**: helper pours held/vehicle ingredients in via clamped routed puts (+ a bare name-set
+  op for empty machines); owner-side merge-guard keeps the machine's single-slot invariant.
+- **Storage-shelf put + fridge/wardrobe family**: the residence routes now serve helper businesses too.
+- **Visibility**: the five CTA/overlay wraps include helpers — safe because every exposed mutation is
+  routed/blocked, or self-gates at interact time on the unflipped ownership flag (register: purchaser
+  short-circuit; sign :97; DJ :28). Hairdresser :191 may comp a helper's haircut — known cosmetic quirk.
+- **Fixed en route**: native `TryToAddToCargo` partially merges before returning false — owner-side puts
+  now roll the partial back, so "full" is all-or-nothing (this dup hazard predated business permissions).
+- **Still blocked**: storage manage/take UI (CargoItemUi paths include SELL — would credit the helper's
+  account — plus discard/drag; needs a dedicated routed panel, the VehicleStoragePanel pattern). Also
+  still owner-only: signs, hairdresser price, DJ booth.
+
+### Phase 3 — register work
+Helper serves local customers; each completed order forwards to the owner into
+`reg.unprocessedCompletedOrders` (native displacement dedups vs the hourly sim). Design details after
+Phase 2.

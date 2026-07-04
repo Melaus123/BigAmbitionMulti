@@ -841,6 +841,11 @@ namespace BigAmbitionsMP
         public static bool HasRosterFor(string addressKey)
             => !string.IsNullOrEmpty(addressKey) && _rosterByAddr.ContainsKey(addressKey);
 
+        /// <summary>Is this employee id one WE injected from another player's roster? (Payroll-skip consumer:
+        /// injected records carry wage 0, but they must never enter the local payroll at all.)</summary>
+        public static bool IsInjectedStaff(string employeeId)
+            => !string.IsNullOrEmpty(employeeId) && _injectedStaff.ContainsKey(employeeId);
+
         private static string RosterSig(List<StaffInfo> staff)
         {
             var sb = new System.Text.StringBuilder();

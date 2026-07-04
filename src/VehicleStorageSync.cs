@@ -268,6 +268,16 @@ namespace BigAmbitionsMP
             catch { }
             try
             {
+                // Round-34 (probe-confirmed stack): a STALE ActiveVehicleId that resolves to NO local vehicle
+                // (a ghost/proxy id left behind) makes the native hands pipeline NRE — ItemPanelUI.
+                // SetUnpaidAmount sees IsUsingVehicle=true and derefs GetCurrentVehicle()=null — so every
+                // take bounced back as "No room to carry that." The state is provably inconsistent (the
+                // game itself can't run with it): repair it, then deliver normally.
+                if (PlayerHelper.IsUsingVehicle && VehicleHelper.GetCurrentVehicle() == null)
+                {
+                    Plugin.Logger.LogWarning($"[VStore] stale ActiveVehicleId='{SaveGameManager.Current?.ActiveVehicleId}' resolves to no vehicle — cleared (take-to-hands repair).");
+                    try { SaveGameManager.Current.ActiveVehicleId = ""; } catch { }
+                }
                 if (PlayerHelper.ItemInstanceInHands == null)   // EMPTY hands only — never clobber what's held
                 {
                     PlayerHelper.ItemInstanceInHands = ItemHelper.InitializeItemInHandsWithCargo(ci);
@@ -275,7 +285,9 @@ namespace BigAmbitionsMP
                     return;
                 }
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] PlaceForAccessor hands: {ex.Message}"); }
+            // DIAG:INVESTIGATION(cart-take-nre) — full stack: 1000×paperbag takes NRE'd in the native
+            // InitializeItemInHandsWithCargo (logs 2026-07-04); the frame names the null. Remove when fixed.
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] PlaceForAccessor hands: {ex}"); }
             // No room (race): return the item to the owner so it isn't lost.
             try
             {

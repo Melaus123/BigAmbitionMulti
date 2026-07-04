@@ -2192,7 +2192,8 @@ namespace BigAmbitionsMP
             foreach (var pl in players)
                 if (pl != me) sb.Append(pl)
                     .Append(GrantSync.IsGranted(GrantKind.Vehicle, me, pl) ? '1' : '0')
-                    .Append(GrantSync.IsGranted(GrantKind.Housing, me, pl) ? '1' : '0').Append(';');
+                    .Append(GrantSync.IsGranted(GrantKind.Housing, me, pl) ? '1' : '0')
+                    .Append(GrantSync.IsGranted(GrantKind.Business, me, pl) ? '1' : '0').Append(';');
             sb.Append('|');
             foreach (var g in mine)
                 if (!g.Online) { sb.Append(g.Handle).Append(g.Name); foreach (var k in g.Kinds) sb.Append((int)k); sb.Append(';'); }
@@ -2215,9 +2216,11 @@ namespace BigAmbitionsMP
                 if (pl == me) continue;
                 bool gv = GrantSync.IsGranted(GrantKind.Vehicle, me, pl);
                 bool gh = GrantSync.IsGranted(GrantKind.Housing, me, pl);
+                bool gb = GrantSync.IsGranted(GrantKind.Business, me, pl);
                 AddPermRow(idx++, RowH, pl,
-                    ("Vehicle", gv ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Vehicle),
-                    ("Housing", gh ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Housing));
+                    ("Vehicle",  gv ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Vehicle),
+                    ("Housing",  gh ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Housing),
+                    ("Business", gb ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Business));
             }
             // Offline grantees (not in the live roster) — same two toggles, by StableId handle.
             foreach (var g in mine)
@@ -2225,8 +2228,9 @@ namespace BigAmbitionsMP
                 if (g.Online || onlineNames.Contains(g.Name)) continue;
                 string nm = string.IsNullOrEmpty(g.Name) ? "(unknown)" : g.Name;
                 AddPermRow(idx++, RowH, $"{nm}  <color={muted}>(offline)</color>",
-                    ("Vehicle", g.Kinds.Contains(GrantKind.Vehicle) ? purple : grey, "stable:" + g.Handle, (byte)7, GrantKind.Vehicle),
-                    ("Housing", g.Kinds.Contains(GrantKind.Housing) ? purple : grey, "stable:" + g.Handle, (byte)7, GrantKind.Housing));
+                    ("Vehicle",  g.Kinds.Contains(GrantKind.Vehicle)  ? purple : grey, "stable:" + g.Handle, (byte)7, GrantKind.Vehicle),
+                    ("Housing",  g.Kinds.Contains(GrantKind.Housing)  ? purple : grey, "stable:" + g.Handle, (byte)7, GrantKind.Housing),
+                    ("Business", g.Kinds.Contains(GrantKind.Business) ? purple : grey, "stable:" + g.Handle, (byte)7, GrantKind.Business));
             }
 
             _hubPermContent.sizeDelta = new Vector2(_hubPermContent.sizeDelta.x, Mathf.Max(idx * RowH, _hubPermVp.rect.height));
@@ -2509,6 +2513,7 @@ namespace BigAmbitionsMP
                 MPServer.RebuildGrantsAfterSceneReset();  // host: immediate store→runtime rebuild + re-broadcast, so
                                               // enforcement never depends on which machine's scene finishes first
                 InteriorSync.Reset();     // interior subs + owner-snapshot caches die with the scene — a prior session's Authoritative=true snapshot must not bleed into a new world (was never wired up)
+                GameStatePatcher.SweepPurchaserPollution("scene ready");   // heal saves polluted by the pre-round-34 purchaser injection (owner shelves/boxes booting in shop mode)
                 MPAudit.Reset();          // divergence streaks/throttle die with the session (else stale [Audit] state pollutes the bug-report log across same-process sessions)
                 MPStockSync.Reset();      // per-shop stock digests die with the session
                 _appearanceSig = ""; _appearanceNextAt = 0f;

@@ -2933,23 +2933,51 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>HOST: the building addressKeys <paramref name="clientPid"/> may ENTER as a granted housing
-        /// guest — every player-owned building whose owner granted them Housing. Clients can't compute this
-        /// (no building→owner map), so the host pushes it.</summary>
+        /// guest (AddressKeys) or WORK IN as a granted business helper (HelperAddressKeys). Clients can't
+        /// compute this (no building→owner map), so the host pushes it. Round-32: each address is classified
+        /// from the host's registry — a BUSINESS address is unlocked by the Business grant, everything else
+        /// (homes, empty buildings, unknown) by the Housing grant.</summary>
         private static PermissionBuildingAccessPayload BuildBuildingAccessFor(string clientPid)
         {
             var pay = new PermissionBuildingAccessPayload();
             if (string.IsNullOrEmpty(clientPid)) return pay;
-            var keys = new HashSet<string>();
-            void Consider(string addr, string owner)
+
+            var bizType = new Dictionary<string, string>();
+            try
+            {
+                var regs = SaveGameManager.Current?.BuildingRegistrations;
+                if (regs != null)
+                    foreach (var reg in regs)
+                    {
+                        try
+                        {
+                            string a = GameStateReader.AddressKey(reg);
+                            if (!string.IsNullOrEmpty(a)) bizType[a] = reg.businessTypeName ?? "";
+                        }
+                        catch { }
+                    }
+            }
+            catch { }
+            bool IsBiz(string a) => bizType.TryGetValue(a, out var bt)
+                && !string.IsNullOrEmpty(bt) && bt != "ba:businesstype_empty";
+
+            var keys = new HashSet<string>(); var helper = new HashSet<string>();
+            void Consider(string addr, string owner, bool operatorLedger)
             {
                 if (string.IsNullOrEmpty(addr) || string.IsNullOrEmpty(owner)) return;
                 string ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;   // resolve the host sentinel to its real pid
                 if (ownerPid == clientPid) return;                                  // the owner enters their own home natively
-                if (GrantSync.IsGranted(GrantKind.Housing, ownerPid, clientPid)) keys.Add(addr);
+                if (IsBiz(addr))
+                {   // helper access keys on who RUNS the business — the rental ledger only, never real-estate
+                    // (a bought building can host an AI tenant's shop; helpers get no access there)
+                    if (operatorLedger && GrantSync.IsGranted(GrantKind.Business, ownerPid, clientPid)) helper.Add(addr);
+                }
+                else if (GrantSync.IsGranted(GrantKind.Housing, ownerPid, clientPid)) keys.Add(addr);
             }
-            foreach (var kv in BuildingOwners)           Consider(kv.Key, kv.Value);
-            foreach (var kv in BuildingRealEstateOwners) Consider(kv.Key, kv.Value);
+            foreach (var kv in BuildingOwners)           Consider(kv.Key, kv.Value, operatorLedger: true);
+            foreach (var kv in BuildingRealEstateOwners) Consider(kv.Key, kv.Value, operatorLedger: false);
             pay.AddressKeys.AddRange(keys);
+            pay.HelperAddressKeys.AddRange(helper);
             return pay;
         }
 
@@ -2972,7 +3000,9 @@ namespace BigAmbitionsMP
                     var pr = PeerForPlayer(pid);
                     if (pr != null) SendBuildingAccessTo(pr, pid);
                 }
-                GrantSync.SetEnterableBuildings(BuildBuildingAccessFor(MPConfig.PlayerId).AddressKeys);
+                var own = BuildBuildingAccessFor(MPConfig.PlayerId);
+                GrantSync.SetEnterableBuildings(own.AddressKeys);
+                GrantSync.SetHelperBusinesses(own.HelperAddressKeys);
                 GameStatePatcher.EnqueueOnMainThread(HousingMapCues.RefreshSharedPois);   // recolour the host's own shared-residence POIs (reciprocal sharing)
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RefreshBuildingAccess: {ex.Message}"); }

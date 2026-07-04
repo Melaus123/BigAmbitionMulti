@@ -28,12 +28,15 @@ namespace BigAmbitionsMP
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;   // no grants in single-player
                 string addr = GameStateReader.AddressKey(address);
-                if (!GrantSync.CanEnterGranted(addr)) return;
+                // Round-32: a business HELPER may enter the owner's business even while it's closed to the
+                // public — that's exactly when you restock together. Same postfix, second key set.
+                bool guest = GrantSync.CanEnterGranted(addr);
+                if (!guest && !GrantSync.IsHelperBusiness(addr)) return;
                 __result = true;
                 // DIAGNOSTIC (remove once re-entry is settled): confirm the gate grants on every attempt, throttled per addr.
                 float now = UnityEngine.Time.unscaledTime;
                 if (!_nextDiagAt.TryGetValue(addr, out var due) || now >= due)
-                { _nextDiagAt[addr] = now + 5f; Plugin.Logger.LogInfo($"[Housing] CanEnter GRANTED '{addr}'."); }
+                { _nextDiagAt[addr] = now + 5f; Plugin.Logger.LogInfo($"[Housing] CanEnter GRANTED '{addr}' ({(guest ? "guest" : "helper")})."); }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] CanEnterBuilding guard: {ex.Message}"); }
         }
@@ -83,14 +86,28 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
-        internal static void Enter()
+        /// <summary>Round-32: the local player is inside a business they hold a HELPER grant for. Kept apart
+        /// from LocalGuestHere — a business helper must NOT inherit the blanket residence flips (the CTA/
+        /// overlay wraps would pass the native owner-gates on shelf stock, register work, and the management
+        /// computer with NO routing behind them, mutating the replica). Helper gates opt in one by one.</summary>
+        internal static bool LocalHelperHere()
+        {
+            try
+            {
+                var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                return reg != null && GrantSync.IsHelperBusiness(GameStateReader.AddressKey(reg));
+            }
+            catch { return false; }
+        }
+
+        internal static void Enter(bool includeHelper = false)
         {
             try
             {
                 if (_depth == 0)
                 {
                     _forced = null;
-                    if (LocalGuestHere())
+                    if (LocalGuestHere() || (includeHelper && LocalHelperHere()))
                     {
                         var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
                         if (reg != null) { _forced = reg; _savedValue = reg.RentedByPlayer; reg.RentedByPlayer = true; }
@@ -154,17 +171,22 @@ namespace BigAmbitionsMP
     // user 2026-06-30). Wrap those three read-only decision methods with the SAME scoped override so a guest is
     // offered the interaction and can complete it. Bounded to these UI decisions (NOT LoadBuilding / save / the
     // many business-context IsPlayerOwnedBusiness readers, which never run in a residence). See PERMISSIONS-SYSTEM.md.
+    // includeHelper on the five visibility wraps (round-32): a business HELPER is offered interactions too.
+    // SAFE ONLY BECAUSE every mutation path this exposes in a business is accounted for: storage-shelf put +
+    // fridge/wardrobe family routed (GuestRoute now helper-aware), stock dropdown + producer refill routed
+    // (BusinessPatches), ManageStorage blocked, and the rest self-gate at INTERACT time on the UNFLIPPED
+    // flag (register work: purchaser-enabled short-circuits; sign stock-select re-checks :97; DJ booth :28).
     [HarmonyPatch(typeof(CtaManager), nameof(CtaManager.UpdateCta))]
     public static class Patch_CtaManager_UpdateCta_Guest
     {
-        static void Prefix()    { HousingFurniture.Enter(); }
+        static void Prefix()    { HousingFurniture.Enter(includeHelper: true); }
         static void Finalizer() { HousingFurniture.Exit(); }
     }
 
     [HarmonyPatch(typeof(OverlayManager), "ShouldShowDetailedOverlay")]
     public static class Patch_OverlayManager_DetailedOverlay_Guest
     {
-        static void Prefix()    { HousingFurniture.Enter(); }
+        static void Prefix()    { HousingFurniture.Enter(includeHelper: true); }
         static void Finalizer() { HousingFurniture.Exit(); }
     }
 
@@ -177,7 +199,7 @@ namespace BigAmbitionsMP
     [HarmonyPatch(typeof(OverlayManager), nameof(OverlayManager.ShowDetailedOverlay))]
     public static class Patch_OverlayManager_ShowDetailed_Guest
     {
-        static void Prefix()    { HousingFurniture.Enter(); }
+        static void Prefix()    { HousingFurniture.Enter(includeHelper: true); }
         static void Finalizer() { HousingFurniture.Exit(); }
     }
 
@@ -187,14 +209,14 @@ namespace BigAmbitionsMP
                   typeof(EntityController), typeof(DynamicOverlayUpdateType))]
     public static class Patch_OverlayManager_UpdateDynamic_Guest
     {
-        static void Prefix()    { HousingFurniture.Enter(); }
+        static void Prefix()    { HousingFurniture.Enter(includeHelper: true); }
         static void Finalizer() { HousingFurniture.Exit(); }
     }
 
     [HarmonyPatch(typeof(ItemController), nameof(ItemController.ShouldReactToIoEnter))]
     public static class Patch_ItemController_ReactToIoEnter_Guest
     {
-        static void Prefix()    { HousingFurniture.Enter(); }
+        static void Prefix()    { HousingFurniture.Enter(includeHelper: true); }
         static void Finalizer() { HousingFurniture.Exit(); }
     }
 
@@ -207,7 +229,10 @@ namespace BigAmbitionsMP
     [HarmonyPatch(typeof(ItemController), nameof(ItemController.SecondaryInteract))]
     public static class Patch_ItemController_SecondaryInteract_Guest
     {
-        static void Prefix()    { HousingFurniture.Enter(); }
+        // includeHelper (round-32): a business HELPER gets the right-click move/pick-up menu too — the move
+        // completes through the placement forward and a pick-up through the removal forward, both helper-
+        // aware. Right-click offers placement actions only, so the brief flip can't reach the economy paths.
+        static void Prefix()    { HousingFurniture.Enter(includeHelper: true); }
         static void Finalizer() { HousingFurniture.Exit(); }
     }
 
@@ -229,7 +254,9 @@ namespace BigAmbitionsMP
                 var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
                 if (reg == null) return false;
                 addr = GameStateReader.AddressKey(reg);
-                if (!GrantSync.CanEnterGranted(addr)) return false;               // owner / non-guest / business → native
+                // Residence guest OR business helper (round-32) — every consumer of this predicate is a
+                // cargo-mutation route/block, which is exactly what a helper needs owner-routed too.
+                if (!GrantSync.CanEnterGranted(addr) && !GrantSync.IsHelperBusiness(addr)) return false;   // owner / non-guest → native
                 fid = fridge?.ItemInstance?.id?.ToString() ?? "";
                 return !string.IsNullOrEmpty(fid);
             }
@@ -518,7 +545,7 @@ namespace BigAmbitionsMP
     {
         static void Postfix(ref bool __result)
         {
-            try { if (!__result && HousingFurniture.LocalGuestHere()) __result = true; }
+            try { if (!__result && (HousingFurniture.LocalGuestHere() || HousingFurniture.LocalHelperHere())) __result = true; }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] CanBuild guest gate: {ex.Message}"); }
         }
     }
@@ -535,7 +562,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (HousingFurniture.LocalGuestHere() && !InteriorDesignerUI.IsOpen)
+                if ((HousingFurniture.LocalGuestHere() || HousingFurniture.LocalHelperHere()) && !InteriorDesignerUI.IsOpen)
                     InteriorSync.ForwardGuestInteriorEdit(HousingDesign.CurrentBuildingAddr());
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] placement guest forward: {ex.Message}"); }
@@ -590,7 +617,7 @@ namespace BigAmbitionsMP
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;   // single-player → native only
                 string addr = GameStateReader.AddressKey(__instance);
-                if (!GrantSync.CanEnterGranted(addr)) return;               // owner / non-guest / business → native only
+                if (!GrantSync.CanEnterGranted(addr) && !GrantSync.IsHelperBusiness(addr)) return;   // owner / non-guest → native only
                 InteriorSync.ForwardGuestInteriorEdit(addr);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] guest removal forward: {ex.Message}"); }
@@ -605,7 +632,7 @@ namespace BigAmbitionsMP
     {
         static void Postfix(CurrentBuildingUI __instance)
         {
-            try { if (__instance?.ownerActions != null && HousingFurniture.LocalGuestHere()) __instance.ownerActions.gameObject.SetActive(true); }
+            try { if (__instance?.ownerActions != null && (HousingFurniture.LocalGuestHere() || HousingFurniture.LocalHelperHere())) __instance.ownerActions.gameObject.SetActive(true); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] ungate design: {ex.Message}"); }
         }
     }
@@ -617,7 +644,7 @@ namespace BigAmbitionsMP
     {
         static void Postfix()
         {
-            try { if (HousingFurniture.LocalGuestHere()) InteriorSync.ForwardGuestInteriorEdit(HousingDesign.CurrentBuildingAddr()); }
+            try { if (HousingFurniture.LocalGuestHere() || HousingFurniture.LocalHelperHere()) InteriorSync.ForwardGuestInteriorEdit(HousingDesign.CurrentBuildingAddr()); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] design close forward: {ex.Message}"); }
         }
     }
