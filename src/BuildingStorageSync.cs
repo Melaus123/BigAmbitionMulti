@@ -103,12 +103,24 @@ namespace BigAmbitionsMP
                 else if (req.Op == OpPut)
                 {
                     // Producer refills may ONLY merge into the machine's single existing stock slot — a
-                    // producer with two cargo instances breaks the game's GetStockInstance invariant. If a
-                    // race loaded a different ingredient between the helper's request and now, refuse.
-                    if (req.Ctx == "producer"
-                        && !(item.cargoInstances != null && item.cargoInstances.Count == 1
-                             && item.cargoInstances[0].itemName == req.ItemName))
-                    { res.Reason = "full"; return res; }
+                    // producer with two cargo instances breaks the game's GetStockInstance invariant.
+                    if (req.Ctx == "producer")
+                    {
+                        var slot = (item.cargoInstances != null && item.cargoInstances.Count == 1) ? item.cargoInstances[0] : null;
+                        if (slot == null) { res.Reason = "full"; return res; }
+                        // Round-37f (user: EMPTY register refused as "full"): an UNSET slot (name cleared,
+                        // amount 0) is a valid deposit target — the owner's own deposit onto an unset
+                        // station names the slot exactly like this (Producer.Interact empty-name branch).
+                        // Only a DIFFERENT ingredient occupying the slot is a real refusal.
+                        if (string.IsNullOrEmpty(slot.itemName) && slot.amount == 0)
+                        {
+                            slot.itemName = req.ItemName;
+                            slot.ResetItemCached();
+                            Plugin.Logger.LogInfo($"[BStore] producer put named the unset slot '{req.ItemName}' on '{req.AddressKey}'/{req.ItemId} (owner-parity name-set).");
+                        }
+                        else if (slot.itemName != req.ItemName)
+                        { res.Reason = "full"; return res; }   // a different ingredient is loaded — genuine refusal
+                    }
                     var ci = new CargoInstance(req.ItemName, req.Amount, req.PricePerUnit, req.Paid);
                     if (item.TryToAddToCargo(ci)) { res.Ok = true; res.Reason = ""; }
                     else
@@ -164,6 +176,12 @@ namespace BigAmbitionsMP
             var stock = cargo[0];
             string newName = req.ItemName ?? "";
             if (stock.itemName == newName) return true;   // idempotent (duplicate click / re-send)
+
+            // Owner-side audit line (round 35): SetStock quietly runs the native stocking moves (return old
+            // stock to a shelf, auto-FILL the new stock from boxes/containers — which DISCARDS containers it
+            // empties, native behavior). Without this line those moves are unattributable ("items vanished").
+            // Helpers keep FULL owner parity including clear (user 2026-07-04) — attribution, not restriction.
+            Plugin.Logger.LogInfo($"[BStore] setstock by '{req.PlayerId}' on '{req.AddressKey}'/{req.ItemId}: '{stock.itemName}'x{stock.amount} → '{newName}' (fill may drain stock containers; empties are discarded natively).");
 
             if (req.Ctx == "producerset")
             {
@@ -230,7 +248,21 @@ namespace BigAmbitionsMP
                 }
                 else // OpPut
                 {
-                    if (!res.Ok) { PassengerHud.Toast(res.Reason == "full" ? "Storage full." : "Couldn't store."); return; }
+                    if (!res.Ok)
+                    {
+                        PassengerHud.Toast(res.Reason == "full" ? "Storage full." : "Couldn't store.");
+                        // Round-37b: our replica said the cargo FITS (the gates only offer puts that fit) yet
+                        // the owner says FULL — proof the replica diverged (e.g. an unrouted local mutation
+                        // stuck via the keep-live apply optimization). Force a full re-pull: drop the
+                        // byte-diff baseline so the next apply replaces every live item, then re-request.
+                        if (res.Reason == "full" && MPClient.IsConnected && !MPServer.IsRunning)
+                        {
+                            GameStatePatcher.ForgetInteriorBaseline(res.AddressKey);
+                            MPClient.SendInteriorRequest(res.AddressKey);
+                            Plugin.Logger.LogInfo($"[BStore] put-full vs replica-fits mismatch on '{res.AddressKey}' — forced interior re-pull (divergence heal).");
+                        }
+                        return;
+                    }
                     // Round-32: producer refills are AMOUNT-CLAMPED (partial stacks) — reduce exactly
                     // res.Amount from the source stack instead of the whole-stack consume below.
                     if (res.Ctx == "producer") { ReducePutSourceByAmount(res); return; }

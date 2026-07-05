@@ -276,12 +276,20 @@ namespace BigAmbitionsMP
                 if (PlayerHelper.IsUsingVehicle && VehicleHelper.GetCurrentVehicle() == null)
                 {
                     Plugin.Logger.LogWarning($"[VStore] stale ActiveVehicleId='{SaveGameManager.Current?.ActiveVehicleId}' resolves to no vehicle — cleared (take-to-hands repair).");
-                    try { SaveGameManager.Current.ActiveVehicleId = ""; } catch { }
+                    // NULL, never "" (round-37m, THE dead-shelf root): the native on-foot contract is
+                    // ActiveVehicleId == null (every native exit writes null). ShelfCtaBehavior.GetCta checks
+                    // `!= null` and dereferences GetCurrentVehicle().VehicleType — an empty string passes the
+                    // check, resolves no vehicle, and NREs INSIDE the hover chain, killing OnIoEnter for every
+                    // storage shelf while on foot. This very repair wrote "" and poisoned the save.
+                    try { SaveGameManager.Current.ActiveVehicleId = null; } catch { }
                 }
                 if (PlayerHelper.ItemInstanceInHands == null)   // EMPTY hands only — never clobber what's held
                 {
                     PlayerHelper.ItemInstanceInHands = ItemHelper.InitializeItemInHandsWithCargo(ci);
-                    VehicleStoragePanel.Close();   // into HANDS → close the panel (mirrors the owner's native UI: you carry one, so it closes). A cart-take returned above and keeps the panel open.
+                    // Into HANDS → close the panel (mirrors the owner's native UI: you carry one, so it
+                    // closes) — but ONLY the panel session this take belongs to: a LATE result from an
+                    // earlier click must not close a freshly-reopened panel (round-35, probe-confirmed).
+                    if (VehicleStoragePanel.IsOpenFor(vid)) VehicleStoragePanel.Close();
                     return;
                 }
             }

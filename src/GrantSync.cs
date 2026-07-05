@@ -224,7 +224,15 @@ namespace BigAmbitionsMP
         // behavior must not light up in homes — each gate opts into exactly one.
         private static HashSet<string> _helperBiz = new();
         public static void SetHelperBusinesses(IEnumerable<string> addressKeys)
-            => _helperBiz = addressKeys != null ? new HashSet<string>(addressKeys) : new HashSet<string>();
+        {
+            var next = addressKeys != null ? new HashSet<string>(addressKeys) : new HashSet<string>();
+            // Log transitions — a silent empty set is indistinguishable from "grant never arrived"
+            // (round-35d: the register helper probe stayed mute; this line says whether helper access
+            // was even live on this machine).
+            if (!next.SetEquals(_helperBiz))
+                Plugin.Logger.LogInfo($"[Grant] helper businesses: {next.Count} (was {_helperBiz.Count}).");
+            _helperBiz = next;
+        }
         public static bool IsHelperBusiness(string addressKey)
             => !string.IsNullOrEmpty(addressKey) && _helperBiz.Contains(addressKey);
     }

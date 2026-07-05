@@ -366,6 +366,12 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[VStore] opened storage for '{vid}' (owner '{_owner}').");
         }
 
+        /// <summary>Round-35: is the panel currently showing THIS vehicle? Take-result deliveries close the
+        /// panel on success ("you carry it now"), but a LATE result from an earlier failed click was closing
+        /// a freshly-reopened panel before the user could do anything (probe caller = PlaceForAccessor via
+        /// OnResult, right after "opened storage"). Results may only close their own panel session.</summary>
+        public static bool IsOpenFor(string vid) => !string.IsNullOrEmpty(vid) && _vid == vid;
+
         public static void Close()
         {
             string vidWas = _vid;   // capture before clearing — used for the highlight reset below (round-12 #3)

@@ -845,6 +845,7 @@ namespace BigAmbitionsMP
                                 lastSer = new Dictionary<string, string>();
                             var newSer  = new Dictionary<string, string>();
                             var newDict = new Dictionary<string, BigAmbitions.Items.ItemInstance>();
+                            int restocked = 0;
                             foreach (var i in payload.ItemInstances)
                             {
                                 if (string.IsNullOrEmpty(i.Id)) continue;
@@ -858,18 +859,43 @@ namespace BigAmbitionsMP
                                 }
                                 var ii = DeserializeItemInstance(i);
                                 if (ii == null) continue;
+                                // Round-37j — IN-PLACE APPLY (the flatbed model, user-mandated after the 6th
+                                // destroy+respawn bug): deltas that don't change WHAT the item is keep the LIVE
+                                // ItemInstance object — its native callbacks (ShelfController.UpdateVisuals et al,
+                                // wired at Start) and any PlacementSystem references stay valid. IdentitySig is
+                                // 'core#cargo#stacked':
+                                //   whole sig equal            → transform-only  → move in place (round-22);
+                                //   core+stacked equal         → cargo-only      → swap the cargo list on the live
+                                //                                 object + fire the native cargo callback (visuals
+                                //                                 refresh exactly like a local deposit);
+                                //   core or stacked changed    → a genuinely different item → destroy+respawn.
+                                if (reg.itemInstances.TryGetValue(i.Id, out var prevLive) && prevLive != null)
+                                {
+                                    string ns = IdentitySig(i), ls = IdentitySig(prevLive);
+                                    bool transformOnly = ns == ls;
+                                    bool cargoOnly = false;
+                                    if (!transformOnly)
+                                    {
+                                        var np = ns.Split('#'); var lp = ls.Split('#');
+                                        cargoOnly = np.Length == 3 && lp.Length == 3 && np[0] == lp[0] && np[2] == lp[2];
+                                    }
+                                    if (transformOnly || cargoOnly)
+                                    {
+                                        if (cargoOnly)
+                                        {
+                                            prevLive.cargoInstances = ii.cargoInstances;
+                                            try { prevLive.OnItemsInCargoUpdated()?.Invoke(); } catch { }
+                                            restocked++;
+                                        }
+                                        prevLive.position  = ii.position;    // data transform follows the wire
+                                        prevLive.yRotation = ii.yRotation;
+                                        newDict[i.Id] = prevLive;            // KEEP the live object
+                                        movedIds.Add(i.Id);                  // GameObject transform sync pass
+                                        continue;
+                                    }
+                                }
                                 newDict[i.Id] = ii;
-                                // MOVE vs CHANGE (round-22): the owner adopting a guest's placement echoes it
-                                // back with a settled/snapped POSITION — a real delta, but destroy+respawning
-                                // the just-placed item made the guest's next click land on the dying zombie
-                                // (StartPlacementMode NRE → refused; the round-14 byte-ser echo-suppression
-                                // can't help because the position genuinely changed). A TRANSFORM-ONLY delta
-                                // (same name/cargo/state) now keeps the live GameObject and moves it in place;
-                                // identity changes (fridge cargo etc.) keep the respawn path.
-                                if (reg.itemInstances.TryGetValue(i.Id, out var prevLive) && prevLive != null
-                                    && IdentitySig(i) == IdentitySig(prevLive))
-                                    movedIds.Add(i.Id);
-                                else changedIds.Add(i.Id);
+                                changedIds.Add(i.Id);
                             }
                             foreach (var k in reg.itemInstances.Keys)
                                 if (!newDict.ContainsKey(k)) removedIds.Add(k);
@@ -942,6 +968,8 @@ namespace BigAmbitionsMP
                             if (purchasable > 0)
                                 Plugin.Logger.LogInfo($"[Patcher] enabled buyer purchasing on {purchasable} cargo shelf/shelves for '{payload.AddressKey}'.");
 
+                            if (restocked > 0)
+                                Plugin.Logger.LogInfo($"[Patcher] {restocked} item(s) restocked IN PLACE for '{payload.AddressKey}' (live objects kept; native cargo callbacks fired).");
                             reg.itemInstances.Clear();
                             foreach (var kv in newDict) reg.itemInstances[kv.Key] = kv.Value;
                             _lastItemSer[payload.AddressKey] = newSer;
@@ -950,7 +978,7 @@ namespace BigAmbitionsMP
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] itemInstances apply: {ex.Message}"); }
 
-                    Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' {InteriorSync.SnapshotSummary(payload)} (changed={changedIds.Count} removed={removedIds.Count}).");
+                    Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' {InteriorSync.SnapshotSummary(payload)} (changed={changedIds.Count} moved={movedIds.Count} removed={removedIds.Count}).");
 
                     // Trigger a visual refresh of the interior IF the local
                     // player is currently inside THIS building.  Writing to
@@ -1278,6 +1306,16 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] owner warning refresh: {ex.Message}"); }
         }
 
+        /// <summary>Round-37b: drop the per-item byte-diff baseline for one building so the NEXT interior
+        /// apply replaces EVERY live item object. The "unchanged → keep live object" optimization assumes
+        /// replicas are never mutated locally; when an unrouted path corrupted one anyway (register-bag
+        /// take), the keep-live branch preserved the corruption FOREVER while the owner's bytes stayed
+        /// unchanged. Callers pair this with an interior re-request = forced full heal.</summary>
+        public static void ForgetInteriorBaseline(string addressKey)
+        {
+            try { if (!string.IsNullOrEmpty(addressKey)) _lastItemSer.Remove(addressKey); } catch { }
+        }
+
         /// <summary>Round-34: pre-fix sessions PERSISTED injected buyer-purchaser flags into saves (the owner
         /// adopts guest edits through the same interior apply that used to inject on any cargo item, and
         /// owners save their own buildings) — a flagged item then boots its controller in SHOP mode (owner
@@ -1400,6 +1438,32 @@ namespace BigAmbitionsMP
                     return;
                 }
                 bool fullRebuild = changedIds == null;
+
+                // Round-37i (dead shelf hover, probe-chain-proven): our destroy+respawn interrupting a LIVE
+                // placement skips PlacementSystem.StopPlacingItem (:622-647) — the ONLY place that pairs the
+                // parent item's Outline() with RemoveOutline(). The stranded parent (e.g. the shelf a box was
+                // being placed onto) keeps disableHighlightInteraction=TRUE: hover check never runs again,
+                // right-click (visible-gated) still works — the user's exact asymmetry. Complete the native
+                // lifecycle BEFORE destroying, only when the refresh actually touches the placed item or its
+                // outlined parent (or on a full rebuild, which touches everything).
+                try
+                {
+                    if (BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode)
+                    {
+                        string placedId = "", parentId = "";
+                        try { placedId = BigAmbitions.PlacementSystem.PlacementSystem.CurrentPlaceableItemBeingPlaced?.GetItemInstance()?.id?.ToString() ?? ""; } catch { }
+                        try { parentId = BigAmbitions.PlacementSystem.PlacementSystem.lastParentItem?.GetItemInstance()?.id?.ToString() ?? ""; } catch { }
+                        bool touched = fullRebuild
+                            || (!string.IsNullOrEmpty(placedId) && (changedIds!.Contains(placedId) || (removedIds?.Contains(placedId) ?? false)))
+                            || (!string.IsNullOrEmpty(parentId) && (changedIds!.Contains(parentId) || (removedIds?.Contains(parentId) ?? false)));
+                        if (touched)
+                        {
+                            Plugin.Logger.LogWarning($"[Patcher] interior refresh intersects a LIVE placement (placed={placedId} parent={parentId}) — running native StopPlacingItem so parent outlines/flags don't strand (round-37i).");
+                            BigAmbitions.PlacementSystem.PlacementSystem.StopPlacingItem();
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] placement-intersect guard: {ex.Message}"); }
 
                 // Live controllers of THIS building, by instance id.
                 var liveById = new Dictionary<string, ItemController>();

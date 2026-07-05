@@ -150,10 +150,30 @@ namespace BigAmbitionsMP
         /// host-loss notice) so they read as a true pause instead of a silent
         /// clock stop.  MAIN THREAD ONLY (IL2CPP).  No-ops gracefully if the
         /// controller can't be resolved — the timeScale clamps still hold.</summary>
+        // Round-36c ("both stuck paused after re-host", dump-proven): the 0.25s rate limiter below
+        // SILENTLY DROPPED a genuine transition (hold-true and release-false landed within the window on
+        // a fast re-host) — the flag stayed paused while timeScale ran. The DESIRED state now persists
+        // here and TickPendingNativePause re-applies it every frame until the flag matches; the limiter
+        // keeps throttling the actual toggles (its anti-tug-of-war job) but can no longer lose the intent.
+        private static bool? _pendingNativePause;
+
+        /// <summary>Call once per frame (MPCanvasUI.Update): converge the native pause flag onto the last
+        /// requested state — survives rate-limit drops, late GSC discovery, and scene churn.</summary>
+        public static void TickPendingNativePause()
+        {
+            try
+            {
+                if (_pendingNativePause == null) return;
+                SetNativePause(_pendingNativePause.Value);   // no-op → clears pending; limiter throttles retries
+            }
+            catch { }
+        }
+
         public static void SetNativePause(bool paused)
         {
             try
             {
+                _pendingNativePause = paused;   // remember the INTENT first — the tick converges on it
                 EnsureGSCProbed();
                 if (_gscType == null) return;
 
@@ -175,7 +195,7 @@ namespace BigAmbitionsMP
                     }
                 }
                 if (_gscInstance == null) return;
-                if (GetGSCPaused() == paused) return;   // already in the wanted state
+                if (GetGSCPaused() == paused) { _pendingNativePause = null; return; }   // already in the wanted state
 
                 _gscMTogglePause ??= _gscType.GetMethod("TogglePause",
                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
@@ -187,6 +207,7 @@ namespace BigAmbitionsMP
                 AllowNativePauseCall = true;            // our key through the MP pause-suppression patches
                 try { _gscMTogglePause.Invoke(_gscInstance, null); }
                 finally { AllowNativePauseCall = false; }
+                _pendingNativePause = null;             // applied — stop converging
                 Plugin.Logger.LogInfo($"[GSC] Native pause → {paused}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[GSC] SetNativePause({paused}): {ex.Message}"); }

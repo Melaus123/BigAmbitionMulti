@@ -231,8 +231,12 @@ namespace BigAmbitionsMP
             return set;
         }
 
-        public static void SendLoadDataToEachClient(string session, MpManifest m)
+        // Round-37: `session` = the folder the .hsg bytes are READ from (may be a frozen checkpoint);
+        // `lineageName` = the session name the CLIENTS adopt as active (the playthrough base), so their
+        // later uploads/disconnect saves continue the lineage and never mutate the loaded checkpoint.
+        public static void SendLoadDataToEachClient(string session, MpManifest m, string? lineageName = null)
         {
+            string adopt = string.IsNullOrEmpty(lineageName) ? session : lineageName;
             foreach (var peer in _clients.Keys)
             {
                 if (!_peerNames.TryGetValue(peer.Id, out var pid)) continue;
@@ -251,7 +255,7 @@ namespace BigAmbitionsMP
                     {
                         Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
                         {
-                            SessionName      = session,
+                            SessionName      = adopt,
                             HsgGzipBase64    = "",
                             SaveUnavailable  = true,
                             FallbackSettings = LastStartSettings,
@@ -264,7 +268,7 @@ namespace BigAmbitionsMP
                     float kc = GetKnownCash(pid);
                     Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
                     {
-                        SessionName      = session,
+                        SessionName      = adopt,
                         HsgGzipBase64    = "",
                         Money            = Math.Max(0f, kc),
                         FallbackSettings = LastStartSettings,
@@ -275,7 +279,7 @@ namespace BigAmbitionsMP
                 float cash = MPSaveCoordinator.BestCashFor(m, stable);
                 var payload = new LoadDataPayload
                 {
-                    SessionName   = session,
+                    SessionName   = adopt,
                     HsgGzipBase64 = data.Value.b64,
                     RawLength     = data.Value.raw,
                     Money         = cash,

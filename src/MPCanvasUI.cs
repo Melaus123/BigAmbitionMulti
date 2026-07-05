@@ -316,12 +316,12 @@ namespace BigAmbitionsMP
                 {
                     if (MPServer.IsRunning)
                     {
-                        string session = MPSaveCoordinator.ActiveSessionName;
-                        if (!string.IsNullOrEmpty(session))
-                        {
-                            Plugin.Logger.LogInfo($"[MPSave] OnApplicationQuit — host self-saving '{session}' before exit.");
-                            MPSaveCoordinator.PerformLocalSave(session);
-                        }
+                        // Round-37: the quit-save goes to the DISCONNECT variant — never the manual base
+                        // (this direct PerformLocalSave(active) was one of the two "my save advanced
+                        // without me saving" leaks; the join-save was the other).
+                        Plugin.Logger.LogInfo("[MPSave] OnApplicationQuit — host quit-checkpoint before exit.");
+                        MPSaveCoordinator.HostQuitCheckpoint();
+                        MPSaveCoordinator.FlushCheckpointsNow();   // don't lose a fresh manual save's frozen copy to the settle timer
                     }
                     else if (MPClient.IsConnected || MPClient.SessionEnded)
                     {
@@ -405,6 +405,12 @@ namespace BigAmbitionsMP
             PassengerRide.Update();      // passenger ride: click-to-board → pin-to-seat → exit + remote riders
             PassengerHud.Tick();         // passenger's in-ride "Exit Vehicle" panel
             VehicleStoragePanel.Tick();  // non-owner shared-storage panel (refresh on cargo change / auto-close)
+            BusinessDiag.Tick();         // DIAG:INVESTIGATION(shelf-item-loss) — owner shelf-state scanner, removable
+            TimeSync.TickStartupHold();  // round-36: had NO caller (dead since inception) — revives the hold's
+                                         // timeScale re-clamp and hosts the DIAG(half-pause) layer dump
+            GameStateReader.TickPendingNativePause();   // round-36c: converge the pause flag onto the last
+                                                        // requested state (rate-limit drops lost it before)
+            MPSaveCoordinator.TickCheckpoints();        // round-37: run due checkpoint copies (worker thread)
             RemotePlayerManager.TickVehicleCollisionIgnores();   // remote avatars must not shove vehicles
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
             MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion
@@ -2514,6 +2520,28 @@ namespace BigAmbitionsMP
                                               // enforcement never depends on which machine's scene finishes first
                 InteriorSync.Reset();     // interior subs + owner-snapshot caches die with the scene — a prior session's Authoritative=true snapshot must not bleed into a new world (was never wired up)
                 GameStatePatcher.SweepPurchaserPollution("scene ready");   // heal saves polluted by the pre-round-34 purchaser injection (owner shelves/boxes booting in shop mode)
+                // Round-35: a save can carry a STALE BAMP_ proxy id in ActiveVehicleId (borrowed cart
+                // despawned mid-push before the round-34b exit guard existed). IsUsingVehicle then reads
+                // true forever with no resolvable vehicle → box clicks NRE at ItemController.Interact:509
+                // ("owner couldn't access the shelf"). BAMP_ ids are ours and never valid across sessions.
+                try
+                {
+                    var av = SaveGameManager.Current?.ActiveVehicleId;
+                    if (!string.IsNullOrEmpty(av) && av.StartsWith("BAMP_", StringComparison.Ordinal))
+                    {
+                        SaveGameManager.Current.ActiveVehicleId = null;
+                        Plugin.Logger.LogWarning($"[Vehicle] scene-ready sweep: cleared stale proxy ActiveVehicleId='{av}' from the loaded save.");
+                    }
+                    // Round-37m: normalize EMPTY to NULL — the native on-foot contract is null; a persisted ""
+                    // (written by the pre-37m take-repair) passes ShelfCtaBehavior's `!= null` check and NREs
+                    // the hover chain on every storage shelf. Heals poisoned saves at load.
+                    else if (av != null && av.Length == 0)
+                    {
+                        SaveGameManager.Current.ActiveVehicleId = null;
+                        Plugin.Logger.LogWarning("[Vehicle] scene-ready sweep: normalized empty ActiveVehicleId to null (dead-shelf-hover poison, round-37m).");
+                    }
+                }
+                catch { }
                 MPAudit.Reset();          // divergence streaks/throttle die with the session (else stale [Audit] state pollutes the bug-report log across same-process sessions)
                 MPStockSync.Reset();      // per-shop stock digests die with the session
                 _appearanceSig = ""; _appearanceNextAt = 0f;
@@ -3745,6 +3773,16 @@ namespace BigAmbitionsMP
                             on = Mathf.Abs(dx) <= half && yy >= 3;
                             break;
                         }
+                        case "Checkpoint": // bookmark: solid ribbon with a V-notch cut from the bottom
+                        {
+                            bool inRibbon = Mathf.Abs(dx) <= c * 0.50f && Mathf.Abs(dy) <= c * 0.88f;
+                            bool notch    = yy < s * 0.34f && Mathf.Abs(dx) <= (s * 0.34f - yy) * 0.5f;
+                            on = inRibbon && !notch;
+                            break;
+                        }
+                        case "Auto checkpoint": // small clock ring + center dot (kin of Autosave, visibly lighter)
+                            on = (r <= c * 0.88f && r >= c * 0.64f) || r <= c * 0.18f;
+                            break;
                         default:           // "Main" — disk/floppy: rounded square, clipped top-right, label slot
                         {
                             float hs = c * 0.80f;
@@ -3965,9 +4003,11 @@ namespace BigAmbitionsMP
 
         private static string VariantLabel(string kind)
         {
-            if (kind == "Autosave")   return "Autosave";
-            if (kind == "Disconnect") return "Disconnect checkpoint";
-            if (kind == "Recover")    return "Recover (crash)";
+            if (kind == "Autosave")        return "Autosave";
+            if (kind == "Disconnect")      return "Disconnect checkpoint";
+            if (kind == "Recover")         return "Recover (crash)";
+            if (kind == "Checkpoint")      return "Save point";        // round-37: frozen copy of a manual save
+            if (kind == "Auto checkpoint") return "Auto save point";   // round-37: frozen copy of an automatic save
             return "Main save";
         }
 

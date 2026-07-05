@@ -62,9 +62,19 @@ namespace BigAmbitionsMP
         // excused this client off a stale "Menu" phase report during the menu detour, or the host simply
         // finished first on a fast reload. EndStartupHold's not-held early-return silently swallowed that
         // release; the hold then began and froze forever (nothing left to release it). Remember an early
-        // release and skip the pending hold — ordering-proof, no protocol change. Cleared per load cycle
-        // (ResetClockState runs in the scene-ready reset block) so a stale marker can't skip a future hold.
-        private static bool _releasedBeforeHold;
+        // release and skip the pending hold.
+        // Round-36 RE-OCCURRENCE (log-proven order): release arrives (marker set) → SCENE-READY reset
+        // CLEARS the marker (the round-18 "per load cycle" clear) → hold engages anyway. The bool can't
+        // survive that ordering, so it's now a TIMESTAMP with a validity window: resets don't clear it,
+        // staleness self-expires. A spurious skip (duplicate release inside the window) just means no
+        // freeze — the release that follows corrects any drift; a WRONGLY-ENGAGED hold is the worse bug.
+        // DateTime.UtcNow (not Time.*): the early release arrives on the NETWORK thread (net48: no TickCount64).
+        private static System.DateTime _releasedBeforeHoldAtUtc = System.DateTime.MinValue;
+        private static bool _releasedBeforeHold
+        {
+            get => (System.DateTime.UtcNow - _releasedBeforeHoldAtUtc).TotalSeconds < 90.0;
+            set => _releasedBeforeHoldAtUtc = value ? System.DateTime.UtcNow : System.DateTime.MinValue;
+        }
 
         /// <summary>True while the game is frozen waiting for all players to load.</summary>
         public static bool IsStartupHeld => _startupHold;
@@ -77,6 +87,10 @@ namespace BigAmbitionsMP
             if (_releasedBeforeHold)
             {
                 _releasedBeforeHold = false;
+                // Round-36c: skipping the hold must STILL end unpaused — the load/menu set the native
+                // pause and no release will follow to clear it (the one that arrived already ran its
+                // early path). Without this, the skip path left the pause FLAG stuck on the client.
+                GameStatePatcher.EnqueueOnMainThread(() => GameStateReader.SetNativePause(false));
                 Plugin.Logger.LogInfo("[TimeSync] Startup hold SKIPPED — the release for this load already arrived (fast host / menu-reload ordering).");
                 return;
             }
@@ -93,6 +107,9 @@ namespace BigAmbitionsMP
             if (!_startupHold)
             {
                 _releasedBeforeHold = true;   // arrived before our hold began — remember it (round-18)
+                // Round-36c: the release's INTENT is "run unpaused" regardless of hold state — the game's
+                // own load pause may still be standing; clear it now, not only on the full-release path.
+                GameStatePatcher.EnqueueOnMainThread(() => GameStateReader.SetNativePause(false));
                 Plugin.Logger.LogInfo("[TimeSync] Startup release received BEFORE the hold began — remembered; the pending hold will be skipped.");
                 return;
             }
@@ -101,7 +118,14 @@ namespace BigAmbitionsMP
             GameStatePatcher.EnqueueOnMainThread(() => GameStateReader.SetNativePause(false));
             MPLoadProfiler.Mark("FREEZE end — game running");
             Plugin.Logger.LogInfo("[TimeSync] Startup hold released — game running.");
+            // DIAG:INVESTIGATION(half-pause) — round 36: menu→re-host left the client "half paused" even
+            // though hold+release ran cleanly (user 2026-07-04). Dump every pause LAYER for 30s after
+            // release so the mismatched one names itself. REMOVE when settled.
+            _pauseDumpUntil = Time.unscaledTime + 30f;
+            _nextPauseDumpAt = 0f;
         }
+
+        private static float _pauseDumpUntil, _nextPauseDumpAt;   // DIAG(half-pause)
 
         /// <summary>
         /// Call every LateUpdate while the hold is active — re-clamps timeScale to
@@ -109,6 +133,19 @@ namespace BigAmbitionsMP
         /// </summary>
         public static void TickStartupHold()
         {
+            // DIAG(half-pause): post-release layer dump — timeScale vs the game's own pause UI vs our
+            // manual/ahead holds. One of these disagreeing with the rest IS the "half paused" state.
+            if (_pauseDumpUntil > 0f)
+            {
+                if (Time.unscaledTime >= _pauseDumpUntil) _pauseDumpUntil = 0f;
+                else if (Time.unscaledTime >= _nextPauseDumpAt)
+                {
+                    _nextPauseDumpAt = Time.unscaledTime + 5f;
+                    bool uiPaused = false;
+                    try { uiPaused = InstanceBehavior<UI.UIs>.Instance?.gameSpeed?.Paused ?? false; } catch { }
+                    Plugin.Logger.LogInfo($"[TimeSync] post-release layers: timeScale={Time.timeScale:F2} uiPaused={uiPaused} manual={ManualPaused} startupHeld={_startupHold} aheadHeld={AheadHeld}");
+                }
+            }
             if (!_startupHold) return;
             if (Time.timeScale != 0f)
                 Time.timeScale = 0f;
@@ -208,7 +245,9 @@ namespace BigAmbitionsMP
         {
             _correctionHours = 0f;
             AheadHeld        = false;
-            _releasedBeforeHold = false;   // early-release marker is per load cycle (round-18)
+            // Round-36: the early-release marker is deliberately NOT cleared here anymore — the scene-ready
+            // reset ran BETWEEN the early release and the hold engage (log-proven), wiping the marker the
+            // hold needed. Its 90s validity window handles staleness instead.
         }
 
         /// <summary>

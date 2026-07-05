@@ -79,6 +79,9 @@ namespace BigAmbitionsMP
             string autoSuffix = reason == "disconnect" ? "-disconnect"
                               : reason == "autosave"   ? "-auto"
                               : reason == "midnight"   ? "-recover"   // daily coordinated rollback checkpoint (lower frequency than -auto)
+                              : reason == "join"       ? "-auto"     // round-37: a player JOINING is not the user
+                                                                     // saving — it wrote the MANUAL base for weeks
+                                                                     // (the "my save advanced without me saving" leak)
                               : "";
             bool isAutomatic = autoSuffix.Length > 0;
             // Always derive from the CLEAN base (strip any drifted sibling suffix) before appending this
@@ -116,10 +119,137 @@ namespace BigAmbitionsMP
                     // BEFORE the session's first save (no folder yet) would
                     // otherwise never persist unless the ledger changed again.
                     MPHub.SaveLedger();
+                    ScheduleCheckpoint(session, isAutomatic);   // round-37: every save event freezes a copy
                     DiagPhase("host lambda: DONE");
                 }
                 catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] Host save: {ex}"); }
             });
+        }
+
+        /// <summary>Round-37: the window-close self-save — writes the DISCONNECT variant, never the manual
+        /// base. The old direct PerformLocalSave(activeSession) was the second "Main advanced without me
+        /// saving" leak (alongside join-saves). Runs the same slot+metadata trio HostSaveNow uses so the
+        /// -disconnect variant stays loadable (HostLoadSession requires a manifest). MAIN THREAD ONLY.</summary>
+        public static void HostQuitCheckpoint()
+        {
+            string session;
+            lock (_lock)
+            {
+                if (string.IsNullOrEmpty(_activeSessionName)) return;
+                session = _activeSessionName;
+            }
+            string dc = MPSaveManager.StripToBase(session) + "-disconnect";
+            Plugin.Logger.LogInfo($"[MPSave] HostQuitCheckpoint → '{dc}' (manual base untouched).");
+            try
+            {
+                var slot = PerformLocalSave(dc);
+                SetSessionMetadata(dc, slot.Day);
+                MergeSlot(dc, slot);
+            }
+            catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] HostQuitCheckpoint: {ex}"); }
+        }
+
+        // ── Immutable checkpoints (round-37, user-mandated save integrity) ───────
+        //
+        // Every completed save event ALSO produces a frozen, timestamped COPY of the session folder:
+        //   manual saves  → '<base>-cp-<stamp>'   kept until the user deletes them
+        //   automatic     → '<base>-cpa-<stamp>'  rolling window (newest AutoCheckpointKeep kept)
+        // A checkpoint is structurally a normal session folder (manifest + <char>/save.hsg), so the
+        // EXISTING picker/load machinery handles it; loading one FORKS: HostLoadSession retargets the
+        // active session to the lineage base, so ongoing saves can never mutate a checkpoint.
+        // The copy is DEFERRED (client .hsg uploads for the save land over a few seconds) and runs on a
+        // worker thread (pure file IO — no IL2CPP).
+        private const int   AutoCheckpointKeep    = 5;
+        private const float CheckpointSettleDelay = 20f;
+        private static readonly List<(string src, string dst, float dueAt, bool prune)> _pendingCp = new();
+
+        private static void ScheduleCheckpoint(string sourceSession, bool automatic)
+        {
+            try
+            {
+                string baseName = MPSaveManager.StripToBase(sourceSession);
+                string stamp    = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                string dst      = baseName + (automatic ? "-cpa-" : "-cp-") + stamp;
+                lock (_pendingCp) _pendingCp.Add((sourceSession, dst, UnityEngine.Time.unscaledTime + CheckpointSettleDelay, automatic));
+                Plugin.Logger.LogInfo($"[MPSave] checkpoint scheduled: '{sourceSession}' → '{dst}' (in {CheckpointSettleDelay:F0}s).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ScheduleCheckpoint: {ex.Message}"); }
+        }
+
+        /// <summary>Per-frame (MPCanvasUI.Update): run due checkpoint copies on a worker thread.</summary>
+        public static void TickCheckpoints()
+        {
+            (string src, string dst, bool prune) job = default;
+            bool have = false;
+            lock (_pendingCp)
+            {
+                for (int i = 0; i < _pendingCp.Count; i++)
+                    if (UnityEngine.Time.unscaledTime >= _pendingCp[i].dueAt)
+                    { job = (_pendingCp[i].src, _pendingCp[i].dst, _pendingCp[i].prune); _pendingCp.RemoveAt(i); have = true; break; }
+            }
+            if (!have) return;
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    string srcDir = MPSaveManager.MpSessionFolder(job.src);
+                    string dstDir = MPSaveManager.MpSessionFolder(job.dst);
+                    if (!Directory.Exists(srcDir)) { Plugin.Logger.LogWarning($"[MPSave] checkpoint source missing: {srcDir}"); return; }
+                    CopyDirectory(srcDir, dstDir);
+                    Plugin.Logger.LogInfo($"[MPSave] checkpoint written: '{job.dst}'.");
+                    if (job.prune) PruneAutoCheckpoints(MPSaveManager.StripToBase(job.src));
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] checkpoint copy '{job.dst}': {ex.Message}"); }
+            });
+        }
+
+        /// <summary>Quit path: run every pending checkpoint copy NOW, synchronously — a manual save followed
+        /// by a quick window-close must not lose its frozen copy to the 20s settle timer.</summary>
+        public static void FlushCheckpointsNow()
+        {
+            List<(string src, string dst, float dueAt, bool prune)> jobs;
+            lock (_pendingCp) { jobs = new List<(string, string, float, bool)>(_pendingCp); _pendingCp.Clear(); }
+            foreach (var j in jobs)
+            {
+                try
+                {
+                    string srcDir = MPSaveManager.MpSessionFolder(j.src);
+                    if (!Directory.Exists(srcDir)) continue;
+                    CopyDirectory(srcDir, MPSaveManager.MpSessionFolder(j.dst));
+                    Plugin.Logger.LogInfo($"[MPSave] checkpoint flushed on quit: '{j.dst}'.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] quit-flush '{j.dst}': {ex.Message}"); }
+            }
+        }
+
+        private static void CopyDirectory(string src, string dst)
+        {
+            Directory.CreateDirectory(dst);
+            foreach (var f in Directory.GetFiles(src))
+                File.Copy(f, Path.Combine(dst, Path.GetFileName(f)), overwrite: true);
+            foreach (var d in Directory.GetDirectories(src))
+                CopyDirectory(d, Path.Combine(dst, Path.GetFileName(d)));
+        }
+
+        private static void PruneAutoCheckpoints(string baseName)
+        {
+            try
+            {
+                string root = MPSaveManager.MpVersionFolder();
+                if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return;
+                string prefix = MPSaveManager.Sanitize(baseName) + "-cpa-";
+                var dirs = new List<string>();
+                foreach (var d in Directory.GetDirectories(root))
+                    if (Path.GetFileName(d).StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) dirs.Add(d);
+                if (dirs.Count <= AutoCheckpointKeep) return;
+                dirs.Sort(StringComparer.OrdinalIgnoreCase);   // stamp format sorts chronologically
+                for (int i = 0; i < dirs.Count - AutoCheckpointKeep; i++)
+                {
+                    try { Directory.Delete(dirs[i], true); Plugin.Logger.LogInfo($"[MPSave] pruned auto checkpoint '{Path.GetFileName(dirs[i])}'."); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] prune '{dirs[i]}': {ex.Message}"); }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] PruneAutoCheckpoints: {ex.Message}"); }
         }
 
         // ── In-game pause-menu save (MiniMenu Save / Save-and-Exit) ─────────────
@@ -159,6 +289,7 @@ namespace BigAmbitionsMP
                 // accepted beforehand would otherwise never reach disk (the ledger
                 // path needs the session folder, which PerformLocalSave just created).
                 MPHub.SaveLedger();
+                ScheduleCheckpoint(session, automatic: false);   // round-37: manual save → permanent checkpoint
             }
             catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] HostSaveSync save: {ex}"); }
         }
@@ -363,10 +494,15 @@ namespace BigAmbitionsMP
             var m = MPSaveManager.ReadManifest(session);
             if (m == null) { Plugin.Logger.LogWarning($"[MPSave] HostLoadSession: no manifest for '{session}'."); return; }
 
-            lock (_lock) { _activeSessionName = session; _activeManifest = m; }
+            // Round-37 FORK SEMANTICS: load FROM the selected variant/checkpoint folder, but CONTINUE the
+            // playthrough on its lineage BASE — ongoing saves go to Main/-auto/checkpoints as usual and can
+            // never mutate the loaded (frozen) source. Loading is a jump to a recorded moment; the recorded
+            // moment stays recorded.
+            string lineage = MPSaveManager.StripToBase(session);
+            lock (_lock) { _activeSessionName = lineage; _activeManifest = m; }
 
-            MPServer.RestoreOwnershipFromManifest(m);     // cross-machine ownership + cash seed
-            MPServer.SendLoadDataToEachClient(session, m); // each client gets its own .hsg
+            MPServer.RestoreOwnershipFromManifest(m);              // cross-machine ownership + cash seed
+            MPServer.SendLoadDataToEachClient(session, m, lineage); // each client gets its own .hsg FROM the source, tagged with the lineage
 
             float hostCash = BestCashFor(m, MPConfig.StableId);
             GameStatePatcher.EnqueueOnMainThread(() =>
@@ -374,7 +510,7 @@ namespace BigAmbitionsMP
                 try { LoadOwnHsg(session, MPConfig.StableId); QueueCashApply(hostCash); }
                 catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] Host load: {ex}"); }
             });
-            Plugin.Logger.LogInfo($"[MPSave] HostLoadSession '{session}' — {m.Slots.Count} slot(s).");
+            Plugin.Logger.LogInfo($"[MPSave] HostLoadSession '{session}' → continuing lineage '{lineage}' — {m.Slots.Count} slot(s).");
         }
 
         /// <summary>Client: received its .hsg from the host — write it locally,

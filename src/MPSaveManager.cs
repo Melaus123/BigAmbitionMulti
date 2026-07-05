@@ -285,7 +285,11 @@ namespace BigAmbitionsMP
                     }
                     pt.Players = newestNamed != null ? newestNamed.Players : "—";
                     foreach (var v in pt.Variants) if (string.IsNullOrEmpty(v.Players)) v.Players = pt.Players;   // recover borrows the run's roster
-                    pt.Variants.Sort((a, b) => VariantOrder(a.Kind).CompareTo(VariantOrder(b.Kind)));
+                    pt.Variants.Sort((a, b) =>
+                    {
+                        int o = VariantOrder(a.Kind).CompareTo(VariantOrder(b.Kind));
+                        return o != 0 ? o : b.SavedAtUnix.CompareTo(a.SavedAtUnix);   // same kind → newest first (round-37: checkpoint stacks)
+                    });
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ListPlaythroughs: {ex.Message}"); }
@@ -296,6 +300,8 @@ namespace BigAmbitionsMP
 
         private static string ClassifyVariant(string name)
         {
+            if (name.Contains("-cpa-"))       return "Auto checkpoint";   // round-37: frozen automatic snapshot
+            if (name.Contains("-cp-"))        return "Checkpoint";        // round-37: frozen manual snapshot
             if (name.EndsWith("-recover"))    return "Recover";      // covers -recover / -auto-recover / -disconnect-recover
             if (name.EndsWith("-disconnect")) return "Disconnect";
             if (name.EndsWith("-auto"))       return "Autosave";
@@ -306,6 +312,11 @@ namespace BigAmbitionsMP
         public static string StripToBase(string name)
         {
             if (string.IsNullOrEmpty(name)) return name ?? "";
+            // Round-37 checkpoints: '<base>-cp-<stamp>' / '<base>-cpa-<stamp>' — cut at the marker.
+            int cpa = name.IndexOf("-cpa-", StringComparison.Ordinal);
+            if (cpa > 0) return name.Substring(0, cpa);
+            int cp = name.IndexOf("-cp-", StringComparison.Ordinal);
+            if (cp > 0) return name.Substring(0, cp);
             foreach (var suf in new[] { "-auto-recover", "-disconnect-recover", "-recover", "-disconnect", "-auto" })
                 if (name.EndsWith(suf)) return name.Substring(0, name.Length - suf.Length);
             return name;
@@ -313,11 +324,13 @@ namespace BigAmbitionsMP
 
         private static int VariantOrder(string kind)
         {
-            if (kind == "Main")       return 0;
-            if (kind == "Autosave")   return 1;
-            if (kind == "Disconnect") return 2;
-            if (kind == "Recover")    return 3;
-            return 4;
+            if (kind == "Main")            return 0;
+            if (kind == "Checkpoint")      return 1;   // the user's frozen manual saves, right under Main
+            if (kind == "Autosave")        return 2;
+            if (kind == "Auto checkpoint") return 3;
+            if (kind == "Disconnect")      return 4;
+            if (kind == "Recover")         return 5;
+            return 9;
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────
