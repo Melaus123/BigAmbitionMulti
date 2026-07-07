@@ -277,10 +277,13 @@ double-counting and helper-charged expenses structurally impossible.
 - **Phase-3 anchor:** `CustomerEntriesCalculator` subtracts live completed orders from the simulated hourly
   customer quota — forwarded helper-served orders injected into `reg.unprocessedCompletedOrders` on the
   owner's machine get native anti-double-count for free.
-- Overstocking impossible: helper puts route through owner-side `TryToAddToCargo` (capacity + whitelist +
-  stack limits); "full" bounces back as a toast.
+- Overstocking impossible: helper puts are owner-side clamped. **CORRECTED 2026-07-07:** for stock STATIONS
+  (register/producer) the primitive is `ItemInstance.MergeCargo` — `TryToAddToCargo` is the GENERAL-holder
+  primitive whose `cargoCapacity`/`itemsWhitelist` gates station data fails (probe-proven: the cash
+  register's `cargoCapacity` is 0 — every station put bounced "full" until the switch). Shelf puts keep
+  `TryToAddToCargo` + partial-merge rollback.
 
-### Phase 1 — SHIPPED 2026-07-04 (uncommitted)
+### Phase 1 — SHIPPED 2026-07-04 (committed 997aed5)
 `GrantKind.Business` + UI toggle; host classifies addresses (businessTypeName ≠ empty ⇒ Business grant key,
 else Housing) and pushes a separate `HelperAddressKeys` set (`GrantSync.IsHelperBusiness`); helper entry
 while closed; furniture place/move (CanBuild + SecondaryInteract `Enter(includeHelper:true)` + placement/
@@ -288,7 +291,7 @@ removal/designer forwards). Helpers deliberately do NOT get the residence CTA/ov
 bypass the native owner-gates (shelf stock, register, computer) with no routing behind them. Injected roster
 staff are skipped in `PayWage` (belt-and-braces).
 
-### Phase 2 — logistics — SHIPPED 2026-07-04 (uncommitted)
+### Phase 2 — logistics — SHIPPED 2026-07-04 (committed 997aed5)
 - **Stock dropdown**: helper picks route to the owner as an OPERATION (`OpSetStock`); the owner runs the
   native moves (return old stock to a shelf, set name, auto-fill from storage, business refreshers).
 - **Producer refill**: helper pours held/vehicle ingredients in via clamped routed puts (+ a bare name-set
@@ -303,7 +306,31 @@ staff are skipped in `PayWage` (belt-and-braces).
   account — plus discard/drag; needs a dedicated routed panel, the VehicleStoragePanel pattern). Also
   still owner-only: signs, hairdresser price, DJ booth.
 
+### Phase 2c — register logistics — SHIPPED + field-verified 2026-07-07 (commit 0bf821a)
+The register deposit/take round-trip, closed over rounds 38b-38e (user-confirmed working in a 2-instance
+run). Everything below is field-proven, not just code-read:
+- **Deposit** (helper pours a bag box in): CTA bind → routed put → owner merges via `MergeCargo` (see the
+  corrected firewall note above). An EMPTY slot adopts the incoming stack's `paid`/`pricePerUnit` before
+  the merge — both native primitives gate on paid EQUALITY, and a station's leftover slot flags are dead
+  data the owner's own deposit would have overwritten wholesale. Partial fills follow native semantics
+  (landed amount echoed; guest consumes exactly that).
+- **Take** (the register panel's REMOVE CONTENT → `ItemController.RemoveStockInContent`): routed as
+  ctx `"stationtake"` — the owner empties the REAL slot with native semantics (whole stock, slot NAME
+  cleared on empty, capacity/change tail) and the box arrives via the take delivery. Empty hands required
+  up front; hands-full race gives back via ctx `"stationreturn"` (the station merge path — a generic
+  return would bounce on `cargoCapacity=0` and vaporize the stock).
+- **Cargo authority shield** (`GameStatePatcher.ApplyInteriorSnapshot`): guest-authored interior forwards
+  are furniture-authoritative but NEVER cargo-authoritative — when the receiver owns the building,
+  pre-existing items keep their live cargo. Field origin: an unrouted replica take got LAUNDERED into
+  owner state by the next furniture forward, emptying the owner's real register.
+- **Relay/apply grant drift fixed**: the host relay gates (`HandleBuildingCargoReq`,
+  `HandleBuildingInteriorEdit`) were Housing-only while `OwnerApply` accepts Housing OR Business — a
+  business-only helper's ops were silently dropped. Both now match the authoritative gate.
+- **Tooltip parity**: `StockOverlay.ShouldShow` (the hover "Contents: … 0/1000") ungated for helpers —
+  read-only visibility flip; helper and owner now read the same facts off the same machine.
+
 ### Phase 3 — register work
 Helper serves local customers; each completed order forwards to the owner into
 `reg.unprocessedCompletedOrders` (native displacement dedups vs the hourly sim). Design details after
-Phase 2.
+Phase 2. NOTE 2026-07-07: the register panel's WORK button (DropdownOverlay sibling) is the natural
+entry point; its helper behavior is currently native/unaudited — audit before Phase 3 design.
