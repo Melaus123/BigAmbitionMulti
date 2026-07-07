@@ -302,9 +302,14 @@ staff are skipped in `PayWage` (belt-and-braces).
   short-circuit; sign :97; DJ :28). Hairdresser :191 may comp a helper's haircut — known cosmetic quirk.
 - **Fixed en route**: native `TryToAddToCargo` partially merges before returning false — owner-side puts
   now roll the partial back, so "full" is all-or-nothing (this dup hazard predated business permissions).
-- **Still blocked**: storage manage/take UI (CargoItemUi paths include SELL — would credit the helper's
-  account — plus discard/drag; needs a dedicated routed panel, the VehicleStoragePanel pattern). Also
-  still owner-only: signs, hairdresser price, DJ booth.
+- **Storage manage/take — SHIPPED 2026-07-07 (round 47/47b), FULL PARITY (user contract change):** the
+  native manage panel opens for helpers. Take routes as "boxtake" (sealed box + nested contents echoed
+  over the wire; loose stacks ride the generic take; hands-full give-back returns the box WITH contents).
+  SELL and DISCARD have full parity per the user's trust-scoped ruling: the REMOVAL routes to the owner
+  ("stacksell"/"stackdiscard", identity = name+amount+paid, Count-bounded), and on a sell the MONEY
+  credits the HELPER's own wallet at verdict time (native whoever-sells-pockets-it; Transfers exist for
+  gifting it back). Sell-all reimplemented with the native confirm. Still owner-only: the row action
+  button (equip/read/place), stored vehicle-type cargo, signs, hairdresser price, DJ booth.
 
 ### Phase 2c — register logistics — SHIPPED + field-verified 2026-07-07 (commit 0bf821a)
 The register deposit/take round-trip, closed over rounds 38b-38e (user-confirmed working in a 2-instance

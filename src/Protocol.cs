@@ -371,6 +371,10 @@ namespace BigAmbitionsMP
         public string Ctx          { get; set; } = "";   // put-source context ("wornHead"/"wornHand"/"") so the
                                                          // accessor's confirm handler knows what to consume locally —
                                                          // explicit beats inferring the source by item name (round-12 A)
+        // Round-47: sealed-box give-backs carry their nested contents (see BuildingCargoResPayload.Nested).
+        public List<CargoNestedInfo> Nested { get; set; } = new();
+        // Round-47b (helper sell/discard parity): how many identical stack instances the op targets.
+        public int Count { get; set; } = 1;
     }
 
     /// <summary>One player business's staff roster (round-30 WS3). The synced work shifts
@@ -406,6 +410,18 @@ namespace BigAmbitionsMP
         public bool   Ok           { get; set; }
         public string Reason       { get; set; } = "";
         public string Ctx          { get; set; } = "";   // echoed from the request (see req)
+        // Round-47 (slice 2b — helper shelf take): a taken SEALED BOX's contents, so the delivered
+        // in-hands box carries exactly what the owner's box held. Empty for loose-cargo takes.
+        public List<CargoNestedInfo> Nested { get; set; } = new();
+        // Round-47b: how many stack instances the owner actually removed (sell/discard credit basis).
+        public int Count { get; set; } = 1;
+    }
+
+    public class CargoNestedInfo
+    {
+        public string ItemName     { get; set; } = "";
+        public int    Amount       { get; set; }
+        public float  PricePerUnit { get; set; }
     }
 
     /// <summary>Driver (a granted borrower) → host → all: the live pose of owner O's car V while the borrower

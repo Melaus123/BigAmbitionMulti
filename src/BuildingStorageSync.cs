@@ -31,6 +31,38 @@ namespace BigAmbitionsMP
         public static void RequestPut(string addressKey, string itemId, string itemName, int amount, bool paid, float price, string ctx = "")
             => Send(OpPut, addressKey, itemId, itemName, amount, paid, price, ctx);
 
+        /// <summary>Round-47b (full sell/discard parity, user 2026-07-07): a helper sells or discards a
+        /// whole stack row. The REMOVAL routes to the owner (stock truth); on a sell, the MONEY credits
+        /// the HELPER's own wallet locally on confirm — native "whoever sells pockets it" semantics; the
+        /// grant is trust-scoped and Transfers exist for gifting it back (user's design).</summary>
+        public static void RequestStackOp(string addressKey, string itemId, string itemName, int amount, bool paid, float price, int count, bool sell)
+        {
+            if (string.IsNullOrEmpty(addressKey) || string.IsNullOrEmpty(itemId) || string.IsNullOrEmpty(itemName) || count <= 0) return;
+            var req = new BuildingCargoReqPayload
+            {
+                AddressKey = addressKey, ItemId = itemId, PlayerId = MPConfig.PlayerId,
+                Op = OpTake, ItemName = itemName, Amount = amount, Paid = paid, PricePerUnit = price,
+                Count = count, Ctx = sell ? "stacksell" : "stackdiscard",
+            };
+            if (MPServer.IsRunning) MPServer.HandleBuildingCargoReq(req, MPConfig.PlayerId);
+            else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BuildingCargoReq, MPConfig.PlayerId, req));
+        }
+
+        /// <summary>Round-47: put a SEALED BOX back (hands-full race after a boxtake) — nested contents
+        /// travel so the give-back doesn't strip the box.</summary>
+        public static void RequestPutBox(string addressKey, string itemId, string itemName, int amount, bool paid, float price, List<CargoNestedInfo> nested)
+        {
+            if (string.IsNullOrEmpty(addressKey) || string.IsNullOrEmpty(itemId) || amount <= 0 || string.IsNullOrEmpty(itemName)) return;
+            var req = new BuildingCargoReqPayload
+            {
+                AddressKey = addressKey, ItemId = itemId, PlayerId = MPConfig.PlayerId,
+                Op = OpPut, ItemName = itemName, Amount = amount, Paid = paid, PricePerUnit = price, Ctx = "boxreturn",
+            };
+            if (nested != null) req.Nested.AddRange(nested);
+            if (MPServer.IsRunning) MPServer.HandleBuildingCargoReq(req, MPConfig.PlayerId);
+            else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BuildingCargoReq, MPConfig.PlayerId, req));
+        }
+
         /// <summary>Round-32 (business helpers): ask the owner to change what a display/showcase item — or a
         /// producer (ctx="producerset") — stocks. The owner runs the same moves the native dropdown does.</summary>
         public static void RequestSetStock(string addressKey, string itemId, string newStockName, string ctx = "setstock")
@@ -86,6 +118,49 @@ namespace BigAmbitionsMP
 
                 if (req.Op == OpTake)
                 {
+                    // Round-47 (slice 2b) — a SEALED BOX taken from a storage shelf through the manage
+                    // panel. The regular take loop SKIPS sealed instances; this branch takes the whole
+                    // box (first name+amount+paid match — identical boxes are fungible; contents are
+                    // owner truth) and echoes its NESTED contents so the guest's in-hands box is exact.
+                    // Round-47b — helper SELL/DISCARD: remove up to Count identical non-sealed stack
+                    // instances (name+amount+paid identity — grouped rows are fungible). Money is the
+                    // REQUESTER's side (credited there on this Ok); the owner only loses the stock,
+                    // exactly as if the helper were standing at the shelf natively.
+                    if (req.Ctx == "stacksell" || req.Ctx == "stackdiscard")
+                    {
+                        var ssrc = item.cargoInstances;
+                        int removed = 0;
+                        if (ssrc != null)
+                            for (int c = ssrc.Count - 1; c >= 0 && removed < req.Count; c--)
+                            {
+                                var ci = ssrc[c];
+                                if (ci == null || ci.IsSealed) continue;
+                                if (ci.itemName != req.ItemName || ci.amount != req.Amount || ci.paid != req.Paid) continue;
+                                item.RemoveFromCargo(ci);
+                                removed++;
+                            }
+                        if (removed > 0) { res.Ok = true; res.Reason = ""; res.Count = removed; }
+                        else res.Reason = "gone";
+                    }
+                    else if (req.Ctx == "boxtake")
+                    {
+                        var bsrc = item.cargoInstances;
+                        if (bsrc != null)
+                            for (int c = 0; c < bsrc.Count; c++)
+                            {
+                                var ci = bsrc[c];
+                                if (ci == null || ci.itemName != req.ItemName) continue;
+                                if (ci.amount != req.Amount || ci.paid != req.Paid) continue;
+                                res.Paid = ci.paid; res.PricePerUnit = ci.pricePerUnit; res.Amount = ci.amount;
+                                if (ci.nestedCargoInstances != null)
+                                    foreach (var n in ci.nestedCargoInstances)
+                                        if (n != null) res.Nested.Add(new CargoNestedInfo { ItemName = n.itemName ?? "", Amount = n.amount, PricePerUnit = n.pricePerUnit });
+                                item.RemoveFromCargo(ci);
+                                res.Ok = true; res.Reason = "";
+                                break;
+                            }
+                    }
+                    else
                     // Round-38e — "REMOVE CONTENT" routed for helpers: mirror of the native
                     // ItemController.RemoveStockInContent (:1091-1152) the owner's button runs — take the
                     // ENTIRE stock (owner truth, not the requester's replica amount), clear the emptied
@@ -179,6 +254,10 @@ namespace BigAmbitionsMP
                     else
                     {
                         var ci = new CargoInstance(req.ItemName, req.Amount, req.PricePerUnit, req.Paid);
+                        // Round-47: a returned sealed box keeps its contents ("boxreturn" give-backs).
+                        if (req.Nested != null && req.Nested.Count > 0)
+                            foreach (var n in req.Nested)
+                                if (n != null) ci.nestedCargoInstances.Add(new NestedCargoInstance(n.ItemName, n.Amount, n.PricePerUnit, null));
                         if (item.TryToAddToCargo(ci)) { res.Ok = true; res.Reason = ""; }
                         else
                         {
@@ -311,6 +390,28 @@ namespace BigAmbitionsMP
             {
                 if (res.Op == OpTake)
                 {
+                    // Round-47b — sell/discard verdicts: nothing arrives in hands. A SELL credits the
+                    // helper's own wallet for exactly what the owner removed (native seller-pockets-it
+                    // semantics; user's trust-scoped design — Transfers exist for gifting it back).
+                    if (res.Ctx == "stacksell" || res.Ctx == "stackdiscard")
+                    {
+                        if (!res.Ok) { PassengerHud.Toast("Already gone."); return; }
+                        if (res.Ctx == "stacksell")
+                        {
+                            try
+                            {
+                                // No custom toast — ChangeMoneySafe fires the game's own transaction
+                                // feedback; doubling it broke parity (user 2026-07-07).
+                                var priced = new CargoInstance(res.ItemName, res.Amount, res.PricePerUnit, res.Paid);
+                                float total = priced.GetSellingPrice() * res.Count;
+                                var data = new System.Collections.Generic.Dictionary<string, string> { { "itemName", res.ItemName } };
+                                GameManager.ChangeMoneySafe(total, new TransactionInfo("ba:transaction_itemsold", data));
+                                Plugin.Logger.LogInfo($"[Business] helper stack sell confirmed: {res.Count}×({res.ItemName}×{res.Amount}) → ${total:F2} credited locally.");
+                            }
+                            catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] sell credit: {ex.Message}"); }
+                        }
+                        return;
+                    }
                     if (res.Ctx == "consume")
                     {
                         // Eaten in place at click time (round-17 parity) — nothing to deliver. A failed
@@ -324,6 +425,10 @@ namespace BigAmbitionsMP
                         return;
                     }
                     var ci = new CargoInstance(res.ItemName, res.Amount, res.PricePerUnit, res.Paid);
+                    // Round-47: a taken sealed box arrives with its contents.
+                    if (res.Nested != null && res.Nested.Count > 0)
+                        foreach (var n in res.Nested)
+                            if (n != null) ci.nestedCargoInstances.Add(new BigAmbitions.Items.NestedCargoInstance(n.ItemName, n.Amount, n.PricePerUnit, null));
                     if (PlayerHelper.ItemInstanceInHands == null)
                         PlayerHelper.ItemInstanceInHands = ItemHelper.InitializeItemInHandsWithCargo(ci);
                     else
@@ -331,9 +436,13 @@ namespace BigAmbitionsMP
                         // No empty hands (race after the request) — give it back so the owner's holder is made
                         // whole. A STATION take must return via the station merge path ("stationreturn"): the
                         // generic put runs TryToAddToCargo, which a register's cargoCapacity=0 always refuses —
-                        // the give-back would bounce and the removed stock would be lost.
-                        RequestPut(res.AddressKey, res.ItemId, res.ItemName, res.Amount, res.Paid, res.PricePerUnit,
-                                   res.Ctx == "stationtake" ? "stationreturn" : "");
+                        // the give-back would bounce and the removed stock would be lost. A sealed BOX returns
+                        // with its nested contents (round-47) or the give-back would strip it.
+                        if (res.Ctx == "boxtake")
+                            RequestPutBox(res.AddressKey, res.ItemId, res.ItemName, res.Amount, res.Paid, res.PricePerUnit, res.Nested);
+                        else
+                            RequestPut(res.AddressKey, res.ItemId, res.ItemName, res.Amount, res.Paid, res.PricePerUnit,
+                                       res.Ctx == "stationtake" ? "stationreturn" : "");
                         PassengerHud.Toast("No room to carry that.");
                     }
                 }

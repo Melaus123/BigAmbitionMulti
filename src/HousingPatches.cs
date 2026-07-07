@@ -476,20 +476,9 @@ namespace BigAmbitionsMP
         }
     }
 
-    [HarmonyPatch(typeof(StorageShelfController), nameof(StorageShelfController.ManageStorage))]
-    public static class Patch_Shelf_Manage_GuestBlock
-    {
-        static bool Prefix(StorageShelfController __instance)
-        {
-            try
-            {
-                if (!HousingFridge.GuestRoute(__instance, out _, out _)) return true;
-                PassengerHud.Toast("Only the owner can manage this shelf (for now).");
-                return false;
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] shelf manage block: {ex.Message}"); return true; }
-        }
-    }
+    // (round-47c: the round-13 "Only the owner can manage this shelf (for now)" ManageStorage block is
+    // RETIRED — the manage panel now opens for guests/helpers with per-row routed take/sell/discard;
+    // see BusinessPatches HelperStorageGuard + Patch_CargoItemUi_HelperRoute.)
 
     /// <summary>Shared residency — FURNITURE + FLOORING editing. The interior designer is a batched editor
     /// (debit-on-close), so a guest edits their LOCAL copy of the owner's interior, and on close we forward

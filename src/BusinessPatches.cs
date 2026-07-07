@@ -2,7 +2,9 @@ using System;
 using HarmonyLib;
 using BigAmbitions.Items;   // CargoInstance, ItemInstance, ItemType, ICargoHolder
 using Buildings;
+using Extensions;           // ToShortCurrencyFormat (round-47b sell confirms)
 using Helpers;
+using Localizor;            // .Localize (native confirm-dialog bodies)
 
 namespace BigAmbitionsMP
 {
@@ -369,32 +371,178 @@ namespace BigAmbitionsMP
         }
     }
 
-    /// <summary>Round-37b — the register-bag DUPLICATION class: the visibility flip exposes the
-    /// manage-cargo UI on owner-authoritative building items, and its take/sell/discard paths mutate the
-    /// LOCAL replica only (a take duplicated 1000 bags). Same class round-13 blocked for storage shelves —
-    /// block the whole manage UI for helpers on building-owned holders until a routed panel exists.</summary>
-    [HarmonyPatch(typeof(UI.MergeCargo.ManageCargoUi), nameof(UI.MergeCargo.ManageCargoUi.Show))]
-    public static class Patch_ManageCargo_HelperBlock
+    /// <summary>Round-47 (slice 2b) — helpers get the storage manage panel, GUARDED. History: round-37b
+    /// blocked the whole panel because its take/sell/discard mutate the LOCAL replica (a take duplicated
+    /// 1000 bags) and sell credits the LOCAL wallet. Now: the panel OPENS for helpers; per-row rewiring
+    /// lives in Patch_CargoItemUi_HelperRoute (take → routed "boxtake"; sell/discard hidden); the
+    /// sell-all button hides + its handler hard-blocks below.</summary>
+    internal static class HelperStorageGuard
     {
-        static bool Prefix(ICargoHolder cargoHolder)
+        /// <summary>The building-owned ItemInstance behind a manage-panel holder when the local player is
+        /// a business HELPER **or a housing GUEST** here (round-47c: the storage panel serves both grant
+        /// kinds — the BStore relay/apply gates accept Housing OR Business) — null in every
+        /// owner/non-building case (native behavior untouched).</summary>
+        internal static ItemInstance? HelperBuildingHolder(ICargoHolder? holder, out string addr)
+        {
+            addr = "";
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return null;
+                var ii = holder as ItemInstance;
+                if (ii == null) return null;   // own vehicles/boxes etc. — not building-owned
+                if (!HousingFurniture.LocalGuestHere() && !HousingFurniture.LocalHelperHere()) return null;
+                var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                if (reg == null) return null;
+                addr = GameStateReader.AddressKey(reg);
+                bool inBuilding = false;
+                try { inBuilding = reg.itemInstances != null && ii.id != null && reg.itemInstances.ContainsKey(ii.id.ToString()); } catch { }
+                return inBuilding ? ii : null;
+            }
+            catch { return null; }
+        }
+    }
+
+    /// <summary>Round-47b (full parity, user: the grant is trust-scoped) — helper SELL ALL: same
+    /// confirm-then-act shape as native, but every removal routes to the owner; the sale money credits
+    /// the helper's wallet per group verdict (Transfers exist for gifting it back).</summary>
+    [HarmonyPatch(typeof(UI.MergeCargo.ManageCargoUi), "OnSellAllClick")]
+    public static class Patch_ManageCargo_HelperSellAll
+    {
+        static bool Prefix(UI.MergeCargo.ManageCargoUi __instance)
         {
             try
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
-                var ii = cargoHolder as ItemInstance;
-                if (ii == null) return true;   // own vehicles/boxes etc. — not building-owned
-                var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
-                bool inBuilding = false;
-                try { inBuilding = reg?.itemInstances != null && ii.id != null && reg.itemInstances.ContainsKey(ii.id.ToString()); } catch { }
-                if (!inBuilding) return true;
-                if (BusinessHelperRoute.HelperHere(out _))
+                var ii = HelperStorageGuard.HelperBuildingHolder(__instance.currentCargoHolder, out var addr);
+                if (ii == null) return true;
+                // Group the holder's PAID non-sealed instances by identity (name+amount+paid) — the same
+                // grouping the panel rows use.
+                var groups = new System.Collections.Generic.Dictionary<string, (CargoInstance first, int count)>();
+                float total = 0f;
+                var src = __instance.currentCargoHolder.GetCargoInstances();
+                if (src != null)
+                    foreach (var ci in src)
+                    {
+                        if (ci == null || !ci.paid || ci.IsSealed) continue;
+                        string k = $"{ci.itemName}|{ci.amount}";
+                        groups[k] = groups.TryGetValue(k, out var g) ? (g.first, g.count + 1) : (ci, 1);
+                        try { total += ci.GetSellingPrice(); } catch { }
+                    }
+                if (groups.Count == 0) return false;
+                string itemId = ii.id?.ToString() ?? "";
+                HudConfirm.Show(default, "manage_cargo_sell_all_confirm".Localize(new
                 {
-                    PassengerHud.Toast("Only the owner can manage this storage (for now).");
-                    return false;
+                    cargoName = __instance.currentCargoHolder.GetCargoName(),
+                    totalPrice = total.ToShortCurrencyFormat(),
+                }), delegate
+                {
+                    foreach (var kv in groups)
+                        BuildingStorageSync.RequestStackOp(addr, itemId, kv.Value.first.itemName, kv.Value.first.amount,
+                                                           paid: true, kv.Value.first.pricePerUnit, kv.Value.count, sell: true);
+                    Plugin.Logger.LogInfo($"[Business] helper SELL ALL routed: {groups.Count} group(s) @'{addr}'.");
+                });
+                return false;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] sell-all route: {ex.Message}"); return true; }
+        }
+    }
+
+    /// <summary>Round-47 — per-row rewiring for helpers on building storage: SELL/DISCARD/action hidden
+    /// (wallet + local-mutation paths), the item click becomes a ROUTED box take — the owner removes the
+    /// real sealed box (contents echoed over the wire) and it lands in the helper's hands, exactly like
+    /// the owner's own ClickItem take. Empty hands required (deferred delivery makes holder-merge racy);
+    /// vehicle-type cargo (stored hand trucks) stays owner-only.</summary>
+    [HarmonyPatch(typeof(UI.PlayerHUD.CargoItemUi), nameof(UI.PlayerHUD.CargoItemUi.SetUp))]
+    public static class Patch_CargoItemUi_HelperRoute
+    {
+        static void Postfix(UI.PlayerHUD.CargoItemUi __instance, BigAmbitions.Items.CargoItem cargoItem, ICargoHolder cargoHolder)
+        {
+            try
+            {
+                ICargoHolder? holder = cargoHolder;
+                if (holder == null)
+                    try { holder = InstanceBehavior<UI.UIs>.Instance?.playerHUD?.manageCargoUI?.currentCargoHolder; } catch { }
+                var ii = HelperStorageGuard.HelperBuildingHolder(holder, out var addr);
+                if (ii == null) return;
+                if (cargoItem?.cargoInstances == null || cargoItem.cargoInstances.Count == 0) return;
+                var first = cargoItem.cargoInstances[0];
+                if (first == null) return;
+
+                string name = first.itemName ?? "";
+                int amount = first.amount; bool paid = first.paid; float price = first.pricePerUnit;
+                int stackCount = cargoItem.cargoInstances.Count;
+                bool isSealed = first.IsSealed;
+                string itemId = ii.id?.ToString() ?? "";
+
+                // Round-47b (full parity): SELL/DISCARD stay visible per the native rules (paid→sell,
+                // unpaid→discard, sealed→neither) but the click routes the REMOVAL to the owner; on a
+                // sell the money credits the helper's own wallet at verdict time.
+                var sellBtn = Btn("sellButton");
+                if (sellBtn != null && sellBtn.gameObject.activeSelf)
+                {
+                    sellBtn.onClick.RemoveAllListeners();
+                    sellBtn.onClick.AddListener(delegate
+                    {
+                        try
+                        {
+                            float sellTotal = 0f;
+                            try { sellTotal = first.GetSellingPrice() * stackCount; } catch { }
+                            HudConfirm.Show(default, "itempanelui_hud_confirm_sellitem".Localize(new
+                            {
+                                type = name,
+                                price = sellTotal.ToShortCurrencyFormat(),
+                            }), delegate
+                            {
+                                BuildingStorageSync.RequestStackOp(addr, itemId, name, amount, paid, price, stackCount, sell: true);
+                                Plugin.Logger.LogInfo($"[Business] helper stack sell {stackCount}×({name}×{amount}) @'{addr}' → routed.");
+                            });
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] sell route: {ex.Message}"); }
+                    });
+                }
+                var discardBtn = Btn("discardButton");
+                if (discardBtn != null && discardBtn.gameObject.activeSelf)
+                {
+                    discardBtn.onClick.RemoveAllListeners();
+                    discardBtn.onClick.AddListener(delegate
+                    {
+                        try
+                        {
+                            BuildingStorageSync.RequestStackOp(addr, itemId, name, amount, paid, price, stackCount, sell: false);
+                            Plugin.Logger.LogInfo($"[Business] helper stack discard {stackCount}×({name}×{amount}) @'{addr}' → routed.");
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] discard route: {ex.Message}"); }
+                    });
+                }
+                Btn("actionButton")?.gameObject.SetActive(false);   // equip/read/place — local-hands paths, still owner-only
+
+                var itemBtn = Btn("itemButton");
+                if (itemBtn == null) return;
+                itemBtn.onClick.RemoveAllListeners();
+                bool isVehicleCargo = false;
+                try { isVehicleCargo = !string.IsNullOrEmpty(BigAmbitions.Items.ItemsGetter.GetByName(name)?.vehicleType); } catch { }
+                itemBtn.onClick.AddListener(delegate
+                {
+                    try
+                    {
+                        if (isVehicleCargo) { PassengerHud.Toast("Stored vehicles are the owner's call."); return; }
+                        if (PlayerHelper.IsHoldingItem || PlayerHelper.IsUsingVehicle)
+                        { PassengerHud.Toast("Empty your hands to take that."); return; }
+                        // Sealed boxes ride "boxtake" (whole instance + nested contents); loose stacks
+                        // ride the generic take (the fridge path).
+                        BuildingStorageSync.RequestTake(addr, itemId, name, amount, paid, price, isSealed ? "boxtake" : "");
+                        Plugin.Logger.LogInfo($"[Business] helper {(isSealed ? "box" : "stack")} take {name}×{amount} @'{addr}' → routed to owner.");
+                        try { InstanceBehavior<UI.UIs>.Instance.playerHUD.manageCargoUI.Close(); } catch { }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] take route: {ex.Message}"); }
+                });
+
+                UnityEngine.UI.Button? Btn(string field)
+                {
+                    try { return HarmonyLib.AccessTools.Field(typeof(UI.PlayerHUD.CargoItemUi), field)?.GetValue(__instance) as UnityEngine.UI.Button; }
+                    catch { return null; }
                 }
             }
-            catch { }
-            return true;
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] cargo row rewire: {ex.Message}"); }
         }
     }
 
