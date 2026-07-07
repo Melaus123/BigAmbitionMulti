@@ -345,6 +345,14 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.BusinessEditRequest:
+                {
+                    // Host-relayed, grant-gated: this machine OWNS the shop — apply natively.
+                    var be = env.GetPayload<BusinessEditPayload>();
+                    if (be != null) GameStatePatcher.EnqueueOnMainThread(() => BusinessSync.ApplyRoutedTemporarilyClose(be));
+                    break;
+                }
+
                 case MessageType.MergerRequest:
                 {
                     // "proposal": someone wants to merge with ME — surface Accept/Decline in the
@@ -1121,6 +1129,13 @@ namespace BigAmbitionsMP
             if (!IsConnected || string.IsNullOrEmpty(action)) return;
             Send(MessageEnvelope.Create(MessageType.MergerRequest, MPConfig.PlayerId,
                 new MergerRequestPayload { Action = action, TargetPid = targetPid ?? "" }));
+        }
+
+        /// <summary>Member-client → host: a routed owner-only business edit (merger slice 3).</summary>
+        public static void SendBusinessEdit(BusinessEditPayload p)
+        {
+            if (!IsConnected || p == null) return;
+            Send(MessageEnvelope.Create(MessageType.BusinessEditRequest, MPConfig.PlayerId, p));
         }
 
         /// <summary>Owner-client → host: revoke an OFFLINE grantee by their StableId handle (taken from

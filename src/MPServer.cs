@@ -852,6 +852,15 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.BusinessEditRequest:
+                {
+                    // Merger slice 3: routed owner-only edit — grant-gated, then applied or relayed.
+                    var be = env.GetPayload<BusinessEditPayload>();
+                    if (be != null)
+                        GameStatePatcher.EnqueueOnMainThread(() => BusinessSync.HostRouteBusinessEdit(be, senderPid));
+                    break;
+                }
+
                 case MessageType.TaxiHail:
                     HandleTaxiHail(env);
                     break;
@@ -3306,6 +3315,10 @@ namespace BigAmbitionsMP
             foreach (var peer in _clients.Keys)
                 if (_peerNames.TryGetValue(peer.Id, out var p) && p == pid) { Send(peer, env); return; }
         }
+
+        /// <summary>Relay a grant-gated business edit to the owning client (merger slice 3).</summary>
+        public static void SendBusinessEditTo(string ownerPid, BusinessEditPayload p)
+            => SendToPid(ownerPid, MessageEnvelope.Create(MessageType.BusinessEditRequest, "host", p));
 
         /// <summary>The merged-companies state broadcast: per group, online member pids (enforcement)
         /// + the full display roster from the store (offline members stay listed by name).</summary>

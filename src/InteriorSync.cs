@@ -207,7 +207,7 @@ namespace BigAmbitionsMP
                 foreach (var reg in gi.BuildingRegistrations)
                 {
                     if (reg == null) continue;
-                    bool mine = false; try { mine = reg.RentedByPlayer; } catch { }
+                    bool mine = false; try { mine = MergerFlip.TrulyMine(reg); } catch { }   // TrulyMine (merger flip excluded)
                     if (!mine) continue;
                     int dirt = 0; try { dirt = reg.dirtSpots?.Count ?? 0; } catch { }
                     if (dirt < DirtWatchThreshold) continue;   // only anomalous shops — healthy ones stay silent
@@ -463,7 +463,7 @@ namespace BigAmbitionsMP
 
         private static bool IsLocalOwnerBusiness(BuildingRegistration reg)
         {
-            try { if (reg.RentedByPlayer) return true; } catch { }
+            try { if (MergerFlip.TrulyMine(reg)) return true; } catch { }   // TrulyMine: flipped partner shops are NOT locally owner-authoritative
             try
             {
                 string owner = reg.businessOwnerRivalId?.ToString() ?? "";
@@ -548,12 +548,12 @@ namespace BigAmbitionsMP
                 // interior (guests seed their local spawner table from it). Owner-only: the host's
                 // replica-built sends (BuildSnapshotForHostSend) see RentedByPlayer=false and skip,
                 // so only the true owner's entries ever travel.
-                try { if (reg.RentedByPlayer) snap.CustomerEntries = CustomerEntrySync.CaptureFor(reg); } catch { }
+                try { if (MergerFlip.TrulyMine(reg)) snap.CustomerEntries = CustomerEntrySync.CaptureFor(reg); } catch { }
                 // Round-39e — complaint parity: the fulfilled-demand set travels too (guests' customers
                 // complain against it; without it every demand reads unfulfilled).
                 try
                 {
-                    if (reg.RentedByPlayer && reg.cachedFulfilledCustomerDemands != null)
+                    if (MergerFlip.TrulyMine(reg) && reg.cachedFulfilledCustomerDemands != null)
                         snap.FulfilledDemands = new List<string>(reg.cachedFulfilledCustomerDemands);
                 }
                 catch { }

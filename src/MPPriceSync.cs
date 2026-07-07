@@ -72,7 +72,7 @@ namespace BigAmbitionsMP
                 {
                     if (reg == null) continue;
                     bool mine;
-                    try { mine = reg.RentedByPlayer; } catch { continue; }
+                    try { mine = MergerFlip.TrulyMine(reg); } catch { continue; }   // flip = presentation; never publish partner prices
                     if (!mine) continue;
 
                     var prices = reg.retailPrices;

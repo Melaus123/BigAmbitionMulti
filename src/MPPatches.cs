@@ -1917,6 +1917,67 @@ namespace BigAmbitionsMP
             }
         }
 
+        // Merger slice 3 — settings-save guard (same reasoning as the deed guard): BizManSettings.
+        // SaveBusinessInformation bundles rename + BUSINESS TYPE change (with employee unassignment)
+        // as inline UI logic — no native data-level method exists to route to, so a faithful routed
+        // version means reimplementing native flow (deferred). On a flipped replica it would only
+        // mutate the local copy and desync; block it plainly instead. Inert without a merger.
+        [HarmonyPatch(typeof(BizManSettings), nameof(BizManSettings.SaveBusinessInformation))]
+        public static class Patch_BizManSettings_Save_MergerGuard
+        {
+            static bool Prefix(BizManSettings __instance)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0) return true;
+                    var bm  = AccessTools.Field(typeof(BizManSettings), "_bizManBusiness")?.GetValue(__instance) as BizManBusiness;
+                    var reg = bm?.buildingRegistration;
+                    if (reg == null) return true;
+                    if (!MergerFlip.IsFlipped(GameStateReader.AddressKey(reg))) return true;
+                    PassengerHud.Toast("Only the deed holder can change business settings (for now).");
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] settings guard: {ex.Message}"); return true; }
+            }
+        }
+
+        // Borrowed-vehicle building transitions (2026-07-07, run-10 field narrative): the native entry
+        // coroutine moves an accompanying vehicle via ITS OWN bookkeeping (selectedVehicle /
+        // VehicleInstances) — a borrowed PROXY is deliberately absent from those records (tax/ticket
+        // dodge), so the transition breaks possession HALFWAY: the pusher keeps a distorted pushing
+        // pose with no cart, the cart strands outside the door, and the follow + physics release then
+        // lose the owner's real cart entirely (flung/under-world). AUTO-PARK instead: the native
+        // ExitVehicle runs at the door (clean pose, clean release to the owner, cart rests where it
+        // was left), then the entry proceeds without it. Borrowed carts simply wait outside — the
+        // honest limitation until proxy transitions are fully supported. Inert without proxies.
+        // (Auto-park REVERTED same day — user, correctly: bringing a cart indoors is a CORE mechanic.
+        //  Run-10's own probes then proved the STATE survives the transition fine — possessed +
+        //  parented for minutes inside; the failure is the cart's RENDERING after the interior
+        //  loads. Fix targets the visual layer instead; see MergerFlip/VehicleManager cart work.)
+
+        // Merger slice 3 — routed open/close toggle: the BizMan toggle calls BuildingRegistration.
+        // TemporarilyClose, which on a FLIPPED replica would only mutate the local copy (the owner's
+        // synced truth then overwrites it — the toggle "doesn't stick"). Route it to the true owner,
+        // who runs the native method (licensing/customer-entry/todo side effects fire on the
+        // authoritative machine) and whose sync republishes the state to everyone. Inert without a
+        // merger (IsFlipped false for everything).
+        [HarmonyPatch(typeof(BuildingRegistration), nameof(BuildingRegistration.TemporarilyClose))]
+        public static class Patch_TemporarilyClose_MergerRoute
+        {
+            static bool Prefix(BuildingRegistration __instance, bool closed)
+            {
+                try
+                {
+                    if (__instance == null) return true;
+                    string key = GameStateReader.AddressKey(__instance);
+                    if (!MergerFlip.IsFlipped(key)) return true;   // genuinely mine / not merged → native
+                    BusinessSync.RouteTemporarilyClose(key, closed);
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] toggle route: {ex.Message}"); return true; }
+            }
+        }
+
         // Merger slice 3 — AUTHORITY VEIL (merger map §13-A): the ownership flip makes partner
         // businesses read RentedByPlayer=true for MENUS, but these audited native passes SIMULATE
         // off that same flag (charging rent/taxes/marketing/licensing, business + summary/net-worth
@@ -2525,7 +2586,10 @@ namespace BigAmbitionsMP
                 {
                     if (!MPServer.IsRunning && !MPClient.InMpGame) return true;   // SP — real check
                     if (buildingRegistration == null) return true;
-                    if (buildingRegistration.RentedByPlayer) return true;          // my own shop — I'm the authority
+                    // TrulyMine, not the raw flag: a merger-flipped partner shop must CONSUME the
+                    // owner's synced open truth, not locally re-derive it (run-4: P1's local "close"
+                    // of P2's shop diverged silently — the owner stays the open-state authority).
+                    if (MergerFlip.TrulyMine(buildingRegistration)) return true;   // my own shop — I'm the authority
                     string addr = GameStateReader.AddressKey(buildingRegistration);
                     if (string.IsNullOrEmpty(addr)) return true;
                     if (BusinessSync.OwnerOpenByAddress.TryGetValue(addr, out var st) && st != 0)
@@ -2554,7 +2618,7 @@ namespace BigAmbitionsMP
                     if (__result) return;                                   // entry allowed — nothing to diagnose
                     if (!MPServer.IsRunning && !MPClient.InMpGame) return;  // SP
                     var reg = BuildingHelper.GetBuildingRegistration(address);
-                    if (reg == null || reg.RentedByPlayer) return;          // my own shop shouldn't read closed
+                    if (reg == null || MergerFlip.TrulyMine(reg)) return;   // my own shop shouldn't read closed
                     string addr = GameStateReader.AddressKey(reg);
                     if (string.IsNullOrEmpty(addr)) return;
                     float now = UnityEngine.Time.unscaledTime;

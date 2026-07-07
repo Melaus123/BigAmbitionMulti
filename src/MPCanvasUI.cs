@@ -409,6 +409,8 @@ namespace BigAmbitionsMP
                                                         // requested state (rate-limit drops lost it before)
             CustomerPuppets.Tick();      // round-41: simulator election (host) + puppet stream/render (both-inside shops)
             MergerFlip.Tick();           // merger slice 3: ownership-flip reconcile (1 Hz) + host state push (10s)
+            MPRegisterSync.TickContextHeal();   // building-context self-heal (hand-vehicle entry skips the entry hook)
+            CartTrace.Tick();                   // DIAG [CartTrace]: event-driven cart state recorder (user-approved instrument)
             RemotePlayerManager.TickVehicleCollisionIgnores();   // remote avatars must not shove vehicles
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
             MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion

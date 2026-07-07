@@ -856,7 +856,7 @@ namespace BigAmbitionsMP
                             // cargo; new items (a placed box) keep the snapshot's. Guests applying owner pushes
                             // are untouched (RentedByPlayer false there).
                             bool receiverOwnsThis = false;
-                            try { receiverOwnsThis = reg.RentedByPlayer; } catch { }
+                            try { receiverOwnsThis = MergerFlip.TrulyMine(reg); } catch { }   // TrulyMine: never shield replica cargo against the true owner
                             int cargoShielded = 0;
                             foreach (var i in payload.ItemInstances)
                             {
@@ -1149,13 +1149,14 @@ namespace BigAmbitionsMP
 
         /// <summary>True for the LOCAL player's OWN business — the correct "is this
         /// mine?" test (contrast IsAnyPlayerBusiness, which is true for everyone's
-        /// shop and false for your own fresh shop).  RentedByPlayer is the reliable
-        /// local flag (the game sets it for buildings this player rents/owns); where a
-        /// business payload is available, callers also OR in OwnerPlayerId ==
-        /// MPConfig.PlayerId for positive attribution (see ApplyBusinessInfoLocal's
-        /// receiverOwnsThis).</summary>
+        /// shop and false for your own fresh shop).  TrulyMine = RentedByPlayer MINUS
+        /// the merger flip: a flipped partner shop reads rented for native MENUS, but
+        /// to the SYNC layer it is a replica whose true owner's pushes must apply
+        /// (run-4 inversion, 2026-07-07). Where a business payload is available,
+        /// callers also OR in OwnerPlayerId == MPConfig.PlayerId for positive
+        /// attribution (see ApplyBusinessInfoLocal's receiverOwnsThis).</summary>
         public static bool IsReceiversOwnBusiness(BuildingRegistration? reg)
-            => reg != null && reg.RentedByPlayer;
+            => MergerFlip.TrulyMine(reg);
 
         /// <summary>True if this rival-owner id actually belongs to a session MP player (our own id,
         /// a roster client, or any session player) — i.e. a "rival" that is really another player, NOT a

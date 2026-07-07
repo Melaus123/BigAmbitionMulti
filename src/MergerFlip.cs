@@ -38,6 +38,20 @@ namespace BigAmbitionsMP
         public static int FlippedCount => _flipped.Count;
         public static bool IsFlipped(string addressKey) => !string.IsNullOrEmpty(addressKey) && _flipped.ContainsKey(addressKey);
 
+        /// <summary>TRUE ownership for the MOD's sync layer: RentedByPlayer minus the flip. Every
+        /// publisher scan, authority gate, and receiver guard in OUR code must use this instead of
+        /// the raw flag — the flip is PRESENTATION for native menus only; treating a flipped reg as
+        /// own in the sync layer makes members broadcast ownership claims over partner shops
+        /// (outbound) and reject the true owner's pushes (inbound) — the run-4 inversion class.</summary>
+        public static bool TrulyMine(BuildingRegistration reg)
+        {
+            if (reg == null) return false;
+            bool rented; try { rented = reg.RentedByPlayer; } catch { return false; }
+            if (!rented) return false;
+            if (_flipped.Count == 0) return true;   // inert without a merger
+            try { return !_flipped.ContainsKey(GameStateReader.AddressKey(reg)); } catch { return true; }
+        }
+
         // ── Reconcile (MAIN THREAD, 1 Hz from MPCanvasUI.Update) ─────────────
         private static float _nextHostPush;
 
@@ -91,6 +105,7 @@ namespace BigAmbitionsMP
                     if (reg.RentedByPlayer && !_flipped.ContainsKey(key) && OwnedByAnother(key))
                     {
                         reg.RentedByPlayer = false;
+                        RefreshPoi(reg);
                         Plugin.Logger.LogWarning($"[Merger] REPAIR '{key}': cleared leaked tenancy (owned by another player; not an active flip).");
                         continue;
                     }
@@ -101,6 +116,7 @@ namespace BigAmbitionsMP
                         _flipped[key] = reg.businessOwnerRivalId ?? "";
                         reg.businessOwnerRivalId = "";
                         reg.RentedByPlayer = true;
+                        RefreshPoi(reg);
                         Plugin.Logger.LogInfo($"[Merger] flip ON  '{key}' (company building now shows as own).");
                     }
                     else if (_flipped.TryGetValue(key, out var parkedRival))
@@ -108,6 +124,7 @@ namespace BigAmbitionsMP
                         reg.RentedByPlayer = false;
                         reg.businessOwnerRivalId = parkedRival;
                         _flipped.Remove(key);
+                        RefreshPoi(reg);
                         Plugin.Logger.LogInfo($"[Merger] flip OFF '{key}' (left merger / ownership changed).");
                     }
                 }
@@ -135,6 +152,20 @@ namespace BigAmbitionsMP
             foreach (var k in MergerSync.MyGroupBuildingKeys)
                 if (!string.IsNullOrEmpty(k)) set.Add(k);
             return set;
+        }
+
+        /// <summary>Refresh the city-map POI after a flip transition — the same calls the native
+        /// terminate flow makes (map colors are computed from reg state at POI-update time; without
+        /// this, merged buildings kept whatever color pre-dated the flip: green-for-renter vs
+        /// teal-for-partner, field report 2026-07-07).</summary>
+        private static void RefreshPoi(BuildingRegistration reg)
+        {
+            try
+            {
+                InstanceBehavior<CityManager>.Instance?.FindCityBuildingController(reg.Address)?.UpdatePoi();
+                InstanceBehavior<UI.UIs>.Instance?.mapFilters.ApplyFilters();
+            }
+            catch { }
         }
 
         /// <summary>Does the operator ledger attribute this address to ANOTHER player? Host reads

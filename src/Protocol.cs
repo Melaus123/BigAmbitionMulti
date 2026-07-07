@@ -150,6 +150,15 @@ namespace BigAmbitionsMP
         CustomerPuppetLook  = 146,       // Simulator → Host → All: a customer's appearance (CharacterData JSON), once per customer — followers dress the puppet to match (round-44).
         MergerState         = 147,       // Host → All: merged-company membership (merger slice 1) — online member PlayerIds (what enforcement reads) + full display roster.
         MergerRequest       = 148,       // Member ↔ Host: propose/accept/decline/leave a company merger; host relays "proposal"/"declined" to the affected member.
+        BusinessEditRequest = 149,       // Member → Host → business owner: an owner-only business edit made on a merger-flipped replica (slice 3: the open/close toggle) — the OWNER applies it natively and their sync republishes the truth.
+    }
+
+    /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
+    /// toggle). Grant-gated at the host like every routed op.</summary>
+    public class BusinessEditPayload
+    {
+        public string AddressKey        { get; set; } = "";
+        public bool   TemporarilyClosed { get; set; }
     }
 
     /// <summary>One merged company. MemberPids is ONLINE members in PlayerId space (all enforcement is
@@ -479,6 +488,10 @@ namespace BigAmbitionsMP
         public float  Fuel { get; set; }
         public float  Damage { get; set; }   // 0..1 — the borrower's accrued damage, applied to the owner's real car
         public bool   Released { get; set; }
+        // The borrower's current building ("" = outdoors). While set, the OWNER's follow HOLDS at the
+        // last exterior pose instead of chasing into interior coordinates — a space that may not even
+        // be loaded on the owner's machine, where the real cart gets deregistered (CartTrace 2026-07-07).
+        public string Bldg { get; set; } = "";
         public float  T { get; set; }
     }
 
@@ -492,11 +505,13 @@ namespace BigAmbitionsMP
         public string VehicleId    { get; set; } = "";   // the REAL vehicle id (no BAMP_ ghost prefix)
         public string OwnerId      { get; set; } = "";   // the vehicle's owner (accessor reads it off the ghost) — host forwards here
         public string PlayerId     { get; set; } = "";   // the accessor (who takes / puts)
-        public byte   Op           { get; set; }          // 0 = take (remove from vehicle), 1 = put (add to vehicle)
+        public byte   Op           { get; set; }          // 0 = take (remove from vehicle), 1 = put (add to vehicle), 2 = mark paid (checkout)
         public string ItemName     { get; set; } = "";
         public int    Amount       { get; set; }
         public bool   Paid         { get; set; } = true;
         public float  PricePerUnit { get; set; }
+        public bool   Silent       { get; set; }          // MIRROR of a native action already applied locally (borrowed-cart
+                                                          // shopping): accessor-side OnResult must NOT place/consume/toast.
     }
 
     /// <summary>Owner → host → accessor: result of a VehicleCargoReq. Ok=true means the real cargo changed
@@ -513,6 +528,7 @@ namespace BigAmbitionsMP
         public float  PricePerUnit { get; set; }
         public bool   Ok           { get; set; }
         public string Reason       { get; set; } = "";
+        public bool   Silent       { get; set; }   // echoed from the request — see VehicleCargoReqPayload.Silent
     }
 
     // ── Envelope ───────────────────────────────────────────────────────────────

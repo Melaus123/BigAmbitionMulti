@@ -164,6 +164,7 @@ namespace BigAmbitionsMP
             public float       SenderT;    // sender's sample clock (velocity measurement)
             public string      AppliedCargo = "";   // manifest|carried sig the ghost was built with
             public Transform   LoadingPos;          // vehicleLoadingPosition (cargo-load spot), captured pre-strip
+            public bool        OwnerUsing;          // fleet e.Driving — the OWNER is driving/pushing it RIGHT NOW (in-use arbitration)
         }
         private const float MaxVehicleExtrapolateSeconds = 0.3f;
         private const float VehicleSnapDistance          = 15f;
@@ -371,7 +372,13 @@ namespace BigAmbitionsMP
                                 // '=' separator: EA 0.11 item ids CONTAIN colons
                                 // ("ba:itemname_cheapgift") — ':' made the parser
                                 // skip every entry (no boxes on remote beds).
-                                csb.Append(c.itemName).Append('=').Append(c.amount).Append(';');
+                                // 4-part since Option A (2026-07-07): paid + price ride along so the
+                                // replica is checkout-faithful — the register reads unpaid stacks and
+                                // prices OFF THE REPLICA when a borrower shops with a pushed cart.
+                                csb.Append(c.itemName).Append('=').Append(c.amount)
+                                   .Append('=').Append(c.paid ? '1' : '0')
+                                   .Append('=').Append(c.pricePerUnit.ToString("R", System.Globalization.CultureInfo.InvariantCulture))
+                                   .Append(';');
                             }
                             cargo = csb.ToString();
                         }
@@ -483,6 +490,10 @@ namespace BigAmbitionsMP
                     if (string.IsNullOrEmpty(e.VehicleId)) continue;
                     seen.Add(e.VehicleId);
                     if (e.Driving) anyDriving = true;
+                    // In-use arbitration (2026-07-07, run-9: dual possession — the partner grabbed the
+                    // cart's ghost WHILE the owner was pushing the real one; the follow then dragged the
+                    // owner's in-hands cart toward the borrower). Remember the owner's live use state;
+                    // CanDriveGhost refuses the grab while it's set.
 
                     var pos = new Vector3(e.X, e.Y, e.Z);
                     var rot = new Quaternion(e.Qx, e.Qy, e.Qz, e.Qw);
@@ -519,9 +530,17 @@ namespace BigAmbitionsMP
                         }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] in-place cargo refresh '{e.VehicleId}': {ex.Message}"); }
                     }
-                    if (rv.Go != null && Vector3.Distance(rv.Go.transform.position, pos) > VehicleSnapDistance)
+                    if (rv.Go != null && !PossessedByLocal(rv.Go)
+                        && Vector3.Distance(rv.Go.transform.position, pos) > VehicleSnapDistance)
                     {
-                        // Teleport (ferry, recovery) — snap, don't slide.
+                        // Teleport (ferry, recovery) — snap, don't slide. NEVER while WE possess the
+                        // ghost (CartTrace-pinned root of the whole borrowed-cart cluster, 2026-07-07):
+                        // this direct write teleported the cart out of the pusher's hands on every
+                        // owner broadcast >15m away — native possession yanked it back, producing the
+                        // packet-rate ping-pong, the corrupted stream→follow feedback with the owner,
+                        // the cart pinned at the door after an interior warp (711m), and the eventual
+                        // possession break. While possessed, THIS machine owns the ghost's transform —
+                        // the owner's broadcast is derived from our own stream and must never re-apply.
                         rv.Go.transform.position = pos;
                         rv.Go.transform.rotation = rot;
                         rv.Velocity = Vector3.zero;
@@ -538,6 +557,7 @@ namespace BigAmbitionsMP
                     rv.TargetRot = rot;
                     rv.TargetAt  = Time.unscaledTime;
                     rv.SenderT   = p.T;
+                    rv.OwnerUsing = e.Driving;   // in-use arbitration (see the run-9 note above)
 
                     // Keep a drivable (granted) proxy fueled from the owner's car so it isn't stuck at 0%.
                     // Skipped while WE drive it (controlledByPlayer) so local consumption isn't clobbered.
@@ -546,25 +566,53 @@ namespace BigAmbitionsMP
                     // Cross-interior mask v2 (per-vehicle building tag — fixes the
                     // vehicle-LEFT-inside case): show the ghost only when its tag
                     // matches MY current building ("" = outdoors, always shown).
+                    // v3 (2026-07-07, borrowed-flatbed field runs): a ghost WE are currently
+                    // possessing (pushing/driving) is NEVER masked — the OWNER's tag for a
+                    // remote-possessed vehicle is computed from ITS stale local position near the
+                    // OWNER (the :401 proximity tagger), so it can claim a building the vehicle
+                    // left long ago and hide the flatbed from its own pusher's hands.
                     if (rv.Go != null)
                     {
-                        bool maskVeh = !string.IsNullOrEmpty(e.Bldg)
+                        // HAND CARTS ARE NEVER TAG-MASKED (2026-07-07, the structural fix): the mask
+                        // exists so cars left inside garages don't render through walls. Carts are
+                        // small, always accompany a player, and their tag goes stale the moment a
+                        // remote player pushes them — a wrong hide then BREAKS the pusher's native
+                        // possession (SetActive(false) on a possessed cart ejects it from their
+                        // hands). Cost of never masking: a cart indoors is faintly visible from
+                        // outside — cosmetic; cost of a wrong mask: gameplay-breaking.
+                        bool iPossessIt = PossessedByLocal(rv.Go);   // flag (cars) OR parented-under-Player
+                        bool maskVeh = !IsHandCartType(rv.Go.name)
+                                       && !iPossessIt
+                                       && !string.IsNullOrEmpty(e.Bldg)
                                        && e.Bldg != MPRegisterSync.CurrentShopAddress;
                         if (rv.Go.activeSelf == maskVeh)
                         {
                             rv.Go.SetActive(!maskVeh);
                             Plugin.Logger.LogInfo(
                                 $"[InteriorMask] ghost '{e.TypeName}' ({e.VehicleId}) {(maskVeh ? "hidden" : "shown")} — " +
-                                $"tag='{e.Bldg}' mine='{MPRegisterSync.CurrentShopAddress}'.");
+                                $"tag='{e.Bldg}' mine='{MPRegisterSync.CurrentShopAddress}' possessed={iPossessIt}.");
                         }
                     }
                 }
 
-                // Vehicles this owner no longer lists have been sold — despawn them.
+                // Vehicles this owner no longer lists have been sold — despawn them. NEVER a ghost
+                // WE currently possess (CartTrace 2026-07-07: the owner's real cart briefly left its
+                // fleet list — deregistered after the follow carried it into unloaded interior
+                // coords — and this cleanup DESTROYED the cart out of the pusher's hands, stack:
+                // ApplyVehicleFleet → DespawnByVehicleId → ExitIfLocallyDriven). A possessed ghost
+                // rides out list flicker; a real sale despawns the moment it's released.
                 var stale = _remoteVehicles
                     .Where(kv => kv.Value.OwnerId == p.OwnerId && !seen.Contains(kv.Key))
                     .Select(kv => kv.Key).ToList();
-                foreach (var id in stale) DespawnByVehicleId(id);
+                foreach (var id in stale)
+                {
+                    if (_remoteVehicles.TryGetValue(id, out var srv) && srv?.Go != null && PossessedByLocal(srv.Go))
+                    {
+                        Plugin.Logger.LogWarning($"[Vehicle] owner's fleet no longer lists '{id}' but WE are pushing/driving it — keeping (no despawn while possessed).");
+                        continue;
+                    }
+                    DespawnByVehicleId(id);
+                }
 
                 // Hide the owner's walking model only when driving an ENCLOSED
                 // vehicle.  On OPEN ones (scooters, push carts/dollies) the
@@ -666,7 +714,9 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Fill a (ghost) VehicleInstance's cargo from the manifest
-        /// string "itemId=amount;…" so the visual boxes appear remotely.
+        /// string "itemId=amount=paid=price;…" (legacy 2-part accepted) so the
+        /// visual boxes appear remotely AND the replica is checkout-faithful
+        /// (Option A: a borrower's register reads unpaid stacks off the replica).
         /// ('=' separator — EA 0.11 item ids contain colons.)
         /// Unknown item names are skipped (version drift safe).</summary>
         private static void ApplyCargoManifest(VehicleInstance inst, string? manifest)
@@ -679,10 +729,16 @@ namespace BigAmbitionsMP
                 {
                     if (string.IsNullOrEmpty(part)) continue;
                     var bits = part.Split('=');
-                    if (bits.Length != 2) continue;
+                    if (bits.Length != 2 && bits.Length != 4) continue;   // 2 = legacy wire, 4 = +paid+price (Option A)
                     if (string.IsNullOrEmpty(bits[0])) continue;
                     if (!int.TryParse(bits[1], out var amount) || amount <= 0) continue;
-                    inst.cargoInstances.Add(new BigAmbitions.Items.CargoInstance(bits[0], amount, 0f, true));
+                    bool paid = true; float price = 0f;
+                    if (bits.Length == 4)
+                    {
+                        paid = bits[2] != "0";
+                        float.TryParse(bits[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out price);
+                    }
+                    inst.cargoInstances.Add(new BigAmbitions.Items.CargoInstance(bits[0], amount, price, paid));
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] cargo manifest: {ex.Message}"); }
@@ -793,6 +849,24 @@ namespace BigAmbitionsMP
             if (drivable)
             {
                 killed = 0;   // keep the controller → drivable (see the comment above).
+                // Class 6 (serialized-state inheritance): a ghost cloned while its OWNER is pushing/
+                // driving carries controlledByPlayer=TRUE — natively that means "already in someone's
+                // hands", so the grab is refused forever (run-8: partner could only open the cart's
+                // inventory). Merger testing surfaces it constantly: every grant change respawns
+                // ghosts, so any respawn mid-push mints a poisoned clone. A fresh ghost is possessed
+                // by NOBODY on this machine — clear the flag on every kept controller.
+                try
+                {
+                    foreach (var kvc in go.GetComponentsInChildren<VehicleController>(true))
+                        if (kvc != null && kvc.controlledByPlayer) { kvc.controlledByPlayer = false; Plugin.Logger.LogInfo($"[Drive] ghost '{e.TypeName}': cleared inherited controlledByPlayer (owner was using it at clone time)."); }
+                    // User-approved 2026-07-07: a GHOST never runs the native abandoned-vehicle timer —
+                    // only the OWNER's machine decides whether a vehicle still exists; the ghost follows
+                    // the owner's broadcast. (The native timer on a ghost would locally destroy a parked
+                    // borrowed cart that left the borrower's sight, then fleet-respawn it — flicker.)
+                    foreach (var adv in go.GetComponentsInChildren<AutoDestroyVehicle>(true))
+                        if (adv != null) UnityEngine.Object.Destroy(adv);
+                }
+                catch { }
                 Plugin.Logger.LogInfo($"[Drive] ghost '{e.TypeName}' for '{ownerId}' spawned DRIVABLE (granted — controller kept, registered).");
             }
             else killed = StripVehicleComponents(go);
@@ -1138,6 +1212,42 @@ namespace BigAmbitionsMP
             typeName != null && (typeName.IndexOf("flatbed", System.StringComparison.OrdinalIgnoreCase) >= 0
                               || typeName.IndexOf("handtruck", System.StringComparison.OrdinalIgnoreCase) >= 0);
 
+        /// <summary>Is this ghost possessed by the LOCAL player right now? Two signals, either
+        /// suffices: controlledByPlayer (cars — the drive path sets it) OR the GO being PARENTED
+        /// under the local Player (hand carts — run-1 CarryProbe showed pushing = 'Player/
+        /// Flatbed(Clone)', and run-7 proved controlledByPlayer stays FALSE for pushed carts, which
+        /// is why the mask ejected a cart from the pusher's hands: SetActive(false) on a possessed
+        /// cart breaks the native possession, 2026-07-07 user report).</summary>
+        internal static bool PossessedByLocal(UnityEngine.GameObject go)
+        {
+            if (go == null) return false;
+            try
+            {
+                var vc = go.GetComponentInChildren<VehicleController>(true);
+                if (vc != null && vc.controlledByPlayer) return true;
+                var pc = Helpers.PlayerHelper.PlayerController;
+                return pc != null && go.transform.IsChildOf(pc.transform);
+            }
+            catch { return false; }
+        }
+
+        // ([CartProbe] sampled probe REPLACED by the event-driven CartTrace, user-approved 2026-07-07 —
+        //  snapshots straddle the transition events these bugs live in.)
+
+        /// <summary>CartTrace accessor: every hand-cart ghost (id, GO, owner, owner-using flag).</summary>
+        internal static IEnumerable<(string id, GameObject go, string ownerId, bool ownerUsing)> CartGhosts()
+        {
+            foreach (var kv in _remoteVehicles)
+            {
+                var rv = kv.Value;
+                if (rv?.Go == null || !IsHandCartType(rv.Go.name)) continue;
+                yield return (kv.Key, rv.Go, rv.OwnerId, rv.OwnerUsing);
+            }
+        }
+
+        /// <summary>CartTrace accessor: the real id of the proxy this machine is streaming (possession).</summary>
+        internal static string DrivingRealVidNow => _drivingRealVid;
+
         private static readonly Collider[] _cartIgnoreBuf = new Collider[256];
         internal static void NeutralizeHandCartGhostObstacle(UnityEngine.GameObject go)
         {
@@ -1271,8 +1381,11 @@ namespace BigAmbitionsMP
 
         private static bool IsGhostBeingDriven(GameObject go)
         {
-            try { var vc = go.GetComponentInChildren<VehicleController>(); return vc != null && vc.controlledByPlayer; }
-            catch { return false; }
+            // PossessedByLocal covers both signals: controlledByPlayer (cars) and parented-under-
+            // Player (pushed hand carts, whose flag stays FALSE — run-7). Without the parent signal
+            // the smoothing lerp fights the pusher and rubber-bands a freed cart to the owner's
+            // stale pose ("parks back at the pickup spot", user 2026-07-07).
+            return PossessedByLocal(go);
         }
 
         /// <summary>Write the owner's synced fuel onto a drivable proxy's FuelModule (so it's not stuck at 0%).
@@ -1325,6 +1438,23 @@ namespace BigAmbitionsMP
                         }
                     }
 
+                // Pushed hand carts: possession = PARENTED under the Player, controlledByPlayer stays
+                // FALSE (run-7 proof) — the flag scan above never sees them, so the owner's real cart
+                // never followed and its stale position poisoned the interior tag. Stream the pose of
+                // a proxy cart in the local player's hands through the SAME driven channel.
+                if (string.IsNullOrEmpty(realVid))
+                {
+                    var pc = Helpers.PlayerHelper.PlayerController;
+                    if (pc != null)
+                        foreach (var vc in pc.GetComponentsInChildren<VehicleController>(true))
+                        {
+                            var inst = vc?.vehicleInstance;
+                            if (inst == null || string.IsNullOrEmpty(inst.id) || !inst.id.StartsWith("BAMP_")) continue;
+                            realVid = inst.id.Substring(5); owner = OwnerIdFor(realVid); pose = vc.transform;
+                            break;
+                        }
+                }
+
                 if (!string.IsNullOrEmpty(realVid) && pose != null && !string.IsNullOrEmpty(owner))
                 {
                     _drivingRealVid = realVid; _drivingOwner = owner;
@@ -1332,7 +1462,8 @@ namespace BigAmbitionsMP
                         VehicleId = realVid, OwnerId = owner, DriverId = MPConfig.PlayerId,
                         X = pose.position.x, Y = pose.position.y, Z = pose.position.z,
                         Qx = pose.rotation.x, Qy = pose.rotation.y, Qz = pose.rotation.z, Qw = pose.rotation.w,
-                        Fuel = fuel, Damage = dmg, Released = false, T = Time.unscaledTime });
+                        Fuel = fuel, Damage = dmg, Released = false, T = Time.unscaledTime,
+                        Bldg = MPRegisterSync.CurrentShopAddress ?? "" });   // owner's follow holds at the door while we're indoors
                 }
                 else if (!string.IsNullOrEmpty(_drivingRealVid))
                 {
@@ -1379,7 +1510,12 @@ namespace BigAmbitionsMP
                     f.RideOff = f.Hide ? Vector3.zero : RideOffsetFor(tn);
                 }
                 f.Driver = p.DriverId;
-                f.Pos = new Vector3(p.X, p.Y, p.Z); f.Rot = new Quaternion(p.Qx, p.Qy, p.Qz, p.Qw);
+                // HOLD while the borrower is indoors: never chase the pose into interior coordinates —
+                // that space may not be loaded here, and the real cart got deregistered inside it
+                // (CartTrace 2026-07-07: follow lerped the cart to 951,* → fleet dropped it → the
+                // borrower's possessed proxy was despawned mid-push). The cart waits at the door.
+                if (string.IsNullOrEmpty(p.Bldg))
+                { f.Pos = new Vector3(p.X, p.Y, p.Z); f.Rot = new Quaternion(p.Qx, p.Qy, p.Qz, p.Qw); }
                 f.Until = Time.unscaledTime + DriveSyncTimeout;
                 // State back-prop (item D): the borrower's fuel + damage → my real car so my save reflects use.
                 try
@@ -1449,14 +1585,25 @@ namespace BigAmbitionsMP
         /// TryDriveGhost, so the click handler can offer a Drive/Storage choice without driving yet — bug #3.)</summary>
         public static bool CanDriveGhost(string vid)
         {
+            string reason;
+            bool ok = CanDriveGhostEx(vid, out reason);
+            CartTrace.NoteDriveCheck(vid, ok, reason);   // intent marker (throttled inside)
+            return ok;
+        }
+
+        private static bool CanDriveGhostEx(string vid, out string reason)
+        {
+            reason = "ok";
             try
             {
-                if (string.IsNullOrEmpty(vid) || !_remoteVehicles.TryGetValue(vid, out var rv) || rv?.Go == null) return false;
-                if (!GrantSync.IsGranted(rv.OwnerId, MPConfig.PlayerId)) return false;   // not my key
-                if (VehicleHelper.GetCurrentVehicle() != null) return false;             // already in a vehicle
-                return rv.Go.GetComponentInChildren<VehicleController>() != null;        // drivable (controller kept)
+                if (string.IsNullOrEmpty(vid) || !_remoteVehicles.TryGetValue(vid, out var rv) || rv?.Go == null) { reason = "no-ghost"; return false; }
+                if (!GrantSync.IsGranted(rv.OwnerId, MPConfig.PlayerId)) { reason = "no-key"; return false; }
+                if (VehicleHelper.GetCurrentVehicle() != null) { reason = "already-in-vehicle"; return false; }
+                if (rv.OwnerUsing) { reason = "owner-using"; return false; }   // no dual possession (run-9)
+                if (rv.Go.GetComponentInChildren<VehicleController>() == null) { reason = "no-controller"; return false; }
+                return true;
             }
-            catch { return false; }
+            catch (Exception ex) { reason = "threw:" + ex.Message; return false; }
         }
 
         /// <summary>A granted player clicked a ghost: if it's a DRIVABLE car they hold a key to and they're

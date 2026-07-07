@@ -257,12 +257,16 @@ shows up only as a spurious *second* action on click (our button "Unlock" also e
 vehicle). The clone also drags along other serialized components — localization drivers that
 re-overwrite our label, the source's icon, key-hint labels.
 
-**Detection grep.**
+**Detection grep.** (BROADENED 2026-07-07 — the original UI-only filter missed a VEHICLE
+instance for weeks: ghosts cloned while their owner was pushing inherited
+`controlledByPlayer=true`, so the native grab refused them as "already in use".)
 ```
-rg -n "Instantiate\(" src/ | rg -i "button|panel|row|cell"
+rg -n "Instantiate\(" src/
 ```
-For each cloned control, confirm `onClick` was **replaced** (not just `RemoveAllListeners`),
-and any inherited driver components (localization, etc.) were stripped.
+For EVERY clone — UI or world object: confirm `onClick` was **replaced** (not just
+`RemoveAllListeners`), inherited driver components (localization, native overlays, AI) were
+stripped/disabled, and LIVE STATE FLAGS were reset (possession/`controlledByPlayer`, enabled
+states, carving obstacles). A clone of a live object is a photograph of that object MID-ACTION.
 
 **Safe fixes.**
 1. **Replace the whole event, don't clear it:** `btn.onClick = new Button.ButtonClickedEvent();`
@@ -277,6 +281,19 @@ and any inherited driver components (localization, etc.) were stripped.
   (`MPPhoneButton`, `MPHubNativePage`, `MPCanvasUI`).
 - Passenger **Lock/Unlock** button cloned from Park → forgot the reset, used
   `RemoveAllListeners` → unlocking ALSO exited the car. Fixed 2026-06-15.
+- **Vehicle ghost cloned mid-push** inherited `controlledByPlayer=true` → the native grab refused
+  the cart as "already in someone's hands" (borrower could only open its inventory). Surfaced by
+  merger testing (grant changes respawn ghosts, so respawn-during-push mints poisoned clones).
+  Fixed 2026-07-07: drivable-ghost spawn clears the flag on every kept controller.
+- (Retro-recognized member) hand-cart ghosts kept their carving **NavMeshObstacle** → carried
+  carts displaced traffic on other machines. Fixed June (NeutralizeHandCartGhostObstacles) before
+  the class was named — same shape: live component state inherited by a clone.
+
+**Audit 2026-07-07** (user-requested full sweep, unfiltered grep): 16 Instantiate sites. 15 carry
+explicit post-clone neutralization (StripToVisual, StripModelScripts+StripCameras, native-driver
+Behaviour disabling, listener replacement + localization stripping, Gley strips, round-45 prop
+hygiene). The 1 unguarded instance was the vehicle-ghost flag above — found via [CartProbe], fixed
+same day. Re-run the unfiltered grep whenever a new Instantiate lands.
 
 > The recurring "remote avatars shove vehicles" bug is **not** in this registry — it was a
 > single bug we mis-fixed twice (we kept freezing *ghost-vehicle* rigidbodies when the shover

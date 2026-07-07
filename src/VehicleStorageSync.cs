@@ -23,8 +23,9 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class VehicleStorageSync
     {
-        public const byte OpTake = 0;   // remove Amount of ItemName from the vehicle (accessor receives it)
-        public const byte OpPut  = 1;   // add Amount of ItemName to the vehicle (from the accessor)
+        public const byte OpTake     = 0;   // remove Amount of ItemName from the vehicle (accessor receives it)
+        public const byte OpPut      = 1;   // add Amount of ItemName to the vehicle (from the accessor)
+        public const byte OpMarkPaid = 2;   // flip Amount of unpaid ItemName stacks to paid (borrowed-cart checkout mirror)
 
         // ── Accessor side: start a take / put ────────────────────────────────────
 
@@ -47,10 +48,26 @@ namespace BigAmbitionsMP
         // CONTENTS (the real item), not the wrapper — otherwise the trunk would show "closed cardboard box".
         // NOTHING is removed locally on send — the source stack leaves hands/hand-truck only when the owner
         // CONFIRMS (OnResult), so a full trunk can never eat items.
+        // One deposit INTENT can reach here by two routes at once (the PassengerRide walk-deposit CTA and
+        // the native AddHeldItemToStorage redirect fired for the same box — 2026-07-07 field-confirmed
+        // duplication: owner applied BOTH trust-based PUTs, +2 for 1 box). Owner-side has no "does the
+        // sender still have it" check, so dedup at the single funnel both routes pass through: one deposit
+        // per vehicle per window. Legit successive deposits are always slower (walk + owner round-trip).
+        private static string _lastDepositVid = "";
+        private static float  _lastDepositAt  = -999f;
+        private const  float  DepositDedupSeconds = 2.5f;
+
         public static void RequestDeposit(string realVehicleId, string ownerId)
         {
             try
             {
+                if (realVehicleId == _lastDepositVid && Time.unscaledTime - _lastDepositAt < DepositDedupSeconds)
+                {
+                    Plugin.Logger.LogInfo($"[VStore] duplicate deposit for '{realVehicleId}' suppressed ({Time.unscaledTime - _lastDepositAt:F1}s after the first — double-routed intent).");
+                    return;
+                }
+                _lastDepositVid = realVehicleId; _lastDepositAt = Time.unscaledTime;
+
                 var held = PlayerHelper.ItemInstanceInHands;
                 if (held != null)
                 {
@@ -105,18 +122,40 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
-        private static void Send(byte op, string vid, string ownerId, string itemName, int amount, bool paid, float price)
+        private static void Send(byte op, string vid, string ownerId, string itemName, int amount, bool paid, float price, bool silent = false)
         {
             if (string.IsNullOrEmpty(vid) || string.IsNullOrEmpty(ownerId) || string.IsNullOrEmpty(itemName) || amount <= 0)
                 return;
             var req = new VehicleCargoReqPayload
             {
                 VehicleId = vid, OwnerId = ownerId, PlayerId = MPConfig.PlayerId,
-                Op = op, ItemName = itemName, Amount = amount, Paid = paid, PricePerUnit = price,
+                Op = op, ItemName = itemName, Amount = amount, Paid = paid, PricePerUnit = price, Silent = silent,
             };
             // Host: hand straight to the broker. Client: send to the host, which forwards to the owner.
             if (MPServer.IsRunning) MPServer.HandleVehicleCargoReq(req, MPConfig.PlayerId);
             else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.VehicleCargoReq, MPConfig.PlayerId, req));
+        }
+
+        // ── Borrowed-cart shopping (Option A, user-approved 2026-07-07) ──────────────────────────
+        // MIRROR of a native cargo mutation that already ran on the possessed pushed proxy: replay the
+        // same change on the owner's REAL cart, fire-and-forget (Silent — the accessor consumed/placed
+        // the item natively; OnResult must not double-place, clear hands, or toast). The next fleet
+        // re-sync overwrites the replica with the owner's truth, which now matches — convergent.
+        internal static void MirrorToOwner(byte op, VehicleInstance proxyInst, string itemName, int amount, bool paid, float price)
+        {
+            try
+            {
+                if (proxyInst == null || amount <= 0 || string.IsNullOrEmpty(itemName)) return;
+                string realVid = proxyInst.id != null && proxyInst.id.StartsWith("BAMP_") ? proxyInst.id.Substring(5) : proxyInst.id;
+                string owner = VehicleManager.OwnerIdFor(realVid);
+                if (string.IsNullOrEmpty(owner))
+                {
+                    Plugin.Logger.LogWarning($"[VStore] mirror {op} {amount}×{itemName} on '{realVid}': no owner known — mirror LOST (re-sync will revert the local change).");
+                    return;
+                }
+                Send(op, realVid, owner, itemName, amount, paid, price, silent: true);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] MirrorToOwner: {ex.Message}"); }
         }
 
         // ── Owner side: apply the change to the REAL cargo (runs on whoever owns V) ──
@@ -128,7 +167,7 @@ namespace BigAmbitionsMP
             {
                 VehicleId = req.VehicleId, PlayerId = req.PlayerId, Op = req.Op,
                 ItemName = req.ItemName, Amount = req.Amount, Paid = req.Paid, PricePerUnit = req.PricePerUnit,
-                Ok = false, Reason = "gone",
+                Ok = false, Reason = "gone", Silent = req.Silent,
             };
             try
             {
@@ -144,22 +183,52 @@ namespace BigAmbitionsMP
                     if (req.Op == OpTake)
                     {
                         // First matching unsealed stack with enough on hand (first request wins).
+                        // Prefer a stack whose paid flag matches the request (mirrored takes name the exact
+                        // stack the borrower consumed natively); fall back to any match so UI takes keep working.
                         var src = inst.cargoInstances;
                         if (src != null)
                         {
-                            for (int c = 0; c < src.Count; c++)
+                            for (int pass = 0; pass < 2 && !res.Ok; pass++)
+                                for (int c = 0; c < src.Count; c++)
+                                {
+                                    var ci = src[c];
+                                    if (ci == null || ci.IsSealed) continue;
+                                    if (ci.itemName != req.ItemName) continue;   // match by item; carry the owner's REAL paid/price back (manifest is lossy)
+                                    if (pass == 0 && ci.paid != req.Paid) continue;
+                                    if (ci.amount < req.Amount) continue;
+                                    res.Paid = ci.paid;
+                                    res.PricePerUnit = ci.pricePerUnit;
+                                    inst.ReduceFromCargo(ci, req.Amount);
+                                    res.Ok = true; res.Reason = "";
+                                    break;
+                                }
+                        }
+                    }
+                    else if (req.Op == OpMarkPaid)
+                    {
+                        // Borrowed-cart checkout mirror: the borrower paid at a register — flip the same
+                        // amount of unpaid ItemName stacks to paid on the REAL cart (split when partial).
+                        int remaining = req.Amount;
+                        var src = inst.cargoInstances;
+                        if (src != null)
+                        {
+                            for (int c = src.Count - 1; c >= 0 && remaining > 0; c--)
                             {
                                 var ci = src[c];
-                                if (ci == null || ci.IsSealed) continue;
-                                if (ci.itemName != req.ItemName) continue;   // match by item; carry the owner's REAL paid/price back (manifest is lossy)
-                                if (ci.amount < req.Amount) continue;
-                                res.Paid = ci.paid;
-                                res.PricePerUnit = ci.pricePerUnit;
-                                inst.ReduceFromCargo(ci, req.Amount);
-                                res.Ok = true; res.Reason = "";
-                                break;
+                                if (ci == null || ci.IsSealed || ci.paid) continue;
+                                if (ci.itemName != req.ItemName) continue;
+                                if (ci.amount <= remaining) { remaining -= ci.amount; ci.paid = true; }
+                                else
+                                {
+                                    ci.amount -= remaining;
+                                    inst.AddToCargo(new CargoInstance(req.ItemName, remaining, ci.pricePerUnit, true));
+                                    remaining = 0;
+                                }
                             }
                         }
+                        try { inst.OnItemsInCargoUpdated()?.Invoke(); } catch { }
+                        res.Ok = remaining == 0;
+                        if (!res.Ok) { res.Reason = "gone"; Plugin.Logger.LogWarning($"[VStore] mark-paid on '{req.VehicleId}': {remaining}×{req.ItemName} had no unpaid stack (state drift; re-sync will converge)."); }
                     }
                     else // OpPut — capacity-checked by the game's own TryToAddToCargo
                     {
@@ -171,7 +240,7 @@ namespace BigAmbitionsMP
                 }
                 // The cargo change re-syncs to every ghost through VehicleManager's normal fleet broadcast.
                 if (res.Ok)
-                    Plugin.Logger.LogInfo($"[VStore] owner applied {(req.Op == OpTake ? "TAKE" : "PUT")} {req.Amount}×{req.ItemName} on '{req.VehicleId}' for '{req.PlayerId}'.");
+                    Plugin.Logger.LogInfo($"[VStore] owner applied {(req.Op == OpTake ? "TAKE" : req.Op == OpMarkPaid ? "MARK-PAID" : "PUT")}{(req.Silent ? " (mirror)" : "")} {req.Amount}×{req.ItemName} on '{req.VehicleId}' for '{req.PlayerId}'.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] OwnerApply: {ex.Message}"); res.Ok = false; res.Reason = "error"; }
             return res;
@@ -184,6 +253,15 @@ namespace BigAmbitionsMP
         {
             try
             {
+                // Mirrors of native actions (borrowed-cart shopping): the local side already consumed or
+                // placed the item natively — a grant needs NOTHING here, and a failure is state drift the
+                // next fleet re-sync repairs. Log failures so drift is visible; never toast or place.
+                if (res.Silent)
+                {
+                    if (!res.Ok)
+                        Plugin.Logger.LogWarning($"[VStore] mirror {(res.Op == OpTake ? "TAKE" : res.Op == OpMarkPaid ? "MARK-PAID" : "PUT")} {res.Amount}×{res.ItemName} on '{res.VehicleId}' FAILED owner-side ({res.Reason}) — replica reverts on next re-sync.");
+                    return;
+                }
                 if (res.Op == OpTake)
                 {
                     if (!res.Ok)
@@ -261,6 +339,8 @@ namespace BigAmbitionsMP
                     if (cur != null && cur.VehicleType != null
                         && cur.VehicleType.spawnInPlayerObject       // a pushed hand-vehicle (hand-truck / flatbed), not a car
                         && cur.VehicleType.maxCargoCapacity > 0
+                        && cur.id != "BAMP_" + vid                   // taking from the cart I'm PUSHING = "I want it in hands" —
+                                                                     // placing it back would round-trip the take into a no-op
                         && cur.TryToAddToCargo(ci))
                         return;
                 }

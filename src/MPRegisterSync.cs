@@ -69,8 +69,50 @@ namespace BigAmbitionsMP
 
         public static void SetCurrentShop(string ownerId, string address)
         {
+            // DIAG [ShopCtx] (2026-07-07, flatbed cluster): the interior mask hid a hand-vehicle
+            // ghost with mine='' while the player stood INSIDE the tagged building — trace every
+            // context transition so the next run shows whether entry set it and what cleared it.
+            if (CurrentShopAddress != (address ?? ""))
+                Plugin.Logger.LogInfo($"[ShopCtx] '{CurrentShopAddress}' → '{address ?? ""}' (owner '{ownerId ?? ""}')");
             CurrentShopOwner = ownerId ?? "";
             CurrentShopAddress = address ?? "";
+        }
+
+        // ── Context self-heal (2026-07-07, [ShopCtx]-proven): entering a building while PUSHING a
+        // hand vehicle skips the DelayedEnterBuildingActions entry hook entirely — the context stayed
+        // '' and the interior mask hid the pushed flatbed from its own pusher. Poll the game's OWN
+        // authority (BuildingManager.buildingRegistration: set while indoors, nulled by ResetIndoors)
+        // so the context converges regardless of WHICH native entry/exit path ran. Frontload principle:
+        // never gate correctness on a specific flow having fired.
+        private static float _ctxNextPoll, _ctxEmptySince = -1f;
+
+        public static void TickContextHeal()
+        {
+            if (UnityEngine.Time.unscaledTime < _ctxNextPoll) return;
+            _ctxNextPoll = UnityEngine.Time.unscaledTime + 0.5f;
+            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            try
+            {
+                var bm  = InstanceBehavior<BuildingManager>.Instance;
+                var reg = bm != null ? bm.buildingRegistration : null;
+                if (reg != null)
+                {
+                    _ctxEmptySince = -1f;
+                    string key = GameStateReader.AddressKey(reg);
+                    if (!string.IsNullOrEmpty(key) && key != CurrentShopAddress)
+                        SetCurrentShop(reg.businessOwnerRivalId?.ToString() ?? "", key);   // hook missed → heal
+                }
+                else if (!string.IsNullOrEmpty(CurrentShopAddress))
+                {
+                    // Exit hook missed too (hand-vehicle exit): clear after 2s of provably-outdoors —
+                    // hysteresis absorbs the null reads during entry/exit transitions.
+                    if (_ctxEmptySince < 0f) _ctxEmptySince = UnityEngine.Time.unscaledTime;
+                    else if (UnityEngine.Time.unscaledTime - _ctxEmptySince > 2f)
+                        SetCurrentShop("", "");
+                }
+                else _ctxEmptySince = -1f;
+            }
+            catch { }
         }
 
         private static string Key(Vector3 p)
@@ -298,7 +340,7 @@ namespace BigAmbitionsMP
                 foreach (var reg in gi.BuildingRegistrations)
                 {
                     if (reg == null) continue;
-                    bool mine; try { mine = reg.RentedByPlayer; } catch { continue; }
+                    bool mine; try { mine = MergerFlip.TrulyMine(reg); } catch { continue; }   // TrulyMine: no station/duty claims on flipped shops
                     if (!mine || reg.itemInstances == null) continue;
                     string addr = GameStateReader.AddressKey(reg);
                     // Round-30 (WS2): stations are derived STRUCTURALLY from the schedule — any item
@@ -375,7 +417,7 @@ namespace BigAmbitionsMP
             try
             {
                 if (reg == null) return;
-                bool mine = false; try { mine = reg.RentedByPlayer; } catch { }
+                bool mine = false; try { mine = MergerFlip.TrulyMine(reg); } catch { }   // TrulyMine (merger flip excluded)
                 string bldgOwner = ""; string bizOwner = "";
                 try { bldgOwner = reg.buildingOwnerRivalId?.ToString() ?? ""; } catch { }
                 try { bizOwner  = reg.businessOwnerRivalId?.ToString() ?? ""; } catch { }
@@ -451,7 +493,7 @@ namespace BigAmbitionsMP
                 foreach (var reg in gi.BuildingRegistrations)
                 {
                     if (reg == null) continue;
-                    bool mine = false; try { mine = reg.RentedByPlayer; } catch { }
+                    bool mine = false; try { mine = MergerFlip.TrulyMine(reg); } catch { }   // TrulyMine (merger flip excluded)
                     if (!mine) continue;
                     owned++;
                     bool hasTill = false;
@@ -877,7 +919,7 @@ namespace BigAmbitionsMP
                 if (gi?.BuildingRegistrations == null || gi.EmployeeInstances == null) return;
                 foreach (var reg in gi.BuildingRegistrations)
                 {
-                    bool mine; try { mine = reg != null && reg.RentedByPlayer; } catch { continue; }
+                    bool mine; try { mine = MergerFlip.TrulyMine(reg); } catch { continue; }   // TrulyMine: never publish a partner shop roster
                     if (!mine) continue;
                     string addr = GameStateReader.AddressKey(reg);
                     var staff = new List<StaffInfo>();

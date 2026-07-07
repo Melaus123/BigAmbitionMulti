@@ -513,9 +513,10 @@ namespace BigAmbitionsMP
                 foreach (var reg in gi.BuildingRegistrations)
                 {
                     if (reg == null) continue;
-                    bool mine = false;
-                    try { mine = reg.RentedByPlayer; } catch { }
-                    if (!mine) continue;                       // only buildings this client runs a business in
+                    // TrulyMine, NOT the raw flag: a merger-flipped partner shop reads RentedByPlayer
+                    // locally, and publishing it from here would broadcast an OWNERSHIP CLAIM over the
+                    // partner's business (OwnerPlayerId=me) — the run-4 ownership churn (2026-07-07).
+                    if (!MergerFlip.TrulyMine(reg)) continue;  // only buildings this client TRULY runs
 
                     var info = ReadInfo(reg);
                     if (info == null) continue;
@@ -580,7 +581,7 @@ namespace BigAmbitionsMP
                     BusinessDescription = SafeStr(reg.BusinessDescription),
                     BuildingOwnerRivalId = SafeStr(reg.buildingOwnerRivalId),
                     BusinessOwnerRivalId = SafeStr(reg.businessOwnerRivalId),
-                    RentedByPlayer       = reg.RentedByPlayer,
+                    RentedByPlayer       = MergerFlip.TrulyMine(reg),   // never publish the merger flip as tenancy
                     // Two separate concepts:
                     //   * Building owner (landlord) — host bought the property.
                     //     reg.BuildingOwnedByPlayer is the canonical check;
@@ -590,7 +591,7 @@ namespace BigAmbitionsMP
                     // A player can be both at once (buy + run own business),
                     // either, or neither.
                     OwnerPlayerId         = ResolveOwnerPlayerId(addr, reg),
-                    BusinessOwnerPlayerId = reg.RentedByPlayer           ? MPConfig.PlayerId : "",
+                    BusinessOwnerPlayerId = MergerFlip.TrulyMine(reg)    ? MPConfig.PlayerId : "",   // an ownership CLAIM — flip must never make one
                 };
 
                 // AI-business retail prices (host-authoritative; audit catch
@@ -696,12 +697,18 @@ namespace BigAmbitionsMP
                 // owner→host→other-clients verbatim and nobody re-derives it (2026-06-19 shop-closed bug).
                 try
                 {
-                    if (reg.RentedByPlayer)
+                    // TrulyMine: only the TRUE owner computes canonical open truth — a merger-flipped
+                    // partner shop must pass through the owner's received value, or a member's local
+                    // toggle publishes bogus "owner truth" (run-4: P1 closed P2's shop, P2 saw open).
+                    if (MergerFlip.TrulyMine(reg))
                         info.OwnerOpenState = BusinessHelper.IsBusinessOpen(reg) ? 1 : 2;
                     else if (OwnerOpenByAddress.TryGetValue(addr, out var ownerSt))
                         info.OwnerOpenState = ownerSt;
                 }
                 catch { }
+
+                // (Routed owner-only edits — see RouteTemporarilyClose below — re-enter here naturally:
+                //  the owner's native TemporarilyClose mutates the reg, this builder picks it up.)
 
                 if (!string.IsNullOrEmpty(info.BusinessName))
                     info.LogoFiles = ReadLogoFilesCached(info.BusinessName, info.LogoShape);
@@ -940,6 +947,62 @@ namespace BigAmbitionsMP
                 if (a[i].Base64 != b[i].Base64) return false;
             }
             return true;
+        }
+
+        // ── Merger slice 3: routed owner-only business edits (the open/close toggle) ──────────────
+        // A member's native TemporarilyClose on a FLIPPED replica is intercepted
+        // (Patch_TemporarilyClose_MergerRoute) and lands here instead of mutating the replica.
+
+        /// <summary>MEMBER machine: send the toggle to the owner (host arbitrates + relays).</summary>
+        public static void RouteTemporarilyClose(string addressKey, bool closed)
+        {
+            var p = new BusinessEditPayload { AddressKey = addressKey, TemporarilyClosed = closed };
+            if (MPServer.IsRunning) HostRouteBusinessEdit(p, MPConfig.PlayerId);
+            else                    MPClient.SendBusinessEdit(p);
+            Plugin.Logger.LogInfo($"[Merger] routed TemporarilyClose({closed}) for '{addressKey}' to the owner.");
+        }
+
+        /// <summary>HOST (main thread): grant-gate the edit (merger unions into the Business grant) and
+        /// apply locally when the host owns the shop, else relay to the owner's machine.</summary>
+        public static void HostRouteBusinessEdit(BusinessEditPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(senderPid)) return;
+                if (!MPServer.BuildingOwners.TryGetValue(p.AddressKey, out var owner) || string.IsNullOrEmpty(owner))
+                { Plugin.Logger.LogWarning($"[Merger] business edit for unowned '{p.AddressKey}' — dropped."); return; }
+                string ownerPid = owner == "host" ? MPConfig.PlayerId : owner;
+                if (ownerPid != senderPid && !GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))
+                { Plugin.Logger.LogWarning($"[Merger] business edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no access, dropped."); return; }
+                if (ownerPid == MPConfig.PlayerId) ApplyRoutedTemporarilyClose(p);
+                else MPServer.SendBusinessEditTo(ownerPid, p);
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Merger] HostRouteBusinessEdit: {ex.Message}"); }
+        }
+
+        /// <summary>OWNER machine (main thread): run the game's own toggle — every native side effect
+        /// (licensing on reopen, customer entries, todo task) fires on the authoritative machine, and
+        /// the regular business sync republishes the new truth to everyone.</summary>
+        public static void ApplyRoutedTemporarilyClose(BusinessEditPayload p)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null || p == null) return;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null) continue;
+                    string key; try { key = GameStateReader.AddressKey(reg); } catch { continue; }
+                    if (key != p.AddressKey) continue;
+                    if (!MergerFlip.TrulyMine(reg))
+                    { Plugin.Logger.LogWarning($"[Merger] routed toggle for '{key}' but this machine is not its true owner — dropped."); return; }
+                    if (reg.temporarilyClosed == p.TemporarilyClosed) return;   // idempotent
+                    reg.TemporarilyClose(p.TemporarilyClosed);
+                    Plugin.Logger.LogInfo($"[Merger] owner applied routed TemporarilyClose({p.TemporarilyClosed}) on '{key}'.");
+                    return;
+                }
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Merger] ApplyRoutedTemporarilyClose: {ex.Message}"); }
         }
     }
 }
