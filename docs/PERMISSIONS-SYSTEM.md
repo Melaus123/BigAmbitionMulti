@@ -329,8 +329,53 @@ run). Everything below is field-proven, not just code-read:
 - **Tooltip parity**: `StockOverlay.ShouldShow` (the hover "Contents: … 0/1000") ungated for helpers —
   read-only visibility flip; helper and owner now read the same facts off the same machine.
 
-### Phase 3 — register work
-Helper serves local customers; each completed order forwards to the owner into
-`reg.unprocessedCompletedOrders` (native displacement dedups vs the hourly sim). Design details after
-Phase 2. NOTE 2026-07-07: the register panel's WORK button (DropdownOverlay sibling) is the natural
-entry point; its helper behavior is currently native/unaudited — audit before Phase 3 design.
+### Phase 3 — register work (audited 2026-07-07; slice 1 SHIPPED)
+**Audit (decompile-verified):** the panel WORK button = `ButtonOverlay` → `EmployeeStationController.Work()`
+→ `PlayerActivityUI.Show(new WorkActivity(job, station))`. `CanWork()`/`ShouldOpenWorkUI` require
+`IsPlayerOwnedBusiness || a hired job here` — for a helper the button SHOWED (overlay renders under the
+visibility flip) but the click-time re-check ran unflipped → **silent no-op** (UI-vs-behavior mismatch,
+now fixed by slice 1). `WorkActivity` with a **null job = the owner's own work mode**: NO salary
+(`IsWorkingInPlayerBuilding` skips the payout — helping-is-donating for free), native energy drain,
+session bounded by opening hours, customer-service skill gain to the worker. The serve loop
+(`FullServiceEmployee.ServeCustomer`) gates EVERY economic step on `IsPlayerOwnedBusiness` (paperbag
+entry :111, `Pay` revenue flag :135-136, order recording :154-156, price checks :179) — on an unflipped
+helper machine, serving is **cosmetic**: no money moves, nothing records.
+
+**Slice 1 — SHIPPED 2026-07-07:** `CanWork` wrapped in the scoped flip (button truthful, helper can man
+the register in owner mode) + `AssignAiToEmployeeStation` guarded for helper businesses (WorkActivity.
+Finish's deferred non-owner branch would mint a phantom AI cashier on the replica; its only other caller
+is AI-shop setup, unaffected). Economically neutral by construction — this slice exists to field-answer
+the design's ONE open question.
+
+**Slice-1 field ANSWER (2026-07-07): NO customers exist on non-owner machines.** Mechanism (decompiled):
+NPC shoppers are machine-local — `IndoorCustomerSpawner` spawns from `CustomerEntriesHelper`'s
+per-address entry table, and player-business entries generate only where `RentedByPlayer` is true; the
+AI fallback (`GenerateAiEntries`) permanently caches an EMPTY list when it runs before the shop has
+products.
+
+**Slice 2 step 1 — customer presence — SHIPPED 2026-07-07:** the owner's pending shopper schedule rides
+the interior snapshot (`InteriorSnapshotPayload.CustomerEntries`, `CustomerEntrySync` captures/seeds);
+receivers seed their local entry table (completed flags preserved across re-pushes; customerCapacity
+recomputed data-level) and the game's own spawner produces the shoppers. Guest-side commerce stays
+COSMETIC (all economic steps gate on the unflipped ownership flag) — no double-count possible yet.
+`OwnerBusinessTail` also refreshes the owner's entries on every routed stock change (native parity).
+
+**Slice 2 step 2 — order forwarding + entry claims + stock deduction — SHIPPED 2026-07-07:**
+- **Identity:** entries carry an owner-minted `EntryId` (weak-keyed; spawn-time keys unusable — the
+  spawner mutates them). Receivers map each seeded entry's Order object to the id.
+- **Forward:** `Order.Pay` postfix — the one point every NPC checkout passes. A successful NPC pay on a
+  helper's machine (where Pay moves no money and records nothing) forwards the PAID items + EntryId to
+  the owner via the host (grant-gated relay). Seeded prices are owner-truth (set at schedule
+  generation), so no serve-coroutine flipping was needed.
+- **Owner adoption:** claim against the owner's own entry table (single-writer ledger — already-consumed
+  entries reject the forward, so a customer counts exactly once no matter which machine hosted them;
+  claiming marks the entry so the owner's spawner never spawns that customer), deduct one display-shelf
+  unit per item (out-of-stock items drop from the sale), consume + charge a paper bag from the register
+  (native :113 parity), record into `reg.unprocessedCompletedOrders` (the hourly calculator displaces the
+  sim quota natively), refresh + re-sync.
+
+**Slice 3 (agreed staged plan, next after field test):** puppet mode for the both-inside case. Authority:
+register-worker first, else earliest-arrived player still inside (host-arbitrated from interior-sub
+order); transfers rendered as walk-out/walk-in churn in v1 (near bug-proof), smooth in-place adoption
+(slice 4) only if the churn grates. "Authority persists after leaving" is REJECTED — the engine unloads
+interiors around the local player; a machine cannot simulate a building its player isn't inside.

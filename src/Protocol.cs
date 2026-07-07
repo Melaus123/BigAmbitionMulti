@@ -143,6 +143,7 @@ namespace BigAmbitionsMP
         BuildingCargoRes    = 139,       // Owner → Host → guest: the verdict (mirrors VehicleCargoRes).
         BuildingInteriorEdit = 140,      // Guest → Host → building owner: my edited interior snapshot (furniture/flooring from the designer). Owner ADOPTS it (ApplyInteriorSnapshot).
         PlayerStaffRoster   = 141,       // Owner → Host → All: the staff roster of one player business (round-30 WS3 — visitors inject these records so the game's own staffing engine can spawn EVERY scheduled worker, not just a synthetic cashier).
+        HelperOrderForward  = 142,       // Helper → Host → building owner: an NPC customer order paid on the helper's machine (round-39f Phase 3 slice-2 step-2). Owner claims the entry, deducts stock, records the order.
     }
 
     /// <summary>Owner → host → all: which of a shop's PRICED shelves are actually stocked (goods item
@@ -1327,6 +1328,53 @@ namespace BigAmbitionsMP
         public List<RetailPriceInfo>      RetailPrices    { get; set; } = new();
         public List<DirtSpotInfo>         DirtSpots       { get; set; } = new();
         public List<ItemInstanceInfo>     ItemInstances   { get; set; } = new();
+        // Round-39d (Phase 3 customer presence): the OWNER's authoritative shopper schedule for this
+        // player business. NPC customers are machine-local — IndoorCustomerSpawner spawns them from
+        // CustomerEntriesHelper's per-address entry list, which only ever gets player-business entries
+        // on the owner's machine (UpdateCustomerEntriesForPlayerBusiness gates on RentedByPlayer), so
+        // guests saw EMPTY shops. Owner fills this on push; guests seed their local entry table from it
+        // and the game's own spawner does the rest.
+        public List<CustomerEntryInfo>    CustomerEntries { get; set; } = new();
+        // Round-39e (complaint parity): the shop's fulfilled-demand set (reg.cachedFulfilledCustomerDemands,
+        // computed owner-side from amenities) — customers complain about demands NOT in this set, so a
+        // guest without it would complain about everything.
+        public List<string>               FulfilledDemands { get; set; } = new();
+    }
+
+    public class CustomerEntryInfo
+    {
+        // Round-39f: stable identity minted by the OWNER at first capture — the claim key for order
+        // forwarding (spawn times MUTATE: TrySpawnCustomer rewrites spawnTime/timestamp on late spawns,
+        // so time-based keys break across machines).
+        public string EntryId    { get; set; } = "";
+        public int   SpawnDay    { get; set; }
+        public int   SpawnHour   { get; set; }
+        public float SpawnMinute { get; set; }
+        public bool  Completed   { get; set; }
+        public List<OrderEntryInfo> Items { get; set; } = new();
+        // Round-39e (complaint parity): the customer's demand types (Order.customerDemandTypes) — a
+        // just-arrived customer complains about each demand the shop doesn't fulfill.
+        public List<string> Demands { get; set; } = new();
+    }
+
+    public class OrderEntryInfo
+    {
+        public string ItemName       { get; set; } = "";
+        public float  Price          { get; set; }
+        public float  WholesalePrice { get; set; }
+    }
+
+    /// <summary>Round-39f (Phase 3 slice-2 step-2) — a customer order PAID on a helper's machine,
+    /// forwarded to the building owner to become real: the owner claims the source entry (single-writer
+    /// dedup — its own entry table is the ledger), deducts the sold items + a paper bag from real stock,
+    /// and records the order in reg.unprocessedCompletedOrders, where the game's own hourly calculator
+    /// subtracts it from the simulated quota (native anti-double-count).</summary>
+    public class HelperOrderPayload
+    {
+        public string AddressKey { get; set; } = "";
+        public string PlayerId   { get; set; } = "";   // the helper who hosted the sale
+        public string EntryId    { get; set; } = "";   // the synced schedule entry this customer came from
+        public List<OrderEntryInfo> Items { get; set; } = new();   // PAID entries only
     }
 
     // ── Item instance DTOs (Phase 2b) ────────────────────────────────────────

@@ -154,6 +154,96 @@ namespace BigAmbitionsMP
         }
     }
 
+    /// <summary>Round-38f — Phase 3 slice 1: let a helper MAN the register (the panel's WORK button was a
+    /// silent no-op: ButtonOverlay renders under the visibility flip so the button SHOWED, but the
+    /// click-time CanWork re-check ran unflipped — ShouldOpenWorkUI needs IsPlayerOwnedBusiness or a hired
+    /// job — and Work() returned false doing nothing). Flipping CanWork itself covers both callers
+    /// uniformly. What the helper gets is the OWNER's work mode (WorkActivity with a null job): no salary
+    /// (IsWorkingInPlayerBuilding skips the payout — "helping is donating" for free), native energy drain,
+    /// session bounded by the store's opening hours. Serving is currently COSMETIC on the helper's machine —
+    /// every economic step in FullServiceEmployee (paperbag entry :111, Pay-with-revenue :135, order
+    /// recording :154) gates on the unflipped IsPlayerOwnedBusiness, so no money moves and nothing records.
+    /// Order forwarding to the owner (the real Phase 3) comes after this slice answers whether customers
+    /// even queue on the helper's machine.</summary>
+    [HarmonyPatch(typeof(EmployeeStationController), nameof(EmployeeStationController.CanWork))]
+    public static class Patch_StationCanWork_Helper
+    {
+        static void Prefix()    { HousingFurniture.Enter(includeHelper: true); }
+        static void Finalizer() { HousingFurniture.Exit(); }
+    }
+
+    /// <summary>Round-39f — Phase 3 slice-2 step-2: ORDER FORWARDING. Order.Pay is the single point
+    /// every NPC checkout passes through (full-service serve :136, self-service, kiosk). On a helper's
+    /// machine the pay moves no money and records nothing (all owner-gated) — so when an NPC pays HERE
+    /// in a granted business, forward the paid order to the owner, who claims the schedule entry
+    /// (single-writer dedup), deducts real stock + a bag, and records it. Only orders born from the
+    /// owner's synced schedule forward (EntryIdOf null = a local stray — skip); each forwards once.</summary>
+    [HarmonyPatch(typeof(Order), nameof(Order.Pay))]
+    public static class Patch_Order_Pay_HelperForward
+    {
+        private static readonly System.Collections.Generic.HashSet<string> _sent = new();
+
+        static void Postfix(Order __instance, bool isPlayer, bool __result)
+        {
+            try
+            {
+                if (!__result || isPlayer || __instance == null) return;
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!BusinessHelperRoute.HelperHere(out var addr)) return;
+                string? entryId = CustomerEntrySync.EntryIdOf(__instance);
+                if (string.IsNullOrEmpty(entryId) || _sent.Contains(entryId)) return;
+
+                var payload = new HelperOrderPayload { AddressKey = addr, PlayerId = MPConfig.PlayerId, EntryId = entryId! };
+                foreach (var e in __instance.entries)
+                {
+                    if (e == null || !e.paid || string.IsNullOrEmpty(e.itemName)) continue;
+                    payload.Items.Add(new OrderEntryInfo { ItemName = e.itemName, Price = e.price, WholesalePrice = e.wholesalePrice });
+                }
+                if (payload.Items.Count == 0) return;   // empty basket — nothing real happened
+                _sent.Add(entryId!);
+
+                if (MPServer.IsRunning) MPServer.HandleHelperOrder(payload, MPConfig.PlayerId);
+                else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.HelperOrderForward, MPConfig.PlayerId, payload));
+                Plugin.Logger.LogInfo($"[Business] forwarded helper-served order {entryId} ({payload.Items.Count} item(s)) @'{addr}' → owner.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] order forward: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>Round-39e — complaint parity: a just-arrived customer's complaint bubbles
+    /// (Customer.Init :204 → ComplainAboutUnfulfilledDemands) gate on IsPlayerOwnedBusiness, so the
+    /// owner saw customers complain about shop shortcomings and a helper never did. The scoped flip
+    /// makes Init's two ownership reads (:196 demand score, :204 complain) pass for helpers; the
+    /// complaint data is real on this machine now that entries carry customerDemandTypes and the
+    /// snapshot carries the fulfilled-demand set (round-39e sync). Cosmetic-only: the expression
+    /// coroutine plays audio + an emoji bubble, no economy writes.</summary>
+    [HarmonyPatch(typeof(Customer), nameof(Customer.Init))]
+    public static class Patch_Customer_Init_HelperComplaints
+    {
+        static void Prefix()    { HousingFurniture.Enter(includeHelper: true); }
+        static void Finalizer() { HousingFurniture.Exit(); }
+    }
+
+    // (register-npc investigation CLOSED 2026-07-07: the [StaffProbe] run showed exactly ONE
+    // AssignEmployee — tpc='Player' isPlayer=True via WorkActivity.StartWorking — no rogue spawner.
+    // The "NPC on top" was the native business-uniform overlay applied to the working player, same as
+    // an owner working their own register; the look restores on stop. Probe retired.)
+
+    /// <summary>Round-38f — when the helper STOPS working, WorkActivity.Finish's deferred branch (:185-191,
+    /// runs one frame later so no scoped flip can cover it) sees a non-owner building and calls
+    /// AssignAiToEmployeeStation — minting a phantom AI cashier on the helper's replica register. Skip it in
+    /// helper businesses; its two native call sites are AI-shop setup (HelperHere false there) and this
+    /// Finish branch, so nothing legitimate is lost.</summary>
+    [HarmonyPatch(typeof(BuildingManager), nameof(BuildingManager.AssignAiToEmployeeStation))]
+    public static class Patch_AssignAi_HelperGuard
+    {
+        static bool Prefix()
+        {
+            try { return !BusinessHelperRoute.HelperHere(out _); }
+            catch { return true; }
+        }
+    }
+
     /// <summary>Round-38 — hover-tooltip parity: the stock overlay ("Contents: …" + "0/1000") gates on
     /// IsPlayerOwnedBusiness (StockOverlay.ShouldShow), so a helper hovering the owner's register saw only
     /// the bare-name tooltip while the owner saw contents+amount — the two players were reading DIFFERENT

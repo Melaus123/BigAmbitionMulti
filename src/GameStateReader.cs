@@ -180,8 +180,16 @@ namespace BigAmbitionsMP
                 // The Harmony postfix caches the instance on the first pause
                 // press, but our holds usually fire before any press — discover
                 // it (and re-discover if the cached one died with its scene).
+                // Round-39 (half-pause on new game, log-proven): the old check `uo != null && uo == null`
+                // was a contradiction — Unity's overloaded == makes both operands agree, so a DESTROYED
+                // cached instance was never detected. Every scene reload (new game / rejoin) then invoked
+                // TogglePause on the corpse: it mutated managed fields (incl. writing LastPlayerPause into
+                // the LIVE save) and threw at the first destroyed-Unity-object touch — host got a
+                // half-executed pause + silent false-convergence off the corpse's stale flag, the guest's
+                // convergence tick retried the corpse forever. The `is` pattern keeps the managed reference
+                // alive past the cast so the Unity lifetime check actually runs.
                 bool dead = false;
-                try { var uo = _gscInstance as UnityEngine.Object; dead = _gscInstance != null && uo != null && uo == null; } catch { }
+                try { dead = _gscInstance is UnityEngine.Object uo && uo == null; } catch { }
                 if (_gscInstance == null || dead)
                 {
                     // Direct singleton first (perf pass 2026-06-12): UIs.gameSpeed
@@ -210,7 +218,13 @@ namespace BigAmbitionsMP
                 _pendingNativePause = null;             // applied — stop converging
                 Plugin.Logger.LogInfo($"[GSC] Native pause → {paused}.");
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[GSC] SetNativePause({paused}): {ex.Message}"); }
+            catch (Exception ex)
+            {
+                // TargetInvocationException hides the real error — surface the inner one (round-39: the
+                // opaque outer message alone cost a diagnosis pass).
+                var inner = (ex as System.Reflection.TargetInvocationException)?.InnerException;
+                Plugin.Logger.LogWarning($"[GSC] SetNativePause({paused}): {(inner ?? ex).Message}");
+            }
         }
 
         /// <summary>True while OUR code is intentionally driving the pause state —

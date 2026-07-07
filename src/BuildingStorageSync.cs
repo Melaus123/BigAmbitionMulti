@@ -214,6 +214,7 @@ namespace BigAmbitionsMP
                 if (res.Ok)
                 {
                     InteriorSync.PushOwnedBuildingNow(req.AddressKey);   // re-sync the interior to everyone inside, now
+                    OwnerBusinessTail(reg);   // round-39c: the business must RECOGNIZE the change (see below)
                     // Round-38: setstock used to log as "PUT 1×<name>" (its wire Amount is a hardcoded 1) —
                     // which read as a landed 1-unit deposit and derailed a log read. Name the op truthfully.
                     string opName = req.Op == OpTake ? "TAKE" : req.Op == OpPut ? "PUT" : "SETSTOCK";
@@ -225,11 +226,43 @@ namespace BigAmbitionsMP
             return res;
         }
 
+        /// <summary>Round-39c — make the business RECOGNIZE a routed cargo change (user: guest-stocked
+        /// shelf items "never recognized as product being sold"). The native recognition pipeline is
+        /// BuildingManager.OnItemChanged → ScheduleUpdateAvailableProducers (re-derives cachedAvailable-
+        /// Products, which the customer sim, BizMan inventory, and retail-price retention all read) —
+        /// but it only fires for the OWNER'S OWN local actions; a routed put mutated reg data and
+        /// nothing re-evaluated, even with the owner standing in the shop. When the owner is INSIDE the
+        /// building: run the full native tail (needs the loaded shelves). When elsewhere: run the
+        /// data-level refreshers; the products re-derive natively when the owner next enters (building
+        /// load rebuilds the item-controller scan).</summary>
+        internal static void OwnerBusinessTail(BuildingRegistration reg)
+        {
+            try
+            {
+                if (reg == null) return;
+                // Round-39d: the shopper schedule keys off products/schedule — refresh it with every
+                // routed stock change (the native owner-stock flow calls this too, Producer.Interact
+                // :154). Data-level, works owner-anywhere. Feeds the CustomerEntries snapshot ship-out.
+                try { AI.Customers.CustomerEntries.CustomerEntriesHelper.UpdateCustomerEntriesForPlayerBusiness(reg, TimeHelper.GetDayOfWeek()); } catch { }
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                if (bm != null && bm.buildingRegistration == reg)
+                {
+                    bm.OnItemChanged(forced: true);   // avail products + capacity + promotion + change event + workstations
+                    return;
+                }
+                try { BusinessHelper.UpdateCustomerCapacity(reg); } catch { }
+                try { if (reg.HasValidAddress) BusinessHelper.UpdatePromotion(reg); } catch { }
+                try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] OwnerBusinessTail: {ex.Message}"); }
+        }
+
         /// <summary>Round-32, OWNER side: change what an item stocks — the native dropdown's moves minus its
         /// UI (ItemController.OnStockOptionSelected, decompile :918-976): return the old stock to a shelf,
         /// set the new name, refill from storage, refresh the business numbers. ctx="producerset" is the
         /// bare variant for PRODUCERS (ingredient name only — no shelf return, no auto-fill: the native
         /// producer flow never does those, and a producer's single cargo slot must stay single).</summary>
+        /// <remarks>See also OwnerBusinessTail below — the shared recognition tail runs on every Ok.</remarks>
         private static bool ApplySetStock(BuildingRegistration reg, ItemInstance item, BuildingCargoReqPayload req, out string reason)
         {
             reason = "";

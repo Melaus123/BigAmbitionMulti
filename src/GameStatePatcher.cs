@@ -1006,6 +1006,24 @@ namespace BigAmbitionsMP
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] itemInstances apply: {ex.Message}"); }
 
+                    // Round-39d — Phase 3 customer presence: seed the local shopper table from the owner's
+                    // schedule (no-op on the owner; local completed flags preserved inside SeedFor).
+                    try
+                    {
+                        if (payload.Authoritative && payload.CustomerEntries != null && payload.CustomerEntries.Count > 0)
+                            CustomerEntrySync.SeedFor(reg, payload.CustomerEntries);
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] customer-entry seed: {ex.Message}"); }
+                    // Round-39e — complaint parity: adopt the owner's fulfilled-demand set so the seeded
+                    // customers complain about the RIGHT things (never on the owner's own machine).
+                    try
+                    {
+                        if (payload.Authoritative && !reg.RentedByPlayer
+                            && payload.FulfilledDemands != null && payload.FulfilledDemands.Count > 0)
+                            reg.cachedFulfilledCustomerDemands = new System.Collections.Generic.List<string>(payload.FulfilledDemands);
+                    }
+                    catch { }
+
                     Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' {InteriorSync.SnapshotSummary(payload)} (changed={changedIds.Count} moved={movedIds.Count} removed={removedIds.Count}).");
 
                     // Trigger a visual refresh of the interior IF the local

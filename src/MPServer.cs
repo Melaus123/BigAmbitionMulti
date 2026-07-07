@@ -1282,6 +1282,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.HelperOrderForward:
+                {
+                    var ho = env.GetPayload<HelperOrderPayload>();
+                    if (ho != null) HandleHelperOrder(ho, senderPid);
+                    break;
+                }
+
                 case MessageType.BuildingInteriorEdit:
                 {
                     var bie = env.GetPayload<InteriorSnapshotPayload>();
@@ -1948,6 +1955,29 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] HandleBuildingCargoReq: {ex.Message}"); }
+        }
+
+        /// <summary>Round-39f: a helper's machine hosted an NPC sale — route the paid order to the
+        /// building owner (or adopt directly when the host owns it). Same shape as HandleBuildingCargoReq.</summary>
+        public static void HandleHelperOrder(HelperOrderPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.AddressKey)) return;
+                if (!SenderIs(p.PlayerId, senderPid, MessageType.HelperOrderForward)) return;
+                string owner = (BuildingOwners.TryGetValue(p.AddressKey, out var o) && !string.IsNullOrEmpty(o)) ? o
+                             : (BuildingRealEstateOwners.TryGetValue(p.AddressKey, out var r) ? r : "");
+                if (string.IsNullOrEmpty(owner)) return;
+                string ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;
+                if (ownerPid != p.PlayerId
+                    && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, p.PlayerId)
+                    && !GrantSync.IsGranted(GrantKind.Business, ownerPid, p.PlayerId)) return;   // grant gate
+                if (ownerPid == MPConfig.PlayerId)
+                    GameStatePatcher.EnqueueOnMainThread(() => CustomerEntrySync.OwnerAdoptForwardedOrder(p));
+                else
+                    SendHubTo(ownerPid, MessageType.HelperOrderForward, p);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] HandleHelperOrder: {ex.Message}"); }
         }
 
         /// <summary>A building owner answered a guest's interior-cargo request — relay the verdict to the guest.</summary>

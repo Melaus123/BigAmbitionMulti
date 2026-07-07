@@ -544,6 +544,20 @@ namespace BigAmbitionsMP
                     Layout     = reg.Layout?.ToString() ?? "",
                 };
 
+                // Round-39d — Phase 3 customer presence: ship the owner's shopper schedule with the
+                // interior (guests seed their local spawner table from it). Owner-only: the host's
+                // replica-built sends (BuildSnapshotForHostSend) see RentedByPlayer=false and skip,
+                // so only the true owner's entries ever travel.
+                try { if (reg.RentedByPlayer) snap.CustomerEntries = CustomerEntrySync.CaptureFor(reg); } catch { }
+                // Round-39e — complaint parity: the fulfilled-demand set travels too (guests' customers
+                // complain against it; without it every demand reads unfulfilled).
+                try
+                {
+                    if (reg.RentedByPlayer && reg.cachedFulfilledCustomerDemands != null)
+                        snap.FulfilledDemands = new List<string>(reg.cachedFulfilledCustomerDemands);
+                }
+                catch { }
+
                 // Interior designs
                 if (reg.interiorDesigns != null)
                 {

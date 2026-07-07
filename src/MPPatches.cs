@@ -1125,6 +1125,33 @@ namespace BigAmbitionsMP
             }
         }
 
+        // Round-39b (client joins a HOST'S NEW GAME, log-proven): the suppressions above silence the rival
+        // data PRODUCERS on clients, but the CONSUMER — RivalsHelper.CheckRivalTimelines — was left running.
+        // On an existing-save join the rival states load from the synced save, so it never threw; on a NEW
+        // game there is nothing, and RivalTimeline.Check NREs on the missing state. That single NRE has two
+        // separate blast radii, both observed: (1) it fires INSIDE CityGenerator.InitializeCity
+        // (MarkBuildingsForRentAndGetAvailableOnes → ShutdownBusiness(updateRivals:true)) and aborts
+        // CityManager.OnScenesLoaded — everything after city init (player spawn placement, world streaming
+        // setup) never runs → the client spawns in the staging area and gets a grey unstreamed world on
+        // building exit; (2) it fires from RivalsHelper.RunHourly and aborts the client's main game tick
+        // every hour (the same tick-abort class as the June "HQ stopped working" bug). Rival timeline
+        // simulation is HOST domain (messages, activation, defenses — results reach clients via sync);
+        // skip the whole check on clients.
+        [HarmonyPatch]
+        public static class Patch_RivalsHelper_CheckRivalTimelines_SkipOnClient
+        {
+            static System.Reflection.MethodBase? TargetMethod() =>
+                VehicleManager.FindGameType("BigAmbitions.Rivals.RivalsHelper")?.GetMethod("CheckRivalTimelines",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                  | System.Reflection.BindingFlags.Static  | System.Reflection.BindingFlags.DeclaredOnly);
+
+            static bool Prefix()
+            {
+                if (!MPClient.IsConnected) return true;
+                return false;   // silent — this runs hourly; one log line per session would still be noise on fast-forward
+            }
+        }
+
         // ── Rivals leaderboard hooks (Phase 1d Wave 4: on-demand stats sync) ──
 
         /// <summary>

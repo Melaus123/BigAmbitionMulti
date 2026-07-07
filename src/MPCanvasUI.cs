@@ -2540,6 +2540,20 @@ namespace BigAmbitionsMP
                     }
                 }
                 catch { }
+                // Round-39: in MP the pause is network-arbitrated (startup hold / votes) — a save carrying
+                // LastPlayerPause=true makes GameSpeedController boot playerGameSpeed PAUSED on every load
+                // (GSC :64 reads it), an SP pause preference restoring into an MP session as a half-pause.
+                // Saves got poisoned by the pre-39 corpse-invoke bug (TogglePause on a destroyed GSC wrote
+                // the flag before throwing); a save written mid-vote-pause carries it legitimately too.
+                try
+                {
+                    if (SaveGameManager.Current != null && SaveGameManager.Current.LastPlayerPause)
+                    {
+                        SaveGameManager.Current.LastPlayerPause = false;
+                        Plugin.Logger.LogWarning("[GSC] scene-ready sweep: cleared LastPlayerPause=true (MP pause is network-arbitrated; a restored SP pause preference reads as a half-pause).");
+                    }
+                }
+                catch { }
                 MPAudit.Reset();          // divergence streaks/throttle die with the session (else stale [Audit] state pollutes the bug-report log across same-process sessions)
                 MPStockSync.Reset();      // per-shop stock digests die with the session
                 _appearanceSig = ""; _appearanceNextAt = 0f;

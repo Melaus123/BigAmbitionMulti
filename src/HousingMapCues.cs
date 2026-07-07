@@ -32,6 +32,21 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
+        /// <summary>Round-39c — ANY building shared with the local player: a granted residence OR a helper
+        /// business (user 2026-07-07: business grant gave no map reference / POI / shared indication —
+        /// the cues were residence-only). Drives the FIND-IT cues (POI tint + permanence + map filter);
+        /// the word/status overrides stay residence-only so a business keeps its Open/Closed label.</summary>
+        internal static bool IsSharedWithMe(BuildingRegistration reg)
+        {
+            try
+            {
+                if (reg == null || reg.RentedByPlayer || reg.BuildingOwnedByPlayer) return false;
+                string k = GameStateReader.AddressKey(reg);
+                return GrantSync.CanEnterGranted(k) || GrantSync.IsHelperBusiness(k);
+            }
+            catch { return false; }
+        }
+
         /// <summary>Re-run UpdatePoi on every residence currently shared with us so its POI exists + gets recoloured.
         /// POIs are built on city load, BEFORE the host's grant set arrives, so we refresh when that set changes.
         /// MAIN THREAD.</summary>
@@ -45,9 +60,9 @@ namespace BigAmbitionsMP
                 foreach (var cbc in cm.cityBuildingControllers)
                 {
                     if (cbc?.buildingRegistration == null) continue;
-                    try { if (IsSharedResidence(cbc.buildingRegistration)) { cbc.UpdatePoi(); n++; } } catch { }
+                    try { if (IsSharedWithMe(cbc.buildingRegistration)) { cbc.UpdatePoi(); n++; } } catch { }
                 }
-                if (n > 0) Plugin.Logger.LogInfo($"[Housing] map: tinted {n} shared-residence POI(s).");
+                if (n > 0) Plugin.Logger.LogInfo($"[Housing] map: tinted {n} shared building POI(s) (residences + helper businesses).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] RefreshSharedPois: {ex.Message}"); }
         }
@@ -109,7 +124,7 @@ namespace BigAmbitionsMP
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                 var reg = __instance?.buildingRegistration;
-                if (!HousingMapCues.IsSharedResidence(reg)) return;
+                if (!HousingMapCues.IsSharedWithMe(reg)) return;
                 var poi = __instance.poi;
                 if (poi == null) return;
                 poi.SetPermanent(true);
@@ -157,14 +172,14 @@ namespace BigAmbitionsMP
                 foreach (var cbc in cm.cityBuildingControllers)
                 {
                     if (cbc?.buildingRegistration == null) continue;
-                    if (!HousingMapCues.IsSharedResidence(cbc.buildingRegistration)) continue;
+                    if (!HousingMapCues.IsSharedWithMe(cbc.buildingRegistration)) continue;
                     if (cbc.poi == null) cbc.CreatePOI();
                     cbc.poi.SetHidden(false);
                     cbc.SetHighlight(true, HousingMapCues.SharedColor);
                     cbc.poi.SetIcon(cbc.buildingRegistration.GetPOIIcon(), HousingMapCues.SharedColor);
                     n++;
                 }
-                if (n > 0) Plugin.Logger.LogInfo($"[Housing] map filter: revealed {n} shared residence(s) under 'rented by you'.");
+                if (n > 0) Plugin.Logger.LogInfo($"[Housing] map filter: revealed {n} shared building(s) under 'rented by you'.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] map filter cue: {ex.Message}"); }
         }

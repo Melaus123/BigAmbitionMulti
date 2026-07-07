@@ -567,6 +567,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.HelperOrderForward:   // host forwarded a helper-hosted sale — I'm the building owner
+                {
+                    var ho = env.GetPayload<HelperOrderPayload>();
+                    if (ho != null) GameStatePatcher.EnqueueOnMainThread(() => CustomerEntrySync.OwnerAdoptForwardedOrder(ho));
+                    break;
+                }
+
                 case MessageType.BuildingInteriorEdit:   // host forwarded a guest's interior edit — I'm the owner: adopt it
                 {
                     var bie = env.GetPayload<InteriorSnapshotPayload>();
