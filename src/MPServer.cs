@@ -1927,7 +1927,12 @@ namespace BigAmbitionsMP
                              : (BuildingRealEstateOwners.TryGetValue(req.AddressKey, out var r) ? r : "");
                 if (string.IsNullOrEmpty(owner)) return;
                 string ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;   // resolve the host sentinel
-                if (ownerPid != req.PlayerId && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, req.PlayerId)) return;   // grant gate
+                // Grant gate — Housing OR Business, matching the authoritative check in OwnerApply: the
+                // Housing-only pre-filter silently dropped every cargo op from a business-only helper
+                // (round-38e relay/apply drift).
+                if (ownerPid != req.PlayerId
+                    && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, req.PlayerId)
+                    && !GrantSync.IsGranted(GrantKind.Business, ownerPid, req.PlayerId)) return;
                 if (ownerPid == MPConfig.PlayerId)
                 {
                     GameStatePatcher.EnqueueOnMainThread(() =>
@@ -1971,7 +1976,11 @@ namespace BigAmbitionsMP
                              : (BuildingRealEstateOwners.TryGetValue(snap.AddressKey, out var r) ? r : "");
                 if (string.IsNullOrEmpty(owner)) return;
                 string ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;
-                if (ownerPid != senderPid && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, senderPid)) return;   // grant gate
+                // Housing OR Business — business helpers forward furniture edits too (round-32 helper-aware
+                // placement); the Housing-only gate silently dropped a business-only helper's edits.
+                if (ownerPid != senderPid
+                    && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, senderPid)
+                    && !GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid)) return;
                 if (ownerPid == MPConfig.PlayerId)
                     GameStatePatcher.EnqueueOnMainThread(() => { GameStatePatcher.ApplyInteriorSnapshot(snap); InteriorSync.PushOwnedBuildingNow(snap.AddressKey); });
                 else

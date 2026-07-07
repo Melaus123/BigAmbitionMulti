@@ -293,9 +293,7 @@ namespace BigAmbitionsMP
                     return;
                 }
             }
-            // DIAG:INVESTIGATION(cart-take-nre) — full stack: 1000×paperbag takes NRE'd in the native
-            // InitializeItemInHandsWithCargo (logs 2026-07-04); the frame names the null. Remove when fixed.
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] PlaceForAccessor hands: {ex}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] PlaceForAccessor hands: {ex.Message}"); }
             // No room (race): return the item to the owner so it isn't lost.
             try
             {

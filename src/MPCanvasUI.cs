@@ -405,9 +405,7 @@ namespace BigAmbitionsMP
             PassengerRide.Update();      // passenger ride: click-to-board → pin-to-seat → exit + remote riders
             PassengerHud.Tick();         // passenger's in-ride "Exit Vehicle" panel
             VehicleStoragePanel.Tick();  // non-owner shared-storage panel (refresh on cargo change / auto-close)
-            BusinessDiag.Tick();         // DIAG:INVESTIGATION(shelf-item-loss) — owner shelf-state scanner, removable
-            TimeSync.TickStartupHold();  // round-36: had NO caller (dead since inception) — revives the hold's
-                                         // timeScale re-clamp and hosts the DIAG(half-pause) layer dump
+            TimeSync.TickStartupHold();  // round-36: had NO caller (dead since inception) — the hold's timeScale re-clamp
             GameStateReader.TickPendingNativePause();   // round-36c: converge the pause flag onto the last
                                                         // requested state (rate-limit drops lost it before)
             MPSaveCoordinator.TickCheckpoints();        // round-37: run due checkpoint copies (worker thread)

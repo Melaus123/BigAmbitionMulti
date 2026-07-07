@@ -86,6 +86,30 @@ namespace BigAmbitionsMP
 
                 if (req.Op == OpTake)
                 {
+                    // Round-38e — "REMOVE CONTENT" routed for helpers: mirror of the native
+                    // ItemController.RemoveStockInContent (:1091-1152) the owner's button runs — take the
+                    // ENTIRE stock (owner truth, not the requester's replica amount), clear the emptied
+                    // slot's NAME like native does (:1123/:1138), fire the cargo callback, run the native
+                    // tail refreshers. Echoes the real amount/paid/price so the delivered box is faithful.
+                    if (req.Ctx == "stationtake")
+                    {
+                        var slot = (item.cargoInstances != null && item.cargoInstances.Count == 1) ? item.cargoInstances[0] : null;
+                        if (slot != null && !slot.IsSealed && !string.IsNullOrEmpty(slot.itemName)
+                            && slot.itemName == req.ItemName && slot.amount > 0)
+                        {
+                            res.Amount = slot.amount; res.Paid = slot.paid; res.PricePerUnit = slot.pricePerUnit;
+                            slot.amount = 0;
+                            slot.itemName = null;
+                            slot.ResetItemCached();
+                            try { item.OnItemsInCargoUpdated()?.Invoke(); } catch { }
+                            try { BusinessHelper.UpdateCustomerCapacity(reg); } catch { }
+                            try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
+                            res.Ok = true; res.Reason = "";
+                        }
+                        // else: slot gone/renamed/empty — res stays !Ok ("gone"); requester's replica was stale.
+                    }
+                    else
+                    {
                     var src = item.cargoInstances;
                     if (src != null)
                         for (int c = 0; c < src.Count; c++)
@@ -99,12 +123,15 @@ namespace BigAmbitionsMP
                             res.Ok = true; res.Reason = "";
                             break;
                         }
+                    }
                 }
                 else if (req.Op == OpPut)
                 {
                     // Producer refills may ONLY merge into the machine's single existing stock slot — a
                     // producer with two cargo instances breaks the game's GetStockInstance invariant.
-                    if (req.Ctx == "producer")
+                    // "stationreturn" = a routed station-take's give-back (requester's hands turned out
+                    // full) — same single-slot merge, but the requester consumes NOTHING locally on success.
+                    if (req.Ctx == "producer" || req.Ctx == "stationreturn")
                     {
                         var slot = (item.cargoInstances != null && item.cargoInstances.Count == 1) ? item.cargoInstances[0] : null;
                         if (slot == null) { res.Reason = "full"; return res; }
@@ -120,31 +147,62 @@ namespace BigAmbitionsMP
                         }
                         else if (slot.itemName != req.ItemName)
                         { res.Reason = "full"; return res; }   // a different ingredient is loaded — genuine refusal
+                        // Round-38 (field-proven: five 1000×bag puts refused "full" on a 0/1000 register):
+                        // BOTH native merge primitives gate on paid EQUALITY (MergeCargo :270,
+                        // TryToAddToCargo :202), and a stock station's cargoCapacity is 1 — a mismatch is an
+                        // instant all-or-nothing refusal. An EMPTY slot's paid/price are dead leftovers from
+                        // whenever it was last stocked; the owner's own first deposit never merges against
+                        // them (TryToAddToCargo APPENDS the incoming stack wholesale onto an empty list,
+                        // stamping the slot with the stack's own flags). Adopt them the same way.
+                        if (slot.amount == 0 && (slot.paid != req.Paid || slot.pricePerUnit != req.PricePerUnit))
+                        {
+                            slot.paid = req.Paid; slot.pricePerUnit = req.PricePerUnit;
+                            Plugin.Logger.LogInfo($"[BStore] producer put adopted paid={req.Paid}/price={req.PricePerUnit:F2} onto the empty slot on '{req.AddressKey}'/{req.ItemId} (owner-parity stamp).");
+                        }
+
+                        // Round-38c: merge via the game's OWN station primitive. The owner's working deposit
+                        // goes TryToMergeAndMoveCargoBetweenHolders → MergeIntoCargo → MergeCargo, which gates
+                        // only on name/paid/sealed/nested + clamps to GetMaxStockCapacity. TryToAddToCargo
+                        // (round-32's pick) additionally hard-gates on the holder's cargoCapacity and
+                        // itemsWhitelist — general-cargo-holder rules a stock station's data doesn't satisfy
+                        // (probe-confirmed 2026-07-07: the cash register's cargoCapacity is 0, whitelist empty),
+                        // which refused every helper deposit the owner's own path would have landed. Partial
+                        // fills are native semantics (excess stays with the guest), so no rollback needed:
+                        // res.Amount echoes what LANDED and the guest consumes exactly that.
+                        var inc = new CargoInstance(req.ItemName, req.Amount, req.PricePerUnit, req.Paid);
+                        int before = slot.amount;
+                        item.MergeCargo(inc, slot, req.Amount);
+                        int landed = slot.amount - before;
+                        if (landed > 0) { res.Ok = true; res.Reason = ""; res.Amount = landed; }
+                        else res.Reason = (slot.amount > 0 && slot.paid != req.Paid) ? "mixed" : "full";
                     }
-                    var ci = new CargoInstance(req.ItemName, req.Amount, req.PricePerUnit, req.Paid);
-                    if (item.TryToAddToCargo(ci)) { res.Ok = true; res.Reason = ""; }
                     else
                     {
-                        // Round-32 (decompile ItemInstance.cs:198-231): TryToAddToCargo PARTIALLY merges
-                        // before returning false when the holder can't take the whole stack — without a
-                        // rollback the absorbed part stays here while the guest keeps the full stack = DUP.
-                        // Roll it back so "full" is all-or-nothing.
-                        int absorbed = req.Amount - ci.amount;
-                        if (absorbed > 0)
+                        var ci = new CargoInstance(req.ItemName, req.Amount, req.PricePerUnit, req.Paid);
+                        if (item.TryToAddToCargo(ci)) { res.Ok = true; res.Reason = ""; }
+                        else
                         {
-                            var src = item.cargoInstances;
-                            if (src != null)
-                                for (int c = src.Count - 1; c >= 0 && absorbed > 0; c--)
-                                {
-                                    var s = src[c];
-                                    if (s == null || s.IsSealed || s.itemName != req.ItemName || s.paid != req.Paid) continue;
-                                    int take = Math.Min(absorbed, s.amount);
-                                    if (take >= s.amount) item.RemoveFromCargo(s); else item.ReduceFromCargo(s, take);
-                                    absorbed -= take;
-                                }
-                            Plugin.Logger.LogInfo($"[BStore] put of {req.Amount}×{req.ItemName} didn't fully fit '{req.AddressKey}'/{req.ItemId} — partial merge rolled back.");
+                            // Round-32 (decompile ItemInstance.cs:198-231): TryToAddToCargo PARTIALLY merges
+                            // before returning false when the holder can't take the whole stack — without a
+                            // rollback the absorbed part stays here while the guest keeps the full stack = DUP.
+                            // Roll it back so "full" is all-or-nothing.
+                            int absorbed = req.Amount - ci.amount;
+                            if (absorbed > 0)
+                            {
+                                var src = item.cargoInstances;
+                                if (src != null)
+                                    for (int c = src.Count - 1; c >= 0 && absorbed > 0; c--)
+                                    {
+                                        var s = src[c];
+                                        if (s == null || s.IsSealed || s.itemName != req.ItemName || s.paid != req.Paid) continue;
+                                        int take = Math.Min(absorbed, s.amount);
+                                        if (take >= s.amount) item.RemoveFromCargo(s); else item.ReduceFromCargo(s, take);
+                                        absorbed -= take;
+                                    }
+                                Plugin.Logger.LogInfo($"[BStore] put of {req.Amount}×{req.ItemName} didn't fully fit '{req.AddressKey}'/{req.ItemId} — partial merge rolled back.");
+                            }
+                            res.Reason = "full";
                         }
-                        res.Reason = "full";
                     }
                 }
                 else if (req.Op == OpSetStock)
@@ -156,7 +214,11 @@ namespace BigAmbitionsMP
                 if (res.Ok)
                 {
                     InteriorSync.PushOwnedBuildingNow(req.AddressKey);   // re-sync the interior to everyone inside, now
-                    Plugin.Logger.LogInfo($"[BStore] owner applied {(req.Op == OpTake ? "TAKE" : "PUT")} {req.Amount}×{req.ItemName} on '{req.AddressKey}'/{req.ItemId} for '{req.PlayerId}'.");
+                    // Round-38: setstock used to log as "PUT 1×<name>" (its wire Amount is a hardcoded 1) —
+                    // which read as a landed 1-unit deposit and derailed a log read. Name the op truthfully.
+                    string opName = req.Op == OpTake ? "TAKE" : req.Op == OpPut ? "PUT" : "SETSTOCK";
+                    string what   = req.Op == OpSetStock ? $"'{req.ItemName}'" : $"{req.Amount}×{req.ItemName}";
+                    Plugin.Logger.LogInfo($"[BStore] owner applied {opName} {what} on '{req.AddressKey}'/{req.ItemId} for '{req.PlayerId}'.");
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] OwnerApply: {ex.Message}"); res.Ok = false; res.Reason = "error"; }
@@ -233,8 +295,12 @@ namespace BigAmbitionsMP
                         PlayerHelper.ItemInstanceInHands = ItemHelper.InitializeItemInHandsWithCargo(ci);
                     else
                     {
-                        // No empty hands (race after the request) — give it back so the owner's fridge is made whole.
-                        RequestPut(res.AddressKey, res.ItemId, res.ItemName, res.Amount, res.Paid, res.PricePerUnit);
+                        // No empty hands (race after the request) — give it back so the owner's holder is made
+                        // whole. A STATION take must return via the station merge path ("stationreturn"): the
+                        // generic put runs TryToAddToCargo, which a register's cargoCapacity=0 always refuses —
+                        // the give-back would bounce and the removed stock would be lost.
+                        RequestPut(res.AddressKey, res.ItemId, res.ItemName, res.Amount, res.Paid, res.PricePerUnit,
+                                   res.Ctx == "stationtake" ? "stationreturn" : "");
                         PassengerHud.Toast("No room to carry that.");
                     }
                 }
@@ -248,9 +314,23 @@ namespace BigAmbitionsMP
                 }
                 else // OpPut
                 {
+                    if (res.Ctx == "stationreturn")
+                    {
+                        // A station-take give-back: on success there is nothing to consume locally (the
+                        // contents never reached our hands). A failure here is the rare double-race (owner
+                        // station changed between the take and the return) — the stock is stranded; log loud.
+                        if (!res.Ok)
+                        {
+                            PassengerHud.Toast("Couldn't return the contents to the station.");
+                            Plugin.Logger.LogWarning($"[BStore] stationreturn REFUSED ({res.Reason}) for {res.Amount}×{res.ItemName} on '{res.AddressKey}'/{res.ItemId} — removed stock could not be returned.");
+                        }
+                        return;
+                    }
                     if (!res.Ok)
                     {
-                        PassengerHud.Toast(res.Reason == "full" ? "Storage full." : "Couldn't store.");
+                        PassengerHud.Toast(res.Reason == "full"  ? "Storage full."
+                                         : res.Reason == "mixed" ? "Can't mix with the stock already loaded."
+                                         : "Couldn't store.");
                         // Round-37b: our replica said the cargo FITS (the gates only offer puts that fit) yet
                         // the owner says FULL — proof the replica diverged (e.g. an unrouted local mutation
                         // stuck via the keep-live apply optimization). Force a full re-pull: drop the

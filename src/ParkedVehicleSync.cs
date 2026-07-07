@@ -587,13 +587,8 @@ namespace BigAmbitionsMP
                             CallPoolRelease(g);
                         }
                         _clientGhosts.Remove(kv.Key);
-                        _nearAudited.Remove(kv.Key);
-                        _appliedG0.Remove(kv.Key);
                     }
-                    else if (isGhost && sq < 144f)   // within 12 m — the band the user sees flips in
-                    {
-                        NearGhostColorAudit(kv.Key);   // DIAG:INVESTIGATION(parked-color), one-shot per rental
-                    }
+                    // (round-31 parked-color probes retired 2026-07-05 — colors user-confirmed stable.)
                 }
 
                 foreach (var dto in toSpawn)
@@ -608,7 +603,6 @@ namespace BigAmbitionsMP
                     // car's color on part of the new one (user 2026-07-03: one model flipping pink↔blue
                     // by LOD band). Reset every renderer to material defaults BEFORE painting.
                     ClearAllPropertyBlocks(go);
-                    LogPaintCoverage(go, dto.Model);   // DIAG:INVESTIGATION(parked-color) — once per model
 
                     // ROOT (round-24, user-prompted re-check of the color system): vehicle prefabs carry
                     // RandomVehicleColor, whose OnEnable RE-ROLLS a random color on EVERY pool re-enable —
@@ -636,9 +630,7 @@ namespace BigAmbitionsMP
                         // host's color IS a palette entry, so nearest = exact. Legacy MPB apply as fallback.
                         if (!ApplyNativeColor(go, dto))
                             ApplyBodyColors(go, dto.Colors);
-                        _appliedG0[dto.Key] = new Color(dto.Colors[0], dto.Colors[1], dto.Colors[2]);   // audit baseline
                     }
-                    _nearAudited.Remove(dto.Key);   // fresh rental → audit anew when approached
                     _clientGhosts[dto.Key] = go;
                 }
             }
@@ -689,13 +681,6 @@ namespace BigAmbitionsMP
         }
 
         // ── SH_Vehicle colour reader/applier ─────────────────────────────────
-
-        // DIAG:INVESTIGATION(parked-color) — one-shot registries so the probes below log each car once.
-        // REMOVE with the probes once the near/far color flip is settled (user 2026-07-03: far matches the
-        // host, CLOSE flips to a wrong color — only a NON-uniform read/apply can do that, so only those log).
-        private static readonly HashSet<int> _colorReadLogged  = new();
-        private static readonly HashSet<int> _colorApplyLogged = new();
-        private static string ColStr(Color c) => $"({c.r:F2},{c.g:F2},{c.b:F2})";
 
         /// <summary>Renderer-name LOD stem: "Zucchini_LOD2" → "Zucchini",
         /// "SM_GMC Yukon Inspired_Civilian_LOD3_2_hwQEK…" → "SM_GMC Yukon Inspired_Civilian".
@@ -754,75 +739,9 @@ namespace BigAmbitionsMP
             catch { }
         }
 
-        // DIAG:INVESTIGATION(parked-color) — NEAR AUDIT: when the local player walks up to a synced parked
-        // ghost (<12 m), compare what its paint-shader renderers are CURRENTLY wearing against what we applied
-        // at spawn. A MISMATCH line = something repainted the car after our apply (the game's own systems, a
-        // per-material-index block our whole-renderer write doesn't cover, …) — catches any post-apply repaint
-        // regardless of source. One-shot per rental; quiet when everything matches.
-        private static readonly Dictionary<long, Color> _appliedG0 = new();
-        private static readonly HashSet<long> _nearAudited = new();
-        private static void NearGhostColorAudit(long key)
-        {
-            try
-            {
-                if (_nearAudited.Contains(key)) return;
-                if (!_clientGhosts.TryGetValue(key, out var go) || go == null) return;
-                if (!_appliedG0.TryGetValue(key, out var expected)) return;
-                _nearAudited.Add(key);
-
-                var mism = new List<string>();
-                var rends = go.GetComponentsInChildren(typeof(Renderer), true);
-                for (int i = 0; i < rends.Length; i++)
-                {
-                    var r = rends[i] as Renderer;
-                    if (r == null) continue;
-                    var mat = FindShVehicleMaterial(r);
-                    if (mat == null) continue;
-                    var g = ReadRendererColors(r, mat, out _);
-                    // Only body-family renderers are expected to wear g0; wheels legitimately differ —
-                    // flag a renderer only when it wore g0's EXPECTED color at apply time is unknowable
-                    // here, so keep it simple: report every paint renderer whose current color is neither
-                    // the expected body color nor "close" to it, with its name — the reader decides.
-                    var c = g.Item1;
-                    bool close = Mathf.Abs(c.r - expected.r) + Mathf.Abs(c.g - expected.g) + Mathf.Abs(c.b - expected.b) < 0.05f;
-                    if (!close) mism.Add($"{r.name}={ColStr(c)}");
-                }
-                if (mism.Count > 0)
-                {
-                    var p = go.transform.position;
-                    Plugin.Logger.LogInfo($"[ParkedColor] NEAR-AUDIT '{go.name}' @({p.x:F0},{p.z:F0}) expected{ColStr(expected)}: "
-                        + string.Join("; ", mism.GetRange(0, Math.Min(8, mism.Count))) + (mism.Count > 8 ? " …" : ""));
-                }
-            }
-            catch { }
-        }
-
-        // DIAG:INVESTIGATION(parked-color) — one line per MODEL naming the renderers our paint system CANNOT
-        // see (non-SH_Vehicle materials). Those are exactly the meshes a stale pool block would survive on.
-        private static readonly HashSet<string> _skipLoggedModels = new();
-        private static void LogPaintCoverage(GameObject ghost, string model)
-        {
-            try
-            {
-                if (!_skipLoggedModels.Add(model)) return;
-                var rends = ghost.GetComponentsInChildren(typeof(Renderer), true);
-                var unseen = new List<string>();
-                for (int i = 0; i < rends.Length; i++)
-                {
-                    var r = rends[i] as Renderer;
-                    if (r != null && FindShVehicleMaterial(r) == null) unseen.Add(r.name);
-                }
-                if (unseen.Count > 0)
-                    Plugin.Logger.LogInfo($"[ParkedColor] COVERAGE '{model}': {unseen.Count} renderer(s) NOT paint-shader — "
-                        + string.Join("; ", unseen.GetRange(0, Math.Min(10, unseen.Count))) + (unseen.Count > 10 ? " …" : ""));
-            }
-            catch { }
-        }
-
         private static List<float> ReadBodyColors(GameObject car)
         {
             var groups = new List<(Color, Color)>();
-            var dbg = new List<string>();   // DIAG:INVESTIGATION(parked-color)
             try
             {
                 var rends = car.GetComponentsInChildren(typeof(Renderer), true);
@@ -858,13 +777,8 @@ namespace BigAmbitionsMP
                     }
                 }
 
-                // Probe log AFTER repair — shows what actually ships (round-19: the pre-repair log hid
-                // whether the repair ran).
                 for (int i = 0; i < entries.Count; i++)
-                {
                     groups.Add(entries[i].g);
-                    dbg.Add($"{entries[i].rendName}[{entries[i].matName}]={(entries[i].fromMpb ? "mpb" : "mat")}{ColStr(entries[i].g.Item1)}");
-                }
             }
             catch { }
             if (groups.Count == 0) groups.Add((Color.white, Color.white));
@@ -872,14 +786,6 @@ namespace BigAmbitionsMP
             bool uniform = true;
             for (int i = 1; i < groups.Count && uniform; i++)
                 if (groups[i] != groups[0]) uniform = false;
-
-            // DIAG:INVESTIGATION(parked-color) — host-side read, only for flip-capable (non-uniform) cars.
-            if (!uniform && _colorReadLogged.Add(car.GetInstanceID()))
-            {
-                var p = car.transform.position;
-                Plugin.Logger.LogInfo($"[ParkedColor] READ '{car.name}' @({p.x:F0},{p.z:F0}) renderers={dbg.Count}: "
-                    + string.Join("; ", dbg.GetRange(0, Math.Min(8, dbg.Count))) + (dbg.Count > 8 ? " …" : ""));
-            }
 
             var flat = new List<float>();
             int count = uniform ? 1 : groups.Count;
@@ -897,7 +803,7 @@ namespace BigAmbitionsMP
             var mpb = new MaterialPropertyBlock();
             r.GetPropertyBlock(mpb);
             Color c1 = Color.white, c2 = Color.white;
-            fromMpb = false;   // DIAG:INVESTIGATION(parked-color) — where the FIRST color came from
+            fromMpb = false;   // where the FIRST color came from — drives the read-repair pairing above
             int found = 0, n = mat.shader.GetPropertyCount();
             for (int p = 0; p < n && found < 2; p++)
             {
@@ -933,11 +839,6 @@ namespace BigAmbitionsMP
                 int groups = colors.Count / 6;
                 if (groups < 1) return;
 
-                // DIAG:INVESTIGATION(parked-color) — client-side apply, only for flip-capable (multi-group)
-                // payloads: shows which renderer got which group by INDEX pairing (the suspected mismatch).
-                var dbgA = (groups > 1 && _colorApplyLogged.Add(ghost.GetInstanceID()))
-                           ? new List<string>() : null;
-
                 var rends = ghost.GetComponentsInChildren(typeof(Renderer), true);
                 int ri = 0;
                 for (int i = 0; i < rends.Length; i++)
@@ -951,7 +852,6 @@ namespace BigAmbitionsMP
                     int b  = gi * 6;
                     var c1 = new Color(colors[b],     colors[b + 1], colors[b + 2]);
                     var c2 = new Color(colors[b + 3], colors[b + 4], colors[b + 5]);
-                    if (dbgA != null && dbgA.Count < 8) dbgA.Add($"{r.name}←g{gi}{ColStr(c1)}");
 
                     var mpb = new MaterialPropertyBlock();
                     r.GetPropertyBlock(mpb);
@@ -966,13 +866,6 @@ namespace BigAmbitionsMP
                     }
                     r.SetPropertyBlock(mpb);
                     ri++;
-                }
-
-                if (dbgA != null)
-                {
-                    var p = ghost.transform.position;
-                    Plugin.Logger.LogInfo($"[ParkedColor] APPLY '{ghost.name}' @({p.x:F0},{p.z:F0}) rends={ri} groups={groups}: "
-                        + string.Join("; ", dbgA) + (ri > 8 ? " …" : ""));
                 }
             }
             catch (Exception ex)

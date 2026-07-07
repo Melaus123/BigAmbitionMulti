@@ -389,17 +389,8 @@ namespace BigAmbitionsMP
                 var gm = InstanceBehavior<GameManager>.Instance;
                 var sel = gm?.selectedVehicle;
                 var cur = VehicleHelper.GetCurrentVehicle();
-                // DIAG:INVESTIGATION(cart-panel-insta-close) — the flatbed menu/panel closed right after
-                // opening with NO auto-close reason logged (2026-07-04) → an untraced Close() caller. Name it.
-                string caller = "";
-                try
-                {
-                    var st = new System.Diagnostics.StackTrace(1, false);
-                    for (int f = 0; f < Math.Min(3, st.FrameCount); f++)
-                        caller += (f > 0 ? "<" : "") + (st.GetFrame(f)?.GetMethod()?.DeclaringType?.Name ?? "?") + "." + (st.GetFrame(f)?.GetMethod()?.Name ?? "?");
-                }
-                catch { }
-                Plugin.Logger.LogInfo($"[VStore] close: selVeh='{(sel?.vehicleInstance?.id ?? "null")}' curVeh='{(cur?.id ?? "null")}' caller={caller}.");   // diag: remove once re-entry + insta-close settled
+                // (round-35 insta-close diag retired 2026-07-05: root = a late take result closing a newer
+                // panel session, fixed via IsOpenFor scoping; the caller-trace confirmed it.)
                 if (sel != null && sel.vehicleInstance?.id != null && sel.vehicleInstance.id.StartsWith("BAMP_") && cur == null)
                 { gm.selectedVehicle = null; Plugin.Logger.LogInfo("[VStore] de-selected borrowed proxy on close."); }
             }

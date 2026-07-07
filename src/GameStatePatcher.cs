@@ -846,6 +846,18 @@ namespace BigAmbitionsMP
                             var newSer  = new Dictionary<string, string>();
                             var newDict = new Dictionary<string, BigAmbitions.Items.ItemInstance>();
                             int restocked = 0;
+                            // Round-38d — CARGO AUTHORITY SHIELD. The only guest→owner interior flow is the
+                            // furniture-edit forward, and its snapshot carries the guest's REPLICA cargo — never
+                            // authoritative (all legit cargo mutations route via BStore ops). Field-proven leak
+                            // (2026-07-07): a guest's UNROUTED local register take diverged their replica; their
+                            // next furniture forward was adopted wholesale and EMPTIED the owner's real register
+                            // (''×0 at the 1467 setstock audit) — laundering a replica divergence into owner
+                            // state. When THIS machine owns the building, pre-existing items keep their LIVE
+                            // cargo; new items (a placed box) keep the snapshot's. Guests applying owner pushes
+                            // are untouched (RentedByPlayer false there).
+                            bool receiverOwnsThis = false;
+                            try { receiverOwnsThis = reg.RentedByPlayer; } catch { }
+                            int cargoShielded = 0;
                             foreach (var i in payload.ItemInstances)
                             {
                                 if (string.IsNullOrEmpty(i.Id)) continue;
@@ -883,15 +895,29 @@ namespace BigAmbitionsMP
                                     {
                                         if (cargoOnly)
                                         {
-                                            prevLive.cargoInstances = ii.cargoInstances;
-                                            try { prevLive.OnItemsInCargoUpdated()?.Invoke(); } catch { }
-                                            restocked++;
+                                            if (receiverOwnsThis)
+                                            {
+                                                cargoShielded++;             // keep the live (owner-true) cargo
+                                            }
+                                            else
+                                            {
+                                                prevLive.cargoInstances = ii.cargoInstances;
+                                                try { prevLive.OnItemsInCargoUpdated()?.Invoke(); } catch { }
+                                                restocked++;
+                                            }
                                         }
                                         prevLive.position  = ii.position;    // data transform follows the wire
                                         prevLive.yRotation = ii.yRotation;
                                         newDict[i.Id] = prevLive;            // KEEP the live object
                                         movedIds.Add(i.Id);                  // GameObject transform sync pass
                                         continue;
+                                    }
+                                    // Core/stacked changed → respawn below; the shield still applies: the
+                                    // replacement keeps the OWNER's live cargo, not the guest replica's.
+                                    if (receiverOwnsThis)
+                                    {
+                                        ii.cargoInstances = prevLive.cargoInstances;
+                                        cargoShielded++;
                                     }
                                 }
                                 newDict[i.Id] = ii;
@@ -970,6 +996,8 @@ namespace BigAmbitionsMP
 
                             if (restocked > 0)
                                 Plugin.Logger.LogInfo($"[Patcher] {restocked} item(s) restocked IN PLACE for '{payload.AddressKey}' (live objects kept; native cargo callbacks fired).");
+                            if (cargoShielded > 0)
+                                Plugin.Logger.LogInfo($"[Patcher] cargo authority shield kept OWNER cargo on {cargoShielded} item(s) for '{payload.AddressKey}' (guest-edit adoption carries replica cargo — never authoritative).");
                             reg.itemInstances.Clear();
                             foreach (var kv in newDict) reg.itemInstances[kv.Key] = kv.Value;
                             _lastItemSer[payload.AddressKey] = newSer;

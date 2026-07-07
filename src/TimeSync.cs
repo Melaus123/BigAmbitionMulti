@@ -118,14 +118,7 @@ namespace BigAmbitionsMP
             GameStatePatcher.EnqueueOnMainThread(() => GameStateReader.SetNativePause(false));
             MPLoadProfiler.Mark("FREEZE end — game running");
             Plugin.Logger.LogInfo("[TimeSync] Startup hold released — game running.");
-            // DIAG:INVESTIGATION(half-pause) — round 36: menu→re-host left the client "half paused" even
-            // though hold+release ran cleanly (user 2026-07-04). Dump every pause LAYER for 30s after
-            // release so the mismatched one names itself. REMOVE when settled.
-            _pauseDumpUntil = Time.unscaledTime + 30f;
-            _nextPauseDumpAt = 0f;
         }
-
-        private static float _pauseDumpUntil, _nextPauseDumpAt;   // DIAG(half-pause)
 
         /// <summary>
         /// Call every LateUpdate while the hold is active — re-clamps timeScale to
@@ -133,19 +126,6 @@ namespace BigAmbitionsMP
         /// </summary>
         public static void TickStartupHold()
         {
-            // DIAG(half-pause): post-release layer dump — timeScale vs the game's own pause UI vs our
-            // manual/ahead holds. One of these disagreeing with the rest IS the "half paused" state.
-            if (_pauseDumpUntil > 0f)
-            {
-                if (Time.unscaledTime >= _pauseDumpUntil) _pauseDumpUntil = 0f;
-                else if (Time.unscaledTime >= _nextPauseDumpAt)
-                {
-                    _nextPauseDumpAt = Time.unscaledTime + 5f;
-                    bool uiPaused = false;
-                    try { uiPaused = InstanceBehavior<UI.UIs>.Instance?.gameSpeed?.Paused ?? false; } catch { }
-                    Plugin.Logger.LogInfo($"[TimeSync] post-release layers: timeScale={Time.timeScale:F2} uiPaused={uiPaused} manual={ManualPaused} startupHeld={_startupHold} aheadHeld={AheadHeld}");
-                }
-            }
             if (!_startupHold) return;
             if (Time.timeScale != 0f)
                 Time.timeScale = 0f;
