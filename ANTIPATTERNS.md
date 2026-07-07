@@ -477,5 +477,101 @@ UI. If a UI path is patched but the underlying data method isn't, the unpatched 
 
 ---
 
+## Class 11 — One throw in an unguarded sequential chain silently kills everything downstream
+
+**Pattern.** A native orchestrator runs a long ORDERED list of subsystem calls with no per-step
+isolation — `GameManager.NewDay` (:628: wages → AI economy → taxes → **worked-hours reset**),
+the hourly block of `RunMainGameTick` (:576: ~18 `RunHourly`/delivery steps), scene-load chains
+(`CityManager.OnScenesLoaded`). ONE exception in any step — native fragility, bad save data, or
+one of OUR patches throwing inside a step — aborts every step after it. The chain then "runs"
+again next tick and dies at the same spot, forever.
+
+**Why it bites.** The symptom lands FAR from the throw: a competitor-business NRE surfaced as
+*payroll doubling* (the skipped step was the worked-hours reset); a rival-timeline NRE surfaced
+as a *grey unloaded world* (the skipped steps were city init). When the throwing sim is one we
+suppress on clients, the failure is **host-only** and masquerades as "the host's world is weird"
+rather than a mod bug. When the skipped step is a daily reset, the damage **compounds and
+persists across saves**. Class 9's complaint-NRE ("HQ stopped working") is the same class at the
+per-entity-loop scale.
+
+**Detection.** Two habits, not a grep:
+1. After any playtest / in any bug-report log, search **`[Guard]`** — the containment wall
+   (below) logs every contained throw in full. A `[Guard] X threw during the game tick` line is
+   a LIVE BUG to root-cause; the wall contains, it never fixes.
+2. Any patch of ours whose body can throw inside a native method is this class at micro scale —
+   the throw aborts the rest of that native method. Patch bodies catch their own exceptions
+   (loudly — see the silent-catch rule); shields use Finalizers.
+
+**Safe fixes.**
+1. **Containment wall on the chain's steps** (`Patch_GameTickChain_ContainThrows`,
+   `src/MPPatches.cs`): a shared Harmony **Finalizer** on every decompile-verified step of
+   NewDay + the hourly tick — logs the exception IN FULL, suppresses it, the chain continues.
+   Native behavior on a throw is "abort the rest of the chain", so containing a step is never
+   worse for world state and always better for the chain. Steps that fail to resolve at patch
+   time log an error (Class 3 discipline).
+2. **Fix the root the wall exposes** — the wall converts silent corruption into a named log
+   line; the actual fix is per-root (e.g. the Class 12 stale-item guard).
+3. **Residual exposure (accepted, documented):** event multicasts (`GlobalEvents.onNewDay` /
+   `onNewHour`, `GameEvent.Invoke`) and un-wrapped chains (scene load) — not wrappable with this
+   pattern. If one of those bites, wrap its subscribers case-by-case.
+
+**Known instances.**
+- `CompetitionHelper.RunDaily` NRE (stale market item) aborted `NewDay` before
+  `EmployeeHelper.RunDaily` → host payroll runaway, field report 2026-07-07 (0.1.8-beta). Root
+  guarded (Class 12) + wall added.
+- `RivalTimeline.Check` NRE aborted `CityManager.OnScenesLoaded` → client grey world / wrong
+  spawn (round 39b, 2026-07-02). Fixed by skipping the client-side consumer.
+- `UnfulfilledDemandsComplaint` NRE escaped `EmployeeHelper.RunHourly` and aborted the hourly
+  economy tick ("HQ stopped working") — see Class 9, instance 3. Now also caught by the wall.
+
+---
+
+## Class 12 — Persisted NAME resolved through a registry that can return null
+
+**Pattern.** Saves and network payloads persist entities as NAMES (`itemName`, business types,
+building types). Registries resolve them (`ItemsGetter.GetByName`, `BusinessTypeHelper.GetData`)
+and return **null on a miss** — but callers (native AND ours) routinely deref the result
+unchecked. Names go stale two ways: a **content mod is removed** (its items linger in
+`productMarketEntries`, cargo, shelf stock, market prices) or a **game update renames/removes**
+content. The data is valid-looking; only resolution fails.
+
+**Why it bites.** Onset is ABRUPT (the first session after the mod is removed — nothing "crept"),
+the symptom is unrelated to items (payroll, in the field report), and the deref usually sits
+inside a Class 11 chain, so one stale name detonates a whole tick. It is whack-a-mole by nature:
+the same stale name hits whichever deref the day's code path reaches first. Native is fragile
+here too — `GetSuitableBuildingTypeForItem` (:496), `IsPrimaryProduct` feeds (:507, :727, :740),
+`RemoveCoatCheckDemand` (pre-EA04 migration) all deref `GetByName` results bare.
+
+**Detection grep.**
+```
+rg -n "GetByName|ItemCached|FindItemByPropName|CreatePrefabItem" src/
+```
+Every hit must tolerate null: `?.`, an explicit null check, or an enclosing try/catch that logs.
+`new CargoInstance(name,…)` and `GetSellingPrice()`/`GetWorth()` are SAFE on stale names
+(construction stores fields; worth is pure arithmetic) — resolution only happens on `ItemCached`.
+
+**Safe fixes.**
+1. **Null-check + skip loudly, once per name** (`Patch_Competition_TryCreateBusiness_StaleItemGuard`
+   — warns `[Guard] … resolves to no item`, skips the entry, native tries the next candidate).
+2. **Guard at the level where skipping is semantically clean** — the reporter's own fix
+   (defaulting `GetSuitableBuildingTypeForItem`) would only have MOVED the NRE to the next deref
+   of the same null two calls later. Guard where the whole work-unit can be skipped.
+3. **Do NOT auto-delete the stale save data.** Removing entries from `productMarketEntries` on
+   load mutates the save on an unverified "the game re-creates them" assumption; the guards make
+   stale entries harmless while keeping the data intact.
+
+**Known instances.**
+- Stale `productMarketEntries` item (removed content mod) → `TryCreateCompetitorBusiness` NRE →
+  Class 11 payroll runaway. Guarded 2026-07-07.
+- **Audit 2026-07-07** of all OUR resolver sites: `GameStatePatcher:979` (null-checked),
+  `CustomerPuppets:769` (null-checked + try/catch), `BusinessPatches:522` (`?.` + try/catch),
+  `MPRivalFairness:116` (null-checked + try/catch), `RemotePlayerManager` prop mint (`?.` +
+  fallback chain), sell-credit / boxtake delivery (`CargoInstance` arithmetic-only + handler-level
+  try/catch) — **0 unguarded**. Re-run the grep when adding any name-resolving code.
+- Latent NATIVE fragility (not ours to fix, wall contains them): `CompetitionHelper` :727/:740,
+  `RemoveCoatCheckDemand` (only runs migrating pre-build-2233 saves).
+
+---
+
 *Registry seeded from real fix history (git log + investigation notes); it is not
 exhaustive — add a class the moment a second instance of any pattern shows up.*

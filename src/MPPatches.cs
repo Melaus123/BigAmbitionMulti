@@ -1857,6 +1857,127 @@ namespace BigAmbitionsMP
             }
         }
 
+        // Payroll-runaway guard (2026-07-07, field bug report): GameManager.NewDay runs
+        // EmployeeHelper.PayDailyWages (:636), CompetitionHelper.RunDaily (:640), then
+        // EmployeeHelper.RunDaily (:651) — the call that zeroes workedHoursToday daily and resets
+        // workedDays/workedHoursThisWeek on Mondays. An exception in the AI-economy step aborts
+        // NewDay BEFORE the reset (and before TaxHelper/ProductMarketHelper/daily summary), so
+        // every midnight charges wages on an ever-growing hours total and never resets it —
+        // host-only, because clients skip CompetitionHelper.RunDaily (patch above). Confirmed
+        // trigger: stale item names in save-persisted productMarketEntries (leftovers of a removed
+        // content mod) — ItemsGetter.GetByName returns null for them, and TryCreateCompetitorBusiness
+        // (CompetitionHelper.cs:292) feeds that null through TryGetBusinessForItem into
+        // GetSuitableBuildingTypeForItem, which derefs item.itemName on its first line (:496).
+        //
+        // Guard at the source: skip a market entry whose item no longer resolves — the day's
+        // competitor-business loop (StartNewBusiness :280) simply tries the next demanded item,
+        // exactly as if this one weren't demanded. Guarding deeper (e.g. defaulting
+        // GetSuitableBuildingTypeForItem) would only move the NRE — IsPrimaryProduct(:507) and
+        // FindSuitableBusinessDefaultForItem(:334) deref the same item.
+        [HarmonyPatch(typeof(Helpers.CompetitionHelper), "TryCreateCompetitorBusiness")]
+        public static class Patch_Competition_TryCreateBusiness_StaleItemGuard
+        {
+            private static readonly HashSet<string> _warned = new HashSet<string>();
+            static bool Prefix(string itemName, ref bool __result)
+            {
+                try { if (BigAmbitions.Items.ItemsGetter.GetByName(itemName, suppressError: true) != null) return true; }
+                catch { return true; }   // guard must never become its own crash — let native run
+                if (_warned.Add(itemName ?? ""))
+                    Plugin.Logger.LogWarning($"[Guard] CompetitionHelper: market entry '{itemName}' resolves to no item " +
+                                             "(stale entry, e.g. from a removed content mod) — skipped as competitor-business candidate.");
+                __result = false;
+                return false;
+            }
+        }
+
+        // Tick-chain containment wall (2026-07-07, ANTIPATTERNS Class 11): GameManager.NewDay and the
+        // hourly section of RunMainGameTick each run a long ORDERED list of subsystem calls with no
+        // per-step isolation — one throw silently kills every step after it (the payroll-runaway bug:
+        // a CompetitionHelper NRE aborted the worked-hours reset, taxes and the market day, every
+        // midnight). Native behavior on a throw is "abort the rest of the chain", so containing a step
+        // is never worse for world state and always better for the chain. Every exception is logged IN
+        // FULL — this is a loud containment wall, not a silent catch (the silent-catch rule stands).
+        // Each step below is decompile-verified for EA 0.11 build 3540 (GameManager.cs :576-608 hourly,
+        // :628-659 daily); an unresolvable step logs an error at patch time instead of failing silently
+        // (ANTIPATTERNS Class 3). Event multicasts (GlobalEvents.onNewDay/onNewHour, GameEvent.Invoke)
+        // are NOT wrappable this way and remain the chain's residual exposure.
+        [HarmonyPatch]
+        public static class Patch_GameTickChain_ContainThrows
+        {
+            private static readonly (string type, string method)[] Steps =
+            {
+                // ── NewDay chain, in call order ──
+                ("Helpers.PlayerHelper",            "IncreasePlayerAge"),
+                ("Helpers.FinancialSummaryHelper",  "SetMoneyBeforeMidnight"),
+                ("UI.Notification.NotificationsListUI", "CleanOldNotifications"),
+                ("Helpers.RealEstateHelper",        "RunDaily"),
+                ("Helpers.EmployeeHelper",          "PayDailyWages"),
+                ("Helpers.EmployeeHelper",          "WorkDaily"),
+                ("Helpers.ParkingSimulator",        "RunDaily"),
+                ("Helpers.BusinessHelper",          "RunDaily"),
+                ("Helpers.CompetitionHelper",       "RunDaily"),
+                ("Helpers.ProductMarketHelper",     "RunDaily"),
+                ("AdManager",                       "RunDaily"),
+                ("Helpers.TaxHelper",               "RunDaily"),
+                ("UI.DailySummary.DailySummary",    "Run"),
+                ("Helpers.InvestmentFundHelper",    "RunDaily"),
+                ("Helpers.EmployeeHelper",          "RunDaily"),
+                ("BigAmbitions.Rivals.RivalsHelper","RunDaily"),
+                // ── hourly chain (RunMainGameTick), in call order ──
+                ("JobHelper",                       "RunHourly"),
+                ("Helpers.ParkingSimulator",        "RunHourly"),
+                ("Helpers.RecruitmentHelper",       "RunHourly"),
+                ("Helpers.HappinessHelper",         "RunHourly"),
+                ("Helpers.EmployeeHelper",          "RunHourly"),
+                ("Helpers.ProductMarketHelper",     "GenerateShortagesAndBackorders"),
+                ("Buildings.Office.Headquarters.LogisticsManagerHelper", "DoAllFactoryDeliveries"),
+                ("Helpers.BusinessHelper",          "HandleWholesaleDeliveries"),
+                ("Entities.ImportPartnership",      "DoAllDeliveries"),
+                ("Buildings.Office.Headquarters.LogisticsManagerHelper", "DoAllWarehouseDeliveries"),
+                ("Helpers.BusinessHelper",          "RunHourly"),
+                ("Buildings.BuildingTypes.Shared.Dirtiness.BuildingCleanlinessHelper", "RunHourly"),
+                ("Buildings.BuildingTypes.Special.FurnitureStore.FurnitureDeliveryHelper", "RunHourly"),
+                ("Vehicles.VehicleDeliveryHelper",  "RunHourly"),
+                ("BigAmbitions.Rivals.RivalsHelper","RunHourly"),
+                ("Extensions.GamePromptHelper",     "RunHourly"),
+                ("Helpers.BankHelper",              "RunHourly"),
+                ("Entities.ContactsHelper",         "RunHourly"),
+            };
+
+            static IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                foreach (var (type, method) in Steps)
+                {
+                    var t = AccessTools.TypeByName(type);
+                    var m = t != null ? AccessTools.Method(t, method) : null;
+                    if (m == null)
+                        Plugin.Logger.LogError($"[Guard] tick-chain wall: {type}.{method} not found (game update renamed it?) — that step is UNPROTECTED.");
+                    else
+                        yield return m;
+                }
+                // PortraitGenerator.Create sits at NewDay:650, BEFORE the payroll reset — overloaded,
+                // so it needs typed resolution (the CharacterData overload is the one NewDay calls).
+                var pg = AccessTools.TypeByName("Character.Customization.PortraitGenerator");
+                var create = pg == null ? null : AccessTools.Method(pg, "Create", new[]
+                {
+                    typeof(CharacterData), typeof(string), typeof(UnityEngine.UI.Image),
+                    typeof(Action<UnityEngine.Sprite>),
+                });
+                if (create == null)
+                    Plugin.Logger.LogError("[Guard] tick-chain wall: PortraitGenerator.Create(CharacterData,…) not found — that step is UNPROTECTED.");
+                else
+                    yield return create;
+            }
+
+            static Exception Finalizer(System.Reflection.MethodBase __originalMethod, Exception __exception)
+            {
+                if (__exception != null)
+                    Plugin.Logger.LogError($"[Guard] {__originalMethod?.DeclaringType?.Name}.{__originalMethod?.Name} threw during the " +
+                                           $"game tick — contained so the rest of the hour/day chain still runs: {__exception}");
+                return null;   // suppress — the chain continues
+            }
+        }
+
         // Host-authoritative market events (2026-06-19, bucket 2 follow-up — audit catch): NewDay also calls
         // ProductMarketHelper.RunDaily (SEPARATE from CompetitionHelper.RunDaily), which CREATES market events
         // (hype / shortage / max-providers) via RNG. Clients must NOT generate their own — they receive the
