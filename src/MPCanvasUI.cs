@@ -321,7 +321,6 @@ namespace BigAmbitionsMP
                         // without me saving" leaks; the join-save was the other).
                         Plugin.Logger.LogInfo("[MPSave] OnApplicationQuit — host quit-checkpoint before exit.");
                         MPSaveCoordinator.HostQuitCheckpoint();
-                        MPSaveCoordinator.FlushCheckpointsNow();   // don't lose a fresh manual save's frozen copy to the settle timer
                     }
                     else if (MPClient.IsConnected || MPClient.SessionEnded)
                     {
@@ -408,7 +407,6 @@ namespace BigAmbitionsMP
             TimeSync.TickStartupHold();  // round-36: had NO caller (dead since inception) — the hold's timeScale re-clamp
             GameStateReader.TickPendingNativePause();   // round-36c: converge the pause flag onto the last
                                                         // requested state (rate-limit drops lost it before)
-            MPSaveCoordinator.TickCheckpoints();        // round-37: run due checkpoint copies (worker thread)
             CustomerPuppets.Tick();      // round-41: simulator election (host) + puppet stream/render (both-inside shops)
             RemotePlayerManager.TickVehicleCollisionIgnores();   // remote avatars must not shove vehicles
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
@@ -3346,11 +3344,13 @@ namespace BigAmbitionsMP
         // ── "Host Saved Game" save picker — grouped by playthrough, scrollable ──
         private GameObject? _savePicker;
         private TextMeshProUGUI? _spInfo;
-        private RectTransform? _rtSpLoad, _rtSpBack;
+        private RectTransform? _rtSpLoad, _rtSpBack, _rtSpRecov;
         private RectTransform? _spViewport, _spContent, _spTrack, _spThumb;
         private float  _spScroll, _spContentH;
         private string _spExpanded   = "";   // base name of the expanded playthrough (accordion)
         private string _spSelSession = "";   // session selected to host
+        private bool   _spShowRecovery;      // native-parity: automatic saves hidden behind a toggle,
+                                             // like vanilla's "show recover saves" (2026-07-07)
         // Plain ref type (NOT a [Serializable] ValueTuple) — a List<ValueTuple<RectTransform,string>>
         // field on a MonoBehaviour trips Unity's type processing at load and the whole mod assembly
         // fails to load.  A non-serializable class field is skipped cleanly.
@@ -3923,8 +3923,10 @@ namespace BigAmbitionsMP
             th.AddComponent<Image>().color = C_LD_SBTHB;
 
             // Buttons — right-aligned at the bottom: [Back] [Host this save], Host rightmost (mockup).
+            // Bottom-left: the recovery-saves toggle (native load screen hides "Recover" saves the same way).
             _rtSpLoad = MakeFlatButton(_savePicker.transform, "BAMP_SpLoad", "Host this save", 462f, -498f, 160f, 34f, C_LD_ACC, new Color(0.04f, 0.086f, 0.149f, 1f), 13, true);
             _rtSpBack = MakeFlatButton(_savePicker.transform, "BAMP_SpBack", "Back", 362f, -498f, 88f, 34f, new Color(0.196f, 0.227f, 0.298f, 1f), C_LD_MUT, 13, false);
+            _rtSpRecov = MakeFlatButton(_savePicker.transform, "BAMP_SpRecov", "Show recovery saves", 8f, -498f, 190f, 34f, new Color(0.196f, 0.227f, 0.298f, 1f), C_LD_MUT, 13, false);
             _savePicker.SetActive(false);
         }
 
@@ -3941,7 +3943,12 @@ namespace BigAmbitionsMP
 
             if (_spInfo != null)
                 _spInfo.text = runs.Count == 0 ? "No multiplayer saves found."
-                                               : "Choose a playthrough to host — expand for autosaves and recovery points.";
+                                               : "Choose a playthrough to host — expand to pick a save.";
+            if (_rtSpRecov != null)
+            {
+                var t = _rtSpRecov.GetComponentInChildren<TextMeshProUGUI>(true);
+                if (t != null) t.text = _spShowRecovery ? "Hide recovery saves" : "Show recovery saves";
+            }
 
             if (runs.Count > 0)
             {
@@ -3956,7 +3963,8 @@ namespace BigAmbitionsMP
             foreach (var run in runs)
             {
                 bool expanded = run.Base == _spExpanded;
-                int nv = expanded ? run.Variants.Count : 0;
+                var vis = VisibleVariants(run);
+                int nv = expanded ? vis.Count : 0;
                 float cardH = HROW + (nv > 0 ? VPAD_TOP + nv * VROW + (nv - 1) * VGAP + VPAD_BOT : 0f);
 
                 // Playthrough card — a FLAT, lighter float on the darker list (the mockup's hierarchy).
@@ -3978,14 +3986,20 @@ namespace BigAmbitionsMP
                     15, C_LD_TXT, 44f, 0f, CARD_W - 200f, HROW, TextAlignmentOptions.Left);
                 ApplyFont(hlbl); hlbl.enableWordWrapping = false;
                 string dayPart = run.NewestDay >= 1 ? $"Day {run.NewestDay} · " : "";
-                ApplyFont(MakeLabel(hgo.transform, $"{dayPart}{run.Variants.Count} save{(run.Variants.Count == 1 ? "" : "s")}",
+                ApplyFont(MakeLabel(hgo.transform, $"{dayPart}{vis.Count} save{(vis.Count == 1 ? "" : "s")}",
                     12, C_LD_MUT, CARD_W - 152f, 0f, 140f, HROW, TextAlignmentOptions.Right));
                 _spHeaderHits.Add(new SpHit(hrt, run.Base));
 
                 if (expanded)
                 {
+                    // Does this card hold more than one save NAME? (playthrough-id grouping can merge
+                    // several named saves of one world — label rows by name where it's ambiguous)
+                    var baseNames = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var v in run.Variants) baseNames.Add(MPSaveManager.StripToBase(v.SessionName));
+                    bool multiName = baseNames.Count > 1;
+
                     float vy = HROW + VPAD_TOP;
-                    foreach (var v in run.Variants)
+                    foreach (var v in vis)
                     {
                         bool sel = v.SessionName == _spSelSession;
                         var vgo = MakeGO("SpVar", cardGO.transform); var vrt = vgo.GetComponent<RectTransform>();
@@ -4000,7 +4014,7 @@ namespace BigAmbitionsMP
                         icRT.anchorMin = icRT.anchorMax = new Vector2(0f, 1f); icRT.pivot = new Vector2(0.5f, 0.5f);
                         icRT.sizeDelta = new Vector2(16f, 16f); icRT.anchoredPosition = new Vector2(18f, -VROW / 2f);
                         var icImg = icGO.AddComponent<Image>(); icImg.sprite = IconSprite(v.Kind); icImg.color = sel ? C_LD_ACC : C_LD_MUT;
-                        ApplyFont(MakeLabel(vgo.transform, VariantLabel(v.Kind), 14, C_LD_TXT, 38f, 0f, rowW - 210f, VROW, TextAlignmentOptions.Left));
+                        ApplyFont(MakeLabel(vgo.transform, SpRowLabel(v, multiName), 14, C_LD_TXT, 38f, 0f, rowW - 210f, VROW, TextAlignmentOptions.Left));
                         ApplyFont(MakeLabel(vgo.transform, VariantMeta(v), 12, C_LD_MUT, rowW - 172f, 0f, 162f, VROW, TextAlignmentOptions.Right));
                         _spVarHits.Add(new SpHit(vrt, v.SessionName));
                         vy += VROW + VGAP;
@@ -4020,9 +4034,19 @@ namespace BigAmbitionsMP
             if (kind == "Autosave")        return "Autosave";
             if (kind == "Disconnect")      return "Disconnect checkpoint";
             if (kind == "Recover")         return "Recover (crash)";
-            if (kind == "Checkpoint")      return "Save point";        // round-37: frozen copy of a manual save
-            if (kind == "Auto checkpoint") return "Auto save point";   // round-37: frozen copy of an automatic save
+            if (kind == "Checkpoint")      return "Save point";        // legacy round-37 frozen copy (creation retired 2026-07-07)
+            if (kind == "Auto checkpoint") return "Auto save point";   // legacy round-37 frozen copy (creation retired 2026-07-07)
             return "Main save";
+        }
+
+        /// <summary>Row label. On a single-name card, kinds label the rows as before. When
+        /// playthrough-id grouping merges several save NAMES into one card, every row carries its
+        /// save's name (native shows the typed name per save row), automatic rows kind-prefixed.</summary>
+        private static string SpRowLabel(MPSaveManager.MpVariant v, bool multiName)
+        {
+            if (!multiName) return VariantLabel(v.Kind);
+            string name = FriendlyName(MPSaveManager.StripToBase(v.SessionName));
+            return v.Kind == "Main" ? name : VariantLabel(v.Kind) + " · " + name;
         }
 
         private static string VariantMeta(MPSaveManager.MpVariant v)
@@ -4033,15 +4057,29 @@ namespace BigAmbitionsMP
             } catch { return v.Day >= 1 ? $"Day {v.Day}" : ""; }
         }
 
-        private static string FirstVariantOf(List<MPSaveManager.MpPlaythrough> runs, string baseName)
+        /// <summary>The variant rows the picker shows for a playthrough. With the recovery toggle
+        /// off, automatic saves (autosave rotation / recover / disconnect — and legacy auto
+        /// checkpoints) are hidden, mirroring the native load screen's collapsed "Recover" list.
+        /// A lineage with ONLY recovery saves shows them regardless — it must stay hostable.</summary>
+        private List<MPSaveManager.MpVariant> VisibleVariants(MPSaveManager.MpPlaythrough run)
         {
-            foreach (var r in runs) if (r.Base == baseName && r.Variants.Count > 0) return r.Variants[0].SessionName;
-            return runs.Count > 0 && runs[0].Variants.Count > 0 ? runs[0].Variants[0].SessionName : "";
+            if (_spShowRecovery) return run.Variants;
+            var vis = run.Variants.FindAll(v => !IsRecoveryKind(v.Kind));
+            return vis.Count > 0 ? vis : run.Variants;
         }
 
-        private static bool SessionListed(List<MPSaveManager.MpPlaythrough> runs, string session)
+        private static bool IsRecoveryKind(string kind)
+            => kind == "Autosave" || kind == "Auto checkpoint" || kind == "Disconnect" || kind == "Recover";
+
+        private string FirstVariantOf(List<MPSaveManager.MpPlaythrough> runs, string baseName)
         {
-            foreach (var r in runs) foreach (var v in r.Variants) if (v.SessionName == session) return true;
+            foreach (var r in runs) if (r.Base == baseName && r.Variants.Count > 0) return VisibleVariants(r)[0].SessionName;
+            return runs.Count > 0 && runs[0].Variants.Count > 0 ? VisibleVariants(runs[0])[0].SessionName : "";
+        }
+
+        private bool SessionListed(List<MPSaveManager.MpPlaythrough> runs, string session)
+        {
+            foreach (var r in runs) foreach (var v in VisibleVariants(r)) if (v.SessionName == session) return true;
             return false;
         }
 
@@ -4076,6 +4114,7 @@ namespace BigAmbitionsMP
             if (!Input.GetMouseButtonDown(0)) return;
             if (RectHit(_rtSpBack, mp)) { OnSpBack(); return; }
             if (RectHit(_rtSpLoad, mp)) { OnSpLoad(); return; }
+            if (RectHit(_rtSpRecov, mp)) { _spShowRecovery = !_spShowRecovery; RefreshSavePicker(); return; }
             if (_spViewport == null || !RectHit(_spViewport, mp)) return;   // list clicks only count inside the viewport
             foreach (var h in _spHeaderHits)
                 if (RectHit(h.Rt, mp)) { _spExpanded = (_spExpanded == h.Key) ? "" : h.Key; RefreshSavePicker(); return; }

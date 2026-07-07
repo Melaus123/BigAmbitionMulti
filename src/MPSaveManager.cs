@@ -39,6 +39,11 @@ namespace BigAmbitionsMP
     {
         public int    Version        { get; set; } = 1;
         public string SessionId      { get; set; } = "";
+        /// <summary>Identity of the WORLD this save belongs to — minted at the world's first save,
+        /// carried across every save name, rename, and fork. Groups all of one world's named saves
+        /// under one picker card, the way the native character folder does (2026-07-07). Empty on
+        /// manifests from before the field existed (those group by base name).</summary>
+        public string PlaythroughId  { get; set; } = "";
         public string GameVersion    { get; set; } = "";   // "EA 0.10" — guards against cross-version loads
         public long   SavedAtUnix    { get; set; }
         public int    WorldDay       { get; set; }          // fingerprint: in-game day at save
@@ -237,11 +242,12 @@ namespace BigAmbitionsMP
         }
         public class MpVariant
         {
-            public string SessionName = "";   // the actual session folder to load
-            public string Kind        = "";   // Main / Autosave / Disconnect / Recover
-            public int    Day         = -1;
+            public string SessionName   = "";   // the actual session folder to load
+            public string Kind          = "";   // Main / Autosave / Disconnect / Recover
+            public int    Day           = -1;
             public long   SavedAtUnix;
-            public string Players     = "";
+            public string Players       = "";
+            public string PlaythroughId = "";   // world identity from the manifest ("" = legacy/manifest-less)
         }
 
         /// <summary>Group MP saves into PLAYTHROUGHS for the load screen: one entry per base session, each
@@ -263,7 +269,7 @@ namespace BigAmbitionsMP
                     var m = ReadManifest(name);
                     if (m != null)
                     {
-                        v.Day = m.WorldDay; v.SavedAtUnix = m.SavedAtUnix;
+                        v.Day = m.WorldDay; v.SavedAtUnix = m.SavedAtUnix; v.PlaythroughId = m.PlaythroughId ?? "";
                         var names = new List<string>();
                         if (m.Slots != null) foreach (var s in m.Slots) names.Add(string.IsNullOrEmpty(s.CharacterName) ? s.DisplayName : s.CharacterName);
                         v.Players = names.Count > 0 ? string.Join(", ", names) : "";
@@ -274,15 +280,38 @@ namespace BigAmbitionsMP
                     if (!byBase.TryGetValue(baseName, out var pt)) { pt = new MpPlaythrough { Base = baseName }; byBase[baseName] = pt; }
                     pt.Variants.Add(v);
                 }
+
+                // Merge base-name groups that belong to the same WORLD (native parity 2026-07-07: the
+                // character folder groups every named save of a playthrough; ours is the PlaythroughId
+                // minted at the world's first save). A group's id = its newest id-bearing variant, so a
+                // legacy sibling (-auto written before the field existed) can't split its base apart.
+                // Groups with no id at all (pre-field saves, manifest-less folders) keep grouping by
+                // base name, exactly as before.
+                var merged = new Dictionary<string, MpPlaythrough>(StringComparer.OrdinalIgnoreCase);
+                foreach (var kv in byBase)
+                {
+                    string pid = ""; long pidWhen = -1;
+                    foreach (var v in kv.Value.Variants)
+                        if (!string.IsNullOrEmpty(v.PlaythroughId) && v.SavedAtUnix > pidWhen) { pid = v.PlaythroughId; pidWhen = v.SavedAtUnix; }
+                    string key = pid.Length > 0 ? "pid:" + pid : "base:" + kv.Key;
+                    if (!merged.TryGetValue(key, out var dst)) merged[key] = kv.Value;
+                    else dst.Variants.AddRange(kv.Value.Variants);
+                }
+                byBase = merged;
+
                 foreach (var pt in byBase.Values)
                 {
-                    MpVariant newestNamed = null;
+                    MpVariant newestNamed = null, newestMain = null;
                     foreach (var v in pt.Variants)
                     {
                         if (v.SavedAtUnix > pt.NewestUnix) pt.NewestUnix = v.SavedAtUnix;
                         if (v.Day > pt.NewestDay) pt.NewestDay = v.Day;
                         if (!string.IsNullOrEmpty(v.Players) && (newestNamed == null || v.SavedAtUnix > newestNamed.SavedAtUnix)) newestNamed = v;
+                        if (v.Kind == "Main" && (newestMain == null || v.SavedAtUnix > newestMain.SavedAtUnix)) newestMain = v;
                     }
+                    // A merged card holds several save NAMES — headline it by the newest manual save,
+                    // the native character-card rule (headline = newest non-recover save).
+                    if (newestMain != null) pt.Base = StripToBase(newestMain.SessionName);
                     pt.Players = newestNamed != null ? newestNamed.Players : "—";
                     foreach (var v in pt.Variants) if (string.IsNullOrEmpty(v.Players)) v.Players = pt.Players;   // recover borrows the run's roster
                     pt.Variants.Sort((a, b) =>
@@ -300,11 +329,14 @@ namespace BigAmbitionsMP
 
         private static string ClassifyVariant(string name)
         {
-            if (name.Contains("-cpa-"))       return "Auto checkpoint";   // round-37: frozen automatic snapshot
-            if (name.Contains("-cp-"))        return "Checkpoint";        // round-37: frozen manual snapshot
+            // '-cp-'/'-cpa-' creation RETIRED 2026-07-07 (native parity — see MPSaveCoordinator);
+            // classification stays so folders already on disk remain listed and loadable.
+            if (name.Contains("-cpa-"))       return "Auto checkpoint";
+            if (name.Contains("-cp-"))        return "Checkpoint";
             if (name.EndsWith("-recover"))    return "Recover";      // covers -recover / -auto-recover / -disconnect-recover
             if (name.EndsWith("-disconnect")) return "Disconnect";
             if (name.EndsWith("-auto"))       return "Autosave";
+            if (NumberedAutoIndex(name) > 0)  return "Autosave";     // '-auto-2'.. rotation slots (2026-07-07)
             return "Main";
         }
 
@@ -312,14 +344,28 @@ namespace BigAmbitionsMP
         public static string StripToBase(string name)
         {
             if (string.IsNullOrEmpty(name)) return name ?? "";
-            // Round-37 checkpoints: '<base>-cp-<stamp>' / '<base>-cpa-<stamp>' — cut at the marker.
+            // Legacy round-37 checkpoints: '<base>-cp-<stamp>' / '<base>-cpa-<stamp>' — cut at the marker.
             int cpa = name.IndexOf("-cpa-", StringComparison.Ordinal);
             if (cpa > 0) return name.Substring(0, cpa);
             int cp = name.IndexOf("-cp-", StringComparison.Ordinal);
             if (cp > 0) return name.Substring(0, cp);
             foreach (var suf in new[] { "-auto-recover", "-disconnect-recover", "-recover", "-disconnect", "-auto" })
                 if (name.EndsWith(suf)) return name.Substring(0, name.Length - suf.Length);
+            int na = NumberedAutoIndex(name);
+            if (na > 0) return name.Substring(0, na);   // '-auto-2'.. rotation slots
             return name;
+        }
+
+        /// <summary>Index of a trailing '-auto-&lt;digits&gt;' rotation suffix, or -1. All-digit tail
+        /// required so a base name containing '-auto-' text is never mangled (mirror of the
+        /// coordinator's check — kept local so this class parses names on its own).</summary>
+        private static int NumberedAutoIndex(string name)
+        {
+            int i = name.LastIndexOf("-auto-", StringComparison.Ordinal);
+            if (i <= 0 || i + 6 >= name.Length) return -1;
+            for (int k = i + 6; k < name.Length; k++)
+                if (name[k] < '0' || name[k] > '9') return -1;
+            return i;
         }
 
         private static int VariantOrder(string kind)

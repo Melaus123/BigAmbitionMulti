@@ -31,6 +31,11 @@ namespace BigAmbitionsMP
         private static readonly object  _lock = new();
         private static MpManifest?      _activeManifest;
         private static string           _activeSessionName = "";
+        // Identity of the WORLD being played (native parity 2026-07-07: what the character folder is
+        // to vanilla). Minted at a new world's first save, adopted from the manifest on load, and kept
+        // across save-name changes — a rename stamps the SAME id into the new name's manifest, so the
+        // picker groups every name of one world under one card. Cleared only with the session itself.
+        private static string           _activePlaythroughId = "";
 
         /// <summary>The MP save session currently in use.  Set when a save fires
         /// or when an existing session is loaded (Phase 4 step 4), so repeated
@@ -38,7 +43,17 @@ namespace BigAmbitionsMP
         public static string ActiveSessionName
         {
             get => _activeSessionName;
-            set { lock (_lock) { _activeSessionName = value ?? ""; _activeManifest = null; } }
+            set
+            {
+                lock (_lock)
+                {
+                    _activeSessionName = value ?? "";
+                    _activeManifest = null;
+                    // Reset (new lobby) drops the world identity; a RENAME (non-empty) keeps it —
+                    // saving under a new name is still the same world.
+                    if (string.IsNullOrEmpty(_activeSessionName)) _activePlaythroughId = "";
+                }
+            }
         }
 
         // ── Host entry point ──────────────────────────────────────────────────
@@ -63,32 +78,30 @@ namespace BigAmbitionsMP
                 session = _activeSessionName;
             }
 
-            // AUTOMATIC saves write a SIBLING session ('<name>-auto') so they
-            // never overwrite the player's MANUAL save.  Two automatic triggers
-            // reach here: the periodic autosave ("autosave") and the on-drop
-            // checkpoint ("disconnect" from MPServer's disconnect handler).  Only
-            // genuinely user-initiated saves (pause-menu / quicksave, which arrive
-            // as "menu"/"menu-exit"/"client-menu"/…) land on the manual base.
-            // _activeSessionName keeps the manual base; '-auto' never stacks
-            // ('-auto-auto').  (user, 2026-06-12; disconnect folded in 2026-06-22.)
-            // Periodic autosave → '<base>-auto'.  A member-left checkpoint → '<base>-disconnect', kept
-            // DISTINCT from periodic autosaves: it's a roster checkpoint (not a traditional autosave), so
-            // it reads clearly in the load list AND it always carries the member who just left (see the
-            // carry-forward below).  _activeSessionName stays on the manual base; suffixes never stack.
+            // AUTOMATIC saves write SIBLING sessions so they never overwrite the player's
+            // MANUAL save (the base).  Only genuinely user-initiated saves (pause-menu /
+            // quicksave, arriving as "menu"/"menu-exit"/"client-menu"/…) land on the base.
             // (user, 2026-06-12; disconnect split out 2026-06-23.)
+            // Native-parity model (user, 2026-07-07 — "otherwise match native"):
+            //   autosave/join → a ROTATION of MaxAutoSavesPerGame slots ('-auto', '-auto-2', …),
+            //                   oldest overwritten — mirrors vanilla's "Recover #N" cycle and
+            //                   honors the player's Options setting (default 3).  A JOIN is not
+            //                   the user saving (round-37: it wrote the manual base for weeks —
+            //                   the "my save advanced without me saving" leak), so it rides the
+            //                   same rotation.
+            //   midnight      → '-recover', one fixed slot — mirrors vanilla's "Recover Midnight".
+            //   disconnect    → '-disconnect', a roster checkpoint carrying the member who just
+            //                   left (see carry-forward below) — MP-specific, no native analog.
+            // _activeSessionName stays on the manual base; suffixes never stack. Always derive
+            // from the CLEAN base (strip any drifted sibling suffix) so names never compound
+            // ('-auto-disconnect') and the lineage resolves together in carry-forward + load.
+            string cleanBase = StripAutoSuffix(session);
             string autoSuffix = reason == "disconnect" ? "-disconnect"
-                              : reason == "autosave"   ? "-auto"
-                              : reason == "midnight"   ? "-recover"   // daily coordinated rollback checkpoint (lower frequency than -auto)
-                              : reason == "join"       ? "-auto"     // round-37: a player JOINING is not the user
-                                                                     // saving — it wrote the MANUAL base for weeks
-                                                                     // (the "my save advanced without me saving" leak)
+                              : reason == "midnight"   ? "-recover"
+                              : (reason == "autosave" || reason == "join") ? NextAutoSlotSuffix(cleanBase)
                               : "";
             bool isAutomatic = autoSuffix.Length > 0;
-            // Always derive from the CLEAN base (strip any drifted sibling suffix) before appending this
-            // save's suffix, so names never stack ('-auto-disconnect', '-disconnect-recover') if
-            // _activeSessionName drifted to a sibling (EnsureManifest sets it to whatever it last wrote),
-            // and so base/-auto/-disconnect stay one lineage that carry-forward + load resolve together.
-            session = StripAutoSuffix(session) + autoSuffix;
+            session = cleanBase + autoSuffix;
 
             Plugin.Logger.LogInfo($"[MPSave] HostSaveNow session='{session}' reason={reason} — broadcasting SaveNow.");
 
@@ -119,7 +132,6 @@ namespace BigAmbitionsMP
                     // BEFORE the session's first save (no folder yet) would
                     // otherwise never persist unless the ledger changed again.
                     MPHub.SaveLedger();
-                    ScheduleCheckpoint(session, isAutomatic);   // round-37: every save event freezes a copy
                     DiagPhase("host lambda: DONE");
                 }
                 catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] Host save: {ex}"); }
@@ -149,108 +161,15 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] HostQuitCheckpoint: {ex}"); }
         }
 
-        // ── Immutable checkpoints (round-37, user-mandated save integrity) ───────
-        //
-        // Every completed save event ALSO produces a frozen, timestamped COPY of the session folder:
-        //   manual saves  → '<base>-cp-<stamp>'   kept until the user deletes them
-        //   automatic     → '<base>-cpa-<stamp>'  rolling window (newest AutoCheckpointKeep kept)
-        // A checkpoint is structurally a normal session folder (manifest + <char>/save.hsg), so the
-        // EXISTING picker/load machinery handles it; loading one FORKS: HostLoadSession retargets the
-        // active session to the lineage base, so ongoing saves can never mutate a checkpoint.
-        // The copy is DEFERRED (client .hsg uploads for the save land over a few seconds) and runs on a
-        // worker thread (pure file IO — no IL2CPP).
-        private const int   AutoCheckpointKeep    = 5;
-        private const float CheckpointSettleDelay = 20f;
-        private static readonly List<(string src, string dst, float dueAt, bool prune)> _pendingCp = new();
-
-        private static void ScheduleCheckpoint(string sourceSession, bool automatic)
-        {
-            try
-            {
-                string baseName = MPSaveManager.StripToBase(sourceSession);
-                string stamp    = DateTime.Now.ToString("yyyyMMdd-HHmmss");
-                string dst      = baseName + (automatic ? "-cpa-" : "-cp-") + stamp;
-                lock (_pendingCp) _pendingCp.Add((sourceSession, dst, UnityEngine.Time.unscaledTime + CheckpointSettleDelay, automatic));
-                Plugin.Logger.LogInfo($"[MPSave] checkpoint scheduled: '{sourceSession}' → '{dst}' (in {CheckpointSettleDelay:F0}s).");
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ScheduleCheckpoint: {ex.Message}"); }
-        }
-
-        /// <summary>Per-frame (MPCanvasUI.Update): run due checkpoint copies on a worker thread.</summary>
-        public static void TickCheckpoints()
-        {
-            (string src, string dst, bool prune) job = default;
-            bool have = false;
-            lock (_pendingCp)
-            {
-                for (int i = 0; i < _pendingCp.Count; i++)
-                    if (UnityEngine.Time.unscaledTime >= _pendingCp[i].dueAt)
-                    { job = (_pendingCp[i].src, _pendingCp[i].dst, _pendingCp[i].prune); _pendingCp.RemoveAt(i); have = true; break; }
-            }
-            if (!have) return;
-            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
-            {
-                try
-                {
-                    string srcDir = MPSaveManager.MpSessionFolder(job.src);
-                    string dstDir = MPSaveManager.MpSessionFolder(job.dst);
-                    if (!Directory.Exists(srcDir)) { Plugin.Logger.LogWarning($"[MPSave] checkpoint source missing: {srcDir}"); return; }
-                    CopyDirectory(srcDir, dstDir);
-                    Plugin.Logger.LogInfo($"[MPSave] checkpoint written: '{job.dst}'.");
-                    if (job.prune) PruneAutoCheckpoints(MPSaveManager.StripToBase(job.src));
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] checkpoint copy '{job.dst}': {ex.Message}"); }
-            });
-        }
-
-        /// <summary>Quit path: run every pending checkpoint copy NOW, synchronously — a manual save followed
-        /// by a quick window-close must not lose its frozen copy to the 20s settle timer.</summary>
-        public static void FlushCheckpointsNow()
-        {
-            List<(string src, string dst, float dueAt, bool prune)> jobs;
-            lock (_pendingCp) { jobs = new List<(string, string, float, bool)>(_pendingCp); _pendingCp.Clear(); }
-            foreach (var j in jobs)
-            {
-                try
-                {
-                    string srcDir = MPSaveManager.MpSessionFolder(j.src);
-                    if (!Directory.Exists(srcDir)) continue;
-                    CopyDirectory(srcDir, MPSaveManager.MpSessionFolder(j.dst));
-                    Plugin.Logger.LogInfo($"[MPSave] checkpoint flushed on quit: '{j.dst}'.");
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] quit-flush '{j.dst}': {ex.Message}"); }
-            }
-        }
-
-        private static void CopyDirectory(string src, string dst)
-        {
-            Directory.CreateDirectory(dst);
-            foreach (var f in Directory.GetFiles(src))
-                File.Copy(f, Path.Combine(dst, Path.GetFileName(f)), overwrite: true);
-            foreach (var d in Directory.GetDirectories(src))
-                CopyDirectory(d, Path.Combine(dst, Path.GetFileName(d)));
-        }
-
-        private static void PruneAutoCheckpoints(string baseName)
-        {
-            try
-            {
-                string root = MPSaveManager.MpVersionFolder();
-                if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return;
-                string prefix = MPSaveManager.Sanitize(baseName) + "-cpa-";
-                var dirs = new List<string>();
-                foreach (var d in Directory.GetDirectories(root))
-                    if (Path.GetFileName(d).StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) dirs.Add(d);
-                if (dirs.Count <= AutoCheckpointKeep) return;
-                dirs.Sort(StringComparer.OrdinalIgnoreCase);   // stamp format sorts chronologically
-                for (int i = 0; i < dirs.Count - AutoCheckpointKeep; i++)
-                {
-                    try { Directory.Delete(dirs[i], true); Plugin.Logger.LogInfo($"[MPSave] pruned auto checkpoint '{Path.GetFileName(dirs[i])}'."); }
-                    catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] prune '{dirs[i]}': {ex.Message}"); }
-                }
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] PruneAutoCheckpoints: {ex.Message}"); }
-        }
+        // ── Immutable checkpoints ('-cp-'/'-cpa-' timestamped copies) — RETIRED 2026-07-07 ───────
+        // Round-37 froze a timestamped copy of the session folder after EVERY save event. That was an
+        // over-delivery on "each listed save must carry what was true at save time": the requirement is
+        // SLOT INTEGRITY (each slot written atomically, only ever overwritten by its own kind of event),
+        // which the suffix separation + fork-on-load already guarantee. Native's answer to "keep this
+        // moment" is a new save name — same name overwrites — so additive version history diverged from
+        // the intended native parity (user, 2026-07-07). Autosave rollback depth is now covered by the
+        // native-style '-auto' slot rotation (NextAutoSlotSuffix). Existing '-cp-'/'-cpa-' folders on
+        // disk stay listed/loadable via the picker's legacy classification; no new ones are created.
 
         // ── In-game pause-menu save (MiniMenu Save / Save-and-Exit) ─────────────
 
@@ -289,7 +208,6 @@ namespace BigAmbitionsMP
                 // accepted beforehand would otherwise never reach disk (the ledger
                 // path needs the session folder, which PerformLocalSave just created).
                 MPHub.SaveLedger();
-                ScheduleCheckpoint(session, automatic: false);   // round-37: manual save → permanent checkpoint
             }
             catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] HostSaveSync save: {ex}"); }
         }
@@ -499,7 +417,9 @@ namespace BigAmbitionsMP
             // never mutate the loaded (frozen) source. Loading is a jump to a recorded moment; the recorded
             // moment stays recorded.
             string lineage = MPSaveManager.StripToBase(session);
-            lock (_lock) { _activeSessionName = lineage; _activeManifest = m; }
+            // Adopt the loaded world's identity (empty on pre-field saves — the first save then
+            // mints one via EnsureManifest and the lineage keeps grouping by name until stamped).
+            lock (_lock) { _activeSessionName = lineage; _activeManifest = m; _activePlaythroughId = m.PlaythroughId ?? ""; }
 
             MPServer.RestoreOwnershipFromManifest(m);              // cross-machine ownership + cash seed
             MPServer.SendLoadDataToEachClient(session, m, lineage); // each client gets its own .hsg FROM the source, tagged with the lineage
@@ -907,15 +827,68 @@ namespace BigAmbitionsMP
         /// midnight crossing in the un-synced final minutes without false-positives).</summary>
         public const int DisconnectDayWindow = 2;
 
-        /// <summary>Strip a trailing automatic-save suffix ('-auto' / '-disconnect') to get the base
-        /// session name shared by a session and its automatic siblings.</summary>
+        /// <summary>Strip a trailing automatic-save suffix ('-auto' / '-auto-N' / '-disconnect' /
+        /// '-recover') to get the base session name shared by a session and its automatic siblings.</summary>
         public static string StripAutoSuffix(string s)
         {
             if (string.IsNullOrEmpty(s)) return s ?? "";
             if (s.EndsWith("-disconnect")) return s.Substring(0, s.Length - "-disconnect".Length);
             if (s.EndsWith("-auto"))       return s.Substring(0, s.Length - "-auto".Length);
             if (s.EndsWith("-recover"))    return s.Substring(0, s.Length - "-recover".Length);   // coordinated midnight checkpoint sibling
+            int i = NumberedAutoIndex(s);
+            if (i > 0) return s.Substring(0, i);   // '-auto-2'.. rotation slots (native-parity, 2026-07-07)
             return s;
+        }
+
+        /// <summary>Index of a trailing '-auto-&lt;digits&gt;' rotation suffix in <paramref name="s"/>,
+        /// or -1. All-digit tail required so a base name containing '-auto-' text is never mangled.</summary>
+        private static int NumberedAutoIndex(string s)
+        {
+            int i = s.LastIndexOf("-auto-", StringComparison.Ordinal);
+            if (i <= 0 || i + 6 >= s.Length) return -1;
+            for (int k = i + 6; k < s.Length; k++)
+                if (s[k] < '0' || s[k] > '9') return -1;
+            return i;
+        }
+
+        // ── Native-parity autosave rotation (2026-07-07) ─────────────────────────
+        // Vanilla cycles "Recover #0..N-1" with N = the player's MaxAutoSavesPerGame Options setting
+        // (default 3). Ours rotates sibling sessions '-auto', '-auto-2', … '-auto-N': first empty slot,
+        // else the OLDEST (by manifest timestamp) is overwritten. Slot 1 keeps the legacy plain '-auto'
+        // name so pre-rotation folders fold into the cycle instead of orphaning.
+
+        private static int _autosaveSlotsCached = 3;
+
+        /// <summary>Autosave rotation depth — mirrors the native MaxAutoSavesPerGame setting. The
+        /// IL2CPP prefs read only succeeds on the main thread; off-main callers (join/disconnect
+        /// handlers) get the last main-thread value (the autosave tick refreshes it every cycle).</summary>
+        public static int AutosaveSlotCount()
+        {
+            try { int m = PlayerPrefSettings.MaxAutoSavesPerGame; if (m >= 1) _autosaveSlotsCached = Math.Min(m, 10); }
+            catch { }
+            return _autosaveSlotsCached;
+        }
+
+        /// <summary>Pick the rotation slot the next automatic save writes to. Pure file/JSON IO —
+        /// thread-safe.</summary>
+        internal static string NextAutoSlotSuffix(string baseName)
+        {
+            int slots = AutosaveSlotCount();
+            string bestSuf = "-auto"; long bestWhen = long.MaxValue;
+            for (int i = 1; i <= slots; i++)
+            {
+                string suf = i == 1 ? "-auto" : "-auto-" + i;
+                try
+                {
+                    string dir = MPSaveManager.MpSessionFolder(baseName + suf);
+                    if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return suf;   // first empty slot
+                    long when = MPSaveManager.ReadManifest(baseName + suf)?.SavedAtUnix ?? 0;
+                    if (when <= 0) when = new DateTimeOffset(Directory.GetLastWriteTimeUtc(dir)).ToUnixTimeSeconds();
+                    if (when < bestWhen) { bestWhen = when; bestSuf = suf; }
+                }
+                catch { }
+            }
+            return bestSuf;   // all slots taken → overwrite the oldest
         }
 
         /// <summary>HOST: make an automatic checkpoint (autosave / disconnect) a COMPLETE roster snapshot.
@@ -932,7 +905,12 @@ namespace BigAmbitionsMP
                 if (string.IsNullOrEmpty(targetSession)) return;
                 var connected = MPServer.ConnectedStableIds();
                 string baseName = StripAutoSuffix(targetSession);
-                string[] lineage = { baseName, baseName + "-auto", baseName + "-disconnect" };
+                // Base + every automatic sibling. Rotation slots swept to a fixed 10 (the setting's cap)
+                // rather than the live slot count — a lowered setting must not hide members whose newest
+                // save sits in a now-out-of-range slot. Missing folders are skipped below anyway.
+                var lineage = new List<string> { baseName, baseName + "-auto" };
+                for (int slot = 2; slot <= 10; slot++) lineage.Add(baseName + "-auto-" + slot);
+                lineage.Add(baseName + "-disconnect");
 
                 // Newest save per member across the lineage. Scan the character FOLDERS (not just manifest
                 // slots) so a manifest-less self-save (OnApplicationQuit) is still found; remember which
@@ -1263,7 +1241,43 @@ namespace BigAmbitionsMP
                     GameVersion = SafeGameVersion(),
                 };
             }
+            // Stamp the world identity (native parity 2026-07-07). The LIVE world's id wins over
+            // whatever is on disk: saving onto an existing name is an overwrite — the manifest must
+            // describe the world being saved, not the one it used to hold. With no live id yet,
+            // adopt the manifest's (resuming a stamped session), else inherit from a lineage
+            // sibling, else mint — this is a new world's first save.
+            if (!string.IsNullOrEmpty(_activePlaythroughId))
+                _activeManifest.PlaythroughId = _activePlaythroughId;
+            else if (!string.IsNullOrEmpty(_activeManifest.PlaythroughId))
+                _activePlaythroughId = _activeManifest.PlaythroughId;
+            else
+            {
+                _activePlaythroughId = InheritedPlaythroughId(sessionName) ?? Guid.NewGuid().ToString("N");
+                _activeManifest.PlaythroughId = _activePlaythroughId;
+            }
             return _activeManifest;
+        }
+
+        /// <summary>A lineage sibling's PlaythroughId, if any manifest in the family carries one —
+        /// covers a save landing on an automatic sibling before the base was stamped. Pure JSON IO.</summary>
+        private static string? InheritedPlaythroughId(string sessionName)
+        {
+            string baseName = StripAutoSuffix(sessionName);
+            var names = new List<string> { baseName, baseName + "-auto" };
+            for (int i = 2; i <= 10; i++) names.Add(baseName + "-auto-" + i);
+            names.Add(baseName + "-disconnect");
+            names.Add(baseName + "-recover");
+            foreach (var n in names)
+            {
+                if (n == sessionName) continue;   // own manifest already checked by the caller
+                try
+                {
+                    var id = MPSaveManager.ReadManifest(n)?.PlaythroughId;
+                    if (!string.IsNullOrEmpty(id)) return id;
+                }
+                catch { }
+            }
+            return null;
         }
 
         /// <summary>Host-only: set the session-wide metadata (ownership map, world
