@@ -409,6 +409,7 @@ namespace BigAmbitionsMP
             GameStateReader.TickPendingNativePause();   // round-36c: converge the pause flag onto the last
                                                         // requested state (rate-limit drops lost it before)
             MPSaveCoordinator.TickCheckpoints();        // round-37: run due checkpoint copies (worker thread)
+            CustomerPuppets.Tick();      // round-41: simulator election (host) + puppet stream/render (both-inside shops)
             RemotePlayerManager.TickVehicleCollisionIgnores();   // remote avatars must not shove vehicles
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
             MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion
@@ -2555,6 +2556,7 @@ namespace BigAmbitionsMP
                 }
                 catch { }
                 MPAudit.Reset();          // divergence streaks/throttle die with the session (else stale [Audit] state pollutes the bug-report log across same-process sessions)
+                CustomerPuppets.Reset();  // round-41: puppet bodies + authority table die with the scene
                 MPStockSync.Reset();      // per-shop stock digests die with the session
                 _appearanceSig = ""; _appearanceNextAt = 0f;
                 _blackOverlayCanvas = null;     // re-scan on fresh game load (#6)

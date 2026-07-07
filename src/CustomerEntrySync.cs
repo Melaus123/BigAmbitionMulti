@@ -38,6 +38,7 @@ namespace BigAmbitionsMP
         // shopping trip, surviving table re-seeds).
         private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<CustomerEntry, string> _ownerIds = new();
         private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Order, string> _seededOrderIds = new();
+        private static readonly Dictionary<string, int> _lastSeedLogged = new();   // DIAG(econ-verify)
         private static int _idCounter;
 
         private static string IdOf(CustomerEntry e)
@@ -52,6 +53,45 @@ namespace BigAmbitionsMP
         /// didn't come from the owner's schedule (nothing to forward against).</summary>
         internal static string? EntryIdOf(Order order)
             => order != null && _seededOrderIds.TryGetValue(order, out var id) ? id : null;
+
+        /// <summary>Round-43 (puppet identity): the schedule-entry id behind a LIVE customer's order, on
+        /// EITHER side — seeded map on receivers, owner table (minting like CaptureFor) on the owner.
+        /// "" = no mapping (a stray — churns on handoff, the rare fallback).</summary>
+        internal static string EntryIdForOrder(BuildingRegistration? reg, Order? order)
+        {
+            try
+            {
+                if (order == null) return "";
+                if (_seededOrderIds.TryGetValue(order, out var id)) return id;
+                if (reg == null) return "";
+                var table = Table();
+                if (table == null || !table.TryGetValue(reg.Address, out var entries) || entries == null) return "";
+                foreach (var e in entries)
+                    if (e != null && ReferenceEquals(e.order, order)) return IdOf(e);
+            }
+            catch { }
+            return "";
+        }
+
+        /// <summary>Round-43 (smooth handoff): find the local schedule entry with this id — checks the
+        /// owner id table and the seeded map alike.</summary>
+        internal static CustomerEntry? TryFindEntry(BuildingRegistration? reg, string entryId)
+        {
+            try
+            {
+                if (reg == null || string.IsNullOrEmpty(entryId)) return null;
+                var table = Table();
+                if (table == null || !table.TryGetValue(reg.Address, out var entries) || entries == null) return null;
+                foreach (var e in entries)
+                {
+                    if (e == null) continue;
+                    if (_ownerIds.TryGetValue(e, out var oid) && oid == entryId) return e;
+                    if (e.order != null && _seededOrderIds.TryGetValue(e.order, out var sid) && sid == entryId) return e;
+                }
+            }
+            catch { }
+            return null;
+        }
 
         /// <summary>OWNER side (BuildSnapshot): capture this business's pending shopper schedule.</summary>
         internal static List<CustomerEntryInfo> CaptureFor(BuildingRegistration reg)
@@ -153,6 +193,20 @@ namespace BigAmbitionsMP
                 }
                 table[reg.Address] = fresh;
 
+                // DIAG:INVESTIGATION(econ-verify) — presence visibility: one line per seed whose entry
+                // count CHANGED (re-pushes with an unchanged schedule stay silent).
+                try
+                {
+                    string ak = GameStateReader.AddressKey(reg);
+                    int pending = 0; foreach (var f in fresh) if (f != null && !f.completed) pending++;
+                    if (!_lastSeedLogged.TryGetValue(ak, out var last) || last != fresh.Count * 1000 + pending)
+                    {
+                        _lastSeedLogged[ak] = fresh.Count * 1000 + pending;
+                        Plugin.Logger.LogInfo($"[Customers] seeded {fresh.Count} shopper entr(ies) for '{ak}' ({pending} pending spawn here).");
+                    }
+                }
+                catch { }
+
                 // The spawner refuses when customerCapacity is 0 — the replica's is often unset (the
                 // native computation runs owner-side). Data-level recompute from the synced items.
                 try { BusinessHelper.UpdateCustomerCapacity(reg); } catch { }
@@ -164,6 +218,18 @@ namespace BigAmbitionsMP
 
         /// <summary>Idempotency ledger — every forwarded EntryId is processed at most once per session.</summary>
         private static readonly HashSet<string> _processedForwards = new();
+
+        // DIAG:INVESTIGATION(econ-verify 2026-07-07) — running tally of adopted forwarded orders per
+        // business, drained into the [EconProbe] daily-revenue line so the books attribute what came
+        // from helper-hosted sales. Retire with the EconProbe once the loop is trusted.
+        private static readonly Dictionary<string, (int orders, float revenue)> _adoptedTally = new();
+
+        internal static (int orders, float revenue) TakeAdoptedTally(string addressKey)
+        {
+            if (string.IsNullOrEmpty(addressKey) || !_adoptedTally.TryGetValue(addressKey, out var t)) return (0, 0f);
+            _adoptedTally.Remove(addressKey);
+            return t;
+        }
 
         /// <summary>OWNER, MAIN THREAD: a customer order paid on a helper's machine arrives. Claim the
         /// source entry (my table is the single-writer ledger: already-completed = my machine spawned or
@@ -265,12 +331,19 @@ namespace BigAmbitionsMP
 
                 reg.unprocessedCompletedOrders.Add(o);
                 _processedForwards.Add(p.EntryId);
+                float orderRevenue = 0f;
+                foreach (var oe in o.entries) if (oe != null && oe.paid) orderRevenue += oe.price;
+                _adoptedTally.TryGetValue(p.AddressKey, out var tally);
+                _adoptedTally[p.AddressKey] = (tally.orders + 1, tally.revenue + orderRevenue);
                 BuildingStorageSync.OwnerBusinessTail(reg);
                 InteriorSync.PushOwnedBuildingNow(p.AddressKey);
                 Plugin.Logger.LogInfo($"[Business] adopted helper-served order {p.EntryId} from '{p.PlayerId}' @'{p.AddressKey}': {sold} item(s){(bagged ? " +bag" : "")}{(dropped > 0 ? $" ({dropped} out-of-stock dropped)" : "")}{(known ? "" : " (entry unknown — schedule rotated)")}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] adopt forwarded order: {ex.Message}"); }
         }
+
+        internal static string ShortItem(string n)
+            => string.IsNullOrEmpty(n) ? "" : (n.StartsWith("ba:itemname_", StringComparison.Ordinal) ? n.Substring(12) : n);
 
         /// <summary>Reduce ONE unit of <paramref name="itemName"/> from a display (showcase-shelf) stock
         /// slot — what a live customer's grab does physically. Display-only on purpose: customers never
@@ -298,6 +371,49 @@ namespace BigAmbitionsMP
             }
             catch { }
             return false;
+        }
+    }
+
+    // DIAG:INVESTIGATION(econ-verify 2026-07-07) — the user cannot see the books; this names the money
+    // truth at the exact moment it becomes money. BusinessHelper.ProcessDailyOrders is where a player
+    // business's completed orders (live, forwarded, and simulated alike) turn into an order-history
+    // entry + a ChangeMoneySafe revenue deposit, then clear. One line per business per daily processing:
+    // customers, revenue, what portion arrived via forwarded helper-hosted orders, and the item tally.
+    // Observe-only; retire once the economic loop is trusted.
+    [HarmonyPatch]
+    public static class Probe_DailyRevenue
+    {
+        static System.Reflection.MethodBase? TargetMethod()
+            => AccessTools.Method(typeof(BusinessHelper), "ProcessDailyOrders");
+
+        static void Postfix(BuildingRegistration registration)
+        {
+            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            try
+            {
+                if (registration == null || !registration.RentedByPlayer) return;
+                string ak = GameStateReader.AddressKey(registration);
+                Entities.OrderHistoryEntry? h = null;
+                var hist = registration.orderHistory;
+                if (hist != null && hist.Count > 0) h = hist[hist.Count - 1];
+                var (fOrders, fRevenue) = CustomerEntrySync.TakeAdoptedTally(ak);
+                string items = "";
+                if (h?.itemSales != null)
+                {
+                    var parts = new List<string>();
+                    foreach (var s in h.itemSales)
+                    {
+                        if (s == null) continue;
+                        parts.Add($"{CustomerEntrySync.ShortItem(s.itemName)}×{s.amountSold}");
+                        if (parts.Count >= 6) { parts.Add("…"); break; }
+                    }
+                    items = string.Join(", ", parts);
+                }
+                Plugin.Logger.LogInfo(
+                    $"[EconProbe] daily revenue '{registration.BusinessName}' @'{ak}': customers={h?.totalCustomers ?? 0} " +
+                    $"revenue=${(h?.totalRevenue ?? 0f):F2} deposited | forwarded helper orders since last: {fOrders} (${fRevenue:F2}) | items: {items}");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[EconProbe] daily revenue: {ex.Message}"); }
         }
     }
 }

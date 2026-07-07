@@ -1222,9 +1222,23 @@ namespace BigAmbitionsMP
                 {
                     var rc = env.GetPayload<RegisterCashierPayload>();
                     if (rc == null || !SenderIs(rc.PlayerId, senderPid, env.Type)) break;
-                    if (!SenderOwns(rc.Address, senderPid))
+                    // Round-42: owner OR granted helper — the owner-only anti-spoof gate predates helper
+                    // grants and silently dropped a helper's register duty (field-proven: the guest worked
+                    // the till, the host never learned, the simulator election never handed off, and the
+                    // simulating owner's customers queued at an unmanned register).
+                    bool dutyAllowed = SenderOwns(rc.Address, senderPid);
+                    if (!dutyAllowed && !string.IsNullOrEmpty(rc.Address))
                     {
-                        Plugin.Logger.LogWarning($"[Server] RegisterCashier for '{rc.Address}' from '{senderPid}' — sender doesn't own/rent it — dropped.");
+                        string dOwner = (BuildingOwners.TryGetValue(rc.Address, out var dg) && !string.IsNullOrEmpty(dg)) ? dg
+                                      : (BuildingRealEstateOwners.TryGetValue(rc.Address, out var dr) ? dr : "");
+                        string dOwnerPid = (dOwner == "host") ? MPConfig.PlayerId : dOwner;
+                        dutyAllowed = !string.IsNullOrEmpty(dOwnerPid)
+                                      && (GrantSync.IsGranted(GrantKind.Housing, dOwnerPid, senderPid)
+                                       || GrantSync.IsGranted(GrantKind.Business, dOwnerPid, senderPid));
+                    }
+                    if (!dutyAllowed)
+                    {
+                        Plugin.Logger.LogWarning($"[Server] RegisterCashier for '{rc.Address}' from '{senderPid}' — sender neither owns nor is granted — dropped.");
                         break;
                     }
                     MPRegisterSync.Apply(rc);
@@ -1286,6 +1300,39 @@ namespace BigAmbitionsMP
                 {
                     var ho = env.GetPayload<HelperOrderPayload>();
                     if (ho != null) HandleHelperOrder(ho, senderPid);
+                    break;
+                }
+
+                case MessageType.CustomerPuppetState:   // a client simulator's stream — apply locally + relay
+                {
+                    var cp = env.GetPayload<CustomerPuppetStatePayload>();
+                    if (cp != null && cp.SimulatorPid == senderPid)
+                    {
+                        GameStatePatcher.EnqueueOnMainThread(() => CustomerPuppets.ApplyState(cp));
+                        BroadcastCustomerPuppets(cp);   // receivers filter their own echo by SimulatorPid
+                    }
+                    break;
+                }
+
+                case MessageType.CustomerPuppetEmote:   // a client simulator's customer emoji — apply + relay
+                {
+                    var ce = env.GetPayload<CustomerPuppetEmotePayload>();
+                    if (ce != null && ce.SimulatorPid == senderPid)
+                    {
+                        GameStatePatcher.EnqueueOnMainThread(() => CustomerPuppets.ApplyEmote(ce));
+                        BroadcastCustomerEmote(ce);
+                    }
+                    break;
+                }
+
+                case MessageType.CustomerPuppetLook:    // a client simulator's customer look — apply + relay
+                {
+                    var cl = env.GetPayload<CustomerPuppetLookPayload>();
+                    if (cl != null && cl.SimulatorPid == senderPid)
+                    {
+                        GameStatePatcher.EnqueueOnMainThread(() => CustomerPuppets.ApplyLook(cl));
+                        BroadcastCustomerLook(cl);
+                    }
                     break;
                 }
 
@@ -2528,6 +2575,31 @@ namespace BigAmbitionsMP
         {
             if (!_running || p == null) return;
             Broadcast(MessageEnvelope.Create(MessageType.ShopStockDigest, "host", p));
+        }
+
+        // Round-41 (customer puppets): the host's simulator-election result / a puppet-state relay.
+        public static void BroadcastCustomerAuthority(CustomerSimAuthorityPayload p)
+        {
+            if (!_running || p == null) return;
+            Broadcast(MessageEnvelope.Create(MessageType.CustomerSimAuthority, "host", p));
+        }
+
+        public static void BroadcastCustomerPuppets(CustomerPuppetStatePayload p)
+        {
+            if (!_running || p == null) return;
+            Broadcast(MessageEnvelope.Create(MessageType.CustomerPuppetState, "host", p));
+        }
+
+        public static void BroadcastCustomerEmote(CustomerPuppetEmotePayload p)
+        {
+            if (!_running || p == null) return;
+            Broadcast(MessageEnvelope.Create(MessageType.CustomerPuppetEmote, "host", p));
+        }
+
+        public static void BroadcastCustomerLook(CustomerPuppetLookPayload p)
+        {
+            if (!_running || p == null) return;
+            Broadcast(MessageEnvelope.Create(MessageType.CustomerPuppetLook, "host", p));
         }
 
         public static void BroadcastAppearanceSync()

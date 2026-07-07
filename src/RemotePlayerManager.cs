@@ -391,6 +391,11 @@ namespace BigAmbitionsMP
         // ── Cross-interior mask state (see SpawnOrUpdate) ─────────────────────
         private static readonly Dictionary<string, string> _remoteBuildings = new();
 
+        /// <summary>Round-41 (customer puppets): which building a remote player is inside ("" = outdoors /
+        /// unknown). Fed by every position payload; the host's simulator election reads it for presence.</summary>
+        internal static string BuildingOf(string playerId)
+            => playerId != null && _remoteBuildings.TryGetValue(playerId, out var b) ? (b ?? "") : "";
+
         /// <summary>True when a remote player's avatar is hidden by the
         /// cross-interior mask (used to hide their nearby vehicle ghosts too).</summary>
         public static bool IsMasked(string playerId) =>
@@ -998,6 +1003,99 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Carry] '{playerId}' holding '{held}' — prop attached.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Carry] {ex.Message}"); }
+        }
+
+        /// <summary>Round-42 (customer puppets): clone a held-prop template (basket/box) for a puppet's
+        /// hand. Same template registry the remote-player carry sync uses; physics stripped.
+        /// Round-44c: checkout BAGS have no scene template on the follower (the game MINTS them fresh —
+        /// FullServiceEmployee.SetPaperbag → CreatePrefabItem(GetRandomBag()), random variant even
+        /// natively) — fall back to the same minting path for bag-named props.</summary>
+        internal static GameObject? CloneHeldPropFor(string name)
+        {
+            try
+            {
+                GameObject? clone = null;
+                var t = FindHeldTemplate(name);
+                // Round-45g: a template is only usable if it's a REAL item (ItemController on the root) —
+                // the fewest-renderers heuristic happily returns a prop's naked MESH CHILD that shares the
+                // prefab's name (field: the 'PaperBag' template was the 1-renderer mesh node, no
+                // controller → native SetHandContent NRE'd on it and mount offsets were unreadable).
+                if (t != null && t.GetComponent<ItemController>() == null) t = null;
+                if (t != null)
+                {
+                    clone = UnityEngine.Object.Instantiate(t);
+                }
+                // Round-45c: BAG names mint via the native checkout path FIRST — the registry name-match
+                // resolved 'PaperBag' to ba:itemname_paperbag, the register-stock PRODUCT (1000-pack
+                // consumable) whose prefab has no in-hand visual; GetRandomBag() picks from the actual
+                // carried-bag items, exactly like FullServiceEmployee.SetPaperbag does.
+                if (clone == null && !string.IsNullOrEmpty(name) && name.IndexOf("bag", StringComparison.OrdinalIgnoreCase) >= 0
+                    && name.IndexOf("basket", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    try { clone = Helpers.PrefabHelper.CreatePrefabItem(BigAmbitions.Items.ItemsGetter.GetRandomBag())?.gameObject; }
+                    catch { }
+                }
+                if (clone == null)
+                {
+                    // Round-45b ([PropProbe]: 'ShoppingBasket → NULL' on a machine that never saw one
+                    // in-scene): resolve the prop name against the ITEM REGISTRY and mint the prefab —
+                    // template scans only work for props the local scene happens to contain.
+                    try
+                    {
+                        var itemName = FindItemByPropName(name);
+                        if (!string.IsNullOrEmpty(itemName)) clone = Helpers.PrefabHelper.CreatePrefabItem(itemName)?.gameObject;
+                    }
+                    catch { }
+                }
+                if (clone == null) return null;
+                clone.name = "BAMP_Held_" + name;
+                // Round-45f: NEUTER the Rigidbody, don't destroy it — SetHandContent's TogglePhysics
+                // derefs it and NRE'd on minted props (the silent-throw behind the invisible bag).
+                try
+                {
+                    foreach (var rb in clone.GetComponentsInChildren<Rigidbody>(true))
+                    { rb.isKinematic = true; rb.detectCollisions = false; }
+                }
+                catch { }
+                try { foreach (var col in clone.GetComponentsInChildren<Collider>(true)) col.enabled = false; } catch { }
+                clone.SetActive(true);
+                return clone;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Round-42: prop-name normalizer shared with the puppet stream.</summary>
+        internal static string CleanProp(string n) => CleanPropName(n);
+
+        /// <summary>Round-45b: match a held-prop name ("ShoppingBasket", "PaperBag") to a registry item
+        /// name ("ba:itemname_shoppingbasket") by normalized name-tail comparison.</summary>
+        private static string? FindItemByPropName(string propName)
+        {
+            try
+            {
+                string norm = Normalize(propName);
+                if (norm.Length < 4) return null;
+                var all = BigAmbitions.Items.ItemsGetter.AllItems;
+                if (all == null) return null;
+                foreach (var it in all)
+                {
+                    if (it == null || string.IsNullOrEmpty(it.itemName)) continue;
+                    string tail = it.itemName;
+                    int us = tail.LastIndexOf('_');
+                    if (us >= 0 && us + 1 < tail.Length) tail = tail.Substring(us + 1);
+                    if (Normalize(tail) == norm) return it.itemName;
+                }
+            }
+            catch { }
+            return null;
+
+            static string Normalize(string s)
+            {
+                var sb = new System.Text.StringBuilder(s.Length);
+                foreach (char c in s)
+                    if (char.IsLetterOrDigit(c)) sb.Append(char.ToLowerInvariant(c));
+                return sb.ToString();
+            }
         }
 
         private static GameObject? FindHeldTemplate(string name)

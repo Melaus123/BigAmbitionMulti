@@ -144,6 +144,83 @@ namespace BigAmbitionsMP
         BuildingInteriorEdit = 140,      // Guest → Host → building owner: my edited interior snapshot (furniture/flooring from the designer). Owner ADOPTS it (ApplyInteriorSnapshot).
         PlayerStaffRoster   = 141,       // Owner → Host → All: the staff roster of one player business (round-30 WS3 — visitors inject these records so the game's own staffing engine can spawn EVERY scheduled worker, not just a synthetic cashier).
         HelperOrderForward  = 142,       // Helper → Host → building owner: an NPC customer order paid on the helper's machine (round-39f Phase 3 slice-2 step-2). Owner claims the entry, deducts stock, records the order.
+        CustomerSimAuthority = 143,      // Host → All: which player SIMULATES customers in a given player building (slice 3: register-worker first, else earliest-arrived inside; "" = building empty).
+        CustomerPuppetState = 144,       // Simulator → Host → All: live customer bodies in one building (~4 Hz); non-simulator players inside render kinematic puppets from it.
+        CustomerPuppetEmote = 145,       // Simulator → Host → All: a customer showed an emoji expression (complaints etc.) — followers replay it on the matching puppet (round-42 parity).
+        CustomerPuppetLook  = 146,       // Simulator → Host → All: a customer's appearance (CharacterData JSON), once per customer — followers dress the puppet to match (round-44).
+    }
+
+    /// <summary>Round-44 — a simulated customer's appearance, shipped once per customer so both players
+    /// see the same person. STRUCTURED fields (round-44b): raw CharacterData JSON silently failed —
+    /// its itemInHands is a full ItemInstance whose cached-Item graph reaches Unity objects, and the
+    /// serializer choked inside a silent catch, so the look never left the simulator.</summary>
+    public class CustomerPuppetLookPayload
+    {
+        public string AddressKey   { get; set; } = "";
+        public string SimulatorPid { get; set; } = "";
+        public string CustomerId   { get; set; } = "";   // entry id
+        public int    Gender       { get; set; }
+        public float  Strength     { get; set; }
+        public float  Fatness      { get; set; }
+        public int    ColorPacked  { get; set; }
+        public int    EyesPacked   { get; set; }
+        public List<LookElementInfo> Elements { get; set; } = new();
+        public List<LookBlendInfo>   Blends   { get; set; } = new();
+    }
+
+    public class LookElementInfo
+    {
+        public int    Type      { get; set; }   // AppearanceElementType
+        public string VariantId { get; set; } = "";
+        public string ColorId   { get; set; } = "";
+    }
+
+    public class LookBlendInfo
+    {
+        public string Name  { get; set; } = "";
+        public float  Value { get; set; }
+    }
+
+    /// <summary>Round-42: a simulated customer's emoji expression (complaint bubbles etc.), replayed on
+    /// the matching puppet so followers see the same feedback the simulator does.</summary>
+    public class CustomerPuppetEmotePayload
+    {
+        public string AddressKey   { get; set; } = "";
+        public string SimulatorPid { get; set; } = "";
+        public string CustomerId   { get; set; } = "";   // entry id (round-43, matches PuppetRowInfo.Id)
+        public int    Emoji        { get; set; }   // CharacterEmojiName as int
+        public float  Seconds      { get; set; } = 3f;
+    }
+
+    /// <summary>Slice 3 (round-41): the host's per-building customer-simulator election result.</summary>
+    public class CustomerSimAuthorityPayload
+    {
+        public string AddressKey   { get; set; } = "";
+        public string SimulatorPid { get; set; } = "";   // "" = nobody inside → every machine native/normal
+    }
+
+    public class PuppetRowInfo
+    {
+        // Round-43: the customer's SCHEDULE ENTRY id — stable across machines, so a body survives an
+        // authority handoff (the new simulator's real customer for entry E replaces puppet E in place).
+        // Customers with no entry mapping fall back to "i<instanceId>" (machine-local, churns on
+        // transfer — the old v1 behavior, now the rare path).
+        public string Id { get; set; } = "";
+        public float X   { get; set; }
+        public float Y   { get; set; }
+        public float Z   { get; set; }
+        public float Yaw { get; set; }
+        public string Held { get; set; } = "";   // round-42: hand prop name (basket/box) — "" = empty hands
+        public int Fill { get; set; }            // round-45: active direct children of the held prop (basket fill visuals)
+    }
+
+    /// <summary>Slice 3 (round-41): the simulating machine's live customer bodies for one building.
+    /// Followers lerp puppets to these rows; a row disappearing = that customer left (puppet walks out).</summary>
+    public class CustomerPuppetStatePayload
+    {
+        public string AddressKey   { get; set; } = "";
+        public string SimulatorPid { get; set; } = "";
+        public List<PuppetRowInfo> Rows { get; set; } = new();
     }
 
     /// <summary>Owner → host → all: which of a shop's PRICED shelves are actually stocked (goods item

@@ -574,6 +574,34 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.CustomerSimAuthority:   // host's per-building simulator election
+                {
+                    var ca = env.GetPayload<CustomerSimAuthorityPayload>();
+                    if (ca != null) GameStatePatcher.EnqueueOnMainThread(() => CustomerPuppets.ApplyAuthority(ca));
+                    break;
+                }
+
+                case MessageType.CustomerPuppetState:    // the simulator's live customer bodies for my room
+                {
+                    var cp = env.GetPayload<CustomerPuppetStatePayload>();
+                    if (cp != null) GameStatePatcher.EnqueueOnMainThread(() => CustomerPuppets.ApplyState(cp));
+                    break;
+                }
+
+                case MessageType.CustomerPuppetEmote:    // a simulated customer's emoji — replay on the puppet
+                {
+                    var ce = env.GetPayload<CustomerPuppetEmotePayload>();
+                    if (ce != null) GameStatePatcher.EnqueueOnMainThread(() => CustomerPuppets.ApplyEmote(ce));
+                    break;
+                }
+
+                case MessageType.CustomerPuppetLook:     // a simulated customer's look — dress the puppet
+                {
+                    var cl = env.GetPayload<CustomerPuppetLookPayload>();
+                    if (cl != null) GameStatePatcher.EnqueueOnMainThread(() => CustomerPuppets.ApplyLook(cl));
+                    break;
+                }
+
                 case MessageType.BuildingInteriorEdit:   // host forwarded a guest's interior edit — I'm the owner: adopt it
                 {
                     var bie = env.GetPayload<InteriorSnapshotPayload>();

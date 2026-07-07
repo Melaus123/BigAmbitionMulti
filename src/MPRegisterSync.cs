@@ -76,6 +76,17 @@ namespace BigAmbitionsMP
         private static string Key(Vector3 p)
             => $"{Mathf.RoundToInt(p.x)}:{Mathf.RoundToInt(p.y)}:{Mathf.RoundToInt(p.z)}";
 
+        /// <summary>Round-41 (customer puppets): the player on PERSONAL register duty at this address
+        /// ("" = none). The simulator election gives the register worker authority — serving requires
+        /// simulating (the serve loop needs real customer AI on the serving machine).</summary>
+        internal static string PersonalDutyHolderAt(string addressKey)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return "";
+            foreach (var kv in _cashiers)
+                if (!kv.Value.employee && kv.Value.address == addressKey) return kv.Value.playerId;
+            return "";
+        }
+
         /// <summary>Apply an on/off-duty state (local echo + remote).</summary>
         public static void Apply(RegisterCashierPayload? p)
         {

@@ -374,8 +374,26 @@ COSMETIC (all economic steps gate on the unflipped ownership flag) — no double
   (native :113 parity), record into `reg.unprocessedCompletedOrders` (the hourly calculator displaces the
   sim quota natively), refresh + re-sync.
 
-**Slice 3 (agreed staged plan, next after field test):** puppet mode for the both-inside case. Authority:
-register-worker first, else earliest-arrived player still inside (host-arbitrated from interior-sub
-order); transfers rendered as walk-out/walk-in churn in v1 (near bug-proof), smooth in-place adoption
-(slice 4) only if the churn grates. "Authority persists after leaving" is REJECTED — the engine unloads
-interiors around the local player; a machine cannot simulate a building its player isn't inside.
+**Slices 3+4 — customer puppets + smooth handoffs — COMPLETE, field-verified 2026-07-07:** shared
+customer bodies when 2+ session players are inside the same player building. Host elects one SIMULATOR
+per occupied building (register-duty holder first — serving requires simulating — else earliest-arrived
+by host clock; 5s re-broadcast for join self-heal). Followers suppress their spawner and render
+kinematic puppets from the simulator's 4 Hz stream. Field-hardened across rounds 42-46:
+- **Identity** = schedule entry ids, validated against the ORDER reference (customer bodies are POOLED —
+  instanceID alone maps a recycled body to the previous customer).
+- **Smooth handoffs both directions**: losing side swaps natives→puppets in place; gaining side adopts
+  each puppet's entry as a real customer at its spot (private SpawnCustomer + warp-hold 0.75s; the AI
+  re-plans from there — brief re-think, no teleport). Walk-out churn remains only for unmatchable
+  entries and disconnects (stale-stream timeout).
+- **Looks** synced (structured CharacterData DTO — raw JSON dies on the embedded ItemInstance graph;
+  session-lifetime look cache keyed by entry id survives puppet rebuilds; looks follow handoffs).
+- **Props**: baskets with live fill (the Products1/Products2 children only), checkout bags (minted via
+  GetRandomBag — 'ba:itemname_paperbag' is the STOCK product, not the carried bag; templates require an
+  ItemController on the root or the scan returns naked mesh children). SetHandContent keeps a LOUD catch
+  (a silent throw there cost three rounds) + manual mount-offset fallback.
+- **Complaints/emojis** mirrored (direct CharacterEmojiSystem.ShowEmoji on the head bone — the native
+  ShowExpression wrapper NREs on disabled-TPC puppets; spawn-instant emotes buffered until the body).
+- Accepted cosmetic residuals: carrying-arm fine-IK (runs in the disabled TPC), bag variant random per
+  machine (native randomness).
+"Authority persists after leaving" remains REJECTED — the engine unloads interiors around the local
+player.
