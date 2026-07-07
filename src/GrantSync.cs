@@ -76,7 +76,11 @@ namespace BigAmbitionsMP
         /// <paramref name="kind"/>? (PlayerId space — both must be online. Owner's own access is caller-handled.)</summary>
         public static bool IsGranted(GrantKind kind, string ownerId, string granteeId)
             => !string.IsNullOrEmpty(ownerId) && !string.IsNullOrEmpty(granteeId)
-               && Runtime(kind).TryGetValue(ownerId, out var set) && set.Contains(granteeId);
+               && ((Runtime(kind).TryGetValue(ownerId, out var set) && set.Contains(granteeId))
+                   // Merger slice 1: merged members mutually hold EVERY kind of key. Unioning here —
+                   // the one chokepoint every gate and the host's building-access classifier read —
+                   // is what makes the merger equal full permissions with zero grant-store writes.
+                   || MergerSync.MergedRuntime(ownerId, granteeId));
 
         /// <summary>Vehicle convenience (the original 2-arg check) — keeps vehicle enforcement call sites unchanged.</summary>
         public static bool IsGranted(string ownerId, string granteeId) => IsGranted(GrantKind.Vehicle, ownerId, granteeId);
@@ -223,6 +227,13 @@ namespace BigAmbitionsMP
         // behavior (fridge routing, furniture ownership flips) must not light up in businesses, and helper
         // behavior must not light up in homes — each gate opts into exactly one.
         private static HashSet<string> _helperBiz = new();
+        // Merger slice 3 repair: addresses the host attributes to OTHER players (operator ledger).
+        private static HashSet<string> _otherOwned = new();
+        public static void SetOtherOwned(IEnumerable<string> addressKeys)
+            => _otherOwned = addressKeys != null ? new HashSet<string>(addressKeys) : new HashSet<string>();
+        public static bool IsOtherOwned(string addressKey)
+            => !string.IsNullOrEmpty(addressKey) && _otherOwned.Contains(addressKey);
+
         public static void SetHelperBusinesses(IEnumerable<string> addressKeys)
         {
             var next = addressKeys != null ? new HashSet<string>(addressKeys) : new HashSet<string>();

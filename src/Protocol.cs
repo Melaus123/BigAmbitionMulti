@@ -148,6 +148,38 @@ namespace BigAmbitionsMP
         CustomerPuppetState = 144,       // Simulator → Host → All: live customer bodies in one building (~4 Hz); non-simulator players inside render kinematic puppets from it.
         CustomerPuppetEmote = 145,       // Simulator → Host → All: a customer showed an emoji expression (complaints etc.) — followers replay it on the matching puppet (round-42 parity).
         CustomerPuppetLook  = 146,       // Simulator → Host → All: a customer's appearance (CharacterData JSON), once per customer — followers dress the puppet to match (round-44).
+        MergerState         = 147,       // Host → All: merged-company membership (merger slice 1) — online member PlayerIds (what enforcement reads) + full display roster.
+        MergerRequest       = 148,       // Member ↔ Host: propose/accept/decline/leave a company merger; host relays "proposal"/"declined" to the affected member.
+    }
+
+    /// <summary>One merged company. MemberPids is ONLINE members in PlayerId space (all enforcement is
+    /// PlayerId — clients never learn StableIds); MemberNames is the FULL roster (offline included).</summary>
+    public class MergerGroupInfo
+    {
+        public string       GroupId     { get; set; } = "";
+        public List<string> MemberPids  { get; set; } = new List<string>();
+        public List<string> MemberNames { get; set; } = new List<string>();
+        public int          MemberCount { get; set; }
+        /// <summary>AddressKeys of every building OPERATED by a group member (host-resolved from its
+        /// ownership map) — slice 3: each member's ownership-flip target set (minus their own).</summary>
+        public List<string> BuildingKeys { get; set; } = new List<string>();
+    }
+
+    /// <summary>Merger slice 1 — ALL merged companies in the session (a session can hold several
+    /// disjoint mergers: P1+P2 and P3+P4), host-broadcast on every change and join (Class 4).</summary>
+    public class MergerStatePayload
+    {
+        public List<MergerGroupInfo> Groups { get; set; } = new List<MergerGroupInfo>();
+    }
+
+    /// <summary>Merger slice 1 — form/dissolve traffic. Client → host: Action = "propose" (TargetPid set)
+    /// / "unpropose" / "accept" / "decline" / "leave". Host → member: Action = "proposal" (FromPid =
+    /// proposer) / "withdrawn" (proposer cancelled) / "declined" / "cooldown" (re-propose throttled).</summary>
+    public class MergerRequestPayload
+    {
+        public string Action    { get; set; } = "";
+        public string TargetPid { get; set; } = "";
+        public string FromPid   { get; set; } = "";
     }
 
     /// <summary>Round-44 — a simulated customer's appearance, shipped once per customer so both players
@@ -352,6 +384,10 @@ namespace BigAmbitionsMP
         // Businesses this player may work in as a granted HELPER (round-32). Separate from AddressKeys
         // (residence-guest access) — the two unlock different behavior sets. JSON-tolerant default.
         public System.Collections.Generic.List<string> HelperAddressKeys { get; set; } = new System.Collections.Generic.List<string>();
+        // Merger slice 3 repair: EVERY address the host's operator ledger attributes to a player
+        // OTHER than this receiver (grants irrelevant). A local reg claiming RentedByPlayer on one
+        // of these, outside an active flip, is contaminated (leaked tenancy) and gets self-healed.
+        public System.Collections.Generic.List<string> OtherOwnedKeys { get; set; } = new System.Collections.Generic.List<string>();
     }
 
     /// <summary>Guest → host → building owner: take/put on a home INTERIOR item's cargo (the fridge — the same

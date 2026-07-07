@@ -1890,6 +1890,88 @@ namespace BigAmbitionsMP
             }
         }
 
+        // Merger slice 3 — DEED GUARD (TEMPORARY until deed ops are routed): terminating the rental
+        // contract of a FLIPPED (partner-owned) business would execute natively on the local REPLICA —
+        // items sold and deposit returned locally while the real owner keeps the business (Class 10
+        // divergence). The merger contract ALLOWS deed changes (user 2026-07-07, "this is ours"), so
+        // this becomes a ROUTED owner-side op in the next increment; until then block it rather than
+        // corrupt. Inert without a merger (FlippedCount == 0 short-circuit).
+        [HarmonyPatch(typeof(BizManPresentation), "OnTerminateContractConfirm")]
+        public static class Patch_BizMan_TerminateContract_MergerDeedGuard
+        {
+            static bool Prefix(BizManPresentation __instance)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0) return true;
+                    var bm  = AccessTools.Field(typeof(BizManPresentation), "bizManBusiness")?.GetValue(__instance) as BizManBusiness;
+                    var reg = bm?.buildingRegistration;
+                    if (reg == null) return true;
+                    string key = GameStateReader.AddressKey(reg);
+                    if (!MergerFlip.IsFlipped(key)) return true;   // genuinely mine — native flow
+                    PassengerHud.Toast("Only the deed holder can terminate this rental (routed deed changes coming).");
+                    Plugin.Logger.LogInfo($"[Merger] deed guard: blocked local contract-termination of flipped '{key}'.");
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] deed guard: {ex.Message}"); return true; }
+            }
+        }
+
+        // Merger slice 3 — AUTHORITY VEIL (merger map §13-A): the ownership flip makes partner
+        // businesses read RentedByPlayer=true for MENUS, but these audited native passes SIMULATE
+        // off that same flag (charging rent/taxes/marketing/licensing, business + summary/net-worth
+        // accumulation, customer-entry generation, dirt sim, todo/job-board state). Around each
+        // pass, every flipped reg reverts to native truth (VeilPush) and re-flips after (VeilPop in
+        // a Finalizer — guaranteed re-flip even when the pass throws; the pass's own throw is then
+        // contained by the tick wall below). Nesting-counted: veiled passes call each other
+        // (PayLicensingFeesForAllBusinesses → PayLicensingFees). Result: every cost and credit
+        // fires exactly once, on the real owner's machine — un-merged behavior, merged presentation.
+        // INERT without a merger: push/pop over an empty flip table touches nothing.
+        [HarmonyPatch]
+        public static class Patch_MergerAuthorityVeil
+        {
+            // Every name below is DECOMPILE-VERIFIED at its declaration (2026-07-07 field run 3:
+            // 9 of the original entries were agent-FABRICATED names — PayRentToNpc etc. — that
+            // resolved to nothing on any build; the real code lives in the RunDaily/RunHourly
+            // bodies. Third agent-fabrication catch this campaign: never trust an audit-table
+            // name that wasn't read at its line.)
+            private static readonly (string type, string method)[] Steps =
+            {
+                ("Helpers.MarketingHelper",         "RunDaily"),                // charges daily marketing spend
+                ("Helpers.BusinessHelper",          "RunDaily"),                // rent (:43), licensing (:76), daily orders/NetWorth (:107)
+                ("Helpers.BusinessHelper",          "RunHourly"),               // job board (:308), security (:330), todo gen (:499)
+                ("Buildings.Retail.Businesses.CinemaTheater.LicensingFeesHelper", "PayLicensingFees"),
+                ("Buildings.Retail.Businesses.CinemaTheater.LicensingFeesHelper", "ShowUnpaidFeesNotifications"),   // (:106)
+                // Tax CHARGE accrues per-transaction (TrackTransaction — per-machine-correct
+                // unveiled); the flag sites are the IRS REPOSSESSION sweep (must never seize a
+                // partner's flipped buildings' items) and the tax-report display builder.
+                ("Helpers.TaxHelper",               "ForcePayCurrentTaxes"),
+                ("Helpers.TaxHelper",               "GenerateTaxes"),
+                ("Helpers.FinancialSummaryHelper",  "CreateFinancialSummary"),  // (:24) drives NetWorth accumulation
+                ("BusinessSimulatorHelper",         "RunHourly"),               // away-from-shop revenue engine
+                ("BusinessSimulatorHelper",         "OnTimeMachineEnd"),
+                ("Entities.ImportPartnership",      "DoDeliveries"),            // (:175/:249) import purchases + deliveries
+                ("Buildings.BuildingTypes.Shared.Dirtiness.BuildingCleanlinessHelper", "RunHourly"),   // dirt sim (:34)
+                ("AI.Customers.CustomerEntries.CustomerEntriesHelper", "UpdateCustomerEntriesForPlayerBusiness"),   // entry GENERATION stays owner-only (namespace is AI.*, not Helpers)
+                ("BigAmbitions.Rivals.RivalsHelper","RunDaily"),                // rival sim sees partner shops as it does today
+                ("BigAmbitions.Rivals.RivalsHelper","RunHourly"),
+            };
+
+            static IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                // ALL overloads by name — AccessTools.Method(name) returns null on an ambiguous
+                // (overloaded) name, which left 9 passes UNVEILED in the 2026-07-07 field run
+                // (the loud patch-time error caught it). Veiling every overload is correct: the
+                // un-flip must hold for whichever variant the game calls.
+                foreach (var (type, method) in Steps)
+                    foreach (var m in Patch_GameTickChain_ContainThrows.ResolveAllByName(type, method, "Merger] authority veil", "UNVEILED (double-run risk in a merger)"))
+                        yield return m;
+            }
+
+            static void Prefix() => MergerFlip.VeilPush();
+            static Exception Finalizer(Exception __exception) { MergerFlip.VeilPop(); return __exception; }
+        }
+
         // Tick-chain containment wall (2026-07-07, ANTIPATTERNS Class 11): GameManager.NewDay and the
         // hourly section of RunMainGameTick each run a long ORDERED list of subsystem calls with no
         // per-step isolation — one throw silently kills every step after it (the payroll-runaway bug:
@@ -1946,27 +2028,26 @@ namespace BigAmbitionsMP
 
             static IEnumerable<System.Reflection.MethodBase> TargetMethods()
             {
+                // ALL overloads by name (see the veil's TargetMethods note — Method(name) nulls out
+                // on overloaded names). Covers PortraitGenerator.Create's two overloads too.
                 foreach (var (type, method) in Steps)
-                {
-                    var t = AccessTools.TypeByName(type);
-                    var m = t != null ? AccessTools.Method(t, method) : null;
-                    if (m == null)
-                        Plugin.Logger.LogError($"[Guard] tick-chain wall: {type}.{method} not found (game update renamed it?) — that step is UNPROTECTED.");
-                    else
+                    foreach (var m in ResolveAllByName(type, method, "Guard] tick-chain wall", "UNPROTECTED"))
                         yield return m;
-                }
-                // PortraitGenerator.Create sits at NewDay:650, BEFORE the payroll reset — overloaded,
-                // so it needs typed resolution (the CharacterData overload is the one NewDay calls).
-                var pg = AccessTools.TypeByName("Character.Customization.PortraitGenerator");
-                var create = pg == null ? null : AccessTools.Method(pg, "Create", new[]
-                {
-                    typeof(CharacterData), typeof(string), typeof(UnityEngine.UI.Image),
-                    typeof(Action<UnityEngine.Sprite>),
-                });
-                if (create == null)
-                    Plugin.Logger.LogError("[Guard] tick-chain wall: PortraitGenerator.Create(CharacterData,…) not found — that step is UNPROTECTED.");
-                else
-                    yield return create;
+                foreach (var m in ResolveAllByName("Character.Customization.PortraitGenerator", "Create", "Guard] tick-chain wall", "UNPROTECTED"))
+                    yield return m;
+            }
+
+            /// <summary>Every non-abstract, non-generic declared method with this name — shared by the
+            /// tick wall and the authority veil. Logs LOUD when a name resolves to nothing (Class 3).</summary>
+            internal static IEnumerable<System.Reflection.MethodBase> ResolveAllByName(string type, string method, string tag, string consequence)
+            {
+                var t = AccessTools.TypeByName(type);
+                int n = 0;
+                if (t != null)
+                    foreach (var m in AccessTools.GetDeclaredMethods(t))
+                        if (m != null && m.Name == method && !m.IsAbstract && !m.ContainsGenericParameters) { n++; yield return m; }
+                if (n == 0)
+                    Plugin.Logger.LogError($"[{tag}: {type}.{method} not found (game update renamed it?) — that step is {consequence}.");
             }
 
             static Exception Finalizer(System.Reflection.MethodBase __originalMethod, Exception __exception)

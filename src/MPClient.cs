@@ -338,6 +338,44 @@ namespace BigAmbitionsMP
                     HandlePermissionSnapshotMsg(env);
                     break;
 
+                case MessageType.MergerState:
+                {
+                    var ms = env.GetPayload<MergerStatePayload>();
+                    if (ms != null) GameStatePatcher.EnqueueOnMainThread(() => MergerSync.ApplyState(ms));
+                    break;
+                }
+
+                case MessageType.MergerRequest:
+                {
+                    // "proposal": someone wants to merge with ME — surface Accept/Decline in the
+                    // Permissions tab. "declined": my proposal was turned down.
+                    var mr = env.GetPayload<MergerRequestPayload>();
+                    if (mr == null) break;
+                    GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        if (mr.Action == "proposal")
+                        {
+                            MergerSync.IncomingFromPid = mr.FromPid ?? "";
+                            PassengerHud.Toast($"{mr.FromPid} proposes a company merger — see Permissions.");
+                        }
+                        else if (mr.Action == "withdrawn")
+                        {
+                            MergerSync.IncomingFromPid = "";   // silent — a withdraw must not be a notification channel
+                        }
+                        else if (mr.Action == "declined")
+                        {
+                            MergerSync.OutgoingToPid = "";
+                            PassengerHud.Toast("Merger proposal declined.");
+                        }
+                        else if (mr.Action == "cooldown")
+                        {
+                            MergerSync.OutgoingToPid = "";
+                            PassengerHud.Toast("Wait a minute before proposing to them again.");
+                        }
+                    });
+                    break;
+                }
+
                 case MessageType.PermissionOwnGrants:
                     HandlePermissionOwnGrantsMsg(env);
                     break;
@@ -1076,6 +1114,15 @@ namespace BigAmbitionsMP
                 new PermissionGrantPayload { OwnerId = MPConfig.PlayerId, GranteeId = granteeId, Granted = granted, Kind = kind }));
         }
 
+        /// <summary>Member-client → host: a merger action ("propose" with TargetPid, or
+        /// "accept"/"decline"/"leave"). The host arbitrates and rebroadcasts MergerState.</summary>
+        public static void SendMergerAction(string action, string targetPid = "")
+        {
+            if (!IsConnected || string.IsNullOrEmpty(action)) return;
+            Send(MessageEnvelope.Create(MessageType.MergerRequest, MPConfig.PlayerId,
+                new MergerRequestPayload { Action = action, TargetPid = targetPid ?? "" }));
+        }
+
         /// <summary>Owner-client → host: revoke an OFFLINE grantee by their StableId handle (taken from
         /// the owner's grantee list). The host updates the durable store + rebroadcasts.</summary>
         /// <summary>Owner-client → host: grant/revoke a kind for an OFFLINE grantee by their StableId handle
@@ -1187,6 +1234,7 @@ namespace BigAmbitionsMP
             {
                 GrantSync.SetEnterableBuildings(p.AddressKeys);
                 GrantSync.SetHelperBusinesses(p.HelperAddressKeys);
+                GrantSync.SetOtherOwned(p.OtherOwnedKeys);   // merger slice 3 repair source
                 HousingMapCues.RefreshSharedPois();
             });
         }

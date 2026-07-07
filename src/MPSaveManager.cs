@@ -59,6 +59,8 @@ namespace BigAmbitionsMP
         /// <summary>Player-to-player access GRANTS ("keys"), keyed by StableId so they survive
         /// renames + reloads (docs/PERMISSIONS-SYSTEM.md, Phase 1).</summary>
         public List<MpGrant> Grants { get; set; } = new();
+        /// <summary>Merged-company membership (merger slice 1) — empty/absent = no merger.</summary>
+        public List<MpMergerMember> Merger { get; set; } = new();
     }
 
     /// <summary>One durable access grant: an owner gave a grantee a key (StableId space).</summary>
@@ -68,6 +70,15 @@ namespace BigAmbitionsMP
         public string    Grantee     { get; set; } = "";                 // grantee StableId
         public string    GranteeName { get; set; } = "";                 // last-known display name (for the owner's UI)
         public GrantKind Kind        { get; set; } = GrantKind.Vehicle;  // which asset kind (old manifests => Vehicle)
+    }
+
+    /// <summary>Merger slice 1 — one merged-company member (StableId-keyed like grants, so membership
+    /// survives renames and offline members). Absent/empty list on old manifests = no merger.</summary>
+    public class MpMergerMember
+    {
+        public string StableId { get; set; } = "";
+        public string Name     { get; set; } = "";   // last-known display name (UI roster)
+        public string Group    { get; set; } = "";   // merged-company id (several disjoint groups per session; "" on old manifests → folded into one legacy group)
     }
 
     public static class MPSaveManager

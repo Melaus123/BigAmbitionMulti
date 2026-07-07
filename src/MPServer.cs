@@ -207,8 +207,20 @@ namespace BigAmbitionsMP
                         if (!string.IsNullOrEmpty(g.GranteeName)) GrantSync.NoteName(g.Grantee, g.GranteeName);
                         gn++;
                     }
+                // Merger membership — same clear-then-apply + unconditional log discipline as grants.
+                MergerSync.ResetStore();
+                int mn = 0;
+                if (m.Merger != null)
+                    foreach (var mem in m.Merger)
+                    {
+                        if (string.IsNullOrEmpty(mem?.StableId)) continue;
+                        // Old manifests carry no Group — fold them into one legacy group.
+                        MergerSync.StoreAdd(string.IsNullOrEmpty(mem.Group) ? "legacy" : mem.Group, mem.StableId);
+                        if (!string.IsNullOrEmpty(mem.Name)) GrantSync.NoteName(mem.StableId, mem.Name);
+                        mn++;
+                    }
                 RefreshGrantsAndBroadcast();
-                Plugin.Logger.LogInfo($"[Server] Restored {gn} access grant(s) from manifest ({(m.Grants?.Count ?? 0)} in file).");
+                Plugin.Logger.LogInfo($"[Server] Restored {gn} access grant(s) + {mn} merger member(s) from manifest ({(m.Grants?.Count ?? 0)} grants in file).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RestoreOwnershipFromManifest: {ex.Message}"); }
         }
@@ -475,6 +487,7 @@ namespace BigAmbitionsMP
             IsInLobby = false;
             GrantSync.ResetStore();   // fresh world — no grants; flush any store left by a previously loaded
                                       // session (the scene reset no longer wipes the store, 2026-06-30)
+            MergerSync.ResetStore();  // fresh world — no merger (same session-boundary lifecycle)
 
             // Re-arm the startup pause hold for this new game.
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
@@ -828,6 +841,16 @@ namespace BigAmbitionsMP
                 case MessageType.PermissionGrantSet:
                     HandlePermissionGrantSet(senderPid, env);
                     break;
+
+                case MessageType.MergerRequest:
+                {
+                    // Merger slice 1. Actor = the CONNECTION's pid (senderPid), never the payload —
+                    // same spoof-guard as every relay gate.
+                    var mreq = env.GetPayload<MergerRequestPayload>();
+                    if (mreq != null)
+                        GameStatePatcher.EnqueueOnMainThread(() => HostMergerAction(mreq.Action, mreq.TargetPid, senderPid));
+                    break;
+                }
 
                 case MessageType.TaxiHail:
                     HandleTaxiHail(env);
@@ -3040,6 +3063,11 @@ namespace BigAmbitionsMP
         private static void RefreshGrantsAndBroadcast()
         {
             RebuildRuntimeGrants();
+            // Merger runtime BEFORE the building-access push below — RefreshBuildingAccess reads
+            // IsGranted, which unions merger membership (slice 1).
+            var merger = BuildMergerState();
+            MergerSync.ApplyState(merger);
+            Broadcast(MessageEnvelope.Create(MessageType.MergerState, "host", merger));
             Broadcast(MessageEnvelope.Create(MessageType.PermissionSnapshot, "host", GrantSync.BuildSnapshot()));
             GrantSync.SetMyGrantees(BuildOwnGrants(MPConfig.StableId).Grantees);
             RefreshBuildingAccess();            // housing: push each guest the buildings they may now enter
@@ -3093,6 +3121,13 @@ namespace BigAmbitionsMP
             foreach (var kv in BuildingRealEstateOwners) Consider(kv.Key, kv.Value, operatorLedger: false);
             pay.AddressKeys.AddRange(keys);
             pay.HelperAddressKeys.AddRange(helper);
+            // Merger slice 3 repair: everything the operator ledger says belongs to someone else.
+            foreach (var kv in BuildingOwners)
+            {
+                if (string.IsNullOrEmpty(kv.Key) || string.IsNullOrEmpty(kv.Value)) continue;
+                string ownerPid = (kv.Value == "host") ? MPConfig.PlayerId : kv.Value;
+                if (ownerPid != clientPid) pay.OtherOwnedKeys.Add(kv.Key);
+            }
             return pay;
         }
 
@@ -3171,6 +3206,150 @@ namespace BigAmbitionsMP
             // (Durable: written to the session manifest at the next coordinated save.)
         }
 
+        // ── Merger slice 1: form/dissolve arbitration (HOST, main thread) ────────
+        // Consent flow: propose → the TARGET accepts or declines → commit. Proposals PERSIST until
+        // answered or withdrawn ("unpropose"); a withdraw/decline arms a per-pair COOLDOWN so nobody
+        // can spam a player with proposal notifications (user, 2026-07-07). A session can hold several
+        // disjoint merger groups; a player belongs to at most one. Any member may LEAVE at any time
+        // (a last pair dissolves that group). Growth: an existing member proposes; accept joins the
+        // proposer's group.
+        private static readonly Dictionary<string, string> _mergerPendingByTarget = new();   // targetPid → fromPid
+        private static readonly Dictionary<string, long>   _mergerCooldown = new();          // "from|to" → next-allowed ms
+        private const long MergerReproposeCooldownMs = 60_000;
+
+        public static void HostMergerAction(string action, string targetPid, string actorPid)
+        {
+            if (!_running || string.IsNullOrEmpty(actorPid)) return;
+            long now = TickMs64;   // monotonic ms (net48 has no Environment.TickCount64)
+
+            switch (action)
+            {
+                case "propose":
+                {
+                    if (string.IsNullOrEmpty(targetPid) || targetPid == actorPid) return;
+                    if (StableOfPid(targetPid) == "") return;                        // target must be online
+                    if (MergerSync.InAnyGroup(targetPid)) return;                    // already in a company (theirs or another)
+                    if (_mergerPendingByTarget.ContainsKey(targetPid)) return;       // target already has an offer pending
+                    foreach (var kv in _mergerPendingByTarget)
+                        if (kv.Value == actorPid) return;                            // one outgoing offer per proposer
+                    if (_mergerCooldown.TryGetValue(actorPid + "|" + targetPid, out var next) && now < next)
+                    {   // anti-spam: a withdrawn/declined offer can't be re-sent immediately
+                        var cool = new MergerRequestPayload { Action = "cooldown", FromPid = targetPid };
+                        if (actorPid == MPConfig.PlayerId) PassengerHud.Toast("Wait a minute before proposing to them again.");
+                        else SendToPid(actorPid, MessageEnvelope.Create(MessageType.MergerRequest, "host", cool));
+                        return;
+                    }
+                    _mergerPendingByTarget[targetPid] = actorPid;
+                    Plugin.Logger.LogInfo($"[Merger] '{actorPid}' proposes a merger to '{targetPid}'.");
+                    var relay = new MergerRequestPayload { Action = "proposal", FromPid = actorPid };
+                    if (targetPid == MPConfig.PlayerId) MergerSync.IncomingFromPid = actorPid;
+                    else SendToPid(targetPid, MessageEnvelope.Create(MessageType.MergerRequest, "host", relay));
+                    break;
+                }
+                case "unpropose":
+                {
+                    string tgt = "";
+                    foreach (var kv in _mergerPendingByTarget) if (kv.Value == actorPid) { tgt = kv.Key; break; }
+                    if (tgt == "") return;
+                    _mergerPendingByTarget.Remove(tgt);
+                    _mergerCooldown[actorPid + "|" + tgt] = now + MergerReproposeCooldownMs;
+                    Plugin.Logger.LogInfo($"[Merger] '{actorPid}' withdrew the proposal to '{tgt}'.");
+                    var relay = new MergerRequestPayload { Action = "withdrawn", FromPid = actorPid };
+                    if (tgt == MPConfig.PlayerId) MergerSync.IncomingFromPid = "";   // silent — no toast on withdraw
+                    else SendToPid(tgt, MessageEnvelope.Create(MessageType.MergerRequest, "host", relay));
+                    break;
+                }
+                case "accept":
+                {
+                    if (!_mergerPendingByTarget.TryGetValue(actorPid, out var fromPid)) return;
+                    _mergerPendingByTarget.Remove(actorPid);
+                    string a = StableOfPid(fromPid), b = StableOfPid(actorPid);
+                    if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return;   // someone left mid-consent
+                    GrantSync.NoteName(a, fromPid); GrantSync.NoteName(b, actorPid);
+                    // Join the proposer's existing company, else mint a fresh group for the pair.
+                    string group = MergerSync.GroupOfStable(a);
+                    group = MergerSync.StoreAdd(group, a);
+                    MergerSync.StoreAdd(group, b);
+                    Plugin.Logger.LogInfo($"[Merger] FORMED/GROWN group '{group}': '{fromPid}' + '{actorPid}'.");
+                    RefreshGrantsAndBroadcast();
+                    break;
+                }
+                case "decline":
+                {
+                    if (!_mergerPendingByTarget.TryGetValue(actorPid, out var fromPid)) return;
+                    _mergerPendingByTarget.Remove(actorPid);
+                    _mergerCooldown[fromPid + "|" + actorPid] = now + MergerReproposeCooldownMs;
+                    Plugin.Logger.LogInfo($"[Merger] '{actorPid}' declined '{fromPid}'.");
+                    var relay = new MergerRequestPayload { Action = "declined", FromPid = actorPid };
+                    if (fromPid == MPConfig.PlayerId) { MergerSync.OutgoingToPid = ""; PassengerHud.Toast("Merger proposal declined."); }
+                    else SendToPid(fromPid, MessageEnvelope.Create(MessageType.MergerRequest, "host", relay));
+                    break;
+                }
+                case "leave":
+                {
+                    string s = StableOfPid(actorPid);
+                    if (string.IsNullOrEmpty(s) || MergerSync.GroupOfStable(s) == "") return;
+                    MergerSync.StoreRemove(s);
+                    Plugin.Logger.LogInfo($"[Merger] '{actorPid}' left their merger group.");
+                    RefreshGrantsAndBroadcast();
+                    break;
+                }
+            }
+        }
+
+        private static string StableOfPid(string pid)
+            => pid == MPConfig.PlayerId ? MPConfig.StableId
+             : StableIdByPlayer.TryGetValue(pid, out var s) ? (s ?? "") : "";
+
+        private static void SendToPid(string pid, MessageEnvelope env)
+        {
+            foreach (var peer in _clients.Keys)
+                if (_peerNames.TryGetValue(peer.Id, out var p) && p == pid) { Send(peer, env); return; }
+        }
+
+        /// <summary>The merged-companies state broadcast: per group, online member pids (enforcement)
+        /// + the full display roster from the store (offline members stay listed by name).</summary>
+        private static MergerStatePayload BuildMergerState()
+        {
+            var pay = new MergerStatePayload();
+            foreach (var grp in MergerSync.StoreGroups)
+            {
+                var info = new MergerGroupInfo { GroupId = grp.Key };
+                foreach (var s in grp.Value)
+                {
+                    info.MemberCount++;
+                    string nm = GrantSync.NameOf(s);
+                    if (s == MPConfig.StableId) { info.MemberPids.Add(MPConfig.PlayerId); nm = MPConfig.PlayerId; }
+                    else
+                        foreach (var kv in StableIdByPlayer)
+                            if (kv.Value == s) { info.MemberPids.Add(kv.Key); nm = kv.Key; break; }
+                    info.MemberNames.Add(string.IsNullOrEmpty(nm) ? "(offline member)" : nm);
+                }
+                // Slice 3: every building OPERATED by a group member (rental ledger; a member's own
+                // buildings are harmless in the list — the receiver's flip skips natively-rented regs).
+                foreach (var kv in BuildingOwners)
+                {
+                    string stable = kv.Value == "host" ? MPConfig.StableId
+                                  : StableIdByPlayer.TryGetValue(kv.Value, out var os) ? (os ?? "") : "";
+                    if (!string.IsNullOrEmpty(stable) && grp.Value.Contains(stable))
+                        info.BuildingKeys.Add(kv.Key);
+                }
+                pay.Groups.Add(info);
+            }
+            return pay;
+        }
+
+        /// <summary>Slice 3: periodic merger-state refresh while any merger exists — newly rented/
+        /// vacated company buildings reach every member's flip set without waiting for a grant or
+        /// roster event (host flip Tick calls this ~10s).</summary>
+        public static void RebroadcastMergerState()
+        {
+            if (!_running || MergerSync.StoreGroups.Count == 0) return;
+            var pay = BuildMergerState();
+            MergerSync.ApplyState(pay);
+            Broadcast(MessageEnvelope.Create(MessageType.MergerState, "host", pay));
+        }
+
         private static void HandleTaxiHail(MessageEnvelope env)
         {
             var payload = env.GetPayload<TaxiHailPayload>();
@@ -3235,13 +3414,15 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendPassengerSnapshotTo: {ex.Message}"); }
         }
 
-        /// <summary>Send the full access-grant table to a single peer (join replay).</summary>
+        /// <summary>Send the full access-grant table to a single peer (join replay). The merger state
+        /// rides along — a joiner must learn the merged company immediately (ANTIPATTERNS Class 4).</summary>
         public static void SendPermissionSnapshotTo(LiteNetLib.NetPeer peer)
         {
             if (peer == null) return;
             try
             {
                 Send(peer, MessageEnvelope.Create(MessageType.PermissionSnapshot, "host", GrantSync.BuildSnapshot()));
+                Send(peer, MessageEnvelope.Create(MessageType.MergerState, "host", BuildMergerState()));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendPermissionSnapshotTo: {ex.Message}"); }
         }

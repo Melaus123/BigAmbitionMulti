@@ -746,6 +746,11 @@ namespace BigAmbitionsMP
             // (where the world-ready cleanup never runs), then RESTORE the exact objects after serialization
             // completes (below) so live MP gameplay is undisturbed.
             var restoreSynthetics = MPRegisterSync.StripSyntheticsForSave("save");
+            // Merger slice 3, same choke point: the ownership FLIP is MP-only presentation — a save
+            // must never claim a partner's business as this player's tenancy (two-owners class).
+            // VeilPush reverts every flipped reg to native truth for the whole serialization;
+            // the finally below re-flips (VeilPop) even if the save throws.
+            MergerFlip.VeilPush();
             string charName = "";
             int    day      = 0;
             // Per-player subfolder keyed by the STABLE id (not the game's characterId) so load can find it
@@ -803,6 +808,7 @@ namespace BigAmbitionsMP
                 // can't leave the live session with un-staffed registers.  JoinSaveGameThreads (inside the try)
                 // has returned in every normal/caught path by here, so serialization is done and gi is safe.
                 try { restoreSynthetics(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore synthetics: {ex.Message}"); }
+                try { MergerFlip.VeilPop(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore merger flip: {ex.Message}"); }
             }
 
             Plugin.Logger.LogInfo($"[MPSave] Local save '{sessionName}': ok={ok} char='{charName}' day={day} → {folder}");
@@ -1295,6 +1301,7 @@ namespace BigAmbitionsMP
                 m.Grants = new List<MpGrant>();
                 foreach (var e in GrantSync.AllStoreEntries())
                     m.Grants.Add(new MpGrant { Kind = e.Kind, Owner = e.Owner, Grantee = e.Grantee, GranteeName = GrantSync.NameOf(e.Grantee) });
+                m.Merger = BuildMergerManifest();
                 RefreshSlotCash(m);
                 MPSaveManager.WriteManifest(sessionName, m);
             }
@@ -1316,12 +1323,22 @@ namespace BigAmbitionsMP
                     m.Grants = new List<MpGrant>();
                     foreach (var e in GrantSync.AllStoreEntries())
                         m.Grants.Add(new MpGrant { Kind = e.Kind, Owner = e.Owner, Grantee = e.Grantee, GranteeName = GrantSync.NameOf(e.Grantee) });
+                    m.Merger = BuildMergerManifest();   // merger membership rides the same persist-on-change
                     m.SavedAtUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
                     MPSaveManager.WriteManifest(_activeSessionName, m);
-                    Plugin.Logger.LogInfo($"[MPSave] Persisted {m.Grants.Count} grant(s) to '{_activeSessionName}' on change.");
+                    Plugin.Logger.LogInfo($"[MPSave] Persisted {m.Grants.Count} grant(s) + {m.Merger.Count} merger member(s) to '{_activeSessionName}' on change.");
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] PersistGrantsNow: {ex.Message}"); }
+        }
+
+        private static List<MpMergerMember> BuildMergerManifest()
+        {
+            var list = new List<MpMergerMember>();
+            foreach (var kv in MergerSync.StoreGroups)
+                foreach (var s in kv.Value)
+                    list.Add(new MpMergerMember { StableId = s, Name = GrantSync.NameOf(s), Group = kv.Key });
+            return list;
         }
 
         /// <summary>Re-key MPServer.BuildingRealEstateOwners (live PlayerId / "host") to

@@ -408,6 +408,7 @@ namespace BigAmbitionsMP
             GameStateReader.TickPendingNativePause();   // round-36c: converge the pause flag onto the last
                                                         // requested state (rate-limit drops lost it before)
             CustomerPuppets.Tick();      // round-41: simulator election (host) + puppet stream/render (both-inside shops)
+            MergerFlip.Tick();           // merger slice 3: ownership-flip reconcile (1 Hz) + host state push (10s)
             RemotePlayerManager.TickVehicleCollisionIgnores();   // remote avatars must not shove vehicles
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
             MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion
@@ -1237,6 +1238,11 @@ namespace BigAmbitionsMP
         private RectTransform? _hubPermVp, _hubPermContent;
         private readonly List<(RectTransform rt, RectTransform vp, string id, byte act, GrantKind kind)> _hubPermBtns = new();
         private string _hubPermSig = "";
+        // Merger confirm modal (user 2026-07-07: proposing/accepting is a BIG decision — explain it).
+        private GameObject? _mergerConfirmGO;
+        private TextMeshProUGUI? _mergerConfirmLbl;
+        private RectTransform? _rtMergerOk, _rtMergerCancel;
+        private string _mergerConfirmMode = "", _mergerConfirmPid = "";
         private string _hubTarget = "";
         private double _hubAmount = 10000;
         private int _hubSeenVersion = -1;
@@ -1812,6 +1818,31 @@ namespace BigAmbitionsMP
                 var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
                 _hubUiHover = !_hubNative && (HubHit(_hubRT, mp) || _hubAmountFocus || _hubRateFocus || _hubTermFocus);
                 if (!Input.GetMouseButtonDown(0)) return;
+
+                // Merger confirm modal swallows every click while open: Confirm executes, anything
+                // else (Cancel, scrim, elsewhere) closes without acting.
+                if (_mergerConfirmGO != null && _mergerConfirmGO.activeSelf)
+                {
+                    if (HubHit(_rtMergerOk, mp))
+                    {
+                        if (_mergerConfirmMode == "propose" && !string.IsNullOrEmpty(_mergerConfirmPid))
+                        {
+                            if (MPServer.IsRunning) MPServer.HostMergerAction("propose", _mergerConfirmPid, MPConfig.PlayerId);
+                            else                    MPClient.SendMergerAction("propose", _mergerConfirmPid);
+                            MergerSync.OutgoingToPid = _mergerConfirmPid;
+                        }
+                        else if (_mergerConfirmMode == "accept")
+                        {
+                            if (MPServer.IsRunning) MPServer.HostMergerAction("accept", "", MPConfig.PlayerId);
+                            else                    MPClient.SendMergerAction("accept");
+                            MergerSync.IncomingFromPid = "";
+                        }
+                        _hubPermSig = "";
+                    }
+                    _mergerConfirmGO.SetActive(false);
+                    return;
+                }
+
                 if (!HubHit(_hubRT, mp)) { CommitHubInputs(); return; }   // click-away commits typing
 
                 if (HubHit(_hubAmountRT, mp)) { _hubAmountFocus = true; _hubRateFocus = false; _hubTermFocus = false; _hubPartialFocus = false; _hubFreshFocus = true; _hubAmountStr = ((long)_hubAmount).ToString(); return; }
@@ -1866,6 +1897,34 @@ namespace BigAmbitionsMP
                         foreach (var g in GrantSync.MyGrantees()) if (g.Handle == handle) { cur = g.Kinds.Contains(kind); break; }
                         if (MPServer.IsRunning) MPServer.HostSetGrantOffline(kind, handle, !cur);
                         else                    MPClient.SendPermissionSetOffline(kind, handle, !cur);
+                        _hubPermSig = "";
+                    }
+                    else if (act == 8 && id.StartsWith("pid:"))       // merger: propose → confirm popup first
+                    {
+                        ShowMergerConfirm("propose", id.Substring(4));
+                    }
+                    else if (act == 9)                                // accept the incoming proposal → confirm popup
+                    {
+                        ShowMergerConfirm("accept", MergerSync.IncomingFromPid);
+                    }
+                    else if (act == 10)                               // decline it (no confirm — declining is safe)
+                    {
+                        if (MPServer.IsRunning) MPServer.HostMergerAction("decline", "", MPConfig.PlayerId);
+                        else                    MPClient.SendMergerAction("decline");
+                        MergerSync.IncomingFromPid = "";
+                        _hubPermSig = "";
+                    }
+                    else if (act == 11)                               // leave the merger (a last pair dissolves it)
+                    {
+                        if (MPServer.IsRunning) MPServer.HostMergerAction("leave", "", MPConfig.PlayerId);
+                        else                    MPClient.SendMergerAction("leave");
+                        _hubPermSig = "";
+                    }
+                    else if (act == 12)                               // withdraw my pending proposal (no confirm)
+                    {
+                        if (MPServer.IsRunning) MPServer.HostMergerAction("unpropose", "", MPConfig.PlayerId);
+                        else                    MPClient.SendMergerAction("unpropose");
+                        MergerSync.OutgoingToPid = "";
                         _hubPermSig = "";
                     }
                     return;
@@ -2196,8 +2255,11 @@ namespace BigAmbitionsMP
                 if (pl != me) sb.Append(pl)
                     .Append(GrantSync.IsGranted(GrantKind.Vehicle, me, pl) ? '1' : '0')
                     .Append(GrantSync.IsGranted(GrantKind.Housing, me, pl) ? '1' : '0')
-                    .Append(GrantSync.IsGranted(GrantKind.Business, me, pl) ? '1' : '0').Append(';');
-            sb.Append('|');
+                    .Append(GrantSync.IsGranted(GrantKind.Business, me, pl) ? '1' : '0')
+                    .Append(MergerSync.IsMemberPid(pl) ? 'M' : MergerSync.InAnyGroup(pl) ? 'O' : '-').Append(';');
+            sb.Append('|').Append(MergerSync.IAmMember ? 'M' : '-')
+              .Append(MergerSync.IncomingFromPid).Append('/').Append(MergerSync.OutgoingToPid)
+              .Append('/').Append(string.Join(",", MergerSync.MemberNames)).Append('|');
             foreach (var g in mine)
                 if (!g.Online) { sb.Append(g.Handle).Append(g.Name); foreach (var k in g.Kinds) sb.Append((int)k); sb.Append(';'); }
             string sig = sb.ToString();
@@ -2212,6 +2274,19 @@ namespace BigAmbitionsMP
             var grey   = new Color(0.20f, 0.22f, 0.30f, 1f);
             string muted = _hubNative ? "#8795A0" : "#9AA3B2";
 
+            // Merger slice 1 — company header rows above the key list.
+            if (MergerSync.IAmMember)
+            {
+                AddPermRow(idx++, RowH, $"<b>Merged company</b>  <color={muted}>{string.Join(", ", MergerSync.MemberNames)}</color>",
+                    ("Leave merger", grey, "merger", (byte)11, GrantKind.Vehicle));
+            }
+            if (!string.IsNullOrEmpty(MergerSync.IncomingFromPid))
+            {
+                AddPermRow(idx++, RowH, $"<b>{MergerSync.IncomingFromPid}</b> proposes a company merger",
+                    ("Accept",  purple, "merger", (byte)9,  GrantKind.Vehicle),
+                    ("Decline", grey,   "merger", (byte)10, GrantKind.Vehicle));
+            }
+
             // Each row: the player + a Vehicle key toggle and a Housing key toggle (purple = granted).
             var onlineNames = new HashSet<string>(players);
             foreach (var pl in players)
@@ -2220,10 +2295,21 @@ namespace BigAmbitionsMP
                 bool gv = GrantSync.IsGranted(GrantKind.Vehicle, me, pl);
                 bool gh = GrantSync.IsGranted(GrantKind.Housing, me, pl);
                 bool gb = GrantSync.IsGranted(GrantKind.Business, me, pl);
+                // Merger chip: member of MY company → static "Merged"; member of ANOTHER company →
+                // static "In a company" (they must leave it before they can be proposed to); my
+                // proposal pending → "Cancel offer" (act 12 withdraws — host arms a re-propose
+                // cooldown so withdraw/re-propose can't be used to spam notifications); else a
+                // Merge button (act 8 → confirm popup). A merger implies every key, so the kind
+                // toggles read fully granted while merged (IsGranted unions membership).
+                var mchip = (MergerSync.IAmMember && MergerSync.IsMemberPid(pl)) ? ("Merged", purple, "", (byte)0, GrantKind.Vehicle)
+                          : MergerSync.InAnyGroup(pl)                            ? ("In a company", grey, "", (byte)0, GrantKind.Vehicle)
+                          : MergerSync.OutgoingToPid == pl                       ? ("Cancel offer", grey, "merger", (byte)12, GrantKind.Vehicle)
+                          : ("Merge", grey, "pid:" + pl, (byte)8, GrantKind.Vehicle);
                 AddPermRow(idx++, RowH, pl,
                     ("Vehicle",  gv ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Vehicle),
                     ("Housing",  gh ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Housing),
-                    ("Business", gb ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Business));
+                    ("Business", gb ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Business),
+                    mchip);
             }
             // Offline grantees (not in the live roster) — same two toggles, by StableId handle.
             foreach (var g in mine)
@@ -2237,6 +2323,55 @@ namespace BigAmbitionsMP
             }
 
             _hubPermContent.sizeDelta = new Vector2(_hubPermContent.sizeDelta.x, Mathf.Max(idx * RowH, _hubPermVp.rect.height));
+        }
+
+        /// <summary>Merger confirm popup (build-once): proposing/accepting a merger is a big decision —
+        /// spell out exactly what is being agreed to before anything is sent (user, 2026-07-07).</summary>
+        private void ShowMergerConfirm(string mode, string pid)
+        {
+            if (string.IsNullOrEmpty(pid) || _hub == null) return;
+            if (_mergerConfirmGO == null)
+            {
+                _mergerConfirmGO = MakeGO("BAMP_MergerConfirm", _hub.transform);
+                var srt = _mergerConfirmGO.GetComponent<RectTransform>();
+                srt.anchorMin = Vector2.zero; srt.anchorMax = Vector2.one;   // scrim over the whole hub
+                srt.offsetMin = Vector2.zero; srt.offsetMax = Vector2.zero;
+                _mergerConfirmGO.AddComponent<Image>().color = new Color(0f, 0f, 0f, 0.62f);
+
+                var box = MakeGO("Box", _mergerConfirmGO.transform);
+                var brt = box.GetComponent<RectTransform>();
+                brt.anchorMin = brt.anchorMax = brt.pivot = new Vector2(0.5f, 0.5f);
+                brt.sizeDelta = new Vector2(470f, 220f);
+                var bimg = box.AddComponent<Image>(); bimg.color = _boxCol;
+                var sprite = IsAlive(_panelSprite) ? _panelSprite : null;
+                if (sprite != null) { try { bimg.sprite = sprite; bimg.type = Image.Type.Sliced; } catch { } }
+
+                _mergerConfirmLbl = MakeLabel(box.transform, "", 13, _inkHi, 18f, -14f, 434f, 140f, TextAlignmentOptions.TopLeft);
+                ApplyFont(_mergerConfirmLbl); _mergerConfirmLbl.enableWordWrapping = true;
+
+                var (ok, okLbl) = MakeHubButton("Confirm", Vector2.zero, 110f, new Color(0.35f, 0.31f, 0.81f, 1f), 30f, sprite);
+                ok.SetParent(box.transform, false);
+                ok.anchorMin = ok.anchorMax = ok.pivot = new Vector2(1f, 0f);
+                ok.anchoredPosition = new Vector2(-16f, 14f); ok.sizeDelta = new Vector2(110f, 30f);
+                okLbl.fontSize = 12; _rtMergerOk = ok;
+
+                var (cx, cxLbl) = MakeHubButton("Cancel", Vector2.zero, 90f, new Color(0.20f, 0.22f, 0.30f, 1f), 30f, sprite);
+                cx.SetParent(box.transform, false);
+                cx.anchorMin = cx.anchorMax = cx.pivot = new Vector2(1f, 0f);
+                cx.anchoredPosition = new Vector2(-136f, 14f); cx.sizeDelta = new Vector2(90f, 30f);
+                cxLbl.fontSize = 12; _rtMergerCancel = cx;
+            }
+            _mergerConfirmMode = mode; _mergerConfirmPid = pid;
+            string terms = "A merger runs your companies as <b>one</b>: every member gets full access to " +
+                           "everything the others own — businesses, registers and storage, homes, and " +
+                           "vehicles — including selling and spending on the company's behalf. Any member " +
+                           "can leave the merger at any time.";
+            if (_mergerConfirmLbl != null)
+                _mergerConfirmLbl.text = mode == "propose"
+                    ? $"<b>Propose merging companies with {pid}?</b>\n\n{terms}\n\nThey will be asked to accept."
+                    : $"<b>Merge companies with {pid}?</b>\n\n{terms}";
+            _mergerConfirmGO.SetActive(true);
+            _mergerConfirmGO.transform.SetAsLastSibling();   // above the tab content
         }
 
         /// <summary>One Permissions-tab row: name label + a key toggle, registered in _hubPermBtns.</summary>
@@ -2508,6 +2643,8 @@ namespace BigAmbitionsMP
                 ParkedVehicleSync.Reset();
                 MPRegisterSync.Reset();   // duty posts die with the scene
                 PassengerSync.Reset();    // passenger seats/locks die with the scene
+                MergerSync.ResetSceneState(); // merger runtime + pending-proposal UI state (same lifecycle as grants)
+                MergerFlip.Reset();           // flip tracking dies with the scene's regs (tick re-applies from state)
                 GrantSync.ResetSceneState();  // runtime grants + local caches die with the scene; the DURABLE store
                                               // survives — its lifecycle is session boundaries (StartNewGame /
                                               // manifest restore), NOT scene loads. The old full Reset() here fired

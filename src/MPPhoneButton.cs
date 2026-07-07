@@ -407,7 +407,11 @@ namespace BigAmbitionsMP
             if (_hubIconRT == null) return;
             try
             {
-                bool pending = MPHub.PendingCount > 0;
+                // A pending merger proposal pulses exactly like a pending transfer/loan offer —
+                // it must be unmissable (user, 2026-07-07). It counts as pending until answered
+                // or withdrawn, so the pulse persists until the player acts on it.
+                int mergerPending = string.IsNullOrEmpty(MergerSync.IncomingFromPid) ? 0 : 1;
+                bool pending = MPHub.PendingCount + mergerPending > 0;
                 if (windowVisible) _seenHubVersion = MPHub.Version;
                 if (!pending || windowVisible)
                 {
@@ -420,7 +424,7 @@ namespace BigAmbitionsMP
                 if (_hubBadgeGO != null)
                 {
                     if (!_hubBadgeGO.activeSelf) _hubBadgeGO.SetActive(true);
-                    if (_hubBadgeText != null) _hubBadgeText.text = Mathf.Clamp(MPHub.PendingCount, 1, 9).ToString();
+                    if (_hubBadgeText != null) _hubBadgeText.text = Mathf.Clamp(MPHub.PendingCount + mergerPending, 1, 9).ToString();
                 }
             }
             catch { _hubIconRT = null; }
