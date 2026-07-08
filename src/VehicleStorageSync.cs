@@ -51,9 +51,13 @@ namespace BigAmbitionsMP
         // One deposit INTENT can reach here by two routes at once (the PassengerRide walk-deposit CTA and
         // the native AddHeldItemToStorage redirect fired for the same box — 2026-07-07 field-confirmed
         // duplication: owner applied BOTH trust-based PUTs, +2 for 1 box). Owner-side has no "does the
-        // sender still have it" check, so dedup at the single funnel both routes pass through: one deposit
-        // per vehicle per window. Legit successive deposits are always slower (walk + owner round-trip).
-        private static string _lastDepositVid = "";
+        // sender still have it" check, so dedup at the single funnel both routes pass through. Keyed on
+        // vehicle + CONTENT signature (user-refined 2026-07-07): the double-route always re-sends the
+        // IDENTICAL source snapshot (both routes fire from one intent, same box in hand), while any
+        // legitimate follow-up necessarily carries different content (the previous load left the source
+        // on the owner's grant) — so no UI shape, however fast, can ever be throttled. Per-machine state:
+        // each player dedups only their own sends; simultaneous deposits by two players never interact.
+        private static string _lastDepositSig = "";
         private static float  _lastDepositAt  = -999f;
         private const  float  DepositDedupSeconds = 2.5f;
 
@@ -61,43 +65,53 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (realVehicleId == _lastDepositVid && Time.unscaledTime - _lastDepositAt < DepositDedupSeconds)
-                {
-                    Plugin.Logger.LogInfo($"[VStore] duplicate deposit for '{realVehicleId}' suppressed ({Time.unscaledTime - _lastDepositAt:F1}s after the first — double-routed intent).");
-                    return;
-                }
-                _lastDepositVid = realVehicleId; _lastDepositAt = Time.unscaledTime;
-
+                // Resolve the source FIRST (hands-box contents / bare held item / pushed hand-truck stacks),
+                // so the dedup can sign exactly what would be sent.
+                var toSend = new System.Collections.Generic.List<CargoInstance>();
                 var held = PlayerHelper.ItemInstanceInHands;
                 if (held != null)
                 {
                     var contents = held.cargoInstances;
                     if (contents != null && contents.Count > 0)
                     {
-                        var snapshot = new System.Collections.Generic.List<CargoInstance>(contents);
-                        foreach (var c in snapshot)
+                        foreach (var c in new System.Collections.Generic.List<CargoInstance>(contents))
                             if (c != null && !string.IsNullOrEmpty(c.itemName) && c.amount > 0)
-                                Send(OpPut, realVehicleId, ownerId, c.itemName, c.amount, c.paid, c.pricePerUnit);
+                                toSend.Add(c);
                     }
                     else   // not a container — deposit the held item itself
                     {
                         var c = held.ConvertToCargoInstance();
                         if (c != null && !string.IsNullOrEmpty(c.itemName) && c.amount > 0)
-                            Send(OpPut, realVehicleId, ownerId, c.itemName, c.amount, c.paid, c.pricePerUnit);
+                            toSend.Add(c);
                     }
+                }
+                else
+                {
+                    // Hands empty → pushed hand-vehicle as the source. Sealed stacks stay on the truck: our wire
+                    // has no Sealed flag, so routing one through would silently UNSEAL it owner-side.
+                    var cur = VehicleHelper.GetCurrentVehicle();
+                    if (cur == null || cur.VehicleType == null || !cur.VehicleType.spawnInPlayerObject) return;
+                    var src = cur.cargoInstances;
+                    if (src == null || src.Count == 0) { PassengerHud.Toast("Nothing to store."); return; }
+                    foreach (var c in new System.Collections.Generic.List<CargoInstance>(src))
+                        if (c != null && !c.IsSealed && !string.IsNullOrEmpty(c.itemName) && c.amount > 0)
+                            toSend.Add(c);
+                }
+                if (toSend.Count == 0) return;
+
+                var sb = new System.Text.StringBuilder(realVehicleId).Append('|');
+                foreach (var c in toSend)
+                    sb.Append(c.itemName).Append('=').Append(c.amount).Append('=').Append(c.paid ? '1' : '0').Append(';');
+                string sig = sb.ToString();
+                if (sig == _lastDepositSig && Time.unscaledTime - _lastDepositAt < DepositDedupSeconds)
+                {
+                    Plugin.Logger.LogInfo($"[VStore] duplicate deposit for '{realVehicleId}' suppressed ({Time.unscaledTime - _lastDepositAt:F1}s after the first, identical content — double-routed intent).");
                     return;
                 }
+                _lastDepositSig = sig; _lastDepositAt = Time.unscaledTime;
 
-                // Hands empty → pushed hand-vehicle as the source. Sealed stacks stay on the truck: our wire
-                // has no Sealed flag, so routing one through would silently UNSEAL it owner-side.
-                var cur = VehicleHelper.GetCurrentVehicle();
-                if (cur == null || cur.VehicleType == null || !cur.VehicleType.spawnInPlayerObject) return;
-                var src = cur.cargoInstances;
-                if (src == null || src.Count == 0) { PassengerHud.Toast("Nothing to store."); return; }
-                var snap2 = new System.Collections.Generic.List<CargoInstance>(src);
-                foreach (var c in snap2)
-                    if (c != null && !c.IsSealed && !string.IsNullOrEmpty(c.itemName) && c.amount > 0)
-                        Send(OpPut, realVehicleId, ownerId, c.itemName, c.amount, c.paid, c.pricePerUnit);
+                foreach (var c in toSend)
+                    Send(OpPut, realVehicleId, ownerId, c.itemName, c.amount, c.paid, c.pricePerUnit);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] RequestDeposit: {ex.Message}"); }
         }

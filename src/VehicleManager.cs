@@ -1231,22 +1231,8 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
-        // ([CartProbe] sampled probe REPLACED by the event-driven CartTrace, user-approved 2026-07-07 —
-        //  snapshots straddle the transition events these bugs live in.)
-
-        /// <summary>CartTrace accessor: every hand-cart ghost (id, GO, owner, owner-using flag).</summary>
-        internal static IEnumerable<(string id, GameObject go, string ownerId, bool ownerUsing)> CartGhosts()
-        {
-            foreach (var kv in _remoteVehicles)
-            {
-                var rv = kv.Value;
-                if (rv?.Go == null || !IsHandCartType(rv.Go.name)) continue;
-                yield return (kv.Key, rv.Go, rv.OwnerId, rv.OwnerUsing);
-            }
-        }
-
-        /// <summary>CartTrace accessor: the real id of the proxy this machine is streaming (possession).</summary>
-        internal static string DrivingRealVidNow => _drivingRealVid;
+        // ([CartProbe] sampled probe and its event-driven successor [CartTrace] both RETIRED —
+        //  the borrowed-cart cluster closed 2026-07-07; see the context log for the full evidence trail.)
 
         private static readonly Collider[] _cartIgnoreBuf = new Collider[256];
         internal static void NeutralizeHandCartGhostObstacle(UnityEngine.GameObject go)
@@ -1586,9 +1572,7 @@ namespace BigAmbitionsMP
         public static bool CanDriveGhost(string vid)
         {
             string reason;
-            bool ok = CanDriveGhostEx(vid, out reason);
-            CartTrace.NoteDriveCheck(vid, ok, reason);   // intent marker (throttled inside)
-            return ok;
+            return CanDriveGhostEx(vid, out reason);
         }
 
         private static bool CanDriveGhostEx(string vid, out string reason)
