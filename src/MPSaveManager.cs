@@ -61,6 +61,11 @@ namespace BigAmbitionsMP
         public List<MpGrant> Grants { get; set; } = new();
         /// <summary>Merged-company membership (merger slice 1) — empty/absent = no merger.</summary>
         public List<MpMergerMember> Merger { get; set; } = new();
+        /// <summary>Shared-wallet balance per merger group (slice 4) — absent on old manifests.</summary>
+        public Dictionary<string, float> MergerWalletBalance { get; set; } = new();
+        /// <summary>Per group: stable ids whose merge-time wallet pooling was already accepted, so a
+        /// restore/join replay can never pool the same member's cash twice (slice 4).</summary>
+        public Dictionary<string, List<string>> MergerWalletContributed { get; set; } = new();
     }
 
     /// <summary>One durable access grant: an owner gave a grantee a key (StableId space).</summary>

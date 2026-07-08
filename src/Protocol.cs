@@ -151,6 +151,8 @@ namespace BigAmbitionsMP
         MergerState         = 147,       // Host → All: merged-company membership (merger slice 1) — online member PlayerIds (what enforcement reads) + full display roster.
         MergerRequest       = 148,       // Member ↔ Host: propose/accept/decline/leave a company merger; host relays "proposal"/"declined" to the affected member.
         BusinessEditRequest = 149,       // Member → Host → business owner: an owner-only business edit made on a merger-flipped replica (slice 3: the open/close toggle) — the OWNER applies it natively and their sync republishes the truth.
+        MergerWalletDelta   = 150,       // Member → Host: a native money change on a merged member's machine (delta + transaction key) — the host ledger is the shared wallet's single source of truth (slice 4).
+        MergerWalletState   = 151,       // Host → All (group-tagged) or targeted (GroupId="" = personal payout on leave): the authoritative shared balance; members set their local mirror to it.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -159,6 +161,26 @@ namespace BigAmbitionsMP
     {
         public string AddressKey        { get; set; } = "";
         public bool   TemporarilyClosed { get; set; }
+    }
+
+    /// <summary>Merger slice 4 — one native money delta from a merged member's machine. NEVER an
+    /// absolute (absolutes lose updates); the host ledger sums deltas. Contribution=true is the
+    /// one-time merge-time pooling of the member's whole personal wallet (host dedupes by StableId).</summary>
+    public class MergerWalletDeltaPayload
+    {
+        public string PlayerId     { get; set; } = "";   // sender (validated SenderIs at the host)
+        public float  Amount       { get; set; }
+        public string Key          { get; set; } = "";   // TransactionInfo.Type — attribution/probes
+        public bool   Contribution { get; set; }
+    }
+
+    /// <summary>Merger slice 4 — the authoritative shared balance. GroupId names the merged company
+    /// (receivers apply only their own group's); GroupId="" is a TARGETED personal set (the leave/
+    /// dissolve payout — "your personal wallet is now X").</summary>
+    public class MergerWalletStatePayload
+    {
+        public string GroupId { get; set; } = "";
+        public float  Balance { get; set; }
     }
 
     /// <summary>One merged company. MemberPids is ONLINE members in PlayerId space (all enforcement is

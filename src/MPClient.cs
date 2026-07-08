@@ -345,6 +345,14 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.MergerWalletState:
+                {
+                    // Slice 4: the authoritative shared balance (or a targeted leave payout).
+                    var ws = env.GetPayload<MergerWalletStatePayload>();
+                    if (ws != null) GameStatePatcher.EnqueueOnMainThread(() => MergerWallet.ApplyState(ws));
+                    break;
+                }
+
                 case MessageType.BusinessEditRequest:
                 {
                     // Host-relayed, grant-gated: this machine OWNS the shop — apply natively.

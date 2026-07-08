@@ -59,6 +59,7 @@ namespace BigAmbitionsMP
                 var gi = SaveGameManager.Current;
                 if (gi == null) return;
                 gi.Money += delta;
+                MergerWallet.ForwardExternal(delta, $"hub: {reason}");   // slice 4: direct writes must reach the shared ledger
                 if (notice) MPChat.AddNotice($"{(delta >= 0 ? "+" : "−")}${Mathf.Abs(delta):N0} — {reason}");
                 Plugin.Logger.LogInfo($"[Hub] money {(delta >= 0 ? "+" : "")}{delta:N0} ({reason}); balance {gi.Money:N0}.");
                 Version++;

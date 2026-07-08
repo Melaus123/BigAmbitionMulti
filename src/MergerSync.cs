@@ -72,6 +72,8 @@ namespace BigAmbitionsMP
         public static string OutgoingToPid = "";
 
         public static bool IAmMember => _groupByPid.ContainsKey(MPConfig.PlayerId);
+        /// <summary>My merged company's group id, or "" (slice 4: wallet broadcasts are group-tagged).</summary>
+        public static string MyGroupId => _groupByPid.TryGetValue(MPConfig.PlayerId, out var g) ? g : "";
         /// <summary>Is this online player in MY merged company?</summary>
         public static bool IsMemberPid(string pid)
             => !string.IsNullOrEmpty(pid)
@@ -121,6 +123,7 @@ namespace BigAmbitionsMP
             }
             else if (!now && _wasMember)
                 PassengerHud.Toast("Merger dissolved.");
+            MergerWallet.OnMembershipEdge(now, _wasMember);   // slice 4: rising edge pools my wallet (host dedupes)
             _wasMember = now;
         }
 

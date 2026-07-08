@@ -1302,6 +1302,8 @@ namespace BigAmbitionsMP
                 foreach (var e in GrantSync.AllStoreEntries())
                     m.Grants.Add(new MpGrant { Kind = e.Kind, Owner = e.Owner, Grantee = e.Grantee, GranteeName = GrantSync.NameOf(e.Grantee) });
                 m.Merger = BuildMergerManifest();
+                m.MergerWalletBalance     = MPServer.SnapshotWalletBalances();      // slice 4
+                m.MergerWalletContributed = MPServer.SnapshotWalletContributed();
                 RefreshSlotCash(m);
                 MPSaveManager.WriteManifest(sessionName, m);
             }
@@ -1324,6 +1326,8 @@ namespace BigAmbitionsMP
                     foreach (var e in GrantSync.AllStoreEntries())
                         m.Grants.Add(new MpGrant { Kind = e.Kind, Owner = e.Owner, Grantee = e.Grantee, GranteeName = GrantSync.NameOf(e.Grantee) });
                     m.Merger = BuildMergerManifest();   // merger membership rides the same persist-on-change
+                    m.MergerWalletBalance     = MPServer.SnapshotWalletBalances();      // slice 4: pooling/payout
+                    m.MergerWalletContributed = MPServer.SnapshotWalletContributed();   // states persist immediately
                     m.SavedAtUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
                     MPSaveManager.WriteManifest(_activeSessionName, m);
                     Plugin.Logger.LogInfo($"[MPSave] Persisted {m.Grants.Count} grant(s) + {m.Merger.Count} merger member(s) to '{_activeSessionName}' on change.");

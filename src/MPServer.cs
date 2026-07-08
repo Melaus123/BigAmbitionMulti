@@ -136,6 +136,89 @@ namespace BigAmbitionsMP
             CashByStableId[stable] = money;
         }
 
+        // ── Shared wallet (merger slice 4) — HOST ledger, one balance per merger group ────────────
+        // groupId → authoritative balance. Deltas only (never absolutes); manifest-persisted with the
+        // merger membership. MAIN THREAD (mutated from HostWalletDelta/HostMergerAction only).
+        private static readonly Dictionary<string, float> _walletBalance = new();
+        // groupId → stable ids whose merge-time wallet pooling was accepted (idempotency across
+        // restore/join replays; removed on leave so a re-joiner pools their then-current wallet again).
+        private static readonly Dictionary<string, HashSet<string>> _walletContributed = new();
+
+        /// <summary>HOST, MAIN THREAD: a merged member reports a native money delta (or its one-time
+        /// merge pooling). Ledger += delta, then the group hears the new truth.</summary>
+        public static void HostWalletDelta(string pid, float amount, string key, bool contribution)
+        {
+            try
+            {
+                if (!_running) return;
+                string stable = StableOfPid(pid);
+                string g = MergerSync.GroupOfStable(stable);
+                if (string.IsNullOrEmpty(g))
+                {
+                    Plugin.Logger.LogInfo($"[EconProbe] wallet delta {amount:N0} '{key}' from '{pid}' DROPPED (not in a merger — late message after leave?).");
+                    return;
+                }
+                if (contribution)
+                {
+                    if (!_walletContributed.TryGetValue(g, out var set)) { set = new HashSet<string>(); _walletContributed[g] = set; }
+                    if (!set.Add(stable))
+                    {
+                        Plugin.Logger.LogInfo($"[EconProbe] wallet POOL from '{pid}' ignored (already pooled — restore/join replay).");
+                        return;
+                    }
+                }
+                _walletBalance.TryGetValue(g, out var bal);
+                _walletBalance[g] = bal + amount;
+                Plugin.Logger.LogInfo($"[EconProbe] wallet ledger '{g}' {(amount >= 0 ? "+" : "")}{amount:N0} '{key}'{(contribution ? " (pool)" : "")} → ${_walletBalance[g]:N0}.");
+                BroadcastWalletGroup(g);
+                // No per-delta manifest write (deltas are frequent): the balance persists with every
+                // coordinated save + on merger membership changes — the same staleness window as the
+                // slot-cash mirrors it must stay consistent with.
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Wallet] HostWalletDelta: {ex.Message}"); }
+        }
+
+        /// <summary>HOST: push one group's authoritative balance to everyone (receivers self-filter by
+        /// group) and apply it locally when the host is a member of that group.</summary>
+        public static void BroadcastWalletGroup(string groupId)
+        {
+            if (!_walletBalance.TryGetValue(groupId, out var bal)) return;
+            var pay = new MergerWalletStatePayload { GroupId = groupId, Balance = bal };
+            Broadcast(MessageEnvelope.Create(MessageType.MergerWalletState, "host", pay));
+            MergerWallet.ApplyState(pay);   // host may be a member; ApplyState self-filters
+        }
+
+        /// <summary>HOST: every group's balance — join replay + the 10s merger heartbeat (lost-packet
+        /// self-heal; also what snaps a freshly restored member's mirror to the manifest balance).</summary>
+        public static void BroadcastAllWalletGroups()
+        {
+            foreach (var g in new List<string>(_walletBalance.Keys)) BroadcastWalletGroup(g);
+        }
+
+        /// <summary>Manifest snapshot accessors (MPSaveCoordinator).</summary>
+        public static Dictionary<string, float> SnapshotWalletBalances() => new(_walletBalance);
+        public static Dictionary<string, List<string>> SnapshotWalletContributed()
+        {
+            var d = new Dictionary<string, List<string>>();
+            foreach (var kv in _walletContributed) d[kv.Key] = new List<string>(kv.Value);
+            return d;
+        }
+
+        /// <summary>HOST: restore the wallet ledger from a manifest (clear-then-apply, beside the
+        /// merger store restore).</summary>
+        public static void RestoreWalletFromManifest(MpManifest m)
+        {
+            _walletBalance.Clear(); _walletContributed.Clear();
+            if (m.MergerWalletBalance != null)
+                foreach (var kv in m.MergerWalletBalance) _walletBalance[kv.Key] = kv.Value;
+            if (m.MergerWalletContributed != null)
+                foreach (var kv in m.MergerWalletContributed) _walletContributed[kv.Key] = new HashSet<string>(kv.Value ?? new List<string>());
+            if (_walletBalance.Count > 0)
+                Plugin.Logger.LogInfo($"[EconProbe] wallet restored {_walletBalance.Count} group balance(s) from manifest.");
+        }
+
+        public static void ResetWallet() { _walletBalance.Clear(); _walletContributed.Clear(); }
+
         /// <summary>Host: rebuild the live ownership map from a session manifest
         /// (re-keying the stableId-keyed owners back to the live playerIds of
         /// connected players; absent owners stay reserved under their stableId
@@ -219,6 +302,7 @@ namespace BigAmbitionsMP
                         if (!string.IsNullOrEmpty(mem.Name)) GrantSync.NoteName(mem.StableId, mem.Name);
                         mn++;
                     }
+                RestoreWalletFromManifest(m);   // slice 4: ledger BEFORE the broadcast below (members snap to it)
                 RefreshGrantsAndBroadcast();
                 Plugin.Logger.LogInfo($"[Server] Restored {gn} access grant(s) + {mn} merger member(s) from manifest ({(m.Grants?.Count ?? 0)} grants in file).");
             }
@@ -488,6 +572,7 @@ namespace BigAmbitionsMP
             GrantSync.ResetStore();   // fresh world — no grants; flush any store left by a previously loaded
                                       // session (the scene reset no longer wipes the store, 2026-06-30)
             MergerSync.ResetStore();  // fresh world — no merger (same session-boundary lifecycle)
+            ResetWallet();            // fresh world — no shared wallet (slice 4)
 
             // Re-arm the startup pause hold for this new game.
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
@@ -858,6 +943,15 @@ namespace BigAmbitionsMP
                     var be = env.GetPayload<BusinessEditPayload>();
                     if (be != null)
                         GameStatePatcher.EnqueueOnMainThread(() => BusinessSync.HostRouteBusinessEdit(be, senderPid));
+                    break;
+                }
+
+                case MessageType.MergerWalletDelta:
+                {
+                    // Merger slice 4: a member's native money delta → the host ledger.
+                    var wd = env.GetPayload<MergerWalletDeltaPayload>();
+                    if (wd != null && SenderIs(wd.PlayerId, senderPid, MessageType.MergerWalletDelta))
+                        GameStatePatcher.EnqueueOnMainThread(() => HostWalletDelta(wd.PlayerId, wd.Amount, wd.Key, wd.Contribution));
                     break;
                 }
 
@@ -3297,7 +3391,48 @@ namespace BigAmbitionsMP
                 case "leave":
                 {
                     string s = StableOfPid(actorPid);
-                    if (string.IsNullOrEmpty(s) || MergerSync.GroupOfStable(s) == "") return;
+                    string g0 = MergerSync.GroupOfStable(s);
+                    if (string.IsNullOrEmpty(s) || g0 == "") return;
+
+                    // Slice 4 — settle the shared wallet BEFORE membership changes. Equal split: the
+                    // leaver takes balance / memberCount; a dissolving pair's REMAINING member takes
+                    // the rest as their personal wallet (combined entity — no contribution tracking
+                    // by design; "this is ours" has no ledgers of whose money it was).
+                    if (_walletBalance.TryGetValue(g0, out var bal))
+                    {
+                        int members = MergerSync.StoreGroups.TryGetValue(g0, out var set) ? set.Count : 0;
+                        if (members > 0)
+                        {
+                            float share = bal / members;
+                            var payout = new MergerWalletStatePayload { GroupId = "", Balance = share };
+                            if (actorPid == MPConfig.PlayerId) MergerWallet.ApplyState(payout);
+                            else SendToPid(actorPid, MessageEnvelope.Create(MessageType.MergerWalletState, "host", payout));
+                            Plugin.Logger.LogInfo($"[EconProbe] wallet SPLIT '{g0}': '{actorPid}' leaves with ${share:N0} of ${bal:N0} ({members} member(s)).");
+                            if (members <= 2)
+                            {
+                                // Group dissolves — the other member gets the remainder as personal cash.
+                                string other = "";
+                                foreach (var mem in set) if (mem != s) { other = mem; break; }
+                                string otherPid = "";
+                                if (other == MPConfig.StableId) otherPid = MPConfig.PlayerId;
+                                else foreach (var kv in StableIdByPlayer) if (kv.Value == other) { otherPid = kv.Key; break; }
+                                var rest = new MergerWalletStatePayload { GroupId = "", Balance = bal - share };
+                                if (otherPid == MPConfig.PlayerId) MergerWallet.ApplyState(rest);
+                                else if (otherPid != "") SendToPid(otherPid, MessageEnvelope.Create(MessageType.MergerWalletState, "host", rest));
+                                else CashByStableId[other] = bal - share;   // offline member: their restore figure
+                                Plugin.Logger.LogInfo($"[EconProbe] wallet DISSOLVE '{g0}': remaining member gets ${bal - share:N0}.");
+                                _walletBalance.Remove(g0);
+                                _walletContributed.Remove(g0);
+                            }
+                            else
+                            {
+                                _walletBalance[g0] = bal - share;
+                                if (_walletContributed.TryGetValue(g0, out var cset)) cset.Remove(s);
+                                BroadcastWalletGroup(g0);
+                            }
+                        }
+                    }
+
                     MergerSync.StoreRemove(s);
                     Plugin.Logger.LogInfo($"[Merger] '{actorPid}' left their merger group.");
                     RefreshGrantsAndBroadcast();
@@ -3361,6 +3496,7 @@ namespace BigAmbitionsMP
             var pay = BuildMergerState();
             MergerSync.ApplyState(pay);
             Broadcast(MessageEnvelope.Create(MessageType.MergerState, "host", pay));
+            BroadcastAllWalletGroups();   // slice 4: the wallet heartbeat rides the same 10s cadence
         }
 
         private static void HandleTaxiHail(MessageEnvelope env)
@@ -3436,6 +3572,9 @@ namespace BigAmbitionsMP
             {
                 Send(peer, MessageEnvelope.Create(MessageType.PermissionSnapshot, "host", GrantSync.BuildSnapshot()));
                 Send(peer, MessageEnvelope.Create(MessageType.MergerState, "host", BuildMergerState()));
+                foreach (var kv in SnapshotWalletBalances())   // slice 4: joining member snaps to the shared balance
+                    Send(peer, MessageEnvelope.Create(MessageType.MergerWalletState, "host",
+                         new MergerWalletStatePayload { GroupId = kv.Key, Balance = kv.Value }));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendPermissionSnapshotTo: {ex.Message}"); }
         }

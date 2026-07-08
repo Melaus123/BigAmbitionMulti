@@ -2201,7 +2201,13 @@ namespace BigAmbitionsMP
                     int removed = gi.realEstate.RemoveAll(x => GameStateReader.AddressKey(x.address) == addressKey);
                     if (removed > 0)
                     {
-                        if (refund > 0f) { try { gi.Money += refund; } catch { } }
+                        if (refund > 0f)
+                        {
+                            try { gi.Money += refund; } catch { }
+                            // Slice 4: the denied buy's CHARGE went through native ChangeMoney (forwarded
+                            // to the shared ledger) — the refund must follow or the reconcile erases it.
+                            MergerWallet.ForwardExternal(refund, "buy-rollback refund");
+                        }
                         Plugin.Logger.LogInfo($"[Patcher] Rolled back buy of {addressKey} (refunded {refund:F0}).");
                     }
                 }
