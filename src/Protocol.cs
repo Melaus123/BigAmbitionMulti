@@ -1163,22 +1163,28 @@ namespace BigAmbitionsMP
         // EA 0.11 — BuildingRegistration no longer has the field.)
         public List<ScheduleDayInfo> Schedule { get; set; } = new();
 
-        // ── Ownership (Phase 1d) ──────────────────────────────────────────────
+        // ── Ownership (Phase 1d; rent-vs-deed split 2026-07-07) ──────────────
         // The two RivalId strings drive BuildingResume.rivalBuildingOwner /
-        // rivalBusinessOwner via RivalsHelper.GetRivalName.  RentedByPlayer is
-        // sent for completeness.  Phase 1d Wave 3 adds OwnerPlayerId fields:
-        // when a building/business is owned by a HUMAN player (local on the
-        // sender's machine), the player's PlayerId is included so receivers
-        // can translate it:
-        //   * if receiver IS that player → set reg.RentedByPlayer = true
-        //   * else → set reg.buildingOwnerRivalId = OwnerPlayerId (and we
-        //     ensure a rival entry exists for that player so the popup shows
-        //     the player's name).
+        // rivalBusinessOwner via RivalsHelper.GetRivalName. Native semantics
+        // (decompile-verified): buildingOwnerRivalId = the DEED holder (the AI
+        // landlord from worldgen, or whoever BOUGHT the building — rival pages
+        // list "owned buildings" from it); businessOwnerRivalId = who RUNS the
+        // business there (the tenant). The player attributions are SPLIT the
+        // same way — conflating them was the 2026-07-07 community bug ("rented
+        // a building, rival page shows him as its OWNER"):
+        //   * OwnerPlayerId       = the player RENTING/OPERATING here (tenancy).
+        //       receiver IS that player → reg.RentedByPlayer = true
+        //       receiver is someone else → reg.businessOwnerRivalId = pid
+        //   * DeedOwnerPlayerId   = the player who BOUGHT the building (deed).
+        //       receiver is someone else → reg.buildingOwnerRivalId = pid
+        //   * BuildingOwnerRivalId rides verbatim otherwise (the AI landlord —
+        //     it must SURVIVE a player renting; worldgen never re-assigns it).
         public string BuildingOwnerRivalId { get; set; } = "";
         public string BusinessOwnerRivalId { get; set; } = "";
         public bool   RentedByPlayer       { get; set; }
         public string OwnerPlayerId        { get; set; } = "";
         public string BusinessOwnerPlayerId{ get; set; } = "";
+        public string DeedOwnerPlayerId    { get; set; } = "";
 
         /// <summary>AI-business retail prices (host-authoritative).  Clients
         /// suppress the daily rival sim, so without this their AI shops keep

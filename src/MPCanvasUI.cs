@@ -2668,7 +2668,8 @@ namespace BigAmbitionsMP
                 MPServer.RebuildGrantsAfterSceneReset();  // host: immediate store→runtime rebuild + re-broadcast, so
                                               // enforcement never depends on which machine's scene finishes first
                 InteriorSync.Reset();     // interior subs + owner-snapshot caches die with the scene — a prior session's Authoritative=true snapshot must not bleed into a new world (was never wired up)
-                GameStatePatcher.SweepPurchaserPollution("scene ready");   // heal saves polluted by the pre-round-34 purchaser injection (owner shelves/boxes booting in shop mode)
+                GameStatePatcher.SweepPurchaserPollution("scene ready");   // heal saves polluted by the pre-round-34 purchaser injectio
+                GameStatePatcher.SweepRivalFieldContamination("scene ready");   // heal renters written into the DEED field (rent-vs-deed split 2026-07-07)n (owner shelves/boxes booting in shop mode)
                 // Round-35: a save can carry a STALE BAMP_ proxy id in ActiveVehicleId (borrowed cart
                 // despawned mid-push before the round-34b exit guard existed). IsUsingVehicle then reads
                 // true forever with no resolvable vehicle → box clicks NRE at ItemController.Interact:509

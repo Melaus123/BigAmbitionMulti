@@ -592,6 +592,7 @@ namespace BigAmbitionsMP
                     // either, or neither.
                     OwnerPlayerId         = ResolveOwnerPlayerId(addr, reg),
                     BusinessOwnerPlayerId = MergerFlip.TrulyMine(reg)    ? MPConfig.PlayerId : "",   // an ownership CLAIM — flip must never make one
+                    DeedOwnerPlayerId     = ResolveDeedOwnerPlayerId(addr, reg),
                 };
 
                 // AI-business retail prices (host-authoritative; audit catch
@@ -742,19 +743,19 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
-        /// <summary>Who owns this building, as a network playerId, for the BusinessInfo
-        /// receivers translate: if a CLIENT rented it (tracked in BuildingOwners), send
-        /// that player's id so the renter sees RentedByPlayer=true and others see it as
-        /// that player's; otherwise fall back to the host's own bought-property check.</summary>
+        /// <summary>TENANCY attribution ONLY (rent-vs-deed split, 2026-07-07): the player who RENTS /
+        /// operates this building. The old deed fallback here (bought-property check) plus the deed
+        /// write on receivers made a RENTER show as the building's OWNER on rival pages — the
+        /// community report. Deed ownership now travels separately (ResolveDeedOwnerPlayerId).</summary>
         private static string ResolveOwnerPlayerId(string addr, BuildingRegistration reg)
         {
             try
             {
-                if (MPServer.BuildingOwners.TryGetValue(addr, out var o) && !string.IsNullOrEmpty(o) && o != "host")
-                    return o;   // a client rented this building
+                if (MPServer.BuildingOwners.TryGetValue(addr, out var o) && !string.IsNullOrEmpty(o))
+                    return o == "host" ? MPConfig.PlayerId : o;   // the rental ledger names the tenant
             }
             catch { }
-            if (SafeBuildingOwnedByPlayer(reg)) return MPConfig.PlayerId;
+            try { if (reg.RentedByPlayer && MergerFlip.TrulyMine(reg)) return MPConfig.PlayerId; } catch { }
 
             // About to attribute an EMPTY owner. For an HQ that is the upstream half of the brick (the
             // receiver then sees ownerPlayer='' → would clear tenancy → schedule wipe). Log WHY on the
@@ -770,6 +771,21 @@ namespace BigAmbitionsMP
                 }
             }
             catch { }
+            return "";
+        }
+
+        /// <summary>DEED attribution (rent-vs-deed split, 2026-07-07): the player who BOUGHT this
+        /// building. Host: the real-estate ledger; any machine: the game's own bought-property check
+        /// for its own buildings. Receivers put THIS (and only this) in buildingOwnerRivalId.</summary>
+        private static string ResolveDeedOwnerPlayerId(string addr, BuildingRegistration reg)
+        {
+            try
+            {
+                if (MPServer.BuildingRealEstateOwners.TryGetValue(addr, out var o) && !string.IsNullOrEmpty(o))
+                    return o == "host" ? MPConfig.PlayerId : o;
+            }
+            catch { }
+            if (SafeBuildingOwnedByPlayer(reg)) return MPConfig.PlayerId;
             return "";
         }
 
@@ -804,6 +820,8 @@ namespace BigAmbitionsMP
                 && a.BuildingOwnerRivalId     == b.BuildingOwnerRivalId
                 && a.BusinessOwnerRivalId     == b.BusinessOwnerRivalId
                 && a.RentedByPlayer           == b.RentedByPlayer
+                && a.OwnerPlayerId            == b.OwnerPlayerId          // rent-vs-deed split 2026-07-07:
+                && a.DeedOwnerPlayerId        == b.DeedOwnerPlayerId      // attribution changes must republish
                 && a.OwnerOpenState           == b.OwnerOpenState;
         }
 

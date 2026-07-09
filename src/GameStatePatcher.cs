@@ -2383,7 +2383,10 @@ namespace BigAmbitionsMP
                 try
                 {
                     receiverOwnsThis = IsReceiversOwnBusiness(reg)
-                                     || (!string.IsNullOrEmpty(info.OwnerPlayerId) && info.OwnerPlayerId == MPConfig.PlayerId);
+                                     || (!string.IsNullOrEmpty(info.OwnerPlayerId) && info.OwnerPlayerId == MPConfig.PlayerId)
+                                     // Rent-vs-deed split (2026-07-07): OwnerPlayerId is tenancy-only now;
+                                     // a building I BOUGHT (deed) is mine even with no business in it.
+                                     || (!string.IsNullOrEmpty(info.DeedOwnerPlayerId) && info.DeedOwnerPlayerId == MPConfig.PlayerId);
                 }
                 catch { }
 
@@ -2511,8 +2514,13 @@ namespace BigAmbitionsMP
                 bool   priorRented        = reg.RentedByPlayer;
                 try
                 {
-                    // Default: mirror host's rival-id fields verbatim.
+                    // Default: mirror host's rival-id fields verbatim — EXCEPT a player id in the
+                    // DEED field (buildingOwnerRivalId), which is contamination from the pre-split
+                    // plumbing (renters were written there — the "rival page says he OWNS it" bug):
+                    // never re-apply it; keep what we had (the AI landlord, or empty).
                     string newBuildingOwner = info.BuildingOwnerRivalId ?? "";
+                    if (IsSessionPlayerId(newBuildingOwner) && newBuildingOwner != (info.DeedOwnerPlayerId ?? ""))
+                        newBuildingOwner = priorBuildingOwner != null && !IsSessionPlayerId(priorBuildingOwner) ? priorBuildingOwner : "";
                     string newBusinessOwner = info.BusinessOwnerRivalId ?? "";
                     // Tenancy: PRESERVE what the client already had unless the host POSITIVELY attributes the
                     // building to a specific player.  The old default of `false` clobbered the client's own
@@ -2520,25 +2528,26 @@ namespace BigAmbitionsMP
                     // join / reclaim miss) — silently losing the building, persisted on the next autosave.
                     bool   newRented        = priorRented;
 
-                    // Wave 3 translation: if host marked the building as owned
-                    // by a HUMAN player (OwnerPlayerId set), translate per
-                    // receiver identity.
+                    // Rent-vs-deed split (2026-07-07). OwnerPlayerId = TENANCY: the receiver being the
+                    // tenant restores RentedByPlayer (the HQ-brick guard, 2026-06-19 — do NOT weaken);
+                    // anyone else displays the tenant as the business RUNNER (businessOwnerRivalId) —
+                    // NEVER as the building's deed owner. That deed write was the community bug: "friend
+                    // rented a building, rival page shows he OWNS it" — and it also clobbered the AI
+                    // landlord, which worldgen never re-assigns.
                     if (!string.IsNullOrEmpty(info.OwnerPlayerId))
                     {
-                        if (info.OwnerPlayerId == MPConfig.PlayerId)
-                        { newRented = true; newBuildingOwner = ""; }                  // it's OURS — clear any stray rival-owner
-                        else
-                        {
-                            // Another player owns the BUILDING — record that, but do NOT clear our
-                            // RentedByPlayer. Whether the LOCAL player RUNS a business here is the client's
-                            // OWN authority (you can run a business in a building someone else owns), and a
-                            // host delta must never take it away. The host can cross-attribute a player's OWN
-                            // building to a player-name-as-rival-id (no real rival record); clearing
-                            // RentedByPlayer here flipped receiverOwnsThis=false on the next apply and let the
-                            // host's blank replica overwrite the owner's schedule — bricking a client's own HQ
-                            // ("never open", can't schedule workers). 2026-06-19.
-                            newBuildingOwner = info.OwnerPlayerId;   // newRented stays = priorRented
-                        }
+                        if (info.OwnerPlayerId == MPConfig.PlayerId) newRented = true;
+                        else                                         newBusinessOwner = info.OwnerPlayerId;
+                        // newRented stays = priorRented for other players' buildings: whether the LOCAL
+                        // player RUNS a business here is the client's OWN authority; a host delta must
+                        // never take it away (the HQ brick, 2026-06-19).
+                    }
+                    // DeedOwnerPlayerId = the player who BOUGHT the building — the one attribution that
+                    // belongs in buildingOwnerRivalId. My own deed: my save is the truth, keep it.
+                    if (!string.IsNullOrEmpty(info.DeedOwnerPlayerId))
+                    {
+                        if (info.DeedOwnerPlayerId == MPConfig.PlayerId) newBuildingOwner = priorBuildingOwner ?? "";
+                        else                                             newBuildingOwner = info.DeedOwnerPlayerId;
                     }
                     if (!string.IsNullOrEmpty(info.BusinessOwnerPlayerId)
                         && info.BusinessOwnerPlayerId != MPConfig.PlayerId)
@@ -2941,10 +2950,12 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Patcher] {addressKey} marked unavailable.");
         }
 
-        /// <summary>HOST: reflect a client's rent in the host's OWN game so the host
-        /// sees the building leave the for-rent pool and show as that player's
-        /// business — mirroring how clients represent the host's player-owned
-        /// buildings (buildingOwnerRivalId = the player's id).  MAIN THREAD.</summary>
+        /// <summary>HOST: reflect a client's RENT in the host's OWN game — the building leaves the
+        /// for-rent pool and shows as that player's BUSINESS. Rent-vs-deed split (2026-07-07): the
+        /// tenant goes in businessOwnerRivalId (who RUNS the business); buildingOwnerRivalId is the
+        /// DEED (the AI landlord, never re-assigned after worldgen) and is NOT touched — writing the
+        /// renter there was the "rival page shows he OWNS the building" community bug, and the old
+        /// vacate erased the landlord permanently.  MAIN THREAD.</summary>
         public static void HostReflectPlayerRent(string addressKey, string playerId)
         {
             try
@@ -2952,15 +2963,15 @@ namespace BigAmbitionsMP
                 var reg = FindRegistration(addressKey);
                 if (reg == null) { Plugin.Logger.LogWarning($"[Patcher/Host] rent reflect: no reg for '{addressKey}'."); return; }
                 reg.AvailableForRent = false;                       // out of the for-rent pool
-                try { reg.buildingOwnerRivalId = playerId; } catch { }   // owned by that player (as a rival)
-                Plugin.Logger.LogInfo($"[Patcher/Host] {addressKey} now owned by player '{playerId}' (removed from for-rent).");
+                try { reg.businessOwnerRivalId = playerId; } catch { }   // the TENANT — runs the business here
+                Plugin.Logger.LogInfo($"[Patcher/Host] {addressKey} now rented by player '{playerId}' (removed from for-rent; landlord '{reg.buildingOwnerRivalId}' kept).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher/Host] HostReflectPlayerRent: {ex.Message}"); }
         }
 
         /// <summary>HOST: reverse HostReflectPlayerRent — a player vacated their
-        /// building, so clear the owner mark and put it back in the for-rent pool in
-        /// the host's OWN game.  MAIN THREAD.</summary>
+        /// building, so clear the tenant mark and put it back in the for-rent pool in
+        /// the host's OWN game. The deed field (landlord) stays.  MAIN THREAD.</summary>
         public static void HostReflectPlayerVacate(string addressKey)
         {
             try
@@ -2968,10 +2979,68 @@ namespace BigAmbitionsMP
                 var reg = FindRegistration(addressKey);
                 if (reg == null) { Plugin.Logger.LogWarning($"[Patcher/Host] vacate reflect: no reg for '{addressKey}'."); return; }
                 reg.AvailableForRent = true;                       // back into the for-rent pool
-                try { reg.buildingOwnerRivalId = ""; } catch { }   // no longer that player's
+                try { reg.businessOwnerRivalId = ""; } catch { }   // no tenant any more (landlord untouched)
                 Plugin.Logger.LogInfo($"[Patcher/Host] {addressKey} vacated — back on the for-rent market.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher/Host] HostReflectPlayerVacate: {ex.Message}"); }
+        }
+
+        /// <summary>Is this id one of the session's HUMAN players? (Rent-vs-deed repair: a player id
+        /// in the DEED field is contamination from the pre-split plumbing.) Checks the live roster +
+        /// self — an offline ex-member's pid isn't matchable, so the sweep is best-effort by design.</summary>
+        public static bool IsSessionPlayerId(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return false;
+            if (id == MPConfig.PlayerId) return true;
+            try { foreach (var p in MPRestSync.AllPlayers()) if (p == id) return true; } catch { }
+            return false;
+        }
+
+        /// <summary>One-shot save repair (scene-ready, every machine): the pre-split plumbing wrote
+        /// RENTERS into buildingOwnerRivalId (the deed field) and erased AI landlords on vacate —
+        /// both persisted into saves. Any session player id found in a deed field moves to the tenant
+        /// field (businessOwnerRivalId) where the display actually belongs; the landlord itself is
+        /// unrecoverable (worldgen never re-assigns) and stays empty — benign: the building simply
+        /// isn't listed under any rival's owned buildings.</summary>
+        public static void SweepRivalFieldContamination(string reason)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return;
+                int repaired = 0;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null) continue;
+                    string deed; try { deed = reg.buildingOwnerRivalId ?? ""; } catch { continue; }
+                    if (!IsSessionPlayerId(deed)) continue;
+                    string addr; try { addr = GameStateReader.AddressKey(reg); } catch { continue; }
+                    // LEGITIMATE deed vs the bug: the real-estate ledger is the authority. If it names
+                    // this player as the BUYER of this building, the attribution is correct — keep it.
+                    // (Only the host holds the ledgers; on clients this finds nothing, and a wrongly
+                    // stripped legitimate deed self-heals on the next BusinessInfo apply, which now
+                    // carries DeedOwnerPlayerId explicitly.)
+                    bool legitimateDeed = false;
+                    try
+                    {
+                        if (MPServer.IsRunning && MPServer.BuildingRealEstateOwners.TryGetValue(addr, out var buyer))
+                            legitimateDeed = (buyer == deed) || (buyer == "host" && deed == MPConfig.PlayerId);
+                    }
+                    catch { }
+                    if (legitimateDeed) continue;
+                    try
+                    {
+                        if (string.IsNullOrEmpty(reg.businessOwnerRivalId)) reg.businessOwnerRivalId = deed;
+                        reg.buildingOwnerRivalId = "";
+                        repaired++;
+                        Plugin.Logger.LogInfo($"[Patcher] rent-vs-deed repair: '{addr}' deed field held player '{deed}' with no purchase on the ledger → moved to tenant field.");
+                    }
+                    catch { }
+                }
+                if (repaired > 0)
+                    Plugin.Logger.LogWarning($"[Patcher] rent-vs-deed repair ({reason}): {repaired} building(s) had a PLAYER in the deed field (pre-split contamination) — repaired.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] SweepRivalFieldContamination: {ex.Message}"); }
         }
 
         private static void MarkBuildingAvailable(string addressKey)
