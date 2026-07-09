@@ -116,7 +116,6 @@ namespace BigAmbitionsMP
         private TMP_InputField?   _mpChatInputField; private RectTransform? _mpChatInputRT;
         private string        _mpChatInput = "";    private bool _mpChatFocus;
         private RectTransform? _mpSendRT;
-        private RectTransform? _mpReportRT;
         private RectTransform? _mpGripRT;            // bottom-left corner resize handle
         private bool          _mpResizing;           private Vector2 _mpResizeStartMouse; private Vector2 _mpResizeStartSize;
         private RectTransform? _mpOpacityTrackRT; private RectTransform? _mpOpacityFillRT; private RectTransform? _mpOpacityKnobRT;
@@ -4946,7 +4945,8 @@ namespace BigAmbitionsMP
             if (Input.GetKeyDown(KeyCode.Escape)) { _crashReportFocus = false; return; }
         }
 
-        private void OpenManualBugReport()
+        /// <summary>Entry point for the recycled native top-bar bug-report button (2026-07-08).</summary>
+        internal void OpenManualBugReport()
         {
             _crashReportIsCrash = false;
             _crashReportMessage = "";
@@ -5033,7 +5033,7 @@ namespace BigAmbitionsMP
                         : $"{_crashReportAttachments.Count} file(s) attached. Files over 24 MB are skipped.";
                     bool uploadOn = MPConfig.BugReportRelayUrlLive().Length > 0 || MPConfig.BugReportDiscordWebhookUrlLive().Length > 0;
                     _crashReportStatusLbl.text = (uploadOn
-                        ? "Uploads description, Player logs, bamp-ring.log and attachments. "
+                        ? "Uploads one zip: description, logs, report and attachments. "
                         : "Discord upload is not configured. A local report folder will be saved. ") + attach;
                 }
             }
@@ -5283,21 +5283,9 @@ namespace BigAmbitionsMP
             closeLbl.color = new Color(0.85f, 0.58f, 0.58f, 1f);
             ApplyFont(closeLbl);
 
-            var reportGO = MakeGO("Report", titleGO.transform);
-            _mpReportRT = reportGO.GetComponent<RectTransform>();
-            _mpReportRT.anchorMin = _mpReportRT.anchorMax = _mpReportRT.pivot = new Vector2(1f, 0.5f);
-            _mpReportRT.anchoredPosition = new Vector2(-168f, 0f);
-            _mpReportRT.sizeDelta = new Vector2(58f, 20f);
-            var reportImg = reportGO.AddComponent<Image>();
-            reportImg.color = new Color(0.45f, 0.25f, 0.24f, 1f);
-            if (_panelSprite != null) { try { reportImg.sprite = _panelSprite; reportImg.type = Image.Type.Sliced; } catch { } }
-            var reportLbl = MakeLabel(reportGO.transform, "Report", 11, C_WHITE, 0f, 0f, 58f, 20f, TextAlignmentOptions.Center);
-            var reportLblRT = reportLbl.rectTransform;
-            reportLblRT.anchorMin = Vector2.zero;
-            reportLblRT.anchorMax = Vector2.one;
-            reportLblRT.offsetMin = Vector2.zero;
-            reportLblRT.offsetMax = Vector2.zero;
-            ApplyFont(reportLbl);
+            // (Chat-bar "Report" button REMOVED 2026-07-08 — too hidden; the native top-bar bug-report
+            //  button, which the game disables on modded saves, is recycled as the entry point instead:
+            //  Patch_ReportBugButton_ModTakeover in MPBugReport.cs.)
 
             // Opacity slider — lives IN the title bar (right side, before [X])
             // so no vertical space is spent on it.  Slim track + fill + knob.
@@ -5619,7 +5607,6 @@ namespace BigAmbitionsMP
 
                 if      (chipHit)                         { }
                 else if (RectHit(_mpCloseRT, mp))         { ToggleMpWindow(); return; }
-                else if (RectHit(_mpReportRT, mp))        { OpenManualBugReport(); return; }
                 else if (RectHit(_mpGripRT, mp))          { _mpResizing = true; _mpResizeStartMouse = mp; _mpResizeStartSize = _mpWinRT != null ? _mpWinRT.sizeDelta : new Vector2(MPW_W, MPW_H); }
                 else if (RectHit(_mpOpacityTrackRT, mp))  { _mpOpacityDragging = true; ApplyOpacityFromMouse(mp); }   // before title: the track lives IN the bar
                 else if (RectHit(_mpTitleRT, mp))         { _mpDragging = true; _mpDragLast = mp; }

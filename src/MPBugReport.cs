@@ -15,6 +15,59 @@ namespace BigAmbitionsMP
         public bool DiscordUploadQueued;
     }
 
+    /// <summary>The native top-bar bug-report button (UI.Topbar.ReportBugButton) disables itself on
+    /// modded saves — dead, highly visible real estate. Recycle it as OUR report entry point (user
+    /// 2026-07-08; replaces the buried chat-bar button): keep it interactable, repaint it purple so
+    /// it's clearly the MOD's, and route the click to our bug-report popup.
+    ///
+    /// NO COPY, NO INHERITED BEHAVIOR (user's explicit caution): the button is taken over IN PLACE,
+    /// and its click event is REPLACED WHOLESALE — assigning a fresh ButtonClickedEvent drops the
+    /// prefab's PERSISTENT listeners (RemoveAllListeners clears only runtime ones), so the native
+    /// feedback flow can never fire alongside ours. The ReportBugButton component itself only acts
+    /// in OnEnable, which we postfix — nothing re-disables or repaints the button afterwards.</summary>
+    [HarmonyLib.HarmonyPatch(typeof(UI.Topbar.ReportBugButton), "OnEnable")]
+    public static class Patch_ReportBugButton_ModTakeover
+    {
+        private static readonly Color ModPurple = new Color(0.35f, 0.31f, 0.81f, 1f);
+
+        static void Postfix(UI.Topbar.ReportBugButton __instance)
+        {
+            try
+            {
+                var button = HarmonyLib.AccessTools.Field(typeof(UI.Topbar.ReportBugButton), "button")
+                                 ?.GetValue(__instance) as UnityEngine.UI.Button;
+                if (button == null) return;
+                // Native leaves the button ENABLED only on unmodded saves — a state we can't be in
+                // while loaded, but if it ever happens the native flow stays untouched.
+                if (button.interactable) return;
+
+                button.interactable = true;
+                button.onClick = new UnityEngine.UI.Button.ButtonClickedEvent();   // wholesale replace — see summary
+                button.onClick.AddListener(() =>
+                {
+                    try { MPCanvasUI.Instance?.OpenManualBugReport(); } catch { }
+                });
+
+                // Purple = unmistakably the mod's. Tint the target graphic; state colors multiply on
+                // top of it (default ColorBlock normal is white), so hover/press keep the purple base.
+                var img = button.targetGraphic as UnityEngine.UI.Image ?? button.GetComponent<UnityEngine.UI.Image>();
+                if (img != null) img.color = ModPurple;
+
+                // The native OnEnable just pointed the tooltip at "disabled because mods" — replace
+                // with our own text. Localizor renders unknown keys as-is, and ',' splits lines.
+                var tooltip = HarmonyLib.AccessTools.Field(typeof(UI.Topbar.ReportBugButton), "tooltip")
+                                  ?.GetValue(__instance) as BasicTooltip;
+                if (tooltip != null)
+                {
+                    tooltip.titleKey = "Report a BigAmbitionsMP bug";
+                    tooltip.descriptionKey = "Opens the multiplayer mod's bug report,Your logs are attached automatically";
+                }
+                Plugin.Logger.LogInfo("[BugReport] Native top-bar report button recycled as the mod's report entry point.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] top-bar button takeover: {ex.Message}"); }
+        }
+    }
+
     public static class MPBugReport
     {
         private const int MaxCopiedLogBytes = 4 * 1024 * 1024;
@@ -224,10 +277,11 @@ namespace BigAmbitionsMP
         /// <summary>Task #5 (2026-07-08, Prabaha report): a hard crash writes its evidence to Unity's
         /// crash folder (%LOCALAPPDATA%\Temp\{Company}\{Product}\Crashes\Crash_*), NOT Player.log —
         /// the report we received proved our collection was blind to the actual death. Copy the newest
-        /// crash folder (≤7 days old): error.log + its Player.log snapshot always; the minidump only
-        /// when small enough to ride the upload.</summary>
-        private const long MaxCrashDumpBytes = 8L * 1024L * 1024L;
-
+        /// crash folder (≤7 days old): error.log + its Player.log snapshot — TEXT files, so the zip's
+        /// IPv4 redaction covers them. The MINIDUMP is deliberately EXCLUDED (maintainer determination
+        /// 2026-07-08): a .dmp carries raw process memory — the host's public IP and the relay key can
+        /// sit there as live strings, a binary dump can't be redacted, and without the game's debug
+        /// symbols it adds nothing over error.log's stack anyway.</summary>
         private static void CollectUnityCrashArtifacts(string dir)
         {
             try
@@ -245,12 +299,11 @@ namespace BigAmbitionsMP
                 int copied = 0;
                 foreach (var f in newest.GetFiles())
                 {
-                    bool isDump = f.Extension.Equals(".dmp", StringComparison.OrdinalIgnoreCase);
-                    if (isDump && f.Length > MaxCrashDumpBytes) continue;
-                    if (!isDump && f.Length > MaxCopiedLogBytes) continue;
+                    if (f.Extension.Equals(".dmp", StringComparison.OrdinalIgnoreCase)) continue;   // see summary
+                    if (f.Length > MaxCopiedLogBytes) continue;
                     try { File.Copy(f.FullName, Path.Combine(sub, "crash-" + f.Name), overwrite: true); copied++; } catch { }
                 }
-                Plugin.Logger.LogInfo($"[BugReport] Unity crash artifacts: '{newest.Name}' ({newest.LastWriteTime:g}) — {copied} file(s) attached.");
+                Plugin.Logger.LogInfo($"[BugReport] Unity crash artifacts: '{newest.Name}' ({newest.LastWriteTime:g}) — {copied} file(s) attached (minidump excluded by policy).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] crash artifact collection: {ex.Message}"); }
         }
@@ -574,11 +627,21 @@ namespace BigAmbitionsMP
                     var payload = JsonConvert.SerializeObject(payloadObj);
                     WriteStringPart(stream, boundary, "payload_json", payload, "application/json");
 
-                    int index = 0;
-                    foreach (var file in UploadFiles(dir))
+                    // One zip per report (2026-07-08) — the redaction already happened inside the
+                    // bundle, and WriteFilePart streams .zip as binary. Loose files only as fallback.
+                    string zip = BuildUploadZip(dir);
+                    if (zip.Length > 0)
                     {
-                        WriteFilePart(stream, boundary, "files[" + index + "]", file);
-                        index++;
+                        WriteFilePart(stream, boundary, "files[0]", zip);
+                    }
+                    else
+                    {
+                        int index = 0;
+                        foreach (var file in UploadFiles(dir))
+                        {
+                            WriteFilePart(stream, boundary, "files[" + index + "]", file);
+                            index++;
+                        }
                     }
 
                     WriteAscii(stream, "--" + boundary + "--\r\n");
@@ -662,11 +725,15 @@ namespace BigAmbitionsMP
 
         private static IEnumerable<string> UploadFiles(string dir)
         {
-            foreach (var name in new[] { "description.txt", "Player.log", "Player-prev.log", "bamp-ring.log" })
+            foreach (var name in new[] { "description.txt", "report.md", "Player.log", "Player-prev.log", "bamp-ring.log", "config-redacted.json" })
             {
                 string path = Path.Combine(dir, name);
                 if (File.Exists(path)) yield return path;
             }
+
+            string crashDir = Path.Combine(dir, "unity-crash");
+            if (Directory.Exists(crashDir))
+                foreach (var path in Directory.GetFiles(crashDir)) yield return path;
 
             string attachDir = Path.Combine(dir, "attachments");
             if (!Directory.Exists(attachDir)) yield break;
@@ -676,6 +743,53 @@ namespace BigAmbitionsMP
                     continue;
                 if (new FileInfo(path).Length <= MaxUserAttachmentBytes)
                     yield return path;
+            }
+        }
+
+        /// <summary>Bundle the whole upload set into ONE zip (user directive 2026-07-08 — a single
+        /// file per Discord post instead of a spray of attachments). Text files (.log/.txt/.md/.json)
+        /// go through the same IPv4 redaction the loose-file upload applied — redaction must happen
+        /// BEFORE compression, a zip entry can't be scrubbed in flight. The local report folder keeps
+        /// the un-redacted originals, exactly as before. Returns "" on failure (caller falls back to
+        /// loose files so a zip bug can never lose a report).</summary>
+        private static string BuildUploadZip(string dir)
+        {
+            try
+            {
+                string zipPath = Path.Combine(dir, Path.GetFileName(dir) + ".zip");
+                using (var fs = new FileStream(zipPath, FileMode.Create, FileAccess.Write))
+                using (var zip = new System.IO.Compression.ZipArchive(fs, System.IO.Compression.ZipArchiveMode.Create))
+                {
+                    foreach (var file in UploadFiles(dir))
+                    {
+                        // Preserve the one level of structure that matters (unity-crash/, attachments/).
+                        string rel = file.StartsWith(dir, StringComparison.OrdinalIgnoreCase)
+                                   ? file.Substring(dir.Length).TrimStart('\\', '/').Replace('\\', '/')
+                                   : Path.GetFileName(file);
+                        var entry = zip.CreateEntry(rel, System.IO.Compression.CompressionLevel.Optimal);
+                        using var es = entry.Open();
+                        string ext = Path.GetExtension(file);
+                        bool text = ext.Equals(".log", StringComparison.OrdinalIgnoreCase) || ext.Equals(".txt", StringComparison.OrdinalIgnoreCase)
+                                 || ext.Equals(".md", StringComparison.OrdinalIgnoreCase) || ext.Equals(".json", StringComparison.OrdinalIgnoreCase);
+                        if (text)
+                        {
+                            var bytes = Encoding.UTF8.GetBytes(RedactIps(File.ReadAllText(file)));
+                            es.Write(bytes, 0, bytes.Length);
+                        }
+                        else
+                        {
+                            using var src = File.Open(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                            src.CopyTo(es);
+                        }
+                    }
+                }
+                Plugin.Logger.LogInfo($"[BugReport] Upload bundle: {Path.GetFileName(zipPath)} ({new FileInfo(zipPath).Length / 1024} KB).");
+                return zipPath;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[BugReport] zip bundle failed ({ex.Message}) — falling back to loose files.");
+                return "";
             }
         }
 

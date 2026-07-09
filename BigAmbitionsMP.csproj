@@ -45,6 +45,13 @@
     <PackageReference Include="Krafs.Publicizer" Version="2.2.1" PrivateAssets="all" />
   </ItemGroup>
 
+  <!-- Framework zip support (bug-report bundle, 2026-07-08). Resolves from the .NET Framework
+       reference assemblies at build; at runtime Unity's Mono ships System.IO.Compression.dll in
+       the game's Managed folder (verified present). -->
+  <ItemGroup>
+    <Reference Include="System.IO.Compression" />
+  </ItemGroup>
+
   <!-- Publicize the game assemblies: the IL2CPP interop layer used to expose
        private members publicly; on Mono the publicizer restores that access
        (compile-time refs with IgnoresAccessChecksTo at runtime). -->
