@@ -634,7 +634,12 @@ namespace BigAmbitionsMP
     /// build can't join and then misparse messages.</summary>
     public static class ProtocolInfo
     {
-        public const int Version = 1;
+        // v2 (mod 0.1.10): BusinessInfo gained DeedOwnerPlayerId (rent-vs-deed split —
+        // a v1 peer would fall back to the tenancy/deed conflation and re-contaminate
+        // the shared world), the vehicle-cargo manifest moved to the 4-part
+        // "item=amount=paid=price" form, and VehicleCargoReq/Res gained the Silent
+        // flag + OpMarkPaid.  Mixed sessions would desync — refuse them cleanly.
+        public const int Version = 2;
     }
 
     /// <summary>Sent by client on connect.</summary>
