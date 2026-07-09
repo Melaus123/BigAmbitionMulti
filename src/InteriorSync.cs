@@ -213,8 +213,14 @@ namespace BigAmbitionsMP
                     if (dirt < DirtWatchThreshold) continue;   // only anomalous shops — healthy ones stay silent
                     string addr = GameStateReader.AddressKey(reg);
                     if (string.IsNullOrEmpty(addr)) continue;
-                    int delta = _lastDirtWatch.TryGetValue(addr, out var last) ? dirt - last : 0;
+                    // Change-gated (2026-07-09, RED ROC report review): 8 shops × "delta=0" × every
+                    // minute carried no information after the first line. The question this probe
+                    // answers is "does dirt ever DECREASE" — so speak on the first sighting of an
+                    // over-threshold shop (baseline) and on any CHANGE; a flat count stays silent.
+                    bool seen = _lastDirtWatch.TryGetValue(addr, out var last);
+                    int delta = seen ? dirt - last : 0;
                     _lastDirtWatch[addr] = dirt;
+                    if (seen && delta == 0) continue;
                     Plugin.Logger.LogWarning(
                         $"[DirtWatch] '{addr}' dirt={dirt} delta={delta:+0;-0;0} since last (~{(int)DirtWatchIntervalSeconds}s) | day {day} h{hod:F1}");
                 }

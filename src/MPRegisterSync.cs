@@ -412,7 +412,7 @@ namespace BigAmbitionsMP
         // Covers every candidate root: ownership, recognized-vs-unrecognized checkout items, the game's
         // IsEmployeeStationEmployedAtHour verdict per till, and the work-shift roster (synthetic vs real-present
         // vs real-MISSING vs real-ORPHANED employees) + the current hour.
-        private static void DumpShopStaffing(BuildingRegistration reg, string addr, string tag)
+        private static void DumpShopStaffing(BuildingRegistration reg, string addr, string tag, bool forced = false)
         {
             try
             {
@@ -424,6 +424,7 @@ namespace BigAmbitionsMP
                 int hour = -1; try { hour = (int)GameStateReader.GetGameTime().hourOfDay; } catch { }
 
                 int nTills = 0, unrecognized = 0;
+                bool tillGap = false;   // a till reads unstaffed while a shift SHOULD cover this hour — the real anomaly
                 var tills = new System.Text.StringBuilder();
                 try
                 {
@@ -437,12 +438,20 @@ namespace BigAmbitionsMP
                                 nTills++;
                                 string sid = ii.id?.ToString() ?? "";
                                 bool staffed = false; try { staffed = Helpers.EmployeeHelper.IsEmployeeStationEmployedAtHour(reg, sid, -1); } catch { }
+                                if (!staffed && StationHasShiftNow(reg, sid, hour)) tillGap = true;
                                 tills.Append($"{n.Replace("ba:itemname_", "")}={(staffed ? "STAFFED" : "unstaffed")} ");
                             }
                             else if (n.IndexOf("register", StringComparison.OrdinalIgnoreCase) >= 0
                                   || n.IndexOf("checkout", StringComparison.OrdinalIgnoreCase) >= 0
                                   || n.IndexOf("counter",  StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
                                 unrecognized++;   // a till-like item NOT in the recognized set (root b)
+                                // 2026-07-09 (RED ROC review): the counter alone was unresolvable from a
+                                // report — the NAME says whether it's a real serving station the whitelist
+                                // misses (ticket booth?) or just furniture matching "counter". Once per type.
+                                if (_unrecognizedTillNames.Add(n))
+                                    Plugin.Logger.LogWarning($"[StaffDiag] unrecognized till-like item type: '{n}' (first seen at '{addr}')");
+                            }
                         }
                 }
                 catch { }
@@ -469,12 +478,45 @@ namespace BigAmbitionsMP
                 }
                 catch { }
 
+                // Anomaly gate (2026-07-09, RED ROC report review): the hourly narrator buried real
+                // signal — a report carried 100+ healthy snapshots ("unstaffed at 10pm, no shift due" is
+                // EXPECTED). Speak only when the data contradicts itself: shift employees the roster
+                // can't resolve (MISSING), employees whose shop can't be resolved (ORPHAN), or a till
+                // unstaffed during an hour a shift SHOULD cover (tillGap). Visitor-side entry dumps
+                // (forced=true) keep logging unconditionally — one line per entry is the cross-machine
+                // evidence pair and self-throttles by the entry event itself.
+                bool anomaly = missing > 0 || orphan > 0 || tillGap;
+                if (!anomaly && !forced) return;
                 Plugin.Logger.LogWarning(
                     $"{tag} '{addr}' mine={mine} bldgOwner='{bldgOwner}' bizOwner='{bizOwner}' h{hour} | tills={nTills} [{tills.ToString().Trim()}]"
+                    + (tillGap ? " TILL-GAP(unstaffed with shift due)" : "")
                     + (unrecognized > 0 ? $" +{unrecognized} UNRECOGNIZED-till-like" : "")
                     + $" | shifts={shifts} (synthetic={synth} realPresent={present} realMISSING={missing} realORPHAN={orphan})");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"{tag} dump '{addr}': {ex.Message}"); }
+        }
+
+        private static readonly HashSet<string> _unrecognizedTillNames = new();
+        private static string _lastStaffSummary = "";
+        private static float _nextStaffSummaryHeartbeatAt;
+
+        /// <summary>Does any work shift reference this station for the CURRENT hour today? (The
+        /// "should be covered" half of the till-gap anomaly test.)</summary>
+        private static bool StationHasShiftNow(BuildingRegistration reg, string stationId, int hour)
+        {
+            try
+            {
+                if (hour < 0 || string.IsNullOrEmpty(stationId)) return false;
+                var today = Helpers.BuildingHelper.GetTodaySchedule(reg);
+                if (today?.workShifts == null) return false;
+                foreach (var w in today.workShifts)
+                    if (w != null && w.itemInstanceId == stationId
+                        && !string.IsNullOrEmpty(w.employeeId)
+                        && hour >= w.startingHour && hour < w.endingHour)
+                        return true;
+            }
+            catch { }
+            return false;
         }
 
         // OWNER side: every 60s, snapshot every shop the local player owns (the source of the duty broadcast).
@@ -509,9 +551,17 @@ namespace BigAmbitionsMP
                     catch { }
                     if (!hasTill) continue;
                     ownedWithTill++;
-                    DumpShopStaffing(reg, GameStateReader.AddressKey(reg), "[StaffDiag/own]");
+                    DumpShopStaffing(reg, GameStateReader.AddressKey(reg), "[StaffDiag/own]");   // anomaly-gated (2026-07-09)
                 }
-                Plugin.Logger.LogWarning($"[StaffDiag/own] SUMMARY ownedShops={owned} withCheckout={ownedWithTill} synthetics={_synthetics.Count} dutyToggles={_cashiers.Count}");
+                // Summary: on CHANGE or as a 10-min heartbeat (was every 60s — a per-minute narrator).
+                // Its presence still proves the tick runs; ownedShops=0 while shops are owned = root c.
+                string summary = $"[StaffDiag/own] SUMMARY ownedShops={owned} withCheckout={ownedWithTill} synthetics={_synthetics.Count} dutyToggles={_cashiers.Count}";
+                if (summary != _lastStaffSummary || Time.unscaledTime >= _nextStaffSummaryHeartbeatAt)
+                {
+                    _lastStaffSummary = summary;
+                    _nextStaffSummaryHeartbeatAt = Time.unscaledTime + 600f;
+                    Plugin.Logger.LogWarning(summary);
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffDiag/own] {ex.Message}"); }
         }
@@ -537,7 +587,7 @@ namespace BigAmbitionsMP
                 if (!hasTill) return;   // not a till shop — irrelevant to the no-workers bug
                 bool synthHere = false; try { synthHere = _synthetics.ContainsKey(addr); } catch { }
                 int togglesHere = 0; try { foreach (var kv in _cashiers) if (kv.Value.address == addr) togglesHere++; } catch { }
-                DumpShopStaffing(reg, addr, "[StaffDiag/visit]");
+                DumpShopStaffing(reg, addr, "[StaffDiag/visit]", forced: true);   // event-driven (one per entry) — keep unconditional
                 Plugin.Logger.LogWarning($"[StaffDiag/visit] '{addr}' synthetic-here={synthHere} duty-toggles-here={togglesHere}");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffDiag/visit] '{addr}': {ex.Message}"); }

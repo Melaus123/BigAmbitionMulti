@@ -2258,13 +2258,24 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Patcher] Baseline check (BEFORE apply): total={total} dirty={dirtyTotal} " +
                     $"(withBiz={withBiz} rivalOwn={withRivalOwn} rivalBiz={withRivalBiz} playerRented={playerRented} avail={availForRent}){sample}");
 
-                if (dirtyTotal > 0)
+                // Rejoin scoping (2026-07-09, RED ROC report review): the suppression question is only
+                // meaningful on the FIRST world load of this app run — CityGenerator ran under
+                // suppression, so a dirty baseline there is a genuine escape. Any LATER load (rejoin
+                // after host loss, reload) re-enters an already-populated world where prior state is
+                // EXPECTED; the report showed 6 false alarms in one evening (~1 per rejoin), each
+                // ~1340 regs = the whole previously-loaded city. The snapshot overwrites either way.
+                if (dirtyTotal > 0 && !_baselineCheckedBefore)
                     Plugin.Logger.LogWarning($"[Patcher] Baseline NOT clean — {dirtyTotal} reg(s) had state before host's snapshot wrote them.  CityGenerator suppression may be incomplete.");
+                else if (dirtyTotal > 0)
+                    Plugin.Logger.LogInfo($"[Patcher] Baseline has prior state ({dirtyTotal} reg(s)) — rejoin/reload into a previously loaded world; expected, snapshot overwrites.");
                 else
                     Plugin.Logger.LogInfo("[Patcher] Baseline is 100% clean ✓");
+                _baselineCheckedBefore = true;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] VerifyCleanBaseline: {ex.Message}"); }
         }
+
+        private static bool _baselineCheckedBefore;
 
         /// <summary>
         /// After applying the snapshot, walk every registration and confirm

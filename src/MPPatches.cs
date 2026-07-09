@@ -2628,16 +2628,30 @@ namespace BigAmbitionsMP
                     int ownerState = BusinessSync.OwnerOpenByAddress.TryGetValue(addr, out var os) ? os : 0;
                     int dayCount   = reg.scheduleDays?.Count ?? -1;
                     var today      = BuildingHelper.GetTodaySchedule(reg);
+                    int hourNow    = SaveGameManager.Current.Hour;
                     string todayDesc;
+                    bool explained = ownerState == 2 || reg.temporarilyClosed;   // positively closed
                     if (today == null) todayDesc = "today=NULL";
                     else
                     {
                         string slots = "";
+                        bool inSlot = false;
                         if (today.openingHourSlots != null)
-                            foreach (var s in today.openingHourSlots) slots += $"[{s.startingHour}-{s.endingHour}]";
+                            foreach (var s in today.openingHourSlots)
+                            {
+                                slots += $"[{s.startingHour}-{s.endingHour}]";
+                                if (hourNow >= s.startingHour && hourNow < s.endingHour) inSlot = true;
+                            }
+                        if (!today.isOpen || !inSlot) explained = true;          // schedule says closed right now
                         todayDesc = $"today.isOpen={today.isOpen} slots={(slots.Length == 0 ? "none" : slots)}";
                     }
-                    Plugin.Logger.LogWarning($"[ShopClosedDiag] DENIED '{addr}' biz='{reg.BusinessName}' ownerState={ownerState}(0=unk/1=open/2=closed) temporarilyClosed={reg.temporarilyClosed} scheduleDays={dayCount} {todayDesc} now=h{SaveGameManager.Current.Hour}/{TimeHelper.GetDayOfWeek()} bizOwnerRival='{reg.businessOwnerRivalId}'");
+                    // Anomaly gate (2026-07-09, RED ROC report review): ~170 lines in one report were all
+                    // legitimate after-hours denials — the diag's own fields contained the explanation.
+                    // A denial the local evidence EXPLAINS is native behavior; only a denial that
+                    // contradicts the evidence (apparently open, yet refused) is the June-19 sync class
+                    // this diagnostic exists to catch. Log ONLY the contradiction.
+                    if (explained) return;
+                    Plugin.Logger.LogWarning($"[ShopClosedDiag] DENIED-WHILE-APPARENTLY-OPEN '{addr}' biz='{reg.BusinessName}' ownerState={ownerState}(0=unk/1=open/2=closed) temporarilyClosed={reg.temporarilyClosed} scheduleDays={dayCount} {todayDesc} now=h{hourNow}/{TimeHelper.GetDayOfWeek()} bizOwnerRival='{reg.businessOwnerRivalId}'");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[ShopClosedDiag] {ex.Message}"); }
             }
