@@ -1682,6 +1682,49 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: PortraitGenerator.GetCharacterPortraitPath(GameInstance) ──
+        // MP self-portrait blank (Rivals page, host + client): the game's Save
+        // regenerates the player portrait NEXT TO THE .HSG — in MP that's
+        // _BAMP_MP\<session>\<stableId>\save portrait.jpg, because
+        // PerformLocalSave passes an explicit characterFolder.  But the 1-arg
+        // path getter (used by LoadPlayerPortrait — the Rivals self row at
+        // RivalLeaderboard :86 and the topbar at Topbar :174/:181 — and by our
+        // ReadLocalPortraitBase64 relay) builds on CurrentVersionFolderPath(),
+        // the NATIVE version folder (EA 0.11\guid-<stableId>\), which never
+        // receives a write in MP.  Read and write never meet, LoadPlayerPortrait
+        // returns null, and the player's own picture is blank.  While an MP
+        // session has a known portrait folder, resolve the 1-arg getter there
+        // so every caller agrees on the folder the save flow actually writes —
+        // including the topbar's regenerate-fallback WRITE, which then
+        // self-heals a fresh session that hasn't saved yet.  The 2-arg overload
+        // (Save's write, explicit folder) and the SaveGameStruct overload
+        // (main-menu save list) are separate methods — untouched.  Gated on a
+        // live MP session so single player and offline forks keep the native
+        // path even if the folder pointer is stale.
+        [HarmonyPatch(typeof(Character.Customization.PortraitGenerator),
+                      nameof(Character.Customization.PortraitGenerator.GetCharacterPortraitPath),
+                      typeof(GameInstance))]
+        public static class Patch_PortraitGenerator_GetCharacterPortraitPath_MpFolder
+        {
+            static bool Prefix(GameInstance saveGame, ref string __result)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                    string? folder = MPSaveCoordinator.PortraitFolder;
+                    if (string.IsNullOrEmpty(folder) || saveGame == null) return true;
+                    __result = System.IO.Path.Combine(folder,
+                        Blueprints.FileSystemHelper.MakeValidFilename(saveGame.SaveGameName + " portrait.jpg"));
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogWarning($"[Patch_PortraitPath_MpFolder] {ex.Message}");
+                    return true;
+                }
+            }
+        }
+
         // ── Suppression: RivalsHelper.GenerateRivals (Phase 1d Wave 2) ────────
         // GenerateRivals uses UuidHelper.GenerateBase64Uuid to make new IDs
         // per session — different on host vs client.  When host syncs

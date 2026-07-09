@@ -51,7 +51,7 @@ namespace BigAmbitionsMP
                     _activeManifest = null;
                     // Reset (new lobby) drops the world identity; a RENAME (non-empty) keeps it —
                     // saving under a new name is still the same world.
-                    if (string.IsNullOrEmpty(_activeSessionName)) _activePlaythroughId = "";
+                    if (string.IsNullOrEmpty(_activeSessionName)) { _activePlaythroughId = ""; PortraitFolder = null; }
                 }
             }
         }
@@ -565,6 +565,18 @@ namespace BigAmbitionsMP
         /// ONLY around a SaveGameManager.Load call, on the main thread.</summary>
         public static volatile string? LoadRedirectFolder;
 
+        /// <summary>The MP character folder holding this player's portrait jpg —
+        /// the game's own Save regenerates "&lt;SaveGameName&gt; portrait.jpg" next
+        /// to the .hsg (SaveGameManager.Save :202) because PerformLocalSave passes
+        /// an explicit characterFolder.  Consulted by
+        /// Patch_PortraitGenerator_GetCharacterPortraitPath_MpFolder so in-game
+        /// portrait READS (LoadPlayerPortrait: Rivals self row + topbar; our
+        /// ReadLocalPortraitBase64 relay) resolve here instead of the native
+        /// version folder, which never receives a write in MP.  Set on MP load
+        /// (LoadOwnHsg) and after each successful local save (freshest rotation
+        /// folder); cleared with the session.  Null → native path passthrough.</summary>
+        public static volatile string? PortraitFolder;
+
         /// <summary>MAIN THREAD: load this player's .hsg out of the MP session folder.
         /// The game's Load() locates saves by re-scanning CurrentVersionFolderPath();
         /// we briefly redirect that to the MP session folder so Load finds + loads our
@@ -593,6 +605,7 @@ namespace BigAmbitionsMP
             LoadRedirectFolder = sessionFolder;
             try   { SaveGameManager.Load(chosen, true); }
             finally { LoadRedirectFolder = null; }
+            PortraitFolder = MPSaveManager.MpCharacterFolder(session, stableId);
             DiagWrite("LoadOwnHsg: redirect OFF, Load returned");
         }
 
@@ -789,6 +802,10 @@ namespace BigAmbitionsMP
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] SaveGameManager.Save: {ex.Message}"); }
                 }
                 DiagWrite($"returned from Save ok={ok}");
+                // Save regenerates the portrait jpg into this folder (async, lands
+                // ~a frame after Save returns) — repoint portrait reads at the
+                // freshest rotation folder.
+                if (ok) PortraitFolder = folder;
 
                 // CRITICAL: the game serializes the GameInstance on a BACKGROUND thread.
                 // If anything mutates the gi while that thread is reading it, the managed
