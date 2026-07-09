@@ -533,6 +533,81 @@ namespace BigAmbitionsMP
         private static string _lastStaffSummary = "";
         private static float _nextStaffSummaryHeartbeatAt;
 
+        // ── [EconProbe] midnight digest (approved diagnostics batch, 2026-07-09) ──────────────────
+        // One line per OWNED business per game-day, read straight from the native ledgers: yesterday's
+        // orderHistory entry (customers + revenue — what the game itself deposited) + today's customer-
+        // entry stats. Answers "my X isn't earning" from the report alone, offices and retail alike.
+        private static int _lastDigestDay = -1;
+
+        public static void TickEconDigest()
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return;
+                int day = gi.Day;
+                if (_lastDigestDay < 0) { _lastDigestDay = day; return; }   // arm on first sight
+                if (day == _lastDigestDay) return;
+                _lastDigestDay = day;
+
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null) continue;
+                    bool mine; try { mine = MergerFlip.TrulyMine(reg); } catch { continue; }
+                    if (!mine) continue;
+                    string biz = ""; try { biz = reg.businessTypeName ?? ""; } catch { }
+                    if (string.IsNullOrEmpty(biz) || biz == "ba:businesstype_empty") continue;
+
+                    int customers = -1; float revenue = -1f;
+                    try
+                    {
+                        if (reg.orderHistory != null)
+                            foreach (var h in reg.orderHistory)
+                                if (h != null && h.dayNumber == day - 1) { customers = h.totalCustomers; revenue = h.totalRevenue; break; }
+                    }
+                    catch { }
+                    var (entries, entriesDone) = CustomerEntrySync.EntryStatsFor(reg.Address);
+                    Plugin.Logger.LogInfo($"[EconProbe] day {day - 1} digest '{GameStateReader.AddressKey(reg)}' biz='{reg.BusinessName}' ({biz.Replace("ba:businesstype_", "")}): " +
+                                          $"customers={customers} revenue=${revenue:N0} todayEntries={entries}/{entriesDone}done" +
+                                          (customers == 0 || revenue == 0f ? "  ← EARNED NOTHING yesterday" : customers < 0 ? "  ← no ledger row for yesterday" : ""));
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[EconProbe] digest: {ex.Message}"); }
+        }
+
+        // ── Duty-broadcast activation summary (TEMPORARY probe, 2026-07-09) ───────────────────────
+        // The hour=-1 fix ACTIVATES schedule-driven duty broadcasting for the first time in the field —
+        // this watches the activation in both failure directions (all-zero while shops have shifts =
+        // the fix didn't take; runaway counts = over-fire). 10-min cadence while in MP. RETIRE after
+        // a couple of clean field sessions (probe lifecycle).
+        private static float _nextDutySummaryAt;
+
+        public static void TickDutySummary()
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (Time.unscaledTime < _nextDutySummaryAt) return;
+                _nextDutySummaryAt = Time.unscaledTime + 600f;
+
+                int shopsWithShifts = 0;
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations != null)
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null) continue;
+                        bool mine; try { mine = MergerFlip.TrulyMine(reg); } catch { continue; }
+                        if (!mine || reg.scheduleDays == null) continue;
+                        foreach (var sd in reg.scheduleDays)
+                            if (sd?.workShifts != null && sd.workShifts.Count > 0) { shopsWithShifts++; break; }
+                    }
+                if (shopsWithShifts == 0 && _empDuty.Count == 0 && _cashiers.Count == 0 && _synthetics.Count == 0) return;   // nothing to watch
+                Plugin.Logger.LogInfo($"[Register] duty summary (10m): empDutyOut={_empDuty.Count} dutyIn={_cashiers.Count} synthetics={_synthetics.Count} ownShopsWithShifts={shopsWithShifts}");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] duty summary: {ex.Message}"); }
+        }
+
         /// <summary>Does any work shift reference this station for the CURRENT hour today? (The
         /// "should be covered" half of the till-gap anomaly test.)</summary>
         private static bool StationHasShiftNow(BuildingRegistration reg, string stationId, int hour)
@@ -992,6 +1067,9 @@ namespace BigAmbitionsMP
         /// display, slice 5 — and the fire route decides replica-vs-native on it.)</summary>
         public static bool IsInjectedStaff(string employeeId)
             => !string.IsNullOrEmpty(employeeId) && _injectedStaff.ContainsKey(employeeId);
+
+        /// <summary>World-health consumer (2026-07-09): how many partner-staff records are injected.</summary>
+        public static int InjectedCount => _injectedStaff.Count;
 
         /// <summary>Slice 5: the shop an injected record belongs to ("" if not injected).</summary>
         public static string InjectedAddrOf(string employeeId)

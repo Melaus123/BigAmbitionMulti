@@ -54,6 +54,22 @@ namespace BigAmbitionsMP
         internal static string? EntryIdOf(Order order)
             => order != null && _seededOrderIds.TryGetValue(order, out var id) ? id : null;
 
+        /// <summary>Econ-digest consumer (2026-07-09): today's entry stats for one shop —
+        /// (total scheduled, completed). (-1,-1) when the table has no row for the address.</summary>
+        internal static (int total, int completed) EntryStatsFor(Address address)
+        {
+            try
+            {
+                var table = Table();
+                if (table == null || address == null || !table.TryGetValue(address, out var entries) || entries == null)
+                    return (-1, -1);
+                int done = 0;
+                foreach (var e in entries) if (e != null && e.completed) done++;
+                return (entries.Count, done);
+            }
+            catch { return (-1, -1); }
+        }
+
         /// <summary>Round-43 (puppet identity): the schedule-entry id behind a LIVE customer's order, on
         /// EITHER side — seeded map on receivers, owner table (minting like CaptureFor) on the owner.
         /// "" = no mapping (a stray — churns on handoff, the rare fallback).</summary>

@@ -300,6 +300,18 @@ namespace BigAmbitionsMP
             MPLifecycle.PhaseChanged += OnLifecyclePhase;
         }
 
+        // World-integrity one-shot (approved diagnostics batch, 2026-07-09): armed at scene-ready,
+        // fires once ~30s later when the rival cache has filled.
+        private float _worldHealthAt = -1f;
+
+        private void TickWorldHealth()
+        {
+            if (_worldHealthAt < 0f || Time.unscaledTime < _worldHealthAt) return;
+            _worldHealthAt = -1f;
+            if (MPServer.IsRunning || MPClient.IsConnected)
+                GameStatePatcher.LogWorldHealth("scene ready +30s");
+        }
+
         // Task #5 (Prabaha report, 2026-07-08): a leftover marker said NOTHING about where the dead
         // session was — menu-kill loop and mid-game crash looked identical. Stamp phase + uptime ~30s.
         private float _nextCrashHeartbeat;
@@ -434,6 +446,9 @@ namespace BigAmbitionsMP
             MergerFlip.Tick();           // merger slice 3: ownership-flip reconcile (1 Hz) + host state push (10s)
             MergerEmployeeSync.Tick();   // merger slice 5: schedule write-back scan on flipped shops (2s)
             MPRegisterSync.TickContextHeal();   // building-context self-heal (hand-vehicle entry skips the entry hook)
+            MPRegisterSync.TickEconDigest();    // [EconProbe] one line per owned business per game-day (2026-07-09)
+            MPRegisterSync.TickDutySummary();   // TEMPORARY: duty-broadcast activation watch, 10m (2026-07-09)
+            TickWorldHealth();                  // one-shot world-integrity line ~30s after scene-ready (2026-07-09)
             RemotePlayerManager.TickVehicleCollisionIgnores();   // remote avatars must not shove vehicles
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
             MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion
@@ -2717,7 +2732,8 @@ namespace BigAmbitionsMP
                                               // enforcement never depends on which machine's scene finishes first
                 InteriorSync.Reset();     // interior subs + owner-snapshot caches die with the scene — a prior session's Authoritative=true snapshot must not bleed into a new world (was never wired up)
                 GameStatePatcher.SweepPurchaserPollution("scene ready");   // heal saves polluted by the pre-round-34 purchaser injectio
-                GameStatePatcher.SweepRivalFieldContamination("scene ready");   // heal renters written into the DEED field (rent-vs-deed split 2026-07-07)n (owner shelves/boxes booting in shop mode)
+                GameStatePatcher.SweepRivalFieldContamination("scene ready");   // heal renters written into the DEED field (rent-vs-deed split 2026-07-09)
+                _worldHealthAt = Time.unscaledTime + 30f;   // world-integrity line AFTER the rival cache fills (30s)
                 // Round-35: a save can carry a STALE BAMP_ proxy id in ActiveVehicleId (borrowed cart
                 // despawned mid-push before the round-34b exit guard existed). IsUsingVehicle then reads
                 // true forever with no resolvable vehicle → box clicks NRE at ItemController.Interact:509

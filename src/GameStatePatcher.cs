@@ -3007,6 +3007,42 @@ namespace BigAmbitionsMP
             return false;
         }
 
+        /// <summary>World-integrity line (approved diagnostics batch, 2026-07-09): one line per session
+        /// describing the world-population invariants MP degradation can break (ANTIPATTERNS Class 14).
+        /// A rival-poor / deed-contaminated world announces itself in the FIRST report instead of being
+        /// reverse-engineered from downstream NREs. Called ~30s after scene-ready (the rival cache
+        /// fills after load; an at-ready read would false-alarm zero).</summary>
+        public static void LogWorldHealth(string reason)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return;
+                int regs = 0, landlorded = 0, playerDeeds = 0, tenanted = 0;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null) continue;
+                    regs++;
+                    string deed = ""; try { deed = reg.buildingOwnerRivalId ?? ""; } catch { }
+                    if (!string.IsNullOrEmpty(deed)) landlorded++;
+                    if (IsSessionPlayerId(deed)) playerDeeds++;
+                    try { if (!string.IsNullOrEmpty(reg.businessOwnerRivalId)) tenanted++; } catch { }
+                }
+                int nonSpecialRivals = -1;
+                try { nonSpecialRivals = BigAmbitions.Rivals.RivalsHelper.GetNonSpecialRivals()?.Count ?? -1; } catch { }
+                int forSale = -1; try { forSale = gi.buildingsForSale?.Count ?? -1; } catch { }
+                int injected = MPRegisterSync.InjectedCount;
+                int players = 0; try { players = MPRestSync.AllPlayers().Count; } catch { }
+
+                bool sick = nonSpecialRivals == 0 || playerDeeds > 0;
+                string line = $"[WorldHealth] ({reason}) regs={regs} landlorded={landlorded} rivalBiz={tenanted} playerDeeds={playerDeeds} " +
+                              $"nonSpecialRivals={nonSpecialRivals} forSale={forSale} injectedStaff={injected} players={players}";
+                if (sick) Plugin.Logger.LogWarning(line + "  ← DEGRADED WORLD (rival-poor and/or deed contamination)");
+                else      Plugin.Logger.LogInfo(line);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[WorldHealth] {ex.Message}"); }
+        }
+
         /// <summary>One-shot save repair (scene-ready, every machine): the pre-split plumbing wrote
         /// RENTERS into buildingOwnerRivalId (the deed field) and erased AI landlords on vacate —
         /// both persisted into saves. Any session player id found in a deed field moves to the tenant
