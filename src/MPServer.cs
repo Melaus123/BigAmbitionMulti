@@ -955,6 +955,15 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.MergerEmployeeEdit:
+                {
+                    // Merger slice 5: routed fire / schedule write-back — gate, then apply or relay.
+                    var ee = env.GetPayload<EmployeeEditPayload>();
+                    if (ee != null && SenderIs(ee.PlayerId, senderPid, MessageType.MergerEmployeeEdit))
+                        GameStatePatcher.EnqueueOnMainThread(() => HostRouteEmployeeEdit(ee, senderPid));
+                    break;
+                }
+
                 case MessageType.TaxiHail:
                     HandleTaxiHail(env);
                     break;
@@ -3454,6 +3463,25 @@ namespace BigAmbitionsMP
         /// <summary>Relay a grant-gated business edit to the owning client (merger slice 3).</summary>
         public static void SendBusinessEditTo(string ownerPid, BusinessEditPayload p)
             => SendToPid(ownerPid, MessageEnvelope.Create(MessageType.BusinessEditRequest, "host", p));
+
+        /// <summary>HOST (main thread), slice 5: gate a routed employee/schedule op — the sender must
+        /// own the shop or hold Business access to its owner (the merger unions into that grant) —
+        /// then apply locally (host owns it) or relay to the owner's machine.</summary>
+        public static void HostRouteEmployeeEdit(EmployeeEditPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(senderPid)) return;
+                if (!BuildingOwners.TryGetValue(p.AddressKey, out var owner) || string.IsNullOrEmpty(owner))
+                { Plugin.Logger.LogWarning($"[MergerStaff] employee edit for unowned '{p.AddressKey}' — dropped."); return; }
+                string ownerPid = owner == "host" ? MPConfig.PlayerId : owner;
+                if (ownerPid != senderPid && !GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))
+                { Plugin.Logger.LogWarning($"[MergerStaff] employee edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no access, dropped."); return; }
+                if (ownerPid == MPConfig.PlayerId) MergerEmployeeSync.ApplyOnOwner(p);
+                else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.MergerEmployeeEdit, "host", p));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MergerStaff] HostRouteEmployeeEdit: {ex.Message}"); }
+        }
 
         /// <summary>The merged-companies state broadcast: per group, online member pids (enforcement)
         /// + the full display roster from the store (offline members stay listed by name).</summary>

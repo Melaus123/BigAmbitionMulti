@@ -153,6 +153,7 @@ namespace BigAmbitionsMP
         BusinessEditRequest = 149,       // Member → Host → business owner: an owner-only business edit made on a merger-flipped replica (slice 3: the open/close toggle) — the OWNER applies it natively and their sync republishes the truth.
         MergerWalletDelta   = 150,       // Member → Host: a native money change on a merged member's machine (delta + transaction key) — the host ledger is the shared wallet's single source of truth (slice 4).
         MergerWalletState   = 151,       // Host → All (group-tagged) or targeted (GroupId="" = personal payout on leave): the authoritative shared balance; members set their local mirror to it.
+        MergerEmployeeEdit  = 152,       // Member → Host → business owner (slice 5): a routed employee/schedule op on a merger-flipped shop ("fire" an injected partner employee; "schedule" = wholesale hours+shifts write-back). Owner applies natively; roster/business heartbeats republish the truth.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -161,6 +162,30 @@ namespace BigAmbitionsMP
     {
         public string AddressKey        { get; set; } = "";
         public bool   TemporarilyClosed { get; set; }
+    }
+
+    /// <summary>Merger slice 5 — a routed employee/schedule operation on a partner's business.
+    /// Action="fire": remove EmployeeId (an injected partner-staff record on the sender's machine) —
+    /// the owner runs the native RemoveEmployee. Action="schedule": replace the shop's whole
+    /// scheduleDays (opening hours + work shifts) with Schedule — last-writer-wins co-op semantics.
+    /// Action="adopt": the sender hired/assigned THEIR OWN employee into the owner's shop — the full
+    /// record (the DTO fields below; never Newtonsoft a game type, §10) migrates into the owner's
+    /// save, where the staffing engine and payroll for that shop actually live.</summary>
+    public class EmployeeEditPayload
+    {
+        public string PlayerId   { get; set; } = "";   // sender (validated SenderIs at the host)
+        public string Action     { get; set; } = "";
+        public string AddressKey { get; set; } = "";
+        public string EmployeeId { get; set; } = "";
+        public List<ScheduleDayInfo> Schedule { get; set; } = new();
+        // "adopt" record fields
+        public string Name         { get; set; } = "";
+        public int    Gender       { get; set; } = -1;
+        public int    AgeDays      { get; set; }
+        public float  Wage         { get; set; }
+        public float  Satisfaction { get; set; } = 100f;
+        public List<string> Skills  { get; set; } = new();   // "name=value" (characterData.skills)
+        public List<string> Demands { get; set; } = new();
     }
 
     /// <summary>Merger slice 4 — one native money delta from a merged member's machine. NEVER an
@@ -462,6 +487,12 @@ namespace BigAmbitionsMP
         public string Name      { get; set; } = "";
         public int    Gender    { get; set; } = -1;
         public bool   Available { get; set; } = true; // IsEmployeeAvailable on the owner (sick/replaced → false)
+        // Merger slice 5 — display fidelity for injected records (a member's MyEmployees/BizMan shows the
+        // partner's staff with real numbers; the payroll skip is id-keyed, so a real wage never double-bills).
+        public float  Wage         { get; set; }
+        public float  Satisfaction { get; set; } = 100f;
+        public int    AgeDays      { get; set; }
+        public List<string> Skills { get; set; } = new();   // "name=value" pairs
     }
 
     public class BuildingCargoResPayload

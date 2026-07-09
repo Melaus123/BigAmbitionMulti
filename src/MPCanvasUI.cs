@@ -409,6 +409,7 @@ namespace BigAmbitionsMP
                                                         // requested state (rate-limit drops lost it before)
             CustomerPuppets.Tick();      // round-41: simulator election (host) + puppet stream/render (both-inside shops)
             MergerFlip.Tick();           // merger slice 3: ownership-flip reconcile (1 Hz) + host state push (10s)
+            MergerEmployeeSync.Tick();   // merger slice 5: schedule write-back scan on flipped shops (2s)
             MPRegisterSync.TickContextHeal();   // building-context self-heal (hand-vehicle entry skips the entry hook)
             RemotePlayerManager.TickVehicleCollisionIgnores();   // remote avatars must not shove vehicles
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
@@ -2276,6 +2277,10 @@ namespace BigAmbitionsMP
             string muted = _hubNative ? "#8795A0" : "#9AA3B2";
 
             // Merger slice 1 — company header rows above the key list.
+            // DEV-ONLY until the merger campaign ships (user 2026-07-07: next release lands before the
+            // feature is ready). The entire merger stack is inert without the UI: no button → no
+            // proposal → no state → every merger patch is a pass-through (the inertness contract, §13).
+#if BAMP_DEV
             if (MergerSync.IAmMember)
             {
                 AddPermRow(idx++, RowH, $"<b>Merged company</b>  <color={muted}>{string.Join(", ", MergerSync.MemberNames)}</color>",
@@ -2287,6 +2292,7 @@ namespace BigAmbitionsMP
                     ("Accept",  purple, "merger", (byte)9,  GrantKind.Vehicle),
                     ("Decline", grey,   "merger", (byte)10, GrantKind.Vehicle));
             }
+#endif
 
             // Each row: the player + a Vehicle key toggle and a Housing key toggle (purple = granted).
             var onlineNames = new HashSet<string>(players);
@@ -2296,12 +2302,13 @@ namespace BigAmbitionsMP
                 bool gv = GrantSync.IsGranted(GrantKind.Vehicle, me, pl);
                 bool gh = GrantSync.IsGranted(GrantKind.Housing, me, pl);
                 bool gb = GrantSync.IsGranted(GrantKind.Business, me, pl);
-                // Merger chip: member of MY company → static "Merged"; member of ANOTHER company →
-                // static "In a company" (they must leave it before they can be proposed to); my
-                // proposal pending → "Cancel offer" (act 12 withdraws — host arms a re-propose
-                // cooldown so withdraw/re-propose can't be used to spam notifications); else a
-                // Merge button (act 8 → confirm popup). A merger implies every key, so the kind
-                // toggles read fully granted while merged (IsGranted unions membership).
+#if BAMP_DEV
+                // Merger chip (DEV-ONLY until the campaign ships): member of MY company → static
+                // "Merged"; member of ANOTHER company → static "In a company" (they must leave it
+                // before they can be proposed to); my proposal pending → "Cancel offer" (act 12
+                // withdraws — host arms a re-propose cooldown so withdraw/re-propose can't be used to
+                // spam notifications); else a Merge button (act 8 → confirm popup). A merger implies
+                // every key, so the kind toggles read fully granted while merged (IsGranted unions).
                 var mchip = (MergerSync.IAmMember && MergerSync.IsMemberPid(pl)) ? ("Merged", purple, "", (byte)0, GrantKind.Vehicle)
                           : MergerSync.InAnyGroup(pl)                            ? ("In a company", grey, "", (byte)0, GrantKind.Vehicle)
                           : MergerSync.OutgoingToPid == pl                       ? ("Cancel offer", grey, "merger", (byte)12, GrantKind.Vehicle)
@@ -2311,6 +2318,12 @@ namespace BigAmbitionsMP
                     ("Housing",  gh ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Housing),
                     ("Business", gb ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Business),
                     mchip);
+#else
+                AddPermRow(idx++, RowH, pl,
+                    ("Vehicle",  gv ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Vehicle),
+                    ("Housing",  gh ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Housing),
+                    ("Business", gb ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Business));
+#endif
             }
             // Offline grantees (not in the live roster) — same two toggles, by StableId handle.
             foreach (var g in mine)
@@ -2646,6 +2659,7 @@ namespace BigAmbitionsMP
                 PassengerSync.Reset();    // passenger seats/locks die with the scene
                 MergerSync.ResetSceneState(); // merger runtime + pending-proposal UI state (same lifecycle as grants)
                 MergerFlip.Reset();           // flip tracking dies with the scene's regs (tick re-applies from state)
+                MergerEmployeeSync.Reset();   // schedule write-back baselines die with the regs too (slice 5)
                 GrantSync.ResetSceneState();  // runtime grants + local caches die with the scene; the DURABLE store
                                               // survives — its lifecycle is session boundaries (StartNewGame /
                                               // manifest restore), NOT scene loads. The old full Reset() here fired

@@ -361,6 +361,14 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.MergerEmployeeEdit:
+                {
+                    // Slice 5, host-relayed: this machine OWNS the shop — apply the fire/schedule natively.
+                    var ee = env.GetPayload<EmployeeEditPayload>();
+                    if (ee != null) GameStatePatcher.EnqueueOnMainThread(() => MergerEmployeeSync.ApplyOnOwner(ee));
+                    break;
+                }
+
                 case MessageType.MergerRequest:
                 {
                     // "proposal": someone wants to merge with ME — surface Accept/Decline in the

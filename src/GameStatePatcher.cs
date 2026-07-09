@@ -2453,8 +2453,11 @@ namespace BigAmbitionsMP
                 {
                     // The owner's OWN shop hours live in their save — never overwrite them from the host's
                     // (possibly stale/blank) replica.  AI + other players' shops take the host's relayed hours.
+                    // Slice 5: while OUR schedule edit to a flipped partner shop is in flight, hold the
+                    // owner heartbeat for that shop — a pre-edit snapshot must not clobber the member's edit.
                     if (reg.scheduleDays != null && info.Schedule != null && info.Schedule.Count > 0
-                        && !receiverOwnsThis)
+                        && !receiverOwnsThis
+                        && !MergerEmployeeSync.HoldScheduleApply(info.AddressKey))
                     {
                         reg.scheduleDays.Clear();
                         foreach (var d in info.Schedule)
@@ -2486,6 +2489,9 @@ namespace BigAmbitionsMP
                             }
                             reg.scheduleDays.Add(sd);
                         }
+                        // Slice 5: the owner's truth is the write-back diff baseline (and an echo of our
+                        // own edit clears the pending hold).
+                        MergerEmployeeSync.NoteOwnerScheduleApplied(info.AddressKey, reg);
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] schedule apply for {info.AddressKey}: {ex.Message}"); }

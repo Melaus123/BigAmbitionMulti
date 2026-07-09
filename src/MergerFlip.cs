@@ -37,6 +37,8 @@ namespace BigAmbitionsMP
 
         public static int FlippedCount => _flipped.Count;
         public static bool IsFlipped(string addressKey) => !string.IsNullOrEmpty(addressKey) && _flipped.ContainsKey(addressKey);
+        /// <summary>Slice 5: the currently flipped partner shops (the schedule write-back scans these).</summary>
+        public static IEnumerable<string> FlippedKeys => _flipped.Keys;
 
         /// <summary>TRUE ownership for the MOD's sync layer: RentedByPlayer minus the flip. Every
         /// publisher scan, authority gate, and receiver guard in OUR code must use this instead of

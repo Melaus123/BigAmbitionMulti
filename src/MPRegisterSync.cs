@@ -895,14 +895,35 @@ namespace BigAmbitionsMP
             => !string.IsNullOrEmpty(addressKey) && _rosterByAddr.ContainsKey(addressKey);
 
         /// <summary>Is this employee id one WE injected from another player's roster? (Payroll-skip consumer:
-        /// injected records carry wage 0, but they must never enter the local payroll at all.)</summary>
+        /// the payroll skip is keyed on THIS — which is why injected records can carry the REAL wage for
+        /// display, slice 5 — and the fire route decides replica-vs-native on it.)</summary>
         public static bool IsInjectedStaff(string employeeId)
             => !string.IsNullOrEmpty(employeeId) && _injectedStaff.ContainsKey(employeeId);
+
+        /// <summary>Slice 5: the shop an injected record belongs to ("" if not injected).</summary>
+        public static string InjectedAddrOf(string employeeId)
+            => !string.IsNullOrEmpty(employeeId) && _injectedStaff.TryGetValue(employeeId, out var v) ? v.addr : "";
+
+        /// <summary>Slice 5: optimistic local removal of an injected record (routed fire) — the owner's
+        /// roster republish is the durable confirmation (or restores it if the op was lost).</summary>
+        public static void DropInjectedStaff(string employeeId) => RemoveInjectedStaff(employeeId);
+
+        /// <summary>Slice 5: owner-side nudge after a routed employee op — republish this shop's roster
+        /// NOW instead of waiting out the 30s heartbeat.</summary>
+        public static void ForceRosterRepublish(string addressKey)
+        {
+            try { _rosterSigSent.Remove(addressKey); _nextRosterPublishAt = 0f; } catch { }
+        }
 
         private static string RosterSig(List<StaffInfo> staff)
         {
             var sb = new System.Text.StringBuilder();
-            foreach (var s in staff) sb.Append(s.Id).Append('|').Append(s.Name).Append('|').Append(s.Gender).Append('|').Append(s.Available).Append(';');
+            foreach (var s in staff)
+                sb.Append(s.Id).Append('|').Append(s.Name).Append('|').Append(s.Gender).Append('|').Append(s.Available)
+                  .Append('|').Append(s.Wage.ToString("F1", System.Globalization.CultureInfo.InvariantCulture))
+                  .Append('|').Append(s.Satisfaction.ToString("F0", System.Globalization.CultureInfo.InvariantCulture))
+                  .Append('|').Append(s.Skills != null ? string.Join(",", s.Skills) : "")
+                  .Append(';');
             return sb.ToString();
         }
 
@@ -934,7 +955,24 @@ namespace BigAmbitionsMP
                         bool avail = true; try { avail = e.IsEmployeeAvailable(); } catch { }
                         int gender = -1;   try { gender = (int)e.characterData.gender; } catch { }
                         string nm = "";    try { nm = e.characterData?.name ?? ""; } catch { }
-                        staff.Add(new StaffInfo { Id = e.id, Name = nm, Gender = gender, Available = avail });
+                        var si = new StaffInfo { Id = e.id, Name = nm, Gender = gender, Available = avail };
+                        // Slice 5 display fidelity — a member's MyEmployees shows the partner's staff
+                        // with real numbers (their payroll skip is id-keyed; a real wage can't double-bill).
+                        try { si.Wage = e.hourlyWage; } catch { }
+                        try { si.Satisfaction = e.satisfaction; } catch { }
+                        try { si.AgeDays = e.characterData?.ageInDays ?? 0; } catch { }
+                        try
+                        {
+                            // characterData.skills is THE skill list (HasSkill/GetPrimarySkill read it;
+                            // EmployeeInstance.skills is a decoy — decompile-verified :211/:226).
+                            var skills = e.characterData?.skills;
+                            if (skills != null)
+                                foreach (var sk in skills)
+                                    if (sk != null && !string.IsNullOrEmpty(sk.name))
+                                        si.Skills.Add(sk.name + "=" + sk.value.ToString("F1", System.Globalization.CultureInfo.InvariantCulture));
+                        }
+                        catch { }
+                        staff.Add(si);
                     }
                     staff.Sort((a, b) => string.CompareOrdinal(a.Id, b.Id));
                     string sig = RosterSig(staff);
@@ -1020,6 +1058,7 @@ namespace BigAmbitionsMP
                             {
                                 if (!string.IsNullOrEmpty(s.Name)) have.inst.characterData.name = s.Name;
                                 have.inst.isAbsent = !s.Available; have.inst.isReplaced = false;
+                                ApplyStaffFidelity(have.inst, s);   // slice 5: wage/skills/satisfaction stay current
                             }
                             catch { }
                             updated++;
@@ -1027,17 +1066,32 @@ namespace BigAmbitionsMP
                         }
                         bool existsLocally = false;
                         try { existsLocally = Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(s.Id); } catch { }
-                        if (existsLocally) continue;   // defensive: never shadow a local record
+                        if (existsLocally)
+                        {
+                            // Slice 5 adopt-confirm: the owner's roster carrying an id we have PENDING-ADOPT
+                            // means the record now lives in THEIR save — release our local original and fall
+                            // through to inject the display copy. Any other local-id collision keeps the
+                            // defensive skip (never shadow a genuinely local record).
+                            if (!MergerEmployeeSync.ConfirmAdopt(s.Id)) continue;
+                            try
+                            {
+                                for (int i = gi.EmployeeInstances.Count - 1; i >= 0; i--)
+                                    if (gi.EmployeeInstances[i]?.id == s.Id) gi.EmployeeInstances.RemoveAt(i);
+                                Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(s.Id);
+                            }
+                            catch { }
+                        }
                         var inst = Helpers.EmployeeHelper.CreateAIEmployeeInstance("ba:skill_customerservice");
                         if (inst == null) continue;
                         inst.id = s.Id;                       // REAL id — the synced shifts match it natively
-                        inst.hourlyWage = 0f;
+                        inst.hourlyWage = 0f;                 // overwritten by fidelity below when the wire carries it
                         inst.satisfaction = 100f;
                         inst.assignedAddress = new Address(reg.StreetName, reg.StreetNumber);
                         inst.characterData.name = string.IsNullOrEmpty(s.Name) ? "Staff" : s.Name;
                         inst.characterData.ageInDays = Helpers.RecruitmentHelper.GetRandomEmployeeAgeInDays();
                         try { if (s.Gender >= 0) inst.characterData.gender = (BigAmbitions.Characters.Gender)s.Gender; } catch { }
                         inst.isAbsent = !s.Available; inst.isReplaced = false;
+                        ApplyStaffFidelity(inst, s);          // slice 5: real wage/skills/satisfaction/age for display
                         for (int i = gi.EmployeeInstances.Count - 1; i >= 0; i--)
                             if (gi.EmployeeInstances[i]?.id == inst.id) gi.EmployeeInstances.RemoveAt(i);
                         gi.EmployeeInstances.Add(inst);
@@ -1065,6 +1119,35 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] apply: {ex.Message}"); }
+        }
+
+        /// <summary>Slice 5: apply the wire's display-fidelity fields to an injected record. Wage is
+        /// safe to be real — the payroll skip keys on the injected-id registry, not on wage 0. Skills
+        /// replace the placeholder so MyEmployees/BizMan show the partner staff's true role/levels.</summary>
+        private static void ApplyStaffFidelity(EmployeeInstance inst, StaffInfo s)
+        {
+            try
+            {
+                if (s.Wage > 0f) inst.hourlyWage = s.Wage;
+                if (s.Satisfaction > 0f) inst.satisfaction = s.Satisfaction;
+                if (s.AgeDays > 0) inst.characterData.ageInDays = s.AgeDays;
+                if (s.Skills != null && s.Skills.Count > 0)
+                {
+                    // characterData.skills is THE list — HasSkill/GetPrimarySkill/every display reads it
+                    // (EmployeeInstance.skills is a decoy; decompile-verified EmployeeInstance :211/:226).
+                    var skills = inst.characterData.skills;
+                    skills.Clear();
+                    foreach (var pair in s.Skills)
+                    {
+                        int eq = pair.IndexOf('=');
+                        if (eq <= 0) continue;
+                        float.TryParse(pair.Substring(eq + 1), System.Globalization.NumberStyles.Float,
+                                       System.Globalization.CultureInfo.InvariantCulture, out var val);
+                        skills.Add(new BigAmbitions.Characters.Skills.Skill { name = pair.Substring(0, eq), value = val });
+                    }
+                }
+            }
+            catch { }
         }
 
         private static void RemoveInjectedStaff(string id)
