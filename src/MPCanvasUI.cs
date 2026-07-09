@@ -922,6 +922,7 @@ namespace BigAmbitionsMP
         private TextMeshProUGUI? _dockTitle, _dockDay, _dockTime, _dockPlayers, _dockSkipLbl;
         private RectTransform? _dockXRT;
         private RectTransform? _tgtM1h, _tgtM15, _tgtP15, _tgtP1h, _skipToggleRT;
+        private bool _skipCommitNudge;   // a wake target was adjusted without committing → pulse "Request time skip"
         private readonly RectTransform?[] _presetRT = new RectTransform?[4];
         private static readonly int[] PresetHours = { 7, 12, 18, 22 };
         private readonly RectTransform?[] _matchRT = new RectTransform?[3];
@@ -1001,8 +1002,22 @@ namespace BigAmbitionsMP
 
                 if (_dockSkipLbl != null)
                     _dockSkipLbl.text = voting ? "Skip requested — click to cancel" : "Request time skip";
+                if (voting) _skipCommitNudge = false;   // committed — the nudge did its job
                 if (_skipToggleImg != null)
-                    _skipToggleImg.color = voting ? new Color(0.24f, 0.60f, 0.31f, 1f) : new Color(0.19f, 0.42f, 0.67f, 1f);
+                {
+                    // Goonie report (2026-07-09): a player adjusted a wake time and waited — nothing
+                    // happens until "Request time skip" is clicked, and nothing SAID so. Once a target
+                    // is touched without a vote, pulse the commit button gently until it's clicked.
+                    var baseCol = voting ? new Color(0.24f, 0.60f, 0.31f, 1f) : new Color(0.19f, 0.42f, 0.67f, 1f);
+                    if (!voting && _skipCommitNudge)
+                    {
+                        // Full-swing pulse (user: the soft one was too easy to miss): breathe the button
+                        // all the way to a bright blue-white, ~0.8 Hz — unmissable, layout untouched.
+                        float w = 0.5f + 0.5f * Mathf.Sin(Time.unscaledTime * 5.0f);
+                        baseCol = Color.Lerp(baseCol, new Color(0.48f, 0.80f, 1.0f, 1f), w);
+                    }
+                    _skipToggleImg.color = baseCol;
+                }
 
                 // Left column: compact who-voted checklist + match buttons.
                 if (_dockPlayers != null)
@@ -1068,6 +1083,9 @@ namespace BigAmbitionsMP
                         return;
                     }
 
+                // Every dock interaction logs ONE line: reporters rarely answer follow-ups, so the
+                // click trail in the log is the interview (Goonie report, 2026-07-09 — a session of
+                // pre-vote preset clicks was completely invisible).
                 double step = 0;
                 if      (RectHit(_tgtM1h, mp)) step = -60;
                 else if (RectHit(_tgtM15, mp)) step = -15;
@@ -1077,6 +1095,9 @@ namespace BigAmbitionsMP
                 {
                     _skipTarget = Math.Max(minT, (voting ? MPRestSync.LocalGoal : _skipTarget) + step);
                     if (voting) MPRestSync.SetSkipRequest(true, _skipTarget);
+                    else _skipCommitNudge = true;   // target touched, vote not started → pulse the commit button
+                    var (sd2, st2) = MPRestSync.FmtParts(_skipTarget);
+                    Plugin.Logger.LogInfo($"[Rest] dock click: step {step:+0;-0}m → target {sd2} {st2} (voting={voting}).");
                     return;
                 }
                 for (int i = 0; i < _presetRT.Length; i++)
@@ -1084,10 +1105,14 @@ namespace BigAmbitionsMP
                     {
                         _skipTarget = MPRestSync.NextOccurrence(PresetHours[i]);
                         if (voting) MPRestSync.SetSkipRequest(true, _skipTarget);
+                        else _skipCommitNudge = true;   // ditto — "6:00" alone does not start the wait
+                        var (pd2, pt2) = MPRestSync.FmtParts(_skipTarget);
+                        Plugin.Logger.LogInfo($"[Rest] dock click: preset {PresetHours[i]}:00 → target {pd2} {pt2} (voting={voting}).");
                         return;
                     }
                 if (RectHit(_skipToggleRT, mp))
                 {
+                    Plugin.Logger.LogInfo($"[Rest] dock click: skip toggle (voting={voting}, seated={MPRestSync.Seated}).");
                     if (voting) MPRestSync.SetSkipRequest(false);
                     else        MPRestSync.SetSkipRequest(true, _skipTarget);
                 }

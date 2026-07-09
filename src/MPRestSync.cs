@@ -183,7 +183,13 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo("[Rest] skip request OFF.");
                 return;
             }
-            if (!Seated) return;
+            if (!Seated)
+            {
+                // Never swallow a player's commit silently (Goonie report, 2026-07-09): a click landing
+                // in a seated-flag flicker was indistinguishable from "never clicked" in the logs.
+                Plugin.Logger.LogInfo("[Rest] skip request IGNORED — not seated at click time.");
+                return;
+            }
             double now = NowMinutes();
             if (goalMinutes < now + 5) goalMinutes = now + 5;
             goalMinutes = Math.Ceiling(goalMinutes / 5.0) * 5.0;
