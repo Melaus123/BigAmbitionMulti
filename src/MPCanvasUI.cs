@@ -392,6 +392,7 @@ namespace BigAmbitionsMP
             MPClient.EndJoinQuiesce();
             GameStatePatcher.StripGhostVehicles("world-ready");   // leaked-ghost hygiene (data only)
             MPRegisterSync.StripOrphanSyntheticEmployees("world-ready");   // clear duty-staff a prior save left behind
+            MPRegisterSync.RepairOrphanDutyShifts("world-ready");          // remove id-only duty shifts ("New Text" report) + log real-id orphans
             ApplyFreshSpawnWarp();  // fresh-character joins: designated start, not the prefab spot
             ApplySpawnSidestep();   // fresh games: one navmesh-validated de-stack, placement final
             // Placement diagnostic: position-restore runs in load-finish —

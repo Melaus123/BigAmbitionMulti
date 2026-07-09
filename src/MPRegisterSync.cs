@@ -839,6 +839,18 @@ namespace BigAmbitionsMP
             {
                 if (string.IsNullOrEmpty(addressKey) || !_synthetics.TryGetValue(addressKey, out var s)) return;
                 _synthetics.Remove(addressKey);
+                // A schedule auto-fill may be IN FLIGHT for this business on a background thread
+                // (ScheduleAutoFillerHelper: new Thread(FillWithEmployees)).  Native roster mutations
+                // abort it (fire → EmployeeInstance.RemoveEmployee → AbortAutoFillForBusiness); ours
+                // must too, or the filler keeps writing shifts for the id we sweep below — those
+                // become permanently orphaned ("New Text" field report, 2026-07-09).  Cheap no-op
+                // when nothing is running; null-guarded internally.
+                try
+                {
+                    var fillReg = Helpers.BuildingHelper.GetBuildingRegistration(s.inst.assignedAddress);
+                    if (fillReg != null) UI.Smartphone.Apps.BizMan.Schedule.BizManSchedule.AbortAutoFillForBusiness(fillReg);
+                }
+                catch { }
                 try { Helpers.EmployeeHelper.UnassignEmployeeFromAllWorkshifts(s.inst); }
                 catch (Exception ux) { Plugin.Logger.LogWarning($"[SynthStaff] unassign: {ux.Message}"); }
                 var gi = SaveGameManager.Current;
@@ -950,6 +962,67 @@ namespace BigAmbitionsMP
             return removed;
         }
 
+        /// <summary>REPAIR ("New Text" field report, 2026-07-09): remove WorkShifts whose employeeId
+        /// carries our BAMP_DUTY_ prefix but has NO matching employee record anywhere in the roster.
+        /// Creation vector: schedule auto-fill runs on a BACKGROUND thread (ScheduleAutoFillerHelper:
+        /// new Thread(FillWithEmployees)) with the business roster INCLUDING our synthetic (its
+        /// assignedAddress is the shop, so the BizMan employee query returns it); when duty ends
+        /// mid-fill, RemoveSynthetic sweeps the record + existing shifts but the filler then writes
+        /// NEW shifts for the dead id.  Every cleanup we had iterated EMPLOYEES — an id existing only
+        /// in shifts survived every sweep and serialized forever.  In the schedule UI such a shift
+        /// renders as "New Text" (WorkShiftSlider.UpdateState NREs before setting the label) and
+        /// cannot be removed (UpdateEmployeeAfterWorkShiftChange throws before the UI refresh).
+        /// The prefix is ours alone → zero-false-positive removal, any mode, any ownership.
+        /// DIAGNOSTIC (wide net, quiet logs): also LOGS — never removes — unresolvable REAL-id
+        /// shifts on the player's own businesses, in case field ghosts are not prefix-tagged
+        /// (would mean this diagnosis is wrong/partial; next report's log settles it).  Real-id
+        /// shifts on OTHER owners' businesses are the synced schedule — expected, not logged.</summary>
+        public static int RepairOrphanDutyShifts(string when)
+        {
+            int removed = 0, realIdOrphans = 0;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return 0;
+                var known = new HashSet<string>();
+                if (gi.EmployeeInstances != null)
+                    foreach (var e in gi.EmployeeInstances)
+                        if (!string.IsNullOrEmpty(e?.id)) known.Add(e.id);
+                foreach (var r in gi.BuildingRegistrations)
+                {
+                    if (r?.scheduleDays == null) continue;
+                    bool mine = false; try { mine = r.RentedByPlayer; } catch { }
+                    for (int d = 0; d < r.scheduleDays.Count; d++)
+                    {
+                        var day = r.scheduleDays[d];
+                        if (day?.workShifts == null) continue;
+                        List<WorkShift>? dead = null;
+                        for (int j = 0; j < day.workShifts.Count; j++)
+                        {
+                            var w = day.workShifts[j];
+                            string id = w?.employeeId ?? "";
+                            if (string.IsNullOrEmpty(id) || known.Contains(id)) continue;
+                            if (id.StartsWith(SyntheticDutyEmployeeIdPrefix))
+                            {
+                                (dead ??= new List<WorkShift>()).Add(w!);
+                                Plugin.Logger.LogWarning($"[ScheduleRepair] orphan duty shift ({when}): '{id}' biz='{r.BusinessName}' station='{w!.itemInstanceId}' day={d} h{w.startingHour}-{w.endingHour} — removing.");
+                            }
+                            else if (mine && realIdOrphans < 20)
+                            {
+                                realIdOrphans++;
+                                Plugin.Logger.LogWarning($"[ScheduleDiag] REAL-ID ORPHAN shift ({when}): '{id}' biz='{r.BusinessName}' station='{w!.itemInstanceId}' day={d} h{w.startingHour}-{w.endingHour} — left in place.");
+                            }
+                        }
+                        if (dead != null) { foreach (var w in dead) day.RemoveWorkShift(w); removed += dead.Count; }
+                    }
+                }
+                if (removed > 0 || realIdOrphans > 0)
+                    Plugin.Logger.LogWarning($"[ScheduleRepair] {when}: removed {removed} orphan duty shift(s); {realIdOrphans} real-id orphan(s) logged only.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[ScheduleRepair] {when}: {ex.Message}"); }
+            return removed;
+        }
+
         /// <summary>SAVE-path strip (anti-pattern Class 5): the synthetic register cashiers (BAMP_DUTY_*) and
         /// their injected WorkShifts are MP-only runtime objects and must NOT be serialised into the .hsg —
         /// they would leak into a single-player load, where the world-ready cleanup never runs.  Unlike
@@ -959,6 +1032,9 @@ namespace BigAmbitionsMP
         /// mutating gi mid-serialise corrupts the save.  Safe to call on a save that has none (returns a no-op).</summary>
         public static System.Action StripSyntheticsForSave(string when)
         {
+            // Orphan duty shifts (id-only leftovers with no record) must never serialize — sweep
+            // them permanently before capturing the live synthetics (no restore for garbage).
+            try { RepairOrphanDutyShifts(when + "-save"); } catch { }
             var removedEmployees = new List<EmployeeInstance>();
             var removedShifts    = new List<(ScheduleDay day, WorkShift shift)>();
             try
@@ -1345,6 +1421,14 @@ namespace BigAmbitionsMP
             {
                 if (!_injectedStaff.TryGetValue(id, out var have)) return;
                 _injectedStaff.Remove(id);
+                // Same auto-fill hazard as RemoveSynthetic: an in-flight background fill holding
+                // this record would write shifts for an id that is about to lose its record.
+                try
+                {
+                    var fillReg = Helpers.BuildingHelper.GetBuildingRegistration(have.inst?.assignedAddress);
+                    if (fillReg != null) UI.Smartphone.Apps.BizMan.Schedule.BizManSchedule.AbortAutoFillForBusiness(fillReg);
+                }
+                catch { }
                 var gi = SaveGameManager.Current;
                 if (gi?.EmployeeInstances != null) gi.EmployeeInstances.Remove(have.inst);
                 try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(id); } catch { }

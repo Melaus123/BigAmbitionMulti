@@ -1725,6 +1725,118 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: ScheduleAutoFiller ctor — exclude mod-injected records ────
+        // "New Text" field report (2026-07-09): the BizMan auto-fill builds its
+        // employee list by assignedAddress, which INCLUDES our duty synthetics
+        // (BAMP_DUTY_*, assignedAddress = the shop) and injected partner
+        // records.  The fill then schedules them like real staff — and because
+        // it runs on a background thread, our duty-off/roster-drop sweeps can
+        // race it, leaving shifts for ids whose record is gone (permanently
+        // orphaned; rendered as "New Text", unremovable).  The ctor is the one
+        // funnel every fill path passes through (BizMan button, per-day fill,
+        // EA010 compat fix) AFTER the null-employees case is resolved — filter
+        // the list in place before the filler snapshots it.  Runs on the main
+        // thread (the worker thread starts later in AutoFillSchedule).
+        [HarmonyPatch(typeof(Buildings.Schedule.ScheduleAutoFiller), MethodType.Constructor,
+                      new Type[] { typeof(System.Collections.Generic.List<Entities.EmployeeInstance>), typeof(BuildingRegistration), typeof(ScheduleDay) })]
+        public static class Patch_ScheduleAutoFiller_ExcludeModRecords
+        {
+            static void Prefix(System.Collections.Generic.List<Entities.EmployeeInstance> __0, BuildingRegistration __1)
+            {
+                try
+                {
+                    if (__0 == null) return;
+                    int n = __0.RemoveAll(e =>
+                    {
+                        string id = e?.id ?? "";
+                        return id.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix) || MPRegisterSync.IsInjectedStaff(id);
+                    });
+                    if (n > 0)
+                        Plugin.Logger.LogInfo($"[ScheduleGuard] excluded {n} synthetic/injected record(s) from auto-fill for '{__1?.BusinessName}'.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_ScheduleAutoFiller_ExcludeModRecords] {ex.Message}"); }
+            }
+        }
+
+        // ── Patch: WorkShiftSlider.UpdateState — orphan-shift render guard ───
+        // A WorkShift whose employeeId resolves to no record makes UpdateState
+        // NRE at employeeById.characterData.name BEFORE the name label is set —
+        // the TMP component keeps its prefab default, which is literally
+        // "New Text".  Swallow ONLY that case: label the slider "(missing
+        // staff)", hide the warning icon, and log (throttled per id).  Any
+        // exception with a RESOLVABLE employee is rethrown — not our case.
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider), "UpdateState")]
+        public static class Patch_WorkShiftSlider_UpdateState_OrphanGuard
+        {
+            private static readonly System.Collections.Generic.HashSet<string> _loggedIds = new();
+            static Exception? Finalizer(Exception __exception,
+                                        UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider __instance,
+                                        WorkShift __0)
+            {
+                if (__exception == null) return null;
+                try
+                {
+                    string id = __0?.employeeId ?? "";
+                    Entities.EmployeeInstance? emp = null;
+                    try { emp = Helpers.EmployeeHelper.GetEmployeeById(id); } catch { }
+                    if (emp != null) return __exception;   // some other failure — surface it
+                    var t = typeof(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider);
+                    if (HarmonyLib.AccessTools.Field(t, "employeeNameLabel")?.GetValue(__instance) is TMPro.TMP_Text label)
+                        label.text = "(missing staff)";
+                    if (HarmonyLib.AccessTools.Field(t, "warningObj")?.GetValue(__instance) is UnityEngine.GameObject warn)
+                        warn.SetActive(false);
+                    if (_loggedIds.Add(id))
+                        Plugin.Logger.LogWarning($"[ScheduleDiag] slider rendered orphan shift (emp='{id}') — labeled '(missing staff)'.");
+                    return null;
+                }
+                catch { return __exception; }
+            }
+        }
+
+        // ── Patch: WorkShiftSlider.UpdateWarning — null-employee guard ───────
+        // The drag/edit path (OnWorkShiftChanged) calls UpdateWarning with the
+        // GetEmployeeById result unchecked; for an orphan shift that is null
+        // and the demands loop NREs.  Nothing to warn about for a nonexistent
+        // employee — hide the icon and skip.
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider), "UpdateWarning")]
+        public static class Patch_WorkShiftSlider_UpdateWarning_NullGuard
+        {
+            static bool Prefix(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider __instance, Entities.EmployeeInstance __0)
+            {
+                if (__0 != null) return true;
+                try
+                {
+                    if (HarmonyLib.AccessTools.Field(typeof(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider), "warningObj")
+                            ?.GetValue(__instance) is UnityEngine.GameObject warn)
+                        warn.SetActive(false);
+                }
+                catch { }
+                return false;
+            }
+        }
+
+        // ── Patch: ScheduleHelper.UpdateEmployeeAfterWorkShiftChange(string) ──
+        // The removal path (right-click → RemoveWorkShift) indexes
+        // EmployeesById[employeeId] AFTER removing the shift but BEFORE the two
+        // UI-refresh calls; for an orphan id the indexer throws and the slider
+        // never leaves the screen — the field report's "unable to remove".
+        // Skipping the per-employee UI update for an id with no record is a
+        // semantic no-op; the refresh calls then complete normally.
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper), "UpdateEmployeeAfterWorkShiftChange",
+                      new Type[] { typeof(string) })]
+        public static class Patch_ScheduleHelper_UpdateEmployee_OrphanGuard
+        {
+            static bool Prefix(string __0)
+            {
+                try
+                {
+                    var dict = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.EmployeesById;
+                    return dict != null && dict.ContainsKey(__0 ?? "");
+                }
+                catch { return true; }
+            }
+        }
+
         // ── Suppression: RivalsHelper.GenerateRivals (Phase 1d Wave 2) ────────
         // GenerateRivals uses UuidHelper.GenerateBase64Uuid to make new IDs
         // per session — different on host vs client.  When host syncs
