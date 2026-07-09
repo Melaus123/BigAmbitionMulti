@@ -2802,6 +2802,45 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Complaint message builder NRE shield (RED ROC reports, 2026-07-09) ────────────────────
+        // Complaint.GetComplaintMessageData picks a NON-SPECIAL rival to name in the message
+        // (FindSuitableRival(...).rivalName — no null check). In the reporters' world the rival
+        // roster had collapsed to just the two players (the rent-vs-deed conflation degraded rival
+        // attribution, and session players register as SPECIAL rivals) → FindSuitableRival returned
+        // null → an NRE EVERY HOUR that aborted EmployeeHelper.RunHourly mid-loop — every employee
+        // sorted after the thrower did no hourly work ("my office staff are not working"). The root
+        // is fixed (692e320 + repair sweep), but already-degraded saves can't regrow erased landlords,
+        // so the complaint path must survive a rival-poor world: swallow the NRE and substitute a
+        // neutral rival name.
+        [HarmonyPatch(typeof(AI.Employees.Complaint), nameof(AI.Employees.Complaint.GetComplaintMessageData))]
+        public static class Patch_Complaint_MessageData_RivalPoorShield
+        {
+            private static int _shielded;
+
+            static Exception? Finalizer(Exception __exception, Entities.EmployeeInstance employeeInstance,
+                                        ref System.Collections.Generic.Dictionary<string, string> __result)
+            {
+                if (__exception == null) return null;
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return __exception;   // SP: vanilla behavior
+                string biz = "the company";
+                try
+                {
+                    var reg = Helpers.BuildingHelper.GetBuildingRegistration(employeeInstance?.assignedAddress);
+                    if (reg != null && !string.IsNullOrEmpty(reg.BusinessName)) biz = reg.BusinessName;
+                }
+                catch { }
+                __result = new System.Collections.Generic.Dictionary<string, string>
+                {
+                    { "businessName", biz },
+                    { "rivalName", "another company" }
+                };
+                _shielded++;
+                if (_shielded <= 3 || _shielded % 100 == 0)
+                    Plugin.Logger.LogWarning($"[Guard] Complaint.GetComplaintMessageData threw ({__exception.GetType().Name}) — rival-poor world? Substituted neutral names (#{_shielded}).");
+                return null;
+            }
+        }
+
         // ── MyEmployees: hide injected partner-staff records (RED ROC report, 2026-07-09) ─────────
         // The roster sync injects OTHER players' employees into gi.EmployeeInstances so the game's own
         // staffing engine can man their stations in visited shops — but the MyEmployees app lists that
@@ -3211,9 +3250,20 @@ namespace BigAmbitionsMP
         // detect that exact state, clear our chat focus/suppression and skip the
         // native body so it can't throw; Escape now ESCAPES our block instead of
         // crashing.  Inert when SuppressGameInput is false (returns true = run native).
-        [HarmonyPatch(typeof(GameManager), "HandleEscapeClick")]
+        [HarmonyPatch]
         public static class Patch_GM_HandleEscapeClick_NullGuard
         {
+            // Attribute-targeted form failed on every install ("Patching exception in method null",
+            // seen in our own log AND both 2026-07-09 field reports) while the sibling
+            // HasInputSelected patch on the same class succeeds — resolve explicitly and LOG the
+            // outcome so the next failure names itself instead of hiding in the patch driver's wrapper.
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var m = HarmonyLib.AccessTools.DeclaredMethod(typeof(GameManager), "HandleEscapeClick");
+                Plugin.Logger.LogInfo($"[Patch] GameManager.HandleEscapeClick resolve: {(m != null ? "found" : "NOT FOUND")}");
+                return m;
+            }
+
             static bool Prefix()
             {
                 try

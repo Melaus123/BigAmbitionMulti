@@ -73,7 +73,11 @@ namespace BigAmbitionsMP
             static void Postfix(float __state)    => ForwardMoneyDiff(__state, "compat force-sale (building)");
         }
 
-        [HarmonyPatch(typeof(Helpers.RealEstateHelper), "SellBuildingForCompat")]
+        // Explicit argument types (2026-07-09, own-log catch): SellBuildingForCompat has THREE
+        // overloads — the name-only patch failed "Ambiguous match" and the wallet bypass guard was
+        // silently NOT applied. The (float, Address) overload is the one that writes Money directly;
+        // the other two funnel into it.
+        [HarmonyPatch(typeof(Helpers.RealEstateHelper), "SellBuildingForCompat", typeof(float), typeof(Address))]
         public static class Patch_RealEstateHelper_SellForCompat_WalletForward
         {
             static void Prefix(out float __state) => __state = MoneyNow();
