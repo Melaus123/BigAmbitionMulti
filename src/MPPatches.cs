@@ -2802,6 +2802,30 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── MyEmployees: hide injected partner-staff records (RED ROC report, 2026-07-09) ─────────
+        // The roster sync injects OTHER players' employees into gi.EmployeeInstances so the game's own
+        // staffing engine can man their stations in visited shops — but the MyEmployees app lists that
+        // same collection, so a partner's whole workforce appeared under "My Employees" ("many of my
+        // friend's customer service employees are showing"). Filter injected records out of the APP's
+        // list only (the staffing engine keeps seeing them) — unless a MERGER makes them ours (slice 5).
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.MyEmployees.EmployeeScrollerController), "PopulateAllModels")]
+        public static class Patch_MyEmployees_HideInjectedStaff
+        {
+            static void Postfix(System.Collections.Generic.List<UI.Smartphone.Apps.MyEmployees.EmployeeModel> allModels)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    int removed = allModels.RemoveAll(m =>
+                        m != null && MPRegisterSync.IsInjectedStaff(m.employeeId)
+                                  && !MPRegisterSync.IsInjectedFromMergedPartner(m.employeeId));
+                    if (removed > 0)
+                        Plugin.Logger.LogInfo($"[StaffRoster] MyEmployees: hid {removed} injected partner-staff record(s) (display only).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] MyEmployees filter: {ex.Message}"); }
+            }
+        }
+
         // ── MP economy shields (2026-06-19) ───────────────────────────────────
         // Other players' shops carry a businessOwnerRivalId locally, so the game's AI city-economy treats them
         // as AI rivals — and it only spares RentedByPlayer (the LOCAL player's own). These guards stop the AI
@@ -3411,7 +3435,9 @@ namespace BigAmbitionsMP
         /// <summary>Round-32 belt-and-braces: roster-injected staff records (another player's employees,
         /// mirrored locally so visitors see them work) must NEVER enter the local payroll. They carry wage 0,
         /// so the charge would be $0 anyway — but a $0 salary line for someone else's cashier in the local
-        /// player's finances is wrong on its face. PayWage is the single native charge point.</summary>
+        /// player's finances is wrong on its face. PayWage is the single native charge point.
+        /// (Slice 5 note: injected records now carry the REAL wage for display — this skip is what makes
+        /// that safe.)</summary>
         [HarmonyPatch(typeof(Entities.EmployeeInstance), nameof(Entities.EmployeeInstance.PayWage))]
         public static class Patch_EmployeeInstance_PayWage_SkipInjected
         {
@@ -3425,6 +3451,56 @@ namespace BigAmbitionsMP
                 }
                 catch { }
                 return true;
+            }
+        }
+
+        /// <summary>Injected-record leak audit (user probe, 2026-07-09): an injected partner-staff record
+        /// is a DISPLAY/STAFFING puppet — the real employee's life (satisfaction, complaints, worked
+        /// hours) runs on the OWNER's machine. The native per-employee hourly was running ALL of it on
+        /// the local copies too; the worst path: a complaint deadline expiring LOCALLY calls
+        /// ComplaintResign() → Resign() — bogus "your employee is unhappy" messages about someone else's
+        /// staff, and (with the slice-5 fire routing) a visitor's local complaint sim could genuinely
+        /// fire the partner's REAL employee. One chokepoint kills the whole family.</summary>
+        [HarmonyPatch(typeof(Entities.EmployeeInstance), nameof(Entities.EmployeeInstance.RunHourly))]
+        public static class Patch_EmployeeInstance_RunHourly_SkipInjected
+        {
+            static bool Prefix(Entities.EmployeeInstance __instance)
+            {
+                try
+                {
+                    if ((MPServer.IsRunning || MPClient.IsConnected)
+                        && __instance != null && MPRegisterSync.IsInjectedStaff(__instance.id))
+                        return false;
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        /// <summary>Injected-record leak audit (2026-07-09): "employ N people" personal goals count the
+        /// unfiltered employee query — 113 injected partner records on the reporter's client would
+        /// complete employment goals instantly. Re-run the goal's own query and subtract the injected.</summary>
+        [HarmonyPatch(typeof(EmploymentGoal), "GetValue")]
+        public static class Patch_EmploymentGoal_ExcludeInjected
+        {
+            static void Postfix(EmploymentGoal __instance, ref int __result)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    if (__result <= 0) return;
+                    var matches = Helpers.EmployeeHelper.GetEmployeeInstances(new EmployeeInstancesQueryInfo
+                    {
+                        excludeBeingReplaced = true,
+                        isAssignedToAnyWorkShift = __instance.requiresToBeScheduled,
+                        withSkills = (!__instance.requireSkill) ? null : new string[1] { __instance.skill }
+                    });
+                    int injected = 0;
+                    foreach (var e in matches)
+                        if (e != null && MPRegisterSync.IsInjectedStaff(e.id)) injected++;
+                    if (injected > 0) __result = Math.Max(0, __result - injected);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] employment-goal filter: {ex.Message}"); }
             }
         }
 

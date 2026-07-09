@@ -366,7 +366,13 @@ namespace BigAmbitionsMP
                         try { reg.itemInstances.TryGetValue(stationId, out ii); } catch { }
                         if (ii == null) continue;
                         bool staffed = false;
-                        try { staffed = Helpers.EmployeeHelper.IsEmployeeStationEmployedAtHour(reg, stationId, -1); }
+                        // CURRENT HOUR, not -1 (RED ROC reports, 2026-07-09): the native query does a plain
+                        // InRange(hour, shift) — hour -1 NEVER matches a shift, so this check was false for
+                        // every scheduled employee since the feature shipped (2026-06-12). Only the
+                        // owner-personally-working early-return could pass — employee-run shops never
+                        // broadcast duty, visitors never saw synthetic staff (their logs: synthetics=0,
+                        // dutyToggles=0, every register "unstaffed" at every hour).
+                        try { staffed = Helpers.EmployeeHelper.IsEmployeeStationEmployedAtHour(reg, stationId, SaveGameManager.Current.Hour); }
                         catch { }
                         if (!staffed) continue;
                         var pos = new Vector3(ii.position.x, ii.position.y, ii.position.z);
@@ -437,7 +443,9 @@ namespace BigAmbitionsMP
                             {
                                 nTills++;
                                 string sid = ii.id?.ToString() ?? "";
-                                bool staffed = false; try { staffed = Helpers.EmployeeHelper.IsEmployeeStationEmployedAtHour(reg, sid, -1); } catch { }
+                                // CURRENT HOUR, not -1 — see TickEmployeeDuty: -1 never matches a shift, so
+                                // this diag reported every register "unstaffed" regardless of the schedule.
+                                bool staffed = false; try { staffed = Helpers.EmployeeHelper.IsEmployeeStationEmployedAtHour(reg, sid, SaveGameManager.Current.Hour); } catch { }
                                 if (!staffed && StationHasShiftNow(reg, sid, hour)) tillGap = true;
                                 tills.Append($"{n.Replace("ba:itemname_", "")}={(staffed ? "STAFFED" : "unstaffed")} ");
                             }
@@ -478,18 +486,43 @@ namespace BigAmbitionsMP
                 }
                 catch { }
 
+                // Any SCHEDULED station (office desk, factory bench, DJ booth…) with a shift due now but
+                // no employee working = the same gap class as a till (RED ROC "office staff not giving
+                // outputs", 2026-07-09 — offices have no till, so the old diag never looked at them).
+                int schedStations = 0, schedStaffedNow = 0; bool stationGap = false;
+                try
+                {
+                    var stationIds = new HashSet<string>();
+                    if (reg.scheduleDays != null)
+                        foreach (var sd in reg.scheduleDays)
+                            if (sd?.workShifts != null)
+                                foreach (var w in sd.workShifts)
+                                    if (w != null && !string.IsNullOrEmpty(w.itemInstanceId) && !string.IsNullOrEmpty(w.employeeId))
+                                        stationIds.Add(w.itemInstanceId);
+                    schedStations = stationIds.Count;
+                    foreach (var sid in stationIds)
+                    {
+                        bool st = false; try { st = Helpers.EmployeeHelper.IsEmployeeStationEmployedAtHour(reg, sid, SaveGameManager.Current.Hour); } catch { }
+                        if (st) schedStaffedNow++;
+                        else if (StationHasShiftNow(reg, sid, hour)) stationGap = true;
+                    }
+                }
+                catch { }
+
                 // Anomaly gate (2026-07-09, RED ROC report review): the hourly narrator buried real
                 // signal — a report carried 100+ healthy snapshots ("unstaffed at 10pm, no shift due" is
                 // EXPECTED). Speak only when the data contradicts itself: shift employees the roster
-                // can't resolve (MISSING), employees whose shop can't be resolved (ORPHAN), or a till
-                // unstaffed during an hour a shift SHOULD cover (tillGap). Visitor-side entry dumps
-                // (forced=true) keep logging unconditionally — one line per entry is the cross-machine
-                // evidence pair and self-throttles by the entry event itself.
-                bool anomaly = missing > 0 || orphan > 0 || tillGap;
+                // can't resolve (MISSING), employees whose shop can't be resolved (ORPHAN), or any
+                // station unstaffed during an hour a shift SHOULD cover (tillGap/stationGap). Visitor-
+                // side entry dumps (forced=true) keep logging unconditionally — one line per entry is
+                // the cross-machine evidence pair and self-throttles by the entry event itself.
+                bool anomaly = missing > 0 || orphan > 0 || tillGap || stationGap;
                 if (!anomaly && !forced) return;
                 Plugin.Logger.LogWarning(
                     $"{tag} '{addr}' mine={mine} bldgOwner='{bldgOwner}' bizOwner='{bizOwner}' h{hour} | tills={nTills} [{tills.ToString().Trim()}]"
+                    + $" stations={schedStations} staffedNow={schedStaffedNow}"
                     + (tillGap ? " TILL-GAP(unstaffed with shift due)" : "")
+                    + (stationGap ? " STATION-GAP(scheduled station unstaffed with shift due)" : "")
                     + (unrecognized > 0 ? $" +{unrecognized} UNRECOGNIZED-till-like" : "")
                     + $" | shifts={shifts} (synthetic={synth} realPresent={present} realMISSING={missing} realORPHAN={orphan})");
             }
@@ -549,8 +582,18 @@ namespace BigAmbitionsMP
                             }
                     }
                     catch { }
-                    if (!hasTill) continue;
-                    ownedWithTill++;
+                    // Offices/factories have no till but DO have scheduled stations — the old till-only
+                    // gate made "office staff not producing" invisible to every report (2026-07-09).
+                    bool hasScheduledStations = false;
+                    try
+                    {
+                        if (reg.scheduleDays != null)
+                            foreach (var sd in reg.scheduleDays)
+                                if (sd?.workShifts != null && sd.workShifts.Count > 0) { hasScheduledStations = true; break; }
+                    }
+                    catch { }
+                    if (!hasTill && !hasScheduledStations) continue;
+                    if (hasTill) ownedWithTill++;
                     DumpShopStaffing(reg, GameStateReader.AddressKey(reg), "[StaffDiag/own]");   // anomaly-gated (2026-07-09)
                 }
                 // Summary: on CHANGE or as a 10-min heartbeat (was every 60s — a per-minute narrator).
@@ -953,6 +996,24 @@ namespace BigAmbitionsMP
         /// <summary>Slice 5: the shop an injected record belongs to ("" if not injected).</summary>
         public static string InjectedAddrOf(string employeeId)
             => !string.IsNullOrEmpty(employeeId) && _injectedStaff.TryGetValue(employeeId, out var v) ? v.addr : "";
+
+        /// <summary>Is this injected record a MERGED partner's employee? Injected records exist to
+        /// staff stations in OTHER players' shops — they are NOT the local player's employees, and
+        /// MyEmployees must not list them (RED ROC report, 2026-07-09: "many of my friend's customer
+        /// service employees are showing"). Under a merger they ARE ours by contract (slice 5) —
+        /// resolve the shop's roster publisher and ask the merger.</summary>
+        public static bool IsInjectedFromMergedPartner(string employeeId)
+        {
+            try
+            {
+                if (!_injectedStaff.TryGetValue(employeeId ?? "", out var v)) return false;
+                lock (_rosterByAddr)
+                    if (_rosterByAddr.TryGetValue(v.addr, out var r))
+                        return MergerSync.IsMemberPid(r.pid);
+            }
+            catch { }
+            return false;
+        }
 
         /// <summary>Slice 5: optimistic local removal of an injected record (routed fire) — the owner's
         /// roster republish is the durable confirmation (or restores it if the op was lost).</summary>
