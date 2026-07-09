@@ -592,3 +592,76 @@ Every hit must tolerate null: `?.`, an explicit null check, or an enclosing try/
 
 *Registry seeded from real fix history (git log + investigation notes); it is not
 exhaustive — add a class the moment a second instance of any pattern shows up.*
+## Class 13 — Dead patch class: a Harmony patch that never applied is silent feature loss
+
+**Pattern.** A `[HarmonyPatch]` class fails to bind — thrown ("Ambiguous match" on an overloaded
+name-only target, "method null" on a missing/renamed target) or, sneakier, `TargetMethod(s)`
+resolves NOTHING and the class "succeeds" with zero bindings. Whatever that class guarded —
+a money-bypass forward, an NRE shield, a suppression — is simply OFF, and nothing downstream
+looks any different until the guarded path fires in the field.
+
+**Why it bites.** The failure is one log line at load, printed once, in a wall of 180 success
+lines. The 2026-07-09 audit found the slice-4 wallet bypass guard had shipped UNAPPLIED for two
+days ("Ambiguous match": the target had THREE overloads), an escape-click guard failing on every
+install since it was written, and eleven "0 method(s)" lines nobody could classify because the
+old patch driver's global-target diff couldn't tell "target shared with an earlier class"
+(benign) from "bound nothing" (dead).
+
+**Detection.**
+```
+rg -n "FAILED|BOUND NOTHING|dead," <deploy Player.log>       # after EVERY build
+rg -n 'HarmonyPatch\(typeof\([^)]+\), *"' src/                # name-only targets → check overloads
+```
+The patch driver now classifies per-class binding truth (`ClassProcessor.Patch()` return count):
+dead classes log `BOUND NOTHING` at WARN and ride every bug report as `PatchIssues:`.
+
+**Safe fixes.**
+1. Overloaded targets: pin with explicit `argumentTypes` in the attribute.
+2. Fragile targets: explicit `TargetMethod()` with a resolution log line, so the next failure
+   names itself instead of hiding in the driver's wrapper exception.
+3. Read the patch summary after every build AND every game update — a game rename turns a
+   working patch into a dead one with zero compile-time signal (Class 3's runtime twin).
+
+**Known instances (all fixed 2026-07-09).**
+- `Patch_RealEstateHelper_SellForCompat_WalletForward` — ambiguous over 3 overloads; wallet
+  bypass guard unapplied. Fixed with `(float, Address)` argumentTypes.
+- `Patch_GM_HandleEscapeClick_NullGuard` — "method null" on every install; converted to logged
+  `TargetMethod()` resolution.
+
+---
+
+## Class 14 — Native invariant broken by MP world degradation (the rival-poor world)
+
+**Pattern.** Native code assumes world-population invariants that single-player generation
+guarantees forever: "non-special rivals exist", "every building has a landlord", "the for-sale
+pool is non-empty". MP sync bugs (or their lingering save damage) can empty those populations —
+and the native consumers deref the picks bare (`GetNonSpecialRivals().GetRandom().id`,
+`FindSuitableRival(...).rivalName`). The NRE then lands INSIDE a Class 11 sequential chain, so
+one impossible-in-SP world state kills whole economy ticks, and the symptom surfaces somewhere
+absurdly far from the cause ("my office staff are not working" ← hourly employee loop aborted ←
+complaint message couldn't name a rival ← rival roster collapsed ← rent-vs-deed field conflation).
+
+**Why it bites.** The invariant break is INVISIBLE in the moment — the world was degraded by an
+already-fixed bug days earlier, persists in the save, and CANNOT self-repair (landlords are
+assigned at worldgen only). Fixing the original writer does nothing for existing saves; every
+bare native deref over the degraded population stays a live hourly/daily mine.
+
+**Detection.**
+```
+rg -n "GetNonSpecialRivals|GetRandom\(\)\.|FirstOrDefault\(\)\." <decompile>   # bare picks over collections
+```
+Ask of every hit: can an MP bug (or its save damage) EMPTY this collection? If yes, the consumer
+needs a shield — root-cause fixes don't heal old saves.
+
+**Safe fixes.**
+1. Finalizer shields on the native consumer, failing to the NATIVE-LEGAL empty state ("" rival id
+   = no landlord; neutral names in message data), MP-gated, throttle-logged.
+2. Fix the writer AND sweep-repair what's repairable — but treat unrepairable degradation
+   (erased worldgen-only data) as permanent: the shield is the fix for those saves.
+
+**Known instances (shielded 2026-07-09).**
+- `Complaint.GetComplaintMessageData` — hourly NRE in rival-poor worlds aborted
+  `EmployeeHelper.RunHourly` mid-loop ("office staff not working", RED ROC field report).
+- `RivalsHelper.GetRandomRivalForBuilding` — host daily real-estate rotation NRE in the same worlds.
+
+---

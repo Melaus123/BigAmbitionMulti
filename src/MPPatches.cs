@@ -2841,6 +2841,29 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Rival-poor shield #2 (2026-07-09 audit): GetRandomRivalForBuilding ────────────────────
+        // Same class as the complaint NRE: `GetNonSpecialRivals().GetRandom().id` with no empty-list
+        // protection — called at RUNTIME by the host's daily real-estate rotation (RealEstateHelper
+        // :108/:126 assign a rival owner) and by load-time compatibility fixes. In a rival-poor world
+        // (degraded saves; players register as SPECIAL rivals) the pick NREs and the daily rotation
+        // dies. An empty rival id is the benign native state ("no landlord"), so fail to that.
+        [HarmonyPatch(typeof(BigAmbitions.Rivals.RivalsHelper), nameof(BigAmbitions.Rivals.RivalsHelper.GetRandomRivalForBuilding))]
+        public static class Patch_RivalsHelper_GetRandomRivalForBuilding_RivalPoorShield
+        {
+            private static int _shielded;
+
+            static Exception? Finalizer(Exception __exception, ref string __result)
+            {
+                if (__exception == null) return null;
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return __exception;   // SP: vanilla behavior
+                __result = "";
+                _shielded++;
+                if (_shielded <= 3 || _shielded % 100 == 0)
+                    Plugin.Logger.LogWarning($"[Guard] GetRandomRivalForBuilding threw ({__exception.GetType().Name}) — rival-poor world? Returned no-owner (#{_shielded}).");
+                return null;
+            }
+        }
+
         // ── MyEmployees: hide injected partner-staff records (RED ROC report, 2026-07-09) ─────────
         // The roster sync injects OTHER players' employees into gi.EmployeeInstances so the game's own
         // staffing engine can man their stations in visited shops — but the MyEmployees app lists that

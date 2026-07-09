@@ -327,6 +327,8 @@ namespace BigAmbitionsMP
             sb.AppendLine($"PreviousCrashDetected: {PendingCrashDetected}");
             if (!string.IsNullOrWhiteSpace(PendingCrashHint))
                 sb.AppendLine($"PreviousCrashHint: {PendingCrashHint}");
+            // A failed/dead patch class is silent feature loss — every report names them (2026-07-09).
+            sb.AppendLine($"PatchIssues: {(ModEntry.PatchIssues.Count == 0 ? "none" : string.Join(" | ", ModEntry.PatchIssues))}");
             sb.AppendLine();
             sb.AppendLine("## Runtime");
             sb.AppendLine($"GameVersion: {Blank(Application.version)}");

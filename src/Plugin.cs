@@ -29,6 +29,11 @@ namespace BigAmbitionsMP
     {
         public static ModEntry Instance { get; private set; } = null!;
 
+        /// <summary>Patch classes that failed or bound nothing at load — a dead patch class is
+        /// SILENT FEATURE LOSS (2026-07-09 audit: the slice-4 wallet guard shipped unapplied for two
+        /// days). Rides every bug report so the field self-reports it.</summary>
+        public static readonly System.Collections.Generic.List<string> PatchIssues = new();
+
         private Harmony? _harmony;
         private GameObject? _uiHost;
 
@@ -51,30 +56,43 @@ namespace BigAmbitionsMP
             // Apply Harmony patches per-class so a single bad class can't take
             // down the rest (PatchAll aborts on the first throw).
             _harmony = new Harmony("com.bamp.bigambitionsmp");
-            int okClasses = 0, failClasses = 0, totalPatched = 0;
+            int okClasses = 0, failClasses = 0, deadClasses = 0, totalPatched = 0;
             foreach (var t in typeof(ModEntry).Assembly.GetTypes())
             {
                 if (!t.GetCustomAttributes(typeof(HarmonyPatch), true).Any()) continue;
                 try
                 {
                     var before = _harmony.GetPatchedMethods().Count();
-                    _harmony.CreateClassProcessor(t).Patch();
+                    // Patch() returns the methods THIS class attached to — the per-class truth. The old
+                    // global-target diff couldn't tell "target shared with an earlier class" (benign,
+                    // the round-15 goose chase) from "bound NOTHING" (dead class = silent feature loss;
+                    // 2026-07-09 audit: the slice-4 wallet guard shipped unapplied behind exactly this
+                    // ambiguity, next to eleven unreviewable zero lines).
+                    var bound = _harmony.CreateClassProcessor(t).Patch();
                     var added = _harmony.GetPatchedMethods().Count() - before;
-                    okClasses++;
                     totalPatched += added;
-                    // "0 method(s)" is NOT necessarily a failure: `added` counts NEWLY-patched methods, so a
-                    // class whose target an earlier class already patched reports 0 (cost a round-15 goose
-                    // chase concluding two live wraps were dead). Say so explicitly.
-                    Plugin.Logger.LogInfo($"[Plugin] Patched {t.Name}: {added} method(s)"
-                        + (added == 0 ? " (0 NEW — target may already be patched by an earlier class; not necessarily a failure)" : ""));
+                    int boundCount = bound?.Count ?? 0;
+                    if (boundCount == 0)
+                    {
+                        deadClasses++;
+                        PatchIssues.Add($"{t.Name}: bound nothing");
+                        Plugin.Logger.LogWarning($"[Plugin] Patch class {t.Name} BOUND NOTHING — dead class (empty TargetMethod(s)); whatever it guards is OFF.");
+                    }
+                    else
+                    {
+                        okClasses++;
+                        Plugin.Logger.LogInfo($"[Plugin] Patched {t.Name}: {boundCount} method(s)"
+                            + (added == 0 ? " (targets shared with an earlier class)" : ""));
+                    }
                 }
                 catch (Exception ex)
                 {
                     failClasses++;
+                    PatchIssues.Add($"{t.Name}: {ex.GetType().Name}: {ex.Message}");
                     Plugin.Logger.LogError($"[Plugin] Patch class {t.Name} FAILED: {ex.GetType().Name}: {ex.Message}");
                 }
             }
-            Plugin.Logger.LogInfo($"[Plugin] Patch summary: {okClasses} class(es) OK, {failClasses} failed, {totalPatched} method(s) patched total.");
+            Plugin.Logger.LogInfo($"[Plugin] Patch summary: {okClasses} class(es) OK, {failClasses} failed, {deadClasses} dead, {totalPatched} method(s) patched total.");
 
             Plugin.Logger.LogInfo($"BigAmbitionsMP v{MyPluginInfo.PLUGIN_VERSION} ({MyPluginInfo.BuildTag}) loaded. Canvas UI active.");
             return Task.CompletedTask;
