@@ -24,6 +24,11 @@ namespace BigAmbitionsMP
 
         public static bool PendingCrashDetected { get; private set; }
         public static string PendingCrashSummary => _pendingCrashSummary;
+        /// <summary>Human-readable one-liner about WHERE the previous session died ("last alive
+        /// 20:07:31, phase 'main menu', uptime 41s") — parsed from the heartbeat fields of the stale
+        /// marker. Empty on markers from before the heartbeat existed. Task #5 (2026-07-08): the
+        /// Prabaha report had NO way to tell a menu-kill loop from a real gameplay crash.</summary>
+        public static string PendingCrashHint { get; private set; } = "";
 
         public static void MarkSessionStarted()
         {
@@ -41,7 +46,8 @@ namespace BigAmbitionsMP
                     {
                         PendingCrashDetected = true;
                         _pendingCrashSummary = old;
-                        Plugin.Logger.LogWarning("[BugReport] Previous session did not close cleanly; crash report popup will be shown.");
+                        PendingCrashHint = BuildCrashHint(old);
+                        Plugin.Logger.LogWarning($"[BugReport] Previous session did not close cleanly; crash report popup will be shown.{(PendingCrashHint.Length > 0 ? " " + PendingCrashHint : "")}");
                     }
                 }
 
@@ -51,6 +57,84 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogWarning($"[BugReport] Session marker start failed: {ex.Message}");
             }
+        }
+
+        private static string BuildCrashHint(string markerJson)
+        {
+            try
+            {
+                var m = JsonConvert.DeserializeObject<Dictionary<string, string>>(markerJson);
+                if (m == null) return "";
+                m.TryGetValue("LastAlive", out var alive);
+                m.TryGetValue("Phase", out var phase);
+                m.TryGetValue("UptimeSeconds", out var up);
+                m.TryGetValue("Started", out var started);
+
+                var sb = new StringBuilder();
+                if (!string.IsNullOrEmpty(alive) || !string.IsNullOrEmpty(phase))
+                {
+                    sb.Append("Previous session was last alive ");
+                    sb.Append(string.IsNullOrEmpty(alive) ? "(unknown)" : alive);
+                    if (!string.IsNullOrEmpty(phase)) sb.Append(", phase '").Append(phase).Append('\'');
+                    if (!string.IsNullOrEmpty(up)) sb.Append(", uptime ").Append(up).Append('s');
+                    sb.Append('.');
+                }
+
+                // Kill-vs-crash classification: a real native crash leaves a Crash_* folder whose
+                // timestamp lines up with the death moment. Found → confident crash. Not found →
+                // dump-less crash, freeze-kill, or plain Task-Manager close — we NEVER suppress the
+                // popup for those (a kill of a FROZEN game is a true positive), we just say so and
+                // give the harmless case an easy out. (User probe, 2026-07-08.)
+                DateTime around = default;
+                if (!DateTime.TryParse(alive, null, System.Globalization.DateTimeStyles.RoundtripKind, out around))
+                    DateTime.TryParse(started, null, System.Globalization.DateTimeStyles.RoundtripKind, out around);
+                bool? dump = around != default ? HasCrashFolderNear(around) : null;
+                if (dump == true)
+                    sb.Append(" A matching crash dump was found — this was a real crash.");
+                else if (dump == false)
+                    sb.Append(" No crash dump was found — if you closed the game via Task Manager (or it was still fine when it ended), you can dismiss this.");
+                return sb.ToString().TrimStart();
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>Does Unity's crash folder hold a Crash_* entry near this moment? (Written by the
+        /// engine's crash handler on a native fault — the marker can't see it, the filesystem can.)</summary>
+        private static bool HasCrashFolderNear(DateTime around)
+        {
+            try
+            {
+                string crashes = Path.Combine(Path.GetTempPath(), Application.companyName ?? "Hovgaard Games",
+                                              Application.productName ?? "Big Ambitions", "Crashes");
+                if (!Directory.Exists(crashes)) return false;
+                foreach (var d in new DirectoryInfo(crashes).GetDirectories("Crash_*"))
+                {
+                    var dt = d.LastWriteTime - around;
+                    if (dt.TotalMinutes > -2 && dt.TotalMinutes < 10) return true;   // died ≤heartbeat before; dump written shortly after
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        // ── Heartbeat (task #5): stamp the open marker so the NEXT session can say where this one
+        // died. Written every ~30s from MPCanvasUI.Update — a stale LastAlive/Phase in a leftover
+        // marker = the death moment, accurate to the heartbeat interval.
+        private static float _sessionStartedAt = -1f;
+
+        public static void Heartbeat(string phase)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(_markerPath)) return;
+                if (_sessionStartedAt < 0f) _sessionStartedAt = Time.unscaledTime;
+                var marker = BuildMarker("normal start", false);
+                marker["LastAlive"] = DateTime.Now.ToString("O");
+                marker["Phase"] = phase ?? "";
+                marker["UptimeSeconds"] = ((int)(Time.unscaledTime - _sessionStartedAt + 0.5f)).ToString(CultureInfo.InvariantCulture);
+                File.WriteAllText(_markerPath, JsonConvert.SerializeObject(marker, Formatting.Indented));
+            }
+            catch { }
         }
 
         public static void MarkCleanShutdown()
@@ -80,7 +164,7 @@ namespace BigAmbitionsMP
         }
 #endif
 
-        public static BugReportResult Create(string reason, bool openFolder = true, IEnumerable<string>? attachments = null, IEnumerable<string>? discordTagIds = null, Action<bool, string>? onUploadComplete = null)
+        public static BugReportResult Create(string reason, bool openFolder = true, IEnumerable<string>? attachments = null, IEnumerable<string>? discordTagIds = null, Action<bool, string>? onUploadComplete = null, bool includeCrashArtifacts = false)
         {
             reason = string.IsNullOrWhiteSpace(reason) ? "manual report" : reason.Trim();
 
@@ -96,6 +180,9 @@ namespace BigAmbitionsMP
             WriteReport(Path.Combine(dir, "report.md"), reason);
             CopyPlayerLogs(dir);
             CopyIfExists(ring, Path.Combine(dir, "bamp-ring.log"), MaxCopiedLogBytes);
+            // Task #5: the actual crash evidence lives OUTSIDE Player.log — but only CRASH reports
+            // carry it (a stale Crash_* folder on an unrelated manual report is misleading noise).
+            if (includeCrashArtifacts) CollectUnityCrashArtifacts(dir);
             CopyUserAttachments(dir, attachments);
             WriteRedactedConfig(Path.Combine(dir, "config-redacted.json"));
             WriteSubmitNotes(Path.Combine(dir, "README-submit.txt"));
@@ -134,6 +221,40 @@ namespace BigAmbitionsMP
             return Path.Combine(Path.GetTempPath(), "BigAmbitionsMP-bug-reports");
         }
 
+        /// <summary>Task #5 (2026-07-08, Prabaha report): a hard crash writes its evidence to Unity's
+        /// crash folder (%LOCALAPPDATA%\Temp\{Company}\{Product}\Crashes\Crash_*), NOT Player.log —
+        /// the report we received proved our collection was blind to the actual death. Copy the newest
+        /// crash folder (≤7 days old): error.log + its Player.log snapshot always; the minidump only
+        /// when small enough to ride the upload.</summary>
+        private const long MaxCrashDumpBytes = 8L * 1024L * 1024L;
+
+        private static void CollectUnityCrashArtifacts(string dir)
+        {
+            try
+            {
+                string crashes = Path.Combine(Path.GetTempPath(), Application.companyName ?? "Hovgaard Games",
+                                              Application.productName ?? "Big Ambitions", "Crashes");
+                if (!Directory.Exists(crashes)) return;
+                DirectoryInfo newest = null;
+                foreach (var d in new DirectoryInfo(crashes).GetDirectories("Crash_*"))
+                    if (newest == null || d.LastWriteTime > newest.LastWriteTime) newest = d;
+                if (newest == null || (DateTime.Now - newest.LastWriteTime).TotalDays > 7) return;
+
+                string sub = Path.Combine(dir, "unity-crash");
+                Directory.CreateDirectory(sub);
+                int copied = 0;
+                foreach (var f in newest.GetFiles())
+                {
+                    bool isDump = f.Extension.Equals(".dmp", StringComparison.OrdinalIgnoreCase);
+                    if (isDump && f.Length > MaxCrashDumpBytes) continue;
+                    if (!isDump && f.Length > MaxCopiedLogBytes) continue;
+                    try { File.Copy(f.FullName, Path.Combine(sub, "crash-" + f.Name), overwrite: true); copied++; } catch { }
+                }
+                Plugin.Logger.LogInfo($"[BugReport] Unity crash artifacts: '{newest.Name}' ({newest.LastWriteTime:g}) — {copied} file(s) attached.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] crash artifact collection: {ex.Message}"); }
+        }
+
         private static void WriteReport(string path, string reason)
         {
             var sb = new StringBuilder();
@@ -151,6 +272,8 @@ namespace BigAmbitionsMP
             sb.AppendLine($"ConnectedClients: {(MPServer.IsRunning ? MPServer.ConnectedCount.ToString(CultureInfo.InvariantCulture) : "n/a")}");
             sb.AppendLine($"ClientConnected: {MPClient.IsConnected}");
             sb.AppendLine($"PreviousCrashDetected: {PendingCrashDetected}");
+            if (!string.IsNullOrWhiteSpace(PendingCrashHint))
+                sb.AppendLine($"PreviousCrashHint: {PendingCrashHint}");
             sb.AppendLine();
             sb.AppendLine("## Runtime");
             sb.AppendLine($"GameVersion: {Blank(Application.version)}");
@@ -193,6 +316,25 @@ namespace BigAmbitionsMP
             File.WriteAllText(path, sb.ToString());
         }
 
+        private static string _startedStamp;   // the ORIGINAL session start — heartbeats must not reset it
+
+        private static Dictionary<string, string> BuildMarker(string reason, bool crashTest)
+        {
+            return new Dictionary<string, string>
+            {
+                ["State"] = "open",
+                ["Started"] = _startedStamp ??= DateTime.Now.ToString("O"),
+                ["Reason"] = reason,
+                ["CrashTest"] = crashTest ? "true" : "false",
+                ["ModVersion"] = MyPluginInfo.PLUGIN_VERSION,
+                ["BuildTag"] = MyPluginInfo.BuildTag,
+                ["Role"] = Role(),
+                ["SessionId"] = MPLog.SessionId ?? "",
+                ["PlayerId"] = MPConfig.PlayerId ?? "",
+                ["StableIdKind"] = StableIdKind()
+            };
+        }
+
         private static void WriteOpenMarker(string reason, bool crashTest)
         {
             try
@@ -200,19 +342,7 @@ namespace BigAmbitionsMP
                 if (string.IsNullOrWhiteSpace(_markerPath))
                     _markerPath = Path.Combine(SafeRoot(), "session-open.json");
                 Directory.CreateDirectory(Path.GetDirectoryName(_markerPath) ?? SafeRoot());
-                var marker = new Dictionary<string, string>
-                {
-                    ["State"] = "open",
-                    ["Started"] = DateTime.Now.ToString("O"),
-                    ["Reason"] = reason,
-                    ["CrashTest"] = crashTest ? "true" : "false",
-                    ["ModVersion"] = MyPluginInfo.PLUGIN_VERSION,
-                    ["BuildTag"] = MyPluginInfo.BuildTag,
-                    ["Role"] = Role(),
-                    ["SessionId"] = MPLog.SessionId ?? "",
-                    ["PlayerId"] = MPConfig.PlayerId ?? "",
-                    ["StableIdKind"] = StableIdKind()
-                };
+                var marker = BuildMarker(reason, crashTest);
                 File.WriteAllText(_markerPath, JsonConvert.SerializeObject(marker, Formatting.Indented));
             }
             catch (Exception ex)

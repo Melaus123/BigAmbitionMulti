@@ -301,6 +301,29 @@ namespace BigAmbitionsMP
             MPLifecycle.PhaseChanged += OnLifecyclePhase;
         }
 
+        // Task #5 (Prabaha report, 2026-07-08): a leftover marker said NOTHING about where the dead
+        // session was — menu-kill loop and mid-game crash looked identical. Stamp phase + uptime ~30s.
+        private float _nextCrashHeartbeat;
+
+        private void TickCrashHeartbeat()
+        {
+            if (Time.unscaledTime < _nextCrashHeartbeat) return;
+            _nextCrashHeartbeat = Time.unscaledTime + 30f;
+            string phase;
+            try
+            {
+                phase = !IsInGame() ? "main menu"
+                      : MPServer.IsRunning ? $"in-game (host, day {SafeDay()})"
+                      : MPClient.IsConnected ? $"in-game (client, day {SafeDay()})"
+                      : $"in-game (offline, day {SafeDay()})";
+            }
+            catch { phase = "unknown"; }
+            MPBugReport.Heartbeat(phase);
+        }
+
+        private static int SafeDay()
+        { try { return SaveGameManager.Current?.Day ?? 0; } catch { return 0; } }
+
         private void OnApplicationQuit()
         {
             MPBugReport.MarkCleanShutdown();
@@ -398,6 +421,7 @@ namespace BigAmbitionsMP
             }
 #endif
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
+            TickCrashHeartbeat();    // task #5: stamp the session marker with where-we-are (~30s)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
             MPRegisterSync.TickDuty();   // mirror the native Work activity into register duty (1s self-throttle)
             MPHub.TickSalePopups();      // rising +$ worker feedback (per-frame: smooth rise/fade)
@@ -4985,8 +5009,12 @@ namespace BigAmbitionsMP
                 _crashReportTitleLbl.text = _crashReportIsCrash ? "Crash report" : "Bug report";
             if (_crashReportBodyLbl != null)
             {
+                // Task #5: tell the player (and the report reader) WHERE the previous session died —
+                // "last alive at the main menu, uptime 41s" reads very differently from a mid-game crash.
+                string hint = MPBugReport.PendingCrashHint;
                 _crashReportBodyLbl.text = _crashReportIsCrash
                     ? "The previous game session did not close cleanly. Describe what happened, what you were doing, and whether you were host or client."
+                      + (string.IsNullOrEmpty(hint) ? "" : "\n" + hint)
                     : "Describe the bug, what you were doing, and whether you were host or client. Attach screenshots or short videos if they help.";
             }
             if (_crashReportInputField != null && _crashReportInputField.text != _crashReportMessage)
@@ -5022,7 +5050,8 @@ namespace BigAmbitionsMP
                 _crashReportResult = "Submitting report...";   // shown by RefreshCrashReportText; popup stays open
                 var result = MPBugReport.Create(prefix + _crashReportMessage, openFolder: false,
                     attachments: _crashReportAttachments, discordTagIds: SelectedDiscordForumTagIds(),
-                    onUploadComplete: (ok, folder) => GameStatePatcher.EnqueueOnMainThread(() => OnReportUploadDone(ok)));
+                    onUploadComplete: (ok, folder) => GameStatePatcher.EnqueueOnMainThread(() => OnReportUploadDone(ok)),
+                    includeCrashArtifacts: _crashReportIsCrash);   // Unity crash folder rides CRASH reports only
                 if (_crashReportIsCrash) MPBugReport.AcknowledgePendingCrash();
                 if (!result.DiscordUploadQueued)   // nothing to upload — report saved locally, done
                 {
