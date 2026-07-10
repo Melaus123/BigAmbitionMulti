@@ -764,7 +764,7 @@ namespace BigAmbitionsMP
         public bool   DisableEnergy                    { get; set; } = true;   // MP: no sleep-skip
         public bool   DisableHappiness                 { get; set; } = false;
         public bool   AllCoursesUnlocked               { get; set; } = false;
-        public int    StartingMoney                    { get; set; } = 100000;
+        public int    StartingMoney                    { get; set; } = 10000;  // vanilla Normal (was a $100k dev leftover)
         public int    TaxPercentage                    { get; set; } = 10;
         public int    DaysPerYear                      { get; set; } = 60;
         public float  MarketPriceMultiplier            { get; set; } = 1f;

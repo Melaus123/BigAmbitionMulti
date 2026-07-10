@@ -2415,32 +2415,55 @@ namespace BigAmbitionsMP
         // ── Multiplayer game settings ─────────────────────────────────────────
 
         /// <summary>
-        /// Returns a mod-defined difficulty preset.  "Normal" is the game's vanilla
-        /// defaults; "Easy"/"Hard" tweak the obvious knobs.  All presets keep the
-        /// multiplayer overrides (no tutorial, no energy need).  Tune values later.
+        /// Returns a mod-defined difficulty preset.  The numbers come from the GAME's
+        /// own difficulty assets (DifficultySetting.GetDifficultySettings — the same
+        /// source the native new-game screen reads), so the MP presets match
+        /// single player exactly (EA 0.11: Easy $15,000 / 0.7× rival attacks,
+        /// Normal $10,000 / 1.0×, Hard $4,200 / 1.2×) and track future game
+        /// rebalances automatically.  The multiplayer overrides stay on top (no
+        /// tutorial, no energy need — the DTO defaults).  If the asset registry
+        /// is not alive yet (this is also called from a UI field initializer),
+        /// falls back to the EA 0.11 numbers; any lobby click re-pulls live.
         /// </summary>
         public static GameVariablesDto Preset(string difficulty)
         {
-            var dto = new GameVariablesDto();   // defaults already = Normal + MP overrides
-            switch (difficulty)
+            var dto = new GameVariablesDto();   // carries the MP overrides (tutorial off, energy off)
+            dto.Difficulty = (difficulty == "Easy" || difficulty == "Hard") ? difficulty : "Normal";
+            try
             {
-                case "Easy":
-                    dto.Difficulty                    = "Easy";
-                    dto.StartingMoney                 = 8000;
-                    dto.TaxPercentage                 = 5;
-                    dto.RivalsDifficultyMultiplier    = 0.6f;
-                    dto.EmployeeHourlySalaryMultiplier= 0.85f;
-                    break;
-                case "Hard":
-                    dto.Difficulty                    = "Hard";
-                    dto.StartingMoney                 = 2500;
-                    dto.TaxPercentage                 = 18;
-                    dto.RivalsDifficultyMultiplier    = 1.5f;
-                    dto.EmployeeHourlySalaryMultiplier= 1.2f;
-                    break;
-                default:
-                    dto.Difficulty                    = "Normal";
-                    break;
+                // Difficulty enum resolved reflectively (same type-name independence
+                // as BuildGameVariables' difficulty write).
+                var m = typeof(DifficultySetting).GetMethod("GetDifficultySettings",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                var enumType = m?.GetParameters()[0].ParameterType;
+                if (m != null && enumType != null
+                    && m.Invoke(null, new object[] { Enum.Parse(enumType, dto.Difficulty) }) is DifficultySetting ds)
+                {
+                    dto.StartingAge                     = ds.startingAge;
+                    dto.StartingMoney                   = ds.startingMoney;
+                    dto.TaxPercentage                   = ds.taxPercentage;
+                    dto.DaysPerYear                     = ds.daysPerYear;
+                    dto.MarketPriceMultiplier           = ds.marketPriceMultiplier;
+                    dto.EmployeeHourlySalaryMultiplier  = ds.employeeHourlySalaryMultiplier;
+                    dto.BankInterestMultiplier          = ds.bankInterestMultiplier;
+                    dto.BankInterestRate                = ds.bankInterestRate;
+                    dto.RivalsDifficultyMultiplier      = ds.rivalsDifficultyMultiplier;
+                    dto.BaseCustomerPromotionMultiplier = ds.baseCustomerPromotionMultiplier;
+                    dto.WholesaleUrgentFeeMultiplier    = ds.wholesaleUrgentFeeMultiplier;
+                    dto.ImporterUrgentFeeMultiplier     = ds.importerUrgentFeeMultiplier;
+                    dto.ExportMultiplier                = ds.exportMultiplier;
+                    // NOT ds.tutorialEnabled — MP keeps the tutorial off (story quests don't sync).
+                    Plugin.Logger.LogInfo($"[Server] Difficulty preset '{dto.Difficulty}' from game asset: cash={dto.StartingMoney} rivals×{dto.RivalsDifficultyMultiplier:0.00}.");
+                    return dto;
+                }
+                Plugin.Logger.LogWarning($"[Server] Preset '{difficulty}': native difficulty asset unavailable — EA 0.11 fallback numbers.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Preset '{difficulty}': {ex.Message} — EA 0.11 fallback numbers."); }
+            switch (dto.Difficulty)
+            {
+                case "Easy": dto.StartingMoney = 15000; dto.RivalsDifficultyMultiplier = 0.7f; break;
+                case "Hard": dto.StartingMoney = 4200;  dto.RivalsDifficultyMultiplier = 1.2f; break;
+                default:     dto.StartingMoney = 10000; dto.RivalsDifficultyMultiplier = 1f;   break;
             }
             return dto;
         }

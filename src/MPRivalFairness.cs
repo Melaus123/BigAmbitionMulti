@@ -18,9 +18,11 @@ namespace BigAmbitionsMP
     /// income / N and business count ceil(/N) — which is mathematically the
     /// same as multiplying every timeline threshold by N, with one patch.
     ///
-    /// DEFERRED (v1): employee poaching stays host-only — a client's
-    /// employees only exist on the client's machine; routing the poach as a
-    /// command is Phase C.  All patches host-only (clients suppress the sim).
+    /// Employee poaching is OFF ENTIRELY in MP (Patch_NoPoachingInMP below —
+    /// user ruling 2026-06-12): it could only ever hit the host, and a
+    /// host-only penalty is worse than no mechanic.  Independent of the
+    /// difficulty presets/rivalsDifficultyMultiplier — no setting re-enables
+    /// it.  All other patches host-only (clients suppress the sim).
     /// </summary>
     public static class MPRivalFairness
     {
