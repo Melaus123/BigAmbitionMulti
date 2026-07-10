@@ -347,6 +347,7 @@ namespace BigAmbitionsMP
                 if (!Steamworks.SteamClient.IsValid) return;
                 _steamProbed = true;
                 Plugin.Logger.LogInfo($"[Steam] client valid: app={Steamworks.SteamClient.AppId} id={Steamworks.SteamClient.SteamId} name='{Steamworks.SteamClient.Name}'.");
+                MPSteamPresence.EnsureHooked();   // stage C: invites/join-requests + cold-start connect
             }
             catch (Exception ex)
             {
@@ -376,6 +377,28 @@ namespace BigAmbitionsMP
                     $"{MyPluginInfo.SHORT_NAME} is installed twice (Steam Workshop + local mods). The extra copy was disabled — please remove one install.");
             }
             catch { }
+        }
+
+        /// <summary>Consume a Steam invite/join queued by MPSteamPresence — from
+        /// the MENU it auto-joins the friend's session; mid-game or mid-session
+        /// it shows a notice instead of yanking the player out.</summary>
+        private void TickSteamJoin()
+        {
+            if (MPSteamPresence.PendingJoinId == 0) return;
+            ulong id = MPSteamPresence.PendingJoinId;
+            MPSteamPresence.PendingJoinId = 0;
+            if (IsInGame() || MPClient.IsConnected || MPClient.IsConnecting || MPServer.IsRunning)
+            {
+                Plugin.Logger.LogInfo($"[SteamJoin] join request for {id} ignored — already in a game/session (notice shown).");
+                try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Info, "Steam invite received — return to the main menu to join your friend."); } catch { }
+                return;
+            }
+            Plugin.Logger.LogInfo($"[SteamJoin] auto-join → {id} ({MPSteamPresence.PendingJoinVia}).");
+            MPConfig.SetRuntime(MPConfig.PlayerId, $"steam:{id}", 0);
+            if (MPClient.ConnectSteam(id))
+            { ShowView(MpView.Lobby); SetStatus("Connecting via Steam relay...", false); }
+            else
+            { SetStatus("Steam relay connect failed to start (see log).", true); }
         }
 
         private static int SafeDay()
@@ -462,6 +485,7 @@ namespace BigAmbitionsMP
             // arrive before it is in-game.  Caching here, every frame from the start,
             // guarantees the path is ready so NO poll-thread handler ever calls IL2CPP.
             MPSaveManager.EnsureVersionCached();
+            TickSteamJoin();   // consume a queued Steam invite/join (menu only)
 #if BAMP_DEV
             // DIAG:INVESTIGATION(passenger-doors) — F6 spawns a visible row of the next few
             //   not-yet-seen vehicle types (their wheel/door data is dumped). F5 was unreliable
@@ -3603,6 +3627,7 @@ namespace BigAmbitionsMP
         private int               _lwRowAgeFocus = -1;
         private TextMeshProUGUI?  _lwRowCashHdr; private TextMeshProUGUI? _lwRowAgeHdr; private TextMeshProUGUI? _lwDiffHdr;
         private GameObject? _lwShowIp; private RectTransform? _rtShowIp;
+        private GameObject? _lwInvite; private RectTransform? _rtInvite;
         private bool _showIp;   // IP hidden by default (streamer-safe); toggle to reveal
 
         // ── "Host Saved Game" save picker — grouped by playthrough, scrollable ──
@@ -4545,6 +4570,7 @@ namespace BigAmbitionsMP
             _lwConnInfo.enableWordWrapping = true;
             _lwConnInfo.fontSize = SZ_FLD - 2;
             _lwShowIp   = CloneButtonInto(_lobbyWindow.transform, "BAMP_ShowIp", "Show IP", OnToggleShowIp, 390f, -58f, 124f, 30f); _rtShowIp = _lwShowIp?.GetComponent<RectTransform>();
+            _lwInvite   = CloneButtonInto(_lobbyWindow.transform, "BAMP_InviteFriends", "Invite Steam Friends", OnInviteFriends, 200f, -58f, 182f, 30f); _rtInvite = _lwInvite?.GetComponent<RectTransform>();
             // Roster header — Players | Starting $ (host-set) | Age (self-set).
             ApplyFont(MakeLabel(_lobbyWindow.transform, "Players", SZ_FLD, grey, 28f, -92f, 200f, 26f, TextAlignmentOptions.Left));
             _lwRowCashHdr = MakeLabel(_lobbyWindow.transform, "Starting $", SZ_LBL, grey, 300f, -92f, 110f, 26f, TextAlignmentOptions.Left); ApplyFont(_lwRowCashHdr);
@@ -4614,6 +4640,12 @@ namespace BigAmbitionsMP
         }
         private void OnToggleShowIp() { _showIp = !_showIp; Plugin.Logger.LogInfo($"[MenuUI] Show IP = {_showIp}"); RefreshLobbyWindow(); }
 
+        private void OnInviteFriends()
+        {
+            Plugin.Logger.LogInfo("[MenuUI] Invite Steam Friends → overlay.");
+            MPSteamPresence.OpenFriendsOverlay();
+        }
+
         private void RefreshLobbyWindow()
         {
             if (_lobbyWindow == null) return;
@@ -4655,6 +4687,8 @@ namespace BigAmbitionsMP
             }
             // Show/Hide IP toggle — host only; label reflects state.
             SetActiveSafe(_lwShowIp, host);
+            bool steamOk = false; try { steamOk = Steamworks.SteamClient.IsValid; } catch { }
+            SetActiveSafe(_lwInvite, host && steamOk);
             if (_lwShowIp != null) { try { var t = _lwShowIp.GetComponentInChildren<TMP_Text>(true); if (t != null) t.text = _showIp ? "Hide IP" : "Show IP"; } catch { } }
 
             var players = host ? MPServer.LobbyPlayers : MPClient.LobbyPlayers;
@@ -4775,6 +4809,7 @@ namespace BigAmbitionsMP
                             return;
                         }
                     if (RectHit(_rtShowIp, mp))     { OnToggleShowIp();   return; }
+            if (RectHit(_rtInvite, mp))     { OnInviteFriends();  return; }
                     if (RectHit(_rtLwStart, mp))    { OnLobbyStart();      return; }
                     if (!_lobbyLoadMode)   // new-game controls are hidden in load mode
                     {

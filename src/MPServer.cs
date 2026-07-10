@@ -533,6 +533,7 @@ namespace BigAmbitionsMP
 
             _running = true;
             ResetJoinControl();   // fresh hosting session — bans lift, pending requests drop
+            MPSteamPresence.AdvertiseHosting();   // friends see Join Game / can be invited (no-op without Steam)
 
             Plugin.Logger.LogInfo($"[Server] Listening on port {port}");
             MPNet.FetchPublicIpAsync();                          // public IP for the lobby "Show IP"
@@ -553,6 +554,7 @@ namespace BigAmbitionsMP
             _transport = null;
             try { _steamTransport?.Stop(); } catch { }
             _steamTransport = null;
+            MPSteamPresence.ClearAdvertise();
             IsInLobby = true;
             LobbyClear();
             _peerNames.Clear();
