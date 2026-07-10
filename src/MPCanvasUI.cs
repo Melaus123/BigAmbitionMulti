@@ -6416,8 +6416,10 @@ namespace BigAmbitionsMP
             if (steamPart.Length > 0 && ulong.TryParse(steamPart, out ulong hostSteamId))
             {
                 MPConfig.SetRuntime(_name.Trim(), addr, 0);
-                MPClient.ConnectSteam(hostSteamId);
-                SetStatus("Connecting via Steam relay...", false);
+                if (MPClient.ConnectSteam(hostSteamId))
+                    SetStatus("Connecting via Steam relay...", false);
+                else
+                    SetStatus("Steam relay connect failed to start (see log). Note: you cannot relay-connect to your OWN SteamId.", true);
                 return;
             }
             if (!int.TryParse(_port, out int p) || p < 1024 || p > 65535)

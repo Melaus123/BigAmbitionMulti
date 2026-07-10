@@ -100,7 +100,7 @@ namespace BigAmbitionsMP
         /// <summary>Connect over Valve's relay network by the host's SteamId
         /// (slice 2) — no port forwarding, no IP.  Same session flow as the IP
         /// path from the Hello onward; the seam hides the transport.</summary>
-        public static void ConnectSteam(ulong hostSteamId)
+        public static bool ConnectSteam(ulong hostSteamId)
         {
             if (_transport != null) Disconnect();
             LastDisconnectReason = "";
@@ -114,9 +114,10 @@ namespace BigAmbitionsMP
             t.Received     += OnReceive;
             _transport = t;
             if (!t.Connect(hostSteamId))
-            { Plugin.Logger.LogError($"[Client] Steam relay connect toward {hostSteamId} failed to start."); _transport = null; return; }
+            { Plugin.Logger.LogError($"[Client] Steam relay connect toward {hostSteamId} failed to start."); _transport = null; return false; }
 
             Plugin.Logger.LogInfo($"[Client] Connecting via Steam relay to {hostSteamId}...");
+            return true;
         }
 
         public static void Disconnect()
