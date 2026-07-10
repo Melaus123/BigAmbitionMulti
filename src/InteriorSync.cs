@@ -64,7 +64,7 @@ namespace BigAmbitionsMP
         /// for that building (removing any prior subscription) and sends the
         /// initial snapshot.
         /// </summary>
-        public static void HandleRequest(NetPeer peer, string playerId, string addressKey)
+        public static void HandleRequest(MPLink peer, string playerId, string addressKey)
         {
             if (peer == null || string.IsNullOrEmpty(addressKey)) return;
             try
@@ -99,7 +99,7 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Handle a client's PlayerExitedBuilding.  Drops them from the subscriber set.</summary>
-        public static void HandleExit(NetPeer peer, string playerId, string addressKey)
+        public static void HandleExit(MPLink peer, string playerId, string addressKey)
         {
             if (peer == null) return;
             try
@@ -248,7 +248,7 @@ namespace BigAmbitionsMP
             }
         }
 
-        public static void HandleOwnerSnapshot(NetPeer peer, string playerId, InteriorSnapshotPayload payload)
+        public static void HandleOwnerSnapshot(MPLink peer, string playerId, InteriorSnapshotPayload payload)
         {
             if (!MPServer.IsRunning || peer == null || payload == null || string.IsNullOrEmpty(payload.AddressKey)) return;
             try

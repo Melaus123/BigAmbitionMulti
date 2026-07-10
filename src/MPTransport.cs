@@ -22,6 +22,8 @@ namespace BigAmbitionsMP
     public abstract class MPLink
     {
         public abstract int Id { get; }
+        /// <summary>Is the underlying connection still live (join-queue expiry checks).</summary>
+        public abstract bool IsAlive { get; }
         /// <summary>Log-safe endpoint description (no raw IPs).</summary>
         public abstract string Describe { get; }
         public abstract void Send(byte[] data, bool reliable);
@@ -36,6 +38,7 @@ namespace BigAmbitionsMP
         public readonly NetPeer Peer;
         public LnlLink(NetPeer peer) { Peer = peer; }
         public override int Id => Peer.Id;
+        public override bool IsAlive => Peer.ConnectionState == ConnectionState.Connected;
         public override string Describe => $"udp:{Peer.Id}";
         public override void Send(byte[] data, bool reliable)
         {

@@ -11,8 +11,9 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class MPServer
     {
-        private static NetManager?   _server;
-        private static EventBasedNetListener? _listener;
+        // Transport seam (Steam-connect slice 1): the host listens through
+        // IHostTransport — LiteNetLib UDP today, + a Steam relay in slice 2.
+        private static LnlHostTransport? _transport;
 
         /// <summary>Address key → player ID who owns it. Empty = unowned.
         /// CONCURRENT: written on the network poll thread (rent/disconnect) and
@@ -105,7 +106,7 @@ namespace BigAmbitionsMP
         // Plain collections corrupt under that race — the same hazard documented
         // for BuildingOwners above — so both are concurrent.  _clients is a
         // ConcurrentDictionary used as a set; iterate it via .Keys.
-        private static readonly ConcurrentDictionary<NetPeer, byte> _clients   = new();
+        private static readonly ConcurrentDictionary<MPLink, byte> _clients   = new();
         private static readonly ConcurrentDictionary<int, string>   _peerNames = new(); // peer.Id → playerId
         /// <summary>playerId → immutable StableId (for save/ownership persistence).
         /// Includes the host's own.  Populated from each client's Hello.
@@ -424,7 +425,6 @@ namespace BigAmbitionsMP
             catch { }
             return 0f;
         }
-        private static Thread? _pollThread;
         private static volatile bool _running;
 
         // ── Startup pause hold ────────────────────────────────────────────────
@@ -475,7 +475,7 @@ namespace BigAmbitionsMP
         {
             // A previous session may still be live (e.g. the host exited to the
             // menu without Leave — nothing stops the server on scene exit prior
-            // to this guard).  Tear it down first: the old NetManager still holds
+            // to this guard).  Tear it down first: the old transport still holds
             // the port, so the new bind fails with AddressAlreadyInUse while
             // _running still reads true — a zombie host whose lobby looks alive
             // but that nobody can connect to.
@@ -504,35 +504,21 @@ namespace BigAmbitionsMP
             CashByStableId.Clear();   // owners/cash; the load path re-seeds from the manifest
             _characterNamesByPlayerId.Clear();   // per-session: a returning player must not collide with a stale name
             _clientSelfStats.Clear();            // …or stale self-reported stats (feeds rival-fairness targeting)
-            _listener = new EventBasedNetListener();
-            _server   = new NetManager(_listener)
-            {
-                AutoRecycle = true,
-                UnconnectedMessagesEnabled = false,
-            };
+            var t = new LnlHostTransport();
+            t.PeerConnected    += OnPeerConnected;
+            t.PeerDisconnected += OnPeerDisconnected;
+            t.Received         += OnReceive;
+            _transport = t;
 
-            _listener.ConnectionRequestEvent += request =>
-            {
-                // Accept all connections (key-gated); LOGGED — a silent handler
-                // made transport-level join failures undiagnosable (2026-06-11).
-                Plugin.Logger.LogInfo($"[Server] connection request from {request.RemoteEndPoint} (peers={_clients.Count}).");
-                request.AcceptIfKey("BAMP");
-            };
-
-            _listener.PeerConnectedEvent += OnPeerConnected;
-            _listener.PeerDisconnectedEvent += OnPeerDisconnected;
-            _listener.NetworkReceiveEvent += OnReceive;
-
-            if (!_server.Start(port))
+            if (!t.Start(port))
             {
                 Plugin.Logger.LogError($"[Server] Failed to start on port {port}");
+                _transport = null;
                 return false;
             }
 
             _running = true;
             ResetJoinControl();   // fresh hosting session — bans lift, pending requests drop
-            _pollThread = new Thread(PollLoop) { IsBackground = true, Name = "BAMP-Server" };
-            _pollThread.Start();
 
             Plugin.Logger.LogInfo($"[Server] Listening on port {port}");
             MPNet.FetchPublicIpAsync();                          // public IP for the lobby "Show IP"
@@ -549,8 +535,8 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning($"[Server] STOP called ({_clients.Count} client(s) will see RemoteConnectionClose) from: {Environment.StackTrace}");
             _running = false;
             MPNet.RemoveMappingAsync();   // best-effort UPnP cleanup (harmless if it can't run)
-            _server?.Stop();
-            _pollThread?.Join(1000);
+            _transport?.Stop();
+            _transport = null;
             IsInLobby = true;
             LobbyClear();
             _peerNames.Clear();
@@ -691,15 +677,15 @@ namespace BigAmbitionsMP
 
         // ── Events ────────────────────────────────────────────────────────────
 
-        private static void OnPeerConnected(NetPeer peer)
+        private static void OnPeerConnected(MPLink peer)
         {
             Plugin.Logger.LogInfo($"[Server] Peer connected: {peer.Id}");
             // Welcome message will be sent after we receive their Hello
         }
 
-        private static void OnPeerDisconnected(NetPeer peer, DisconnectInfo info)
+        private static void OnPeerDisconnected(MPLink peer, string reason)
         {
-            Plugin.Logger.LogInfo($"[Server] Peer disconnected: {peer.Id} — {info.Reason}");
+            Plugin.Logger.LogInfo($"[Server] Peer disconnected: {peer.Id} — {reason}");
             _clients.TryRemove(peer, out _);
             lock (_pendingJoins) _pendingJoins.Remove(peer.Id);   // abandoned join request
 
@@ -790,8 +776,9 @@ namespace BigAmbitionsMP
             // clean close means the player deliberately quit: keep playing.
             if (leftPlayer != null && !IsInLobby)
             {
-                bool cleanLeave = info.Reason == DisconnectReason.RemoteConnectionClose
-                               || info.Reason == DisconnectReason.DisconnectPeerCalled;
+                // reason is the transport's DisconnectReason name (ToString) — same values as pre-seam.
+                bool cleanLeave = reason == "RemoteConnectionClose"
+                               || reason == "DisconnectPeerCalled";
                 try
                 {
                     string leftName = DisplayNameFor(leftPlayer);
@@ -803,12 +790,12 @@ namespace BigAmbitionsMP
 
                     if (!cleanLeave)
                     {
-                        MPLog.Dump($"host: '{leftPlayer}' lost connection ({info.Reason})");
+                        MPLog.Dump($"host: '{leftPlayer}' lost connection ({reason})");
                         _pausedByDisconnect = true;    // cleared on reconnect or overlay dismiss
                         DisconnectPauseWho  = leftPlayer;
                         BroadcastManualPause(true);
                         GameStatePatcher.EnqueueOnMainThread(() => TimeSync.SetManualPause(true));
-                        Plugin.Logger.LogInfo($"[Server] Paused session — '{leftPlayer}' dropped ({info.Reason}).");
+                        Plugin.Logger.LogInfo($"[Server] Paused session — '{leftPlayer}' dropped ({reason}).");
                     }
                     else
                     {
@@ -822,9 +809,8 @@ namespace BigAmbitionsMP
             }
         }
 
-        private static void OnReceive(NetPeer peer, NetPacketReader reader, byte channel, DeliveryMethod delivery)
+        private static void OnReceive(MPLink peer, byte[] bytes)
         {
-            var bytes = reader.GetRemainingBytes();
             var env   = MessageEnvelope.Deserialize(bytes);
             if (env == null) return;
 
@@ -1525,7 +1511,7 @@ namespace BigAmbitionsMP
         // CONCURRENT: written on the main thread (kick/reject UI), read on the
         // poll thread (HandleHello ban check).  ConcurrentDictionary used as a set.
         private static readonly ConcurrentDictionary<string, byte> _banned = new();
-        private static readonly Dictionary<int, (NetPeer peer, HelloPayload hello)> _pendingJoins = new();
+        private static readonly Dictionary<int, (MPLink peer, HelloPayload hello)> _pendingJoins = new();
 
         /// <summary>Snapshot for the host's approval popup.</summary>
         public static List<(int peerId, string playerId)> PendingJoinList
@@ -1542,13 +1528,13 @@ namespace BigAmbitionsMP
         /// <summary>Host approved a mid-game joiner.</summary>
         public static void AcceptPendingJoin(int peerId)
         {
-            (NetPeer peer, HelloPayload hello) entry;
+            (MPLink peer, HelloPayload hello) entry;
             lock (_pendingJoins)
             {
                 if (!_pendingJoins.TryGetValue(peerId, out entry)) return;
                 _pendingJoins.Remove(peerId);
             }
-            if (entry.peer.ConnectionState != ConnectionState.Connected)
+            if (!entry.peer.IsAlive)
             { Plugin.Logger.LogInfo($"[Server] join request from '{entry.hello.PlayerId}' expired (disconnected)."); return; }
             Plugin.Logger.LogInfo($"[Server] host ACCEPTED mid-game join: '{entry.hello.PlayerId}'.");
             RegisterAndProcessJoin(entry.peer, entry.hello);
@@ -1557,7 +1543,7 @@ namespace BigAmbitionsMP
         /// <summary>Host rejected a mid-game joiner — banned until re-host.</summary>
         public static void RejectPendingJoin(int peerId)
         {
-            (NetPeer peer, HelloPayload hello) entry;
+            (MPLink peer, HelloPayload hello) entry;
             lock (_pendingJoins)
             {
                 if (!_pendingJoins.TryGetValue(peerId, out entry)) return;
@@ -1605,7 +1591,7 @@ namespace BigAmbitionsMP
         /// switches on a live connection, and ids already bound to another live
         /// connection.  Everything downstream (money, saves, ownership) keys on
         /// this binding.</summary>
-        private static bool ValidateHelloIdentity(NetPeer peer, HelloPayload hello)
+        private static bool ValidateHelloIdentity(MPLink peer, HelloPayload hello)
         {
             string refuse = "";
             if (string.IsNullOrWhiteSpace(hello.PlayerId))
@@ -1646,10 +1632,8 @@ namespace BigAmbitionsMP
                     _peerNames.TryRemove(staleId, out _);   // remove BEFORE disconnect → its cleanup skips player-level removal
                     try
                     {
-                        var mgr = _server;
-                        if (mgr != null)
-                            foreach (var p in mgr.ConnectedPeerList)
-                                if (p.Id == staleId) { p.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:takeover")); break; }
+                        foreach (var p in _clients.Keys)
+                            if (p.Id == staleId) { p.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:takeover")); break; }
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] takeover disconnect of stale peer {staleId}: {ex.Message}"); }
                     Plugin.Logger.LogWarning($"[Server] '{hello.PlayerId}' reconnecting — dropped stale peer {staleId}, accepting new peer {peer.Id} (takeover).");
@@ -1666,7 +1650,7 @@ namespace BigAmbitionsMP
         /// out-of-date mod build would misparse messages), and a game-version
         /// mismatch means the two installs would desync.  The refusal tag carries
         /// the host's versions so the client can show exactly what to match.</summary>
-        private static bool ValidateHelloVersion(NetPeer peer, HelloPayload hello)
+        private static bool ValidateHelloVersion(MPLink peer, HelloPayload hello)
         {
             string hostGame = MPSaveManager.GameVersionNameCached();
             // Game-version check is skipped when either side is unknown (empty) so a
@@ -1682,7 +1666,7 @@ namespace BigAmbitionsMP
             return false;
         }
 
-        private static void HandleHello(NetPeer peer, MessageEnvelope env)
+        private static void HandleHello(MPLink peer, MessageEnvelope env)
         {
             var hello = env.GetPayload<HelloPayload>();
             if (hello == null) return;
@@ -1724,7 +1708,7 @@ namespace BigAmbitionsMP
 
         /// <summary>Approved mid-game join: register the peer and run the
         /// load chain (host-stored save → fresh character).</summary>
-        private static void RegisterAndProcessJoin(NetPeer peer, HelloPayload hello)
+        private static void RegisterAndProcessJoin(MPLink peer, HelloPayload hello)
         {
             // Re-check at approval time: another connection may have taken this
             // identity while the request sat in the queue.
@@ -1847,7 +1831,7 @@ namespace BigAmbitionsMP
         /// (guards anti-pattern Class 4 — "new host-authoritative state not replayed to joiners").
         /// The caller sends the Welcome/WorldSnapshot first; path-specific extras (host profile,
         /// parked-car reset) stay at the call site.</summary>
-        private static void SendJoinReplayTo(NetPeer peer)
+        private static void SendJoinReplayTo(MPLink peer)
         {
             // Rival roster BEFORE businesses so building-owner ID strings resolve to names.
             SendRivalsSnapshotTo(peer);
@@ -1872,7 +1856,7 @@ namespace BigAmbitionsMP
         /// rivals, businesses) — on the main thread (IL2CPP).  Used for both late-join
         /// and the frozen-until-synced startup hold (sent while the client is frozen on
         /// the wait screen, so it applies before anyone gets control).</summary>
-        public static void SendWorldStateTo(NetPeer peer)
+        public static void SendWorldStateTo(MPLink peer)
         {
             if (peer == null) return;
             GameStatePatcher.EnqueueOnMainThread(() =>
@@ -1898,7 +1882,7 @@ namespace BigAmbitionsMP
         /// employees") until someone toggled duty off/on (field bug 2026-06-13).
         /// Sent peer-targeted, on the main thread (IL2CPP), after the world state so
         /// it lands on a peer that has already applied its reload + Reset.</summary>
-        public static void SendRegisterDutyTo(NetPeer peer)
+        public static void SendRegisterDutyTo(MPLink peer)
         {
             if (peer == null) return;
             GameStatePatcher.EnqueueOnMainThread(() =>
@@ -1932,7 +1916,7 @@ namespace BigAmbitionsMP
         {
             bool hostJustReady = false;
             bool released;
-            List<NetPeer> sendTo = new();
+            List<MPLink> sendTo = new();
             lock (_startupLock)
             {
                 released = _startupReleased;
@@ -2396,7 +2380,7 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Server] ManualPause broadcast: {paused}");
         }
 
-        private static void HandleClientManualPause(NetPeer sender, string senderPid, MessageEnvelope env)
+        private static void HandleClientManualPause(MPLink sender, string senderPid, MessageEnvelope env)
         {
             var payload = env.GetPayload<ManualPausePayload>();
             if (payload == null) return;
@@ -2540,7 +2524,7 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Server] Enforce starting cash = {enforce}");
         }
 
-        private static void HandleRentRequest(NetPeer peer, string senderPid, MessageEnvelope env)
+        private static void HandleRentRequest(MPLink peer, string senderPid, MessageEnvelope env)
         {
             var req = env.GetPayload<BuildingOwnershipPayload>();
             if (req == null) return;
@@ -2584,7 +2568,7 @@ namespace BigAmbitionsMP
         // its own machine.  Release the host's authoritative ownership (so the host
         // stops re-asserting the rental onto that client), reflect the vacate in the
         // host's own game, and tell every client the building is free again.
-        private static void HandleVacateRequest(NetPeer peer, string senderPid, MessageEnvelope env)
+        private static void HandleVacateRequest(MPLink peer, string senderPid, MessageEnvelope env)
         {
             var req = env.GetPayload<BuildingOwnershipPayload>();
             if (req == null) return;
@@ -2614,7 +2598,7 @@ namespace BigAmbitionsMP
         // (the client rolls back).  Otherwise record the owner + remove the building from
         // the host's authoritative for-sale market — the for-sale poll then broadcasts
         // the removal, so no other player can buy it.
-        private static void HandleBuyRequest(NetPeer peer, string senderPid, MessageEnvelope env)
+        private static void HandleBuyRequest(MPLink peer, string senderPid, MessageEnvelope env)
         {
             var req = env.GetPayload<BuildingOwnershipPayload>();
             if (req == null) return;
@@ -2650,7 +2634,7 @@ namespace BigAmbitionsMP
 
         // A client listed an owned building for sale.  Add it to the host's authoritative
         // for-sale market (with the seller's price); the for-sale poll then broadcasts it.
-        private static void HandleListForSale(NetPeer peer, string senderPid, MessageEnvelope env)
+        private static void HandleListForSale(MPLink peer, string senderPid, MessageEnvelope env)
         {
             var info = env.GetPayload<BuildingForSaleInfo>();
             if (info == null || string.IsNullOrEmpty(info.AddressKey)) return;
@@ -2664,7 +2648,7 @@ namespace BigAmbitionsMP
         }
 
         // A client canceled its building's sale.  Remove it from the host's market.
-        private static void HandleCancelSale(NetPeer peer, string senderPid, MessageEnvelope env)
+        private static void HandleCancelSale(MPLink peer, string senderPid, MessageEnvelope env)
         {
             var req = env.GetPayload<BuildingOwnershipPayload>();
             if (req == null || string.IsNullOrEmpty(req.AddressKey)) return;
@@ -2680,7 +2664,7 @@ namespace BigAmbitionsMP
 
         // The AI bought a client's listed building (completed in the client's own sim).
         // Drop it from the host's authoritative market + clear the ownership registry.
-        private static void HandleSaleCompleted(NetPeer peer, string senderPid, MessageEnvelope env)
+        private static void HandleSaleCompleted(MPLink peer, string senderPid, MessageEnvelope env)
         {
             var req = env.GetPayload<BuildingOwnershipPayload>();
             if (req == null || string.IsNullOrEmpty(req.AddressKey)) return;
@@ -2721,7 +2705,7 @@ namespace BigAmbitionsMP
         /// <summary>Broadcasts every known player appearance to all clients.</summary>
         /// <summary>Peer-targeted appearance replay for a (re)joiner — appearances are host-authoritative
         /// but only broadcast on change, so a joiner would otherwise see default avatars until someone re-dresses.</summary>
-        public static void SendAppearanceSyncTo(NetPeer peer)
+        public static void SendAppearanceSyncTo(MPLink peer)
         {
             if (peer == null) return;
             Send(peer, MessageEnvelope.Create(MessageType.AppearanceSync, "host",
@@ -2768,7 +2752,7 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Server] AppearanceSync broadcast ({payload.Players.Count} players).");
         }
 
-        private static void HandlePlayerMove(NetPeer sender, string senderPid, MessageEnvelope env)
+        private static void HandlePlayerMove(MPLink sender, string senderPid, MessageEnvelope env)
         {
             var payload = env.GetPayload<PlayerPositionPayload>();
             if (payload == null || !SenderIs(payload.PlayerId, senderPid, MessageType.PlayerMove)) return;
@@ -2778,15 +2762,13 @@ namespace BigAmbitionsMP
                 RemotePlayerManager.SpawnOrUpdate(payload));
 
             // Relay to every other connected client
-            var bytes  = env.Serialize();
-            var writer = new NetDataWriter();
-            writer.Put(bytes);
+            var bytes = env.Serialize();
             foreach (var peer in _clients.Keys)
                 if (peer.Id != sender.Id)
-                    peer.Send(writer, DeliveryMethod.Unreliable);
+                    peer.Send(bytes, reliable: false);
         }
 
-        private static void HandleAnimTrigger(NetPeer sender, string senderPid, MessageEnvelope env)
+        private static void HandleAnimTrigger(MPLink sender, string senderPid, MessageEnvelope env)
         {
             var payload = env.GetPayload<AnimTriggerPayload>();
             if (payload == null || !SenderIs(payload.PlayerId, senderPid, MessageType.PlayerAnimTrigger)) return;
@@ -2797,12 +2779,10 @@ namespace BigAmbitionsMP
                 RemotePlayerManager.ApplyTrigger(payload.PlayerId, payload.ParamIndex));
 
             // Relay to every other connected client (reliable — triggers are one-off)
-            var bytes  = env.Serialize();
-            var writer = new NetDataWriter();
-            writer.Put(bytes);
+            var bytes = env.Serialize();
             foreach (var peer in _clients.Keys)
                 if (peer.Id != sender.Id)
-                    peer.Send(writer, DeliveryMethod.ReliableOrdered);
+                    peer.Send(bytes, reliable: true);
         }
 
         /// <summary>Authoritative market-events list → all clients.</summary>
@@ -2817,7 +2797,7 @@ namespace BigAmbitionsMP
         /// MarketEvents are broadcast only on CHANGE (hash-gated), so without this a hot-joiner would see no
         /// active shortages/hype until the event set next changes — which may be never. Call on the main thread
         /// (reads gi); the on-connect senders already are.</summary>
-        public static void SendMarketEventsTo(NetPeer peer)
+        public static void SendMarketEventsTo(MPLink peer)
         {
             if (!_running || peer == null) return;
             try
@@ -2854,7 +2834,7 @@ namespace BigAmbitionsMP
                 new AnimTriggerPayload { PlayerId = MPConfig.PlayerId, ParamIndex = paramIndex }));
         }
 
-        private static void HandleVehicleSync(NetPeer sender, string senderPid, MessageEnvelope env)
+        private static void HandleVehicleSync(MPLink sender, string senderPid, MessageEnvelope env)
         {
             var payload = env.GetPayload<VehicleFleetPayload>();
             if (payload == null || !SenderIs(payload.OwnerId, senderPid, MessageType.VehicleSync)) return;
@@ -2872,12 +2852,10 @@ namespace BigAmbitionsMP
             });
 
             // Relay to every other connected client
-            var bytes  = env.Serialize();
-            var writer = new NetDataWriter();
-            writer.Put(bytes);
+            var bytes = env.Serialize();
             foreach (var peer in _clients.Keys)
                 if (peer.Id != sender.Id)
-                    peer.Send(writer, DeliveryMethod.ReliableOrdered);
+                    peer.Send(bytes, reliable: true);
         }
 
         /// <summary>Broadcasts the host's own vehicle fleet to all clients.</summary>
@@ -3047,8 +3025,8 @@ namespace BigAmbitionsMP
             });
         }
 
-        /// <summary>Resolve the live NetPeer for a player id (null if not connected).</summary>
-        private static NetPeer? PeerForPid(string pid)
+        /// <summary>Resolve the live MPLink for a player id (null if not connected).</summary>
+        private static MPLink? PeerForPid(string pid)
         {
             foreach (var peer in _clients.Keys)
                 if (_peerNames.TryGetValue(peer.Id, out var nm) && nm == pid) return peer;
@@ -3058,7 +3036,7 @@ namespace BigAmbitionsMP
         /// <summary>Send a joining/rejoining client its resolved session save: their stored .hsg if present,
         /// 'save-unavailable' if a slot exists but the file can't be read, else a fresh-character fallback.
         /// Used by the mid-join Hello path and after a validated disconnect-save upload.</summary>
-        private static bool SendMidJoinLoadData(NetPeer peer, string pid, string stable, string session)
+        private static bool SendMidJoinLoadData(MPLink peer, string pid, string stable, string session)
         {
             if (peer == null || string.IsNullOrEmpty(session) || string.IsNullOrEmpty(stable)) return false;
             var data = MPSaveCoordinator.ReadSaveBytesGzip(session, stable);
@@ -3139,7 +3117,7 @@ namespace BigAmbitionsMP
                 new VehicleLockPayload { OwnerId = MPConfig.PlayerId, VehicleId = vehicleId, Locked = locked }));
         }
 
-        private static NetPeer? PeerForPlayer(string pid)
+        private static MPLink? PeerForPlayer(string pid)
         {
             if (!string.IsNullOrEmpty(pid))
                 foreach (var peer in _clients.Keys)
@@ -3266,7 +3244,7 @@ namespace BigAmbitionsMP
             return pay;
         }
 
-        private static void SendBuildingAccessTo(NetPeer peer, string clientPid)
+        private static void SendBuildingAccessTo(MPLink peer, string clientPid)
         {
             if (peer == null) return;
             try { Send(peer, MessageEnvelope.Create(MessageType.PermissionBuildingAccess, "host", BuildBuildingAccessFor(clientPid))); }
@@ -3293,7 +3271,7 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RefreshBuildingAccess: {ex.Message}"); }
         }
 
-        private static void SendOwnGrantsTo(NetPeer peer, string ownerStable)
+        private static void SendOwnGrantsTo(MPLink peer, string ownerStable)
         {
             if (peer == null) return;
             try { Send(peer, MessageEnvelope.Create(MessageType.PermissionOwnGrants, "host", BuildOwnGrants(ownerStable))); }
@@ -3583,7 +3561,7 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Send the full business table to a single peer (on connect).</summary>
-        public static void SendBusinessSnapshotTo(LiteNetLib.NetPeer peer)
+        public static void SendBusinessSnapshotTo(MPLink peer)
         {
             if (peer == null) return;
             try
@@ -3604,7 +3582,7 @@ namespace BigAmbitionsMP
 
         /// <summary>Send a single building's interior snapshot to one peer (initial response to InteriorRequest).</summary>
         /// <summary>Send the full passenger lock + seat state to a single peer (join replay).</summary>
-        public static void SendPassengerSnapshotTo(LiteNetLib.NetPeer peer)
+        public static void SendPassengerSnapshotTo(MPLink peer)
         {
             if (peer == null) return;
             try
@@ -3616,7 +3594,7 @@ namespace BigAmbitionsMP
 
         /// <summary>Send the full access-grant table to a single peer (join replay). The merger state
         /// rides along — a joiner must learn the merged company immediately (ANTIPATTERNS Class 4).</summary>
-        public static void SendPermissionSnapshotTo(LiteNetLib.NetPeer peer)
+        public static void SendPermissionSnapshotTo(MPLink peer)
         {
             if (peer == null) return;
             try
@@ -3630,7 +3608,7 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendPermissionSnapshotTo: {ex.Message}"); }
         }
 
-        public static void SendInteriorSnapshotTo(LiteNetLib.NetPeer peer, InteriorSnapshotPayload snap)
+        public static void SendInteriorSnapshotTo(MPLink peer, InteriorSnapshotPayload snap)
         {
             if (!_running || peer == null || snap == null) return;
             try
@@ -3650,11 +3628,11 @@ namespace BigAmbitionsMP
                 var env = MessageEnvelope.Create(MessageType.InteriorSnapshot, "host", snap);
                 byte[] data = env.Serialize();
                 int sent = 0;
-                foreach (var peer in _server.ConnectedPeerList)
+                foreach (var peer in _clients.Keys)
                 {
                     if (peer == null) continue;
                     if (!peerIds.Contains(peer.Id)) continue;
-                    peer.Send(data, LiteNetLib.DeliveryMethod.ReliableOrdered);
+                    peer.Send(data, reliable: true);
                     sent++;
                 }
                 if (sent > 0)
@@ -3781,7 +3759,7 @@ namespace BigAmbitionsMP
             return snap;
         }
 
-        public static void SendRivalsSnapshotTo(LiteNetLib.NetPeer peer)
+        public static void SendRivalsSnapshotTo(MPLink peer)
         {
             if (peer == null) return;
             try
@@ -3990,7 +3968,7 @@ namespace BigAmbitionsMP
             return snap;
         }
 
-        public static void SendRivalsStatsSnapshotTo(LiteNetLib.NetPeer peer)
+        public static void SendRivalsStatsSnapshotTo(MPLink peer)
         {
             if (peer == null) return;
             try
@@ -4054,7 +4032,7 @@ namespace BigAmbitionsMP
 
         /// <summary>Host: send ONE peer a parked-vehicle snapshot (per-peer resync
         /// on teleport / building-exit / (re)join).</summary>
-        public static void SendParkedSnapshotTo(NetPeer peer, ParkedSnapshotPayload payload)
+        public static void SendParkedSnapshotTo(MPLink peer, ParkedSnapshotPayload payload)
         {
             if (!_running || peer == null || payload == null) return;
             Send(peer, MessageEnvelope.Create(MessageType.ParkedSnapshot, "host", payload));
@@ -4062,9 +4040,9 @@ namespace BigAmbitionsMP
 
         /// <summary>Host: connected client peers paired with their player ids
         /// (snapshot copy; both backing maps are concurrent, safe to enumerate).</summary>
-        public static List<(NetPeer peer, string playerId)> ConnectedClientPeers()
+        public static List<(MPLink peer, string playerId)> ConnectedClientPeers()
         {
-            var list = new List<(NetPeer, string)>();
+            var list = new List<(MPLink, string)>();
             foreach (var peer in _clients.Keys)
                 if (_peerNames.TryGetValue(peer.Id, out var pid) && !string.IsNullOrEmpty(pid))
                     list.Add((peer, pid));
@@ -4112,11 +4090,9 @@ namespace BigAmbitionsMP
         {
             if (!_running) return;
             var env    = MessageEnvelope.Create(MessageType.PlayerMove, MPConfig.PlayerId, payload);
-            var bytes  = env.Serialize();
-            var writer = new NetDataWriter();
-            writer.Put(bytes);
+            var bytes = env.Serialize();
             foreach (var peer in _clients.Keys)
-                peer.Send(writer, DeliveryMethod.Unreliable);
+                peer.Send(bytes, reliable: false);
         }
 
         /// <summary>
@@ -4172,12 +4148,10 @@ namespace BigAmbitionsMP
 
         private static void Broadcast(MessageEnvelope env)
         {
-            if (_server == null) return;
-            var bytes  = env.Serialize();
-            var writer = new NetDataWriter();
-            writer.Put(bytes);
+            if (_transport == null) return;
+            var bytes = env.Serialize();
             foreach (var peer in _clients.Keys)
-                peer.Send(writer, DeliveryMethod.ReliableOrdered);
+                peer.Send(bytes, reliable: true);
         }
 
         /// <summary>Public wrapper around Broadcast so external code (e.g. Harmony patches) can use it.</summary>
@@ -4231,7 +4205,7 @@ namespace BigAmbitionsMP
         /// price-competition sim runs on stale inputs until an owner re-prices or the joiner enters the shop.
         /// Replays the host's cache of own + relayed price payloads — each carries the correct OwnerId, so the
         /// joiner's own shops are skipped by MPPriceSync.Apply's own-echo guard. Main thread (on-connect path).</summary>
-        public static void SendPlayerShopPricesTo(NetPeer peer)
+        public static void SendPlayerShopPricesTo(MPLink peer)
         {
             if (!_running || peer == null) return;
             try
@@ -4278,13 +4252,7 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendChatPrivate: {ex.Message}"); }
         }
 
-        private static void Send(NetPeer peer, MessageEnvelope env)
-        {
-            var bytes  = env.Serialize();
-            var writer = new NetDataWriter();
-            writer.Put(bytes);
-            peer.Send(writer, DeliveryMethod.ReliableOrdered);
-        }
+        private static void Send(MPLink peer, MessageEnvelope env) => peer.Send(env);
 
         // ── Utilities ─────────────────────────────────────────────────────────
 
@@ -4299,18 +4267,7 @@ namespace BigAmbitionsMP
             };
         }
 
-        private static void PollLoop()
-        {
-            while (_running)
-            {
-                // A message handler throwing (e.g. a transient collection race or
-                // a malformed payload) must NOT kill the network thread — that
-                // would freeze the whole session with no recovery short of
-                // re-hosting.  Catch, log, and keep polling.
-                try { _server?.PollEvents(); }
-                catch (Exception ex) { Plugin.Logger.LogError($"[Server] PollEvents: {ex}"); }
-                Thread.Sleep(15);
-            }
-        }
+        // Poll loop lives in LnlHostTransport now (transport seam) — same
+        // thread name, cadence, and throw-isolation as before.
     }
 }
