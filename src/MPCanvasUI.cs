@@ -4599,7 +4599,12 @@ namespace BigAmbitionsMP
             _lwDiffHard   = CloneButtonInto(_lobbyWindow.transform, "BAMP_DiffHard",   "Hard",   () => SetDifficulty("Hard"),   406f, -320f, 110f, 36f); _rtDiffHard   = _lwDiffHard?.GetComponent<RectTransform>();
 
             _lwCustomize = CloneButtonInto(_lobbyWindow.transform, "BAMP_Customize", "Customize", OnCustomize, 196f, -372f, 148f, 36f); _rtCustomize = _lwCustomize?.GetComponent<RectTransform>();
-            _lwInvite    = CloneButtonInto(_lobbyWindow.transform, "BAMP_InviteFriends", "Invite Friends", OnInviteFriends, 352f, -372f, 148f, 36f); _rtInvite = _lwInvite?.GetComponent<RectTransform>();
+            // Fresh-GO flat button (save-picker primitive), NOT a menu-template
+            // clone: the cloned version's hit rect swallowed every lobby click
+            // (2026-07-10 field report — overlay popped on any click, reopened on
+            // close).  Manual RectHit dispatch is the one and only click path.
+            _rtInvite = MakeFlatButton(_lobbyWindow.transform, "BAMP_InviteFriends", "Invite Friends", 352f, -372f, 148f, 36f, new Color(0.196f, 0.227f, 0.298f, 1f), C_LD_MUT, 13, false);
+            _lwInvite = _rtInvite != null ? _rtInvite.gameObject : null;
 
             _lwStart   = CloneButtonInto(_lobbyWindow.transform, "BAMP_LwStart", "Start Game", OnLobbyStart, 110f, -456f, 160f, 42f); _rtLwStart = _lwStart?.GetComponent<RectTransform>();
             var leave  = CloneButtonInto(_lobbyWindow.transform, "BAMP_LwLeave", "Leave",      OnLobbyLeave, 290f, -456f, 160f, 42f); _rtLwLeave = leave?.GetComponent<RectTransform>();
@@ -4784,9 +4789,25 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>MAIN THREAD per frame while the lobby window is open — clicks + cash typing.</summary>
+        private bool _btnDiagLogged;
         private void TickLobbyWindow()
         {
-            if (_lobbyWindow == null || !_lobbyWindow.activeSelf) return;
+            if (_lobbyWindow == null || !_lobbyWindow.activeSelf) { _btnDiagLogged = false; return; }
+            // One-shot geometry diagnostic (2026-07-10 invite-button report): name
+            // the actual hit rects so a bad one is identified from the field log
+            // instead of anchor theory.  Logs once per lobby open, first frame
+            // after layout settles.
+            if (!_btnDiagLogged)
+            {
+                _btnDiagLogged = true;
+                try
+                {
+                    string D(RectTransform? rt) => rt == null ? "null"
+                        : $"rect={rt.rect} aMin={rt.anchorMin} aMax={rt.anchorMax} pos={rt.anchoredPosition}";
+                    Plugin.Logger.LogInfo($"[BtnDiag] invite: {D(_rtInvite)} | showip: {D(_rtShowIp)} | customize: {D(_rtCustomize)}");
+                }
+                catch { }
+            }
             bool host = MPServer.IsRunning;
             var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
 
@@ -4809,7 +4830,7 @@ namespace BigAmbitionsMP
                             return;
                         }
                     if (RectHit(_rtShowIp, mp))     { OnToggleShowIp();   return; }
-            if (RectHit(_rtInvite, mp))     { OnInviteFriends();  return; }
+                    if (_lwInvite != null && _lwInvite.activeSelf && RectHit(_rtInvite, mp)) { OnInviteFriends(); return; }
                     if (RectHit(_rtLwStart, mp))    { OnLobbyStart();      return; }
                     if (!_lobbyLoadMode)   // new-game controls are hidden in load mode
                     {
