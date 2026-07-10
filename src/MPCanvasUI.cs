@@ -4570,7 +4570,6 @@ namespace BigAmbitionsMP
             _lwConnInfo.enableWordWrapping = true;
             _lwConnInfo.fontSize = SZ_FLD - 2;
             _lwShowIp   = CloneButtonInto(_lobbyWindow.transform, "BAMP_ShowIp", "Show IP", OnToggleShowIp, 390f, -58f, 124f, 30f); _rtShowIp = _lwShowIp?.GetComponent<RectTransform>();
-            _lwInvite   = CloneButtonInto(_lobbyWindow.transform, "BAMP_InviteFriends", "Invite Steam Friends", OnInviteFriends, 200f, -58f, 182f, 30f); _rtInvite = _lwInvite?.GetComponent<RectTransform>();
             // Roster header — Players | Starting $ (host-set) | Age (self-set).
             ApplyFont(MakeLabel(_lobbyWindow.transform, "Players", SZ_FLD, grey, 28f, -92f, 200f, 26f, TextAlignmentOptions.Left));
             _lwRowCashHdr = MakeLabel(_lobbyWindow.transform, "Starting $", SZ_LBL, grey, 300f, -92f, 110f, 26f, TextAlignmentOptions.Left); ApplyFont(_lwRowCashHdr);
@@ -4600,6 +4599,7 @@ namespace BigAmbitionsMP
             _lwDiffHard   = CloneButtonInto(_lobbyWindow.transform, "BAMP_DiffHard",   "Hard",   () => SetDifficulty("Hard"),   406f, -320f, 110f, 36f); _rtDiffHard   = _lwDiffHard?.GetComponent<RectTransform>();
 
             _lwCustomize = CloneButtonInto(_lobbyWindow.transform, "BAMP_Customize", "Customize", OnCustomize, 196f, -372f, 148f, 36f); _rtCustomize = _lwCustomize?.GetComponent<RectTransform>();
+            _lwInvite    = CloneButtonInto(_lobbyWindow.transform, "BAMP_InviteFriends", "Invite Friends", OnInviteFriends, 352f, -372f, 148f, 36f); _rtInvite = _lwInvite?.GetComponent<RectTransform>();
 
             _lwStart   = CloneButtonInto(_lobbyWindow.transform, "BAMP_LwStart", "Start Game", OnLobbyStart, 110f, -456f, 160f, 42f); _rtLwStart = _lwStart?.GetComponent<RectTransform>();
             var leave  = CloneButtonInto(_lobbyWindow.transform, "BAMP_LwLeave", "Leave",      OnLobbyLeave, 290f, -456f, 160f, 42f); _rtLwLeave = leave?.GetComponent<RectTransform>();
@@ -4642,8 +4642,8 @@ namespace BigAmbitionsMP
 
         private void OnInviteFriends()
         {
-            Plugin.Logger.LogInfo("[MenuUI] Invite Steam Friends → overlay.");
-            MPSteamPresence.OpenFriendsOverlay();
+            Plugin.Logger.LogInfo("[MenuUI] Invite Friends → Steam invite dialog.");
+            MPSteamPresence.OpenInviteDialog();
         }
 
         private void RefreshLobbyWindow()
