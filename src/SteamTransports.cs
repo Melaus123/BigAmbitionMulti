@@ -99,6 +99,9 @@ namespace BigAmbitionsMP
             {
                 if (!SteamClient.IsValid)
                 { Plugin.Logger.LogWarning("[SteamHost] Steam client not valid — relay listener OFF (UDP-only session)."); return false; }
+                // Valve recommends kicking off SDR access early — it warms the relay
+                // route asynchronously and is a no-op when already available.
+                try { SteamNetworkingUtils.InitRelayNetworkAccess(); Plugin.Logger.LogInfo($"[SteamHost] relay network status: {SteamNetworkingUtils.Status}."); } catch { }
                 _links.Clear();
                 _socket = SteamNetworkingSockets.CreateRelaySocket(0, this);
                 _running = true;
@@ -183,6 +186,7 @@ namespace BigAmbitionsMP
             {
                 if (!SteamClient.IsValid)
                 { Plugin.Logger.LogWarning("[SteamClient] Steam client not valid — cannot relay-connect."); return false; }
+                try { SteamNetworkingUtils.InitRelayNetworkAccess(); Plugin.Logger.LogInfo($"[SteamClient] relay network status: {SteamNetworkingUtils.Status}."); } catch { }
                 _closeTag = Array.Empty<byte>();
                 _mgr = SteamNetworkingSockets.ConnectRelay(hostId, 0, this);
                 _running = true;
