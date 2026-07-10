@@ -10,12 +10,11 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class MPClient
     {
-        private static NetManager?   _client;
-        private static EventBasedNetListener? _listener;
-        private static NetPeer?      _server;
-
-        private static Thread? _pollThread;
-        private static volatile bool _running;
+        // Transport seam (Steam-connect slice 1): the client reaches the host
+        // through IClientTransport — LiteNetLib UDP today, Steam relay later.
+        // Events fire on the transport's poll thread, exactly as before.
+        private static IClientTransport? _transport;
+        private static volatile bool _connected;   // set on Connected, cleared on Disconnected/Disconnect
 
         /// <summary>Player list last received from the host's lobby update.
         /// CONCURRENT: replaced wholesale on the poll thread (lobby update / connect /
@@ -47,8 +46,8 @@ namespace BigAmbitionsMP
         public static bool   HostLoadMode;
         public static string HostLoadSession = "";
 
-        public static bool IsConnected  => _server?.ConnectionState == ConnectionState.Connected;
-        public static bool IsConnecting => _running && !IsConnected;
+        public static bool IsConnected  => _connected && _transport is { IsRunning: true };
+        public static bool IsConnecting => _transport is { IsRunning: true } && !_connected;
 
         /// <summary>Why the last connection ended ("ConnectionFailed", "Timeout", …).
         /// Set in OnDisconnected, cleared on Connect — the lobby UI shows it so a
@@ -80,25 +79,20 @@ namespace BigAmbitionsMP
         {
             // A previous session/attempt may still be live (exited to the menu
             // without disconnecting, or an autopilot retry).  Tear it down so we
-            // never run two NetManagers/poll threads at once.
-            if (_running || _client != null) Disconnect();
+            // never run two transports/poll threads at once.
+            if (_transport != null) Disconnect();
             LastDisconnectReason = "";
             SessionEnded = false;
             _voluntaryDisconnect = false;
+            _connected = false;
 
-            _listener = new EventBasedNetListener();
-            _client   = new NetManager(_listener) { AutoRecycle = true };
-
-            _listener.PeerConnectedEvent += OnConnected;
-            _listener.PeerDisconnectedEvent += OnDisconnected;
-            _listener.NetworkReceiveEvent += OnReceive;
-
-            _client.Start();
-            _server = _client.Connect(hostIp, port, "BAMP");
-
-            _running = true;
-            _pollThread = new Thread(PollLoop) { IsBackground = true, Name = "BAMP-Client" };
-            _pollThread.Start();
+            var t = new LnlClientTransport();
+            t.Connected    += OnConnected;
+            t.Disconnected += OnDisconnected;
+            t.Received     += OnReceive;
+            _transport = t;
+            if (!t.Connect(hostIp, port))
+            { Plugin.Logger.LogError($"[Client] transport failed to start toward {hostIp}:{port}."); _transport = null; return; }
 
             Plugin.Logger.LogInfo($"[Client] Connecting to {hostIp}:{port}...");
         }
@@ -106,24 +100,22 @@ namespace BigAmbitionsMP
         public static void Disconnect()
         {
             // Initiator forensics (see MPServer.Stop note).
-            if (_running)
+            if (_transport is { IsRunning: true })
                 Plugin.Logger.LogWarning($"[Client] DISCONNECT called from: {Environment.StackTrace}");
             _voluntaryDisconnect = true;   // deliberate — never the session-over lock
-            _running = false;
-            _client?.Stop();
-            _pollThread?.Join(1000);
+            _transport?.Disconnect();
+            _transport = null;
+            _connected = false;
             IsInLobby = true;
             _lobbyPlayers = new List<string>();
-            _server = null;
-            _client = null;
         }
 
         // ── Events ────────────────────────────────────────────────────────────
 
-        private static void OnConnected(NetPeer peer)
+        private static void OnConnected()
         {
             Plugin.Logger.LogInfo("[Client] Connected to host.");
-            _server   = peer;
+            _connected = true;
 
             // RECONNECT: the host's vote tally + any in-flight skip are gone on its side — clear our stale
             // copy so a leftover SkipActive or phantom vote rows don't wedge the rest dock / world-clock
@@ -161,20 +153,20 @@ namespace BigAmbitionsMP
             Send(MessageEnvelope.Create(MessageType.Hello, MPConfig.PlayerId, hello));
         }
 
-        private static void OnDisconnected(NetPeer peer, DisconnectInfo info)
+        private static void OnDisconnected(string reason, byte[] extra)
         {
-            Plugin.Logger.LogWarning($"[Client] Disconnected from host: {info.Reason}");
+            Plugin.Logger.LogWarning($"[Client] Disconnected from host: {reason}");
             // Host can attach a HUMAN reason (kick/reject/ban) as disconnect
             // data — "RemoteConnectionClose" told the user nothing (2026-06-11).
-            string why = info.Reason.ToString();
+            string why = reason;
             try
             {
-                if (info.AdditionalData != null && !info.AdditionalData.EndOfData)
+                if (extra != null && extra.Length > 0)
                 {
-                    // RAW bytes (server sends UTF8 directly) — GetString expects
-                    // LiteNetLib's length-prefixed format and threw, which ate
-                    // the kick/reject reason (2026-06-11).
-                    string tag = System.Text.Encoding.UTF8.GetString(info.AdditionalData.GetRemainingBytes());
+                    // RAW bytes (server sends UTF8 directly) — the transport hands
+                    // them over verbatim (LiteNetLib's length-prefixed GetString
+                    // threw and ate the kick/reject reason, 2026-06-11).
+                    string tag = System.Text.Encoding.UTF8.GetString(extra);
                     if (tag == "BAMP:rejected") why = "Join REJECTED by host";
                     else if (tag == "BAMP:kicked") why = "KICKED by host";
                     else if (tag == "BAMP:banned") why = "Banned until host re-hosts";
@@ -195,12 +187,13 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Client] disconnect-tag read: {ex.Message}"); }
             LastDisconnectReason = why;
-            _server  = null;
-            // The connection is gone either way — let the poll loop exit so
+            _connected = false;
+            // The connection is gone either way — stop the poll loop so
             // IsConnecting goes false (the UI was stuck showing "Connecting…"
-            // forever after a ConnectionFailed).  The NetManager itself is
-            // stopped by the next Connect()'s teardown guard.
-            _running = false;
+            // forever after a ConnectionFailed).  StopPolling only (we're ON the
+            // poll thread); the transport itself is torn down by the next
+            // Connect()'s guard, exactly as the pre-seam NetManager was.
+            _transport?.StopPolling();
             bool voluntary = _voluntaryDisconnect;
             // Clean up all remote-player capsules on the main thread, and release
             // the startup hold — we must not stay frozen after losing the host.
@@ -247,10 +240,9 @@ namespace BigAmbitionsMP
             try { InteriorSync.PublishAllOwnedInteriors("world live"); } catch { }
         }
 
-        private static void OnReceive(NetPeer peer, NetPacketReader reader, byte channel, DeliveryMethod delivery)
+        private static void OnReceive(byte[] bytes)
         {
-            var bytes = reader.GetRemainingBytes();
-            var env   = MessageEnvelope.Deserialize(bytes);
+            var env = MessageEnvelope.Deserialize(bytes);
             if (env == null) return;
 
             // Streaming world traffic is DROPPED during a join load (snapshots
@@ -1509,11 +1501,8 @@ namespace BigAmbitionsMP
         public static void SendPlayerPosition(PlayerPositionPayload payload)
         {
             if (!IsConnected) return;
-            var env    = MessageEnvelope.Create(MessageType.PlayerMove, MPConfig.PlayerId, payload);
-            var bytes  = env.Serialize();
-            var writer = new NetDataWriter();
-            writer.Put(bytes);
-            _server?.Send(writer, DeliveryMethod.Unreliable);
+            var env = MessageEnvelope.Create(MessageType.PlayerMove, MPConfig.PlayerId, payload);
+            _transport?.Send(env.Serialize(), reliable: false);
         }
 
         /// <summary>
@@ -1608,11 +1597,7 @@ namespace BigAmbitionsMP
 
         private static void Send(MessageEnvelope env)
         {
-            if (_server == null) return;
-            var bytes  = env.Serialize();
-            var writer = new NetDataWriter();
-            writer.Put(bytes);
-            _server.Send(writer, DeliveryMethod.ReliableOrdered);
+            _transport?.Send(env.Serialize(), reliable: true);
         }
 
         /// <summary>Reliable send for modules that build their own envelope.</summary>
@@ -1621,17 +1606,7 @@ namespace BigAmbitionsMP
             if (IsConnected) Send(env);
         }
 
-        private static void PollLoop()
-        {
-            while (_running)
-            {
-                // A message handler throwing must NOT kill the network thread —
-                // that would silently drop the client out of the session.  Catch,
-                // log, and keep polling.
-                try { _client?.PollEvents(); }
-                catch (Exception ex) { Plugin.Logger.LogError($"[Client] PollEvents: {ex}"); }
-                Thread.Sleep(15);
-            }
-        }
+        // Poll loop lives in LnlClientTransport now (transport seam) — same
+        // thread name, cadence, and throw-isolation as before.
     }
 }

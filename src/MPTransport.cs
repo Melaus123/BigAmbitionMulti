@@ -62,6 +62,12 @@ namespace BigAmbitionsMP
     public interface IClientTransport
     {
         void Disconnect();
+        /// <summary>Stop the poll loop WITHOUT tearing down or joining — safe to
+        /// call from the Disconnected handler (which runs ON the poll thread;
+        /// a full Disconnect there would join the thread against itself).  The
+        /// manager itself is torn down by the next Connect's guard, exactly as
+        /// the pre-seam code did.</summary>
+        void StopPolling();
         bool IsRunning { get; }
         void Send(byte[] data, bool reliable);
         event Action? Connected;
@@ -184,11 +190,13 @@ namespace BigAmbitionsMP
             return true;
         }
 
+        public void StopPolling() => _running = false;
+
         public void Disconnect()
         {
             _running = false;
             _client?.Stop();
-            _pollThread?.Join(1000);
+            if (_pollThread != null && _pollThread != Thread.CurrentThread) _pollThread.Join(1000);
             _client = null;
         }
 
