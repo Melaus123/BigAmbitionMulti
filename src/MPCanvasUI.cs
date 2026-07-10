@@ -6405,12 +6405,25 @@ namespace BigAmbitionsMP
 
         private void OnJoin()
         {
+            if (string.IsNullOrWhiteSpace(_name))
+            { SetStatus("Enter a player name.", true); return; }
+            // Slice 2: the address field also accepts "steam:<SteamID64>" (or a
+            // bare 17-digit id) → relay connect, no port/IP needed.  Proper
+            // friends-list/invite UX is stage C; this unlocks testing now.
+            string addr = (_ip ?? "").Trim();
+            string steamPart = addr.StartsWith("steam:", StringComparison.OrdinalIgnoreCase) ? addr.Substring(6).Trim()
+                             : (addr.Length == 17 && ulong.TryParse(addr, out _)) ? addr : "";
+            if (steamPart.Length > 0 && ulong.TryParse(steamPart, out ulong hostSteamId))
+            {
+                MPConfig.SetRuntime(_name.Trim(), addr, 0);
+                MPClient.ConnectSteam(hostSteamId);
+                SetStatus("Connecting via Steam relay...", false);
+                return;
+            }
             if (!int.TryParse(_port, out int p) || p < 1024 || p > 65535)
             { SetStatus("Invalid port.", true); return; }
             if (string.IsNullOrWhiteSpace(_ip))
-            { SetStatus("Enter a host IP.", true); return; }
-            if (string.IsNullOrWhiteSpace(_name))
-            { SetStatus("Enter a player name.", true); return; }
+            { SetStatus("Enter a host IP (or steam:<id64>).", true); return; }
             MPConfig.SetRuntime(_name.Trim(), _ip.Trim(), p);
             MPClient.Connect(_ip.Trim(), p);
             SetStatus("Connecting...", false);

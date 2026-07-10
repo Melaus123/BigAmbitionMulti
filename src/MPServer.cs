@@ -13,7 +13,8 @@ namespace BigAmbitionsMP
     {
         // Transport seam (Steam-connect slice 1): the host listens through
         // IHostTransport — LiteNetLib UDP today, + a Steam relay in slice 2.
-        private static LnlHostTransport? _transport;
+        private static LnlHostTransport?  _transport;        // UDP (direct IP / LAN) — always on
+        private static SteamHostTransport? _steamTransport;   // Steam relay — best-effort beside UDP
 
         /// <summary>Address key → player ID who owns it. Empty = unowned.
         /// CONCURRENT: written on the network poll thread (rent/disconnect) and
@@ -517,6 +518,19 @@ namespace BigAmbitionsMP
                 return false;
             }
 
+            // Steam relay listener BESIDE UDP (slice 2): same three handlers — the
+            // seam makes relay peers indistinguishable above the transport.  Steam
+            // being unavailable must never block hosting (UDP-only fallback logs).
+            try
+            {
+                var st = new SteamHostTransport();
+                st.PeerConnected    += OnPeerConnected;
+                st.PeerDisconnected += OnPeerDisconnected;
+                st.Received         += OnReceive;
+                _steamTransport = st.Start(0) ? st : null;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Steam relay listener: {ex.Message} — UDP only."); _steamTransport = null; }
+
             _running = true;
             ResetJoinControl();   // fresh hosting session — bans lift, pending requests drop
 
@@ -537,6 +551,8 @@ namespace BigAmbitionsMP
             MPNet.RemoveMappingAsync();   // best-effort UPnP cleanup (harmless if it can't run)
             _transport?.Stop();
             _transport = null;
+            try { _steamTransport?.Stop(); } catch { }
+            _steamTransport = null;
             IsInLobby = true;
             LobbyClear();
             _peerNames.Clear();

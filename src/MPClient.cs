@@ -97,6 +97,28 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Client] Connecting to {hostIp}:{port}...");
         }
 
+        /// <summary>Connect over Valve's relay network by the host's SteamId
+        /// (slice 2) — no port forwarding, no IP.  Same session flow as the IP
+        /// path from the Hello onward; the seam hides the transport.</summary>
+        public static void ConnectSteam(ulong hostSteamId)
+        {
+            if (_transport != null) Disconnect();
+            LastDisconnectReason = "";
+            SessionEnded = false;
+            _voluntaryDisconnect = false;
+            _connected = false;
+
+            var t = new SteamClientTransport();
+            t.Connected    += OnConnected;
+            t.Disconnected += OnDisconnected;
+            t.Received     += OnReceive;
+            _transport = t;
+            if (!t.Connect(hostSteamId))
+            { Plugin.Logger.LogError($"[Client] Steam relay connect toward {hostSteamId} failed to start."); _transport = null; return; }
+
+            Plugin.Logger.LogInfo($"[Client] Connecting via Steam relay to {hostSteamId}...");
+        }
+
         public static void Disconnect()
         {
             // Initiator forensics (see MPServer.Stop note).
