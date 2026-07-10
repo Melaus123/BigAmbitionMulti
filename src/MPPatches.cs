@@ -3431,14 +3431,22 @@ namespace BigAmbitionsMP
         [HarmonyPatch]
         public static class Patch_GM_HandleEscapeClick_NullGuard
         {
-            // Attribute-targeted form failed on every install ("Patching exception in method null",
-            // seen in our own log AND both 2026-07-09 field reports) while the sibling
-            // HasInputSelected patch on the same class succeeds — resolve explicitly and LOG the
-            // outcome so the next failure names itself instead of hiding in the patch driver's wrapper.
+            // 2026-07-10 field run named the cause: "HandleEscapeClick" resolves NOT FOUND in the
+            // LIVE build while the decompile dump (GameManager.cs:964) still has it and the sibling
+            // ShouldBlockKeyboardShortcuts patch on the same type binds — the game renamed the method
+            // in a post-dump hotfix.  Resolve by SCAN (void, no params, name contains "Escape") so a
+            // rename can't kill the guard again, and LOG what bound so the field verifies the pick.
             static System.Reflection.MethodBase? TargetMethod()
             {
                 var m = HarmonyLib.AccessTools.DeclaredMethod(typeof(GameManager), "HandleEscapeClick");
-                Plugin.Logger.LogInfo($"[Patch] GameManager.HandleEscapeClick resolve: {(m != null ? "found" : "NOT FOUND")}");
+                if (m == null)
+                {
+                    foreach (var c in HarmonyLib.AccessTools.GetDeclaredMethods(typeof(GameManager)))
+                        if (c.Name.IndexOf("Escape", StringComparison.OrdinalIgnoreCase) >= 0
+                            && c.GetParameters().Length == 0 && c.ReturnType == typeof(void))
+                        { m = c; break; }
+                }
+                Plugin.Logger.LogInfo($"[Patch] GameManager escape-click resolve: {(m != null ? m.Name : "NOT FOUND — guard stays off")}");
                 return m;
             }
 
