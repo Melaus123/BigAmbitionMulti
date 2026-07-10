@@ -4605,6 +4605,28 @@ namespace BigAmbitionsMP
             // close).  Manual RectHit dispatch is the one and only click path.
             _rtInvite = MakeFlatButton(_lobbyWindow.transform, "BAMP_InviteFriends", "Invite Friends", 352f, -372f, 148f, 36f, new Color(0.196f, 0.227f, 0.298f, 1f), C_LD_MUT, 13, false);
             _lwInvite = _rtInvite != null ? _rtInvite.gameObject : null;
+            // Copy the NEIGHBOURING clone's visual onto the flat button (field
+            // report: the flat default read as a disabled button next to
+            // Start/Leave/Customize).  Visual only — geometry stays the flat
+            // button's own, which the [BtnDiag] run verified sane.
+            try
+            {
+                var srcImg = _lwCustomize != null ? _lwCustomize.GetComponentInChildren<Image>(true) : null;
+                var dstImg = _lwInvite    != null ? _lwInvite.GetComponentInChildren<Image>(true)    : null;
+                if (srcImg != null && dstImg != null)
+                {
+                    dstImg.sprite = srcImg.sprite; dstImg.color = srcImg.color;
+                    dstImg.type = srcImg.type; dstImg.pixelsPerUnitMultiplier = srcImg.pixelsPerUnitMultiplier;
+                }
+                var srcTxt = _lwCustomize != null ? _lwCustomize.GetComponentInChildren<TMP_Text>(true) : null;
+                var dstTxt = _lwInvite    != null ? _lwInvite.GetComponentInChildren<TMP_Text>(true)    : null;
+                if (srcTxt != null && dstTxt != null)
+                {
+                    dstTxt.color = srcTxt.color; dstTxt.fontSize = srcTxt.fontSize;
+                    dstTxt.fontStyle = srcTxt.fontStyle; dstTxt.font = srcTxt.font;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] invite visual match: {ex.Message}"); }
 
             _lwStart   = CloneButtonInto(_lobbyWindow.transform, "BAMP_LwStart", "Start Game", OnLobbyStart, 110f, -456f, 160f, 42f); _rtLwStart = _lwStart?.GetComponent<RectTransform>();
             var leave  = CloneButtonInto(_lobbyWindow.transform, "BAMP_LwLeave", "Leave",      OnLobbyLeave, 290f, -456f, 160f, 42f); _rtLwLeave = leave?.GetComponent<RectTransform>();
