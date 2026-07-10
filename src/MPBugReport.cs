@@ -59,7 +59,7 @@ namespace BigAmbitionsMP
                                   ?.GetValue(__instance) as BasicTooltip;
                 if (tooltip != null)
                 {
-                    tooltip.titleKey = "Report a BigAmbitionsMP bug";
+                    tooltip.titleKey = "Report a " + MyPluginInfo.SHORT_NAME + " bug";
                     tooltip.descriptionKey = "Opens the multiplayer mod's bug report,Your logs are attached automatically";
                 }
                 Plugin.Logger.LogInfo("[BugReport] Native top-bar report button recycled as the mod's report entry point.");
@@ -267,8 +267,8 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (!string.IsNullOrWhiteSpace(MPConfig.ModRootPath) && MPConfig.ModRootPath != ".")
-                    return Path.Combine(MPConfig.ModRootPath, "bug-reports");
+                if (!string.IsNullOrWhiteSpace(MPConfig.DataRootPath) && MPConfig.DataRootPath != ".")
+                    return Path.Combine(MPConfig.DataRootPath, "bug-reports");
             }
             catch { }
             return Path.Combine(Path.GetTempPath(), "BigAmbitionsMP-bug-reports");
@@ -311,7 +311,7 @@ namespace BigAmbitionsMP
         private static void WriteReport(string path, string reason)
         {
             var sb = new StringBuilder();
-            sb.AppendLine("# BigAmbitionsMP Bug Report");
+            sb.AppendLine($"# {MyPluginInfo.DISPLAY_NAME} — Bug Report");
             sb.AppendLine();
             sb.AppendLine($"Created: {DateTime.Now:O}");
             sb.AppendLine($"Reason: {reason}");
@@ -618,7 +618,7 @@ namespace BigAmbitionsMP
 
                 using (var stream = req.GetRequestStream())
                 {
-                    string content = $"BigAmbitionsMP bug report: {Role()} / session {Blank(MPLog.SessionId)} / {reason}";
+                    string content = $"{MyPluginInfo.SHORT_NAME} bug report: {Role()} / session {Blank(MPLog.SessionId)} / {reason}";
                     var payloadObj = new Dictionary<string, object>
                     {
                         ["content"] = content,
@@ -722,7 +722,7 @@ namespace BigAmbitionsMP
             foreach (char c in title) sb.Append(char.IsControl(c) ? ' ' : c);
             string name = sb.ToString().Trim();
             if (name.Length > 90) name = name.Substring(0, 90).TrimEnd() + "…";
-            return name.Length == 0 ? "BAMP bug report" : name;
+            return name.Length == 0 ? MyPluginInfo.SHORT_NAME + " bug report" : name;
         }
 
         private static IEnumerable<string> UploadFiles(string dir)

@@ -98,17 +98,29 @@
     <Reference Include="UnityEngine.UI"><HintPath>$(ManagedDir)UnityEngine.UI.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Unity.TextMeshPro"><HintPath>$(ManagedDir)Unity.TextMeshPro.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Cinemachine"><HintPath>$(ManagedDir)Cinemachine.dll</HintPath><Private>false</Private></Reference>
+    <!-- Steam-connect campaign: the game ships + initializes Facepunch.Steamworks
+         (2.5.2) — we piggyback for relay networking, invites, rich presence. -->
+    <Reference Include="Facepunch.Steamworks.Win64"><HintPath>$(ManagedDir)Facepunch.Steamworks.Win64.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 
   <!-- Deploy to the official loader's local-mods folder (shared by both
        instances).  Layout: ModsLocal\BigAmbitionsMP\BigAmbitionsMP.dll
-       + Dependencies\{0Harmony,LiteNetLib}.dll + assets. -->
+       + Dependencies\{0Harmony,LiteNetLib}.dll + assets\ icons.
+       preview.png is the ONLY top-level image: the game's Workshop upload
+       panel auto-picks the first top-level png/jpg as the item thumbnail. -->
   <Target Name="DeployToModsLocal" AfterTargets="Build">
-    <MakeDir Directories="$(ModDeployDir);$(ModDeployDir)Dependencies" />
+    <MakeDir Directories="$(ModDeployDir);$(ModDeployDir)Dependencies;$(ModDeployDir)assets" />
     <Copy SourceFiles="$(TargetDir)$(AssemblyName).dll" DestinationFolder="$(ModDeployDir)" ContinueOnError="true" />
     <Copy SourceFiles="$(TargetDir)0Harmony.dll" DestinationFolder="$(ModDeployDir)Dependencies\" ContinueOnError="true" />
     <Copy SourceFiles="$(TargetDir)LiteNetLib.dll" DestinationFolder="$(ModDeployDir)Dependencies\" ContinueOnError="true" />
-    <Copy Condition="Exists('$(ProjectDir)assets\BAMP_ChatIcon.png')" SourceFiles="$(ProjectDir)assets\BAMP_ChatIcon.png" DestinationFolder="$(ModDeployDir)" ContinueOnError="true" />
-    <Copy Condition="Exists('$(ProjectDir)assets\BAMP_HubIcon.png')" SourceFiles="$(ProjectDir)assets\BAMP_HubIcon.png" DestinationFolder="$(ModDeployDir)" ContinueOnError="true" />
+    <Copy Condition="Exists('$(ProjectDir)assets\BAMP_ChatIcon.png')" SourceFiles="$(ProjectDir)assets\BAMP_ChatIcon.png" DestinationFolder="$(ModDeployDir)assets\" ContinueOnError="true" />
+    <Copy Condition="Exists('$(ProjectDir)assets\BAMP_HubIcon.png')" SourceFiles="$(ProjectDir)assets\BAMP_HubIcon.png" DestinationFolder="$(ModDeployDir)assets\" ContinueOnError="true" />
+    <Copy Condition="Exists('$(ProjectDir)assets\preview.png')" SourceFiles="$(ProjectDir)assets\preview.png" DestinationFolder="$(ModDeployDir)" ContinueOnError="true" />
+    <!-- MIT notices must travel with the bundled Harmony/LiteNetLib binaries —
+         the deployed folder is also the Workshop upload source. -->
+    <Copy SourceFiles="$(ProjectDir)THIRD-PARTY-NOTICES.txt;$(ProjectDir)LICENSE" DestinationFolder="$(ModDeployDir)" ContinueOnError="true" />
+    <!-- Pre-0.1.11 deploys left the icons at the mod root — remove them so the
+         Workshop thumbnail auto-pick can't grab a phone icon. -->
+    <Delete Files="$(ModDeployDir)BAMP_ChatIcon.png;$(ModDeployDir)BAMP_HubIcon.png" ContinueOnError="true" />
   </Target>
 </Project>

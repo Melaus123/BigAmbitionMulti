@@ -68,11 +68,15 @@ $modDir = Join-Path $stage "BigAmbitionsMP"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force (Join-Path $modDir "Dependencies") | Out-Null
 
+New-Item -ItemType Directory -Force (Join-Path $modDir "assets") | Out-Null
 Copy-Item $dll                                        $modDir
 Copy-Item (Join-Path $outDir "0Harmony.dll")          (Join-Path $modDir "Dependencies")
 Copy-Item (Join-Path $outDir "LiteNetLib.dll")        (Join-Path $modDir "Dependencies")
-Copy-Item (Join-Path $root "assets\BAMP_ChatIcon.png") $modDir
-Copy-Item (Join-Path $root "assets\BAMP_HubIcon.png")  $modDir
+# Icons live under assets\; preview.png is the ONLY top-level image — the game's
+# Workshop upload panel auto-picks the first top-level png/jpg as the thumbnail.
+Copy-Item (Join-Path $root "assets\BAMP_ChatIcon.png") (Join-Path $modDir "assets")
+Copy-Item (Join-Path $root "assets\BAMP_HubIcon.png")  (Join-Path $modDir "assets")
+Copy-Item (Join-Path $root "assets\preview.png")       $modDir
 # MIT requires the bundled Harmony / LiteNetLib license notices to travel with them.
 Copy-Item (Join-Path $root "THIRD-PARTY-NOTICES.txt")  $modDir
 Copy-Item (Join-Path $root "LICENSE")                  $modDir

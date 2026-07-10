@@ -42,6 +42,26 @@ namespace BigAmbitionsMP
             Instance = this;
             Plugin.Logger = new ModLog(context.Logger);
 
+            // ── Double-install guard (Workshop readiness) ─────────────────────
+            // The game loads mods from BOTH ModsLocal and Steam Workshop with no
+            // dedup — a Manager install plus a Workshop subscription would run
+            // TWO copies of this mod (two Harmony patch sets = breakage).
+            // Assembly statics are per-copy, so coordinate through AppDomain
+            // data slots: the first copy claims the singleton slot; any later
+            // copy records itself in the duplicate slot (the live copy's UI
+            // polls it and warns the player) and loads NOTHING.
+            var priorRoot = AppDomain.CurrentDomain.GetData("BAMP_SINGLETON_ROOT") as string;
+            if (priorRoot != null)
+            {
+                AppDomain.CurrentDomain.SetData("BAMP_DUPLICATE_ROOT", context.ModRootPath ?? "unknown");
+                Plugin.Logger.LogError(
+                    $"{MyPluginInfo.DISPLAY_NAME}: another copy is already loaded from '{priorRoot}' — " +
+                    $"this copy ('{context.ModRootPath}') will NOT start. Keep ONE install: either the " +
+                    "Steam Workshop subscription or the local ModsLocal copy, not both.");
+                return Task.CompletedTask;
+            }
+            AppDomain.CurrentDomain.SetData("BAMP_SINGLETON_ROOT", context.ModRootPath ?? "unknown");
+
             Plugin.Logger.LogInfo($"BigAmbitionsMP loading (official loader, modId='{context.ModId}', root='{context.ModRootPath}')...");
 
             MPConfig.Init(context.ModRootPath);
@@ -94,7 +114,7 @@ namespace BigAmbitionsMP
             }
             Plugin.Logger.LogInfo($"[Plugin] Patch summary: {okClasses} class(es) OK, {failClasses} failed, {deadClasses} dead, {totalPatched} method(s) patched total.");
 
-            Plugin.Logger.LogInfo($"BigAmbitionsMP v{MyPluginInfo.PLUGIN_VERSION} ({MyPluginInfo.BuildTag}) loaded. Canvas UI active.");
+            Plugin.Logger.LogInfo($"{MyPluginInfo.DISPLAY_NAME} (BigAmbitionsMP) v{MyPluginInfo.PLUGIN_VERSION} ({MyPluginInfo.BuildTag}) loaded. Canvas UI active.");
             return Task.CompletedTask;
         }
 

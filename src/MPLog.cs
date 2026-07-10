@@ -87,7 +87,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                string root = MPConfig.ModRootPath;
+                string root = MPConfig.DataRootPath;
                 if (!string.IsNullOrEmpty(root) && root != ".") return Path.Combine(root, "logs");
             }
             catch { }

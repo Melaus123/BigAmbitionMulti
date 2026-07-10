@@ -186,7 +186,7 @@ namespace BigAmbitionsMP
                         var parts = rest.Split('|');
                         string hostMod  = parts.Length > 0 && parts[0].Length > 0 ? parts[0] : "?";
                         string hostGame = parts.Length > 1 && parts[1].Length > 0 ? parts[1] : "?";
-                        why = $"Join refused — version mismatch. Host: BigAmbitionsMP {hostMod} / {hostGame}; " +
+                        why = $"Join refused — version mismatch. Host: {MyPluginInfo.SHORT_NAME} {hostMod} / {hostGame}; " +
                               $"you: {MyPluginInfo.PLUGIN_VERSION} / {MPSaveManager.GameVersionNameCached()}. " +
                               "Both players need the same mod and game version.";
                     }

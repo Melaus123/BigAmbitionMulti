@@ -564,12 +564,17 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[PhoneBtn] grow '{tr.name}': {ex.Message}"); }
         }
 
-        /// <summary>Load any icon PNG from the plugins folder (owned texture).</summary>
+        /// <summary>Load any icon PNG from the mod folder (owned texture).
+        /// Icons live in assets\ so the mod-folder ROOT holds only preview.png —
+        /// the game's Workshop upload panel auto-picks the first top-level image
+        /// as the item thumbnail.  Root fallback covers pre-0.1.11 installs.</summary>
         internal static Sprite? LoadIconFile(string file)
         {
             try
             {
-                string path = System.IO.Path.Combine(MPConfig.ModRootPath, file);
+                string path = System.IO.Path.Combine(MPConfig.ModRootPath, "assets", file);
+                if (!System.IO.File.Exists(path))
+                    path = System.IO.Path.Combine(MPConfig.ModRootPath, file);
                 if (!System.IO.File.Exists(path))
                 {
                     Plugin.Logger.LogWarning($"[PhoneBtn] icon not found: {path}");

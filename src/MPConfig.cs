@@ -104,9 +104,16 @@ namespace BigAmbitionsMP
             catch { return 0; }
         }
 
-        /// <summary>The mod's install folder (ModsLocal\BigAmbitionsMP) — asset
-        /// lookups (icons) read from here; replaces BepInEx.Paths.PluginPath.</summary>
+        /// <summary>The mod's install folder (ModsLocal\BigAmbitionsMP or the Steam
+        /// Workshop item dir) — STATIC CONTENT ONLY (icons, preview).  Never write
+        /// here: Workshop installs are Steam-managed and re-validated on update.</summary>
         public static string ModRootPath { get; private set; } = ".";
+
+        /// <summary>Per-user runtime-data root (config, ring logs, bug reports):
+        /// LocalLow\Hovgaard Games\Big Ambitions\BigAmbitionsMP.  Survives Steam
+        /// Workshop updates and never rides a Workshop upload.  Set in Init;
+        /// falls back to ModRootPath only if persistentDataPath is unavailable.</summary>
+        public static string DataRootPath { get; private set; } = ".";
         public static string ConfigPath => _cfgPath;
 
         public static string BugReportDiscordWebhookUrlLive()
@@ -246,8 +253,38 @@ namespace BigAmbitionsMP
                 ModRootPath  = modRootPath ?? ".";
                 // dataPath = "<gameRoot>/Big Ambitions_Data"
                 GameRootPath = Path.GetDirectoryName(UnityEngine.Application.dataPath) ?? "";
-                _cfgPath = Path.Combine(ModRootPath, $"BigAmbitionsMP.cfg.{InstallKey()}.json");
-                Plugin.Logger.LogInfo($"[Config] install '{InstallKey()}' (root '{GameRootPath}') → cfg '{Path.GetFileName(_cfgPath)}'.");
+                // Runtime data (config, ring logs, bug reports) lives OUTSIDE the mod
+                // folder (Workshop readiness): on a Workshop install the mod folder is
+                // Steam-managed content — updates re-validate/clobber it, and a config
+                // wipe would destroy StableId (the player's save identity).  The
+                // in-game Workshop upload also ships the WHOLE selected folder, so
+                // runtime logs/configs must never live in it.  persistentDataPath is
+                // per-user and update-safe; per-instance config filenames already
+                // disambiguate the two local game installs via InstallKey.
+                try
+                {
+                    DataRootPath = Path.Combine(UnityEngine.Application.persistentDataPath, "BigAmbitionsMP");
+                    Directory.CreateDirectory(DataRootPath);
+                }
+                catch (Exception dx)
+                {
+                    DataRootPath = ModRootPath;
+                    Plugin.Logger.LogWarning($"[Config] data root unavailable ({dx.Message}) — falling back to the mod folder.");
+                }
+                _cfgPath = Path.Combine(DataRootPath, $"BigAmbitionsMP.cfg.{InstallKey()}.json");
+                // One-time migration: pre-0.1.11 the config lived in the mod folder.
+                // MOVE it — StableId must survive or the player returns as a stranger.
+                try
+                {
+                    string legacy = Path.Combine(ModRootPath, $"BigAmbitionsMP.cfg.{InstallKey()}.json");
+                    if (!File.Exists(_cfgPath) && File.Exists(legacy))
+                    {
+                        File.Move(legacy, _cfgPath);
+                        Plugin.Logger.LogInfo("[Config] migrated config out of the mod folder (Workshop-safe data root).");
+                    }
+                }
+                catch (Exception mx) { Plugin.Logger.LogWarning($"[Config] config migration: {mx.Message}"); }
+                Plugin.Logger.LogInfo($"[Config] install '{InstallKey()}' (root '{GameRootPath}') → cfg '{Path.GetFileName(_cfgPath)}' in '{DataRootPath}'.");
                 if (File.Exists(_cfgPath))
                     _cfg = JsonConvert.DeserializeObject<Dictionary<string, string>>(File.ReadAllText(_cfgPath))
                            ?? new Dictionary<string, string>();

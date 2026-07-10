@@ -330,6 +330,52 @@ namespace BigAmbitionsMP
             }
             catch { phase = "unknown"; }
             MPBugReport.Heartbeat(phase);
+            TickDuplicateInstallWarning();
+            TickSteamProbe();
+        }
+
+        private static bool _steamProbed;
+        /// <summary>Steam-connect campaign, slice-1 probe: one line confirming we can
+        /// link + read the game-initialized Facepunch SteamClient.  Gates slice 2
+        /// (relay transport rides the same client).  Logs once, first heartbeat
+        /// where Steam reports valid; silent otherwise.</summary>
+        private static void TickSteamProbe()
+        {
+            if (_steamProbed) return;
+            try
+            {
+                if (!Steamworks.SteamClient.IsValid) return;
+                _steamProbed = true;
+                Plugin.Logger.LogInfo($"[Steam] client valid: app={Steamworks.SteamClient.AppId} id={Steamworks.SteamClient.SteamId} name='{Steamworks.SteamClient.Name}'.");
+            }
+            catch (Exception ex)
+            {
+                _steamProbed = true;   // one shot either way — a throw means the link/runtime is the story
+                Plugin.Logger.LogWarning($"[Steam] probe failed: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        private bool _duplicateWarned;
+        /// <summary>A second copy of this mod (ModsLocal + Workshop subscription)
+        /// refuses to start (Plugin double-install guard) and records itself in an
+        /// AppDomain slot — assembly statics are per-copy, so the slot is the only
+        /// channel.  The LIVE copy announces it here, once, so the player learns
+        /// to remove one install instead of wondering why the Mods list shows two.</summary>
+        private void TickDuplicateInstallWarning()
+        {
+            if (_duplicateWarned) return;
+            string? dup = null;
+            try { dup = System.AppDomain.CurrentDomain.GetData("BAMP_DUPLICATE_ROOT") as string; } catch { }
+            if (string.IsNullOrEmpty(dup)) return;
+            _duplicateWarned = true;
+            Plugin.Logger.LogWarning($"[Plugin] Duplicate install detected: a second copy at '{dup}' was refused. Remove either the Workshop subscription or the ModsLocal folder.");
+            try { ModEntry.PatchIssues.Add($"duplicate install refused: {dup}"); } catch { }
+            try
+            {
+                UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error,
+                    $"{MyPluginInfo.SHORT_NAME} is installed twice (Steam Workshop + local mods). The extra copy was disabled — please remove one install.");
+            }
+            catch { }
         }
 
         private static int SafeDay()
@@ -4877,7 +4923,7 @@ namespace BigAmbitionsMP
 
             _crashReportTitleLbl = MakeLabel(header.transform, "Crash report", 18, C_WHITE, 18f, 0f, 320f, 46f, TextAlignmentOptions.Left);
             ApplyFont(_crashReportTitleLbl);
-            var tag = MakeLabel(header.transform, "BigAmbitionsMP", 12, new Color(0.78f, 0.84f, 0.94f, 1f), 456f, 0f, 140f, 46f, TextAlignmentOptions.Right);
+            var tag = MakeLabel(header.transform, MyPluginInfo.SHORT_NAME, 12, new Color(0.78f, 0.84f, 0.94f, 1f), 456f, 0f, 140f, 46f, TextAlignmentOptions.Right);
             ApplyFont(tag);
 
             _crashReportBodyLbl = MakeLabel(panel.transform,
