@@ -2547,7 +2547,13 @@ namespace BigAmbitionsMP
                     // landlord, which worldgen never re-assigns.
                     if (!string.IsNullOrEmpty(info.OwnerPlayerId))
                     {
-                        if (info.OwnerPlayerId == MPConfig.PlayerId) newRented = true;
+                        // I am the tenant → no rival "runs" this business: CLEAR the runner
+                        // field rather than keeping the verbatim copy from above, which for my
+                        // own shop is the HOST's translated view — MY OWN player id.  Writing
+                        // that onto my reg changed the publish signature every echo → the
+                        // 2026-07-13 report's endless rebroadcast loop for the client's shop
+                        // (and the map-POI churn perceived as "map icons moving").
+                        if (info.OwnerPlayerId == MPConfig.PlayerId) { newRented = true; newBusinessOwner = ""; }
                         else                                         newBusinessOwner = info.OwnerPlayerId;
                         // newRented stays = priorRented for other players' buildings: whether the LOCAL
                         // player RUNS a business here is the client's OWN authority; a host delta must
