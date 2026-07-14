@@ -1682,6 +1682,36 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: BizManSettings.RenameLogoSpriteFolder — stale-target shield ──
+        // RED ROC log 2026-07-13: renaming a business to a name it previously
+        // held throws IOException in the native rename (Directory.Move onto an
+        // existing folder from the earlier round-trip) — which aborts the REST
+        // of SaveBusinessInformation for that click AND skips our sync postfix,
+        // so the rename neither fully applies nor propagates.  Native already
+        // deletes a stale TempSpriteFolder the same way — this extends that
+        // exact pattern to a stale DESTINATION.  Vanilla-reproducible bug;
+        // shield not MP-gated.
+        [HarmonyPatch(typeof(BizManSettings), nameof(BizManSettings.RenameLogoSpriteFolder))]
+        public static class Patch_RenameLogoSpriteFolder_StaleTargetShield
+        {
+            static void Prefix(string oldName, string newName)
+            {
+                try
+                {
+                    string src = LogoHelper.GetPlayerBusinessLogoPath(oldName);
+                    string dst = LogoHelper.GetPlayerBusinessLogoPath(newName);
+                    if (!System.IO.Directory.Exists(src)
+                        || string.Equals(src, dst, StringComparison.OrdinalIgnoreCase)) return;
+                    if (System.IO.Directory.Exists(dst))
+                    {
+                        System.IO.Directory.Delete(dst, true);
+                        Plugin.Logger.LogWarning($"[ModCompat] logo rename '{oldName}' → '{newName}': stale destination folder removed (rename round-trip) so the native move can't abort the settings save.");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_RenameLogoSpriteFolder] {ex.Message}"); }
+            }
+        }
+
         // ── Patch: CustomerEntriesHelper.RemoveSeasonalItems — stale-mod-item shield ──
         // Field report 2026-07-12 (offline player, no comment): a store's sale
         // list carried 'it-services:itemname_bladeserver' from a removed CONTENT
