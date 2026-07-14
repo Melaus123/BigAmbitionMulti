@@ -61,6 +61,40 @@ namespace BigAmbitionsMP
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] item-names: {ex.Message}"); }
                 if (itemFixed > 0) parts.Add($"item-names×{itemFixed} repaired");
 
+                // ── Class 5: vehicle-slots (REPAIR) ──────────────────────────
+                // A Warehouse/factory reg whose vehicleSlots list is shorter than
+                // the building's bay count: parking a truck throws index-out-of-
+                // range (assignment aborts — "factory not taking in delivery
+                // truck", RED ROC 2026-07-13) and driver assignment has no slot
+                // to bind.  Native-legal by PRECEDENT: the game's own EA06
+                // compat fix (FixNumberOfVehicleSlotsInWarehouses) appends
+                // missing slots exactly like this — but it is version-gated to
+                // old saves and never re-runs.  Producers: native sizing yields
+                // 0 when the building lookup isn't ready (?? 0), and our
+                // business-type apply bypassed native setup (guarded now).
+                int slotsFixed = 0, slotsLogged = 0;
+                try
+                {
+                    if (gi.BuildingRegistrations != null)
+                        foreach (var reg in gi.BuildingRegistrations)
+                        {
+                            if (reg is not Entities.Warehouse w) continue;
+                            int expected = 0;
+                            try { expected = Buildings.BuildingSizeHelper.GetData(Helpers.BuildingHelper.GetBuilding(w.Address))?.numberOfVehicleSlots ?? 0; }
+                            catch { }
+                            if (expected <= 0) continue;   // unknown → never shrink/guess
+                            w.vehicleSlots ??= new List<Entities.VehicleSlot>();
+                            int missing = expected - w.vehicleSlots.Count;
+                            if (missing <= 0) continue;
+                            for (int i = 0; i < missing; i++) w.vehicleSlots.Add(new Entities.VehicleSlot());
+                            slotsFixed += missing;
+                            if (slotsLogged++ < LogCapPerClass)
+                                Plugin.Logger.LogWarning($"[Integrity] {reason}: '{w.BusinessName}' had {expected - missing}/{expected} vehicle slot(s) — appended {missing} (native EA06-fix precedent).");
+                        }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] vehicle-slots: {ex.Message}"); }
+                if (slotsFixed > 0) parts.Add($"vehicle-slots×{slotsFixed} repaired");
+
                 // ── Classes 2+3: duty shifts (REPAIR) + real-id shift orphans
                 // (DETECT) — the existing zero-false-positive sweep; its
                 // wider-net pass logs [ScheduleDiag] details for real ids.

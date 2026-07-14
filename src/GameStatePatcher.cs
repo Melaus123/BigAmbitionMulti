@@ -2414,6 +2414,22 @@ namespace BigAmbitionsMP
                     reg.BusinessName        = info.BusinessName;
                     reg.businessTypeName    = info.BusinessTypeName;
                     reg.temporarilyClosed   = info.TemporarilyClosed;
+                    // Producer guard (RED ROC 2026-07-13): writing the type directly bypasses
+                    // native setup, whose ResetBuildingSpecific sizes Warehouse.vehicleSlots —
+                    // a replica typed here with 0 slots becomes a BROKEN factory the moment a
+                    // player later rents it (truck assignment indexes the short list and
+                    // throws; the corruption persists in the save).  Size the slots natively
+                    // whenever the list is short; the load-time integrity sweep backstops.
+                    try
+                    {
+                        if (reg is Entities.Warehouse wh)
+                        {
+                            int want = 0;
+                            try { want = Buildings.BuildingSizeHelper.GetData(Helpers.BuildingHelper.GetBuilding(wh.Address))?.numberOfVehicleSlots ?? 0; } catch { }
+                            if (want > 0 && (wh.vehicleSlots == null || wh.vehicleSlots.Count < want)) wh.ResetVehicleSlots();
+                        }
+                    }
+                    catch { }
 
                     // Rental marketplace state (Phase 1b).  Overrides client's
                     // local AI-economy decisions.  If host considers this building

@@ -234,6 +234,7 @@ namespace BigAmbitionsMP
         /// Call every Update frame (even when paused, but skip if timeScale == 0).
         /// Drips the scheduled clock correction into the game time.
         /// </summary>
+        private static bool _tickCorrectionThrew;
         public static void TickClockCorrection()
         {
             if (!MPServer.IsRunning && !MPClient.InMpGame) return;   // never drain MP catch-up outside an MP game (e.g. a disconnect dropped us to single-player) — mirrors the AheadFreeze gate
@@ -248,7 +249,16 @@ namespace BigAmbitionsMP
             if (advanceMin <= 0f) return;
 
             var gm = InstanceBehavior<GameManager>.Instance;
-            if (gm != null) gm.RunMainGameTick(advanceMin);
+            // Throw isolation (RED ROC field NRE 2026-07-13): the native tick can NRE on
+            // transient world state during catch-up; unguarded, that aborted the whole
+            // MPCanvasUI.Update chain for the frame.  Log once per session, keep draining —
+            // the gap still closes on subsequent frames.
+            try { if (gm != null) gm.RunMainGameTick(advanceMin); }
+            catch (Exception ex)
+            {
+                if (!_tickCorrectionThrew)
+                { _tickCorrectionThrew = true; Plugin.Logger.LogWarning($"[TimeSync] catch-up tick threw (logged once): {ex.GetType().Name}: {ex.Message}"); }
+            }
             _wroteClock       = true;            // authorized fast-advance — the watchdog re-bases, doesn't pin
             _correctionHours -= advanceMin / 60f;
             if (_correctionHours < 0.0001f) _correctionHours = 0f;
