@@ -20,8 +20,22 @@ namespace BigAmbitionsMP
         {
             while (_mainThreadQueue.TryDequeue(out var action))
             {
+                long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 try { action(); }
                 catch (Exception ex) { Plugin.Logger.LogError($"[Patcher] Dispatch error: {ex.Message}"); }
+                // Drain attribution (perf finding 2026-07-13: single applies of
+                // 230ms-6.8s hitched a day-116 client ~every 90s, and the perf
+                // probe couldn't say WHICH message).  The delegate's compiled
+                // method name identifies the enqueuing source for free — no
+                // call-site labels needed.  Anomaly-gated: silent under 100ms.
+                double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0
+                            / System.Diagnostics.Stopwatch.Frequency;
+                if (ms >= 100.0)
+                {
+                    string who = "?";
+                    try { var m = action.Method; who = $"{m.DeclaringType?.FullName}::{m.Name}"; } catch { }
+                    Plugin.Logger.LogWarning($"[DrainDiag] slow apply: {who} took {ms:F0}ms (backlog={_mainThreadQueue.Count}).");
+                }
             }
         }
 
