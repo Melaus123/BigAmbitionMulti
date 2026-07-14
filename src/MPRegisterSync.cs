@@ -977,6 +977,10 @@ namespace BigAmbitionsMP
         /// shifts on the player's own businesses, in case field ghosts are not prefix-tagged
         /// (would mean this diagnosis is wrong/partial; next report's log settles it).  Real-id
         /// shifts on OTHER owners' businesses are the synced schedule — expected, not logged.</summary>
+        /// <summary>Real-id orphan count from the latest repair pass — consumed by
+        /// MPSaveIntegrity's sweep summary (detect-only class).</summary>
+        public static int LastRealIdOrphans;
+
         public static int RepairOrphanDutyShifts(string when)
         {
             int removed = 0, realIdOrphans = 0;
@@ -1020,6 +1024,7 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogWarning($"[ScheduleRepair] {when}: removed {removed} orphan duty shift(s); {realIdOrphans} real-id orphan(s) logged only.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[ScheduleRepair] {when}: {ex.Message}"); }
+            LastRealIdOrphans = realIdOrphans;
             return removed;
         }
 

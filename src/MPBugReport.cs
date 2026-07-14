@@ -329,6 +329,9 @@ namespace BigAmbitionsMP
                 sb.AppendLine($"PreviousCrashHint: {PendingCrashHint}");
             // A failed/dead patch class is silent feature loss — every report names them (2026-07-09).
             sb.AppendLine($"PatchIssues: {(ModEntry.PatchIssues.Count == 0 ? "none" : string.Join(" | ", ModEntry.PatchIssues))}");
+            // What the save-integrity sweep repaired/detected on this save — even when the
+            // player reports something unrelated, the field self-reports data health (2026-07-12).
+            sb.AppendLine($"IntegrityFindings: {(string.IsNullOrEmpty(MPSaveIntegrity.LastSummary) ? "none" : MPSaveIntegrity.LastSummary)}");
             sb.AppendLine();
             sb.AppendLine("## Runtime");
             sb.AppendLine($"GameVersion: {Blank(Application.version)}");
