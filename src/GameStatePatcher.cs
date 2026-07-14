@@ -2571,6 +2571,12 @@ namespace BigAmbitionsMP
                     {
                         newBusinessOwner = info.BusinessOwnerPlayerId;
                     }
+                    // INVARIANT (echo-loop family, 2026-07-13): my own pid must NEVER land in
+                    // my runner field — my tenancy is RentedByPlayer, not a rival entry.  The
+                    // attributed case above clears it; this covers a degraded/stale delta that
+                    // carries my pid WITHOUT attribution (the malformed shape the rival-poor /
+                    // contamination family produces), which would re-open the rebroadcast loop.
+                    if (newBusinessOwner == MPConfig.PlayerId) newBusinessOwner = "";
 
                     reg.buildingOwnerRivalId = newBuildingOwner;
                     reg.businessOwnerRivalId = newBusinessOwner;
@@ -3092,6 +3098,29 @@ namespace BigAmbitionsMP
                 }
                 if (repaired > 0)
                     Plugin.Logger.LogWarning($"[Patcher] rent-vs-deed repair ({reason}): {repaired} building(s) had a PLAYER in the deed field (pre-split contamination) — repaired.");
+
+                // Runner-field self-contamination (echo-loop family, 2026-07-13): MY OWN pid
+                // in MY businessOwnerRivalId is always wrong — my tenancy is RentedByPlayer.
+                // Sources: the 0.1.10 ownership-apply hole (fixed), a degraded delta, or the
+                // deed→tenant move ABOVE when the contaminated deed held my own pid.  Other
+                // players' pids in the runner field are LEGITIMATE (that's how "run by X"
+                // is stored) — only the self case is swept.  RentedByPlayer is untouched:
+                // whether I truly rent here is my save's own authority.
+                int selfRunner = 0;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    try
+                    {
+                        if (reg == null || (reg.businessOwnerRivalId ?? "") != MPConfig.PlayerId) continue;
+                        reg.businessOwnerRivalId = "";
+                        selfRunner++;
+                        if (selfRunner <= 10)
+                            Plugin.Logger.LogInfo($"[Patcher] runner-field repair: '{GameStateReader.AddressKey(reg)}' held MY OWN pid as business runner — cleared.");
+                    }
+                    catch { }
+                }
+                if (selfRunner > 0)
+                    Plugin.Logger.LogWarning($"[Patcher] runner-field repair ({reason}): {selfRunner} building(s) had my own pid in the runner field — cleared.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] SweepRivalFieldContamination: {ex.Message}"); }
         }
