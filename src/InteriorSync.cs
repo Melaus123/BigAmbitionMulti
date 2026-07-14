@@ -178,16 +178,18 @@ namespace BigAmbitionsMP
             SendLocalOwnerSnapshot(_localOwnerAddress, force: false, reason: "tick");
         }
 
-        // ── [DirtWatch] diagnostic (2026-06-25): does a shop's dirt ever DECREASE, or only climb? ─────────
-        // Player report: owned shops accumulate hundreds-to-~1000 dirt spots (a healthy shop should be <10).
-        // The mod only SYNCS dirt — it never generates or cleans it — so this just samples each OWNED shop's
-        // dirt count over time and logs the delta, to show whether dirt ever goes DOWN (something is cleaning)
-        // or only UP / stays flat. Deliberately tracks NOTHING about employees/janitors — raw dirt only. Runs
-        // on each owner's own machine (RentedByPlayer). Release-safe but anomaly-gated (only shops over the
-        // threshold) + throttled, so a healthy game logs nothing. REMOVE once the question is answered.
+        // ── [DirtWatch] diagnostic (2026-06-25; RE-AIMED 2026-07-14) ──────────────────────────────────────
+        // ORIGINAL question ("shops accumulate ~1000 dirt spots") is ANSWERED: reg.dirtSpots is a fixed
+        // LATTICE — one entry per floor tile (GetDirtSpotsForBuilding walks the Floors transforms), so a
+        // big building legitimately carries 987-1737 entries forever.  Filth is the per-spot dirtiness
+        // VALUE: the decal renders only at dirtiness >= 5 (DirtSpotObject.SetDirtiness) and cleanliness
+        // scoring averages values, never counts.  The old metric (list Count) therefore cried wolf on
+        // every large clean shop.  NOW WATCHED: the count of VISIBLY DIRTY spots (dirtiness >= 5) — the
+        // thing a player can actually see — same delta/change-gated reporting.  The mod only SYNCS dirt;
+        // it never generates or cleans it.
         private static float _lastDirtWatchAt = -999f;
         private static readonly Dictionary<string, int> _lastDirtWatch = new(StringComparer.Ordinal);
-        private const int   DirtWatchThreshold       = 25;     // a healthy shop should be well under 10
+        private const int   DirtWatchThreshold       = 25;     // visibly-dirty spots; a tended shop stays well under this
         private const float DirtWatchIntervalSeconds = 60f;
 
         public static void TickDirtWatch()
@@ -209,7 +211,17 @@ namespace BigAmbitionsMP
                     if (reg == null) continue;
                     bool mine = false; try { mine = MergerFlip.TrulyMine(reg); } catch { }   // TrulyMine (merger flip excluded)
                     if (!mine) continue;
-                    int dirt = 0; try { dirt = reg.dirtSpots?.Count ?? 0; } catch { }
+                    // Visibly dirty spots only (dirtiness >= 5 = the decal render threshold) —
+                    // raw Count is the per-tile lattice and says nothing about filth.
+                    int dirt = 0;
+                    try
+                    {
+                        var spots = reg.dirtSpots;
+                        if (spots != null)
+                            for (int i = 0; i < spots.Count; i++)
+                                if (spots[i] != null && spots[i].dirtiness >= 5f) dirt++;
+                    }
+                    catch { }
                     if (dirt < DirtWatchThreshold) continue;   // only anomalous shops — healthy ones stay silent
                     string addr = GameStateReader.AddressKey(reg);
                     if (string.IsNullOrEmpty(addr)) continue;
