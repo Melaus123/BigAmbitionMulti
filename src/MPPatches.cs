@@ -1682,6 +1682,41 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: CustomerEntriesHelper.RemoveSeasonalItems — stale-mod-item shield ──
+        // Field report 2026-07-12 (offline player, no comment): a store's sale
+        // list carried 'it-services:itemname_bladeserver' from a removed CONTENT
+        // MOD; the seasonal filter's ItemsGetter.GetByName(x).season deref NREd,
+        // and IndoorCustomerSpawner.Update aborted EVERY FRAME (3,467 in one
+        // log) — the store silently never spawned customers.  Same class as the
+        // 0.1.9 payroll-runaway fix (stale content-mod item aborts a native
+        // loop).  Prefix strips names that no longer resolve BEFORE the native
+        // filter runs: an unresolvable item cannot be sold, and this method's
+        // whole job is removing unsellable items, so the repair is native-shaped
+        // — and it cleans the CACHED list, so the spawner recovers for good.
+        // NOT MP-gated: the report shows it biting in offline play.
+        [HarmonyPatch(typeof(AI.Customers.CustomerEntries.CustomerEntriesHelper), "RemoveSeasonalItems")]
+        public static class Patch_RemoveSeasonalItems_StaleModItemShield
+        {
+            private static readonly System.Collections.Generic.HashSet<string> _reported = new();
+            static void Prefix(System.Collections.Generic.List<string> itemsForSale)
+            {
+                try
+                {
+                    if (itemsForSale == null) return;
+                    itemsForSale.RemoveAll(x =>
+                    {
+                        bool dead;
+                        try { dead = string.IsNullOrEmpty(x) || BigAmbitions.Items.ItemsGetter.GetByName(x) == null; }
+                        catch { dead = true; }
+                        if (dead && !string.IsNullOrEmpty(x) && _reported.Add(x))
+                            Plugin.Logger.LogWarning($"[ModCompat] sale list references '{x}' but no such item exists (content mod removed?) — dropped so customer generation can run.");
+                        return dead;
+                    });
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_RemoveSeasonalItems_StaleModItemShield] {ex.Message}"); }
+            }
+        }
+
         // ── Patch: PortraitGenerator.GetCharacterPortraitPath(GameInstance) ──
         // MP self-portrait blank (Rivals page, host + client): the game's Save
         // regenerates the player portrait NEXT TO THE .HSG — in MP that's
