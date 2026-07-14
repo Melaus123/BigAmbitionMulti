@@ -11,41 +11,103 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class GameStatePatcher
     {
-        // ── Thread-safe action queue (network threads enqueue, Unity Update dequeues) ──
+        // ── Budgeted main-thread apply queue (perf item 3, 2026-07-14) ─────────
+        // Network threads enqueue, the Unity Update loop drains — but no longer
+        // all at once: the drain has a per-frame millisecond budget, checked
+        // BETWEEN messages only (each apply is ATOMIC within one frame — slicing
+        // inside a message would expose torn world state to the game's Update,
+        // the auto-fill-race class).  Full-state payloads may pass a coalesce
+        // key: a newer enqueue with the same key REPLACES the queued payload in
+        // place (newest wins; queue position kept, so a hammered key cannot
+        // starve).  Safety rails: at least one apply always runs per frame
+        // (forward progress), and once the queue head has waited past the
+        // starvation ceiling the budget is ignored — degrading to exactly the
+        // pre-slicing full drain, never worse.
 
-        private static readonly System.Collections.Concurrent.ConcurrentQueue<Action> _mainThreadQueue = new();
+        private sealed class ApplyEntry
+        {
+            public string? Key;
+            public Action? Action;
+            public int     EnqueuedMs;   // Environment.TickCount (thread-safe; wrap-tolerant diffs)
+        }
+
+        private static readonly object _queueLock = new();
+        private static readonly Queue<ApplyEntry> _applyQueue = new();
+        private static readonly Dictionary<string, ApplyEntry> _keyedEntries = new(StringComparer.Ordinal);
+        private const double FrameBudgetMs       = 5.0;   // target apply time per frame
+        private const int    StarvationCeilingMs = 500;   // head older than this → full drain (pre-slicing behavior)
 
         /// <summary>Called from the Unity Update loop by MainThreadDispatcher.</summary>
         public static void DrainQueue()
         {
-            while (_mainThreadQueue.TryDequeue(out var action))
+            long start = System.Diagnostics.Stopwatch.GetTimestamp();
+            bool ranOne = false;
+            while (true)
             {
+                ApplyEntry entry; Action? action; int backlog;
+                lock (_queueLock)
+                {
+                    if (_applyQueue.Count == 0) return;
+                    double elapsed = (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000.0
+                                     / System.Diagnostics.Stopwatch.Frequency;
+                    int headAge = Environment.TickCount - _applyQueue.Peek().EnqueuedMs;
+                    // Budget gates STARTING the next apply, never finishing one; the
+                    // ceiling turns a pathological backlog back into today's full drain.
+                    if (ranOne && elapsed >= FrameBudgetMs && headAge < StarvationCeilingMs) return;
+                    entry = _applyQueue.Dequeue();
+                    action = entry.Action;   // newest payload (coalescing swaps in place under this lock)
+                    if (entry.Key != null && _keyedEntries.TryGetValue(entry.Key, out var cur) && ReferenceEquals(cur, entry))
+                        _keyedEntries.Remove(entry.Key);
+                    backlog = _applyQueue.Count;
+                }
+                ranOne = true;
+                if (action == null) continue;
                 long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 try { action(); }
                 catch (Exception ex) { Plugin.Logger.LogError($"[Patcher] Dispatch error: {ex.Message}"); }
-                // Drain attribution (perf finding 2026-07-13: single applies of
-                // 230ms-6.8s hitched a day-116 client ~every 90s, and the perf
-                // probe couldn't say WHICH message).  The delegate's compiled
-                // method name identifies the enqueuing source for free — no
-                // call-site labels needed.  Anomaly-gated: silent under 100ms.
+                // Drain attribution (perf finding 2026-07-13): name any single apply
+                // over 100ms via the delegate's compiled method name.  Anomaly-gated.
                 double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0
                             / System.Diagnostics.Stopwatch.Frequency;
                 if (ms >= 100.0)
                 {
                     string who = "?";
                     try { var m = action.Method; who = $"{m.DeclaringType?.FullName}::{m.Name}"; } catch { }
-                    Plugin.Logger.LogWarning($"[DrainDiag] slow apply: {who} took {ms:F0}ms (backlog={_mainThreadQueue.Count}).");
+                    Plugin.Logger.LogWarning($"[DrainDiag] slow apply: {who} took {ms:F0}ms (backlog={backlog}).");
                 }
             }
         }
 
-        private static void RunOnMainThread(Action action) => _mainThreadQueue.Enqueue(action);
+        private static void RunOnMainThread(Action action) => EnqueueOnMainThread(action);
 
         /// <summary>
         /// Public entry point so MPServer and MPClient can dispatch game-start actions
         /// from their background network threads onto the Unity main thread.
         /// </summary>
-        public static void EnqueueOnMainThread(Action action) => _mainThreadQueue.Enqueue(action);
+        public static void EnqueueOnMainThread(Action action) => EnqueueInternal(action, null);
+
+        /// <summary>Keyed variant for FULL-STATE payloads (a newer snapshot fully
+        /// supersedes an older un-applied one): same key replaces the queued
+        /// payload in place — newest wins, queue position kept.  Only opt in
+        /// where the payload is genuinely idempotent full-state.</summary>
+        public static void EnqueueOnMainThread(Action action, string coalesceKey) => EnqueueInternal(action, coalesceKey);
+
+        private static void EnqueueInternal(Action action, string? key)
+        {
+            if (action == null) return;
+            lock (_queueLock)
+            {
+                if (key != null && _keyedEntries.TryGetValue(key, out var existing) && existing.Action != null)
+                {
+                    existing.Action     = action;                    // newest wins, position kept
+                    existing.EnqueuedMs = Environment.TickCount;
+                    return;
+                }
+                var entry = new ApplyEntry { Key = key, Action = action, EnqueuedMs = Environment.TickCount };
+                _applyQueue.Enqueue(entry);
+                if (key != null) _keyedEntries[key] = entry;
+            }
+        }
 
         // ── Snapshot application ──────────────────────────────────────────────
 
