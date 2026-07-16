@@ -45,7 +45,9 @@ internal sealed class LauncherBugReporter
 
     private string CreateReportDirectory()
     {
-        string root = Path.Combine(_manager.ModDirectory, "launcher-bug-reports");
+        // Data root, not the mod folder (0.1.11 policy: the mod folder is static
+        // content only — it is also the Workshop upload source).
+        string root = Path.Combine(_manager.DataDirectory, "launcher-bug-reports");
         Directory.CreateDirectory(root);
         string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
         string dir = Path.Combine(root, "bamp-launcher-" + stamp);

@@ -26,11 +26,31 @@ internal sealed class ModManager : IDisposable
             settings.GameDataFolder,
             settings.ModsFolderName,
             settings.ModFolderName);
+
+        DataDirectory = Path.Combine(
+            KnownFolders.GetLocalAppDataLow(),
+            settings.PublisherFolder,
+            settings.GameDataFolder,
+            settings.ModFolderName);
     }
 
     public string ModDirectory { get; }
 
-    public string LogsDirectory => Path.Combine(ModDirectory, "logs");
+    /// <summary>The mod's runtime-data root (mod 0.1.11+): config, logs, and
+    /// bug reports live OUTSIDE the mod folder so Steam Workshop revalidation
+    /// can't clobber them and the in-game Workshop upload can't ship them.</summary>
+    public string DataDirectory { get; }
+
+    /// <summary>Prefer the 0.1.11+ data-root logs; fall back to the legacy
+    /// in-mod-folder location for installs that haven't run 0.1.11 yet.</summary>
+    public string LogsDirectory
+    {
+        get
+        {
+            string modern = Path.Combine(DataDirectory, "logs");
+            return Directory.Exists(modern) ? modern : Path.Combine(ModDirectory, "logs");
+        }
+    }
 
     public ModStatus GetStatus()
     {
@@ -85,6 +105,12 @@ internal sealed class ModManager : IDisposable
             progress?.Report(new OperationProgress("Installing files...", 82));
             Directory.CreateDirectory(ModDirectory);
             CopyDirectory(payloadRoot, ModDirectory);
+            // Copy-over never removes obsolete payload: pre-0.1.11 zips shipped the
+            // icons at the mod-folder ROOT (they moved to assets\ for the Workshop
+            // thumbnail auto-pick). Harmless to the mod, but clean them so updated
+            // installs match fresh ones.
+            TryDeleteFile(Path.Combine(ModDirectory, "BAMP_ChatIcon.png"));
+            TryDeleteFile(Path.Combine(ModDirectory, "BAMP_HubIcon.png"));
             WriteInstallManifest(release, packageFiles);
 
             progress?.Report(new OperationProgress(backupDir == null

@@ -4,7 +4,7 @@ namespace BigAmbitionsMP
     {
         public const string PLUGIN_GUID = "com.bigambitions.multiplayer";
         public const string PLUGIN_NAME = "BigAmbitionsMP";
-        public const string PLUGIN_VERSION = "0.1.10";
+        public const string PLUGIN_VERSION = "0.1.11";
 
         /// <summary>Official public name (Steam Workshop title, UI, bug reports,
         /// release notes).  NAMING POLICY (2026-07-09): only DISPLAY text uses
