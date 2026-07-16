@@ -22,7 +22,7 @@ namespace BigAmbitionsMP
         private static Type? _rainHelper;
         private static System.Reflection.PropertyInfo? _isRainingProp;
         private static System.Reflection.FieldInfo?    _isRainingField;
-        private static bool _resolved, _surfaceDumped;
+        private static bool _resolved;
 
         private static void Resolve()
         {
@@ -81,43 +81,33 @@ namespace BigAmbitionsMP
             TryForceRain(hostState == 1);
         }
 
-        /// <summary>Invoke a RainHelper transition; on total candidate miss, dump
-        /// its static method surface once so the field log names the real API.</summary>
+        /// <summary>Invoke a RainHelper transition.  API named by the 2026-07-14
+        /// F7 discovery dump ('BigAmbitions.DayNightCycle.RainHelper' in the
+        /// DayNightCycle assembly): StopRaining/0 = deterministic stop;
+        /// Command_ToggleRain/0 = the game's own console toggle (smooth
+        /// transition) — safe for START because we only call it after checking
+        /// the current state, so the toggle direction is guaranteed.  Exact
+        /// Type.EmptyTypes lookups avoid the Command_ToggleRain/2 overload.</summary>
         public static void TryForceRain(bool on)
         {
             Resolve();
             if (_rainHelper == null) return;
-            string[] candidates = on
-                ? new[] { "StartRain", "BeginRain", "RainStart", "StartRaining" }
-                : new[] { "StopRain", "EndRain", "RainStop", "StopRaining" };
-            foreach (var name in candidates)
+            try
             {
-                try
+                int cur = CurrentRainState();
+                if (cur == (on ? 1 : 0)) return;   // already matching
+                if (!on)
                 {
-                    var m = AccessTools.Method(_rainHelper, name);
-                    if (m != null && m.IsStatic && m.GetParameters().Length == 0)
-                    {
-                        m.Invoke(null, null);
-                        Plugin.Logger.LogInfo($"[Weather] RainHelper.{name}() invoked (→ {(on ? "rain" : "dry")}).");
-                        return;
-                    }
+                    var stop = AccessTools.Method(_rainHelper, "StopRaining", Type.EmptyTypes);
+                    if (stop != null)
+                    { stop.Invoke(null, null); Plugin.Logger.LogInfo("[Weather] RainHelper.StopRaining() invoked."); return; }
                 }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Weather] {name}: {ex.InnerException?.Message ?? ex.Message}"); }
+                var toggle = AccessTools.Method(_rainHelper, "Command_ToggleRain", Type.EmptyTypes);
+                if (toggle != null)
+                { toggle.Invoke(null, null); Plugin.Logger.LogInfo($"[Weather] RainHelper.Command_ToggleRain() invoked (→ {(on ? "rain" : "dry")})."); return; }
+                Plugin.Logger.LogWarning("[Weather] transition methods missing (StopRaining/Command_ToggleRain) — weather sync inert.");
             }
-            if (!_surfaceDumped)
-            {
-                _surfaceDumped = true;
-                try
-                {
-                    var names = new System.Collections.Generic.List<string>();
-                    foreach (var m in _rainHelper.GetMethods(System.Reflection.BindingFlags.Public
-                                                           | System.Reflection.BindingFlags.NonPublic
-                                                           | System.Reflection.BindingFlags.Static))
-                        if (m.DeclaringType == _rainHelper) names.Add($"{m.Name}/{m.GetParameters().Length}");
-                    Plugin.Logger.LogWarning($"[Weather] no known transition method — RainHelper statics: {string.Join(", ", names)}");
-                }
-                catch { }
-            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Weather] force: {ex.InnerException?.Message ?? ex.Message}"); }
         }
     }
 }
