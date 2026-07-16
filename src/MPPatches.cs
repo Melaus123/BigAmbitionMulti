@@ -1682,6 +1682,67 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: EmployeeHelper.RunDaily — mod records sit out the daily pass ──
+        // Field report 2026-07-16: "my colleague keeps getting messages that MY
+        // employees are calling in sick / want to switch shifts" (+ 'On Duty
+        // Staff' messages).  RunDaily iterates EVERY employee record on the
+        // machine — including the partner-staff copies and duty synthetics we
+        // inject for station staffing — and rolls sick days ("called in sick"
+        // notifications), demands (shift-change requests), retirement notices,
+        // and HR substitutions.  The injected copies' STATE drift was accepted
+        // (roster re-sync overwrites it) but the MESSAGES had already reached
+        // the wrong player.  Same remedy as the save path: strip the mod's
+        // records for the duration of the native pass, restore right after
+        // (Finalizer, so a native throw can't leave the roster stripped).
+        // The owner's machine still generates everything for their own staff.
+        // NOTE merger (on hold): merged-partner staff are also stripped here;
+        // revisit if the merger ships message-sharing semantics.
+        [HarmonyPatch(typeof(Helpers.EmployeeHelper), nameof(Helpers.EmployeeHelper.RunDaily))]
+        public static class Patch_EmployeeHelper_RunDaily_SkipModRecords
+        {
+            static void Prefix(out System.Collections.Generic.List<Entities.EmployeeInstance> __state)
+            {
+                __state = new System.Collections.Generic.List<Entities.EmployeeInstance>();
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;   // records only exist in MP anyway
+                    var list = SaveGameManager.Current?.EmployeeInstances;
+                    if (list == null) return;
+                    for (int i = list.Count - 1; i >= 0; i--)
+                    {
+                        string id = list[i]?.id ?? "";
+                        if (!id.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix) && !MPRegisterSync.IsInjectedStaff(id)) continue;
+                        __state.Add(list[i]!);
+                        list.RemoveAt(i);
+                        try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(id); } catch { }
+                    }
+                    if (__state.Count > 0)
+                        Plugin.Logger.LogInfo($"[StaffRoster] {__state.Count} injected/synthetic record(s) sit out the daily employee pass (sick/demand/retirement messages stay on the owner's machine).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_RunDaily_SkipModRecords] strip: {ex.Message}"); }
+            }
+
+            static Exception? Finalizer(System.Collections.Generic.List<Entities.EmployeeInstance> __state, Exception __exception)
+            {
+                try
+                {
+                    var list = SaveGameManager.Current?.EmployeeInstances;
+                    if (list != null && __state != null)
+                        foreach (var emp in __state)
+                        {
+                            if (emp == null || string.IsNullOrEmpty(emp.id)) continue;
+                            bool exists = false;
+                            for (int i = 0; i < list.Count; i++)
+                                if (list[i]?.id == emp.id) { exists = true; break; }
+                            if (!exists) list.Add(emp);
+                            try { Helpers.EmployeeHelper.EmployeeInstancesDictionary[emp.id] = emp; } catch { }
+                        }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_RunDaily_SkipModRecords] restore: {ex.Message}"); }
+                return __exception;   // never swallow the native pass's own failure
+            }
+        }
+
         // ── Patch: BizManSettings.RenameLogoSpriteFolder — stale-target shield ──
         // RED ROC log 2026-07-13: renaming a business to a name it previously
         // held throws IOException in the native rename (Directory.Move onto an
