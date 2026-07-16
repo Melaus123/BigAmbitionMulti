@@ -1102,6 +1102,9 @@ namespace BigAmbitionsMP
         /// -1 means "speed not included in this packet" — client should not apply it.
         /// </summary>
         public float Speed     { get; set; } = -1f;
+        /// <summary>Host rain state: -1 absent/unknown (older builds omit the field —
+        /// JSON-tolerant), 0 dry, 1 raining.  Clients align their local RainHelper.</summary>
+        public int   RainState { get; set; } = -1;
     }
 
     // ── Business sync (Phase 1: exterior business state) ──────────────────────

@@ -4159,7 +4159,7 @@ namespace BigAmbitionsMP
             var (day, hour) = GameStateReader.GetGameTime();
             float speed = speedOverride ?? UnityEngine.Time.timeScale;
 
-            var payload = new GameTimeSyncPayload { Day = day, TimeOfDay = hour, Speed = speed };
+            var payload = new GameTimeSyncPayload { Day = day, TimeOfDay = hour, Speed = speed, RainState = MPWeatherSync.CurrentRainState() };
             Broadcast(MessageEnvelope.Create(MessageType.GameTimeSync, "host", payload));
             Plugin.Logger.LogInfo($"[Server] GameTimeSync: day={day} hour={hour:F1} speed={speed:F2}×");
         }

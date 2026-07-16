@@ -978,6 +978,14 @@ namespace BigAmbitionsMP
 
             // Applies clock-drift correction toward the host's authoritative clock.
             GameStatePatcher.ApplyGameTime(payload);
+
+            // Weather (2026-07-14): align local rain with the host's state — main
+            // thread, coalesced (only the newest state matters).
+            if (payload.RainState >= 0)
+            {
+                int rs = payload.RainState;
+                GameStatePatcher.EnqueueOnMainThread(() => MPWeatherSync.ApplyRainState(rs), "weather");
+            }
         }
 
         private static void HandleMarketSnapshot(MessageEnvelope env)

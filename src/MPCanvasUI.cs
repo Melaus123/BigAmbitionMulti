@@ -501,6 +501,17 @@ namespace BigAmbitionsMP
                 MPHub.ApplyMoneyDelta(1_000_000f, "DEV cheat (F8)", true);
                 Plugin.Logger.LogInfo("[DevCheat] F8 — +$1,000,000.");
             }
+            // F7: dev weather toggle — forces a local rain transition through the
+            // SAME apply path the weather sync uses, so the whole loop (host F7 →
+            // GameTimeSync → client follows) is testable on one rig without
+            // waiting for natural rain.  Also the discovery trigger for the
+            // RainHelper API dump (decompile gap).
+            if (Input.GetKeyDown(KeyCode.F7))
+            {
+                int cur = MPWeatherSync.CurrentRainState();
+                Plugin.Logger.LogInfo($"[DevCheat] F7 — force rain toggle (current={(cur == 1 ? "raining" : cur == 0 ? "dry" : "unknown")}).");
+                MPWeatherSync.TryForceRain(cur != 1);
+            }
 #endif
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             TickCrashHeartbeat();    // task #5: stamp the session marker with where-we-are (~30s)
