@@ -30,9 +30,26 @@ namespace BigAmbitionsMP
             _resolved = true;
             try
             {
+                // FindGameType needs the FULL name and RainHelper's namespace is a
+                // dump gap (first F7 run confirmed the bare name misses) — scan all
+                // loaded assemblies by simple name and log what resolved.
                 _rainHelper = VehicleManager.FindGameType("RainHelper");
                 if (_rainHelper == null)
-                { Plugin.Logger.LogWarning("[Weather] RainHelper type not found — weather sync off."); return; }
+                {
+                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        Type?[] types;
+                        try { types = asm.GetTypes(); }
+                        catch (System.Reflection.ReflectionTypeLoadException rtle) { types = rtle.Types; }
+                        catch { continue; }
+                        foreach (var t in types)
+                            if (t != null && t.Name == "RainHelper") { _rainHelper = t; break; }
+                        if (_rainHelper != null) break;
+                    }
+                }
+                if (_rainHelper == null)
+                { Plugin.Logger.LogWarning("[Weather] RainHelper type not found in any loaded assembly — weather sync off."); return; }
+                Plugin.Logger.LogInfo($"[Weather] RainHelper resolved: '{_rainHelper.FullName}' in {_rainHelper.Assembly.GetName().Name}.");
                 _isRainingProp  = AccessTools.Property(_rainHelper, "isRaining");
                 _isRainingField = _isRainingProp == null ? AccessTools.Field(_rainHelper, "isRaining") : null;
                 if (_isRainingProp == null && _isRainingField == null)
