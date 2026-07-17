@@ -870,6 +870,17 @@ namespace BigAmbitionsMP
             {
                 if (string.IsNullOrEmpty(addressKey) || !_synthetics.TryGetValue(addressKey, out var s)) return;
                 _synthetics.Remove(addressKey);
+                // Freeze-correlation probe (2026-07-16): the record removal below makes
+                // the native engine despawn the serving NPC; if the LOCAL player is
+                // standing in this shop, that despawn is the suspected trigger for the
+                // stuck-selection freeze (see Patch_MouseController_ResetSelected_
+                // FreezeGuard).  One line so field logs pair trigger and guard.
+                try
+                {
+                    if (!string.IsNullOrEmpty(CurrentShopAddress) && CurrentShopAddress == addressKey)
+                        Plugin.Logger.LogInfo($"[SynthStaff] removing staff at '{addressKey}' while the local player is INSIDE — if a freeze follows, expect an [IoGuard] line next.");
+                }
+                catch { }
                 // A schedule auto-fill may be IN FLIGHT for this business on a background thread
                 // (ScheduleAutoFillerHelper: new Thread(FillWithEmployees)).  Native roster mutations
                 // abort it (fire → EmployeeInstance.RemoveEmployee → AbortAutoFillForBusiness); ours

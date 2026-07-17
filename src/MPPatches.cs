@@ -1140,15 +1140,26 @@ namespace BigAmbitionsMP
         [HarmonyPatch]
         public static class Patch_RivalsHelper_CheckRivalTimelines_SkipOnClient
         {
-            static System.Reflection.MethodBase? TargetMethod() =>
-                VehicleManager.FindGameType("BigAmbitions.Rivals.RivalsHelper")?.GetMethod("CheckRivalTimelines",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
-                  | System.Reflection.BindingFlags.Static  | System.Reflection.BindingFlags.DeclaredOnly);
+            // BOTH variants (field NRE 2026-07-16): the hourly sweep
+            // (CheckRivalTimelines, plural) AND the per-neighborhood check
+            // (CheckRivalTimeline(string), singular — fires on neighborhood
+            // entry) — the singular slipped through the original patch and
+            // NRE'd RivalTimeline.Check on a client.  Same rationale: rival
+            // machinery is host-authoritative.
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var t = VehicleManager.FindGameType("BigAmbitions.Rivals.RivalsHelper");
+                if (t == null) yield break;
+                foreach (var m in t.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                                             | System.Reflection.BindingFlags.Static  | System.Reflection.BindingFlags.DeclaredOnly))
+                    if (m.Name == "CheckRivalTimelines" || m.Name == "CheckRivalTimeline")
+                        yield return m;
+            }
 
             static bool Prefix()
             {
                 if (!MPClient.IsConnected) return true;
-                return false;   // silent — this runs hourly; one log line per session would still be noise on fast-forward
+                return false;   // silent — the sweep runs hourly; one log line per session would still be noise on fast-forward
             }
         }
 
@@ -2973,6 +2984,9 @@ namespace BigAmbitionsMP
                     int hourNow    = SaveGameManager.Current.Hour;
                     string todayDesc;
                     bool explained = ownerState == 2 || reg.temporarilyClosed;   // positively closed
+                    // Vacant shells deny naturally (field 2026-07-16: ~30 lines of
+                    // door-trying on no-name/no-schedule buildings) — explained.
+                    if (string.IsNullOrEmpty(reg.BusinessName)) explained = true;
                     if (today == null) todayDesc = "today=NULL";
                     else
                     {
@@ -3469,6 +3483,155 @@ namespace BigAmbitionsMP
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] HR list filter: {ex.Message}"); }
+            }
+        }
+
+        // ── Freeze guard: stuck selection/overlay after entity-destroy NRE ────
+        // Field 2026-07-16 ("suddenly couldn't move" in the partner's shop) —
+        // HYPOTHESIS (attempt 1/2): EntityController.OnDestroy →
+        // ResetCurrentEntitySelected(entity) calls entity.OnIoExit() BEFORE
+        // clearing the selection, and OnIoExit NREs on half-destroyed state (×5
+        // that session), aborting BEFORE HideSimpleOverlayAndClearCta.  Result:
+        // currentTargetEntity/CurrentTarget stay set and the interaction CTA
+        // overlay stays up over a dead entity — a stuck overlay eating clicks is
+        // a movement lock in a click-to-move game.  The Finalizer completes the
+        // native method's own intent (clear selection, hide overlay), swallows
+        // the teardown NRE, and timestamps every occurrence so field logs can
+        // correlate with freeze reports (the [SynthStaff] INSIDE line is the
+        // trigger side).  Covers native-caused destroys (despawning vehicles
+        // etc.) too, not just our synthetic-staff removal.
+        [HarmonyPatch(typeof(MouseController), nameof(MouseController.ResetCurrentEntitySelected))]
+        public static class Patch_MouseController_ResetSelected_FreezeGuard
+        {
+            static Exception? Finalizer(Exception? __exception, EntityController __0)
+            {
+                if (__exception == null) return null;
+                try
+                {
+                    string what = "?";
+                    try { what = __0 == null ? "null" : __0.GetType().Name; } catch { }
+                    // Clear when it's the same entity (native intent) or the field
+                    // holds a destroyed leftover (Unity fake-null) — never a live
+                    // different entity the cursor has since moved to.
+                    if (ReferenceEquals(MouseController.currentTargetEntity, __0) || MouseController.currentTargetEntity == null)
+                    {
+                        MouseController.currentTargetEntity = null;
+                        try { AccessTools.Field(typeof(MouseController), "CurrentTarget")?.SetValue(null, null); } catch { }
+                    }
+                    try
+                    {
+                        var om = InstanceBehavior<Player.HUD.ItemInfoOverlays.OverlayManager>.Instance;
+                        if (om != null)
+                        {
+                            bool showing;
+                            try { showing = om.IsShowingOverlayOverItem(__0); } catch { showing = true; }   // the check itself can die on the dead entity
+                            if (showing) om.HideSimpleOverlayAndClearCta();
+                        }
+                    }
+                    catch { }
+                    Plugin.Logger.LogWarning($"[IoGuard] ResetCurrentEntitySelected({what}) threw {__exception.GetType().Name} during entity teardown — cleared stuck selection/overlay (freeze guard).");
+                }
+                catch { return __exception; }   // guard itself failed — surface the original
+                return null;   // swallow: the entity is dying anyway; native cleanup intent completed above
+            }
+        }
+
+        // ── Own-only economics displays (approved 2026-07-16) ─────────────────
+        // The daily financial summary builder iterates every RentedByPlayer reg —
+        // partner replicas included — so DailySummary income, CharacterInfo weekly
+        // profit, and the finances history all report COMBINED economics.  Veil the
+        // foreign regs for the duration of the build (RunDaily-strip pattern:
+        // Prefix hides, Finalizer restores and rethrows) so the native loop skips
+        // them naturally.  Forward-looking only: summaries already persisted stay
+        // polluted (not provably repairable).  Merger-aware via
+        // HideFromOwnAssetLists — flipped shops stay IN the summary, which is
+        // exactly what a merged company's combined books should do.
+        [HarmonyPatch(typeof(Helpers.FinancialSummaryHelper), nameof(Helpers.FinancialSummaryHelper.CreateFinancialSummary))]
+        public static class Patch_FinancialSummary_OwnBusinessesOnly
+        {
+            static void Prefix(out System.Collections.Generic.List<BuildingRegistration>? __state)
+            {
+                __state = null;
+                try
+                {
+                    var gi = SaveGameManager.Current;
+                    if (gi?.BuildingRegistrations == null) return;
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null || !reg.RentedByPlayer) continue;
+                        if (!GameStatePatcher.HideFromOwnAssetLists(reg)) continue;
+                        reg.RentedByPlayer = false;
+                        (__state ??= new()).Add(reg);
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Economics] summary veil: {ex.Message}"); }
+            }
+
+            static Exception? Finalizer(Exception? __exception, System.Collections.Generic.List<BuildingRegistration>? __state)
+            {
+                if (__state != null)
+                    foreach (var reg in __state)
+                        try { reg.RentedByPlayer = true; } catch { }
+                return __exception;   // pass through — the veil never swallows native failures
+            }
+        }
+
+        /// <summary>Character page: the business count enumerates all rented regs.
+        /// Recompute own-only and re-stamp the label.  The weekly-profit figure
+        /// self-heals as veiled summaries accumulate; NetWorth is native and may
+        /// still include partner assets (known, unpatched).</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.Persona.CharacterInfo), "OnEnable")]
+        public static class Patch_CharacterInfo_OwnBusinessCount
+        {
+            static void Postfix(UI.Smartphone.Apps.Persona.CharacterInfo __instance)
+            {
+                try
+                {
+                    var gi = SaveGameManager.Current;
+                    if (gi?.BuildingRegistrations == null) return;
+                    int own = 0, foreign = 0;
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null || !reg.RentedByPlayer) continue;
+                        bool revenue; try { revenue = BusinessTypeHelper.GetData(reg).HasTag(BigAmbitions.Tags.TagRef.Businesstag.generatesrevenue); } catch { continue; }
+                        if (!revenue) continue;
+                        if (GameStatePatcher.HideFromOwnAssetLists(reg)) foreign++; else own++;
+                    }
+                    if (foreign == 0) return;   // native count was already correct
+                    var lbl = AccessTools.Field(typeof(UI.Smartphone.Apps.Persona.CharacterInfo), "totalBusinesses")?.GetValue(__instance);
+                    var prop = lbl?.GetType().GetProperty("Arguments");
+                    if (lbl != null && prop != null) prop.SetValue(lbl, new { amount = own });
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Economics] character count: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>EconoView: its selector listed partner businesses (their charts
+        /// rendered as yours) AND its "Open in BizMan" button opened the selection
+        /// by address — a path around the BizMan list block.  Filtering the private
+        /// list closes both; options rebuilt exactly as OnEnable does.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.EconoView.EconoView), "OnEnable")]
+        public static class Patch_EconoView_HidePartnerBusinesses
+        {
+            static void Postfix(UI.Smartphone.Apps.EconoView.EconoView __instance)
+            {
+                try
+                {
+                    var regs = AccessTools.Field(typeof(UI.Smartphone.Apps.EconoView.EconoView), "_businesses")
+                                          ?.GetValue(__instance) as System.Collections.Generic.List<BuildingRegistration>;
+                    if (regs == null || regs.Count == 0) return;
+                    int removed = regs.RemoveAll(r => GameStatePatcher.HideFromOwnAssetLists(r));
+                    if (removed == 0) return;
+                    var opts = new System.Collections.Generic.List<string>();
+                    foreach (var r in regs)
+                    {
+                        string n; try { n = !string.IsNullOrEmpty(r.BusinessName) ? r.BusinessName : Streets.AddressHelper.ToFormattedString(r.Address); } catch { n = "?"; }
+                        opts.Add(n);
+                    }
+                    __instance.businessNameDropdown.SetOptions(opts, false);
+                    Plugin.Logger.LogInfo($"[Economics] EconoView: hid {removed} partner business(es).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Economics] EconoView filter: {ex.Message}"); }
             }
         }
 
