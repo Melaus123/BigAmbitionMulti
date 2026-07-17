@@ -736,13 +736,26 @@ namespace BigAmbitionsMP
                 return VehicleManager.SpawnVisualGhost(model, pos, rot);   // fallback
 
             GameObject go;
-            try { go = UnityEngine.Object.Instantiate(prefab, pos, rot); }
+            // Instantiate INACTIVE (field NREs 2026-07-16: AiCarRescueCheck.OnEnable
+            // threw ×30 inside Instantiate — clone components wake up BEFORE the
+            // strip below removes them).  Deactivating the pool template for the
+            // clone call makes the clone start inactive, so no OnEnable runs until
+            // after the strip; the template's own active state is restored either way.
+            bool prefabWasActive = prefab.activeSelf;
+            try
+            {
+                if (prefabWasActive) prefab.SetActive(false);
+                go = UnityEngine.Object.Instantiate(prefab, pos, rot);
+            }
             catch (Exception ex)
             {
                 Plugin.Logger.LogWarning($"[TrafficSync] Instantiate '{model}': {ex.Message}");
                 return VehicleManager.SpawnVisualGhost(model, pos, rot);    // fallback
             }
-            go.SetActive(true);
+            finally
+            {
+                try { if (prefabWasActive) prefab.SetActive(true); } catch { }
+            }
 
             // Strip Gley AI / audio / LOD components — leaves a pure visual prop.
             // Taxis are special: keep TaxiController (the fast-travel interaction)
@@ -804,6 +817,7 @@ namespace BigAmbitionsMP
                 }
             }
             catch { }
+            go.SetActive(true);   // activate ONLY now — surviving components wake on a pure visual prop
             return go;
         }
 

@@ -1376,6 +1376,67 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_GetRivalLeaderboardData_FromCache] {ex.Message}"); }
             }
+
+            /// <summary>Backstop (field 2026-07-16: Load died ×3 mid-build and the
+            /// Rivals page never rendered): if the native row build throws for ANY
+            /// entry, substitute a minimal safe row instead of letting one bad
+            /// entry take down the whole page.  The primary fix is the
+            /// OnRivalDefeat player guard below; this catches whatever else the
+            /// native path may throw on.  Skipped-postfix caveat: a substituted
+            /// row misses the income/name overrides above — acceptable, it only
+            /// exists so the page loads.</summary>
+            static Exception? Finalizer(Exception? __exception, object __0, ref object? __result)
+            {
+                if (__exception == null) return null;
+                try
+                {
+                    var rd = __0 as BigAmbitions.Rivals.RivalData;
+                    string id   = rd?.id ?? "";
+                    string name = rd?.rivalName ?? "";
+                    try { if (GameStatePatcher.ClientRivalStats.TryGetValue(id, out var ps) && !string.IsNullOrEmpty(ps.Name)) name = ps.Name; } catch { }
+                    __result = new UI.Smartphone.Apps.Rivals.RivalLeaderboardData
+                    {
+                        rivalId         = id,
+                        entryName       = string.IsNullOrEmpty(name) ? "Unknown" : name,
+                        ageInYears      = 0,
+                        weeklyIncome    = 0f,
+                        isDefeated      = false,
+                        ownedBusinesses = rd?.ownedRetailOfficeBusinesses ?? new(),
+                        ownedBuildings  = rd?.ownedBuildings ?? new(),
+                        mostActiveNeighborhood = "",
+                    };
+                    Plugin.Logger.LogWarning($"[Patch_GetRivalLeaderboardData_FromCache] row build threw for '{id}' ({__exception.GetType().Name}: {__exception.Message}) — safe row substituted so the page loads.");
+                    return null;   // swallow: the page keeps loading
+                }
+                catch { return __exception; }   // backstop itself failed — surface the original
+            }
+        }
+
+        /// <summary>Session players are NOT defeatable rivals.  The leaderboard's
+        /// row builder flags any entry with negative weekly income or zero
+        /// retail/office businesses as defeated and calls
+        /// RivalsHelper.OnRivalDefeat on it — for a remote player's synthetic
+        /// stub (fresh player: 0 businesses) that runs the game's rival-shutdown
+        /// machinery (shutdown businesses / sell real estate / clear state)
+        /// against a PLAYER id, and NREs on the rival-state we deliberately
+        /// strip for players (field 2026-07-16: Rivals page died ×3 on load).
+        /// Skip the whole method for session-player ids.</summary>
+        [HarmonyPatch(typeof(BigAmbitions.Rivals.RivalsHelper), "OnRivalDefeat")]
+        public static class Patch_RivalsHelper_OnRivalDefeat_PlayerGuard
+        {
+            private static readonly HashSet<string> _logged = new();
+            static bool Prefix(BigAmbitions.Rivals.RivalData rival)
+            {
+                try
+                {
+                    string id = rival?.id ?? "";
+                    if (string.IsNullOrEmpty(id) || !GameStatePatcher.IsSessionPlayerId(id)) return true;
+                    if (_logged.Add(id))
+                        Plugin.Logger.LogInfo($"[Patch_OnRivalDefeat] skipped for session player '{id}' — players can't be defeated as rivals.");
+                    return false;
+                }
+                catch { return true; }   // never block the real rival path on a guard error
+            }
         }
 
         // ── RivalsHelper.GetRivalName override (Phase 1d Wave 2) ──────────────
