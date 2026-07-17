@@ -135,6 +135,46 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] rival-refs: {ex.Message}"); }
                 if (rivalRefs > 0) parts.Add($"rival-refs×{rivalRefs} logged");
+
+                // ── Class 6: cross-owner staff (REPAIR) ──────────────────────
+                // An OWN employee whose assignedAddress points at ANOTHER
+                // player's business (2026-07-16 report: the native assign-to-
+                // business dropdowns listed partner shops, so players "swapped"
+                // employees across saves).  The record exists only on THIS
+                // machine — roster sync publishes own-shop staff only — so the
+                // partner sees ghost workers they never hired while the record
+                // keeps generating demands here.  Native-legal repair: this IS
+                // the dropdown's own "Unassigned" path (abort auto-fill, clear
+                // work shifts, null the address, todo task) — the employee stays
+                // hired and just needs a workplace again.  The dropdowns are
+                // filtered now, so this heals old damage rather than racing new.
+                int crossFixed = 0, crossLogged = 0;
+                try
+                {
+                    if (gi.EmployeeInstances != null)
+                        foreach (var emp in gi.EmployeeInstances)
+                        {
+                            if (emp == null || emp.assignedAddress == null) continue;
+                            string eid = ""; try { eid = emp.id ?? ""; } catch { }
+                            if (eid.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix)) continue;   // runtime stand-ins
+                            try { if (MPRegisterSync.IsInjectedStaff(eid)) continue; } catch { }          // partner copies — theirs, not ours
+                            BuildingRegistration? reg = null;
+                            try { reg = Helpers.BuildingHelper.GetBuildingRegistration(emp.assignedAddress); } catch { }
+                            if (!GameStatePatcher.IsForeignPlayerBusiness(reg)) continue;
+                            try { UI.Smartphone.Apps.BizMan.Schedule.BizManSchedule.AbortAutoFillForBusiness(reg); } catch { }
+                            try { Helpers.EmployeeHelper.UnassignEmployeeFromAllWorkshifts(emp); } catch { }
+                            emp.assignedAddress = null;
+                            try { emp.AddTodoTask(Entities.TodoTaskType.EmployeeUnassigned); } catch { }
+                            crossFixed++;
+                            if (crossLogged++ < LogCapPerClass)
+                            {
+                                string en = ""; try { en = emp.characterData?.name ?? ""; } catch { }
+                                Plugin.Logger.LogWarning($"[Integrity] {reason}: employee '{en}' was assigned to another player's business '{reg!.BusinessName}' — unassigned (cross-owner staffing can't sync).");
+                            }
+                        }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] cross-owner-staff: {ex.Message}"); }
+                if (crossFixed > 0) parts.Add($"cross-owner-staff×{crossFixed} repaired");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] sweep ({reason}): {ex.Message}"); }
 

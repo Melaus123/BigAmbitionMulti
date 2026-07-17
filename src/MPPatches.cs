@@ -3230,6 +3230,248 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Assign-to-business dropdowns: hide partner businesses (2026-07-16) ─────
+        // The game's two "assign employee to business" dropdowns enumerate every
+        // player-rented registration — which in MP includes the PARTNER's shops, so
+        // players could "swap" employees into each other's businesses.  A cross-
+        // assigned record exists only on the assigning machine (roster sync
+        // publishes own-shop staff only): the partner sees ghost workers they never
+        // hired, and the record keeps generating demands here.  Filter both
+        // dropdowns; MPSaveIntegrity's cross-owner-staff class repairs saves that
+        // already mixed.
+
+        /// <summary>MyEmployees detail page: PlayerBuildingFilter is the dropdown's
+        /// own per-registration filter, so vetoing here keeps the option list and
+        /// the _businessRegistrations index mapping aligned for free.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.MyEmployees.MyEmployees), "PlayerBuildingFilter")]
+        public static class Patch_MyEmployees_AssignDropdown_HidePartnerBusinesses
+        {
+            static void Postfix(UI.Smartphone.Apps.MyEmployees.MyEmployees __instance,
+                                BuildingRegistration buildingRegistration, ref bool __result)
+            {
+                try
+                {
+                    if (!__result) return;
+                    if (!GameStatePatcher.IsForeignPlayerBusiness(buildingRegistration)) return;
+                    // Native exception preserved: stay visible while the employee is
+                    // STILL assigned there (pre-repair save) so the dropdown can show
+                    // the current assignment; the integrity sweep unassigns on load.
+                    var emp = AccessTools.Field(typeof(UI.Smartphone.Apps.MyEmployees.MyEmployees), "_selectedEmployeeInstance")
+                                         ?.GetValue(__instance) as Entities.EmployeeInstance;
+                    if (emp != null && buildingRegistration.Address == emp.assignedAddress) return;
+                    __result = false;
+                }
+                catch { }   // never break the dropdown over a guard error
+            }
+        }
+
+        /// <summary>HeadHunter candidate rows build their assign dropdown from an
+        /// inline LINQ over ALL rented registrations — no filter seam, so re-filter
+        /// the private list after SetData and rebuild the options the same way the
+        /// native code does (option i+1 must map to _buildingRegistrations[i]).</summary>
+        [HarmonyPatch(typeof(CandidateCellView), "SetData")]
+        public static class Patch_CandidateCell_AssignDropdown_HidePartnerBusinesses
+        {
+            private static int _logged;
+            static void Postfix(CandidateCellView __instance)
+            {
+                try
+                {
+                    var regs = AccessTools.Field(typeof(CandidateCellView), "_buildingRegistrations")
+                                          ?.GetValue(__instance) as System.Collections.Generic.List<BuildingRegistration>;
+                    if (regs == null || regs.Count == 0) return;
+                    var emp = AccessTools.Field(typeof(CandidateCellView), "_employeeInstance")
+                                         ?.GetValue(__instance) as Entities.EmployeeInstance;
+                    int removed = regs.RemoveAll(r => GameStatePatcher.IsForeignPlayerBusiness(r)
+                                                   && (emp == null || r.Address != emp.assignedAddress));
+                    if (removed == 0) return;
+                    var opts = new System.Collections.Generic.List<string> { VehicleStoragePanel.Localize("common_unassigned") };
+                    foreach (var r in regs)
+                    {
+                        string dn; try { dn = r.GetDisplayName(); } catch { dn = r.BusinessName ?? "?"; }
+                        opts.Add(dn);
+                    }
+                    int sel = 0;
+                    try { if (emp != null && emp.IsAssignedToAnyBusiness()) sel = regs.FindIndex(r => r.Address == emp.assignedAddress) + 1; } catch { }
+                    __instance.assignBusiness.SetOptions(opts, false, sel);
+                    if (_logged++ < 3)
+                        Plugin.Logger.LogInfo($"[StaffRoster] candidate assign-dropdown: hid {removed} partner business(es).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] candidate dropdown filter: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>Mass-action variants of the same hole (Tier-1 ownership sweep,
+        /// 2026-07-16): AssignBusinessMassAction and AssignToBusinessAndHireMassAction
+        /// each carry their OWN private PlayerBuildingFilter and bulk-write
+        /// assignedAddress.  Both the option list and the confirm handler re-query
+        /// through that same filter, so a filter veto stays index-consistent.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.MyEmployees.Types.AssignBusinessMassAction), "PlayerBuildingFilter")]
+        public static class Patch_MassAssign_HidePartnerBusinesses
+        {
+            static void Postfix(BuildingRegistration buildingRegistration, ref bool __result)
+            {
+                try { if (__result && GameStatePatcher.IsForeignPlayerBusiness(buildingRegistration)) __result = false; } catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.MyEmployees.Types.AssignToBusinessAndHireMassAction), "PlayerBuildingFilter")]
+        public static class Patch_MassAssignHire_HidePartnerBusinesses
+        {
+            static void Postfix(BuildingRegistration buildingRegistration, ref bool __result)
+            {
+                try { if (__result && GameStatePatcher.IsForeignPlayerBusiness(buildingRegistration)) __result = false; } catch { }
+            }
+        }
+
+        // ── Ownership choke point + BizMan visibility block (approved 2026-07-16) ──
+        // Tier-2 audit verdict: GetPlayerBuildingRegistrations' only base predicate
+        // is RentedByPlayer, and in MP the partner's shops are RentedByPlayer
+        // replicas — so EVERY native "pick one of your businesses" surface offered
+        // them (worst: Moving Service can SHUT DOWN the origin business; Interior
+        // Firm installs a new interior).  One postfix here closes: MovingService
+        // origin+destination, Delivery/FurnitureDelivery/Marketing/Recruitment/
+        // InteriorFirm settings, LogisticsManagerPlanUI, PurchasingAgent, and the
+        // BizManBusiness page-nav dropdown.  Merger-aware via HideFromOwnAssetLists
+        // (flipped regs stay visible — shared management is the merger's job).
+        // Full audit: .modding/03-systems/ownership-exposure-map.md.
+        [HarmonyPatch(typeof(Helpers.BuildingHelper), nameof(Helpers.BuildingHelper.GetPlayerBuildingRegistrations))]
+        public static class Patch_GetPlayerBuildingRegistrations_HidePartnerBusinesses
+        {
+            static void Postfix(System.Collections.Generic.List<BuildingRegistration> __result)
+            {
+                try { __result?.RemoveAll(r => GameStatePatcher.HideFromOwnAssetLists(r)); } catch { }
+            }
+        }
+
+        /// <summary>BizMan main business list: enumerates registrations directly
+        /// (not via the helper), so filter its models.  Rented rows hide via the
+        /// business-owner stamp; real-estate rows (isRealEstate branch) via the
+        /// BUILDING-owner stamp — defensive, AI landlords can't match because
+        /// their buildings are never BuildingOwnedByPlayer.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.BusinessScrollerController), "PopulateAllModels")]
+        public static class Patch_BizManBusinessList_HidePartnerBusinesses
+        {
+            private static int _logged;
+            static void Postfix(System.Collections.Generic.List<BusinessCellView.BusinessModel> allModels)
+            {
+                try
+                {
+                    if (allModels == null || allModels.Count == 0) return;
+                    // No connection gate: offline MP saves still carry ownership
+                    // stamps and the partner's shops must stay unmanageable there too.
+                    int removed = allModels.RemoveAll(m =>
+                    {
+                        if (m == null) return false;
+                        BuildingRegistration? reg = null;
+                        try { reg = Helpers.BuildingHelper.GetBuildingRegistration(m.Address); } catch { }
+                        if (reg == null) return false;
+                        if (GameStatePatcher.HideFromOwnAssetLists(reg)) return true;
+                        try
+                        {
+                            string bOwner = reg.buildingOwnerRivalId?.ToString() ?? "";
+                            if (!string.IsNullOrEmpty(bOwner) && bOwner != MPConfig.PlayerId && reg.BuildingOwnedByPlayer
+                                && !MergerFlip.IsFlipped(GameStateReader.AddressKey(reg)))
+                                return true;
+                        }
+                        catch { }
+                        return false;
+                    });
+                    if (removed > 0 && _logged++ < 3)
+                        Plugin.Logger.LogInfo($"[BizMan] business list: hid {removed} partner entr(ies) — rivals don't manage each other's businesses.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[BizMan] list filter: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>BizMan HQ and Warehouse tabs enumerate directly per entry —
+        /// prefix-skip the entry builder for partner buildings.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HeadquartersList), "SetUpEntry")]
+        public static class Patch_BizManHQList_HidePartnerBusinesses
+        {
+            static bool Prefix(BuildingRegistration headquarters)
+            {
+                try { return !GameStatePatcher.HideFromOwnAssetLists(headquarters); } catch { return true; }
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.WarehouseList), "SetUpEntry")]
+        public static class Patch_BizManWarehouseList_HidePartnerBusinesses
+        {
+            static bool Prefix(Entities.Warehouse warehouse)
+            {
+                try { return !GameStatePatcher.HideFromOwnAssetLists(warehouse); } catch { return true; }
+            }
+        }
+
+        /// <summary>HR-manager assign list: Load()'s unassigned branch enumerates
+        /// GetEmployeeInstances() unfiltered, so the partner's INJECTED staff could
+        /// be put under an own HR plan (auto-replacement/training on records that
+        /// aren't ours).  Same treatment as the MyEmployees list: drop injected ids
+        /// unless a merger shares them.  DUMP DRIFT: the type exists in the mono-0.11
+        /// decompile but not in the shipped reference assembly (CS0234), so this
+        /// resolves at runtime; a miss logs one FAILED line and no-ops.</summary>
+        [HarmonyPatch]
+        public static class Patch_HrManagerList_HideInjectedStaff
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var t = VehicleManager.FindGameType("UI.Smartphone.Apps.BizMan.HrManagers.EmployeesScrollerController");
+                if (t == null)
+                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        try
+                        {
+                            foreach (var x in asm.GetTypes())
+                                if (x != null && x.Name == "EmployeesScrollerController" && (x.Namespace ?? "").Contains("HrManagers")) { t = x; break; }
+                        }
+                        catch { }
+                        if (t != null) break;
+                    }
+                return t == null ? null : AccessTools.Method(t, "Load");
+            }
+
+            static void Postfix(object __instance)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    var data = AccessTools.Field(__instance.GetType(), "data")?.GetValue(__instance) as System.Collections.IList;
+                    if (data == null || data.Count == 0) return;
+                    System.Reflection.FieldInfo? idF = null;
+                    int removed = 0;
+                    for (int i = data.Count - 1; i >= 0; i--)
+                    {
+                        var m = data[i]; if (m == null) continue;
+                        idF ??= AccessTools.Field(m.GetType(), "employeeId");
+                        string id = idF?.GetValue(m) as string ?? "";
+                        if (id.Length == 0 || !MPRegisterSync.IsInjectedStaff(id) || MPRegisterSync.IsInjectedFromMergedPartner(id)) continue;
+                        data.RemoveAt(i); removed++;
+                    }
+                    if (removed > 0)
+                    {
+                        try
+                        {
+                            var sc = AccessTools.Field(__instance.GetType(), "scroller")?.GetValue(__instance);
+                            var mi = sc?.GetType().GetMethod("ReloadData");   // ReloadData(float = 0) — empty-types lookup would miss it
+                            if (mi != null)
+                            {
+                                var ps = mi.GetParameters();
+                                var args = new object?[ps.Length];
+                                for (int k = 0; k < ps.Length; k++)
+                                    args[k] = ps[k].HasDefaultValue ? ps[k].DefaultValue
+                                            : ps[k].ParameterType.IsValueType ? Activator.CreateInstance(ps[k].ParameterType) : null;
+                                mi.Invoke(sc, args);
+                            }
+                        }
+                        catch { }
+                        Plugin.Logger.LogInfo($"[StaffRoster] HR-manager list: hid {removed} injected partner-staff record(s).");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] HR list filter: {ex.Message}"); }
+            }
+        }
+
         // ── MP economy shields (2026-06-19) ───────────────────────────────────
         // Other players' shops carry a businessOwnerRivalId locally, so the game's AI city-economy treats them
         // as AI rivals — and it only spares RentedByPlayer (the LOCAL player's own). These guards stop the AI

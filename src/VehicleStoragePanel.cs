@@ -298,7 +298,7 @@ namespace BigAmbitionsMP
         // Localize a game key WITHOUT a compile-time GetLocalization binding (that bound to a runtime-ABSENT
         // LocalizorManager.GetLocalization(string,Object) overload → MissingMethodException that broke the clone).
         // Reflection finds whatever GetLocalization the RUNNING build actually has; Friendly fallback on miss.
-        private static string Localize(string key)
+        internal static string Localize(string key)   // shared: also used by the assign-dropdown rebuild in MPPatches
         {
             if (string.IsNullOrEmpty(key)) return key ?? "";
             try

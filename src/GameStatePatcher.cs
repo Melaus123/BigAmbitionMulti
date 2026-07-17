@@ -1202,6 +1202,41 @@ namespace BigAmbitionsMP
             return IsLedgerReservedToPlayer(reg);
         }
 
+        /// <summary>True when this registration's business belongs to a DIFFERENT
+        /// player than the local one — a partner-shop replica.  Unlike
+        /// IsAnyPlayerBusiness this is roster-free: it reads only the PERSISTED
+        /// ownership stamp, so it also works on an MP save opened offline (where
+        /// the roster is empty).  Predicate: businessOwnerRivalId non-empty, not
+        /// the local pid, and the registration is player-rented.  AI-rival
+        /// businesses can't false-match (never RentedByPlayer) and vanilla saves
+        /// carry no stamps at all.  Added 2026-07-16 (employee-mixing report):
+        /// the game's assign-employee-to-business dropdowns list every rented
+        /// registration, which in MP includes the partner's shops.</summary>
+        public static bool IsForeignPlayerBusiness(BuildingRegistration? reg)
+        {
+            if (reg == null) return false;
+            try
+            {
+                string owner = reg.businessOwnerRivalId?.ToString() ?? "";
+                if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return false;
+                return reg.RentedByPlayer;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>UI-list variant of IsForeignPlayerBusiness (approved 2026-07-16:
+        /// rivals must not manage each other's businesses): hide a foreign player's
+        /// business from native "my assets" enumerations — UNLESS a merger's
+        /// presentation flip deliberately shares it (MergerFlip: flipped = shown as
+        /// mine in native menus for the merger's shared management).  Inert outside
+        /// mergers (_flipped empty).  Use for DISPLAY/PICKER filtering only — sync
+        /// authority questions stay on MergerFlip.TrulyMine / IsReceiversOwnBusiness.</summary>
+        public static bool HideFromOwnAssetLists(BuildingRegistration? reg)
+        {
+            if (!IsForeignPlayerBusiness(reg)) return false;
+            try { return !MergerFlip.IsFlipped(GameStateReader.AddressKey(reg!)); } catch { return true; }
+        }
+
         /// <summary>HOST-only: true when this building is reserved in the ownership
         /// ledger — BuildingOwners (rents/operates) or BuildingRealEstateOwners (bought)
         /// — to a player: a connected player's pid OR an absent owner's stable id held

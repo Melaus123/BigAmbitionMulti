@@ -44,6 +44,9 @@ namespace BigAmbitionsMP
         // the checkout-routing Harmony patches read it on the main thread.
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string playerId, Vector3 pos, bool employee, string address, string stationId)> _cashiers = new();
 
+        /// <summary>[CrossOwner] probe: employee ids already reported this session.</summary>
+        private static readonly HashSet<string> _crossOwnerLogged = new();
+
         public static void Reset()
         {
             // Remove the synthetic duty NPCs we injected from the live game first,
@@ -57,7 +60,7 @@ namespace BigAmbitionsMP
             foreach (var id in new List<string>(_injectedStaff.Keys)) RemoveInjectedStaff(id);
             lock (_rosterByAddr) { _rosterByAddr.Clear(); }
             _rosterApplied.Clear(); _rosterSigSent.Clear();
-            _cashiers.Clear(); _empDuty.Clear(); _synthetics.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = "";
+            _cashiers.Clear(); _empDuty.Clear(); _synthetics.Clear(); _crossOwnerLogged.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = "";
         }
 
         // ── Current building context (set by the building entry patch) ────────
@@ -602,6 +605,34 @@ namespace BigAmbitionsMP
                         foreach (var sd in reg.scheduleDays)
                             if (sd?.workShifts != null && sd.workShifts.Count > 0) { shopsWithShifts++; break; }
                     }
+                // ── [CrossOwner] probe (approved 2026-07-16): the load-time sweep
+                // (MPSaveIntegrity Class 6) cleans cross-owner assignments at
+                // world-ready and the known assign dropdowns are filtered, so an
+                // OWN employee sitting on a partner business MID-SESSION proves an
+                // unguarded producer we haven't found yet.  Names the record and
+                // timestamps the damage (ring log correlation); one line per
+                // employee per session.  Doubles as a permanent invariant tripwire
+                // — silence across field sessions = the dropdowns were the only
+                // holes.
+                try
+                {
+                    if (gi?.EmployeeInstances != null)
+                        foreach (var emp in gi.EmployeeInstances)
+                        {
+                            if (emp == null || emp.assignedAddress == null) continue;
+                            string eid = ""; try { eid = emp.id ?? ""; } catch { }
+                            if (eid.Length == 0 || eid.StartsWith(SyntheticDutyEmployeeIdPrefix)) continue;
+                            if (_injectedStaff.ContainsKey(eid) || _crossOwnerLogged.Contains(eid)) continue;
+                            BuildingRegistration? xreg = null;
+                            try { xreg = Helpers.BuildingHelper.GetBuildingRegistration(emp.assignedAddress); } catch { }
+                            if (!GameStatePatcher.IsForeignPlayerBusiness(xreg)) continue;
+                            _crossOwnerLogged.Add(eid);
+                            string en = ""; try { en = emp.characterData?.name ?? ""; } catch { }
+                            Plugin.Logger.LogWarning($"[CrossOwner] employee '{en}' ({eid}) is assigned to partner business '{xreg!.BusinessName}' MID-SESSION — an unguarded assign path still exists.");
+                        }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[CrossOwner] probe: {ex.Message}"); }
+
                 if (shopsWithShifts == 0 && _empDuty.Count == 0 && _cashiers.Count == 0 && _synthetics.Count == 0) return;   // nothing to watch
                 Plugin.Logger.LogInfo($"[Register] duty summary (10m): empDutyOut={_empDuty.Count} dutyIn={_cashiers.Count} synthetics={_synthetics.Count} ownShopsWithShifts={shopsWithShifts}");
             }
