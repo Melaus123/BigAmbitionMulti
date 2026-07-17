@@ -3544,53 +3544,16 @@ namespace BigAmbitionsMP
             static void Postfix(ref bool __result) { if (MPChat.SuppressGameInput) __result = true; }
         }
 
-        // Escape-safety guard for our HasInputSelected override.  The patch above
-        // can make GameManager.HasInputSelected() return true while NOTHING is
-        // EventSystem-selected (our chat is a custom canvas input, not a Unity-
-        // selected object).  The game's HandleEscapeClick then derefs
-        // EventSystem.current.currentSelectedGameObject with no null check
-        // (GameManager.cs:968) → an NRE that aborts Update on every Escape press —
-        // the "stuck after exiting a car, Escape does nothing" field bug.  When we
-        // detect that exact state, clear our chat focus/suppression and skip the
-        // native body so it can't throw; Escape now ESCAPES our block instead of
-        // crashing.  Inert when SuppressGameInput is false (returns true = run native).
-        [HarmonyPatch]
-        public static class Patch_GM_HandleEscapeClick_NullGuard
-        {
-            // 2026-07-10 field run named the cause: "HandleEscapeClick" resolves NOT FOUND in the
-            // LIVE build while the decompile dump (GameManager.cs:964) still has it and the sibling
-            // ShouldBlockKeyboardShortcuts patch on the same type binds — the game renamed the method
-            // in a post-dump hotfix.  Resolve by SCAN (void, no params, name contains "Escape") so a
-            // rename can't kill the guard again, and LOG what bound so the field verifies the pick.
-            static System.Reflection.MethodBase? TargetMethod()
-            {
-                var m = HarmonyLib.AccessTools.DeclaredMethod(typeof(GameManager), "HandleEscapeClick");
-                if (m == null)
-                {
-                    foreach (var c in HarmonyLib.AccessTools.GetDeclaredMethods(typeof(GameManager)))
-                        if (c.Name.IndexOf("Escape", StringComparison.OrdinalIgnoreCase) >= 0
-                            && c.GetParameters().Length == 0 && c.ReturnType == typeof(void))
-                        { m = c; break; }
-                }
-                Plugin.Logger.LogInfo($"[Patch] GameManager escape-click resolve: {(m != null ? m.Name : "NOT FOUND — guard stays off")}");
-                return m;
-            }
-
-            static bool Prefix()
-            {
-                try
-                {
-                    var es = UnityEngine.EventSystems.EventSystem.current;
-                    if (MPChat.SuppressGameInput && (es == null || es.currentSelectedGameObject == null))
-                    {
-                        MPCanvasUI.ClearChatFocus();
-                        return false;   // skip native — it would NRE on the null selection
-                    }
-                }
-                catch { }
-                return true;
-            }
-        }
+        // RETIRED 2026-07-16: the escape-click null guard (protected the June
+        // "Escape does nothing after exiting a car" NRE inside GameManager.
+        // HandleEscapeClick).  Three generations never bound in the field: the
+        // live build removed/restructured the method beyond both name lookup and
+        // a void/no-param *Escape* scan (our decompile dump predates the change),
+        // and every failed bind stamped PatchIssues noise into every report.
+        // Field evidence for retirement: the guard was effectively OFF on all
+        // installs for five weeks with zero recurrence of the original symptom.
+        // TRIPWIRE: if "Escape does nothing while/after chat" reports return,
+        // re-dump the CURRENT game build and rebuild the guard against it.
 
         [HarmonyPatch]
         public static class Patch_MiniMenu_SaveGame
