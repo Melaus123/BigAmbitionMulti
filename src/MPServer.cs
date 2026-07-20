@@ -2460,7 +2460,14 @@ namespace BigAmbitionsMP
                 }
                 Plugin.Logger.LogWarning($"[Server] Preset '{difficulty}': native difficulty asset unavailable — EA 0.11 fallback numbers.");
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Preset '{difficulty}': {ex.Message} — EA 0.11 fallback numbers."); }
+            // Unwrap TargetInvocationException (field 2026-07-18: a modded install logged
+            // only the generic "Exception has been thrown by the target of an invocation"
+            // — the INNER exception is the actual cause and must self-diagnose).
+            catch (Exception ex)
+            {
+                var root = ex; while (root.InnerException != null) root = root.InnerException;
+                Plugin.Logger.LogWarning($"[Server] Preset '{difficulty}': {root.GetType().Name}: {root.Message} — EA 0.11 fallback numbers.");
+            }
             switch (dto.Difficulty)
             {
                 case "Easy": dto.StartingMoney = 15000; dto.RivalsDifficultyMultiplier = 0.7f; break;
