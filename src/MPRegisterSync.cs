@@ -633,6 +633,11 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[CrossOwner] probe: {ex.Message}"); }
 
+                // Foreign-todo purge rides the same 10-min cadence (field 2026-07-20:
+                // the objectives panel alerted about another player's staff LIVE —
+                // the load-time sweep alone can't clear mid-session creations).
+                try { MPSaveIntegrity.PurgeForeignTodos("periodic"); } catch { }
+
                 if (shopsWithShifts == 0 && _empDuty.Count == 0 && _cashiers.Count == 0 && _synthetics.Count == 0) return;   // nothing to watch
                 Plugin.Logger.LogInfo($"[Register] duty summary (10m): empDutyOut={_empDuty.Count} dutyIn={_cashiers.Count} synthetics={_synthetics.Count} ownShopsWithShifts={shopsWithShifts}");
             }

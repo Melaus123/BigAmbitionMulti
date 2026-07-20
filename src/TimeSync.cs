@@ -174,6 +174,20 @@ namespace BigAmbitionsMP
         private static volatile bool _wroteClock;
         public static bool ConsumeClockWrite() { var v = _wroteClock; _wroteClock = false; return v; }
 
+        // One-time JOIN snap (user 2026-07-19, "on connect you match"): connecting
+        // days behind the host used to schedule a run-forward catch-up that
+        // SIMULATED every skipped day (wages, rent, RunDaily…) at fast-forward.
+        // The no-snap rule (2026-06-18) was designed for small IN-SESSION drift,
+        // where simulating is correct; a join gap is different — the host's world
+        // already lived that time and its state arrives via sync anyway.  So the
+        // FIRST clock sync of an MP game load WRITES the clock straight to host
+        // time (exactly what loading a save does), unconditionally beyond the
+        // dead-band.  All later in-session drift keeps the run-only rule.
+        // (Client-AHEAD at join is structurally impossible — the join clock is
+        // always host-derived via LoadData/StartFreshFromHost — so the snap
+        // firing in either direction is purely defensive.)
+        private static bool _firstSyncSeen;
+
         /// <summary>
         /// Called when a clock-sync packet arrives.  Calculates drift and schedules correction.
         /// </summary>
@@ -189,6 +203,31 @@ namespace BigAmbitionsMP
             float hostTotal  = hostDay  * 24f + hostHour;
             float localTotal = localDay * 24f + localHour;
             float drift      = hostTotal - localTotal;  // positive = we're behind host
+
+            // One-time join snap: the FIRST sync of this load, on a client — match
+            // the host outright (beyond the dead-band, in either direction).
+            // Consume the arm ONLY when eligible: GameTimeSync packets also arrive
+            // DURING loading (before InMpGame), and burning the one-shot there
+            // would silently disable the snap for the load it exists for.
+            bool firstSync = false;
+            if (!_firstSyncSeen && MPClient.InMpGame && !MPServer.IsRunning)
+            {
+                _firstSyncSeen = true;
+                firstSync = true;
+            }
+            if (firstSync && Mathf.Abs(drift) >= DRIFT_IGNORE_HOURS)
+            {
+                int snapDay = hostDay; float snapHour = hostHour;
+                _correctionHours = 0f;
+                AheadHeld        = false;
+                GameStatePatcher.EnqueueOnMainThread(() =>
+                {
+                    GameStateReader.SetGameTime(snapDay, snapHour);
+                    _wroteClock = true;   // authorized write — the anti-skip watchdog re-bases
+                    Plugin.Logger.LogInfo($"[TimeSync] JOIN SNAP: clock set to day {snapDay}, {snapHour:0.00}h (drift was {drift:+0.#;-0.#}h) — the gap is NOT simulated (one-time per load).");
+                });
+                return;
+            }
 
             float absDrift = Mathf.Abs(drift);
 
@@ -225,6 +264,7 @@ namespace BigAmbitionsMP
         {
             _correctionHours = 0f;
             AheadHeld        = false;
+            _firstSyncSeen   = false;   // re-arm the one-time join snap for the next load
             // Round-36: the early-release marker is deliberately NOT cleared here anymore — the scene-ready
             // reset ran BETWEEN the early release and the hold engage (log-proven), wiping the marker the
             // hold needed. Its 90s validity window handles staleness instead.

@@ -559,7 +559,7 @@ namespace BigAmbitionsMP
             LobbyClear();
             _peerNames.Clear();
             _clients.Clear();
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
         }
 
         /// <summary>Host clicked "Start New Game" in the lobby.</summary>
@@ -579,7 +579,7 @@ namespace BigAmbitionsMP
             ResetWallet();            // fresh world — no shared wallet (slice 4)
 
             // Re-arm the startup pause hold for this new game.
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
 
             // Per-player starting cash: each client gets the host-designated amount
             // (their override, else the difficulty base).  The host now designates
@@ -641,7 +641,7 @@ namespace BigAmbitionsMP
             IsInLobby = false;
 
             // Re-arm the startup pause hold for this new game.
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
 
             // Phase 4: if a multiplayer session exists, resume it — the host holds
             // every player's .hsg, so it ships each connected client its own and
@@ -2211,11 +2211,62 @@ namespace BigAmbitionsMP
             if (changed) Plugin.Logger.LogInfo($"[Server] phase: '{p.PlayerId}' → {p.Phase}");
         }
 
+        // ── Gate self-heal (field 2026-07-19) ─────────────────────────────────
+        // A client that reported scene-loaded (PlayerInGame) but never became
+        // world-ready is missing its world sync — the field case: the Steam
+        // relay refused the 826-building business snapshot mid-burst and it was
+        // silently lost, so the client could never send WorldReady and the
+        // startup overlay waited forever.  The transport now retries refused
+        // sends, and THIS heals any residual cause: while the hold is up, a
+        // player in-game but not world-ready gets the business snapshot
+        // re-sent after 15s, max 3 attempts, 15s apart.
+        private static readonly Dictionary<string, (int attempts, long lastMs)> _gateHeal = new();
+
+        private static void TickGateHeal()
+        {
+            List<string>? needs = null;
+            lock (_startupLock)
+            {
+                if (_startupReleased) return;
+                long now = TickMs64;
+                foreach (var pid in _inGamePlayers)
+                {
+                    if (pid == MPConfig.PlayerId) continue;                     // host syncs itself
+                    if (_worldReadyPlayers.Contains(pid) || _fenceExcused.Contains(pid)) continue;
+                    _gateHeal.TryGetValue(pid, out var st);
+                    if (st.lastMs == 0) { _gateHeal[pid] = (0, now); continue; } // arm on first sight
+                    if (st.attempts >= 3 || now - st.lastMs < 15000) continue;
+                    _gateHeal[pid] = (st.attempts + 1, now);
+                    (needs ??= new List<string>()).Add(pid);
+                }
+            }
+            if (needs == null) return;
+            foreach (var pid in needs)
+            {
+                var link = LinkForPlayer(pid);
+                if (link == null) continue;
+                Plugin.Logger.LogWarning($"[Server] gate-heal: '{pid}' is in-game but not world-ready — re-sending business snapshot.");
+                SendBusinessSnapshotTo(link);
+            }
+        }
+
+        private static MPLink? LinkForPlayer(string playerId)
+        {
+            foreach (var kv in _peerNames)
+            {
+                if (kv.Value != playerId) continue;
+                foreach (var peer in _clients.Keys)
+                    if (peer.Id == kv.Key) return peer;
+            }
+            return null;
+        }
+
         /// <summary>Host main thread, ~1 Hz while hosting: excuse fence-waited
         /// players who bailed to the menu; release if nobody real remains.</summary>
         public static void TickFencePrune()
         {
             if (!_running) return;
+            TickGateHeal();
             bool release = false;
             List<string>? waiting = null;
             lock (_startupLock)
@@ -3598,7 +3649,7 @@ namespace BigAmbitionsMP
                 int bytes = env.Serialize().Length;
                 Send(peer, env);
                 MPLoadProfiler.Mark($"HOST sent BusinessSnapshot to '{peer.Id}': {bytes} bytes ({snap.Businesses.Count} buildings)");
-                Plugin.Logger.LogInfo($"[Server] Sent business snapshot to '{peer.Id}': {snap.Businesses.Count} buildings, {snap.BuildingsForSale.Count} for-sale.");
+                Plugin.Logger.LogInfo($"[Server] Sent business snapshot to '{peer.Id}': {snap.Businesses.Count} buildings, {snap.BuildingsForSale.Count} for-sale, {bytes}B.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendBusinessSnapshotTo: {ex.Message}"); }
         }

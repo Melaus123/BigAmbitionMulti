@@ -528,6 +528,7 @@ namespace BigAmbitionsMP
             MergerFlip.Tick();           // merger slice 3: ownership-flip reconcile (1 Hz) + host state push (10s)
             MergerEmployeeSync.Tick();   // merger slice 5: schedule write-back scan on flipped shops (2s)
             MPFreezeProbe.Tick();        // [MoveFreeze] symptom probe: input-without-motion detector (claim-4 backstop)
+            MPHousingMorale.Tick();      // shared-residence morale: a Housing grant counts as having a home (10s reconcile)
             MPRegisterSync.TickContextHeal();   // building-context self-heal (hand-vehicle entry skips the entry hook)
             MPRegisterSync.TickEconDigest();    // [EconProbe] one line per owned business per game-day (2026-07-09)
             MPRegisterSync.TickDutySummary();   // TEMPORARY: duty-broadcast activation watch, 10m (2026-07-09)
@@ -2803,6 +2804,7 @@ namespace BigAmbitionsMP
                 ParkedVehicleSync.Reset();
                 MPRegisterSync.Reset();   // duty posts die with the scene
                 MPFreezeProbe.Reset();    // freeze-episode state dies with the scene
+                MPHousingMorale.Reset();  // morale-reconcile log state dies with the scene
                 PassengerSync.Reset();    // passenger seats/locks die with the scene
                 MergerSync.ResetSceneState(); // merger runtime + pending-proposal UI state (same lifecycle as grants)
                 MergerFlip.Reset();           // flip tracking dies with the scene's regs (tick re-applies from state)

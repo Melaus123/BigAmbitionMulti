@@ -595,25 +595,13 @@ namespace BigAmbitionsMP
         private static Sprite? LoadIcon()
         {
             if (_iconSprite != null) return _iconSprite;
-            try
-            {
-                string path = System.IO.Path.Combine(MPConfig.ModRootPath, IconFile);
-                if (!System.IO.File.Exists(path))
-                {
-                    Plugin.Logger.LogWarning($"[PhoneBtn] icon not found: {path}");
-                    return null;
-                }
-                var bytes = System.IO.File.ReadAllBytes(path);
-                var tex = new Texture2D(2, 2);
-                tex.hideFlags = HideFlags.HideAndDontSave;
-                if (!ImageConversion.LoadImage(tex, bytes))
-                { Plugin.Logger.LogWarning("[PhoneBtn] icon decode failed."); return null; }
-                _iconSprite = Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f));
-                _iconSprite.hideFlags = HideFlags.HideAndDontSave;
-                Plugin.Logger.LogInfo($"[PhoneBtn] icon loaded ({tex.width}x{tex.height}, {bytes.Length}B).");
-                return _iconSprite;
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[PhoneBtn] LoadIcon: {ex.Message}"); return null; }
+            // Field 2026-07-19 ("chat icon is wrong"): this older loader only
+            // checked the mod ROOT, but the icons moved into assets\ for the
+            // Workshop packaging (0.1.11) — LoadIconFile was updated, this
+            // wasn't, so the chat button silently fell back to the borrowed
+            // Persona look.  Route through the shared assets-aware loader.
+            _iconSprite = LoadIconFile(IconFile);
+            return _iconSprite;
         }
     }
 }

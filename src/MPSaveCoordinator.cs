@@ -125,9 +125,12 @@ namespace BigAmbitionsMP
                     DiagPhase("host lambda: SetSessionMetadata done → MergeSlot");
                     MergeSlot(session, slot);                 // host's own slot
                     // Carry forward anyone who isn't here to save themselves (a member who just left, or
-                    // was offline) so an auto/disconnect checkpoint never silently drops them → a load that
-                    // would otherwise fresh-start them as a brand-new player. (2026-06-23)
-                    if (isAutomatic) CarryForwardAbsentMembers(session);
+                    // was offline) so a save never silently drops them → a load that would otherwise
+                    // fresh-start them as a brand-new player. (2026-06-23; field 2026-07-19: the
+                    // isAutomatic gate meant MANUAL saves — including save-as under a NEW NAME —
+                    // skipped this entirely, and the host's next load of that store reset the
+                    // offline member. Every save carries absent members now.)
+                    CarryForwardAbsentMembers(session);
                     // Loan ledger rides every session save — loans created
                     // BEFORE the session's first save (no folder yet) would
                     // otherwise never persist unless the ledger changed again.
@@ -157,6 +160,10 @@ namespace BigAmbitionsMP
                 var slot = PerformLocalSave(dc);
                 SetSessionMetadata(dc, slot.Day);
                 MergeSlot(dc, slot);
+                // Same carry-forward as every other save path (review 2026-07-20):
+                // a '-disconnect' store missing offline members is the same
+                // character-reset trap if the host later loads it.
+                CarryForwardAbsentMembers(dc);
             }
             catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] HostQuitCheckpoint: {ex}"); }
         }
@@ -203,6 +210,11 @@ namespace BigAmbitionsMP
                 var slot = PerformLocalSave(session);
                 SetSessionMetadata(session, slot.Day);
                 MergeSlot(session, slot);
+                // Field 2026-07-19 (the unintended character reset): this MANUAL path —
+                // which is exactly where a save-as under a new name lands — never carried
+                // absent members, so the new store was born without the offline player's
+                // .hsg and the host's next load fresh-started them.
+                CarryForwardAbsentMembers(session);
                 // Loan ledger rides every session save, exactly as HostSaveNow does.
                 // The pause-menu save is often the session's FIRST save, so a loan
                 // accepted beforehand would otherwise never reach disk (the ledger
@@ -934,6 +946,22 @@ namespace BigAmbitionsMP
                 var lineage = new List<string> { baseName, baseName + "-auto" };
                 for (int slot = 2; slot <= 10; slot++) lineage.Add(baseName + "-auto-" + slot);
                 lineage.Add(baseName + "-disconnect");
+                // Cross-BASE lineage (field 2026-07-19): a save-as under a NEW NAME starts a
+                // different base, so the same-base sweep above can't see the old chain — the
+                // offline member's newest save lived in 'MP <date>-auto-2' while the target
+                // was 'Kaido_melaus game'. PlaythroughId is the world identity carried across
+                // every rename/fork: sweep every session of the SAME world too. (Manifest-less
+                // self-save folders are still covered by the same-base list above.)
+                try
+                {
+                    string pid = MPSaveManager.ReadManifest(targetSession)?.PlaythroughId
+                              ?? MPSaveManager.ReadManifest(baseName)?.PlaythroughId ?? "";
+                    if (!string.IsNullOrEmpty(pid))
+                        foreach (var (name, m) in MPSaveManager.ListSessions())
+                            if (m != null && m.PlaythroughId == pid && !lineage.Contains(name))
+                                lineage.Add(name);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] carry-forward lineage scan: {ex.Message}"); }
 
                 // Newest save per member across the lineage. Scan the character FOLDERS (not just manifest
                 // slots) so a manifest-less self-save (OnApplicationQuit) is still found; remember which

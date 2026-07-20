@@ -175,12 +175,64 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] cross-owner-staff: {ex.Message}"); }
                 if (crossFixed > 0) parts.Add($"cross-owner-staff×{crossFixed} repaired");
+
+                // ── Class 7: foreign todos (REPAIR) ──────────────────────────
+                // Field 2026-07-20: the objectives panel alerted about on-duty
+                // staff that wasn't the player's.  ANY todo referencing an
+                // injected/synthetic employee id or a partner-owned business is
+                // wrong by definition — native todo generation has no concept of
+                // "someone else's staff/shop".  Native-legal removal: the game's
+                // own compat fixes prune TodoTasks by direct RemoveAll/RemoveAt.
+                int todosFixed = PurgeForeignTodos(reason);
+                if (todosFixed > 0) parts.Add($"foreign-todos×{todosFixed} repaired");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] sweep ({reason}): {ex.Message}"); }
 
             LastSummary = string.Join("; ", parts);
             if (LastSummary.Length > 0)
                 Plugin.Logger.LogWarning($"[Integrity] {reason}: {LastSummary}.");
+        }
+
+        /// <summary>Class 7's worker, ALSO called periodically (the 10-min duty
+        /// tick) because foreign todos are created LIVE mid-session — a load-time
+        /// sweep alone would leave the objectives panel wrong until next load.
+        /// Foreign = references an injected/synthetic employee id (live-session
+        /// knowledge only) or a partner-owned business (persisted stamp — works
+        /// offline too).</summary>
+        public static int PurgeForeignTodos(string reason)
+        {
+            int removed = 0, logged = 0;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.TodoTasks == null) return 0;
+                for (int i = gi.TodoTasks.Count - 1; i >= 0; i--)
+                {
+                    var t = gi.TodoTasks[i];
+                    if (t == null) continue;
+                    bool foreign = false;
+                    string eid = "";
+                    try { eid = t.employeeId ?? ""; } catch { }
+                    if (eid.Length > 0 && (eid.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix) || MPRegisterSync.IsInjectedStaff(eid)))
+                        foreign = true;
+                    if (!foreign)
+                    {
+                        try
+                        {
+                            var reg = t.address != null ? Helpers.BuildingHelper.GetBuildingRegistration(t.address) : null;
+                            if (GameStatePatcher.HideFromOwnAssetLists(reg)) foreign = true;
+                        }
+                        catch { }
+                    }
+                    if (!foreign) continue;
+                    gi.TodoTasks.RemoveAt(i);
+                    removed++;
+                    if (logged++ < LogCapPerClass)
+                        Plugin.Logger.LogWarning($"[Integrity] {reason}: todo '{t.type}' referenced another player's staff/business — removed (objectives are own-only).");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] foreign-todos: {ex.Message}"); }
+            return removed;
         }
     }
 }

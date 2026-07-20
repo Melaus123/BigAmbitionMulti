@@ -1769,49 +1769,111 @@ namespace BigAmbitionsMP
         // The owner's machine still generates everything for their own staff.
         // NOTE merger (on hold): merged-partner staff are also stripped here;
         // revisit if the merger ships message-sharing semantics.
+        /// <summary>Shared strip/restore for native passes that iterate EVERY employee
+        /// record (RunDaily, employee complaints, …): remove the mod's injected +
+        /// synthetic records for the duration, restore after.  The owner's machine
+        /// still generates everything for their own staff.</summary>
+        internal static System.Collections.Generic.List<Entities.EmployeeInstance> StripModEmployeeRecords(string context)
+        {
+            var stripped = new System.Collections.Generic.List<Entities.EmployeeInstance>();
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return stripped;   // records only exist in MP anyway
+                var list = SaveGameManager.Current?.EmployeeInstances;
+                if (list == null) return stripped;
+                for (int i = list.Count - 1; i >= 0; i--)
+                {
+                    string id = list[i]?.id ?? "";
+                    if (!id.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix) && !MPRegisterSync.IsInjectedStaff(id)) continue;
+                    stripped.Add(list[i]!);
+                    list.RemoveAt(i);
+                    try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(id); } catch { }
+                }
+                if (stripped.Count > 0)
+                    Plugin.Logger.LogInfo($"[StaffRoster] {stripped.Count} injected/synthetic record(s) sit out {context} (their messages stay on the owner's machine).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] strip ({context}): {ex.Message}"); }
+            return stripped;
+        }
+
+        internal static void RestoreModEmployeeRecords(System.Collections.Generic.List<Entities.EmployeeInstance>? stripped, string context)
+        {
+            try
+            {
+                var list = SaveGameManager.Current?.EmployeeInstances;
+                if (list != null && stripped != null)
+                    foreach (var emp in stripped)
+                    {
+                        if (emp == null || string.IsNullOrEmpty(emp.id)) continue;
+                        bool exists = false;
+                        for (int i = 0; i < list.Count; i++)
+                            if (list[i]?.id == emp.id) { exists = true; break; }
+                        if (!exists) list.Add(emp);
+                        try { Helpers.EmployeeHelper.EmployeeInstancesDictionary[emp.id] = emp; } catch { }
+                    }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] restore ({context}): {ex.Message}"); }
+        }
+
         [HarmonyPatch(typeof(Helpers.EmployeeHelper), nameof(Helpers.EmployeeHelper.RunDaily))]
         public static class Patch_EmployeeHelper_RunDaily_SkipModRecords
         {
             static void Prefix(out System.Collections.Generic.List<Entities.EmployeeInstance> __state)
-            {
-                __state = new System.Collections.Generic.List<Entities.EmployeeInstance>();
-                try
-                {
-                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;   // records only exist in MP anyway
-                    var list = SaveGameManager.Current?.EmployeeInstances;
-                    if (list == null) return;
-                    for (int i = list.Count - 1; i >= 0; i--)
-                    {
-                        string id = list[i]?.id ?? "";
-                        if (!id.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix) && !MPRegisterSync.IsInjectedStaff(id)) continue;
-                        __state.Add(list[i]!);
-                        list.RemoveAt(i);
-                        try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(id); } catch { }
-                    }
-                    if (__state.Count > 0)
-                        Plugin.Logger.LogInfo($"[StaffRoster] {__state.Count} injected/synthetic record(s) sit out the daily employee pass (sick/demand/retirement messages stay on the owner's machine).");
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_RunDaily_SkipModRecords] strip: {ex.Message}"); }
-            }
+                => __state = StripModEmployeeRecords("the daily employee pass");
 
             static Exception? Finalizer(System.Collections.Generic.List<Entities.EmployeeInstance> __state, Exception __exception)
             {
+                RestoreModEmployeeRecords(__state, "RunDaily");
+                return __exception;   // never swallow the native pass's own failure
+            }
+        }
+
+        /// <summary>Guard family member 8 (field 2026-07-20: "notice from on duty
+        /// staff from another player's staff"): employee complaints enumerate the
+        /// FULL roster OUTSIDE RunDaily, so the RunDaily strip never covered them —
+        /// an injected partner record could be picked to complain, and the message
+        /// (delivered via the staff contact) created the Contacts→Employees entry
+        /// on the wrong machine.  Same strip/restore for the complaint pass.</summary>
+        [HarmonyPatch(typeof(AI.Employees.ComplaintHelper), nameof(AI.Employees.ComplaintHelper.RunEmployeeComplaints))]
+        public static class Patch_ComplaintHelper_RunEmployeeComplaints_SkipModRecords
+        {
+            static void Prefix(out System.Collections.Generic.List<Entities.EmployeeInstance> __state)
+                => __state = StripModEmployeeRecords("the employee-complaint pass");
+
+            static Exception? Finalizer(System.Collections.Generic.List<Entities.EmployeeInstance> __state, Exception __exception)
+            {
+                RestoreModEmployeeRecords(__state, "RunEmployeeComplaints");
+                return __exception;
+            }
+        }
+
+        /// <summary>Field 2026-07-20 ("employee hit skill level — but it's not my
+        /// employee"): training completion adds the record to the STATIC
+        /// FinishedTrainingEmployees dictionary AT COMPLETION TIME — outside the
+        /// RunDaily strip window — and the notification at RunDaily's tail reads
+        /// that dictionary directly, so the roster strip never protected it.
+        /// Purge injected/synthetic entries just before the reader runs.</summary>
+        [HarmonyPatch(typeof(Helpers.EmployeeHelper), "ShowFinishedTrainingEmployeeNotifications")]
+        public static class Patch_TrainingNotifications_SkipModRecords
+        {
+            static void Prefix()
+            {
                 try
                 {
-                    var list = SaveGameManager.Current?.EmployeeInstances;
-                    if (list != null && __state != null)
-                        foreach (var emp in __state)
-                        {
-                            if (emp == null || string.IsNullOrEmpty(emp.id)) continue;
-                            bool exists = false;
-                            for (int i = 0; i < list.Count; i++)
-                                if (list[i]?.id == emp.id) { exists = true; break; }
-                            if (!exists) list.Add(emp);
-                            try { Helpers.EmployeeHelper.EmployeeInstancesDictionary[emp.id] = emp; } catch { }
-                        }
+                    var dict = Helpers.EmployeeHelper.FinishedTrainingEmployees;
+                    if (dict == null || dict.Count == 0) return;
+                    var dead = new System.Collections.Generic.List<Entities.EmployeeInstance>();
+                    foreach (var kv in dict)
+                    {
+                        string id = kv.Key?.id ?? "";
+                        if (id.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix) || MPRegisterSync.IsInjectedStaff(id))
+                            dead.Add(kv.Key!);
+                    }
+                    foreach (var k in dead) dict.Remove(k);
+                    if (dead.Count > 0)
+                        Plugin.Logger.LogInfo($"[StaffRoster] {dead.Count} injected/synthetic record(s) removed from the finished-training notification list (announced on the owner's machine, not here).");
                 }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_RunDaily_SkipModRecords] restore: {ex.Message}"); }
-                return __exception;   // never swallow the native pass's own failure
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_TrainingNotifications] purge: {ex.Message}"); }
             }
         }
 
@@ -3632,6 +3694,40 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Economics] EconoView: hid {removed} partner business(es).");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Economics] EconoView filter: {ex.Message}"); }
+            }
+        }
+
+        // ── Pickup gate in foreign businesses (field 2026-07-19) ──────────────
+        // A visitor grabbed a floor box in a partner's shop: native pickup has
+        // no concept of "someone else's shop" (every reachable box is yours in
+        // vanilla), so the take applied LOCALLY only — the visitor conjured a
+        // sellable box that exists on no other machine (dup exploit) while the
+        // owner's real box never moved.  Gate ItemController.TryToGrabItem: in
+        // another player's business without a Business grant, refuse like a
+        // rival store would.  Granted guests keep the owner-confirmed storage
+        // flows; merger-flipped shops are shared and stay grabbable.
+        [HarmonyPatch(typeof(ItemController), nameof(ItemController.TryToGrabItem))]
+        public static class Patch_ItemController_TryToGrabItem_ForeignShopGate
+        {
+            private static int _logged;
+            static bool Prefix(ref bool __result)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                    var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                    if (reg == null || !GameStatePatcher.IsForeignPlayerBusiness(reg)) return true;
+                    string owner = MPRegisterSync.CurrentShopOwner;
+                    if (string.IsNullOrEmpty(owner)) { try { owner = reg.businessOwnerRivalId?.ToString() ?? ""; } catch { } }
+                    if (!string.IsNullOrEmpty(owner) && GrantSync.IsGranted(GrantKind.Business, owner, MPConfig.PlayerId)) return true;
+                    try { if (MergerFlip.IsFlipped(GameStateReader.AddressKey(reg))) return true; } catch { }
+                    __result = false;
+                    PassengerHud.Toast($"This belongs to {(string.IsNullOrEmpty(owner) ? "another player" : owner)} — you need permission to take items here.");
+                    if (_logged++ < 10)
+                        Plugin.Logger.LogInfo($"[PickupGate] grab refused in '{reg.BusinessName}' (owner '{owner}', no Business grant).");
+                    return false;
+                }
+                catch { return true; }   // never break native pickup on a guard error
             }
         }
 

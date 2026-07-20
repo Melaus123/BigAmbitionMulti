@@ -573,16 +573,19 @@ namespace BigAmbitionsMP
                     // left long ago and hide the flatbed from its own pusher's hands.
                     if (rv.Go != null)
                     {
-                        // HAND CARTS ARE NEVER TAG-MASKED (2026-07-07, the structural fix): the mask
-                        // exists so cars left inside garages don't render through walls. Carts are
-                        // small, always accompany a player, and their tag goes stale the moment a
-                        // remote player pushes them — a wrong hide then BREAKS the pusher's native
-                        // possession (SetActive(false) on a possessed cart ejects it from their
-                        // hands). Cost of never masking: a cart indoors is faintly visible from
-                        // outside — cosmetic; cost of a wrong mask: gameplay-breaking.
+                        // Hand carts ARE tag-masked again (field 2026-07-19: a friend in a
+                        // different same-model interior saw the owner's pushed flatbed).
+                        // The 2026-07-07 blanket exemption existed because a wrong hide
+                        // ejected a cart from its pusher's hands — but BOTH causes of a
+                        // wrong hide have since been fixed structurally: iPossessIt below
+                        // exempts anything in the LOCAL player's hands, and the [ShopCtx]
+                        // context self-heal keeps CurrentShopAddress converged even when
+                        // hand-vehicle entry skips the entry hook.  Residual worst case is
+                        // a NON-possessed cart briefly hidden on a stale tag until its
+                        // owner nears it — cosmetic and self-healing, vs. rendering
+                        // through walls which is what the mask exists to stop.
                         bool iPossessIt = PossessedByLocal(rv.Go);   // flag (cars) OR parented-under-Player
-                        bool maskVeh = !IsHandCartType(rv.Go.name)
-                                       && !iPossessIt
+                        bool maskVeh = !iPossessIt
                                        && !string.IsNullOrEmpty(e.Bldg)
                                        && e.Bldg != MPRegisterSync.CurrentShopAddress;
                         if (rv.Go.activeSelf == maskVeh)
