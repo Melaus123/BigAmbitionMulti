@@ -233,6 +233,9 @@ namespace BigAmbitionsMP
 
         // ── Host comparison ───────────────────────────────────────────────────
 
+        // playerId → last self-heal snapshot push (ms) — divergence heal throttle.
+        private static readonly Dictionary<string, long> _lastHealMs = new();
+
         // "playerId/field" → consecutive mismatch count.
         private static readonly Dictionary<string, int> _streaks = new();
 
@@ -283,6 +286,18 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogWarning($"[Audit] biz divergence localized to bucket(s): {string.Join(",", diverged)} — drilling both sides.");
                     LogBizDrill(diverged);                       // host side
                     MPServer.SendAuditDrill(p.PlayerId, diverged); // client side
+                    // SELF-HEAL (2026-07-20, severity review of the silent-loss class):
+                    // detection alone left the client divergent until luck of the delta
+                    // traffic — a CONFIRMED divergence now pushes a fresh business
+                    // snapshot (fragmentation makes it deliverable regardless of size).
+                    // Throttled per player so a persistent mismatch can't spam.
+                    long nowMs = System.DateTime.UtcNow.Ticks / System.TimeSpan.TicksPerMillisecond;
+                    if (!_lastHealMs.TryGetValue(p.PlayerId, out var lh) || nowMs - lh > 120_000)
+                    {
+                        _lastHealMs[p.PlayerId] = nowMs;
+                        bool sent = MPServer.SendBusinessSnapshotToPlayer(p.PlayerId);
+                        Plugin.Logger.LogWarning($"[Audit] divergence self-heal: business snapshot {(sent ? "re-sent to" : "COULD NOT be sent to (no link)")} '{p.PlayerId}'.");
+                    }
                 }
 
                 bool rosterOk = p.RosterHash == mine.RosterHash;

@@ -456,7 +456,8 @@ namespace BigAmbitionsMP
             if (p.SaveUnavailable)
             {
                 Plugin.Logger.LogError("[MPSave] Host reports our save is temporarily unavailable — aborting join WITHOUT fresh-starting (your character is not lost).");
-                try { MPChat.AddNotice("Your save couldn't be loaded right now — your character is safe. Try reconnecting, or ask the host to check the session save."); } catch { }
+                // Important + rare: gets a LONG toast (chat is player-only now).
+                try { GameStatePatcher.EnqueueOnMainThread(() => PassengerHud.Toast("Your save couldn't be loaded right now — your character is safe. Try reconnecting, or ask the host to check the session save.", 8f)); } catch { }
                 MPClient.Disconnect();
                 return;
             }

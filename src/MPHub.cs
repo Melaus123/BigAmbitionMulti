@@ -195,6 +195,11 @@ namespace BigAmbitionsMP
                 if (p.From != MPConfig.PlayerId) return;
                 OutgoingOffers.RemoveAll(o => o.Id == p.Id);
                 Version++;
+                // The proposer deserves an explicit answer (user 2026-07-20) — before
+                // this, acceptance was only inferable from the money-movement toast.
+                string verdict = p.State == "accepted" ? "accepted" : "declined";
+                string what = p.Kind == "gift" ? "gift" : "loan offer";
+                GameStatePatcher.EnqueueOnMainThread(() => PassengerHud.Toast($"{p.To} {verdict} your ${p.Principal:N0} {what}.", 4f));
                 return;
             }
             if (p.To != MPConfig.PlayerId) return;

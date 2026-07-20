@@ -53,12 +53,13 @@ namespace BigAmbitionsMP
             Toast(char.ToUpper(reason[0]) + reason.Substring(1) + ".");
         }
 
-        /// <summary>Briefly flash a centred message (e.g. "Vehicle locked.").</summary>
-        public static void Toast(string msg)
+        /// <summary>Briefly flash a centred message (e.g. "Vehicle locked.").
+        /// seconds: how long it stays (important lines get more than the 2s default).</summary>
+        public static void Toast(string msg, float seconds = 2f)
         {
             if (!_baseBuilt) BuildBase();
             if (_toastLabel != null) _toastLabel.text = msg;
-            _toastUntil = Time.unscaledTime + 2f;
+            _toastUntil = Time.unscaledTime + seconds;
             if (_toast != null) _toast.SetActive(true);
         }
 

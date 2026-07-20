@@ -1701,6 +1701,15 @@ namespace BigAmbitionsMP
 
             Plugin.Logger.LogInfo($"[Server] Hello from '{hello.PlayerId}' (v{hello.Version})");
 
+            // Same-protocol version SKEW passes the hard gate (by design) but is
+            // exactly where the silent-loss class lives in the field (2026-07-20
+            // severity review) — make it visible to the host instead of silent.
+            if (!string.IsNullOrEmpty(hello.Version) && hello.Version != MyPluginInfo.PLUGIN_VERSION)
+            {
+                Plugin.Logger.LogWarning($"[Server] VERSION SKEW: '{hello.PlayerId}' runs v{hello.Version}, host runs v{MyPluginInfo.PLUGIN_VERSION} — they can connect, but fixes only protect updated machines (Steam large-transfer fixes need both sides).");
+                GameStatePatcher.EnqueueOnMainThread(() => PassengerHud.Toast($"{hello.PlayerId} runs v{hello.Version} (you: v{MyPluginInfo.PLUGIN_VERSION}) — recommend updating everyone.", 6f));
+            }
+
             // Mid-game joins need the HOST'S APPROVAL — park the request; the
             // in-game popup accepts or rejects it.
             if (!IsInLobby)
@@ -2250,6 +2259,16 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>Push a fresh business snapshot to one player by id (audit
+        /// self-heal, gate-heal).  False when the player has no live link.</summary>
+        public static bool SendBusinessSnapshotToPlayer(string playerId)
+        {
+            var link = LinkForPlayer(playerId);
+            if (link == null) return false;
+            SendBusinessSnapshotTo(link);
+            return true;
+        }
+
         private static MPLink? LinkForPlayer(string playerId)
         {
             foreach (var kv in _peerNames)
@@ -2553,7 +2572,10 @@ namespace BigAmbitionsMP
             {
                 gv.startingAge                       = dto.StartingAge;
                 gv.disableAging                      = dto.DisableAging;
-                gv.disableEnergy                     = dto.DisableEnergy;
+                // 0% drain = the exact native "off" (bar hidden, NoEat sad-period
+                // excluded); the legacy bool still honored for old-peer DTOs.
+                gv.disableEnergy                     = dto.DisableEnergy || dto.NeedsDrainPercent == 0;
+                MPNeedsTuning.Apply(dto, "game settings");
                 gv.disableHappiness                  = dto.DisableHappiness;
                 gv.allCoursesUnlocked                = dto.AllCoursesUnlocked;
                 gv.startingMoney                     = dto.StartingMoney;
@@ -4217,7 +4239,12 @@ namespace BigAmbitionsMP
             var (day, hour) = GameStateReader.GetGameTime();
             float speed = speedOverride ?? UnityEngine.Time.timeScale;
 
-            var payload = new GameTimeSyncPayload { Day = day, TimeOfDay = hour, Speed = speed, RainState = MPWeatherSync.CurrentRainState() };
+            var payload = new GameTimeSyncPayload
+            {
+                Day = day, TimeOfDay = hour, Speed = speed, RainState = MPWeatherSync.CurrentRainState(),
+                TuneDrain = MPNeedsTuning.DrainPercent, TuneRest = MPNeedsTuning.RestPercent,
+                TuneMorale = MPNeedsTuning.MoralePercent,
+            };
             Broadcast(MessageEnvelope.Create(MessageType.GameTimeSync, "host", payload));
             Plugin.Logger.LogInfo($"[Server] GameTimeSync: day={day} hour={hour:F1} speed={speed:F2}×");
         }

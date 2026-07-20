@@ -154,7 +154,17 @@ namespace BigAmbitionsMP
         // reliable sends queue behind it so delivery order is preserved.
         private readonly System.Collections.Generic.Queue<byte[]> _pending = new();
         private long _pendingBytes;
-        private const long MaxPendingBytes = 8L * 1024 * 1024;
+        // 64MB (2026-07-20 scaling review): the old 8MB cap was a rebirth of the
+        // silent-loss cliff — a fragmented message bigger than the cap (or a join
+        // burst sharing it) would drop MID-MESSAGE and never reassemble.  Mature
+        // worlds project to 2-6MB snapshots; 64MB = ~15× headroom.  Transient
+        // worst-case memory only while a connection is congested; cleared when
+        // the link dies.  The 4MB high-water warn signals pressure far earlier
+        // than the cap.
+        private const long MaxPendingBytes  = 64L * 1024 * 1024;
+        private const long HighWaterBytes   = 4L * 1024 * 1024;
+        private const long HighWaterRearm   = 1L * 1024 * 1024;
+        private bool _highWaterLatched;
         private int _refusalsLogged;
 
         private static int _nextFragId;
@@ -213,6 +223,11 @@ namespace BigAmbitionsMP
                 return;
             }
             _pending.Enqueue(data); _pendingBytes += data.Length;
+            if (!_highWaterLatched && _pendingBytes > HighWaterBytes)
+            {
+                _highWaterLatched = true;
+                Plugin.Logger.LogWarning($"[SteamLink] send backlog high-water for {Describe}: {_pendingBytes / 1024}KB queued — connection is congested (delivery delayed, nothing lost).");
+            }
         }
 
         /// <summary>Re-offer queued reliable sends.  Pump thread, ~15ms.</summary>
@@ -231,6 +246,11 @@ namespace BigAmbitionsMP
                     if (r != Result.OK) return;   // still refused — next pump retries
                     _pending.Dequeue(); _pendingBytes -= d.Length;
                     Plugin.Logger.LogInfo($"[SteamLink] retry to {Describe} accepted ({d.Length}B, {_pending.Count} still pending).");
+                    if (_highWaterLatched && _pendingBytes < HighWaterRearm)
+                    {
+                        _highWaterLatched = false;
+                        Plugin.Logger.LogInfo($"[SteamLink] send backlog for {Describe} drained below {HighWaterRearm / 1024}KB — congestion cleared.");
+                    }
                 }
             }
         }
@@ -389,7 +409,17 @@ namespace BigAmbitionsMP
         // Result; queue refused reliable sends and re-offer from the pump loop.
         private readonly System.Collections.Generic.Queue<byte[]> _pending = new();
         private long _pendingBytes;
-        private const long MaxPendingBytes = 8L * 1024 * 1024;
+        // 64MB (2026-07-20 scaling review): the old 8MB cap was a rebirth of the
+        // silent-loss cliff — a fragmented message bigger than the cap (or a join
+        // burst sharing it) would drop MID-MESSAGE and never reassemble.  Mature
+        // worlds project to 2-6MB snapshots; 64MB = ~15× headroom.  Transient
+        // worst-case memory only while a connection is congested; cleared when
+        // the link dies.  The 4MB high-water warn signals pressure far earlier
+        // than the cap.
+        private const long MaxPendingBytes  = 64L * 1024 * 1024;
+        private const long HighWaterBytes   = 4L * 1024 * 1024;
+        private const long HighWaterRearm   = 1L * 1024 * 1024;
+        private bool _highWaterLatched;
         private int _refusalsLogged;
 
         private static int _nextFragId;
@@ -449,6 +479,11 @@ namespace BigAmbitionsMP
                 return;
             }
             _pending.Enqueue(data); _pendingBytes += data.Length;
+            if (!_highWaterLatched && _pendingBytes > HighWaterBytes)
+            {
+                _highWaterLatched = true;
+                Plugin.Logger.LogWarning($"[SteamClient] send backlog high-water: {_pendingBytes / 1024}KB queued — connection is congested (delivery delayed, nothing lost).");
+            }
         }
 
         private void FlushPending()
@@ -466,6 +501,11 @@ namespace BigAmbitionsMP
                     if (r != Result.OK) return;   // still refused — next pump retries
                     _pending.Dequeue(); _pendingBytes -= d.Length;
                     Plugin.Logger.LogInfo($"[SteamClient] retry accepted ({d.Length}B, {_pending.Count} still pending).");
+                    if (_highWaterLatched && _pendingBytes < HighWaterRearm)
+                    {
+                        _highWaterLatched = false;
+                        Plugin.Logger.LogInfo($"[SteamClient] send backlog drained below {HighWaterRearm / 1024}KB — congestion cleared.");
+                    }
                 }
             }
         }

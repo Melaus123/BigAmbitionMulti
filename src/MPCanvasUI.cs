@@ -512,6 +512,12 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[DevCheat] F7 — force rain toggle (current={(cur == 1 ? "raining" : cur == 0 ? "dry" : "unknown")}).");
                 MPWeatherSync.TryForceRain(cur != 1);
             }
+            // F10: Steam-frame self-test — round-trips a 2MB random buffer through
+            // WrapFragment → SteamReassembly (in order AND shuffled) and verifies the
+            // reassembled bytes match.  Validates the fragmentation logic on one rig;
+            // the actual relay behavior still needs a two-rig session.
+            if (Input.GetKeyDown(KeyCode.F10))
+                DevRunSteamFrameSelfTest();
 #endif
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             TickCrashHeartbeat();    // task #5: stamp the session marker with where-we-are (~30s)
@@ -2984,6 +2990,47 @@ namespace BigAmbitionsMP
         private static int   _carParkedCached;
         private static int   _carTrafficCached;
         private float        _hostReadyDiagNext;
+
+#if BAMP_DEV
+        /// <summary>F10: in-process fragmentation round-trip (2MB random buffer →
+        /// WrapFragment chunks → SteamReassembly, in order and shuffled) with a
+        /// byte-exact compare.  One-rig validation of the framing logic.</summary>
+        private static void DevRunSteamFrameSelfTest()
+        {
+            try
+            {
+                var rng = new System.Random(12345);
+                var payload = new byte[2_000_000];
+                rng.NextBytes(payload);
+                int count = SteamFrames.FragmentCount(payload.Length);
+                var frames = new System.Collections.Generic.List<byte[]>(count);
+                for (int i = 0, off = 0; i < count; i++)
+                {
+                    int len = System.Math.Min(SteamFrames.ChunkSize, payload.Length - off);
+                    frames.Add(SteamFrames.WrapFragment(4242, i, count, payload, off, len));
+                    off += len;
+                }
+                bool Pass(System.Collections.Generic.IEnumerable<byte[]> order, string label)
+                {
+                    var re = new SteamReassembly("SelfTest");
+                    byte[]? full = null;
+                    foreach (var f in order)
+                        if (re.TryAccept(f, out var done) && done != null) full = done;
+                    bool ok = full != null && full.Length == payload.Length;
+                    if (ok) for (int i = 0; i < payload.Length; i++) if (full![i] != payload[i]) { ok = false; break; }
+                    Plugin.Logger.LogInfo($"[SelfTest] fragmentation {label}: {(ok ? "PASS" : "FAIL")} ({count} chunks, {payload.Length}B).");
+                    return ok;
+                }
+                var shuffled = new System.Collections.Generic.List<byte[]>(frames);
+                for (int i = shuffled.Count - 1; i > 0; i--)
+                { int j = rng.Next(i + 1); (shuffled[i], shuffled[j]) = (shuffled[j], shuffled[i]); }
+                bool a = Pass(frames, "in-order");
+                bool b = Pass(shuffled, "shuffled");
+                Plugin.Logger.LogInfo($"[SelfTest] overall: {(a && b ? "PASS" : "FAIL")}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogError($"[SelfTest] fragmentation: {ex}"); }
+        }
+#endif
 
         private void TickOverlayFreezeGate()
         {
@@ -6169,8 +6216,19 @@ namespace BigAmbitionsMP
             SettingsHeader(ct, ref y, "PLAYER — per character");
             SettingsBoolRow(ct, ref y, "Disable aging", "Your character never grows older.",
                             () => _hostSettings.DisableAging, v => _hostSettings.DisableAging = v);
-            SettingsBoolRow(ct, ref y, "Disable energy need", "Removes the sleep/energy need. Required for multiplayer.",
-                            () => _hostSettings.DisableEnergy, v => _hostSettings.DisableEnergy = v);
+            // Needs & morale tempo (2026-07-20): single-percent controls replace the
+            // old energy on/off (0 = off, no redundant toggle).  MP's clock never
+            // pauses, so native rates feel much faster in real time — defaults
+            // compensate (drain 10%, rest 300%, buffs 300%, sad periods 25%).
+            SettingsNumRow (ct, ref y, "Needs drain %", "Energy & hunger drain speed as % of normal. 0 = off entirely (no sleep/food needs).",
+                            () => _hostSettings.NeedsDrainPercent, v => { _hostSettings.NeedsDrainPercent = (int)v; _hostSettings.DisableEnergy = (int)v == 0; },
+                            1f, 0f, 100f, "0");
+            SettingsNumRow (ct, ref y, "Rest speed %", "How fast energy recovers while resting (bed/bench/car), as % of normal.",
+                            () => _hostSettings.RestSpeedPercent, v => _hostSettings.RestSpeedPercent = (int)v,
+                            10f, 10f, 1000f, "0");
+            SettingsNumRow (ct, ref y, "Morale multiplier %", "Speed of morale pressure as % of normal. Lower = positive effects last longer AND sad periods are rarer (10% = buffs last 10x, sad periods 10x rarer).",
+                            () => _hostSettings.MoraleTempoPercent, v => _hostSettings.MoraleTempoPercent = (int)v,
+                            1f, 1f, 100f, "0");
             SettingsBoolRow(ct, ref y, "Disable happiness need", "Removes the happiness need from your character.",
                             () => _hostSettings.DisableHappiness, v => _hostSettings.DisableHappiness = v);
             SettingsBoolRow(ct, ref y, "All courses unlocked", "Every education course is available immediately.",
@@ -6493,6 +6551,10 @@ namespace BigAmbitionsMP
             MPConfig.SetRuntime(_name.Trim(), null, p);
             if (!MPServer.Start(p))
             { SetStatus($"Hosting FAILED on port {p} (port in use?).", true); return; }
+            // Needs/morale tuning applies for EVERY hosted session (a LOADED game
+            // never runs BuildGameVariables) — the heartbeat then carries it to
+            // all clients, so the whole session runs the host's percents.
+            MPNeedsTuning.Apply(_hostSettings, "host settings");
             SetStatus($"Hosting on port {p} — waiting for players.", false);
         }
 

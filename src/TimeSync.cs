@@ -101,9 +101,42 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo("[TimeSync] Startup hold — game paused until all players have loaded.");
         }
 
+        // ── World-sync release gate (2026-07-20 severity review) ─────────────
+        // The hot-join path could hand the CLIENT control before the business
+        // snapshot applied ("playing blind" — the divergence incubator of the
+        // silent-loss class).  A release arriving while the world sync hasn't
+        // applied is DEFERRED: the hold stands until ApplyBusinessSnapshot
+        // completes (gate-heal + fragmentation make that short), with a 180s
+        // force-release fail-safe so a dead host can't freeze the client forever.
+        private static System.DateTime _deferredReleaseUtc = System.DateTime.MinValue;
+        private static bool _releaseDeferred;
+        private static bool _forceNextRelease;   // 180s fail-safe bypasses the gate exactly once
+
+        /// <summary>Called when the world sync has applied (ApplyBusinessSnapshot)
+        /// — fires a deferred release if one is waiting.</summary>
+        public static void NotifyWorldSyncApplied()
+        {
+            if (!_releaseDeferred) return;
+            _releaseDeferred = false;
+            Plugin.Logger.LogInfo("[TimeSync] deferred release firing — world sync has applied.");
+            EndStartupHold();
+        }
+
         /// <summary>Release the startup hold — resumes the game at normal speed.</summary>
         public static void EndStartupHold()
         {
+            // CLIENT world-sync gate: never unfreeze onto an unsynced world.
+            if (_forceNextRelease) { _forceNextRelease = false; }
+            else if (!MPServer.IsRunning && MPClient.InMpGame && !MPClient.WorldSyncApplied)
+            {
+                if (!_releaseDeferred)
+                {
+                    _releaseDeferred = true;
+                    _deferredReleaseUtc = System.DateTime.UtcNow;
+                    Plugin.Logger.LogWarning("[TimeSync] release DEFERRED — world sync not yet applied (holding so the player can't act on an incomplete world).");
+                }
+                return;
+            }
             if (!_startupHold)
             {
                 _releasedBeforeHold = true;   // arrived before our hold began — remember it (round-18)
@@ -126,6 +159,17 @@ namespace BigAmbitionsMP
         /// </summary>
         public static void TickStartupHold()
         {
+            // Deferred-release fail-safe: if the world sync never lands (dead host,
+            // pre-fix peer), force the release after 180s — a playable-but-partial
+            // world beats a frozen game, and the audit self-heal keeps converging it.
+            if (_releaseDeferred && (System.DateTime.UtcNow - _deferredReleaseUtc).TotalSeconds > 180.0)
+            {
+                _releaseDeferred = false;
+                _forceNextRelease = true;
+                Plugin.Logger.LogWarning("[TimeSync] deferred release FORCED after 180s without world sync — playing on a partial world (audit self-heal will converge it).");
+                EndStartupHold();
+                return;
+            }
             if (!_startupHold) return;
             if (Time.timeScale != 0f)
                 Time.timeScale = 0f;
@@ -265,6 +309,7 @@ namespace BigAmbitionsMP
             _correctionHours = 0f;
             AheadHeld        = false;
             _firstSyncSeen   = false;   // re-arm the one-time join snap for the next load
+            _releaseDeferred = false; _forceNextRelease = false;   // world-sync release gate dies with the load
             // Round-36: the early-release marker is deliberately NOT cleared here anymore — the scene-ready
             // reset ran BETWEEN the early release and the hold engage (log-proven), wiping the marker the
             // hold needed. Its 90s validity window handles staleness instead.

@@ -2113,6 +2113,7 @@ namespace BigAmbitionsMP
                 MPClient.WorldSyncApplied = true;
                 if (MPClient.IsConnected && TimeSync.IsStartupHeld)
                     MPClient.SendWorldReady();
+                TimeSync.NotifyWorldSyncApplied();   // fires a release the gate deferred (hot-join world-sync gate)
             });
         }
 

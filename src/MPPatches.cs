@@ -3490,21 +3490,46 @@ namespace BigAmbitionsMP
         [HarmonyPatch]
         public static class Patch_HrManagerList_HideInjectedStaff
         {
+            /// <summary>SIGNATURE-based resolution (field 2026-07-20: the live build
+            /// renamed the class beyond even the name scan — one FAILED line per
+            /// report, filter inert).  The method's SHAPE is the stable identity:
+            /// public instance (List&lt;EmployeeInstance&gt;, bool, string) — the
+            /// employee list, the include-unassigned flag, the manager id.  Any
+            /// rename of class, namespace, or even the method survives this;
+            /// "Load"-named matches are preferred if several types qualify.</summary>
             static System.Reflection.MethodBase? TargetMethod()
             {
-                var t = VehicleManager.FindGameType("UI.Smartphone.Apps.BizMan.HrManagers.EmployeesScrollerController");
-                if (t == null)
-                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                System.Reflection.MethodInfo? best = null;
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    string an = asm.GetName().Name ?? "";
+                    if (an.StartsWith("System") || an.StartsWith("mscorlib") || an.StartsWith("netstandard")
+                     || an.StartsWith("Unity") || an.StartsWith("Mono") || an.StartsWith("Newtonsoft")
+                     || an.StartsWith("Steamworks") || an.StartsWith("LiteNetLib") || an.StartsWith("0Harmony")
+                     || an.StartsWith("BigAmbitionsMP")) continue;
+                    Type?[] types;
+                    try { types = asm.GetTypes(); }
+                    catch (System.Reflection.ReflectionTypeLoadException rtle) { types = rtle.Types; }
+                    catch { continue; }
+                    foreach (var t in types)
                     {
-                        try
+                        if (t == null || t.IsAbstract || !t.IsClass) continue;
+                        System.Reflection.MethodInfo[] methods;
+                        try { methods = t.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly); }
+                        catch { continue; }
+                        foreach (var m in methods)
                         {
-                            foreach (var x in asm.GetTypes())
-                                if (x != null && x.Name == "EmployeesScrollerController" && (x.Namespace ?? "").Contains("HrManagers")) { t = x; break; }
+                            var ps = m.GetParameters();
+                            if (ps.Length != 3) continue;
+                            if (ps[0].ParameterType != typeof(System.Collections.Generic.List<Entities.EmployeeInstance>)) continue;
+                            if (ps[1].ParameterType != typeof(bool) || ps[2].ParameterType != typeof(string)) continue;
+                            if (best == null || (m.Name == "Load" && best.Name != "Load")) best = m;
                         }
-                        catch { }
-                        if (t != null) break;
                     }
-                return t == null ? null : AccessTools.Method(t, "Load");
+                }
+                if (best != null)
+                    Plugin.Logger.LogInfo($"[Plugin] HR-list target resolved by signature: {best.DeclaringType?.FullName}.{best.Name} ({best.DeclaringType?.Assembly.GetName().Name}).");
+                return best;
             }
 
             static void Postfix(object __instance)

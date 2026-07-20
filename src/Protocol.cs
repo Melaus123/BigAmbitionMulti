@@ -604,7 +604,32 @@ namespace BigAmbitionsMP
 
         public byte[] Serialize()
         {
-            return System.Text.Encoding.UTF8.GetBytes(Newtonsoft.Json.JsonConvert.SerializeObject(this));
+            var bytes = System.Text.Encoding.UTF8.GetBytes(Newtonsoft.Json.JsonConvert.SerializeObject(this));
+            // Size telemetry (2026-07-20 severity review): the silent-loss class
+            // was a message quietly outgrowing a transport limit — watch growth
+            // centrally (fragmentation makes size SAFE; this makes it VISIBLE).
+            // Throttled per type so a chatty big sender logs once per 5 minutes.
+            if (bytes.Length > 300_000) SizeTelemetry.Note(Type, bytes.Length);
+            return bytes;
+        }
+
+        internal static class SizeTelemetry
+        {
+            private static readonly System.Collections.Generic.Dictionary<MessageType, long> _nextMs = new();
+            internal static void Note(MessageType type, int len)
+            {
+                try
+                {
+                    long now = System.DateTime.UtcNow.Ticks / System.TimeSpan.TicksPerMillisecond;
+                    lock (_nextMs)
+                    {
+                        if (_nextMs.TryGetValue(type, out var due) && now < due) return;
+                        _nextMs[type] = now + 300_000;
+                    }
+                    Plugin.Logger.LogWarning($"[SizeWatch] {type} serialized at {len / 1024}KB — large message (handled by fragmentation on Steam; logged for growth tracking).");
+                }
+                catch { }
+            }
         }
 
         public static MessageEnvelope? Deserialize(byte[] bytes)
@@ -782,6 +807,15 @@ namespace BigAmbitionsMP
         public bool   DisableWholesaleAndImportLimits  { get; set; } = false;
         public bool   AllProductsAvailableFromImporters{ get; set; } = false;
         public float  ExportMultiplier                 { get; set; } = 0.65f;
+
+        // ── Needs & morale tempo (2026-07-20, additive — old peers ignore) ──
+        // Single-percent controls, "% of native"; 0 = the respective system off.
+        public int NeedsDrainPercent             { get; set; } = 10;    // energy+hunger drain; 0 drives native DisableEnergy
+        public int RestSpeedPercent              { get; set; } = 300;   // energy regen while resting
+        /// <summary>ONE dial for morale pressure, "% of native speed" (min 1):
+        /// buff durations scale INVERSELY (10% → positives last 10×) and the
+        /// sad-period roll scales directly (10% → 0.1%/hour at zero morale).</summary>
+        public int MoraleTempoPercent            { get; set; } = 10;
     }
 
     /// <summary>
@@ -1105,6 +1139,12 @@ namespace BigAmbitionsMP
         /// <summary>Host rain state: -1 absent/unknown (older builds omit the field —
         /// JSON-tolerant), 0 dry, 1 raining.  Clients align their local RainHelper.</summary>
         public int   RainState { get; set; } = -1;
+        /// <summary>Needs/morale tuning percents (drain, rest, morale-tempo) —
+        /// -1 = absent (older hosts).  Rides the heartbeat so LOADED-session
+        /// clients converge too (the RainState pattern).</summary>
+        public int TuneDrain  { get; set; } = -1;
+        public int TuneRest   { get; set; } = -1;
+        public int TuneMorale { get; set; } = -1;
     }
 
     // ── Business sync (Phase 1: exterior business state) ──────────────────────

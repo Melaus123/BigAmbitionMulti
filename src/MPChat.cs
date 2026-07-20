@@ -53,11 +53,18 @@ namespace BigAmbitionsMP
         /// <summary>Legacy entry point (network receive paths).</summary>
         public static void AddLine(string who, string text) => AddMessage(who, "", text);
 
-        /// <summary>System/notice line, e.g. "X joined".</summary>
+        /// <summary>System/status feedback.  RE-ROUTED (user 2026-07-20): chat is a
+        /// player-to-player channel ONLY — status lines in it made the phone blink
+        /// like a received message.  Former notices now flash as a transient toast
+        /// (marshalled — callers include poll-thread handlers); nothing is appended
+        /// to the chat log and the unread badge never moves.  Response-required
+        /// events (loans/gifts) badge the Business Hub icon, which their handlers
+        /// already do via MPHub.Version.</summary>
         public static void AddNotice(string text)
         {
             if (string.IsNullOrWhiteSpace(text)) return;
-            Append(new ChatLine { Text = text.Trim(), Notice = true });
+            string t = text.Trim();
+            GameStatePatcher.EnqueueOnMainThread(() => PassengerHud.Toast(t, 3f));
         }
 
         private static void Append(ChatLine line)

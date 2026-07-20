@@ -520,7 +520,19 @@ namespace BigAmbitionsMP
                 case MessageType.Chat:
                 {
                     var cp = env.GetPayload<ChatPayload>();
-                    if (cp != null) MPChat.AddMessage(cp.PlayerId, cp.To ?? "", cp.Text);   // pure C# — safe on poll thread
+                    if (cp == null) break;
+                    // Hub events ride the private-chat envelope with sender "Hub"
+                    // (NotifyParty) — but chat is a PLAYER channel (user 2026-07-20):
+                    // route them to a toast + the Business Hub badge instead of the
+                    // chat log, so the phone never blinks "message" for a loan event.
+                    if (cp.PlayerId == "Hub")
+                    {
+                        string t = cp.Text ?? "";
+                        MPHub.Version++;   // response-required events live on the Hub icon
+                        GameStatePatcher.EnqueueOnMainThread(() => PassengerHud.Toast(t, 3f));
+                        break;
+                    }
+                    MPChat.AddMessage(cp.PlayerId, cp.To ?? "", cp.Text);   // pure C# — safe on poll thread
                     break;
                 }
 
@@ -978,6 +990,10 @@ namespace BigAmbitionsMP
 
             // Applies clock-drift correction toward the host's authoritative clock.
             GameStatePatcher.ApplyGameTime(payload);
+
+            // Needs/morale tuning rides the heartbeat (loaded-session clients
+            // converge too; -1 = older host, keep current values).
+            MPNeedsTuning.SetFromHeartbeat(payload.TuneDrain, payload.TuneRest, payload.TuneMorale);
 
             // Weather (2026-07-14): align local rain with the host's state — main
             // thread, coalesced (only the newest state matters).
