@@ -725,6 +725,10 @@ namespace BigAmbitionsMP
 
         /// <summary>Last deposit paid.</summary>
         public float LastDeposit { get; set; }
+
+        /// <summary>Round-50: why a RentDeny was issued (host-side availability verdict) —
+        /// for the client's log/toast. Optional; absent/empty on older senders.</summary>
+        public string DenyReason { get; set; } = "";
     }
 
     /// <summary>Periodic market price broadcast.</summary>

@@ -2630,36 +2630,59 @@ namespace BigAmbitionsMP
 
             Plugin.Logger.LogInfo($"[Server] RentRequest: {req.AddressKey} by {senderPid}");
 
-            // Check availability
-            if (BuildingOwners.TryGetValue(req.AddressKey, out var currentOwner) && currentOwner != "")
+            // Round-50 (bug 2026-07-21-204010): the whole grant/deny decision moves to the MAIN
+            // THREAD — the new availability check reads the host's live game state, and the
+            // enqueue ordering serialises racing requests for the same address (the off-thread
+            // check-then-stamp was racy anyway).
+            GameStatePatcher.EnqueueOnMainThread(() =>
             {
-                // Already taken — deny
-                Send(peer, MessageEnvelope.Create(MessageType.RentDeny, "host", req));
-                Plugin.Logger.LogInfo($"[Server] Rent denied — {req.AddressKey} already owned by {currentOwner}");
-                return;
-            }
+                try
+                {
+                    // (1) Player ledger — some player already holds it.
+                    if (BuildingOwners.TryGetValue(req.AddressKey, out var currentOwner) && currentOwner != "")
+                    {
+                        req.DenyReason = $"already owned by {currentOwner}";
+                        Send(peer, MessageEnvelope.Create(MessageType.RentDeny, "host", req));
+                        Plugin.Logger.LogInfo($"[Server] Rent denied — {req.AddressKey} already owned by {currentOwner}");
+                        return;
+                    }
 
-            // Grant it — to the CONNECTION's verified player, never a payload claim.
-            BuildingOwners[req.AddressKey] = senderPid;
-            req.OwnerPlayerId = senderPid;
+                    // (2) The HOST'S GAME is the authority on availability, not just the player
+                    // ledger. A diverged client can rent a building its world wrongly shows as
+                    // empty (field: an address the host ran a rival business on) — granting then
+                    // stamped the ledger onto an occupied building: a permanently conflicted
+                    // record every ownership sync re-fought, and the contaminated player stamp
+                    // made the overtake blocker treat the AI shop as a player's.
+                    string occupied = GameStatePatcher.HostRentUnavailableReason(req.AddressKey);
+                    if (occupied != "")
+                    {
+                        req.DenyReason = occupied;
+                        Send(peer, MessageEnvelope.Create(MessageType.RentDeny, "host", req));
+                        Plugin.Logger.LogWarning($"[Server] Rent denied — {req.AddressKey} not available on the host: {occupied} (requester '{senderPid}' likely has a diverged world copy).");
+                        return;
+                    }
 
-            // Confirm to the OTHER clients (not the requester — it already rented
-            // locally, so re-applying would double-charge it).  They mark it taken.
-            var confirm = MessageEnvelope.Create(MessageType.RentConfirm, "host", req);
-            foreach (var p in _clients.Keys)
-                if (p != peer) Send(p, confirm);
-            Plugin.Logger.LogInfo($"[Server] Rent confirmed: {req.AddressKey} → {senderPid} (relayed to {_clients.Count - 1} other client(s)).");
-            RefreshBuildingAccess();   // housing: a guest granted housing can now enter this newly-rented building
+                    // Grant it — to the CONNECTION's verified player, never a payload claim.
+                    BuildingOwners[req.AddressKey] = senderPid;
+                    req.OwnerPlayerId = senderPid;
 
-            // Reflect it in the HOST's own game (main thread — IL2CPP): take the
-            // building off the for-rent pool + mark it owned by that player, so the
-            // host sees it occupied as the client's business (was missing — the host
-            // only updated its dict, never its game state).
-            string addr = req.AddressKey, owner = senderPid;
-            GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostReflectPlayerRent(addr, owner));
-            // (No event-driven save here: ownership is already tracked live on the
-            //  host, and cash is live-streamed — so a crash right after a purchase
-            //  loses neither.  Business internals ride the periodic autosave.)
+                    // Confirm to the OTHER clients (not the requester — it already rented
+                    // locally, so re-applying would double-charge it).  They mark it taken.
+                    var confirm = MessageEnvelope.Create(MessageType.RentConfirm, "host", req);
+                    foreach (var p in _clients.Keys)
+                        if (p != peer) Send(p, confirm);
+                    Plugin.Logger.LogInfo($"[Server] Rent confirmed: {req.AddressKey} → {senderPid} (relayed to {_clients.Count - 1} other client(s)).");
+                    RefreshBuildingAccess();   // housing: a guest granted housing can now enter this newly-rented building
+
+                    // Reflect it in the HOST's own game: take the building off the for-rent
+                    // pool + mark it owned by that player (already on the main thread here).
+                    GameStatePatcher.HostReflectPlayerRent(req.AddressKey, senderPid);
+                    // (No event-driven save here: ownership is already tracked live on the
+                    //  host, and cash is live-streamed — so a crash right after a purchase
+                    //  loses neither.  Business internals ride the periodic autosave.)
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RentRequest apply for '{req.AddressKey}': {ex.Message}"); }
+            });
         }
 
         // Symmetric to HandleRentRequest: a client terminated a building's lease on

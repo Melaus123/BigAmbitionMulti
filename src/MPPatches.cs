@@ -3788,7 +3788,14 @@ namespace BigAmbitionsMP
             static void Postfix(string rivalId, ref float __result)
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                if (GameStatePatcher.IsSessionPlayerRivalId(rivalId)) __result = float.MaxValue;
+                if (GameStatePatcher.IsSessionPlayerRivalId(rivalId))
+                {
+                    __result = float.MaxValue;
+                    // Round-50: say so — a silently-impossible offer reads as "overtake is broken"
+                    // in reports (2026-07-21-204010, where a CONTAMINATED player stamp on an AI shop
+                    // sent every offer down this branch).
+                    Plugin.Logger.LogInfo($"[EconShield] overtake offer vs player-rival '{rivalId}' blocked (players can't buy each other out; mergers are the sharing path).");
+                }
             }
         }
 

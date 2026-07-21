@@ -306,10 +306,29 @@ namespace BigAmbitionsMP
 
         private void TickWorldHealth()
         {
-            if (_worldHealthAt < 0f || Time.unscaledTime < _worldHealthAt) return;
-            _worldHealthAt = -1f;
-            if (MPServer.IsRunning || MPClient.IsConnected)
-                GameStatePatcher.LogWorldHealth("scene ready +30s");
+            if (_worldHealthAt >= 0f && Time.unscaledTime >= _worldHealthAt)
+            {
+                _worldHealthAt = -1f;
+                if (MPServer.IsRunning || MPClient.IsConnected)
+                    GameStatePatcher.LogWorldHealth("scene ready +30s");
+            }
+            if (_postSyncHealthAt >= 0f && Time.unscaledTime >= _postSyncHealthAt)
+            {
+                _postSyncHealthAt = -1f;
+                if (MPServer.IsRunning || MPClient.IsConnected)
+                    GameStatePatcher.LogWorldHealth("post-sync +10s");
+            }
+        }
+
+        // Round-50 (approved): one-shot per load, armed by the FIRST business-snapshot apply —
+        // the event the +30s timer races on slow links. Static so GameStatePatcher can arm it.
+        private static float _postSyncHealthAt = -1f;
+        private static bool  _postSyncHealthDone;
+        public static void ArmPostSyncWorldHealth()
+        {
+            if (_postSyncHealthDone) return;
+            _postSyncHealthDone = true;
+            _postSyncHealthAt = Time.unscaledTime + 10f;
         }
 
         // Task #5 (Prabaha report, 2026-07-08): a leftover marker said NOTHING about where the dead
@@ -462,6 +481,7 @@ namespace BigAmbitionsMP
             GameStatePatcher.StripGhostVehicles("world-ready");   // leaked-ghost hygiene (data only)
             MPRegisterSync.StripOrphanSyntheticEmployees("world-ready");   // clear duty-staff a prior save left behind
             MPSaveIntegrity.RunSweep("world-ready");   // dangling-reference repair/detect (includes duty-shift repair); summary rides bug reports
+            GameStatePatcher.SweepLedgerVsRivalBusinesses("world-ready");   // round-50: drop player reservations on AI-rival-run addresses (host-only inside)
             ApplyFreshSpawnWarp();  // fresh-character joins: designated start, not the prefab spot
             ApplySpawnSidestep();   // fresh games: one navmesh-validated de-stack, placement final
             // Placement diagnostic: position-restore runs in load-finish —
@@ -2826,6 +2846,7 @@ namespace BigAmbitionsMP
                 GameStatePatcher.SweepPurchaserPollution("scene ready");   // heal saves polluted by the pre-round-34 purchaser injectio
                 GameStatePatcher.SweepRivalFieldContamination("scene ready");   // heal renters written into the DEED field (rent-vs-deed split 2026-07-09)
                 _worldHealthAt = Time.unscaledTime + 30f;   // world-integrity line AFTER the rival cache fills (30s)
+                _postSyncHealthDone = false; _postSyncHealthAt = -1f;   // round-50: re-arm the post-sync census for this load
                 // Round-35: a save can carry a STALE BAMP_ proxy id in ActiveVehicleId (borrowed cart
                 // despawned mid-push before the round-34b exit guard existed). IsUsingVehicle then reads
                 // true forever with no resolvable vehicle → box clicks NRE at ItemController.Interact:509

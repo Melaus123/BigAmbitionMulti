@@ -2144,6 +2144,11 @@ namespace BigAmbitionsMP
                 if (MPClient.IsConnected && TimeSync.IsStartupHeld)
                     MPClient.SendWorldReady();
                 TimeSync.NotifyWorldSyncApplied();   // fires a release the gate deferred (hot-join world-sync gate)
+                // Round-50 (approved): SECOND world-health census, event-triggered — the +30s line
+                // races slow-link snapshot delivery (field 2026-07-21-204010: "DEGRADED" printed
+                // before the world had arrived). This one runs 10s after the snapshot actually
+                // applied (top-up time), so reports carry a post-sync verdict that means something.
+                MPCanvasUI.ArmPostSyncWorldHealth();
             });
         }
 
@@ -2329,6 +2334,43 @@ namespace BigAmbitionsMP
         /// <summary>MAIN THREAD: the host denied our optimistic buy (someone else already
         /// owns it) — undo it: drop the real-estate entry and refund what we paid.  The
         /// host's for-sale broadcast restores the building to our market.</summary>
+        /// <summary>CLIENT (round-50): reverse the OPTIMISTIC local rent after the host denied it —
+        /// the missing half of the deny path (HandleRentDeny was a log-only TODO: the client kept a
+        /// rent the host never granted AND the money it paid, silently). Mirrors the native
+        /// terminate-lease state writes and refunds the DEPOSIT (the payload's LastDeposit — the
+        /// native terminate refunds exactly the deposit too; a first-day rent charge, if the native
+        /// contract took one, is not reconstructable here and stays lost — logged). MAIN THREAD.</summary>
+        public static void RollbackRent(string addressKey, float lastDeposit)
+        {
+            RunOnMainThread(() =>
+            {
+                try
+                {
+                    var reg = FindRegistration(addressKey);
+                    if (reg != null && reg.RentedByPlayer)
+                    {
+                        reg.RentedByPlayer   = false;
+                        reg.AvailableForRent = true;
+                        reg.BusinessName     = null;
+                        reg.businessTypeName = "ba:businesstype_empty";
+                        try { reg.RentPerDay = 0f; reg.lastDeposit = 0f; } catch { }
+                        try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
+                        try { InstanceBehavior<UI.UIs>.Instance?.mapFilters?.ApplyFilters(); } catch { }
+                    }
+                    if (lastDeposit > 0f)
+                    {
+                        try { SaveGameManager.Current.Money += lastDeposit; } catch { }
+                        // The optimistic rent's charge went through native ChangeMoney (forwarded to
+                        // the shared ledger) — the refund must follow or the reconcile erases it.
+                        MergerWallet.ForwardExternal(lastDeposit, "rent-rollback refund");
+                    }
+                    PassengerHud.Toast("The host denied that rental — the building isn't available. Deposit refunded.", 6f);
+                    Plugin.Logger.LogInfo($"[Patcher] Rolled back rent of {addressKey} (deposit {lastDeposit:F0} refunded).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] RollbackRent: {ex.Message}"); }
+            });
+        }
+
         public static void RollbackBuy(string addressKey)
         {
             RunOnMainThread(() =>
@@ -2742,15 +2784,17 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ownership apply for {info.AddressKey}: {ex.Message}"); }
 
-                // Diagnostic: log only when ownership actually CHANGES (host's reported state vs the
-                // client's prior state). Logging every sync, including unchanged owned records, was
-                // ~270 no-op repeats/session; a transition (rent/unrent, owner A→B, AI↔player) is the
-                // part worth seeing.
-                if (info.BuildingOwnerRivalId != priorBuildingOwner
-                    || info.BusinessOwnerRivalId != priorBusinessOwner
-                    || info.RentedByPlayer != priorRented)
+                // Diagnostic: log only when ownership actually CHANGES. Round-50 operand fix
+                // (2026-07-21-204010): the old check compared the host's RAW fields against the
+                // client's TRANSLATED state — for every host-owned shop those always differ (raw
+                // rented=True/biz='' vs the client's stamped 'hostpid'/False), so it printed a fake
+                // "transition" on every sync: the phantom ownership oscillation. Compare what we
+                // actually WROTE against what we had; keep the raw host record for context.
+                if ((reg.buildingOwnerRivalId?.ToString() ?? "") != priorBuildingOwner
+                    || (reg.businessOwnerRivalId?.ToString() ?? "") != priorBusinessOwner
+                    || reg.RentedByPlayer != priorRented)
                 {
-                    Plugin.Logger.LogInfo($"[Patcher] Ownership for {info.AddressKey}: host[bldg='{info.BuildingOwnerRivalId}' biz='{info.BusinessOwnerRivalId}' rented={info.RentedByPlayer}] client-was[bldg='{priorBuildingOwner}' biz='{priorBusinessOwner}' rented={priorRented}].");
+                    Plugin.Logger.LogInfo($"[Patcher] Ownership for {info.AddressKey}: applied[bldg='{reg.buildingOwnerRivalId}' biz='{reg.businessOwnerRivalId}' rented={reg.RentedByPlayer}] was[bldg='{priorBuildingOwner}' biz='{priorBusinessOwner}' rented={priorRented}] host-raw[bldg='{info.BuildingOwnerRivalId}' biz='{info.BusinessOwnerRivalId}' rented={info.RentedByPlayer} owner='{info.OwnerPlayerId}'].");
                 }
 
                 // HQ DIAGNOSTIC (2026-06-19, release-safe): a client's own HQ can be bricked if a host delta
@@ -3137,6 +3181,89 @@ namespace BigAmbitionsMP
         /// DEED (the AI landlord, never re-assigned after worldgen) and is NOT touched — writing the
         /// renter there was the "rival page shows he OWNS the building" community bug, and the old
         /// vacate erased the landlord permanently.  MAIN THREAD.</summary>
+        /// <summary>HOST, MAIN THREAD (round-50): why this address can NOT be rented by a client,
+        /// per the host's own game — "" when it's genuinely available. The player ledger is checked
+        /// separately by the caller; this guards against DIVERGED CLIENTS renting a building the
+        /// host's world has occupied (bug 2026-07-21-204010: the ledger got stamped onto a
+        /// rival-run shop and the conflicted record churned forever). Fails open — a probe error
+        /// must never block a legitimate rent.</summary>
+        public static string HostRentUnavailableReason(string addressKey)
+        {
+            try
+            {
+                var reg = FindRegistration(addressKey);
+                if (reg == null) return "";   // unknown address — can't judge; legacy behavior
+                if (reg.RentedByPlayer) return "rented by the host player";
+                bool hasBusiness = false;
+                try
+                {
+                    hasBusiness = !string.IsNullOrEmpty(reg.BusinessName?.ToString())
+                               || (!string.IsNullOrEmpty(reg.businessTypeName) && reg.businessTypeName != "ba:businesstype_empty");
+                }
+                catch { }
+                if (hasBusiness) return $"occupied by '{reg.BusinessName}' ({reg.businessTypeName}, owner '{reg.businessOwnerRivalId}')";
+                if (!reg.AvailableForRent) return "not on the for-rent market";
+                return "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>HOST, MAIN THREAD (round-50): LEDGER DECONTAMINATION. Drops BuildingOwners
+        /// reservations that contradict the host's own rival economy — an address an AI rival
+        /// authoritatively runs a business at (RivalData.ownedRetailOfficeBusinesses, the same
+        /// source the rivals leaderboard reads) can not be reserved to a player. Field case
+        /// 2026-07-21-204010: a diverged client rented such an address; the grant stamped the
+        /// ledger AND overwrote the reg's businessOwnerRivalId, making the AI shop read as a
+        /// player's (overtake offers auto-rejected). Restores the rival's tenancy stamp. Skips
+        /// injected session-player rival ids (their businesses ARE player businesses). Best-effort:
+        /// rival factories/warehouses aren't in the retail/office list and aren't checked.</summary>
+        public static void SweepLedgerVsRivalBusinesses(string reason)
+        {
+            if (!MPServer.IsRunning) return;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.rivalStates == null) return;
+                var aiBiz = new Dictionary<string, string>();   // addressKey → AI rival id
+                foreach (var rs in gi.rivalStates)
+                {
+                    string id = rs?.rivalId?.ToString() ?? "";
+                    if (string.IsNullOrEmpty(id) || IsSessionPlayerRivalId(id)) continue;
+                    try
+                    {
+                        var rd = BigAmbitions.Rivals.RivalsHelper.GetRivalData(id);
+                        if (rd?.ownedRetailOfficeBusinesses == null) continue;
+                        foreach (var reg in rd.ownedRetailOfficeBusinesses)
+                            if (reg != null) aiBiz[GameStateReader.AddressKey(reg)] = id;
+                    }
+                    catch { }
+                }
+                if (aiBiz.Count == 0) return;
+
+                var contaminated = new List<string>();
+                foreach (var kv in MPServer.BuildingOwners)
+                    if (!string.IsNullOrEmpty(kv.Value) && kv.Value != "host" && aiBiz.ContainsKey(kv.Key))
+                        contaminated.Add(kv.Key);
+                foreach (var addr in contaminated)
+                {
+                    string rid = aiBiz[addr];
+                    if (!MPServer.BuildingOwners.TryRemove(addr, out var pid)) continue;
+                    try
+                    {
+                        var reg = FindRegistration(addr);
+                        if (reg != null)
+                        {
+                            if ((reg.businessOwnerRivalId?.ToString() ?? "") == pid) reg.businessOwnerRivalId = rid;   // undo the grant's stamp
+                            reg.AvailableForRent = false;   // an AI-run shop is not on the market
+                        }
+                    }
+                    catch { }
+                    Plugin.Logger.LogWarning($"[Integrity] ({reason}) ledger decontaminated: '{addr}' was reserved to player '{pid}' but the host's world runs AI rival '{rid}'s business there — reservation dropped, rival tenancy restored.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] ledger sweep: {ex.Message}"); }
+        }
+
         public static void HostReflectPlayerRent(string addressKey, string playerId)
         {
             try
@@ -3209,6 +3336,31 @@ namespace BigAmbitionsMP
                               $"nonSpecialRivals={nonSpecialRivals} forSale={forSale} injectedStaff={injected} players={players}";
                 if (sick) Plugin.Logger.LogWarning(line + "  ← DEGRADED WORLD (rival-poor and/or deed contamination)");
                 else      Plugin.Logger.LogInfo(line);
+
+                // Round-50 ZOMBIE DETECTOR (approved, log-only): a record with a business NAME but
+                // no tenant while still ON THE RENT MARKET is a state no clean native flow produces
+                // (rent occupies, terminate wipes the name, AI shops are off the market). Field case
+                // 2026-07-21-204010: such a save-resident zombie LOOKED like a rival shop but was
+                // rentable — the "couldn't take over rival business" report. Runs on both sides at
+                // both health checks; first 10 named, rest counted.
+                try
+                {
+                    int zombies = 0;
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null) continue;
+                        bool named = false;
+                        try { named = !string.IsNullOrEmpty(reg.BusinessName?.ToString()); } catch { }
+                        if (!named || reg.RentedByPlayer || !reg.AvailableForRent) continue;
+                        zombies++;
+                        if (zombies <= 10)
+                            Plugin.Logger.LogWarning($"[WorldHealth] ({reason}) ZOMBIE record: '{GameStateReader.AddressKey(reg)}' " +
+                                $"name='{reg.BusinessName}' type={reg.businessTypeName} rented=False AVAILABLE — " +
+                                $"occupied-looking but rentable (bizOwner='{reg.businessOwnerRivalId}', deed='{reg.buildingOwnerRivalId}').");
+                    }
+                    if (zombies > 10) Plugin.Logger.LogWarning($"[WorldHealth] ({reason}) …and {zombies - 10} more zombie record(s).");
+                }
+                catch { }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[WorldHealth] {ex.Message}"); }
         }

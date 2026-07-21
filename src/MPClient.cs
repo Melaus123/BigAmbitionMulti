@@ -873,8 +873,11 @@ namespace BigAmbitionsMP
             var payload = env.GetPayload<BuildingOwnershipPayload>();
             if (payload == null) return;
 
-            Plugin.Logger.LogWarning($"[Client] Rent DENIED for {payload.AddressKey} — already taken.");
-            // TODO: show in-game notification to the player
+            // Round-50: the deny path was a log-only TODO — the client kept the optimistic local
+            // rent AND its money, silently. Roll both back and tell the player.
+            string why = string.IsNullOrEmpty(payload.DenyReason) ? "already taken" : payload.DenyReason;
+            Plugin.Logger.LogWarning($"[Client] Rent DENIED for {payload.AddressKey} — {why}; rolling back the optimistic local rent.");
+            GameStatePatcher.RollbackRent(payload.AddressKey, payload.LastDeposit);
         }
 
         private static void HandleVacate(MessageEnvelope env)
