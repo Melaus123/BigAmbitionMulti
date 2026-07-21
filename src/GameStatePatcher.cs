@@ -1611,8 +1611,16 @@ namespace BigAmbitionsMP
                         string placedId = "", parentId = "";
                         try { placedId = BigAmbitions.PlacementSystem.PlacementSystem.CurrentPlaceableItemBeingPlaced?.GetItemInstance()?.id?.ToString() ?? ""; } catch { }
                         try { parentId = BigAmbitions.PlacementSystem.PlacementSystem.lastParentItem?.GetItemInstance()?.id?.ToString() ?? ""; } catch { }
+                        // Round-48b (live test 2026-07-21): the refresh NEVER touches the
+                        // actively-placed item — changed OR removed.  An unconfirmed
+                        // placement exists only on THIS machine, so the owner's diff
+                        // marks it "removed" (never-heard-of-it ≠ owner-deleted-it) and
+                        // the old abort+destroy vaporized the item mid-place (value
+                        // lost).  The destroy pass defers it in all cases; if the owner
+                        // GENUINELY deleted the same id, the guest's forward re-adds it
+                        // (guest-edit authority, last-writer-wins).  Abort only for the
+                        // PARENT changing (outline strand) or a full rebuild.
                         bool touched = fullRebuild
-                            || (!string.IsNullOrEmpty(placedId) && (changedIds!.Contains(placedId) || (removedIds?.Contains(placedId) ?? false)))
                             || (!string.IsNullOrEmpty(parentId) && (changedIds!.Contains(parentId) || (removedIds?.Contains(parentId) ?? false)));
                         if (touched)
                         {
@@ -1645,10 +1653,32 @@ namespace BigAmbitionsMP
                             catch { continue; }
                             string id = "";
                             try { id = ic.ItemInstance?.id ?? ""; } catch { }
+                            bool isChanged = changedIds != null && changedIds.Contains(id);
+                            bool isRemoved = removedIds != null && removedIds.Contains(id);
+                            // Round-48b: NEVER destroy the item actively being placed —
+                            // changed OR removed (live test 2026-07-21: an unconfirmed
+                            // placement is unknown to the owner, so the diff calls it
+                            // "removed" and the old rule vaporized it mid-place).  Its
+                            // controller keeps the old instance for one cycle; placement
+                            // completes; the guest forward re-converges the state.
+                            if ((isChanged || isRemoved) && !fullRebuild && !string.IsNullOrEmpty(id))
+                            {
+                                try
+                                {
+                                    if (BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode
+                                        && (BigAmbitions.PlacementSystem.PlacementSystem.CurrentPlaceableItemBeingPlaced?.GetItemInstance()?.id?.ToString() ?? "") == id)
+                                    {
+                                        Plugin.Logger.LogInfo($"[Patcher] refresh DEFERRED for '{id}' — actively being placed; change applies on a later refresh (round-48).");
+                                        liveById[id] = ic;   // counts as survivor → spawn pass skips it
+                                        continue;
+                                    }
+                                }
+                                catch { }
+                            }
                             bool kill = fullRebuild
                                         || string.IsNullOrEmpty(id)
-                                        || (changedIds != null && changedIds.Contains(id))
-                                        || (removedIds != null && removedIds.Contains(id));
+                                        || isChanged
+                                        || isRemoved;
                             if (kill)
                             {
                                 UnityEngine.Object.Destroy(ic.gameObject);

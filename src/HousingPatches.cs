@@ -574,6 +574,16 @@ namespace BigAmbitionsMP
             {
                 if (itemControllerToPlace == null || itemControllerToPlace.ItemInstance == null)
                 { __result = false; return false; }   // destroyed / uninitialized target → refuse, no side effects
+                // Field 2026-07-20 (helper's stuck computer, ×5): the native body
+                // derefs ItemInstance.ItemCached (warp-cursor wallMounted read)
+                // one field deeper than the old check — a refresh-respawned
+                // controller can sit in exactly that half-initialized state.
+                // Refuse it SPECIFICALLY so the log names the item, not just "NRE".
+                if (itemControllerToPlace.ItemInstance.ItemCached == null)
+                {
+                    Plugin.Logger.LogWarning($"[Housing] StartPlacementMode refused: '{itemControllerToPlace.itemName}' (id {itemControllerToPlace.ItemInstance.id}) has no cached item data — mid-refresh zombie window.");
+                    __result = false; return false;
+                }
             }
             catch { __result = false; return false; }
             return true;
@@ -584,7 +594,9 @@ namespace BigAmbitionsMP
             if (__exception == null) return null;
             __result = false;
             try { InstanceBehavior<GameManager>.Instance.playerController.UnsetNavigationBlocker(NavigationBlocker.PlacementMode); } catch { }
-            Plugin.Logger.LogWarning($"[Housing] StartPlacementMode threw ({__exception.GetType().Name}: {__exception.Message}) — refused cleanly, PlacementMode blocker released.");
+            // Full STACK (field 2026-07-20): message-only logging hid the exact
+            // native null for a session's worth of failures — never again.
+            Plugin.Logger.LogWarning($"[Housing] StartPlacementMode threw ({__exception.GetType().Name}: {__exception.Message}) — refused cleanly, PlacementMode blocker released.\n{__exception.StackTrace}");
             return null;   // swallow — the caller sees false and the player keeps moving
         }
     }
