@@ -174,8 +174,9 @@ namespace BigAmbitionsMP
     // includeHelper on the five visibility wraps (round-32): a business HELPER is offered interactions too.
     // SAFE ONLY BECAUSE every mutation path this exposes in a business is accounted for: storage-shelf put +
     // fridge/wardrobe family routed (GuestRoute now helper-aware), stock dropdown + producer refill routed
-    // (BusinessPatches), ManageStorage blocked, and the rest self-gate at INTERACT time on the UNFLIPPED
-    // flag (register work: purchaser-enabled short-circuits; sign stock-select re-checks :97; DJ booth :28).
+    // (BusinessPatches), ManageStorage routed per-row (round-47c; delivery-spot place + stored-vehicle take
+    // routed round-49), sign stock-select routed (round-49, BusinessPatches), and the rest self-gate at
+    // INTERACT time on the UNFLIPPED flag (register work: purchaser-enabled short-circuits; DJ booth :28).
     [HarmonyPatch(typeof(CtaManager), nameof(CtaManager.UpdateCta))]
     public static class Patch_CtaManager_UpdateCta_Guest
     {

@@ -22,7 +22,7 @@ namespace BigAmbitionsMP
     {
         public const byte OpTake     = 0;   // remove Amount of ItemName from the interior item (guest receives it)
         public const byte OpPut      = 1;   // add Amount of ItemName to the interior item (from the guest)
-        public const byte OpSetStock = 2;   // round-32: set the item's STOCK type (display shelf / producer) — ItemName = new stock name ("" = clear)
+        public const byte OpSetStock = 2;   // round-32: set the item's STOCK type (display shelf / producer) — ItemName = new stock name ("" = clear); round-49 ctx "signset" = a SIGN's linkedItemName instead
 
         // ── Guest side: start a take / put ───────────────────────────────────────
         public static void RequestTake(string addressKey, string itemId, string itemName, int amount, bool paid, float price, string ctx = "")
@@ -67,6 +67,28 @@ namespace BigAmbitionsMP
         /// producer (ctx="producerset") — stocks. The owner runs the same moves the native dropdown does.</summary>
         public static void RequestSetStock(string addressKey, string itemId, string newStockName, string ctx = "setstock")
             => Send(OpSetStock, addressKey, itemId, newStockName ?? "", 1, paid: false, price: 0f, ctx);
+
+        // ── Round-49 slice 2: helper PLACE from a delivery spot. The reduce routes to the owner first;
+        // placement starts only on the Ok verdict, so the cargo details the wire doesn't echo (nested
+        // contents, custom colors) are captured here at click time. Single-slot by design: clicks and
+        // verdicts are both main-thread, and one place can be in flight at a time. ──
+        private static CargoInstance? _pendingPlace;
+
+        public static void SetPendingPlace(string addressKey, string itemId, CargoInstance source)
+        {
+            try
+            {
+                var pc = source.Copy();   // name/price/paid/colors (colors deep-copied by the game's Copy)
+                pc.amount = 1;            // native place consumes exactly one unit
+                if (source.nestedCargoInstances != null)
+                    foreach (var n in source.nestedCargoInstances)
+                        if (n != null)
+                            pc.nestedCargoInstances.Add(new NestedCargoInstance(n.itemName, n.amount, n.pricePerUnit,
+                                n.customColors == null ? null : new List<CustomColor>(n.customColors)));
+                _pendingPlace = pc;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] SetPendingPlace: {ex.Message}"); _pendingPlace = null; }
+        }
 
         private static void Send(byte op, string addressKey, string itemId, string itemName, int amount, bool paid, float price, string ctx = "")
         {
@@ -345,6 +367,18 @@ namespace BigAmbitionsMP
         private static bool ApplySetStock(BuildingRegistration reg, ItemInstance item, BuildingCargoReqPayload req, out string reason)
         {
             reason = "";
+            // Round-49 slice 5 — a SIGN's dropdown pick: linkedItemName lives on the ItemInstance itself
+            // (signs have no cargo slots — the checks below would refuse one as "gone"). The shared Ok tail
+            // fires onBuildingRegistrationChange — exactly the event SignController re-reads — and the
+            // interior push carries linkedItemName to every client (it's in the snapshot hash + apply).
+            if (req.Ctx == "signset")
+            {
+                string linkName = req.ItemName ?? "";
+                if ((item.linkedItemName ?? "") == linkName) return true;   // idempotent (duplicate click / re-send)
+                Plugin.Logger.LogInfo($"[BStore] signset by '{req.PlayerId}' on '{req.AddressKey}'/{req.ItemId}: '{item.linkedItemName}' → '{linkName}'.");
+                item.linkedItemName = linkName;
+                return true;
+            }
             var cargo = item.cargoInstances;
             if (cargo == null || cargo.Count != 1) { reason = "gone"; return false; }   // stock carriers hold exactly one stock instance
             var stock = cargo[0];
@@ -417,6 +451,75 @@ namespace BigAmbitionsMP
                         // Eaten in place at click time (round-17 parity) — nothing to deliver. A failed
                         // confirm is the phantom-bite race: fridge unchanged, nothing lost; log only.
                         if (!res.Ok) Plugin.Logger.LogInfo($"[BStore] consume confirm failed ({res.Reason}) — nothing removed, nothing delivered.");
+                        return;
+                    }
+                    if (res.Ctx == "placereduce")
+                    {
+                        // Round-49 slice 2: the owner reduced one furniture unit off the delivery spot —
+                        // start the native placement from the click-time captured cargo. Any local failure
+                        // gives the unit back so the owner's holder is made whole.
+                        var pc = _pendingPlace; _pendingPlace = null;
+                        if (!res.Ok) { PassengerHud.Toast("Already gone."); return; }
+                        if (pc == null || pc.itemName != res.ItemName)
+                        {
+                            RequestPut(res.AddressKey, res.ItemId, res.ItemName, 1, res.Paid, res.PricePerUnit);
+                            Plugin.Logger.LogWarning("[BStore] placereduce Ok without a matching pending place — unit returned to the owner.");
+                            return;
+                        }
+                        bool started = false;
+                        try
+                        {
+                            var inst = pc.InitializeNewInstance();
+                            pc.ParseIntoItemInstance(inst);
+                            // The native place flow's own entry (private static): creates the controller,
+                            // enters placement mode, adds the instance to the (replica) registration —
+                            // completion then forwards through the guest interior-edit flow.
+                            var m = HarmonyLib.AccessTools.Method(typeof(UI.ItemPanel.ItemPanelUI), "TryToStartPlacingItem");
+                            started = m != null && (bool)m.Invoke(null, new object[] { pc.ItemCached, pc.itemName, inst });
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] place start: {ex.Message}"); }
+                        if (!started)
+                        {
+                            RequestPut(res.AddressKey, res.ItemId, res.ItemName, 1, res.Paid, res.PricePerUnit);
+                            PassengerHud.Toast("Couldn't start placing that — it was put back.");
+                        }
+                        else Plugin.Logger.LogInfo($"[BStore] helper placement started: {pc.itemName} (unit reduced owner-side; completion forwards the interior).");
+                        return;
+                    }
+                    if (res.Ctx == "vehicletake")
+                    {
+                        // Round-49 slice 4: the owner's storage lost the packed hand truck/flatbed — spawn
+                        // it HERE as the HELPER'S OWN vehicle (user ruling 2026-07-21: valueless + freely
+                        // spawnable, taker keeps it) with the same native call the owner's unpack runs
+                        // (CargoItemUi.ClickItem :389); the regular local-vehicle sync picks it up.
+                        if (!res.Ok) { PassengerHud.Toast("Already gone."); return; }
+                        string vt = "";
+                        try { vt = ItemsGetter.GetByName(res.ItemName)?.vehicleType ?? ""; } catch { }
+                        if (string.IsNullOrEmpty(vt))
+                        {
+                            RequestPut(res.AddressKey, res.ItemId, res.ItemName, res.Amount, res.Paid, res.PricePerUnit);
+                            Plugin.Logger.LogWarning($"[BStore] vehicletake Ok but '{res.ItemName}' has no vehicleType — returned to the owner.");
+                            return;
+                        }
+                        if (PlayerHelper.IsHoldingItem || PlayerHelper.IsUsingVehicle)
+                        {
+                            // Hands filled during the round-trip — give it back rather than strand it.
+                            RequestPut(res.AddressKey, res.ItemId, res.ItemName, res.Amount, res.Paid, res.PricePerUnit);
+                            PassengerHud.Toast("No room to unpack that now.");
+                            return;
+                        }
+                        try
+                        {
+                            var vc = VehicleSpawnerController.CreateVehicle(InstanceBehavior<GameManager>.Instance.playerController.transform, vt);
+                            if (vc != null) vc.EnterVehicle();
+                            try { GameEvent.Invoke("ba:gameevent_itemcargochanged"); } catch { }
+                            Plugin.Logger.LogInfo($"[BStore] helper unpacked stored vehicle '{res.ItemName}' → local spawn, helper-owned.");
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.Logger.LogWarning($"[BStore] vehicle spawn: {ex.Message}");
+                            RequestPut(res.AddressKey, res.ItemId, res.ItemName, res.Amount, res.Paid, res.PricePerUnit);
+                        }
                         return;
                     }
                     if (!res.Ok)

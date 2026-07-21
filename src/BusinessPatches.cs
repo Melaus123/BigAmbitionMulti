@@ -284,6 +284,53 @@ namespace BigAmbitionsMP
         }
     }
 
+    /// <summary>Round-49 slice 5 — SIGN parity. SignController's IO methods gate on IsPlayerOwnedBusiness
+    /// (decompile :66/:78): non-owners get redirected to the linked item's customer overlay instead of the
+    /// sign's own owner overlay (whose dropdown the already-wrapped base UpdateSelectedStockOverlay shows).
+    /// Read-only routing decisions — same scoped-flip family as the CTA/overlay wraps.</summary>
+    [HarmonyPatch(typeof(Controllers.SignController), nameof(Controllers.SignController.OnIoEnter))]
+    public static class Patch_SignController_IoEnter_Helper
+    {
+        static void Prefix()    { HousingFurniture.Enter(includeHelper: true); }
+        static void Finalizer() { HousingFurniture.Exit(); }
+    }
+
+    [HarmonyPatch(typeof(Controllers.SignController), nameof(Controllers.SignController.OnIoLeftClick))]
+    public static class Patch_SignController_IoLeftClick_Helper
+    {
+        static void Prefix()    { HousingFurniture.Enter(includeHelper: true); }
+        static void Finalizer() { HousingFurniture.Exit(); }
+    }
+
+    /// <summary>Round-49 slice 5 — the sign's dropdown pick. SignController overrides the INT overload and
+    /// sets ItemInstance.linkedItemName directly (self-gated on IsPlayerOwnedBusiness, :97) — it never
+    /// reaches the base string overload our generic stock-select route patches. linkedItemName is a pure
+    /// display link (no cargo moves), so the route is: set the replica for instant feedback, send
+    /// "signset" to the owner (authoritative), whose interior push carries linkedItemName back to every
+    /// client (it's in the snapshot hash + apply, GameStatePatcher :1936/:1968).</summary>
+    [HarmonyPatch(typeof(Controllers.SignController), nameof(Controllers.SignController.OnStockOptionSelected),
+                  typeof(int), typeof(UI.Elements.Dropdown))]
+    public static class Patch_SignController_StockSelect_HelperRoute
+    {
+        static bool Prefix(Controllers.SignController __instance, int stockIndex)
+        {
+            try
+            {
+                if (!BusinessHelperRoute.HelperHere(out var addr)) return true;
+                var ii = __instance?.ItemInstance;
+                var st = __instance?.StockTypes;
+                if (ii == null || st == null || stockIndex < 0 || stockIndex >= st.Count) return false;   // helper + bad pick: mirror the native no-op
+                string newName = st[stockIndex] == "ba:itemname_undefined" ? string.Empty : st[stockIndex];
+                ii.linkedItemName = newName;   // optimistic local — the owner's next interior push confirms it
+                try { HarmonyLib.AccessTools.Method(typeof(Controllers.SignController), "SetInfo")?.Invoke(__instance, null); } catch { }
+                BuildingStorageSync.RequestSetStock(addr, ii.id?.ToString() ?? "", newName, "signset");
+                Plugin.Logger.LogInfo($"[Business] helper sign-select '{newName}' on {ii.itemName} @'{addr}' → routed to owner.");
+                return false;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] sign-select route: {ex.Message}"); return true; }
+        }
+    }
+
     /// <summary>Round-34: owner-management WARNING ICONS ("out of paper bags", low stock…) leaked to
     /// helpers — the visibility flip lets UpdateSelectedStockOverlay run its UpdateWarningIcon call in
     /// owner mode. Warning icons are the owner's management UI; suppress them entirely for a helper in
@@ -446,11 +493,16 @@ namespace BigAmbitionsMP
         }
     }
 
-    /// <summary>Round-47 — per-row rewiring for helpers on building storage: SELL/DISCARD/action hidden
-    /// (wallet + local-mutation paths), the item click becomes a ROUTED box take — the owner removes the
-    /// real sealed box (contents echoed over the wire) and it lands in the helper's hands, exactly like
-    /// the owner's own ClickItem take. Empty hands required (deferred delivery makes holder-merge racy);
-    /// vehicle-type cargo (stored hand trucks) stays owner-only.</summary>
+    /// <summary>Round-47 — per-row rewiring for helpers on building storage: SELL/DISCARD route the
+    /// removal to the owner (money credits the helper), the item click becomes a ROUTED box take — the
+    /// owner removes the real sealed box (contents echoed over the wire) and it lands in the helper's
+    /// hands, exactly like the owner's own ClickItem take. Empty hands required (deferred delivery makes
+    /// holder-merge racy). Round-49 (helper parity): the action button's one building-holder action —
+    /// PLACE furniture from a delivery spot — is re-enabled with the reduce routed ("placereduce"; the
+    /// placement itself rides the native flow + the existing guest interior forward), and vehicle-type
+    /// cargo (stored hand trucks / flatbeds) becomes a routed take that spawns the vehicle LOCALLY as the
+    /// HELPER'S OWN ("vehicletake"; user ruling 2026-07-21: valueless + freely spawnable, so the taker
+    /// keeps it — re-storing it into owner storage gifts it back).</summary>
     [HarmonyPatch(typeof(UI.PlayerHUD.CargoItemUi), nameof(UI.PlayerHUD.CargoItemUi.SetUp))]
     public static class Patch_CargoItemUi_HelperRoute
     {
@@ -513,7 +565,56 @@ namespace BigAmbitionsMP
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] discard route: {ex.Message}"); }
                     });
                 }
-                Btn("actionButton")?.gameObject.SetActive(false);   // equip/read/place — local-hands paths, still owner-only
+                // Round-49 slice 2 — the ONLY native action for a building holder is PLACE (furniture on a
+                // delivery spot; the equip/read/consume family belongs to the vehicle-picker mode, decompile
+                // CargoItemUi.SetupActionButton :226-307). Native gates paid && isFurniture && owned-business
+                // && holder isdeliveryspot; for a helper the ownership term is the grant. Click = route the
+                // 1-unit reduce to the owner FIRST ("placereduce"); placement starts only on the owner's Ok
+                // (BuildingStorageSync.OnResult) so a lost race costs nothing. The placed item then forwards
+                // through the existing guest interior-edit flow on completion.
+                var actionBtn = Btn("actionButton");
+                bool canPlace = false;
+                try
+                {
+                    canPlace = paid && first.ItemCached != null && first.ItemCached.isFurniture
+                               && ii.ItemCached != null && ii.ItemCached.HasTag(BigAmbitions.Tags.TagRef.Itemtag.isdeliveryspot);
+                }
+                catch { }
+                if (actionBtn != null)
+                {
+                    if (canPlace)
+                    {
+                        try
+                        {
+                            var lbl = HarmonyLib.AccessTools.Field(typeof(UI.PlayerHUD.CargoItemUi), "actionButtonLabel")?.GetValue(__instance);
+                            if (lbl != null)
+                            {
+                                var t = HarmonyLib.Traverse.Create(lbl);
+                                if (t.Property("Key").PropertyExists()) t.Property("Key").SetValue("itempanelui_buttons_place");
+                                else t.Field("Key").SetValue("itempanelui_buttons_place");
+                            }
+                        }
+                        catch { }
+                        actionBtn.onClick.RemoveAllListeners();
+                        var placeSrc = first;
+                        actionBtn.onClick.AddListener(delegate
+                        {
+                            try
+                            {
+                                if (BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode) return;   // native early-out parity
+                                bool fits = true;
+                                try { fits = placeSrc.ItemCached.FitsInBuilding(); } catch { }
+                                if (!fits) { PassengerHud.Toast("That item is too tall for this building."); return; }
+                                BuildingStorageSync.SetPendingPlace(addr, itemId, placeSrc);
+                                BuildingStorageSync.RequestTake(addr, itemId, name, 1, paid, price, "placereduce");
+                                Plugin.Logger.LogInfo($"[Business] helper PLACE {name} from delivery spot @'{addr}' → reduce routed, placement starts on Ok.");
+                            }
+                            catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] place route: {ex.Message}"); }
+                        });
+                        actionBtn.gameObject.SetActive(true);
+                    }
+                    else actionBtn.gameObject.SetActive(false);   // no other holder-context action exists natively
+                }
 
                 var itemBtn = Btn("itemButton");
                 if (itemBtn == null) return;
@@ -524,7 +625,19 @@ namespace BigAmbitionsMP
                 {
                     try
                     {
-                        if (isVehicleCargo) { PassengerHud.Toast("Stored vehicles are the owner's call."); return; }
+                        if (isVehicleCargo)
+                        {
+                            // Round-49 slice 4 — unpack a stored hand truck/flatbed. The owner's copy loses the
+                            // cargo (routed, "vehicletake"); the vehicle spawns LOCALLY on the owner's Ok and is
+                            // the HELPER'S OWN from birth (user ruling 2026-07-21) — same native spawn call the
+                            // owner's own unpack runs, so the normal local-vehicle sync picks it up.
+                            if (PlayerHelper.IsHoldingItem || PlayerHelper.IsUsingVehicle)
+                            { PassengerHud.Toast("Empty your hands to unpack that."); return; }
+                            BuildingStorageSync.RequestTake(addr, itemId, name, amount, paid, price, "vehicletake");
+                            Plugin.Logger.LogInfo($"[Business] helper stored-vehicle take {name} @'{addr}' → routed; spawns locally on Ok.");
+                            try { InstanceBehavior<UI.UIs>.Instance.playerHUD.manageCargoUI.Close(); } catch { }
+                            return;
+                        }
                         if (PlayerHelper.IsHoldingItem || PlayerHelper.IsUsingVehicle)
                         { PassengerHud.Toast("Empty your hands to take that."); return; }
                         // Sealed boxes ride "boxtake" (whole instance + nested contents); loose stacks
