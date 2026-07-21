@@ -275,6 +275,13 @@ namespace BigAmbitionsMP
             // synchronous at spawn; Start fires next frame) stops the coroutine ever launching. Only
             // ghosts go through StripVehicleComponents, so real ridable scooters keep it.
             "ScooterController",
+            // Delivery-job mission logic on the delivery-van prefab (field 2026-07-20, NRE ×11): its
+            // Start() caches GetComponent<VehicleController>() — null after the strip — and subscribes
+            // CheckIfShouldDisappear to GlobalEvents.onNewHour, which then derefs the null EVERY GAME
+            // HOUR a delivery ghost exists. Worse than noise: the throw aborts every onNewHour
+            // subscriber combined after it for that hour. Same remedy as ScooterController — die
+            // before Start ever subscribes. Real delivery vans (the local player's own job) keep it.
+            "DeliveryJobVehicle",
         };
 
         // Keyed by VehicleId (a player owns several vehicles).
