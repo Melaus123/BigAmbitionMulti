@@ -334,10 +334,14 @@ namespace BigAmbitionsMP
             sb.AppendLine($"IntegrityFindings: {(string.IsNullOrEmpty(MPSaveIntegrity.LastSummary) ? "none" : MPSaveIntegrity.LastSummary)}");
             sb.AppendLine();
             sb.AppendLine("## Runtime");
+            // (InstalledMods below — round-57, Rialgame report 2026-07-22: a broken third-party
+            // mod (Voogle Route, missing companion DLL) was only inferable from exception text;
+            // every report should answer "what else is running?" at a glance.)
             sb.AppendLine($"GameVersion: {Blank(Application.version)}");
             sb.AppendLine($"UnityVersion: {Blank(Application.unityVersion)}");
             sb.AppendLine($"Scene: {ActiveSceneName()}");
             sb.AppendLine($"GameRoot: {Blank(MPConfig.GameRootPath)}");
+            sb.AppendLine($"InstalledMods: {Blank(ListInstalledMods())}");
             sb.AppendLine($"PersistentDataPath: {Blank(Application.persistentDataPath)}");
             sb.AppendLine($"OS: {Environment.OSVersion}");
             sb.AppendLine($"64BitProcess: {Environment.Is64BitProcess}");
@@ -442,6 +446,39 @@ namespace BigAmbitionsMP
         }
 
         private static string Blank(string value) => string.IsNullOrWhiteSpace(value) ? "(blank)" : value;
+
+        /// <summary>Round-57: enumerate installed mod folders — Workshop items (with the inner mod
+        /// folder named when present) + ModsLocal — so a report answers "what else is running?"
+        /// without exception archaeology. Best-effort: any failure yields a partial/empty list.</summary>
+        private static string ListInstalledMods()
+        {
+            var parts = new System.Collections.Generic.List<string>();
+            try
+            {
+                var root = MPConfig.GameRootPath;                                     // .../steamapps/common/Big Ambitions
+                if (!string.IsNullOrEmpty(root))
+                {
+                    var steamapps = Path.GetDirectoryName(Path.GetDirectoryName(root));
+                    if (!string.IsNullOrEmpty(steamapps))
+                    {
+                        var ws = Path.Combine(steamapps, "workshop", "content", "1331550");
+                        if (Directory.Exists(ws))
+                            foreach (var item in Directory.GetDirectories(ws))
+                            {
+                                string id = Path.GetFileName(item), inner = "";
+                                try { var subs = Directory.GetDirectories(item); if (subs.Length > 0) inner = Path.GetFileName(subs[0]); } catch { }
+                                parts.Add(string.IsNullOrEmpty(inner) ? $"workshop:{id}" : $"workshop:{id}({inner})");
+                            }
+                    }
+                }
+                var local = Path.Combine(Application.persistentDataPath, "ModsLocal");
+                if (Directory.Exists(local))
+                    foreach (var d in Directory.GetDirectories(local))
+                        parts.Add($"local:{Path.GetFileName(d)}");
+            }
+            catch { }
+            return string.Join(", ", parts);
+        }
 
         private static void CopyPlayerLogs(string dir)
         {

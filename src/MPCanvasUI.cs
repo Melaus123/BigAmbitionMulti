@@ -3311,16 +3311,23 @@ namespace BigAmbitionsMP
                 int filled = 0;
                 for (int i = 0; i < fields.Length && filled < 2; i++)
                 {
-                    var f = fields[i] as TMP_InputField;
-                    if (f == null) continue;
-                    // Only fill if the field is currently empty / placeholder — never clobber typed text.
-                    var cur = f.text;
-                    if (!string.IsNullOrWhiteSpace(cur)) continue;
-                    string fill = filled == 0 ? first : last;
-                    if (string.IsNullOrEmpty(fill)) { filled++; continue; }
-                    f.text = fill;
-                    Plugin.Logger.LogInfo($"[IntroName] pre-filled field[{i}] '{f.gameObject.name}' ← '{fill}'");
-                    filled++;
+                    // Round-57 (Rialgame report): per-field guard — an inactive/not-yet-initialized
+                    // TMP_InputField (fetched with includeInactive) can NRE inside its text accessors;
+                    // one bad field must not abort the rest or warn-spam reports.
+                    try
+                    {
+                        var f = fields[i] as TMP_InputField;
+                        if (f == null || f.textComponent == null) continue;
+                        // Only fill if the field is currently empty / placeholder — never clobber typed text.
+                        var cur = f.text;
+                        if (!string.IsNullOrWhiteSpace(cur)) continue;
+                        string fill = filled == 0 ? first : last;
+                        if (string.IsNullOrEmpty(fill)) { filled++; continue; }
+                        f.text = fill;
+                        Plugin.Logger.LogInfo($"[IntroName] pre-filled field[{i}] '{f.gameObject.name}' ← '{fill}'");
+                        filled++;
+                    }
+                    catch { }
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[IntroName] prefill: {ex.Message}"); }
