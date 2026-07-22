@@ -771,9 +771,33 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] RefreshGhostCargo: {ex.Message}"); }
         }
 
+        // Round-56b: early-fleet-packet suppression (mirrors RemotePlayerManager's 2026-06-01 guard).
+        private static float _earlyGhostNextLog;
+        private static int   _earlyGhostCount;
+
         private static RemoteVehicle? SpawnRemoteVehicle(string ownerId, VehicleEntry e,
                                                          Vector3 pos, Quaternion rot)
         {
+            // Round-56b (Westi 0.1.12 prev-log: 5,656 "CreateAndSpawnVehicle failed" NREs during a
+            // stuck load): fleet packets arrive at 10 Hz while the local world is still loading —
+            // the native spawn derefs scene systems that don't exist yet, and every packet retried
+            // the NRE. Same guard the remote-player spawn has: world not ready → drop the packet
+            // (the fleet re-sends continuously, so a drop costs nothing). Throttled log.
+            try
+            {
+                if (InstanceBehavior<GameManager>.Instance?.playerController == null)
+                {
+                    _earlyGhostCount++;
+                    float now = UnityEngine.Time.unscaledTime;
+                    if (now >= _earlyGhostNextLog)
+                    {
+                        _earlyGhostNextLog = now + 2f;
+                        Plugin.Logger.LogWarning($"[Vehicle] EARLY-DATA: ghost '{e.TypeName}' for '{ownerId}' before world ready — spawn suppressed. count={_earlyGhostCount}");
+                    }
+                    return null;
+                }
+            }
+            catch { }
             VehicleInstance inst;
             try
             {

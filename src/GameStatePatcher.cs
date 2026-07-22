@@ -2153,7 +2153,12 @@ namespace BigAmbitionsMP
                 // races slow-link snapshot delivery (field 2026-07-21-204010: "DEGRADED" printed
                 // before the world had arrived). This one runs 10s after the snapshot actually
                 // applied (top-up time), so reports carry a post-sync verdict that means something.
-                MPCanvasUI.ArmPostSyncWorldHealth();
+                // Round-56b (first 0.1.13 field report, Westi): arm only on a SUBSTANTIVE apply —
+                // a NEW-GAME join's first snapshot is the empty pre-generation one, and arming on
+                // it printed an all-zeros census that never re-sampled. 50 businesses ≈ any real
+                // world push; the empty snapshot carries none.
+                if (payload.Businesses != null && payload.Businesses.Count >= 50)
+                    MPCanvasUI.ArmPostSyncWorldHealth();
             });
         }
 
