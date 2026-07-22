@@ -1012,6 +1012,22 @@ namespace BigAmbitionsMP
                     removed++;
                     Plugin.Logger.LogInfo($"[SynthStaff] orphan staff stripped ({when}): '{id}'.");
                 }
+
+                // Round-55 (Westi 2026-07-22): a native system that messaged the synthetic (the
+                // rival poach offer, pre-fix) left a persistent "On-Duty Staff" CONTACT thread in
+                // the save — contacts are keyed by character NAME and survive the employee strip.
+                // No legitimate contact ever carries our invented name; purge it.
+                try
+                {
+                    var contacts = gi?.Contacts;
+                    if (contacts != null)
+                    {
+                        int purged = contacts.RemoveAll(c => c != null && c.id == "On-Duty Staff");
+                        if (purged > 0)
+                            Plugin.Logger.LogInfo($"[SynthStaff] purged {purged} stale 'On-Duty Staff' contact thread(s) ({when}) — native message to a synthetic (round-55).");
+                    }
+                }
+                catch (Exception cx) { Plugin.Logger.LogWarning($"[SynthStaff] contact purge ({when}): {cx.Message}"); }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] orphan strip ({when}): {ex.Message}"); }
             return removed;

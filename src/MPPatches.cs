@@ -3879,6 +3879,28 @@ namespace BigAmbitionsMP
             }
         }
 
+        // Round-55 (Westi report 2026-07-22, screenshot-confirmed): the rival "hire your best
+        // employees" defense (RivalDefenseHelper.ActivateHireEmployees) ranks poach targets by
+        // skill+satisfaction — our synthetic's pinned satisfaction 100 made it the FIRST pick, so
+        // the rival "poached" the fake employee and the owner got the training-ultimatum message
+        // from contact "On-Duty Staff" ("...or I'll leave"). IsPoachable is the game's own
+        // can-this-employee-be-poached predicate and the single chokepoint every selector honors —
+        // a synthetic is never poachable. (The stale contact thread in affected saves is purged by
+        // MPRegisterSync.StripOrphanSyntheticEmployees at world-ready.)
+        [HarmonyPatch(typeof(Entities.EmployeeInstance), nameof(Entities.EmployeeInstance.IsPoachable), MethodType.Getter)]
+        public static class Patch_EmployeeInstance_IsPoachable_NeverSynthetic
+        {
+            static void Postfix(Entities.EmployeeInstance __instance, ref bool __result)
+            {
+                try
+                {
+                    if (__result && __instance?.id != null && __instance.id.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix))
+                        __result = false;
+                }
+                catch { }
+            }
+        }
+
         // (5) Our synthetic on-duty staff has zero "demands", so the game's hourly satisfaction calc does
         // 0/0 → NaN. Skip it for the synthetic; it keeps its mod-set satisfaction (100). (2026-06-19.)
         [HarmonyPatch(typeof(Entities.EmployeeInstance), "UpdateSatisfaction")]

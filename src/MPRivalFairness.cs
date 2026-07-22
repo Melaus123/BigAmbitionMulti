@@ -140,7 +140,13 @@ namespace BigAmbitionsMP
         {
             static bool Prefix(ref bool __result)
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                // Round-55 (Westi 2026-07-22): gate on InMpGame, not IsConnected — a DISCONNECT with
+                // the world still loaded (reconnect window) dropped IsConnected while the game kept
+                // running, the suppression lapsed, and the native poach fired — straight into the
+                // lingering synthetic (its removal rides an off-duty message a dead link never
+                // delivers). InMpGame is the predicate the time system already holds through that
+                // exact window.
+                if (!MPServer.IsRunning && !MPClient.IsConnected && !MPClient.InMpGame) return true;
                 __result = false;
                 Plugin.Logger.LogInfo("[RivalFair] rival employee-poach suppressed (MP fairness — host-only mechanic).");
                 return false;

@@ -3697,6 +3697,7 @@ namespace BigAmbitionsMP
         private TextMeshProUGUI[] _lwRoster = new TextMeshProUGUI[6];
         private GameObject? _lwDiffEasy, _lwDiffNormal, _lwDiffHard, _lwCustomize, _lwStart;
         private RectTransform? _rtDiffEasy, _rtDiffNormal, _rtDiffHard, _rtCustomize, _rtLwStart, _rtLwLeave;
+        private RectTransform? _rtLwReport;   // round-54: lobby report button (both roles)
         // Per-player roster columns.  Cash = host-dictated (host edits any row);
         // Age = self-edited (each player edits only their own row).  This is the
         // ONLY starting-cash UI now — the old base field + customize-page cash are
@@ -3916,6 +3917,9 @@ namespace BigAmbitionsMP
             _mpSubmenu.Add(CloneMenuButton(template, "BAMP_HostNew",   "Host New Game",   OnMpHostNew,   null));
             _mpSubmenu.Add(CloneMenuButton(template, "BAMP_HostSaved", "Host Saved Game", OnMpHostSaved, null));
             _mpSubmenu.Add(CloneMenuButton(template, "BAMP_Join",      "Join Game",       OnMpJoin,      null));
+            // Round-54: menu-side report entry — the player who CAN'T get in-game (failed join)
+            // was exactly the one who couldn't reach the in-game top-bar report button.
+            _mpSubmenu.Add(CloneMenuButton(template, "BAMP_Report",    "Report a Bug",    OpenManualBugReport, null));
             _mpSubmenu.Add(CloneMenuButton(template, "BAMP_Back",      "Back",            OnMpBack,      null));
             foreach (var b in _mpSubmenu) b.SetActive(false);
 
@@ -4730,6 +4734,9 @@ namespace BigAmbitionsMP
 
             _lwStart   = CloneButtonInto(_lobbyWindow.transform, "BAMP_LwStart", "Start Game", OnLobbyStart, 110f, -456f, 160f, 42f); _rtLwStart = _lwStart?.GetComponent<RectTransform>();
             var leave  = CloneButtonInto(_lobbyWindow.transform, "BAMP_LwLeave", "Leave",      OnLobbyLeave, 290f, -456f, 160f, 42f); _rtLwLeave = leave?.GetComponent<RectTransform>();
+            // Round-54: report entry IN the lobby — "Not connected" strands players exactly here,
+            // with the failed join's reason freshest in the log. Both roles (clients included).
+            var lwRep  = CloneButtonInto(_lobbyWindow.transform, "BAMP_LwReport", "Report", OpenManualBugReport, 16f, -456f, 84f, 42f); _rtLwReport = lwRep?.GetComponent<RectTransform>();
 
             _lobbyWindow.SetActive(false);
         }
@@ -4940,6 +4947,7 @@ namespace BigAmbitionsMP
             if (Input.GetMouseButtonDown(0))
             {
                 if (RectHit(_rtLwLeave, mp)) { OnLobbyLeave(); return; }
+                if (RectHit(_rtLwReport, mp)) { OpenManualBugReport(); return; }   // round-54: both roles
                 if (host)
                 {
                     // KICK [X] on a roster row.
@@ -5226,7 +5234,7 @@ namespace BigAmbitionsMP
             _crashReportAutoFocusPending = true;
             if (_crashReportInputField != null)
                 _crashReportInputField.SetTextWithoutNotify("");
-            MPChat.AddNotice("bug report window opened");
+            Plugin.Logger.LogInfo("[BugReport] manual report window opened.");
         }
 
         private void AttachFilesToBugReport()
