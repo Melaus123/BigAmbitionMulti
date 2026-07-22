@@ -26,7 +26,7 @@ namespace BigAmbitionsMP
             addr = "";
             try
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return false;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return false;
                 var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
                 if (reg == null) return false;
                 addr = GameStateReader.AddressKey(reg);
@@ -190,7 +190,7 @@ namespace BigAmbitionsMP
             try
             {
                 if (!__result || isPlayer || __instance == null) return;
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                 if (!BusinessHelperRoute.HelperHere(out var addr)) return;
                 string? entryId = CustomerEntrySync.EntryIdOf(__instance);
                 if (string.IsNullOrEmpty(entryId) || _sent.Contains(entryId)) return;
@@ -434,7 +434,7 @@ namespace BigAmbitionsMP
             addr = "";
             try
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return null;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return null;
                 var ii = holder as ItemInstance;
                 if (ii == null) return null;   // own vehicles/boxes etc. — not building-owned
                 if (!HousingFurniture.LocalGuestHere() && !HousingFurniture.LocalHelperHere()) return null;

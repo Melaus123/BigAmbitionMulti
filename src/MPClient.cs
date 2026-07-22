@@ -71,6 +71,15 @@ namespace BigAmbitionsMP
         /// Cleared ONLY on full exit-to-menu (scene unload) and the offline-fork dismiss, so a genuine solo
         /// fork (host gone for good) still gets native time. NOT cleared on a mere disconnect.</summary>
         public static volatile bool InMpGame;
+
+        /// <summary>Round-56 — the "reconnect-window suppression lapse" fix (the Westi poach case,
+        /// generalized): TRUE while this machine is a CLIENT with an MP world loaded, INCLUDING the
+        /// disconnected reconnect window (InMpGame is sticky through drops; hosts excluded via
+        /// !IsRunning). Suppressions of native world-mutating passes, shields over mod-created
+        /// state, and replica protections must gate on THIS instead of IsConnected — a dropped
+        /// link must never hand the loaded MP world back to the native single-player simulation.
+        /// Pure network sends keep gating on IsConnected (nothing to send without a link).</summary>
+        public static bool IsClientInWorld => IsConnected || (InMpGame && !MPServer.IsRunning);
         // Set by Disconnect() so a deliberate leave (Leave button, exit-to-menu
         // teardown, reconnect guard) never triggers the session-over lock.
         private static bool _voluntaryDisconnect;

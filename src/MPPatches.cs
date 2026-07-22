@@ -301,13 +301,13 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(Helpers.RealEstateHelper), "UpdateBuildingsForSale")]
         public static class Patch_UpdateBuildingsForSale_HostOnly
         {
-            static bool Prefix() => !MPClient.IsConnected;   // host + single player run it; clients get the market via sync
+            static bool Prefix() => !MPClient.IsClientInWorld;   // host + single player run it; clients get the market via sync
         }
 
         [HarmonyPatch(typeof(Helpers.RealEstateHelper), "SimulateCompetitorBuyingAIBuildings")]
         public static class Patch_SimulateCompetitorBuyingAIBuildings_HostOnly
         {
-            static bool Prefix() => !MPClient.IsConnected;
+            static bool Prefix() => !MPClient.IsClientInWorld;
         }
 
         // ── Patch: GameManager.Update ─────────────────────────────────────────
@@ -814,7 +814,7 @@ namespace BigAmbitionsMP
             {
                 if (UnityEngine.Time.timeSinceLevelLoad <= 5f) return true;     // let the pool init first
                 // false = skip Gley's update (no spawn, no sim) on a pure client while suppression is on.
-                return !(MPClient.IsConnected && !MPServer.IsRunning && TrafficSync.ClientTrafficSuppressionEnabled);
+                return !(MPClient.IsClientInWorld && !MPServer.IsRunning && TrafficSync.ClientTrafficSuppressionEnabled);
             }
         }
 
@@ -893,7 +893,7 @@ namespace BigAmbitionsMP
             {
                 // CLAUDE-DIAGNOSTIC — gated on ParkedVehicleSync.SpawnSuppressionEnabled
                 // so F6 can toggle the suppression at runtime for the entry-bug A/B test.
-                if (MPClient.IsConnected && ParkedVehicleSync.SpawnSuppressionEnabled) return false;
+                if (MPClient.IsClientInWorld && ParkedVehicleSync.SpawnSuppressionEnabled) return false;
                 return true;
             }
         }
@@ -1099,7 +1099,7 @@ namespace BigAmbitionsMP
 
             static bool Prefix()
             {
-                if (!MPClient.IsConnected) return true;
+                if (!MPClient.IsClientInWorld) return true;
                 Plugin.Logger.LogInfo("[Suppress] SetupResidentialBuildings skipped on client.");
                 return false;
             }
@@ -1115,7 +1115,7 @@ namespace BigAmbitionsMP
 
             static bool Prefix()
             {
-                if (!MPClient.IsConnected) return true;
+                if (!MPClient.IsClientInWorld) return true;
                 Plugin.Logger.LogInfo("[Suppress] SetupWarehouseBuildings skipped on client.");
                 return false;
             }
@@ -1131,7 +1131,7 @@ namespace BigAmbitionsMP
 
             static bool Prefix()
             {
-                if (!MPClient.IsConnected) return true;
+                if (!MPClient.IsClientInWorld) return true;
                 Plugin.Logger.LogInfo("[Suppress] DistributeBuildingsToRivals skipped on client.");
                 return false;
             }
@@ -1147,7 +1147,7 @@ namespace BigAmbitionsMP
 
             static bool Prefix()
             {
-                if (!MPClient.IsConnected) return true;
+                if (!MPClient.IsClientInWorld) return true;
                 Plugin.Logger.LogInfo("[Suppress] SetupRivalFactories skipped on client.");
                 return false;
             }
@@ -1163,7 +1163,7 @@ namespace BigAmbitionsMP
 
             static bool Prefix()
             {
-                if (!MPClient.IsConnected) return true;
+                if (!MPClient.IsClientInWorld) return true;
                 Plugin.Logger.LogInfo("[Suppress] SetRivalBuildings skipped on client.");
                 return false;
             }
@@ -1202,7 +1202,7 @@ namespace BigAmbitionsMP
 
             static bool Prefix()
             {
-                if (!MPClient.IsConnected) return true;
+                if (!MPClient.IsClientInWorld) return true;
                 return false;   // silent — the sweep runs hourly; one log line per session would still be noise on fast-forward
             }
         }
@@ -1235,7 +1235,7 @@ namespace BigAmbitionsMP
                     // before the body calls GetAllRivalData; cleared in the Load
                     // Postfix).  Fires on either role so the host injects clients
                     // and the client injects the host/other clients.
-                    if (!MPClient.IsConnected && !MPServer.IsRunning) return;
+                    if (!MPClient.IsClientInWorld && !MPServer.IsRunning) return;
                     GameStatePatcher.RivalsLeaderboardLoadRunning = true;
                     // Reset on EVERY Load (before the throttle) so the re-Load
                     // fired when the stats snapshot arrives logs fresh income
@@ -1383,7 +1383,7 @@ namespace BigAmbitionsMP
                     // Only the client needs the rest of this Postfix's work
                     // (populating ownedBusinesses + overriding lb.weeklyIncome).
                     // On host, the natural game calc is authoritative.
-                    if (!MPClient.IsConnected) return;
+                    if (!MPClient.IsClientInWorld) return;
 
                     // Client AI rival: client's RivalData has EMPTY owned lists (we
                     // suppressed SetRivalBuildings).  Repopulate them to mirror the
@@ -1517,7 +1517,7 @@ namespace BigAmbitionsMP
                     // Fire on EITHER role — host needs the same override so the
                     // host's UI shows client character names (not PlayerIds) when
                     // looking up the client's rival entry.
-                    if (!MPClient.IsConnected && !MPServer.IsRunning) return true;
+                    if (!MPClient.IsClientInWorld && !MPServer.IsRunning) return true;
                     if (string.IsNullOrEmpty(__0))  return true;
                     if (GameStatePatcher.ClientRivalNames.TryGetValue(__0, out var name)
                         && !string.IsNullOrWhiteSpace(name))
@@ -1662,7 +1662,7 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (!GameStatePatcher.RivalsLeaderboardLoadRunning) return;
-                    if (!MPClient.IsConnected && !MPServer.IsRunning) return;
+                    if (!MPClient.IsClientInWorld && !MPServer.IsRunning) return;
                     if (GameStatePatcher.ClientPlayerRoster.Count == 0) return;
                     if (__result == null) return;
 
@@ -1737,7 +1737,7 @@ namespace BigAmbitionsMP
                     // self-reported rows (its replicas have no order history → native calc showed $0 for a
                     // client's businesses). Addresses NOT in the map (own businesses; AI on the host)
                     // render natively as before.
-                    if ((!MPClient.IsConnected && !MPServer.IsRunning) || __0 == null) return;
+                    if ((!MPClient.IsClientInWorld && !MPServer.IsRunning) || __0 == null) return;
                     string key = GameStateReader.AddressKey(__0.Address);
                     if (string.IsNullOrEmpty(key)) return;
                     if (GameStatePatcher.ClientBusinessIncomeByAddress.TryGetValue(key, out var inc))
@@ -1822,7 +1822,7 @@ namespace BigAmbitionsMP
             var stripped = new System.Collections.Generic.List<Entities.EmployeeInstance>();
             try
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return stripped;   // records only exist in MP anyway
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return stripped;   // records only exist in MP anyway
                 var list = SaveGameManager.Current?.EmployeeInstances;
                 if (list == null) return stripped;
                 for (int i = list.Count - 1; i >= 0; i--)
@@ -2014,7 +2014,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
                     string? folder = MPSaveCoordinator.PortraitFolder;
                     if (string.IsNullOrEmpty(folder) || saveGame == null) return true;
                     __result = System.IO.Path.Combine(folder,
@@ -2255,7 +2255,7 @@ namespace BigAmbitionsMP
                     // Only intercept when we're inside GenerateRivals on the
                     // CLIENT and our queue has IDs to feed.  All other callers
                     // (item IDs, employee IDs, etc.) see the original.
-                    if (!MPClient.IsConnected) return true;
+                    if (!MPClient.IsClientInWorld) return true;
                     if (!GameStatePatcher.RivalsGenerateRunning) return true;
                     if (GameStatePatcher.PendingRivalIdQueue.Count == 0)
                     {
@@ -2293,7 +2293,7 @@ namespace BigAmbitionsMP
 
             static bool Prefix()
             {
-                if (!MPClient.IsConnected) return true;
+                if (!MPClient.IsClientInWorld) return true;
                 Plugin.Logger.LogInfo("[Suppress] RealEstateHelper.RunDaily skipped on client.");
                 return false;
             }
@@ -2310,7 +2310,7 @@ namespace BigAmbitionsMP
         {
             static bool Prefix()
             {
-                if (!MPClient.IsConnected) return true;
+                if (!MPClient.IsClientInWorld) return true;
                 Plugin.Logger.LogInfo("[Suppress] CompetitionHelper.RunDaily skipped on client (host-authoritative AI economy).");
                 return false;
             }
@@ -2591,7 +2591,7 @@ namespace BigAmbitionsMP
         {
             static bool Prefix()
             {
-                if (!MPClient.IsConnected) return true;
+                if (!MPClient.IsClientInWorld) return true;
                 ItemHelper.ClearLmpCache();
                 Plugin.Logger.LogInfo("[Suppress] ProductMarketHelper.RunDaily skipped on client (host-authoritative market events; LMP cache cleared).");
                 return false;
@@ -2608,7 +2608,7 @@ namespace BigAmbitionsMP
         {
             static void Postfix(ref bool __result)
             {
-                if (MPServer.IsRunning || MPClient.IsConnected) __result = true;
+                if (MPServer.IsRunning || MPClient.IsClientInWorld) __result = true;
             }
         }
 
@@ -2648,7 +2648,7 @@ namespace BigAmbitionsMP
         {
             static void Postfix(string itemName, BuildingRegistration registration, ref float __result)
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                 if (registration == null || !GameStatePatcher.IsAnyPlayerBusiness(registration)) return;
                 try
                 {
@@ -2826,7 +2826,7 @@ namespace BigAmbitionsMP
             static Exception? Finalizer(Exception? __exception)
             {
                 if (__exception == null) return null;
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return __exception;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return __exception;
                 _swallowed++;
                 if (_swallowed <= 5 || _swallowed % 200 == 0)
                     Plugin.Logger.LogWarning($"[ActivityUI] swallowed {__exception.GetType().Name} in Update (#{_swallowed}).");
@@ -2854,7 +2854,7 @@ namespace BigAmbitionsMP
 
             static void Postfix()
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                 MPHubNativePage.HidePage();
             }
         }
@@ -3078,7 +3078,7 @@ namespace BigAmbitionsMP
             private static int _n;
             internal static bool Skip(string via)
             {
-                if (!MPClient.IsConnected || MPServer.IsRunning) return false;   // SP + host: native
+                if (!MPClient.IsClientInWorld || MPServer.IsRunning) return false;   // SP + host: native
                 _n++;
                 if (_n == 1 || _n % 25 == 0)
                     Plugin.Logger.LogInfo($"[Suppress] {via} skipped on client (#{_n}) — market/AI-shop state is host-derived (round-51).");
@@ -3178,7 +3178,7 @@ namespace BigAmbitionsMP
             static Exception? Finalizer(Exception __exception)
             {
                 if (__exception == null) return null;
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return __exception;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return __exception;
                 _swallowed++;
                 if (_swallowed <= 5 || _swallowed % 200 == 0)
                     Plugin.Logger.LogWarning($"[NavShield] swallowed {__exception.GetType().Name} in UpdateNavMeshTargets (#{_swallowed}).");
@@ -3217,14 +3217,14 @@ namespace BigAmbitionsMP
             // low-volume real-traffic-vs-remote-vehicle-ghost contacts.
             static bool Prefix()
             {
-                return !(MPClient.IsConnected && !MPServer.IsRunning);   // false = skip original (client only)
+                return !(MPClient.IsClientInWorld && !MPServer.IsRunning);   // false = skip original (client only)
             }
 
             private static int _swallowed;
             static Exception? Finalizer(Exception __exception)
             {
                 if (__exception == null) return null;
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return __exception;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return __exception;
                 _swallowed++;
                 if (_swallowed <= 5 || _swallowed % 500 == 0)
                     Plugin.Logger.LogWarning($"[Gley] swallowed {__exception.GetType().Name} in traffic collider handler (#{_swallowed}) — ghost contact.");
@@ -3319,7 +3319,7 @@ namespace BigAmbitionsMP
                                         ref System.Collections.Generic.Dictionary<string, string> __result)
             {
                 if (__exception == null) return null;
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return __exception;   // SP: vanilla behavior
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return __exception;   // SP: vanilla behavior
                 string biz = "the company";
                 try
                 {
@@ -3353,7 +3353,7 @@ namespace BigAmbitionsMP
             static Exception? Finalizer(Exception __exception, ref string __result)
             {
                 if (__exception == null) return null;
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return __exception;   // SP: vanilla behavior
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return __exception;   // SP: vanilla behavior
                 __result = "";
                 _shielded++;
                 if (_shielded <= 3 || _shielded % 100 == 0)
@@ -3375,7 +3375,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                     int removed = allModels.RemoveAll(m =>
                         m != null && MPRegisterSync.IsInjectedStaff(m.employeeId)
                                   && !MPRegisterSync.IsInjectedFromMergedPartner(m.employeeId));
@@ -3616,7 +3616,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                     var data = AccessTools.Field(__instance.GetType(), "data")?.GetValue(__instance) as System.Collections.IList;
                     if (data == null || data.Count == 0) return;
                     System.Reflection.FieldInfo? idF = null;
@@ -3819,7 +3819,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
                     var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
                     if (reg == null || !GameStatePatcher.IsForeignPlayerBusiness(reg)) return true;
                     string owner = MPRegisterSync.CurrentShopOwner;
@@ -3849,7 +3849,7 @@ namespace BigAmbitionsMP
         {
             static bool Prefix(BuildingRegistration __instance)
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
                 if (GameStatePatcher.IsAnyPlayerBusiness(__instance))
                 {
                     Plugin.Logger.LogInfo("[EconShield] blocked AI shutdown of another player's business.");
@@ -3867,7 +3867,7 @@ namespace BigAmbitionsMP
         {
             static void Postfix(string rivalId, ref float __result)
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                 if (GameStatePatcher.IsSessionPlayerRivalId(rivalId))
                 {
                     __result = float.MaxValue;
@@ -3938,7 +3938,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsConnected) return true;   // single player — run native
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;   // single player — run native
                     if (__instance == null) return true;
 
                     BuildingRegistration? reg = null;
@@ -3984,7 +3984,7 @@ namespace BigAmbitionsMP
         {
             static void Prefix()
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                 var states = SaveGameManager.Current?.rivalStates;
                 if (states == null) return;
                 int removed = states.RemoveAll(rs =>
@@ -4031,7 +4031,7 @@ namespace BigAmbitionsMP
 
             static void Prefix()
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                 try { MPRestSync.OnTaxiRideStarting(); } catch { }
             }
         }
@@ -4332,7 +4332,7 @@ namespace BigAmbitionsMP
             static void Postfix(ref bool __result)
             {
                 if (__result) return;                                     // native already allows
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                 try
                 {
                     string owner = MPRegisterSync.CurrentShopOwner;
@@ -4389,7 +4389,7 @@ namespace BigAmbitionsMP
                 if (__exception == null) return null;
                 try
                 {
-                    if ((MPServer.IsRunning || MPClient.IsConnected) && InPlayerShop())
+                    if ((MPServer.IsRunning || MPClient.IsClientInWorld) && InPlayerShop())
                     {
                         Plugin.Logger.LogWarning(
                             $"[RegShield] OnPlaceOrder threw in '{MPRegisterSync.CurrentShopOwner}' shop — " +
@@ -4430,7 +4430,7 @@ namespace BigAmbitionsMP
             static void Postfix(EmployeeStationController __instance, ref bool __result)
             {
                 if (__result) return;
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                 try
                 {
                     // Round-30 (WS3): the override now also admits ANY station inside a shop we hold a synced
@@ -4466,7 +4466,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if ((MPServer.IsRunning || MPClient.IsConnected)
+                    if ((MPServer.IsRunning || MPClient.IsClientInWorld)
                         && __instance != null && MPRegisterSync.IsInjectedStaff(__instance.id))
                         return false;
                 }
@@ -4489,7 +4489,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if ((MPServer.IsRunning || MPClient.IsConnected)
+                    if ((MPServer.IsRunning || MPClient.IsClientInWorld)
                         && __instance != null && MPRegisterSync.IsInjectedStaff(__instance.id))
                         return false;
                 }
@@ -4508,7 +4508,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                     if (__result <= 0) return;
                     var matches = Helpers.EmployeeHelper.GetEmployeeInstances(new EmployeeInstancesQueryInfo
                     {
@@ -4670,7 +4670,7 @@ namespace BigAmbitionsMP
             static bool Prefix(Controllers.CashRegisterController __instance,
                                System.Collections.Generic.List<BigAmbitions.Items.CargoInstance> orderedCargoInstances)
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
                 string owner = MPRegisterSync.CurrentShopOwner;
                 if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return true;
                 if (!MPRestSync.AllPlayers().Contains(owner)) return true;   // AI shops fully native
@@ -4838,7 +4838,7 @@ namespace BigAmbitionsMP
                     // socket — the owner would never be credited nor the stock decremented, yet the local debit
                     // would still run (cash destroyed, no rollback). Abort and charge nothing; the buyer retries
                     // once reconnected. (Mirrors the "buyer cancelled" branch above.)
-                    if (!MPServer.IsRunning && !MPClient.IsConnected)
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld)
                     {
                         Plugin.Logger.LogWarning("[MPSale] host link down at ring-up — sale aborted, nothing charged (retry after reconnect).");
                         return;
@@ -4916,7 +4916,7 @@ namespace BigAmbitionsMP
 
             static bool Prefix(Controllers.CashRegisterController __instance, ref bool __result)
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
                 try
                 {
                     string owner = MPRegisterSync.CurrentShopOwner;
@@ -4984,7 +4984,7 @@ namespace BigAmbitionsMP
             static void Postfix(Controllers.CashRegisterController __instance, ref bool __result)
             {
                 if (!__result) return;
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                 try
                 {
                     // Skip the receiver's OWN shop — guard EVERYTHING else (AI shops AND other
@@ -5033,7 +5033,7 @@ namespace BigAmbitionsMP
         {
             static bool Prefix(Controllers.IRSStationController __instance)
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;   // single player / offline → native
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;   // single player / offline → native
                 try
                 {
                     if (__instance.employee != null) return true;               // staffed → native cancel is safe
@@ -5065,7 +5065,7 @@ namespace BigAmbitionsMP
         {
             static bool Prefix(PlayerActivity.IPlayerActivity playerActivity)
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
                 try
                 {
                     if (playerActivity is PlayerActivity.StudyActivity)
@@ -5092,7 +5092,7 @@ namespace BigAmbitionsMP
         {
             static bool Prefix(BuildingManager __instance)
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
                 try
                 {
                     var reg = __instance.buildingRegistration;
@@ -5109,7 +5109,7 @@ namespace BigAmbitionsMP
         {
             static void Postfix(BuildingRegistration buildingRegistration, ref bool __result)
             {
-                if (!__result || (!MPServer.IsRunning && !MPClient.IsConnected)) return;
+                if (!__result || (!MPServer.IsRunning && !MPClient.IsClientInWorld)) return;
                 try
                 {
                     if (GameStatePatcher.IsAnyPlayerBusiness(buildingRegistration))
@@ -5127,7 +5127,7 @@ namespace BigAmbitionsMP
         {
             static void Postfix(BuildingRegistration buildingRegistration, ref bool __result)
             {
-                if (!__result || (!MPServer.IsRunning && !MPClient.IsConnected)) return;
+                if (!__result || (!MPServer.IsRunning && !MPClient.IsClientInWorld)) return;
                 try
                 {
                     if (GameStatePatcher.IsAnyPlayerBusiness(buildingRegistration))
@@ -5151,7 +5151,7 @@ namespace BigAmbitionsMP
         {
             static void Postfix(Controllers.PlayerItemPurchaser __instance)
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                 try
                 {
                     var ic = __instance.itemController;

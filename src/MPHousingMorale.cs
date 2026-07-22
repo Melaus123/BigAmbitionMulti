@@ -30,7 +30,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                 if (UnityEngine.Time.unscaledTime < _nextAt) return;
                 _nextAt = UnityEngine.Time.unscaledTime + 10f;
 

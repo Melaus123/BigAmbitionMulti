@@ -297,7 +297,7 @@ namespace BigAmbitionsMP
             try
             {
                 if (!__result || vehicleInstance == null) return;
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;      // SP — vanilla behavior
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;      // SP — vanilla behavior
                 bool keep = VehicleManager.IsDrivenRemotely(vehicleInstance.id)   // in a borrower's hands
                             || AnySessionPlayerNear(vehicleInstance);             // user-approved 2026-07-07: "out of
                                                                                   // ALL players' sight" — proximity is

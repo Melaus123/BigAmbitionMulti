@@ -93,7 +93,7 @@ namespace BigAmbitionsMP
         {
             if (UnityEngine.Time.unscaledTime < _ctxNextPoll) return;
             _ctxNextPoll = UnityEngine.Time.unscaledTime + 0.5f;
-            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
             try
             {
                 var bm  = InstanceBehavior<BuildingManager>.Instance;
@@ -554,7 +554,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                 var gi = SaveGameManager.Current;
                 if (gi?.BuildingRegistrations == null) return;
                 int day = gi.Day;
@@ -598,7 +598,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                 if (Time.unscaledTime < _nextDutySummaryAt) return;
                 _nextDutySummaryAt = Time.unscaledTime + 600f;
 
@@ -676,7 +676,7 @@ namespace BigAmbitionsMP
         // ownedShops=0 while the player owns shops = an ownership/RentedByPlayer gap (root c).
         public static void LogStaffDiagOwner()
         {
-            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
             if (Time.unscaledTime - _nextStaffDiagAt < 60f) return;
             _nextStaffDiagAt = Time.unscaledTime;
             try
@@ -734,7 +734,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if ((!MPServer.IsRunning && !MPClient.IsConnected) || reg == null || string.IsNullOrEmpty(addr)) return;
+                if ((!MPServer.IsRunning && !MPClient.IsClientInWorld) || reg == null || string.IsNullOrEmpty(addr)) return;
                 bool hasTill = false;
                 try
                 {
@@ -1274,7 +1274,7 @@ namespace BigAmbitionsMP
         {
             if (Time.unscaledTime < _nextRosterPublishAt) return;
             _nextRosterPublishAt = Time.unscaledTime + 30f;
-            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
             try
             {
                 var gi = SaveGameManager.Current;

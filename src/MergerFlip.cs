@@ -150,7 +150,7 @@ namespace BigAmbitionsMP
         private static HashSet<string> DesiredKeys()
         {
             var set = new HashSet<string>();
-            if (!MPServer.IsRunning && !MPClient.IsConnected) return set;
+            if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return set;
             foreach (var k in MergerSync.MyGroupBuildingKeys)
                 if (!string.IsNullOrEmpty(k)) set.Add(k);
             return set;
@@ -181,7 +181,7 @@ namespace BigAmbitionsMP
                 string ownerPid = owner == "host" ? MPConfig.PlayerId : owner;
                 return ownerPid != MPConfig.PlayerId;
             }
-            return MPClient.IsConnected && GrantSync.IsOtherOwned(key);
+            return MPClient.IsClientInWorld && GrantSync.IsOtherOwned(key);
         }
 
         // ── Authority veil (§13-A passes) + save strip ────────────────────────

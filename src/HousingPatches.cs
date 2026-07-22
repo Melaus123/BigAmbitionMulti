@@ -26,7 +26,7 @@ namespace BigAmbitionsMP
             if (__result) return;   // already enterable (the owner, or an open business) — leave it
             try
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;   // no grants in single-player
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;   // no grants in single-player
                 string addr = GameStateReader.AddressKey(address);
                 // Round-32: a business HELPER may enter the owner's business even while it's closed to the
                 // public — that's exactly when you restock together. Same postfix, second key set.
@@ -251,7 +251,7 @@ namespace BigAmbitionsMP
             addr = ""; fid = "";
             try
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return false;   // no grants in single-player
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return false;   // no grants in single-player
                 var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
                 if (reg == null) return false;
                 addr = GameStateReader.AddressKey(reg);
@@ -617,7 +617,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;   // single-player → native only
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;   // single-player → native only
                 string addr = GameStateReader.AddressKey(__instance);
                 if (!GrantSync.CanEnterGranted(addr) && !GrantSync.IsHelperBusiness(addr)) return;   // owner / non-guest → native only
                 InteriorSync.ForwardGuestInteriorEdit(addr);
