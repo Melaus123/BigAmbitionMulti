@@ -664,7 +664,15 @@ namespace BigAmbitionsMP
         // the shared world), the vehicle-cargo manifest moved to the 4-part
         // "item=amount=paid=price" form, and VehicleCargoReq/Res gained the Silent
         // flag + OpMarkPaid.  Mixed sessions would desync — refuse them cleanly.
-        public const int Version = 2;
+        //
+        // v3 (mod 0.1.13): CLEAN-BREAK POLICY (user 2026-07-22 — every release bumps this;
+        // mixed-version sessions are never worth the risk). Concretely this release: needs/
+        // morale tuning rides GameVariablesDto + the time heartbeat (an old client would
+        // drain needs at native rates while everyone else runs the dials), clients no
+        // longer generate their own rental market (an old client still would, recreating
+        // the zombie/wrongful-rent divergence), RentDeny carries DenyReason + expects the
+        // rollback handler, and BuildingStorageSync gained placereduce/vehicletake/signset.
+        public const int Version = 3;
     }
 
     /// <summary>Sent by client on connect.</summary>
