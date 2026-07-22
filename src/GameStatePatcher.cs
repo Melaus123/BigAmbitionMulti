@@ -1269,6 +1269,11 @@ namespace BigAmbitionsMP
         public static bool IsReceiversOwnBusiness(BuildingRegistration? reg)
             => MergerFlip.TrulyMine(reg);
 
+        // Round-50b: double-tenancy conflicts logged once per address per load (the record
+        // re-arrives every sync — one line carries the signal, repeats would bury it).
+        private static readonly HashSet<string> _tenancyConflictLogged = new();
+        public static void ResetTenancyConflictLog() { try { _tenancyConflictLogged.Clear(); } catch { } }
+
         /// <summary>True if this rival-owner id actually belongs to a session MP player (our own id,
         /// a roster client, or any session player) — i.e. a "rival" that is really another player, NOT a
         /// game AI rival. Used to shield player-owned shops from AI-economy administration (shutdown /
@@ -2552,6 +2557,18 @@ namespace BigAmbitionsMP
             RunOnMainThread(() =>
             {
                 var reg = FindRegistration(info.AddressKey);
+                // Round-50b: the HOST'S OWN ACTIVE SHOP is never overwritable by a remote claim.
+                // A stale manifest-carried ledger entry can vouch for the sender (field:
+                // 57-fifthavenue, 2026-07-21-204010 — both saves claimed the address), letting
+                // the SenderOwns gate pass a push that would clobber the host's own business.
+                // TrulyMine excludes merger-flipped partner shops (their pushes stay legit).
+                if (reg != null && reg.RentedByPlayer && MergerFlip.TrulyMine(reg))
+                {
+                    Plugin.Logger.LogWarning($"[Conflict] DOUBLE TENANCY at '{info.AddressKey}': the host actively rents it " +
+                        $"(local name='{reg.BusinessName}') but '{info.OwnerPlayerId}' pushed a business change (name='{info.BusinessName}') — " +
+                        "refused; the world-ready ledger sweep drops the stale reservation on the next host load.");
+                    return;
+                }
                 bool signObjNull = reg == null || reg.signAppearanceSettings == null;
                 if (ApplyBusinessInfoLocal(info))
                     Plugin.Logger.LogInfo($"[Patcher/Host] Client business applied: {info.AddressKey} = '{info.BusinessName}' sign=type{info.SignType} (owner '{info.OwnerPlayerId}', signObjNull={signObjNull}).");
@@ -2582,6 +2599,21 @@ namespace BigAmbitionsMP
                                      // Rent-vs-deed split (2026-07-07): OwnerPlayerId is tenancy-only now;
                                      // a building I BOUGHT (deed) is mine even with no business in it.
                                      || (!string.IsNullOrEmpty(info.DeedOwnerPlayerId) && info.DeedOwnerPlayerId == MPConfig.PlayerId);
+                }
+                catch { }
+
+                // Round-50b DOUBLE-TENANCY DETECTOR (runs on WHICHEVER machine applies the
+                // contradiction — bug reports come from either side): this machine's game actively
+                // rents the building, yet the incoming record is not attributed here — the apply
+                // below will treat it as a foreign shop and overwrite name/sign/schedule. Field
+                // case 57-fifthavenue (2026-07-21-204010): the client's own shop was repeatedly
+                // renamed by the host's record whenever attribution flapped. Once per address.
+                try
+                {
+                    if (reg.RentedByPlayer && !receiverOwnsThis && _tenancyConflictLogged.Add(info.AddressKey ?? ""))
+                        Plugin.Logger.LogWarning($"[Conflict] DOUBLE TENANCY at '{info.AddressKey}': this machine actively rents it " +
+                            $"(local name='{reg.BusinessName}') but the incoming record says name='{info.BusinessName}' " +
+                            $"owner='{info.OwnerPlayerId}' deed='{info.DeedOwnerPlayerId}' — two saves claim this address.");
                 }
                 catch { }
 
@@ -3223,22 +3255,24 @@ namespace BigAmbitionsMP
             try
             {
                 var gi = SaveGameManager.Current;
-                if (gi?.rivalStates == null) return;
+                if (gi == null) return;
+
+                // Pass 1 — reservations on addresses an AI RIVAL authoritatively runs (round-50).
                 var aiBiz = new Dictionary<string, string>();   // addressKey → AI rival id
-                foreach (var rs in gi.rivalStates)
-                {
-                    string id = rs?.rivalId?.ToString() ?? "";
-                    if (string.IsNullOrEmpty(id) || IsSessionPlayerRivalId(id)) continue;
-                    try
+                if (gi.rivalStates != null)
+                    foreach (var rs in gi.rivalStates)
                     {
-                        var rd = BigAmbitions.Rivals.RivalsHelper.GetRivalData(id);
-                        if (rd?.ownedRetailOfficeBusinesses == null) continue;
-                        foreach (var reg in rd.ownedRetailOfficeBusinesses)
-                            if (reg != null) aiBiz[GameStateReader.AddressKey(reg)] = id;
+                        string id = rs?.rivalId?.ToString() ?? "";
+                        if (string.IsNullOrEmpty(id) || IsSessionPlayerRivalId(id)) continue;
+                        try
+                        {
+                            var rd = BigAmbitions.Rivals.RivalsHelper.GetRivalData(id);
+                            if (rd?.ownedRetailOfficeBusinesses == null) continue;
+                            foreach (var reg in rd.ownedRetailOfficeBusinesses)
+                                if (reg != null) aiBiz[GameStateReader.AddressKey(reg)] = id;
+                        }
+                        catch { }
                     }
-                    catch { }
-                }
-                if (aiBiz.Count == 0) return;
 
                 var contaminated = new List<string>();
                 foreach (var kv in MPServer.BuildingOwners)
@@ -3259,6 +3293,34 @@ namespace BigAmbitionsMP
                     }
                     catch { }
                     Plugin.Logger.LogWarning($"[Integrity] ({reason}) ledger decontaminated: '{addr}' was reserved to player '{pid}' but the host's world runs AI rival '{rid}'s business there — reservation dropped, rival tenancy restored.");
+                }
+
+                // Pass 2 (round-50b) — reservations contradicting the HOST'S OWN TENANCY: the
+                // host's native game actively rents the address (TrulyMine excludes merger-flipped
+                // partner shops), so no client can hold the reservation. Field: 57-fifthavenue —
+                // a manifest-carried 'RED ROC' entry re-attributed the host's own shop to the
+                // client every session; the client's lease-terminate could never stick.
+                var hostTenanted = new List<string>();
+                foreach (var kv in MPServer.BuildingOwners)
+                {
+                    if (string.IsNullOrEmpty(kv.Value) || kv.Value == "host") continue;
+                    try
+                    {
+                        var reg = FindRegistration(kv.Key);
+                        if (reg != null && reg.RentedByPlayer && MergerFlip.TrulyMine(reg)) hostTenanted.Add(kv.Key);
+                    }
+                    catch { }
+                }
+                foreach (var addr in hostTenanted)
+                {
+                    if (!MPServer.BuildingOwners.TryRemove(addr, out var pid)) continue;
+                    try
+                    {
+                        var reg = FindRegistration(addr);
+                        if (reg != null && (reg.businessOwnerRivalId?.ToString() ?? "") == pid) reg.businessOwnerRivalId = "";   // undo the stamp; host tenancy needs no runner entry
+                    }
+                    catch { }
+                    Plugin.Logger.LogWarning($"[Integrity] ({reason}) ledger decontaminated: '{addr}' was reserved to player '{pid}' but the HOST'S OWN game actively rents it — reservation dropped (double-tenancy, round-50b).");
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] ledger sweep: {ex.Message}"); }

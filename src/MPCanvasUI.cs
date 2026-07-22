@@ -2847,6 +2847,7 @@ namespace BigAmbitionsMP
                 GameStatePatcher.SweepRivalFieldContamination("scene ready");   // heal renters written into the DEED field (rent-vs-deed split 2026-07-09)
                 _worldHealthAt = Time.unscaledTime + 30f;   // world-integrity line AFTER the rival cache fills (30s)
                 _postSyncHealthDone = false; _postSyncHealthAt = -1f;   // round-50: re-arm the post-sync census for this load
+                GameStatePatcher.ResetTenancyConflictLog();             // round-50b: conflict lines are once-per-address-per-load
                 // Round-35: a save can carry a STALE BAMP_ proxy id in ActiveVehicleId (borrowed cart
                 // despawned mid-push before the round-34b exit guard existed). IsUsingVehicle then reads
                 // true forever with no resolvable vehicle → box clicks NRE at ItemController.Interact:509
