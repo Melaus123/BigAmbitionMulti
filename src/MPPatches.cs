@@ -3018,6 +3018,42 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Round-51: clients never manufacture market/AI-shop state ──────────
+        // PROBE-RESOLVED (dual-instance run 2026-07-21, 50 hits, stack-confirmed): the Phase-1b
+        // suppression kept CityGenerator.PopulateBuildings for the registration skeleton — but
+        // PopulateBuildings ALSO rolls the "ideal empty percentage" rental market
+        // (MarkBuildingsForRentAndGetAvailableOnes → SetBuildingForRent) with the CLIENT'S OWN
+        // dice at every scene load (CityManager.OnScenesLoaded → InitializeCity). A client thus
+        // marks buildings empty+rentable that the host filled with AI shops — the FORMATION
+        // MECHANISM of the round-50 zombie/wrongful-rent class (field: 18 retail + 11 office
+        // rival shops flipped within minutes of a 0.1.11 join). The client's market is fully
+        // host-derived (BusinessSync carries AvailableForRent; the apply writes it), so both
+        // native "empty+rentable" producers are simply dead code on a client. Counted, quiet.
+        internal static class ShopClearSuppress
+        {
+            private static int _n;
+            internal static bool Skip(string via)
+            {
+                if (!MPClient.IsConnected || MPServer.IsRunning) return false;   // SP + host: native
+                _n++;
+                if (_n == 1 || _n % 25 == 0)
+                    Plugin.Logger.LogInfo($"[Suppress] {via} skipped on client (#{_n}) — market/AI-shop state is host-derived (round-51).");
+                return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(BusinessHelper), nameof(BusinessHelper.SetBuildingForRent))]
+        public static class Patch_SetBuildingForRent_SkipOnClient
+        {
+            static bool Prefix() => !ShopClearSuppress.Skip("SetBuildingForRent");
+        }
+
+        [HarmonyPatch(typeof(BuildingRegistration), nameof(BuildingRegistration.ShutDownAIBusiness))]
+        public static class Patch_ShutDownAIBusiness_SkipOnClient
+        {
+            static bool Prefix() => !ShopClearSuppress.Skip("ShutDownAIBusiness");
+        }
+
         // ── Patch: BuildingHelper.CanEnterBuilding — DIAGNOSTIC for the shop-closed bug ──
         // Release-safe: fires ONLY when entry is DENIED for a business you don't run, logging the exact
         // open-check inputs on THIS client so an affected player's log pinpoints the cause (synced truth vs
