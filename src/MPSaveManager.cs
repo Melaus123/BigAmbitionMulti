@@ -66,6 +66,14 @@ namespace BigAmbitionsMP
         /// <summary>Per group: stable ids whose merge-time wallet pooling was already accepted, so a
         /// restore/join replay can never pool the same member's cash twice (slice 4).</summary>
         public Dictionary<string, List<string>> MergerWalletContributed { get; set; } = new();
+
+        /// <summary>Round-53 — per-SAVE needs/morale authority (user design 2026-07-22): the load
+        /// lobby mirrors these, the Customize panel edits them, and the edited values become the
+        /// save's new authority. -1 = absent (pre-field manifest) → the lobby falls back to the
+        /// host's current settings.</summary>
+        public int TuneNeedsDrain  { get; set; } = -1;
+        public int TuneRestSpeed   { get; set; } = -1;
+        public int TuneMoraleTempo { get; set; } = -1;
     }
 
     /// <summary>One durable access grant: an owner gave a grantee a key (StableId space).</summary>

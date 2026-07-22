@@ -482,6 +482,7 @@ namespace BigAmbitionsMP
             MPRegisterSync.StripOrphanSyntheticEmployees("world-ready");   // clear duty-staff a prior save left behind
             MPSaveIntegrity.RunSweep("world-ready");   // dangling-reference repair/detect (includes duty-shift repair); summary rides bug reports
             GameStatePatcher.SweepLedgerVsRivalBusinesses("world-ready");   // round-50: drop player reservations on AI-rival-run addresses (host-only inside)
+            GameStatePatcher.ReconcileLoadedNeedsFlag();   // round-53: the drain dial owns the save's baked energy on/off after load (host-only inside)
             ApplyFreshSpawnWarp();  // fresh-character joins: designated start, not the prefab spot
             ApplySpawnSidestep();   // fresh games: one navmesh-validated de-stack, placement final
             // Placement diagnostic: position-restore runs in load-finish —
@@ -4502,6 +4503,21 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[MenuUI] Save picker → host session '{name}'.");
             ShowSavePicker(false);
             _lobbyLoadMode = true;
+            // Round-53: the lobby MIRRORS the save's own tuning settings (save-authoritative);
+            // a pre-field manifest leaves the host's current values as the fallback.
+            try
+            {
+                var m = MPSaveManager.ReadManifest(name);
+                if (m != null && m.TuneNeedsDrain >= 0)
+                {
+                    _hostSettings.NeedsDrainPercent  = m.TuneNeedsDrain;
+                    _hostSettings.RestSpeedPercent   = Math.Max(0, m.TuneRestSpeed);
+                    _hostSettings.MoraleTempoPercent = Math.Max(1, m.TuneMoraleTempo);
+                    _hostSettings.DisableEnergy      = m.TuneNeedsDrain == 0;
+                    Plugin.Logger.LogInfo($"[MenuUI] lobby mirrors save tuning: drain={m.TuneNeedsDrain}% rest={m.TuneRestSpeed}% morale={m.TuneMoraleTempo}% ('{name}').");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] save tuning mirror: {ex.Message}"); }
             try { OnHost(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] host: {ex.Message}"); }
             MPServer.ChosenLoadSession = name;   // set AFTER OnHost so Start() can't clear it
             ShowView(MpView.Lobby);
@@ -4875,7 +4891,9 @@ namespace BigAmbitionsMP
             bool newGame = host && !loadMode;
             SetActiveSafe(_lwDiffHdr != null ? _lwDiffHdr.gameObject : null, newGame);
             SetActiveSafe(_lwDiffEasy, newGame); SetActiveSafe(_lwDiffNormal, newGame); SetActiveSafe(_lwDiffHard, newGame);
-            SetActiveSafe(_lwCustomize, newGame);
+            // Round-53: Customize shows in LOAD mode too — there it edits the save's own
+            // adjustable settings (needs/rest/morale), which become the save's new authority.
+            SetActiveSafe(_lwCustomize, host);
             SetActiveSafe(_lwStart, host);   // Start shown to host in both modes
             if (newGame) HighlightDifficulty();
         }
@@ -6175,8 +6193,16 @@ namespace BigAmbitionsMP
         /// clicked and typed directly.  Hovering a name shows a description.
         /// Editing any value flips the difficulty to "Custom".
         /// </summary>
-        private void BuildSettingsPanel(Transform canvasRoot)
+        // Round-53: the panel exists in two shapes — full (new game: everything) and load-mode
+        // (only the save-authoritative dials; the rest is baked into the save at creation and
+        // showing dead rows would be a UI-vs-behavior lie). Rebuilt on open when the mode flips.
+        private bool _settingsPanelLoadMode;
+
+        private void BuildSettingsPanel(Transform canvasRoot) => BuildSettingsPanel(canvasRoot, false);
+
+        private void BuildSettingsPanel(Transform canvasRoot, bool loadMode)
         {
+            _settingsPanelLoadMode = loadMode;
             _settingsHits.Clear();
             _settingsRefreshers.Clear();
             _settingsTips.Clear();
@@ -6204,6 +6230,13 @@ namespace BigAmbitionsMP
                       SZ_STS, C_LBLGREY, PAD, y, SET_W - PAD * 2f, LH, TextAlignmentOptions.Center);
             y -= LADV + 2f;
 
+            if (loadMode)
+            {
+                MakeLabel(ct, "This world already exists — settings below can be changed each time you host it.\nEverything else was fixed when the world was created.",
+                          SZ_STS, C_YELLOW, PAD, y, SET_W - PAD * 2f, LH * 2f, TextAlignmentOptions.Center);
+                y -= LADV * 2f;
+            }
+            if (!loadMode) {
             SettingsHeader(ct, ref y, "WORLD — applies to everyone");
             SettingsNumRow (ct, ref y, "Tax %", "Percent of profit paid as income tax each period.",
                             () => _hostSettings.TaxPercentage, v => _hostSettings.TaxPercentage = (int)v, 1f, 0f, 50f, "0");
@@ -6238,6 +6271,8 @@ namespace BigAmbitionsMP
             SettingsHeader(ct, ref y, "PLAYER — per character");
             SettingsBoolRow(ct, ref y, "Disable aging", "Your character never grows older.",
                             () => _hostSettings.DisableAging, v => _hostSettings.DisableAging = v);
+            }   // end !loadMode (round-53)
+            if (loadMode) SettingsHeader(ct, ref y, "THIS SAVE — adjustable each time you host");
             // Needs & morale tempo (2026-07-20): single-percent controls replace the
             // old energy on/off (0 = off, no redundant toggle).  MP's clock never
             // pauses, so native rates feel much faster in real time — defaults
@@ -6251,6 +6286,7 @@ namespace BigAmbitionsMP
             SettingsNumRow (ct, ref y, "Morale multiplier %", "Speed of morale pressure as % of normal. Lower = positive effects last longer AND sad periods are rarer (10% = buffs last 10x, sad periods 10x rarer).",
                             () => _hostSettings.MoraleTempoPercent, v => _hostSettings.MoraleTempoPercent = (int)v,
                             1f, 1f, 100f, "0");
+            if (!loadMode) {
             SettingsBoolRow(ct, ref y, "Disable happiness need", "Removes the happiness need from your character.",
                             () => _hostSettings.DisableHappiness, v => _hostSettings.DisableHappiness = v);
             SettingsBoolRow(ct, ref y, "All courses unlocked", "Every education course is available immediately.",
@@ -6261,6 +6297,7 @@ namespace BigAmbitionsMP
                             () => _hostSettings.DisableVehicleDamage, v => _hostSettings.DisableVehicleDamage = v);
             SettingsBoolRow(ct, ref y, "Disable vehicle fuel", "Your vehicles never consume fuel.",
                             () => _hostSettings.DisableVehicleFuel, v => _hostSettings.DisableVehicleFuel = v);
+            }   // end !loadMode (round-53)
             // Tutorial is forced OFF in multiplayer (story quests desync), so it's not exposed here.
 
             y -= SGAP;
@@ -6613,7 +6650,30 @@ namespace BigAmbitionsMP
             MPServer.StartNewGame(_hostSettings);
             SetStatus($"Starting new game ({_hostSettings.Difficulty})...", false);
         }
-        private void OnStartLoad() { MPServer.StartLoadGame(); SetStatus("Loading save...", false); }
+        private void OnStartLoad()
+        {
+            // Round-53: the lobby's (possibly customized) dials are the save's NEW authority —
+            // apply them for this session and write them back to the manifest before loading.
+            try
+            {
+                MPNeedsTuning.Apply(_hostSettings, "load lobby");
+                string name = MPServer.ChosenLoadSession;
+                if (!string.IsNullOrEmpty(name))
+                {
+                    var m = MPSaveManager.ReadManifest(name);
+                    if (m != null)
+                    {
+                        m.TuneNeedsDrain   = _hostSettings.NeedsDrainPercent;
+                        m.TuneRestSpeed    = _hostSettings.RestSpeedPercent;
+                        m.TuneMoraleTempo  = _hostSettings.MoraleTempoPercent;
+                        MPSaveManager.WriteManifest(name, m);
+                        Plugin.Logger.LogInfo($"[MenuUI] save tuning authority updated: drain={m.TuneNeedsDrain}% rest={m.TuneRestSpeed}% morale={m.TuneMoraleTempo}% → '{name}'.");
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] load tuning apply: {ex.Message}"); }
+            MPServer.StartLoadGame(); SetStatus("Loading save...", false);
+        }
 
         private void OnCycleDifficulty()
         {
@@ -6646,6 +6706,16 @@ namespace BigAmbitionsMP
         private void OnOpenSettings()
         {
             _settingsOpen = true;
+            // Round-53: the load lobby gets the save-authoritative shape of the panel; rebuild
+            // when the mode differs from what's built (panel is otherwise built once).
+            bool wantLoadMode = _lobbyLoadMode && MPServer.IsRunning;
+            if (_settingsPanelGO == null || wantLoadMode != _settingsPanelLoadMode)
+            {
+                try { if (_settingsPanelGO != null) Destroy(_settingsPanelGO); } catch { }
+                _settingsPanelGO = null;
+                try { BuildSettingsPanel(_canvasGO!.transform, wantLoadMode); }
+                catch (Exception ex) { Plugin.Logger.LogError($"[UI] BuildSettingsPanel rebuild failed: {ex}"); }
+            }
             RefreshSettingsPanel();
             StyleSettingsPanel();   // native font + rounded panel (lazy — once assets are captured)
             if (_settingsPanelGO != null)

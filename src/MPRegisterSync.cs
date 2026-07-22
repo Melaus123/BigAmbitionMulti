@@ -461,7 +461,15 @@ namespace BigAmbitionsMP
                                 // report — the NAME says whether it's a real serving station the whitelist
                                 // misses (ticket booth?) or just furniture matching "counter". Once per type.
                                 if (_unrecognizedTillNames.Add(n))
-                                    Plugin.Logger.LogWarning($"[StaffDiag] unrecognized till-like item type: '{n}' (first seen at '{addr}')");
+                                {
+                                    // Round-53b (KuyuSuyu review, 'counter2'): the NAME can't answer whether
+                                    // this is a staffable station the whitelist misses or plain furniture —
+                                    // the item's native TYPE FLAGS can (PointOfSale/EmployeeWorkstation =
+                                    // needs the whitelist; anything else = name-heuristic false positive).
+                                    string flags = "";
+                                    try { var it = BigAmbitions.Items.ItemsGetter.GetByName(n); flags = it == null ? "unknown-item" : it.type.ToString(); } catch { flags = "unreadable"; }
+                                    Plugin.Logger.LogWarning($"[StaffDiag] unrecognized till-like item type: '{n}' (first seen at '{addr}', native type flags: [{flags}])");
+                                }
                             }
                         }
                 }

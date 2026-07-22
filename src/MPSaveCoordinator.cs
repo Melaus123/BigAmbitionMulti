@@ -1350,6 +1350,11 @@ namespace BigAmbitionsMP
                 m.Merger = BuildMergerManifest();
                 m.MergerWalletBalance     = MPServer.SnapshotWalletBalances();      // slice 4
                 m.MergerWalletContributed = MPServer.SnapshotWalletContributed();
+                // Round-53: the running session's tuning dials persist with the save (mid-session
+                // changes included), so the next load's lobby mirrors what this world actually ran.
+                m.TuneNeedsDrain   = MPNeedsTuning.DrainPercent;
+                m.TuneRestSpeed    = MPNeedsTuning.RestPercent;
+                m.TuneMoraleTempo  = MPNeedsTuning.MoralePercent;
                 RefreshSlotCash(m);
                 MPSaveManager.WriteManifest(sessionName, m);
             }

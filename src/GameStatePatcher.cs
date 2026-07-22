@@ -3427,6 +3427,29 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[WorldHealth] {ex.Message}"); }
         }
 
+        /// <summary>HOST, world-ready (round-53): the drain dial replaced the old energy on/off
+        /// toggle, and for LOADED saves the flag baked into gameVariables must follow it — old MP
+        /// saves baked disableEnergy=true (the old default), which silently deadened the dial
+        /// (needs stayed off no matter what it said). The session values themselves are already
+        /// applied and heartbeat-distributed; this only aligns the native flag on the host's save
+        /// (it re-bakes on the next save, and clients take the flag via the game-variables sync).</summary>
+        public static void ReconcileLoadedNeedsFlag()
+        {
+            if (!MPServer.IsRunning) return;
+            try
+            {
+                var gv = SaveGameManager.Current?.gameVariables;
+                if (gv == null) return;
+                bool want = MPNeedsTuning.DrainPercent == 0;
+                if (gv.disableEnergy != want)
+                {
+                    Plugin.Logger.LogInfo($"[Needs] loaded save disableEnergy {gv.disableEnergy} → {want} (drain dial {MPNeedsTuning.DrainPercent}% is the authority, round-53).");
+                    gv.disableEnergy = want;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Needs] reconcile flag: {ex.Message}"); }
+        }
+
         /// <summary>One-shot save repair (scene-ready, every machine): the pre-split plumbing wrote
         /// RENTERS into buildingOwnerRivalId (the deed field) and erased AI landlords on vacate —
         /// both persisted into saves. Any session player id found in a deed field moves to the tenant
