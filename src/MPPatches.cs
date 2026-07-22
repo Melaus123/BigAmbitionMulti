@@ -390,6 +390,50 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Round-52: register income during a consensus skip (field 2026-07-22, KuyuSuyu ×2:
+        // "7 customers instead of 40-50 per day") ─────────────────────────────
+        // The game's hourly abstract simulator (BusinessSimulatorHelper.RunHourly, GameManager
+        // hourly tick) simulates every shop the local player rents EXCEPT the one they are
+        // standing in — UNLESS the native time machine is running, in which case it simulates
+        // that one too. That bypass is how SP register fast-forward pays you: the 40-50
+        // customers are bookkept by the sim, not physically served. Our consensus skip drives
+        // RunMainGameTick directly and never engages the time machine, so the one shop the
+        // register-worker occupies was the one shop that earned nothing. Postfix = simulate
+        // exactly the shop native exempted, only while OUR skip is active, per machine for its
+        // own player. Staffing is native-correct for both cases: an ad-hoc worker hits
+        // PlayerHelper.IsPlayerWorkingInEmployeeStation first in GetEmployeeAtStationAndHour,
+        // and a remote helper's register is covered by the synthetic duty employee's blanket
+        // 0-24 station shift. No OnTimeMachineEnd mirror: normal (non-TM) play never calls it
+        // for hourly-simmed shops, and our skip IS normal play at speed. No double income: the
+        // sim and the real customer spawner consume the same CustomerEntry list (completed
+        // flags), so walk-ins served during the skip are simply not re-billed.
+        [HarmonyPatch(typeof(BusinessSimulatorHelper), nameof(BusinessSimulatorHelper.RunHourly))]
+        public static class Patch_RunHourly_SimulateOccupiedShopDuringSkip
+        {
+            private static int _simmed;
+            static void Postfix()
+            {
+                try
+                {
+                    if (!MPRestSync.SkipActive) return;
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    var current = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                    if (current == null || !current.RentedByPlayer) return;
+                    if (!MergerFlip.TrulyMine(current)) return;          // only MY shop — replicas sim on their owner's machine
+                    var data = BusinessTypeHelper.GetData(current);
+                    if (data?.simulator == null || !data.spawnCustomers) return;   // !spawnCustomers shops already simulated natively
+                    try { if (InstanceBehavior<UI.UIs>.Instance?.timeMachine?.isRunning == true) return; } catch { }   // native TM already covered it
+                    if (!BusinessHelper.IsBusinessOpen(current)) return;
+                    data.simulator.SetUp(current, SaveGameManager.Current.Hour);
+                    data.simulator.SimulateCurrentHour();
+                    _simmed++;
+                    if (_simmed == 1 || _simmed % 12 == 0)
+                        Plugin.Logger.LogInfo($"[Rest] occupied-shop hourly sim during skip: '{current.BusinessName}' h{SaveGameManager.Current.Hour} (#{_simmed}) — SP time-machine parity (round-52).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] occupied-shop sim: {ex.Message}"); }
+            }
+        }
+
         // ── Patch: Animator.SetTrigger ────────────────────────────────────────
         // Triggers are momentary (fire-and-forget) so they can't be polled like
         // float/bool params.  This catches them at the source.  It fires for
