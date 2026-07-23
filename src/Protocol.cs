@@ -154,6 +154,7 @@ namespace BigAmbitionsMP
         MergerWalletDelta   = 150,       // Member → Host: a native money change on a merged member's machine (delta + transaction key) — the host ledger is the shared wallet's single source of truth (slice 4).
         MergerWalletState   = 151,       // Host → All (group-tagged) or targeted (GroupId="" = personal payout on leave): the authoritative shared balance; members set their local mirror to it.
         MergerEmployeeEdit  = 152,       // Member → Host → business owner (slice 5): a routed employee/schedule op on a merger-flipped shop ("fire" an injected partner employee; "schedule" = wholesale hours+shifts write-back). Owner applies natively; roster/business heartbeats republish the truth.
+        StoreMirror         = 153,       // Host → all-but-owner (handoff slice 1): one piece of the session store — a member's saved .hsg and/or the manifest — so every member holds the complete session store and can host the world later.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -1887,6 +1888,26 @@ namespace BigAmbitionsMP
         /// (ClientDisconnectUpload); I'll validate its actual day and send your real load after." The client
         /// must NOT load on this message; it uploads and waits for the follow-up LoadData.</summary>
         public bool   AwaitClientDisconnectUpload { get; set; } = false;
+    }
+
+    /// <summary>Host → clients (handoff slice 1, 2026-07-23): one piece of the session STORE —
+    /// a member's saved .hsg (gzipped) and/or the session manifest. Sent at every coordinated
+    /// save so EVERY member holds the complete "single save" (manifest + all members' .hsg)
+    /// and can host the world later with full fidelity. Never sent to the member the .hsg
+    /// belongs to (their local copy is written by their own save). StableId empty =
+    /// manifest-only. HostStoreToken is a hash of the host's physical store folder: a
+    /// receiver whose own token matches shares the SAME folder (dual-instance on one
+    /// machine) and must not apply — the files are already there, and writing them would
+    /// race the host's own writes.</summary>
+    public class StoreMirrorPayload
+    {
+        public string SessionName    { get; set; } = "";
+        public string StableId       { get; set; } = "";   // whose .hsg ("" = manifest-only)
+        public string SaveName       { get; set; } = "";   // .hsg file name, no extension
+        public string HsgGzipBase64  { get; set; } = "";
+        public int    RawLength      { get; set; }
+        public string ManifestJson   { get; set; } = "";   // full session manifest (small)
+        public string HostStoreToken { get; set; } = "";
     }
 
     /// <summary>

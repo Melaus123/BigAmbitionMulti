@@ -135,6 +135,10 @@ namespace BigAmbitionsMP
                     // BEFORE the session's first save (no folder yet) would
                     // otherwise never persist unless the ledger changed again.
                     MPHub.SaveLedger();
+                    // Handoff slice 1: replicate the store (manifest + host's own +
+                    // absent members' .hsg) to every client. Off-thread — pure file
+                    // IO + sends; the .hsg is complete (JoinSaveGameThreads returned).
+                    System.Threading.Tasks.Task.Run(() => MirrorStoreSweep(session));
                     DiagPhase("host lambda: DONE");
                 }
                 catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] Host save: {ex}"); }
@@ -164,6 +168,9 @@ namespace BigAmbitionsMP
                 // a '-disconnect' store missing offline members is the same
                 // character-reset trap if the host later loads it.
                 CarryForwardAbsentMembers(dc);
+                // Handoff slice 1: best-effort mirror before the window closes —
+                // inline (not Task.Run) so the sends are queued before teardown.
+                MirrorStoreSweep(dc);
             }
             catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] HostQuitCheckpoint: {ex}"); }
         }
@@ -220,6 +227,10 @@ namespace BigAmbitionsMP
                 // accepted beforehand would otherwise never reach disk (the ledger
                 // path needs the session folder, which PerformLocalSave just created).
                 MPHub.SaveLedger();
+                // Handoff slice 1: replicate the store to clients. Off-thread; on a
+                // Save-and-Exit this is best-effort — whatever the socket flushes
+                // before teardown still lands, and the next session re-mirrors.
+                System.Threading.Tasks.Task.Run(() => MirrorStoreSweep(session));
             }
             catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] HostSaveSync save: {ex}"); }
         }
@@ -410,6 +421,10 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] HostHandleSaveData write: {ex}"); return; }
 
             MergeSlot(data.SessionName, data.Slot);
+            // Handoff slice 1: this member's fresh .hsg just landed — mirror it (+
+            // current manifest) to every OTHER client. Already on the network
+            // thread, so the gzip + sends run inline without touching a frame.
+            MirrorMemberFile(data.SessionName, data.Slot.StableId);
             DiagWrite("HostHandleSaveData done");
         }
 
@@ -671,6 +686,177 @@ namespace BigAmbitionsMP
                 return (GzipBase64(raw), raw.Length);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ReadSaveBytesGzip: {ex.Message}"); return null; }
+        }
+
+        // ── Handoff slice 1 (2026-07-23): session-store mirror ───────────────────
+        // The session store (manifest + EVERY member's .hsg) is operationally ONE
+        // SAVE — an atomic snapshot of the world and all characters, including
+        // members offline at save time (carry-forward). The host replicates it to
+        // every connected member at each coordinated save, so any member can host
+        // the world later with full fidelity, and a character survives as long as
+        // ANY member's mirror survives. Two channels:
+        //   MirrorStoreSweep — after the host's own save: manifest + the host's
+        //     .hsg + carried-forward ABSENT members' .hsg. Connected clients' own
+        //     files are skipped here — their fresh upload is seconds away and
+        //     mirrors incrementally when it lands.
+        //   MirrorMemberFile — after a member's .hsg lands on the host (coordinated
+        //     upload / accepted disconnect save): that one file to everyone else.
+        // A member NEVER receives its own .hsg back (its local copy is written by
+        // its own save), and a receiver sharing the host's physical store folder
+        // (dual-instance testing on one machine) skips applying entirely — matched
+        // by HostStoreToken. All pure file/JSON IO + sends — safe off the main thread.
+
+        /// <summary>Hash of this machine's MP store root — identifies a shared
+        /// physical store without disclosing the path (it contains a username).</summary>
+        internal static string StoreToken()
+        {
+            try
+            {
+                using var sha = System.Security.Cryptography.SHA1.Create();
+                var bytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(
+                    MPSaveManager.MpVersionFolder().ToLowerInvariant()));
+                return Convert.ToBase64String(bytes);
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>The session's manifest as JSON, preferring the in-memory active copy.
+        /// Read under _lock so a concurrent MergeSlot/WriteManifest can't tear it.</summary>
+        private static string ManifestJsonSnapshot(string session)
+        {
+            lock (_lock)
+            {
+                var m = (_activeManifest != null && _activeSessionName == session)
+                        ? _activeManifest : MPSaveManager.ReadManifest(session);
+                return m == null ? "" : Newtonsoft.Json.JsonConvert.SerializeObject(m);
+            }
+        }
+
+        /// <summary>HOST: manifest-only mirror (ledger change between saves — KBs).</summary>
+        private static void MirrorManifestOnly(string session, string manifestJson)
+        {
+            if (!MPServer.IsRunning || string.IsNullOrEmpty(manifestJson)) return;
+            MPServer.SendStoreMirror(new StoreMirrorPayload
+            {
+                SessionName = session, ManifestJson = manifestJson, HostStoreToken = StoreToken(),
+            }, exceptStable: "");
+        }
+
+        /// <summary>HOST: mirror the manifest + the host's own and every ABSENT member's
+        /// .hsg for one session to all connected clients.</summary>
+        public static void MirrorStoreSweep(string session)
+        {
+            if (!MPServer.IsRunning || string.IsNullOrEmpty(session)) return;
+            try
+            {
+                string token = StoreToken();
+                string manifestJson = ManifestJsonSnapshot(session);
+                if (!string.IsNullOrEmpty(manifestJson))
+                    MPServer.SendStoreMirror(new StoreMirrorPayload
+                    {
+                        SessionName = session, ManifestJson = manifestJson, HostStoreToken = token,
+                    }, exceptStable: "");
+
+                string sessionFolder = MPSaveManager.MpSessionFolder(session);
+                if (string.IsNullOrEmpty(sessionFolder) || !Directory.Exists(sessionFolder)) return;
+                var connected = MPServer.ConnectedStableIds();
+                int sent = 0;
+                foreach (var dir in Directory.GetDirectories(sessionFolder))
+                {
+                    string stable = Path.GetFileName(dir);
+                    if (!stable.StartsWith("guid-") && !stable.StartsWith("steam-")) continue;   // character folders only (same filter as carry-forward)
+                    if (stable != MPConfig.StableId && connected.Contains(stable)) continue;     // their fresh upload mirrors itself
+                    try
+                    {
+                        string? file = NewestHsg(dir);
+                        if (file == null) continue;
+                        byte[] raw = File.ReadAllBytes(file);
+                        if (raw.Length == 0) continue;
+                        MPServer.SendStoreMirror(new StoreMirrorPayload
+                        {
+                            SessionName = session, StableId = stable,
+                            SaveName = Path.GetFileNameWithoutExtension(file),
+                            HsgGzipBase64 = GzipBase64(raw), RawLength = raw.Length,
+                            HostStoreToken = token,   // manifest already sent above
+                        }, exceptStable: stable);
+                        sent++;
+                    }
+                    // One locked/mid-write file (e.g. a disconnect commit landing right
+                    // now) must not abort the rest of the sweep — skip it; the next
+                    // save re-mirrors.
+                    catch (IOException ex) { Plugin.Logger.LogWarning($"[MPSave] sweep skip '{stable}': {ex.Message}"); }
+                }
+                Plugin.Logger.LogInfo($"[MPSave] Store mirror sweep '{session}': manifest + {sent} member file(s) → clients.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] MirrorStoreSweep '{session}': {ex.Message}"); }
+        }
+
+        /// <summary>HOST: one member's fresh .hsg just landed — mirror it (+ current
+        /// manifest) to every client EXCEPT that member.</summary>
+        public static void MirrorMemberFile(string session, string stable)
+        {
+            if (!MPServer.IsRunning || string.IsNullOrEmpty(session) || string.IsNullOrEmpty(stable)) return;
+            try
+            {
+                string dir = MPSaveManager.MpCharacterFolder(session, stable);
+                string? file = NewestHsg(dir);
+                if (file == null) return;
+                byte[] raw = File.ReadAllBytes(file);
+                if (raw.Length == 0) return;
+                MPServer.SendStoreMirror(new StoreMirrorPayload
+                {
+                    SessionName = session, StableId = stable,
+                    SaveName = Path.GetFileNameWithoutExtension(file),
+                    HsgGzipBase64 = GzipBase64(raw), RawLength = raw.Length,
+                    ManifestJson = ManifestJsonSnapshot(session),
+                    HostStoreToken = StoreToken(),
+                }, exceptStable: stable);
+                Plugin.Logger.LogInfo($"[MPSave] Mirrored member file (stable={stable}, {raw.Length}B) for '{session}' → other clients.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] MirrorMemberFile '{stable}': {ex.Message}"); }
+        }
+
+        /// <summary>CLIENT: a piece of the session store arrived — write it into our
+        /// LOCAL store at the same paths, so this machine holds the complete session
+        /// ("single save") and can host the world later. Our OWN .hsg is never applied
+        /// (our save writes it); path components are sanitized like every other
+        /// network-supplied name. Network thread; pure file/JSON IO.</summary>
+        public static void ClientHandleStoreMirror(StoreMirrorPayload p)
+        {
+            if (p == null || MPServer.IsRunning) return;   // client role only
+            try
+            {
+                // Same-machine guard: host + client sharing ONE SaveGames folder
+                // (dual-instance testing) — the files are already there, and writing
+                // them here would race the host's own writes.
+                string ownToken = StoreToken();
+                if (!string.IsNullOrEmpty(p.HostStoreToken) && p.HostStoreToken == ownToken) return;
+
+                string session = SanitizeSession(p.SessionName);
+                if (string.IsNullOrEmpty(session)) return;
+
+                if (!string.IsNullOrEmpty(p.ManifestJson))
+                {
+                    var m = Newtonsoft.Json.JsonConvert.DeserializeObject<MpManifest>(p.ManifestJson);
+                    if (m != null) MPSaveManager.WriteManifest(session, m);
+                }
+
+                if (!string.IsNullOrEmpty(p.StableId) && p.StableId != MPConfig.StableId
+                    && !string.IsNullOrEmpty(p.HsgGzipBase64))
+                {
+                    byte[] raw = UnGzipBase64(p.HsgGzipBase64);
+                    if (p.RawLength > 0 && raw.Length != p.RawLength)
+                        Plugin.Logger.LogWarning($"[MPSave] Store mirror length mismatch (stable={p.StableId}): got {raw.Length}, expected {p.RawLength}.");
+                    if (raw.Length > 0)
+                    {
+                        string dir  = MPSaveManager.MpCharacterFolder(session, p.StableId);   // sanitizes the id component
+                        string name = MPSaveManager.Sanitize(string.IsNullOrEmpty(p.SaveName) ? SaveFileName : p.SaveName);
+                        File.WriteAllBytes(Path.Combine(dir, name + ".hsg"), raw);
+                        Plugin.Logger.LogInfo($"[MPSave] Store mirror: member .hsg (stable={p.StableId}, {raw.Length}B) → '{session}'.");
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ClientHandleStoreMirror: {ex.Message}"); }
         }
 
         // ── Core: local save (MAIN THREAD ONLY) ──────────────────────────────────
@@ -1165,6 +1351,9 @@ namespace BigAmbitionsMP
                         StableId = stable, DisplayName = p.Slot?.DisplayName ?? stable, CharacterId = stable,
                         SaveName = name, Day = actualDay, IsHost = false,
                     });
+                    // Handoff slice 1: an accepted disconnect save is a fresh member
+                    // file — mirror it. Off-thread (this path runs on the main thread).
+                    System.Threading.Tasks.Task.Run(() => MirrorMemberFile(session, stable));
                     Plugin.Logger.LogInfo($"[MPSave] ACCEPTED client disconnect save (stable={stable}, actualDay={actualDay}, storedDay={storedDay}, window={DisconnectDayWindow}) → committed to '{session}'.");
                 }
                 else
@@ -1355,6 +1544,8 @@ namespace BigAmbitionsMP
                 m.TuneNeedsDrain   = MPNeedsTuning.DrainPercent;
                 m.TuneRestSpeed    = MPNeedsTuning.RestPercent;
                 m.TuneMoraleTempo  = MPNeedsTuning.MoralePercent;
+                // Handoff slice 1: store provenance — who hosted when this was written.
+                m.LastHostStableId = MPConfig.StableId;
                 RefreshSlotCash(m);
                 MPSaveManager.WriteManifest(sessionName, m);
             }
@@ -1394,6 +1585,7 @@ namespace BigAmbitionsMP
         {
             try
             {
+                string session; string manifestJson;
                 lock (_lock)
                 {
                     if (string.IsNullOrEmpty(_activeSessionName)) return;
@@ -1407,7 +1599,12 @@ namespace BigAmbitionsMP
                     m.SavedAtUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
                     MPSaveManager.WriteManifest(_activeSessionName, m);
                     Plugin.Logger.LogInfo($"[MPSave] Persisted {m.Grants.Count} grant(s) + {m.Merger.Count} merger member(s) to '{_activeSessionName}' on change.");
+                    session = _activeSessionName;
+                    manifestJson = Newtonsoft.Json.JsonConvert.SerializeObject(m);
                 }
+                // Handoff slice 1: ledgers changed → manifest-only mirror (KBs), so
+                // every member's store copy stays ledger-current between saves.
+                MirrorManifestOnly(session, manifestJson);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] PersistGrantsNow: {ex.Message}"); }
         }

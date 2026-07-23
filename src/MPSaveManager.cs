@@ -74,6 +74,14 @@ namespace BigAmbitionsMP
         public int TuneNeedsDrain  { get; set; } = -1;
         public int TuneRestSpeed   { get; set; } = -1;
         public int TuneMoraleTempo { get; set; } = -1;
+
+        /// <summary>Handoff (slice 1, 2026-07-23): store provenance. LastHostStableId = who
+        /// hosted when this manifest was written (stamped at every save-time metadata write);
+        /// HostEpoch = host-start counter for the lineage (increments land in slice 2/4;
+        /// 0 = pre-field manifest). Both travel inside every mirrored copy so a future host
+        /// or joiner can see where the store came from.</summary>
+        public int    HostEpoch        { get; set; } = 0;
+        public string LastHostStableId { get; set; } = "";
     }
 
     /// <summary>One durable access grant: an owner gave a grantee a key (StableId space).</summary>

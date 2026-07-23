@@ -526,6 +526,13 @@ namespace BigAmbitionsMP
                     MPSaveCoordinator.ClientHandleLoadData(env.GetPayload<LoadDataPayload>());
                     break;
 
+                case MessageType.StoreMirror:
+                    // Handoff slice 1: a piece of the session store (another member's
+                    // .hsg and/or the manifest) — write into our local store so this
+                    // machine holds the complete session and can host it later.
+                    MPSaveCoordinator.ClientHandleStoreMirror(env.GetPayload<StoreMirrorPayload>());
+                    break;
+
                 case MessageType.Chat:
                 {
                     var cp = env.GetPayload<ChatPayload>();

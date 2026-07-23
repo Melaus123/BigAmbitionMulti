@@ -4311,6 +4311,27 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendHubTo: {ex.Message}"); }
         }
 
+        /// <summary>Host (handoff slice 1): send one session-store mirror piece to every
+        /// client EXCEPT the member whose .hsg it is (their own local save writes that
+        /// file — sending it back could only race it). exceptStable "" = everyone
+        /// (manifest-only pieces).</summary>
+        public static void SendStoreMirror(StoreMirrorPayload payload, string exceptStable)
+        {
+            if (!_running || payload == null) return;
+            try
+            {
+                var env = MessageEnvelope.Create(MessageType.StoreMirror, "host", payload);
+                foreach (var peer in _clients.Keys)
+                {
+                    if (!_peerNames.TryGetValue(peer.Id, out var pid)) continue;
+                    if (!string.IsNullOrEmpty(exceptStable)
+                        && StableIdByPlayer.TryGetValue(pid, out var st) && st == exceptStable) continue;
+                    Send(peer, env);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendStoreMirror: {ex.Message}"); }
+        }
+
         /// <summary>Host: broadcast the consensus rest/skip state.</summary>
         public static void BroadcastRestState(RestSkipStatePayload p)
         {
