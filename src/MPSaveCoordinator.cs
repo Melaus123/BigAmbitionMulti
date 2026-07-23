@@ -1360,6 +1360,31 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>Round-58 (RED ROC day-117→131 regression, 2026-07-22): loud line when the ACTIVE
+        /// manifest's ownership state (deeds/rentals/grants) is meaningfully OLDER than the world we
+        /// actually loaded — the signature of loading stale ledgers from an old save base while the
+        /// character saves are current (the field case's lost window was bounded by mod-upgrade
+        /// days). Log-only, report-visible; called at host world-ready.</summary>
+        public static void CheckManifestFreshness()
+        {
+            if (!MPServer.IsRunning) return;
+            try
+            {
+                MpManifest? m; string name;
+                lock (_lock) { m = _activeManifest; name = _activeSessionName; }
+                if (m == null || m.WorldDay <= 0) return;
+                int worldDay = 0; try { worldDay = SaveGameManager.Current?.Day ?? 0; } catch { }
+                if (worldDay <= 0) return;
+                int drift = worldDay - m.WorldDay;
+                if (drift >= 3)
+                    Plugin.Logger.LogWarning(
+                        $"[Integrity] MANIFEST STALE: session '{name}' ownership state (deeds/rentals/grants) is from day {m.WorldDay}, " +
+                        $"but the loaded world is day {worldDay} ({drift} day(s) newer) — purchases/rentals made in between are NOT in " +
+                        "the ledger and will read unowned (round-58; RED ROC class 2026-07-22).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] manifest freshness: {ex.Message}"); }
+        }
+
         /// <summary>Host: persist the CURRENT grant set to the active session's manifest immediately. The grant
         /// store used to be written only at the "next coordinated save" — so a grant set after the last save (or
         /// before one happened) never reached the manifest and was lost on load (Grants=[], user 2026-06-30). This

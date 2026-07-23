@@ -297,6 +297,16 @@ namespace BigAmbitionsMP
 
             HostIP = Get("HostIP", "127.0.0.1");
             Port   = int.TryParse(Get("Port", "7777"), out var p) ? p : 7777;
+            // Round-59 SELF-HEAL (Tali/JP field case 2026-07-23): Steam-relay joins persisted
+            // their portless "0" into the config, and the host/join validation (1024-65535)
+            // then refused EVERY later attempt on that machine — "can't start multiplayer or
+            // load any saves". Any out-of-range persisted port resets to the default.
+            if (Port < 1024 || Port > 65535)
+            {
+                Plugin.Logger.LogWarning($"[Config] persisted port {Port} is invalid (Steam-join poisoning) — reset to 7777.");
+                Port = 7777;
+                try { Set("Port", "7777"); } catch { }
+            }
 
             StableId = ResolveStableId();
             Plugin.Logger.LogInfo($"[Config] Stable id: {StableId}");
@@ -331,7 +341,11 @@ namespace BigAmbitionsMP
         public static void SetRuntime(string playerId, string? hostIp, int port)
         {
             PlayerId = playerId;
-            Port     = port;
+            // Round-59: Steam-relay joins pass port 0 (relay sessions are portless) — that must
+            // never REPLACE the stored port, or the next launch's host/join validation refuses
+            // everything (the Tali/JP "can't start anything" brick). Keep the last real port.
+            bool portValid = port >= 1024 && port <= 65535;
+            if (portValid) Port = port;
             if (hostIp != null)
                 HostIP = hostIp;
 
@@ -346,7 +360,7 @@ namespace BigAmbitionsMP
                 {
                     Set("PlayerId", playerId);
                     if (hostIp != null) Set("HostIP", hostIp);
-                    Set("Port", port.ToString());
+                    if (portValid) Set("Port", port.ToString());   // round-59: never persist a portless (0) Steam join
                     Plugin.Logger.LogInfo($"[Config] Persisted PlayerId='{playerId}' to disk.");
                 }
             }

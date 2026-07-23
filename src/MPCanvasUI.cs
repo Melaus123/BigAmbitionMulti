@@ -483,6 +483,7 @@ namespace BigAmbitionsMP
             MPSaveIntegrity.RunSweep("world-ready");   // dangling-reference repair/detect (includes duty-shift repair); summary rides bug reports
             GameStatePatcher.SweepLedgerVsRivalBusinesses("world-ready");   // round-50: drop player reservations on AI-rival-run addresses (host-only inside)
             GameStatePatcher.ReconcileLoadedNeedsFlag();   // round-53: the drain dial owns the save's baked energy on/off after load (host-only inside)
+            MPSaveCoordinator.CheckManifestFreshness();    // round-58: stale ownership-ledger detector (host-only inside)
             ApplyFreshSpawnWarp();  // fresh-character joins: designated start, not the prefab spot
             ApplySpawnSidestep();   // fresh games: one navmesh-validated de-stack, placement final
             // Placement diagnostic: position-restore runs in load-finish —
@@ -6618,8 +6619,16 @@ namespace BigAmbitionsMP
 
         private void OnHost()
         {
+            // Round-59: HOSTS never type a port (only the join dialog has a field), so refusing
+            // here left a bricked host with NO in-game recovery (Tali/JP field case: 22 refused
+            // attempts). An invalid runtime port falls back to the config port, which the
+            // load-time self-heal guarantees valid.
             if (!int.TryParse(_port, out int p) || p < 1024 || p > 65535)
-            { SetStatus("Invalid port.", true); return; }
+            {
+                p = MPConfig.Port >= 1024 && MPConfig.Port <= 65535 ? MPConfig.Port : 7777;
+                _port = p.ToString();
+                Plugin.Logger.LogWarning($"[UI] host port fell back to {p} (runtime port string was invalid).");
+            }
             if (string.IsNullOrWhiteSpace(_name))
             { SetStatus("Enter a player name.", true); return; }
             MPConfig.SetRuntime(_name.Trim(), null, p);
