@@ -107,9 +107,15 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex)
                 {
+                    // Walk to the ROOT cause (round-65): HarmonyException wraps the real
+                    // TargetMethod failure — the outer message alone left the MIREL
+                    // report undiagnosable (which of 34 mods broke the scan? unknowable).
+                    var root = ex;
+                    while (root.InnerException != null) root = root.InnerException;
+                    string inner = ReferenceEquals(root, ex) ? "" : $" ← {root.GetType().Name}: {root.Message}";
                     failClasses++;
-                    PatchIssues.Add($"{t.Name}: {ex.GetType().Name}: {ex.Message}");
-                    Plugin.Logger.LogError($"[Plugin] Patch class {t.Name} FAILED: {ex.GetType().Name}: {ex.Message}");
+                    PatchIssues.Add($"{t.Name}: {ex.GetType().Name}: {ex.Message}{inner}");
+                    Plugin.Logger.LogError($"[Plugin] Patch class {t.Name} FAILED: {ex.GetType().Name}: {ex.Message}{inner}");
                 }
             }
             Plugin.Logger.LogInfo($"[Plugin] Patch summary: {okClasses} class(es) OK, {failClasses} failed, {deadClasses} dead, {totalPatched} method(s) patched total.");

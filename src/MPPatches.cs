@@ -3655,11 +3655,21 @@ namespace BigAmbitionsMP
                         catch { continue; }
                         foreach (var m in methods)
                         {
-                            var ps = m.GetParameters();
-                            if (ps.Length != 3) continue;
-                            if (ps[0].ParameterType != typeof(System.Collections.Generic.List<Entities.EmployeeInstance>)) continue;
-                            if (ps[1].ParameterType != typeof(bool) || ps[2].ParameterType != typeof(string)) continue;
-                            if (best == null || (m.Name == "Load" && best.Name != "Load")) best = m;
+                            // Per-method guard (round-65, MIREL report 20260723-030421):
+                            // GetParameters()/ParameterType THROW TypeLoadException on
+                            // methods whose parameter types live in a missing dependency
+                            // (broken third-party mods ship these — 34-mod install killed
+                            // this whole scan and the patch never applied).  One
+                            // unreadable method must skip, not abort the resolution.
+                            try
+                            {
+                                var ps = m.GetParameters();
+                                if (ps.Length != 3) continue;
+                                if (ps[0].ParameterType != typeof(System.Collections.Generic.List<Entities.EmployeeInstance>)) continue;
+                                if (ps[1].ParameterType != typeof(bool) || ps[2].ParameterType != typeof(string)) continue;
+                                if (best == null || (m.Name == "Load" && best.Name != "Load")) best = m;
+                            }
+                            catch { }
                         }
                     }
                 }
