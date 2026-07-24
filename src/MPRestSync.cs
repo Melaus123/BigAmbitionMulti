@@ -210,6 +210,8 @@ namespace BigAmbitionsMP
         private static System.Reflection.FieldInfo? _navBlockerSetField;
         private static System.Reflection.FieldInfo? _navAgentField;
         private static System.Reflection.FieldInfo? _sittingOnField;
+        private static float _cartBadSince = -1f;   // round-83 tripwire: when cart-mode machinery went bad
+        private static float _cartWarnNext;         // round-83 tripwire: re-warn throttle
 
         /// <summary>The nine ACTIVITY-class navigation blockers — the IPlayerActivity states whose
         /// UI our dock replaces (and whose lifecycle we therefore own in MP). The nav-heal watchdog
@@ -472,6 +474,69 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] nav heal: {ex.Message}"); }
             }
+
+            // Round-83 (user-approved): SILENT-CLASS TRIPWIRE — log-only, never heals, never
+            // touches behavior. The round-73 heal above deliberately skips players using a
+            // vehicle, so a player stranded WHILE attached to a hand truck/flatbed (KILOKEN
+            // 20260724-170745: own loaded flatbed, map-taxi mid-push, auto-entry at own shop,
+            // frozen at the door — the ring held 91s of NOTHING) leaves zero log evidence.
+            // While pushing, the character is agent-driven: agent enabled + updatePosition on
+            // + non-kinematic is the only healthy steady state; door transitions break it only
+            // transiently. Any of them wrong for 5s+ → ONE warn naming the exact broken
+            // component (re-warned each 60s while it persists), so the next field report of
+            // this class names its own cause.
+            try
+            {
+                HandTruck? cart = null;
+                if (MPServer.IsRunning || MPClient.IsClientInWorld)
+                    try { cart = Helpers.VehicleHelper.GetCurrentVehicleBase() as HandTruck; } catch { }
+                if (cart == null) _cartBadSince = -1f;
+                else
+                {
+                    var chC = InstanceBehavior<GameManager>.Instance?.playerController?.Character;
+                    bool cAgentOff = false, cPosOff = false, cKinematic = false;
+                    if (chC != null)
+                    {
+                        _navAgentField ??= HarmonyLib.AccessTools.Field(chC.GetType(), "navmeshAgent");
+                        if (_navAgentField?.GetValue(chC) is UnityEngine.AI.NavMeshAgent cAg)
+                        { cAgentOff = !cAg.enabled; cPosOff = cAg.enabled && !cAg.updatePosition; }
+                        cKinematic = chC.isKinematic;
+                    }
+                    if (!(cAgentOff || cPosOff || cKinematic)) _cartBadSince = -1f;
+                    else
+                    {
+                        if (_cartBadSince < 0f) { _cartBadSince = Time.unscaledTime; _cartWarnNext = 0f; }
+                        if (Time.unscaledTime - _cartBadSince >= 5f && Time.unscaledTime >= _cartWarnNext)
+                        {
+                            _cartWarnNext = Time.unscaledTime + 60f;
+                            string vType = "?", vId = "", vMine = "?";
+                            try
+                            {
+                                vType = cart.vehicleInstance?.vehicleTypeName ?? cart.name;
+                                vId   = cart.vehicleInstance?.id ?? "";
+                                vMine = (cart.vehicleInstance != null
+                                         && SaveGameManager.Current?.VehicleInstances?.Contains(cart.vehicleInstance) == true)
+                                        ? "True" : "False";
+                            }
+                            catch { }
+                            string blockers = "";
+                            try
+                            {
+                                var pcC = InstanceBehavior<GameManager>.Instance?.playerController;
+                                _navBlockerSetField ??= HarmonyLib.AccessTools.Field(typeof(PlayerController), "_activeNavigationBlockers");
+                                if (pcC != null && _navBlockerSetField?.GetValue(pcC) is System.Collections.IEnumerable heldC)
+                                    foreach (var b in heldC) blockers += (blockers.Length > 0 ? "," : "") + b;
+                            }
+                            catch { }
+                            Plugin.Logger.LogWarning(
+                                $"[Rest] CART STUCK (round-83, log-only): pushing '{vType}' id='{vId}' mine={vMine} — "
+                                + $"agentOff={cAgentOff} updatePosOff={cPosOff} kinematic={cKinematic} blockers=[{blockers}] "
+                                + $"held {Time.unscaledTime - _cartBadSince:F0}s. No action taken.");
+                        }
+                    }
+                }
+            }
+            catch { }
 
             // Sitting is INDEFINITE: the game's default duration (30 min) was
             // auto-standing players while they pondered the dock ("the window
