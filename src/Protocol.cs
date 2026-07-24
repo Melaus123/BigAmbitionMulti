@@ -673,7 +673,17 @@ namespace BigAmbitionsMP
         // longer generate their own rental market (an old client still would, recreating
         // the zombie/wrongful-rent divergence), RentDeny carries DenyReason + expects the
         // rollback handler, and BuildingStorageSync gained placereduce/vehicletake/signset.
-        public const int Version = 3;
+        //
+        // v4 (mod 0.1.14): clean-break bump. Concretely this release: the host-handoff
+        // campaign added StoreMirror (new message type) + Hello/manifest lineage fields
+        // (HostEpoch, PlaythroughId — an old peer's disconnect-commit could land on the
+        // wrong world on a name collision), the vehicle fleet went data-level
+        // (VehicleEntry.Dormant — an old peer treats a parked-in-unloaded-interior
+        // vehicle as sold and deletes it), the push-pose stream extended
+        // (PlayerPositionPayload.MlZ + hand-IK anchors grew elbow poles, IkT 8→14),
+        // and helper station refills route via new BuildingStorageSync contexts
+        // (producerset/producer — an old host silently drops them).
+        public const int Version = 4;
     }
 
     /// <summary>Sent by client on connect.</summary>
