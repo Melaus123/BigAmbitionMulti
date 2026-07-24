@@ -1069,6 +1069,18 @@ namespace BigAmbitionsMP
                             // Buyer-purchasing only makes sense in a building that RUNS A BUSINESS — skip the rest.
                             bool hasBusiness = false;
                             try { hasBusiness = !string.IsNullOrEmpty(reg.businessTypeName?.ToString()); } catch { }
+                            // HELPER GUARD (round-69, user repro 2026-07-24): the shoppable flag never
+                            // discriminated HELPERS from ordinary visitors. A granted helper who stocked a
+                            // display got it flagged by the owner's echo; the flag arms on the next building
+                            // RELOAD (ItemController.Start reads it) — one exit+re-enter and the helper is
+                            // demoted to CUSTOMER: deposit-on-click gone (dropdown/shop overlay instead) and
+                            // the refill route deliberately steps aside on purchaser-enabled items. Helpers
+                            // get MANAGE affordances, not the shop flow — never flag displays on a machine
+                            // whose local player holds a helper grant here. Folding the check into
+                            // `qualifies` reuses the !qualifies branch below, which auto-DISABLES any flag
+                            // an earlier apply already set — wrongly-flagged displays heal on the next sync.
+                            bool localIsHelper = false;
+                            try { localIsHelper = GrantSync.IsHelperBusiness(payload.AddressKey); } catch { }
                             if (hasBusiness)
                             foreach (var kv in newDict)
                             {
@@ -1088,6 +1100,7 @@ namespace BigAmbitionsMP
                                     try
                                     {
                                         qualifies = !reg.RentedByPlayer
+                                            && !localIsHelper
                                             && ii.ItemCached != null
                                             && (ii.ItemCached.type & (BigAmbitions.Items.ItemType.PointOfSale | BigAmbitions.Items.ItemType.ShowcaseShelf)) != 0;
                                     }
