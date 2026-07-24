@@ -525,8 +525,12 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (!__result) return;
-                    if (!MPRestSync.SkipActive) return;
-                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    // STATELESS by design (suppression-lapse class, round-56): the throttle
+                    // exists only inside this call while SkipActive reads true — there is no
+                    // latch to un-stick when a skip ends. The residual timestamp is zeroed
+                    // whenever we're NOT skipping so the next skip starts with a clean slate.
+                    if (!MPRestSync.SkipActive) { _nextAllowed = 0f; return; }
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) { _nextAllowed = 0f; return; }
                     if (UnityEngine.Time.unscaledTime < _nextAllowed) { __result = false; return; }
                     _nextAllowed = UnityEngine.Time.unscaledTime + CurrentNormalPaceInterval();
                 }
