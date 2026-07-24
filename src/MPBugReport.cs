@@ -503,11 +503,20 @@ namespace BigAmbitionsMP
                     return;
                 }
 
+                // Round-70 (TrainingWh33ls 20260723-063104): the tail-only cap discarded the session
+                // HEAD — mod list, patch summary, and the FIRST occurrence of a frame-spam exception —
+                // exactly the diagnostic part of a spam-flooded log. Keep head + tail; the omitted
+                // middle of a log that big is repetition by definition.
+                int headBytes = Math.Min(256 * 1024, maxBytes / 4);
+                int tailBytes = maxBytes - headBytes;
                 using var input = File.Open(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                input.Seek(-maxBytes, SeekOrigin.End);
                 using var output = File.Create(dest);
-                var header = Encoding.UTF8.GetBytes($"# Log truncated to last {maxBytes} bytes from {source}\r\n");
-                output.Write(header, 0, header.Length);
+                var head = new byte[headBytes];
+                int headRead = input.Read(head, 0, headBytes);
+                output.Write(head, 0, headRead);
+                var sep = Encoding.UTF8.GetBytes($"\r\n\r\n# ---- middle omitted: kept first {headRead} and last {tailBytes} of {fi.Length} bytes ({source}) ----\r\n\r\n");
+                output.Write(sep, 0, sep.Length);
+                input.Seek(-tailBytes, SeekOrigin.End);
                 input.CopyTo(output);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] Copy '{source}': {ex.Message}"); }
