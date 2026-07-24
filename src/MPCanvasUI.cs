@@ -4367,8 +4367,14 @@ namespace BigAmbitionsMP
                 chRT.localRotation = Quaternion.Euler(0f, 0f, expanded ? -90f : 0f);
                 var chImg = chGO.AddComponent<Image>(); chImg.sprite = ChevronSprite(); chImg.color = C_LD_MUT;
                 string players = (run.Players ?? "").Replace("—", "-"); if (string.IsNullOrEmpty(players)) players = "-";
+                // Handoff slice 2: a store whose last host is ANOTHER member is a shared
+                // world this machine holds via the mirror — say who ran it last, so
+                // "host the shared world" and "host my own world" are distinguishable.
+                string shared = "";
+                if (!string.IsNullOrEmpty(run.LastHostStableId) && run.LastHostStableId != MPConfig.StableId)
+                    shared = $" · <color=#5FA8E0>shared — last hosted by {(string.IsNullOrEmpty(run.LastHostName) ? "another player" : run.LastHostName)}</color>";
                 var hlbl = MakeLabel(hgo.transform,
-                    $"<b>{FriendlyName(run.Base)}</b>\n<size=80%><color=#8B97A4>{players}</color></size>",
+                    $"<b>{FriendlyName(run.Base)}</b>\n<size=80%><color=#8B97A4>{players}</color>{shared}</size>",
                     15, C_LD_TXT, 44f, 0f, CARD_W - 200f, HROW, TextAlignmentOptions.Left);
                 ApplyFont(hlbl); hlbl.enableWordWrapping = false;
                 string dayPart = run.NewestDay >= 1 ? $"Day {run.NewestDay} · " : "";
@@ -4527,6 +4533,16 @@ namespace BigAmbitionsMP
                     _hostSettings.MoraleTempoPercent = Math.Max(1, m.TuneMoraleTempo);
                     _hostSettings.DisableEnergy      = m.TuneNeedsDrain == 0;
                     Plugin.Logger.LogInfo($"[MenuUI] lobby mirrors save tuning: drain={m.TuneNeedsDrain}% rest={m.TuneRestSpeed}% morale={m.TuneMoraleTempo}% ('{name}').");
+                }
+                // Handoff slice 4: hosting a SHARED world (someone else hosted it last) from a
+                // mirror that hasn't been refreshed in days — if the group played since, a newer
+                // copy exists on another member's machine. Log-only, report-visible (round-58 style).
+                if (m != null && !string.IsNullOrEmpty(m.LastHostStableId)
+                    && m.LastHostStableId != MPConfig.StableId && m.SavedAtUnix > 0)
+                {
+                    double ageDays = (DateTimeOffset.UtcNow.ToUnixTimeSeconds() - m.SavedAtUnix) / 86400.0;
+                    if (ageDays >= 3)
+                        Plugin.Logger.LogWarning($"[MenuUI] Hosting a SHARED world from a mirror last updated {ageDays:0} day(s) ago — if the group has played since, a newer copy exists on another member's machine (handoff slice 4).");
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] save tuning mirror: {ex.Message}"); }

@@ -271,6 +271,11 @@ namespace BigAmbitionsMP
             public long   NewestUnix;
             public int    NewestDay = -1;
             public string Players   = "—";
+            /// <summary>Handoff slice 2: who last hosted this world (from the newest variant's
+            /// manifest) — the picker labels a store whose last host is someone else as a
+            /// shared/mirrored world. Empty on pre-field manifests.</summary>
+            public string LastHostStableId = "";
+            public string LastHostName     = "";
         }
         public class MpVariant
         {
@@ -280,6 +285,8 @@ namespace BigAmbitionsMP
             public long   SavedAtUnix;
             public string Players       = "";
             public string PlaythroughId = "";   // world identity from the manifest ("" = legacy/manifest-less)
+            public string LastHostStableId = "";   // handoff slice 2: manifest provenance
+            public string LastHostName     = "";
         }
 
         /// <summary>Group MP saves into PLAYTHROUGHS for the load screen: one entry per base session, each
@@ -305,6 +312,14 @@ namespace BigAmbitionsMP
                         var names = new List<string>();
                         if (m.Slots != null) foreach (var s in m.Slots) names.Add(string.IsNullOrEmpty(s.CharacterName) ? s.DisplayName : s.CharacterName);
                         v.Players = names.Count > 0 ? string.Join(", ", names) : "";
+                        // Handoff slice 2: provenance — resolve the last host's display
+                        // name from the manifest's own slots (StableId-keyed).
+                        v.LastHostStableId = m.LastHostStableId ?? "";
+                        if (v.LastHostStableId.Length > 0 && m.Slots != null)
+                        {
+                            var hs = m.Slots.Find(s => s.StableId == v.LastHostStableId);
+                            if (hs != null) v.LastHostName = string.IsNullOrEmpty(hs.CharacterName) ? hs.DisplayName : hs.CharacterName;
+                        }
                     }
                     else { try { v.SavedAtUnix = new DateTimeOffset(Directory.GetLastWriteTimeUtc(dir)).ToUnixTimeSeconds(); } catch { } }
 
@@ -333,14 +348,16 @@ namespace BigAmbitionsMP
 
                 foreach (var pt in byBase.Values)
                 {
-                    MpVariant newestNamed = null, newestMain = null;
+                    MpVariant newestNamed = null, newestMain = null, newestHosted = null;
                     foreach (var v in pt.Variants)
                     {
                         if (v.SavedAtUnix > pt.NewestUnix) pt.NewestUnix = v.SavedAtUnix;
                         if (v.Day > pt.NewestDay) pt.NewestDay = v.Day;
                         if (!string.IsNullOrEmpty(v.Players) && (newestNamed == null || v.SavedAtUnix > newestNamed.SavedAtUnix)) newestNamed = v;
                         if (v.Kind == "Main" && (newestMain == null || v.SavedAtUnix > newestMain.SavedAtUnix)) newestMain = v;
+                        if (!string.IsNullOrEmpty(v.LastHostStableId) && (newestHosted == null || v.SavedAtUnix > newestHosted.SavedAtUnix)) newestHosted = v;
                     }
+                    if (newestHosted != null) { pt.LastHostStableId = newestHosted.LastHostStableId; pt.LastHostName = newestHosted.LastHostName; }
                     // A merged card holds several save NAMES — headline it by the newest manual save,
                     // the native character-card rule (headline = newest non-recover save).
                     if (newestMain != null) pt.Base = StripToBase(newestMain.SessionName);

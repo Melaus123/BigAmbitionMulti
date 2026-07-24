@@ -36,6 +36,12 @@ namespace BigAmbitionsMP
         // across save-name changes — a rename stamps the SAME id into the new name's manifest, so the
         // picker groups every name of one world under one card. Cleared only with the session itself.
         private static string           _activePlaythroughId = "";
+        // Handoff slice 2: host-start counter for the ACTIVE lineage. 1 for a brand-new
+        // world; a (re)load of a stored session sets it to the stored epoch + 1 — one
+        // increment per host-start, every manifest write stamps the current value (so
+        // all lineage siblings carry it uniformly). Provenance + dual-host detection
+        // (slice 4) read it; it never resolves conflicts (host is sovereign).
+        private static int              _activeHostEpoch = 1;
 
         /// <summary>The MP save session currently in use.  Set when a save fires
         /// or when an existing session is loaded (Phase 4 step 4), so repeated
@@ -51,7 +57,7 @@ namespace BigAmbitionsMP
                     _activeManifest = null;
                     // Reset (new lobby) drops the world identity; a RENAME (non-empty) keeps it —
                     // saving under a new name is still the same world.
-                    if (string.IsNullOrEmpty(_activeSessionName)) { _activePlaythroughId = ""; PortraitFolder = null; }
+                    if (string.IsNullOrEmpty(_activeSessionName)) { _activePlaythroughId = ""; _activeHostEpoch = 1; PortraitFolder = null; }
                 }
             }
         }
@@ -446,7 +452,20 @@ namespace BigAmbitionsMP
             string lineage = MPSaveManager.StripToBase(session);
             // Adopt the loaded world's identity (empty on pre-field saves — the first save then
             // mints one via EnsureManifest and the lineage keeps grouping by name until stamped).
-            lock (_lock) { _activeSessionName = lineage; _activeManifest = m; _activePlaythroughId = m.PlaythroughId ?? ""; }
+            // Handoff slice 2: a (re)load is a host-start of this lineage — bump the epoch
+            // (works identically on the original host and on a member hosting from their
+            // MIRRORED copy of the store; every save stamps the new value + our identity).
+            lock (_lock) { _activeSessionName = lineage; _activeManifest = m; _activePlaythroughId = m.PlaythroughId ?? ""; _activeHostEpoch = Math.Max(1, m.HostEpoch + 1); }
+
+            // One greppable line so any submitted log answers "did the host change hands?"
+            // (user 2026-07-23) — the manifest records who hosted last; compare to this machine.
+            if (!string.IsNullOrEmpty(m.LastHostStableId) && m.LastHostStableId != MPConfig.StableId)
+            {
+                var prevSlot = m.Slots?.Find(s => s.StableId == m.LastHostStableId);
+                string prev = prevSlot == null ? m.LastHostStableId
+                            : (string.IsNullOrEmpty(prevSlot.CharacterName) ? prevSlot.DisplayName : prevSlot.CharacterName);
+                Plugin.Logger.LogWarning($"[MPSave] HOST HANDOFF: '{session}' was last hosted by '{prev}' — now hosting on this machine (host-start #{Math.Max(1, m.HostEpoch + 1)}).");
+            }
 
             MPServer.RestoreOwnershipFromManifest(m);              // cross-machine ownership + cash seed
             MPServer.SendLoadDataToEachClient(session, m, lineage); // each client gets its own .hsg FROM the source, tagged with the lineage
@@ -500,6 +519,50 @@ namespace BigAmbitionsMP
                 MPClient.StartFreshFromHost(p.FallbackSettings);
                 return;
             }
+            // Handoff slice 4 (REVISED per user 2026-07-23): loading an older save is STANDARD
+            // multiplayer behavior — the host loaded it, joiners get it, no warning, no prompt
+            // (we don't invent a new convention where one exists). The day/epoch comparison
+            // survives as a LOG-ONLY diagnostic (report-visible, round-58 style) so a
+            // "my progress went backwards" report can be read straight off the log.
+            LogJoinRollbackFacts(p);
+            ProceedWithLoadData(p);
+        }
+
+        /// <summary>LOG-ONLY (handoff slice 4): note when the session being joined is BEHIND what
+        /// this machine's own store knows of the same world (host rolled back — normal), or when
+        /// our store recorded a LATER host-start than the joined store knows (possible fork —
+        /// two members hosting the same world independently). Pure file/JSON IO; never blocks
+        /// or defers the load. Silent when either side lacks the fields.</summary>
+        private static void LogJoinRollbackFacts(LoadDataPayload p)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.PlaythroughId) || p.WorldDay <= 0) return;
+                int localDay = -1, localEpoch = -1; string newerHostName = "";
+                foreach (var (_, m) in MPSaveManager.ListSessions())
+                {
+                    if (m == null || m.PlaythroughId != p.PlaythroughId) continue;
+                    if (m.WorldDay > localDay) localDay = m.WorldDay;
+                    if (m.HostEpoch > localEpoch)
+                    {
+                        localEpoch = m.HostEpoch;
+                        var hs = m.Slots?.Find(s => s.StableId == m.LastHostStableId);
+                        newerHostName = hs == null ? "" : (string.IsNullOrEmpty(hs.CharacterName) ? hs.DisplayName : hs.CharacterName);
+                    }
+                }
+                if (localDay < 0) return;   // we know nothing of this world
+                int aheadDays = localDay - p.WorldDay;
+                if (aheadDays >= 1)
+                    Plugin.Logger.LogInfo($"[MPSave] Joining a rolled-back session: our store knows day {localDay}, session is day {p.WorldDay} ({aheadDays} day(s) earlier) — loading it (standard behavior).");
+                else if (p.HostEpoch > 0 && localEpoch > p.HostEpoch)
+                    Plugin.Logger.LogWarning($"[MPSave] FORK SUSPECT: our store records a later host-start of this world (epoch {localEpoch}{(string.IsNullOrEmpty(newerHostName) ? "" : $", by {newerHostName}")}) than the joined session (epoch {p.HostEpoch}) — if that newer session is still played elsewhere, this world now has two versions.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] join rollback facts: {ex.Message}"); }
+        }
+
+        /// <summary>The "write + load our .hsg" tail of ClientHandleLoadData.</summary>
+        private static void ProceedWithLoadData(LoadDataPayload p)
+        {
             MPClient.MarkLeftLobby();   // loading now — the lobby pane yields
             MPClient.SendPhaseReport("Loading");   // INTENT: don't excuse me from the fence
             MPClient.BeginJoinQuiesce();   // live stream must not touch the load
@@ -1208,6 +1271,10 @@ namespace BigAmbitionsMP
             public string StableId    = "";
             public int    Day;
             public long   SavedAtUnix;
+            /// <summary>Handoff slice 3: the world this save belongs to, read from our
+            /// MIRRORED manifest (slice 1) at marker-write time. "" = no mirror yet
+            /// (pre-mirror store) → the host falls back to name-only matching.</summary>
+            public string PlaythroughId = "";
         }
 
         private static string ClientDisconnectMarkerPath()
@@ -1225,12 +1292,18 @@ namespace BigAmbitionsMP
                 var slot = PerformLocalSave(baseName + "-disconnect");   // current game → <base>-disconnect/<ourStable>/
                 long nowUnix = 0;
                 try { nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds(); } catch { }
+                // Handoff slice 3: stamp the WORLD identity from our mirrored manifest so a
+                // future host — original or a rotated one — only requests this save for the
+                // same lineage (session names alone can collide across worlds).
+                string pid = "";
+                try { pid = MPSaveManager.ReadManifest(baseName)?.PlaythroughId ?? ""; } catch { }
                 var marker = new ClientDisconnectMarker
                 {
                     SessionBase = baseName,
                     StableId    = MPConfig.StableId,
                     Day         = slot.Day,
                     SavedAtUnix = nowUnix,
+                    PlaythroughId = pid,
                 };
                 File.WriteAllText(ClientDisconnectMarkerPath(),
                     Newtonsoft.Json.JsonConvert.SerializeObject(marker, Newtonsoft.Json.Formatting.Indented));
@@ -1544,8 +1617,10 @@ namespace BigAmbitionsMP
                 m.TuneNeedsDrain   = MPNeedsTuning.DrainPercent;
                 m.TuneRestSpeed    = MPNeedsTuning.RestPercent;
                 m.TuneMoraleTempo  = MPNeedsTuning.MoralePercent;
-                // Handoff slice 1: store provenance — who hosted when this was written.
+                // Handoff slice 1/2: store provenance — who hosted when this was written,
+                // and which host-start of the lineage this is.
                 m.LastHostStableId = MPConfig.StableId;
+                m.HostEpoch        = _activeHostEpoch;
                 RefreshSlotCash(m);
                 MPSaveManager.WriteManifest(sessionName, m);
             }

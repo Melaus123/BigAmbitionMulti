@@ -381,6 +381,11 @@ namespace BigAmbitionsMP
                     HsgGzipBase64 = data.Value.b64,
                     RawLength     = data.Value.raw,
                     Money         = cash,
+                    // Handoff slice 4: world identity/day/epoch for the joiner's
+                    // rollback-consent check.
+                    WorldDay      = m.WorldDay,
+                    PlaythroughId = m.PlaythroughId ?? "",
+                    HostEpoch     = m.HostEpoch,
                 };
                 Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", payload));
                 Plugin.Logger.LogInfo($"[Server] Sent LoadData to '{pid}' ({data.Value.raw}B, ${cash:F0}).");
@@ -1774,8 +1779,22 @@ namespace BigAmbitionsMP
                         // Phase 3: if the joiner offers a pending disconnect save for THIS session, request it
                         // first — we validate its ACTUAL in-game day on upload (HandleClientDisconnectUpload)
                         // before deciding, then send the real load. Only the disconnect file is eligible.
-                        if (hello.HasDisconnectSave &&
-                            string.Equals(hello.DisconnectSessionBase, MPSaveCoordinator.StripAutoSuffix(session), StringComparison.Ordinal))
+                        bool offerMatches = hello.HasDisconnectSave &&
+                            string.Equals(hello.DisconnectSessionBase, MPSaveCoordinator.StripAutoSuffix(session), StringComparison.Ordinal);
+                        // Handoff slice 3: names can collide across DIFFERENT worlds (esp. after a
+                        // handoff/fork) — when both sides know their world identity, they must agree.
+                        // Either side empty (pre-field marker / unstamped manifest) = legacy name-only.
+                        if (offerMatches && !string.IsNullOrEmpty(hello.DisconnectPlaythroughId))
+                        {
+                            string hostPid = "";
+                            try { hostPid = MPSaveManager.ReadManifest(MPSaveCoordinator.StripAutoSuffix(session))?.PlaythroughId ?? ""; } catch { }
+                            if (!string.IsNullOrEmpty(hostPid) && hostPid != hello.DisconnectPlaythroughId)
+                            {
+                                offerMatches = false;
+                                Plugin.Logger.LogWarning($"[Server] '{hello.PlayerId}' offered a disconnect save named for this session but from a DIFFERENT world (lineage mismatch) — ignoring the offer; sending their stored save.");
+                            }
+                        }
+                        if (offerMatches)
                         {
                             Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
                             { SessionName = session, AwaitClientDisconnectUpload = true }));
@@ -3174,7 +3193,11 @@ namespace BigAmbitionsMP
                 float cash = m != null ? MPSaveCoordinator.BestCashFor(m, stable)
                                        : (CashByStableId.TryGetValue(stable, out var c) ? c : 0f);
                 Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
-                { SessionName = session, HsgGzipBase64 = data.Value.b64, RawLength = data.Value.raw, Money = cash }));
+                {
+                    SessionName = session, HsgGzipBase64 = data.Value.b64, RawLength = data.Value.raw, Money = cash,
+                    // Handoff slice 4: identity/day/epoch for the joiner's rollback-consent check.
+                    WorldDay = m?.WorldDay ?? 0, PlaythroughId = m?.PlaythroughId ?? "", HostEpoch = m?.HostEpoch ?? 0,
+                }));
                 Plugin.Logger.LogInfo($"[Server] Mid-session join: sent LoadData to '{pid}' (session='{session}', {data.Value.raw}B, ${cash:F0}); world state follows once their scene loads.");
                 return true;
             }

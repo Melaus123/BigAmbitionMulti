@@ -697,6 +697,13 @@ namespace BigAmbitionsMP
         public string DisconnectSessionBase { get; set; } = "";
         public int    DisconnectDay         { get; set; }
         public long   DisconnectSavedAtUnix { get; set; }
+        /// <summary>Handoff slice 3: the WORLD the disconnect save belongs to (from the
+        /// client's mirrored manifest at marker-write time). The host requests the upload
+        /// only when this matches its own lineage — session NAMES can collide across
+        /// different worlds (esp. after handoffs/forks), and a name-only match could
+        /// commit a foreign world's character file into this session. Empty (pre-field
+        /// marker / no mirrored manifest yet) = legacy name-only matching.</summary>
+        public string DisconnectPlaythroughId { get; set; } = "";
     }
 
     /// <summary>
@@ -1888,6 +1895,15 @@ namespace BigAmbitionsMP
         /// (ClientDisconnectUpload); I'll validate its actual day and send your real load after." The client
         /// must NOT load on this message; it uploads and waits for the follow-up LoadData.</summary>
         public bool   AwaitClientDisconnectUpload { get; set; } = false;
+        /// <summary>Handoff slice 4: the session's identity/day/epoch (from the host's
+        /// manifest), sent with a real .hsg. LOG-ONLY diagnostics on the joiner (user
+        /// 2026-07-23: loading an older save is standard MP behavior — no warnings, it
+        /// just loads): a rolled-back join logs the day delta; a joiner whose store
+        /// recorded a LATER host-start logs a fork-suspect line naming the newer host.
+        /// 0/empty = pre-field host (silent).</summary>
+        public int    WorldDay      { get; set; }
+        public string PlaythroughId { get; set; } = "";
+        public int    HostEpoch     { get; set; }
     }
 
     /// <summary>Host → clients (handoff slice 1, 2026-07-23): one piece of the session STORE —

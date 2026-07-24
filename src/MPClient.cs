@@ -179,6 +179,7 @@ namespace BigAmbitionsMP
                     hello.DisconnectSessionBase = dc.SessionBase;
                     hello.DisconnectDay         = dc.Day;
                     hello.DisconnectSavedAtUnix = dc.SavedAtUnix;
+                    hello.DisconnectPlaythroughId = dc.PlaythroughId ?? "";   // handoff slice 3: lineage tag
                 }
             }
             catch { }
