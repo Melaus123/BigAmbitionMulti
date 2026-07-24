@@ -993,12 +993,36 @@ namespace BigAmbitionsMP
             static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
                 => VehicleManager.FindAllMethodsByName("GenerateParkedVehicles");
 
-            static bool Prefix()
+            // Round-82: the delivery JOB TRUCK is spawned INSIDE this method (first lane slot,
+            // ParkingLaneGenerator:517) — the blanket client skip removed every job truck from
+            // every client since parked-suppression shipped (probe-confirmed 2026-07-24: zero
+            // DeliveryJobStartController instances client-side while the host logged 10 VISIBLE).
+            private static readonly System.Reflection.MethodInfo? MiVanLane =
+                AccessTools.Method(typeof(ParkingLaneGenerator), "ContainsDeliveryVehicle");
+
+            static bool Prefix(object __instance, ref int freeSpotChance)
             {
                 // CLAUDE-DIAGNOSTIC — gated on ParkedVehicleSync.SpawnSuppressionEnabled
                 // so F6 can toggle the suppression at runtime for the entry-bug A/B test.
-                if (MPClient.IsClientInWorld && ParkedVehicleSync.SpawnSuppressionEnabled) return false;
-                return true;
+                if (!MPClient.IsClientInWorld || !ParkedVehicleSync.SpawnSuppressionEnabled) return true;
+
+                // Round-82 (user-approved): job-truck lanes run NATIVE with every regular spot
+                // forced FREE — Chance(100) is always true (Random.Range(0,100) <= 100), so the
+                // ambient arm provably spawns nothing (no doubling with host-mirror ghosts) while
+                // the van slot BYPASSES the chance roll and spawns normally: native placement,
+                // building link, DeactivateIfNeeded, DeliveryVanSpots bookkeeping. Non-owner van
+                // lanes (another lane already holds this building's van) degrade to all-free too.
+                try
+                {
+                    if (MiVanLane != null && __instance is ParkingLaneGenerator
+                        && (bool)MiVanLane.Invoke(__instance, null))
+                    {
+                        freeSpotChance = 100;
+                        return true;
+                    }
+                }
+                catch { }
+                return false;   // every other lane: host snapshot stays the only source of parked cars
             }
         }
 
@@ -3439,6 +3463,73 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogInfo($"[StaffRoster] MyEmployees: hid {removed} injected partner-staff record(s) (display only).");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] MyEmployees filter: {ex.Message}"); }
+            }
+        }
+
+        // ── Global employee queries hide injected partner staff (round-80) ────
+        // cdawg 20260724-165131: the partner's PURCHASING AGENTS appeared in the
+        // import dialog / HQ specialist pages. Full survey of the query API
+        // (EmployeeHelper.GetEmployeeInstances(queryInfo)):
+        //   ADDRESS-SCOPED queries — security-guard strength, per-shop staffing/
+        //   schedules — are exactly what the round-30 injection exists to serve:
+        //   NEVER filtered (and your own shop's address can't match a partner
+        //   record anyway).
+        //   GLOBAL queries (withAssignedAddress null) are "MY workforce"
+        //   semantics: the six specialist surfaces (ImportManagerDialog,
+        //   ImportPartnershipSettings, HeadquartersList ×3 [purchasing/HR/
+        //   headhunter], ScheduleDaySelection's HR check) and EmploymentGoal's
+        //   counts — injected records filtered here, one choke point.
+        // Merged-company partner staff stay visible (same exemption as the
+        // MyEmployees filter above).
+        [HarmonyPatch(typeof(Helpers.EmployeeHelper), nameof(Helpers.EmployeeHelper.GetEmployeeInstances),
+                      typeof(EmployeeInstancesQueryInfo), typeof(System.Collections.Generic.List<Entities.EmployeeInstance>))]
+        public static class Patch_EmployeeQuery_GlobalHidesInjected
+        {
+            private static float _nextLog;
+            static void Postfix(EmployeeInstancesQueryInfo queryInfo, System.Collections.Generic.List<Entities.EmployeeInstance> __result)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                    // QueryInfo is a STRUCT; Address is a class with overloaded operators — use a
+                    // pattern match so the null test can't route through an operator surprise.
+                    if (__result == null || queryInfo.withAssignedAddress is not null) return;
+                    int removed = __result.RemoveAll(e =>
+                        e != null && MPRegisterSync.IsInjectedStaff(e.id)
+                                  && !MPRegisterSync.IsInjectedFromMergedPartner(e.id));
+                    if (removed > 0 && UnityEngine.Time.unscaledTime >= _nextLog)
+                    {
+                        _nextLog = UnityEngine.Time.unscaledTime + 5f;
+                        Plugin.Logger.LogInfo($"[StaffRoster] global employee query: hid {removed} injected partner record(s) (specialist/goal surfaces, round-80).");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] employee query filter: {ex.Message}"); }
+            }
+        }
+
+        // Round-80 survey, raw-list consumer: EmployeeMaxLevelGoal takes a GLOBAL
+        // max over every employee's skills — a partner's level-10 worker completed
+        // YOUR goal. Recompute minus injected (merged partners exempt, as above).
+        [HarmonyPatch(typeof(EmployeeMaxLevelGoal), "GetValue")]
+        public static class Patch_EmployeeMaxLevelGoal_SkipInjected
+        {
+            static bool Prefix(ref float __result)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
+                    var list = Helpers.EmployeeHelper.GetEmployeeInstances();
+                    if (list == null) return true;
+                    __result = list
+                        .Where(e => e?.characterData?.skills != null
+                                    && !(MPRegisterSync.IsInjectedStaff(e.id) && !MPRegisterSync.IsInjectedFromMergedPartner(e.id)))
+                        .SelectMany(e => e.characterData.skills)
+                        .Select(x => x.value)
+                        .DefaultIfEmpty(0f)
+                        .Max();
+                    return false;
+                }
+                catch { return true; }   // any surprise → native behavior
             }
         }
 

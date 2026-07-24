@@ -310,6 +310,18 @@ namespace BigAmbitionsMP
             AheadHeld        = false;
             _firstSyncSeen   = false;   // re-arm the one-time join snap for the next load
             _releaseDeferred = false; _forceNextRelease = false;   // world-sync release gate dies with the load
+            // Round-81 (user-approved): a stale MANUAL pause dies with the load too. It was never
+            // reset at session boundaries, so a pause from the PREVIOUS session survived the menu on
+            // both roles and re-imposed itself on the fresh world (host informs joiners at
+            // MPServer:1905; client re-relays during load) — world sat silently paused after the
+            // startup hold released ("characters stuck until pause/unpause", log-proven 2026-07-24).
+            // Flag-only on purpose: the startup hold owns NATIVE pause during a load, so we must not
+            // drive an unpause here — just forget the stale intent.
+            if (ManualPaused)
+            {
+                ManualPaused = false;
+                Plugin.Logger.LogInfo("[TimeSync] Stale manual pause cleared at scene load (round-81).");
+            }
             // Round-36: the early-release marker is deliberately NOT cleared here anymore — the scene-ready
             // reset ran BETWEEN the early release and the hold engage (log-proven), wiping the marker the
             // hold needed. Its 90s validity window handles staleness instead.
