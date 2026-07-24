@@ -3705,7 +3705,6 @@ namespace BigAmbitionsMP
         private TextMeshProUGUI[] _lwRoster = new TextMeshProUGUI[6];
         private GameObject? _lwDiffEasy, _lwDiffNormal, _lwDiffHard, _lwCustomize, _lwStart;
         private RectTransform? _rtDiffEasy, _rtDiffNormal, _rtDiffHard, _rtCustomize, _rtLwStart, _rtLwLeave;
-        private RectTransform? _rtLwReport;   // round-54: lobby report button (both roles)
         // Per-player roster columns.  Cash = host-dictated (host edits any row);
         // Age = self-edited (each player edits only their own row).  This is the
         // ONLY starting-cash UI now — the old base field + customize-page cash are
@@ -4758,9 +4757,8 @@ namespace BigAmbitionsMP
 
             _lwStart   = CloneButtonInto(_lobbyWindow.transform, "BAMP_LwStart", "Start Game", OnLobbyStart, 110f, -456f, 160f, 42f); _rtLwStart = _lwStart?.GetComponent<RectTransform>();
             var leave  = CloneButtonInto(_lobbyWindow.transform, "BAMP_LwLeave", "Leave",      OnLobbyLeave, 290f, -456f, 160f, 42f); _rtLwLeave = leave?.GetComponent<RectTransform>();
-            // Round-54: report entry IN the lobby — "Not connected" strands players exactly here,
-            // with the failed join's reason freshest in the log. Both roles (clients included).
-            var lwRep  = CloneButtonInto(_lobbyWindow.transform, "BAMP_LwReport", "Report", OpenManualBugReport, 16f, -456f, 84f, 42f); _rtLwReport = lwRep?.GetComponent<RectTransform>();
+            // (Round-54's lobby Report button REMOVED 2026-07-23 per user — redundant with the
+            // "Report a Bug" entry in the multiplayer submenu, one Leave-click away.)
 
             _lobbyWindow.SetActive(false);
         }
@@ -4971,7 +4969,6 @@ namespace BigAmbitionsMP
             if (Input.GetMouseButtonDown(0))
             {
                 if (RectHit(_rtLwLeave, mp)) { OnLobbyLeave(); return; }
-                if (RectHit(_rtLwReport, mp)) { OpenManualBugReport(); return; }   // round-54: both roles
                 if (host)
                 {
                     // KICK [X] on a roster row.
