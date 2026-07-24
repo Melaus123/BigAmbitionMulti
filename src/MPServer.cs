@@ -1176,6 +1176,9 @@ namespace BigAmbitionsMP
                     if (!SenderOwns(bc.Info.AddressKey ?? "", senderPid))
                     {
                         Plugin.Logger.LogWarning($"[Server] BusinessChange for '{bc.Info.AddressKey}' from '{senderPid}' — sender doesn't own it (incl. AI/unowned) — dropped.");
+                        // Round-61: unless this is a LEDGER HOLE — the owner's machine runs a
+                        // living business the host's ledger knows nothing about. See the method.
+                        TryAdoptOrphanedTenancy(bc.Info, senderPid);
                         break;
                     }
                     GameStatePatcher.ApplyClientBusinessChange(bc.Info);
@@ -2775,6 +2778,72 @@ namespace BigAmbitionsMP
             if (BuildingOwners.TryGetValue(addr, out var o) && o == senderPid) return true;
             if (BuildingRealEstateOwners.TryGetValue(addr, out var r) && r == senderPid) return true;
             return false;
+        }
+
+        // ── Round-61: orphaned-tenancy reconcile (RED ROC factory, 2026-07-23) ─────
+        // A 0.1.12-era ledger hole never heals on its own: the owner's machine runs a
+        // LIVING business while the host's ledger has no entry for the building — so
+        // every push is dropped forever ("sender doesn't own it") and the two worlds
+        // stay permanently diverged (field: '9 twentysecondstreet', a factory with 19
+        // staff on the owner's side vs an empty unowned shell on the host's; 42 drops
+        // in one session; the client's own match check showed exactly 1 mismatch of
+        // 825 addresses). When a business push claims a building the ledger knows
+        // NOTHING about, verify on the main thread that the host's side is completely
+        // VIRGIN — no rent owner, no deed owner, not the host's own tenancy, no AI
+        // tenant, no live business type — and if so ADOPT the sender as tenant exactly
+        // like a rent confirm would (ledger entry + HostReflectPlayerRent + access
+        // refresh) and apply the push. The guards mean adoption can never take a
+        // building from ANYONE: it only fills holes where the host has nothing and the
+        // claimant has a living business. The next coordinated save persists the entry
+        // (BuildOwnersStableKeyed); a crash before that just re-adopts next session.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _adoptNextCheckMs = new();
+        private const int AdoptRecheckMs = 120_000;   // owner re-asserts periodically; one check per 2 min is plenty
+
+        private static void TryAdoptOrphanedTenancy(BusinessInfo info, string senderPid)
+        {
+            try
+            {
+                string addr = info?.AddressKey ?? "";
+                if (string.IsNullOrEmpty(addr) || string.IsNullOrEmpty(senderPid)) return;
+                // The push must itself claim a LIVING business — an empty/typeless
+                // push can't adopt anything.
+                string type = info.BusinessTypeName ?? "";
+                if (type.Length == 0 || type.EndsWith("_empty", StringComparison.Ordinal)) return;
+                // The ledger must know NOTHING about the building — a claim by anyone
+                // (including a renamed pid) stays the normal drop above.
+                if (BuildingOwners.TryGetValue(addr, out var o) && !string.IsNullOrEmpty(o)) return;
+                if (BuildingRealEstateOwners.TryGetValue(addr, out var r) && !string.IsNullOrEmpty(r)) return;
+                // Per-address throttle (poll thread — TickCount wrap-safe comparison).
+                int now = Environment.TickCount;
+                if (_adoptNextCheckMs.TryGetValue(addr, out var next) && now - next < 0) return;
+                _adoptNextCheckMs[addr] = now + AdoptRecheckMs;
+                var pushed = info; string pid = senderPid;
+                GameStatePatcher.EnqueueOnMainThread(() =>
+                {
+                    try
+                    {
+                        // Re-check the ledgers on the main thread (a rent/buy could have
+                        // landed while this was queued).
+                        if (BuildingOwners.TryGetValue(addr, out var o2) && !string.IsNullOrEmpty(o2)) return;
+                        if (BuildingRealEstateOwners.TryGetValue(addr, out var r2) && !string.IsNullOrEmpty(r2)) return;
+                        var reg = GameStatePatcher.FindRegistration(addr);
+                        if (reg == null) return;
+                        bool hostRents = false; try { hostRents = reg.RentedByPlayer; } catch { }
+                        if (hostRents) return;                                     // the host's own shop — never
+                        string tenant = ""; try { tenant = reg.businessOwnerRivalId ?? ""; } catch { }
+                        if (tenant.Length > 0 && tenant != pid && !GameStatePatcher.IsSessionPlayerId(tenant)) return;   // an AI runs a business here
+                        string hostType = ""; try { hostType = reg.businessTypeName ?? ""; } catch { }
+                        if (hostType.Length > 0 && !hostType.EndsWith("_empty", StringComparison.Ordinal)) return;       // host sees a live business
+                        BuildingOwners[addr] = pid;
+                        GameStatePatcher.HostReflectPlayerRent(addr, pid);
+                        RefreshBuildingAccess();
+                        Plugin.Logger.LogWarning($"[Ledger] ADOPTED orphaned tenancy: '{addr}' → '{pid}' — the owner's machine runs a live business ('{pushed.BusinessName}', {pushed.BusinessTypeName}) but the host ledger had NO entry and the host's world showed an unowned empty shell (0.1.12-era hole; round-61). This building's pushes are accepted from now on.");
+                        GameStatePatcher.ApplyClientBusinessChange(pushed);
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Ledger] orphan adopt '{addr}': {ex.Message}"); }
+                });
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Ledger] orphan adopt: {ex.Message}"); }
         }
 
         // A client listed an owned building for sale.  Add it to the host's authoritative
