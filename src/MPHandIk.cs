@@ -62,6 +62,20 @@ namespace BigAmbitionsMP
                 p.IkT.Add(r.x); p.IkT.Add(r.y); p.IkT.Add(r.z);
                 p.IkT.Add(1f);  p.IkT.Add(1f);
 
+                // Round-74f: ship the REAL elbow anchors too (indices 8-13). The observer's
+                // two-bone solve has a free elbow-orbit parameter; the world-down pole guess
+                // collapsed the elbows inward (native push holds them out). With the true elbow
+                // point the bend plane is exact — same no-guessing model as the hands.
+                var le = anim.GetBoneTransform(HumanBodyBones.LeftLowerArm);
+                var re = anim.GetBoneTransform(HumanBodyBones.RightLowerArm);
+                if (le != null && re != null)
+                {
+                    var lel = veh.InverseTransformPoint(le.position);
+                    var rel = veh.InverseTransformPoint(re.position);
+                    p.IkT.Add(lel.x); p.IkT.Add(lel.y); p.IkT.Add(lel.z);
+                    p.IkT.Add(rel.x); p.IkT.Add(rel.y); p.IkT.Add(rel.z);
+                }
+
                 if (!_loggedFill)
                 {
                     _loggedFill = true;

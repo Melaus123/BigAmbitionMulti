@@ -901,6 +901,14 @@ namespace BigAmbitionsMP
         /// (baskets hang off-axis; identity placement looked wrong).</summary>
         public List<float> HeldT { get; set; } = new();
 
+        /// <summary>Round-74e — the sender MODEL's local Z offset under its root.
+        /// The native push stance slides the model backward relative to the root
+        /// (HandTruck.EnterVehicle :169-172, per-vehicle amount) — invisible to
+        /// root-position sync; without it the clone's body stood a meter too far
+        /// forward with hands IK'd to the handle (the non-native push posture,
+        /// PushPose probe verdict 2026-07-24). 0 when not pushing.</summary>
+        public float MlZ { get; set; }
+
         // ── Animator state (generic full-mirror) ──────────────────────────────
         // Parameter indices are positions in Animator.parameters; the controller
         // asset is identical for every player so an index means the same thing
@@ -966,11 +974,19 @@ namespace BigAmbitionsMP
         /// amounts).  Receivers render that many generic boxes.</summary>
         public int CarriedItems { get; set; }
         /// <summary>Address key of the building this vehicle is inside ("" =
-        /// outdoors).  Cross-interior mask v2: tagged sender-side (near the
-        /// owner while they're inside → that building; near them outside → "";
-        /// far from them → last tag kept), so a cart LEFT in a shop stays
-        /// hidden from players in other same-type interiors.</summary>
+        /// outdoors).  Cross-interior mask v3 (round-74): sourced from the
+        /// VEHICLE's own native street data (VehicleInstance.Address, which the
+        /// game maintains on every door transition) — never from the owner's
+        /// whereabouts (the old 30m owner-proximity heuristic mis-tagged carts
+        /// whenever the owner stood in an adjacent interior).</summary>
         public string Bldg { get; set; } = "";
+        /// <summary>Round-74 data-level fleet: TRUE for a vehicle whose live
+        /// object is unloaded on the owner's machine (native interior scoping —
+        /// vehicles parked in a building unload with its interior).  The entry
+        /// carries the SAVE-DATA position/cargo instead of a live transform.
+        /// Receivers keep the ghost parked there; absence from the payload now
+        /// unambiguously means SOLD.</summary>
+        public bool Dormant { get; set; }
     }
 
     /// <summary>

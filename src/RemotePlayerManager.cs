@@ -81,7 +81,8 @@ namespace BigAmbitionsMP
                                    List<int>? trueBools,
                                    Dictionary<int, int>? ints,
                                    List<float>? layerWeights = null,
-                                   List<float>? ikTargets = null)
+                                   List<float>? ikTargets = null,
+                                   float modelLocalZ = 0f)
         {
             if (floats != null)
                 foreach (var kv in floats) _targetF[kv.Key] = kv.Value;
@@ -91,6 +92,7 @@ namespace BigAmbitionsMP
             if (trueBools != null)
                 foreach (var b in trueBools) _trueB.Add(b);
             _layerW = layerWeights;
+            _targetMlZ = modelLocalZ;
             // Hand-IK anchors with a grace window: one missed packet must not
             // release the hands (visible pop).  Cleared after 0.6s of silence.
             if (ikTargets != null && ikTargets.Count >= 8)
@@ -120,6 +122,16 @@ namespace BigAmbitionsMP
         private bool _ikHuman;
         private bool _ikSmoothInit;
         private Vector3 _ikL, _ikR;   // smoothed vehicle-local hand anchors
+        private bool _ikElbowInit;    // round-74f: smoothed vehicle-local ELBOW anchors (true poles)
+        private Vector3 _ikLE, _ikRE;
+
+        // Round-74e (PushPose probe verdict): the native push shifts the pusher's MODEL backward
+        // relative to its root (HandTruck.EnterVehicle :169-172, per-vehicle offset — probe: local
+        // model at z=-1.00, clone at 0) — invisible to root-position sync, so the clone's body
+        // stood a meter too far forward with hands IK'd to the handle = the non-native posture.
+        // The sender's actual model-local Z rides the position payload; mirrored here smoothly.
+        private float _targetMlZ;
+        private float _curMlZ;
 
         /// <summary>The clone's HandContent bone — the anchor space for
         /// held-item hand mirroring (cart pushing uses the vehicle instead).</summary>
@@ -167,11 +179,29 @@ namespace BigAmbitionsMP
                 _ikL = Vector3.Lerp(_ikL, lRaw, k);
                 _ikR = Vector3.Lerp(_ikR, rRaw, k);
 
-                // Pole = world down: elbow solution stays stable however the
-                // avatar/cart rotate (an avatar-relative pole flipped the
-                // elbows on turns — the "arms coming off" wobble).
-                MPHandIk.SolveArm(Anim, true,  space.TransformPoint(_ikL), Vector3.down);
-                MPHandIk.SolveArm(Anim, false, space.TransformPoint(_ikR), Vector3.down);
+                // Round-74f: TRUE elbow poles when the sender ships them (IkT 8-13) — the
+                // world-down guess collapsed the elbows inward (native push holds them out).
+                // Anchor-space poles rotate WITH the cart, so the old avatar-relative
+                // turn-wobble can't return. Fallback: world down (older sender).
+                Vector3 lPole = Vector3.down, rPole = Vector3.down;
+                if (_ikT.Count >= 14)
+                {
+                    var leRaw = new Vector3(_ikT[8],  _ikT[9],  _ikT[10]);
+                    var reRaw = new Vector3(_ikT[11], _ikT[12], _ikT[13]);
+                    if (!_ikElbowInit) { _ikElbowInit = true; _ikLE = leRaw; _ikRE = reRaw; }
+                    _ikLE = Vector3.Lerp(_ikLE, leRaw, k);
+                    _ikRE = Vector3.Lerp(_ikRE, reRaw, k);
+                    try
+                    {
+                        var lu = Anim.GetBoneTransform(HumanBodyBones.LeftUpperArm);
+                        var ru = Anim.GetBoneTransform(HumanBodyBones.RightUpperArm);
+                        if (lu != null) lPole = space.TransformPoint(_ikLE) - lu.position;
+                        if (ru != null) rPole = space.TransformPoint(_ikRE) - ru.position;
+                    }
+                    catch { }
+                }
+                MPHandIk.SolveArm(Anim, true,  space.TransformPoint(_ikL), lPole);
+                MPHandIk.SolveArm(Anim, false, space.TransformPoint(_ikR), rPole);
                 MPPerf.End("RemLate", _pf);
             }
             catch { }
@@ -222,6 +252,14 @@ namespace BigAmbitionsMP
                 transform.rotation = Quaternion.Slerp(transform.rotation, TargetRotation, k);
             }
 
+
+            // Round-74e: mirror the sender's model-local backward shift (the native push stance
+            // slides the MODEL behind the root — see _targetMlZ). Smoothly, x/y stay native-zero.
+            if (Anim != null && Mathf.Abs(_curMlZ - _targetMlZ) > 0.001f)
+            {
+                _curMlZ = Mathf.Lerp(_curMlZ, _targetMlZ, Mathf.Min(Time.deltaTime * 8f, 0.5f));
+                try { Anim.transform.localPosition = new Vector3(0f, 0f, _curMlZ); } catch { }
+            }
 
             // Mirror the owner's real animator state (no local guessing).
             if (Anim != null)
@@ -343,7 +381,7 @@ namespace BigAmbitionsMP
             if (mover != null)
             {
                 mover.SetTarget(new Vector3(p.X, p.Y, p.Z), Quaternion.Euler(0f, p.RotY, 0f), p.T);
-                mover.ApplyAnimState(p.AnimF, p.AnimB, p.AnimI, p.LayerW, p.IkT);
+                mover.ApplyAnimState(p.AnimF, p.AnimB, p.AnimI, p.LayerW, p.IkT, p.MlZ);
             }
             else
             {
@@ -874,6 +912,11 @@ namespace BigAmbitionsMP
                 for (int l = 0; l < lc && l < 8; l++)
                     p.LayerW.Add(anim.GetLayerWeight(l));
 
+                // Round-74e: the native push stance slides the MODEL backward relative to the root
+                // (HandTruck.EnterVehicle :169-172, per-vehicle amount) — root sync can't see it, so
+                // ship the actual model-local Z (0 when not pushing; the clone mirrors it smoothly).
+                try { p.MlZ = anim.transform.localPosition.z; } catch { }
+
                 // Held prop (HandContent skeleton node) — first active child's
                 // cleaned name rides the payload; "" = empty hands.
                 try
@@ -909,6 +952,7 @@ namespace BigAmbitionsMP
 
         // ── Held-prop sync (CarryProbe verdict 2026-06-12) ────────────────────
         private static Transform? _localHandContent;
+
 
         /// <summary>The LOCAL player's HandContent bone (hand-IK anchor space
         /// for held items — see MPHandIk.FillPayload).</summary>

@@ -349,6 +349,12 @@ namespace BigAmbitionsMP
                     // 'BAMP_BAMP…' id is additionally a save-cycle leak (warn once).
                     if (inst.id.StartsWith("BAMP_"))
                     {
+                        // Round-74c: a DRIVEN granted proxy must still anchor the hand-IK export —
+                        // this skip ran BEFORE the openDriven capture, so CurrentOpenDriven stayed
+                        // null for borrowed carts and the pusher's hands-on-handle pose never left
+                        // this machine (user: "host didn't see the client's hands on the flatbed").
+                        // The proxy still never enters the broadcast itself.
+                        try { if (vc.controlledByPlayer && IsOpenVehicle(inst.vehicleTypeName ?? "")) openDriven = vc.transform; } catch { }
                         if (inst.id.Contains("BAMP_BAMP") && !_lastManifestLogged.ContainsKey(inst.id))
                         {
                             _lastManifestLogged[inst.id] = "LEAKED";
@@ -404,19 +410,22 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogInfo($"[Vehicle] manifest {tn} '{inst.id}': {(cargo.Length > 0 ? cargo : "(empty)")} carried={carried}");
                     }
 
-                    // Cross-interior tag (v2 — replaces the owner-proximity
-                    // heuristic): a vehicle near ME while I'm inside a building
-                    // belongs to that interior; near me outside → outdoors; far
-                    // from me → keep its last tag (left where it was).
-                    string bldg = _lastVehicleBldg.TryGetValue(inst.id, out var prevB) ? prevB : "";
-                    try
+                    // Cross-interior tag v3 (round-74): the VEHICLE's own native street data is the
+                    // truth — the game maintains it on every door transition (BuildingManager:779
+                    // drive-in, HandTruck:184 / Scooter:199, "" outdoors) and it persists in the
+                    // save. The old 30m owner-proximity heuristic mis-tagged carts whenever the
+                    // owner stood in an ADJACENT interior box (interior volumes are spatially
+                    // packed): a parked cart was hidden exactly where it really was and "shown"
+                    // only where it wasn't (test #3 "teleported away", indoor AND outdoor).
+                    // While a borrower drives it, their live building rides the drive stream
+                    // instead — this machine's street data lags their door transitions.
+                    string bldg;
+                    if (_ownedFollowing.TryGetValue(inst.id, out var fTag)) bldg = fTag.Bldg ?? "";
+                    else
                     {
-                        var me = Helpers.PlayerHelper.PlayerController?.Character?.transform;
-                        if (me != null && UnityEngine.Vector3.Distance(me.position, t.position) < 30f)
-                            bldg = MPRegisterSync.CurrentShopAddress;   // "" when outdoors
+                        try { bldg = string.IsNullOrEmpty(inst.streetName) ? "" : $"{inst.streetNumber} {inst.streetName}"; }
+                        catch { bldg = ""; }
                     }
-                    catch { }
-                    _lastVehicleBldg[inst.id] = bldg;
 
                     // Live fuel (CarController.fuelModule) if it's a car, else the persisted instance value.
                     float fuel = inst.fuel;
@@ -436,6 +445,63 @@ namespace BigAmbitionsMP
                         Bldg  = bldg,
                     });
                 }
+
+                // Round-74 data-level fleet: vehicles whose live object is UNLOADED (native interior
+                // scoping — a cart parked in a building unloads with its interior; VehicleController.
+                // OnDisable then deregisters it from AllPlayerVehicles) used to silently vanish from
+                // this payload, indistinguishable from SOLD, so receivers despawned the ghost — the
+                // whole stuck/vanishing-cart family. Emit them as DORMANT entries from save data:
+                // parked at their recorded position, tagged by their own address. A vehicle ABSENT
+                // from the payload now unambiguously means sold/removed.
+                try
+                {
+                    var insts = SaveGameManager.Current?.VehicleInstances;
+                    if (insts != null)
+                    {
+                        var live = new HashSet<string>();
+                        foreach (var e in fleet.Vehicles) live.Add(e.VehicleId);
+                        foreach (var inst in insts)
+                        {
+                            try
+                            {
+                                if (inst == null || string.IsNullOrEmpty(inst.id) || live.Contains(inst.id)) continue;
+                                if (inst.id.StartsWith("BAMP_") && !inst.id.StartsWith("BAMP_TESTRIG")) continue;   // leaked ghosts: never re-broadcast
+                                string dCargo = "";
+                                if (inst.cargoInstances != null && inst.cargoInstances.Count > 0)
+                                {
+                                    var csb = new System.Text.StringBuilder();
+                                    for (int ci = 0; ci < inst.cargoInstances.Count && ci < 24; ci++)
+                                    {
+                                        var c = inst.cargoInstances[ci];
+                                        if (c == null) continue;
+                                        csb.Append(c.itemName).Append('=').Append(c.amount)
+                                           .Append('=').Append(c.paid ? '1' : '0')
+                                           .Append('=').Append(c.pricePerUnit.ToString("R", System.Globalization.CultureInfo.InvariantCulture))
+                                           .Append(';');
+                                    }
+                                    dCargo = csb.ToString();
+                                }
+                                int dCarried = 0; try { dCarried = inst.cargoIds?.Count ?? 0; } catch { }
+                                string dBldg = string.IsNullOrEmpty(inst.streetName) ? "" : $"{inst.streetNumber} {inst.streetName}";
+                                fleet.Vehicles.Add(new VehicleEntry
+                                {
+                                    VehicleId = inst.id,
+                                    TypeName  = inst.vehicleTypeName ?? "",
+                                    ColorName = inst.vehicleColorName ?? "",
+                                    Driving   = false,
+                                    Fuel      = inst.fuel,
+                                    X = inst.position.x, Y = inst.position.y, Z = inst.position.z,
+                                    Qx = inst.rotation.x, Qy = inst.rotation.y, Qz = inst.rotation.z, Qw = inst.rotation.w,
+                                    Cargo = dCargo, CarriedItems = dCarried,
+                                    Bldg = dBldg, Dormant = true,
+                                });
+                            }
+                            catch { }   // one malformed instance must not gut the pass
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] dormant fleet pass: {ex.Message}"); }
+
                 CurrentOpenDriven = openDriven;
                 return fleet;
             }
@@ -480,7 +546,8 @@ namespace BigAmbitionsMP
         // Sender-side per-vehicle state: last logged cargo manifest (handcart
         // evidence) and last interior tag (cross-interior mask v2).
         private static readonly Dictionary<string, string> _lastManifestLogged = new();
-        private static readonly Dictionary<string, string> _lastVehicleBldg = new();
+        // (_lastVehicleBldg removed round-74: cross-interior tags now come from the vehicle's own
+        //  native street data — see the v3 tag block in ReadLocalFleet.)
 
         public static void ApplyVehicleFleet(VehicleFleetPayload p)
         {
@@ -717,10 +784,13 @@ namespace BigAmbitionsMP
         /// on the deck at the root (scooter verified fine at zero).</summary>
         private static Vector3 RideOffsetFor(string typeName)
         {
-            bool rideOn = typeName.IndexOf("scooter", StringComparison.OrdinalIgnoreCase) >= 0
-                       || typeName.IndexOf("bike",    StringComparison.OrdinalIgnoreCase) >= 0
-                       || typeName.IndexOf("moped",   StringComparison.OrdinalIgnoreCase) >= 0;
-            return rideOn ? Vector3.zero : new Vector3(0f, 0f, -1.0f);
+            // Round-74e: ZERO for everything. Native parents the cart to the player at LOCAL ZERO
+            // (HandTruck.EnterVehicle :156-158) — root and cart origin coincide; the pusher's whole
+            // backward stance lives in the MODEL-local shift (:169-172), which now syncs as
+            // PlayerPositionPayload.MlZ and is mirrored on the clone. The old -1m root offset here
+            // was an unknowing compensation for that un-synced shift — keeping both stood the clone
+            // 2m back (user-caught double offset).
+            return Vector3.zero;
         }
 
         /// <summary>Fill a (ghost) VehicleInstance's cargo from the manifest
@@ -1440,8 +1510,12 @@ namespace BigAmbitionsMP
         // to everyone else). Reverts on exit (Released) or a ~1.5 s timeout (driver disconnect).
         private static string _drivingRealVid = "";   // REAL id of the proxy I'm currently driving ("" = none)
         private static string _drivingOwner   = "";
-        private sealed class DrivenFollow { public Vector3 Pos; public Quaternion Rot = Quaternion.identity; public float Until; public float LastDamage = -1f; public string Driver = ""; public bool Hide; public Vector3 RideOff; }
+        private sealed class DrivenFollow { public Vector3 Pos; public Quaternion Rot = Quaternion.identity; public float Until; public float LastDamage = -1f; public string Driver = ""; public bool Hide; public Vector3 RideOff; public string Bldg = ""; }
         private static readonly Dictionary<string, DrivenFollow> _ownedFollowing = new();   // MY cars driven remotely
+        // Round-74: cars a borrower RELEASED inside an interior WE haven't loaded stay kinematic
+        // (parked-dormant) until we load that interior — resuming physics over an unloaded floor
+        // dropped them into the void and the native OnDisable deregistration ate them.
+        private static readonly Dictionary<string, string> _dormantReleases = new();   // vid → interior addressKey
         private const float DriveSyncTimeout = 1.5f;
 
         /// <summary>True if vid (one of MY cars) is currently driven remotely — used to redirect the owner's
@@ -1509,6 +1583,33 @@ namespace BigAmbitionsMP
                     foreach (var kv in _ownedFollowing) if (now > kv.Value.Until) (expired ??= new List<string>()).Add(kv.Key);
                     if (expired != null) foreach (var v in expired) ReleaseOwnedFollow(v);
                 }
+
+                // Round-74b: OWNER-side interior mask for MY OWN live vehicles. The redesign keeps
+                // my real cart alive at interior coords while a borrower pushes/parks it in a
+                // building I'm not in — but native vehicles never needed interior masking (indoors-
+                // elsewhere meant unloaded), so mine rendered across ADJACENT interior boxes (user:
+                // "host saw it in his building while it was pushed in another"). Mirror the ghost
+                // mask rule — hidden when its building is non-empty and not mine — via RENDERERS +
+                // COLLIDERS only: SetActive(false) would fire VehicleController.OnDisable and
+                // deregister it from the fleet (the round-74 root class).
+                try { TickOwnedVehicleInteriorMask(); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] owned interior mask: {ex.Message}"); }
+
+                // Round-74: wake dormant-parked cars once WE load the interior they were released in.
+                if (_dormantReleases.Count > 0)
+                {
+                    List<string> wake = null;
+                    foreach (var kv in _dormantReleases)
+                        if (kv.Value == MPRegisterSync.CurrentShopAddress) (wake ??= new List<string>()).Add(kv.Key);
+                    if (wake != null)
+                        foreach (var vid in wake)
+                        {
+                            _dormantReleases.Remove(vid);
+                            var dgo = FindOwnedGo(vid);
+                            if (dgo != null) { try { foreach (var rb in dgo.GetComponentsInChildren<Rigidbody>(true)) if (rb != null) rb.isKinematic = false; } catch { } }
+                            Plugin.Logger.LogInfo($"[Drive] dormant-parked '{vid}' woken — its interior is loaded here now.");
+                        }
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Drive] TickDriveSync: {ex.Message}"); }
         }
@@ -1527,11 +1628,29 @@ namespace BigAmbitionsMP
             {
                 if (p == null || string.IsNullOrEmpty(p.VehicleId) || p.DriverId == MPConfig.PlayerId) return;
                 var ownedGo = FindOwnedGo(p.VehicleId);
-                if (ownedGo == null) return;   // not my car — I'll see it move via the owner's normal broadcast
+                if (ownedGo == null)
+                {
+                    // Round-74: a granted borrower can grab a DORMANT cart of mine (parked in an
+                    // interior I don't have loaded — no live object on my side). Track the drive
+                    // stream at the DATA level so the instance's position/address/fuel follow the
+                    // borrower and the release parks it correctly in my save; the dormant fleet
+                    // entry then broadcasts the new truth. Not my vehicle at all → no-op inside.
+                    DataFollow(p);
+                    return;
+                }
                 if (p.Released) { ReleaseOwnedFollow(p.VehicleId); return; }
                 if (!_ownedFollowing.TryGetValue(p.VehicleId, out var f))
                 {
                     f = new DrivenFollow(); _ownedFollowing[p.VehicleId] = f; BeginOwnedFollow(ownedGo, p.VehicleId);
+                    // Round-74: SEED the follow target from the cart's CURRENT pose. f.Pos was born
+                    // Vector3.zero, and a borrow that STARTED indoors (every packet Bldg-tagged under
+                    // the old door-hold) never overwrote it — TickOwnedFollow lerped the real cart
+                    // toward WORLD ORIGIN until it left valid space and the native OnDisable chain
+                    // (VehicleController:184 → UnregisterPlayerVehicle) dropped it from the fleet,
+                    // which despawned the borrower's possessed proxy mid-push (lauraskrobo1
+                    // 20260723-221447; the CartTrace 2026-07-07 "lerped to 951" reads as this same
+                    // hole caught mid-flight and misdiagnosed as an interior-coordinates problem).
+                    f.Pos = ownedGo.transform.position; f.Rot = ownedGo.transform.rotation;
                     // Bug #1: depict the borrower in the seat the same way the fleet path depicts any remote driver
                     // (560-585) — enclosed car → hide the walk model; open vehicle (borrowed flatbed/cart) → keep it
                     // visible + pinned. The owner's own fleet broadcast never runs on the owner's machine, so the
@@ -1541,13 +1660,18 @@ namespace BigAmbitionsMP
                     f.RideOff = f.Hide ? Vector3.zero : RideOffsetFor(tn);
                 }
                 f.Driver = p.DriverId;
-                // HOLD while the borrower is indoors: never chase the pose into interior coordinates —
-                // that space may not be loaded here, and the real cart got deregistered inside it
-                // (CartTrace 2026-07-07: follow lerped the cart to 951,* → fleet dropped it → the
-                // borrower's possessed proxy was despawned mid-push). The cart waits at the door.
-                if (string.IsNullOrEmpty(p.Bldg))
-                { f.Pos = new Vector3(p.X, p.Y, p.Z); f.Rot = new Quaternion(p.Qx, p.Qy, p.Qz, p.Qw); }
+                // Round-74 (door-hold REMOVED — user-directed seamless-cart model): follow the borrower
+                // TRUTHFULLY everywhere, interior coordinates included. The cart is where they push it,
+                // on every machine, and parks wherever they leave it. Interior coords are survivable
+                // because the cart is KINEMATIC for the whole follow (BeginOwnedFollow) — it cannot fall
+                // through a floor this machine hasn't loaded. The RELEASE is the only physics-resume
+                // point, and ReleaseOwnedFollow defers that until the interior is loaded here.
+                f.Pos = new Vector3(p.X, p.Y, p.Z); f.Rot = new Quaternion(p.Qx, p.Qy, p.Qz, p.Qw);
+                f.Bldg = p.Bldg ?? "";
                 f.Until = Time.unscaledTime + DriveSyncTimeout;
+                // (Round-74d dynamic ride offset REVERTED same day: the per-type offset was already
+                // placing the pusher correctly — the "posture" gap is the push POSE animation, not
+                // the standing spot — and the computed offset made placement worse.)
                 // State back-prop (item D): the borrower's fuel + damage → my real car so my save reflects use.
                 try
                 {
@@ -1585,8 +1709,118 @@ namespace BigAmbitionsMP
             if (!string.IsNullOrEmpty(f.Driver))
                 try { RemotePlayerManager.SetRide(f.Driver, null, Vector3.zero); RemotePlayerManager.SetDriving(f.Driver, false); } catch { }
             var go = FindOwnedGo(vid);
-            if (go != null) { try { foreach (var rb in go.GetComponentsInChildren<Rigidbody>(true)) if (rb != null) rb.isKinematic = false; } catch { } }
+            if (go != null)
+            {
+                // Round-74: resume physics ONLY where this machine can simulate the ground under the
+                // cart — outdoors, or an interior WE currently have loaded. Released inside an
+                // interior we have NOT loaded, the cart stays kinematic (parked-dormant; position and
+                // data stay correct, the fleet keeps listing it, the borrower's ghost stays put)
+                // until we enter that building — un-kinematic over an unloaded floor dropped it into
+                // the void and the native deregistration ate it (both stuck-trolley reports).
+                bool safeHere = string.IsNullOrEmpty(f.Bldg) || f.Bldg == MPRegisterSync.CurrentShopAddress;
+                if (safeHere)
+                { try { foreach (var rb in go.GetComponentsInChildren<Rigidbody>(true)) if (rb != null) rb.isKinematic = false; } catch { } }
+                else
+                {
+                    _dormantReleases[vid] = f.Bldg;
+                    Plugin.Logger.LogInfo($"[Drive] my car '{vid}' released inside '{f.Bldg}' (not loaded here) — parked dormant until I enter that building.");
+                }
+                // Persist the borrower's parking NATIVELY: transform → instance (SavePosition) and
+                // the borrower's building → the instance's street data. The v3 fleet tag and the
+                // save both now record the cart exactly where it was left — same as if the owner
+                // had parked it there themselves.
+                try
+                {
+                    var vc = go.GetComponentInChildren<VehicleController>();
+                    if (vc?.vehicleInstance != null) { ApplyStreetData(vc.vehicleInstance, f.Bldg ?? ""); vc.SavePosition(); }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Drive] release persist: {ex.Message}"); }
+            }
             Plugin.Logger.LogInfo($"[Drive] my car '{vid}' released → resuming local control.");
+        }
+
+        // ── Round-74: DATA-level follow for dormant-borrowed vehicles (no live object here) ──
+        private sealed class DataFollowState { public Vector3 Pos; public Quaternion Rot = Quaternion.identity; public string Bldg = ""; public bool Has; }
+        private static readonly Dictionary<string, DataFollowState> _dataFollow = new();
+
+        private static void DataFollow(VehicleDrivePayload p)
+        {
+            try
+            {
+                var insts = SaveGameManager.Current?.VehicleInstances;
+                if (insts == null) return;
+                VehicleInstance inst = null;
+                foreach (var vi in insts) if (vi != null && vi.id == p.VehicleId) { inst = vi; break; }
+                if (inst == null) { _dataFollow.Remove(p.VehicleId); return; }   // not my vehicle
+                if (p.Released)
+                {
+                    if (_dataFollow.TryGetValue(p.VehicleId, out var df) && df.Has)
+                        Plugin.Logger.LogInfo($"[Drive] dormant-borrowed '{p.VehicleId}' released at '{(string.IsNullOrEmpty(df.Bldg) ? "outdoors" : df.Bldg)}' — save data holds the parked state.");
+                    _dataFollow.Remove(p.VehicleId);
+                    return;
+                }
+                if (!_dataFollow.TryGetValue(p.VehicleId, out var f))
+                {
+                    f = new DataFollowState(); _dataFollow[p.VehicleId] = f;
+                    Plugin.Logger.LogInfo($"[Drive] my dormant car '{p.VehicleId}' is being driven remotely — data-follow (no live object here).");
+                }
+                f.Pos = new Vector3(p.X, p.Y, p.Z); f.Rot = new Quaternion(p.Qx, p.Qy, p.Qz, p.Qw);
+                f.Bldg = p.Bldg ?? ""; f.Has = true;
+                // The instance IS the truth here — write it live so the dormant fleet entry keeps
+                // broadcasting the borrower's current position/building to everyone else.
+                inst.position = new SerializableVector3 { x = p.X, y = p.Y, z = p.Z };
+                inst.rotation = new SerializableQuaternion { x = p.Qx, y = p.Qy, z = p.Qz, w = p.Qw };
+                ApplyStreetData(inst, f.Bldg);
+                try { inst.fuel = p.Fuel; } catch { }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Drive] data-follow: {ex.Message}"); }
+        }
+
+        // ── Round-74b: owner-side interior visibility for OWN vehicles ──
+        private static readonly Dictionary<string, bool> _ownedMaskState = new();   // vid → currently hidden
+
+        private static void TickOwnedVehicleInteriorMask()
+        {
+            var list = VehicleHelper.AllPlayerVehicles;
+            if (list == null) return;
+            string mine = MPRegisterSync.CurrentShopAddress ?? "";
+            for (int i = 0; i < list.Count; i++)
+            {
+                var vc = list[i];
+                var inst = vc?.vehicleInstance;
+                if (vc == null || inst == null || string.IsNullOrEmpty(inst.id)) continue;
+                if (vc.controlledByPlayer) continue;                     // with me — never masked
+                if (inst.id.StartsWith("BAMP_") && !inst.id.StartsWith("BAMP_TESTRIG")) continue;   // ghosts have their own mask
+                // The vehicle's building: live borrower building while followed (street data lags
+                // until release), else its own native street data.
+                string bldg;
+                if (_ownedFollowing.TryGetValue(inst.id, out var f)) bldg = f.Bldg ?? "";
+                else bldg = string.IsNullOrEmpty(inst.streetName) ? "" : $"{inst.streetNumber} {inst.streetName}";
+                bool hide = bldg.Length > 0 && bldg != mine;             // same rule as the ghost mask
+                _ownedMaskState.TryGetValue(inst.id, out bool wasHidden);
+                if (hide == wasHidden) continue;
+                _ownedMaskState[inst.id] = hide;
+                try
+                {
+                    foreach (var r in vc.GetComponentsInChildren<Renderer>(true)) if (r != null) r.enabled = !hide;
+                    foreach (var c in vc.GetComponentsInChildren<Collider>(true)) if (c != null) c.enabled = !hide;
+                }
+                catch { }
+                Plugin.Logger.LogInfo($"[Vehicle] own '{inst.vehicleTypeName}' ({inst.id}) {(hide ? "hidden" : "shown")} — its bldg='{bldg}' mine='{mine}' (owner-side interior mask, round-74b).");
+            }
+        }
+
+        /// <summary>Write a "N ba:street_x" address key (or "" = outdoors) into the instance's
+        /// native street data — the same fields every native door transition maintains.</summary>
+        private static void ApplyStreetData(VehicleInstance inst, string bldg)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(bldg)) { inst.SetStreetData(string.Empty, 0); return; }
+                int sp = bldg.IndexOf(' ');
+                if (sp > 0 && int.TryParse(bldg.Substring(0, sp), out int num)) inst.SetStreetData(bldg.Substring(sp + 1), num);
+            }
+            catch { }
         }
 
         /// <summary>Lerp my cars that are being driven remotely toward the driver's synced pose (+ apply fuel).
