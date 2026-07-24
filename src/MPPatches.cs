@@ -4003,7 +4003,7 @@ namespace BigAmbitionsMP
                     // real record and delivers the complaint to the right player. The copies
                     // were prime complainers (no native task assigned) and, when the roster
                     // carried no name, messaged from a contact literally called "Staff".
-                    try { if (MPRegisterSync.IsInjectedStaffId(__instance.id)) return false; } catch { }
+                    try { if (MPRegisterSync.IsInjectedStaff(__instance.id)) return false; } catch { }
 
                     // Round-62: a NULL/undefined address is the NATIVE state of a hired-but-
                     // unassigned employee — vanilla lets them complain ("the company" message;
