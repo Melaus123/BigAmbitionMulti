@@ -206,6 +206,23 @@ namespace BigAmbitionsMP
         /// The exit must never depend on a button existing.</summary>
         private static float _suppressAutoStartUntil;
         private static float _navHealNext;
+        private static float _notSeatedSince;
+        private static System.Reflection.FieldInfo? _navBlockerSetField;
+        private static System.Reflection.FieldInfo? _navAgentField;
+        private static System.Reflection.FieldInfo? _sittingOnField;
+
+        /// <summary>The nine ACTIVITY-class navigation blockers — the IPlayerActivity states whose
+        /// UI our dock replaces (and whose lifecycle we therefore own in MP). The nav-heal watchdog
+        /// may release ONLY these; every other NavigationBlocker key belongs to a different system
+        /// (menus, vehicles, placement, scripted sequences) with its own lifecycle.</summary>
+        private static readonly NavigationBlocker[] ActivityBlockers =
+        {
+            NavigationBlocker.RestActivity,   NavigationBlocker.SleepActivity,
+            NavigationBlocker.WorkActivity,   NavigationBlocker.WorkoutActivity,
+            NavigationBlocker.HygieneActivity, NavigationBlocker.EntertainActivity,
+            NavigationBlocker.StudyActivity,  NavigationBlocker.SwimmingActivity,
+            NavigationBlocker.PaidActivity,
+        };
 
         public static void StandUp()
         {
@@ -361,31 +378,99 @@ namespace BigAmbitionsMP
             // Seated state from the game's activity system.
             UpdateSeated();
 
-            // Self-healing nav watchdog: NOT seated but navigation disabled =
-            // a lingering activity state (the lock the user kept hitting).
-            // Name the guilty flag and force the close-out again.
-            if (!Seated && Time.unscaledTime >= _navHealNext)
+            // Self-healing nav watchdog (round-73 — REPLACES the old diagnostic, which was
+            // BLIND in MP: its signal, PlayerActivityUI.HasNavigationDisabled (:157), only
+            // reports while IsPanelOpen — and Rest v5 force-hides that panel, so it said
+            // "fine" straight through two field strandings (Baydos 20260723-165848 + our
+            // live repro). Read the PlayerController's blocker set directly instead.
+            //
+            // ROOT CAUSE (confirmed live 2026-07-24, NavProbe): the native activity arms its
+            // navigation blocker from a DEFERRED lambda (RestActivity.<StartResting>b__15_1,
+            // fired later by PlayerController.Update). A fast exit — which our dock's
+            // auto-start + instant cancel / movement-key hatch makes one frame wide — races
+            // it in either order and strands the lock: navDisabled forever, avatar stuck
+            // seated on every machine, dock + hatch gated off by the same desync, chair
+            // owned by the half-dead activity. Vanilla can't reach the race (its panel flow
+            // makes the earliest exit seconds late).
+            //
+            // The heal: out of ANY activity for a SUSTAINED 2s (Seated covers all nine
+            // IPlayerActivity kinds) but an ACTIVITY-class blocker still held → release it
+            // via the game's own unset call, loudly. Non-activity blockers (Map, Vehicle,
+            // PlacementMode, …) belong to other systems and are never touched.
+            if (Seated || SkipActive)
+            {
+                _notSeatedSince = Time.unscaledTime;
+            }
+            else if ((MPServer.IsRunning || MPClient.IsClientInWorld)
+                     && Time.unscaledTime >= _navHealNext
+                     && Time.unscaledTime - _notSeatedSince >= 2f)
             {
                 _navHealNext = Time.unscaledTime + 2f;
                 try
                 {
-                    var (ui, uiType) = GetActivityUiCached();
-                    if (ui != null && uiType != null)
+                    var pc = InstanceBehavior<GameManager>.Instance?.playerController;
+                    if (pc != null)
                     {
-                        bool nav = (bool)(uiType.GetMethod("HasNavigationDisabled", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.Invoke(null, null) ?? false);
-                        if (nav)
+                        // 1. Blocker layer: release stranded ACTIVITY-class keys; note any FOREIGN key
+                        //    (another system's lock) — its presence means hands off the physical layer.
+                        bool foreignHeld = false;
+                        _navBlockerSetField ??= HarmonyLib.AccessTools.Field(typeof(PlayerController), "_activeNavigationBlockers");
+                        if (_navBlockerSetField?.GetValue(pc) is System.Collections.IEnumerable held)
                         {
-                            bool waiting = (bool)(uiType.GetProperty("IsWaiting", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null) ?? false);
-                            bool panel   = (bool)(uiType.GetProperty("IsPanelOpen", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null) ?? false);
-                            bool moving  = (bool)(uiType.GetProperty("IsMovingTowardsActivity", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null) ?? false);
-                            // Diagnostic only — slot force-nulling breaks the
-                            // seat's release (bench unusable); if this ever
-                            // fires we fix the real cause instead.
-                            Plugin.Logger.LogWarning($"[Rest] NAV LOCK while not seated (IsWaiting={waiting} IsPanelOpen={panel} IsMoving={moving}).");
+                            List<NavigationBlocker>? stranded = null;
+                            foreach (var b in held)
+                            {
+                                if (b is not NavigationBlocker key) continue;
+                                if (System.Array.IndexOf(ActivityBlockers, key) >= 0)
+                                    (stranded ??= new List<NavigationBlocker>()).Add(key);
+                                else foreignHeld = true;
+                            }
+                            if (stranded != null)
+                                foreach (var key in stranded)
+                                {
+                                    pc.UnsetNavigationBlocker(key);
+                                    Plugin.Logger.LogWarning($"[Rest] NAV HEAL: released stranded '{key}' blocker (no activity for 2s — deferred-set race, round-73). Movement restored.");
+                                }
+                        }
+
+                        // 2. Physical layer (round-73b, live repro: blocker healed but the avatar stayed
+                        //    seated — could spin, not walk): the raced CancelResting skips the ENTIRE
+                        //    physical teardown that Finish() runs — SitOnChair left the nav agent disabled
+                        //    (updatePosition/Rotation off, enabled=false), the rigidbody kinematic, and the
+                        //    seat claimed. ThirdPersonCharacter.Reset() (:771) is the game's own catch-all
+                        //    restore (re-enables the agent, releases the seat THROUGH the seat's callback,
+                        //    clears the anchor + kinematic state) and is what every proper teardown calls.
+                        //    STRICT ownership guard: never while ANY foreign blocker is held (vehicle,
+                        //    casino, map, placement, sequences — those systems legitimately pin the
+                        //    character) and never while using a vehicle.
+                        if (!foreignHeld && !Helpers.PlayerHelper.IsUsingVehicle)
+                        {
+                            var ch = pc.Character;
+                            if (ch != null)
+                            {
+                                bool agentOff = false, seatHeld = false;
+                                try
+                                {
+                                    _navAgentField ??= HarmonyLib.AccessTools.Field(ch.GetType(), "navmeshAgent");
+                                    if (_navAgentField?.GetValue(ch) is UnityEngine.AI.NavMeshAgent ag) agentOff = !ag.enabled;
+                                }
+                                catch { }
+                                try
+                                {
+                                    _sittingOnField ??= HarmonyLib.AccessTools.Field(ch.GetType(), "isSittingOn");
+                                    seatHeld = _sittingOnField?.GetValue(ch) is UnityEngine.Object o && o != null;
+                                }
+                                catch { }
+                                if (agentOff || seatHeld)
+                                {
+                                    ch.Reset();
+                                    Plugin.Logger.LogWarning($"[Rest] NAV HEAL: physical restore via Character.Reset() (agentOff={agentOff} seatHeld={seatHeld}) — the raced cancel skipped the native stand-up teardown (round-73b).");
+                                }
+                            }
                         }
                     }
                 }
-                catch { }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] nav heal: {ex.Message}"); }
             }
 
             // Sitting is INDEFINITE: the game's default duration (30 min) was
