@@ -57,7 +57,7 @@ namespace BigAmbitionsMP
                     _activeManifest = null;
                     // Reset (new lobby) drops the world identity; a RENAME (non-empty) keeps it —
                     // saving under a new name is still the same world.
-                    if (string.IsNullOrEmpty(_activeSessionName)) { _activePlaythroughId = ""; _activeHostEpoch = 1; PortraitFolder = null; }
+                    if (string.IsNullOrEmpty(_activeSessionName)) { _activePlaythroughId = ""; _activeHostEpoch = 1; _midJoinSource = ""; PortraitFolder = null; }
                 }
             }
         }
@@ -137,6 +137,9 @@ namespace BigAmbitionsMP
                     // skipped this entirely, and the host's next load of that store reset the
                     // offline member. Every save carries absent members now.)
                     CarryForwardAbsentMembers(session);
+                    // This save target is now the freshest complete roster snapshot —
+                    // serve mid-session joiners from it (review-2 fix).
+                    lock (_lock) { _midJoinSource = session; }
                     // Loan ledger rides every session save — loans created
                     // BEFORE the session's first save (no folder yet) would
                     // otherwise never persist unless the ledger changed again.
@@ -170,10 +173,13 @@ namespace BigAmbitionsMP
                 var slot = PerformLocalSave(dc);
                 SetSessionMetadata(dc, slot.Day);
                 MergeSlot(dc, slot);
-                // Same carry-forward as every other save path (review 2026-07-20):
-                // a '-disconnect' store missing offline members is the same
-                // character-reset trap if the host later loads it.
-                CarryForwardAbsentMembers(dc);
+                // Same carry-forward as every other save path (review 2026-07-20) — but
+                // INCLUDING connected members (review-2 fix 2026-07-23): unlike every
+                // other save, the quit checkpoint broadcasts NO SaveNow, so no uploads
+                // are coming. Skipping connected members left the dc manifest without
+                // their slots — the member who then hosted the checkpoint got their
+                // cash overlaid with $0 (BestCashFor: no live figure, no slot).
+                CarryForwardAbsentMembers(dc, includeConnected: true);
                 // Handoff slice 1: best-effort mirror before the window closes —
                 // inline (not Task.Run) so the sends are queued before teardown.
                 MirrorStoreSweep(dc);
@@ -211,6 +217,10 @@ namespace BigAmbitionsMP
                     _activeSessionName = DefaultSessionName();
                 session = _activeSessionName;
             }
+            // Review-3 fix: the active pointer can sit on a suffixed sibling (EnsureManifest
+            // relocates it during automatic saves and after a disconnect-save commit) — a
+            // MANUAL save must always land on the lineage base, like HostSaveNow's strip.
+            session = StripAutoSuffix(session);
             Plugin.Logger.LogInfo($"[MPSave] HostSaveSync session='{session}' reason={reason} (inline).");
             try
             {
@@ -228,6 +238,8 @@ namespace BigAmbitionsMP
                 // absent members, so the new store was born without the offline player's
                 // .hsg and the host's next load fresh-started them.
                 CarryForwardAbsentMembers(session);
+                // Serve mid-session joiners from this fresh snapshot (review-2 fix).
+                lock (_lock) { _midJoinSource = session; }
                 // Loan ledger rides every session save, exactly as HostSaveNow does.
                 // The pause-menu save is often the session's FIRST save, so a loan
                 // accepted beforehand would otherwise never reach disk (the ledger
@@ -455,7 +467,7 @@ namespace BigAmbitionsMP
             // Handoff slice 2: a (re)load is a host-start of this lineage — bump the epoch
             // (works identically on the original host and on a member hosting from their
             // MIRRORED copy of the store; every save stamps the new value + our identity).
-            lock (_lock) { _activeSessionName = lineage; _activeManifest = m; _activePlaythroughId = m.PlaythroughId ?? ""; _activeHostEpoch = Math.Max(1, m.HostEpoch + 1); }
+            lock (_lock) { _activeSessionName = lineage; _activeManifest = m; _activePlaythroughId = m.PlaythroughId ?? ""; _activeHostEpoch = Math.Max(1, m.HostEpoch + 1); _midJoinSource = session; }
 
             // One greppable line so any submitted log answers "did the host change hands?"
             // (user 2026-07-23) — the manifest records who hosted last; compare to this machine.
@@ -471,9 +483,17 @@ namespace BigAmbitionsMP
             MPServer.SendLoadDataToEachClient(session, m, lineage); // each client gets its own .hsg FROM the source, tagged with the lineage
 
             float hostCash = BestCashFor(m, MPConfig.StableId);
+            // Review-2 fix: only overlay cash we actually KNOW (a live figure or a
+            // manifest slot). A manifest without our slot — e.g. hosting a quit
+            // checkpoint written before the carry-forward fix — used to overlay a
+            // literal $0 over the loaded save's real money.
+            bool hostCashKnown = MPServer.CashByStableId.ContainsKey(MPConfig.StableId)
+                              || (m.Slots != null && m.Slots.Exists(s => s.StableId == MPConfig.StableId));
+            if (!hostCashKnown)
+                Plugin.Logger.LogInfo($"[MPSave] No recorded cash for this host in '{session}' — keeping the loaded save's own money.");
             GameStatePatcher.EnqueueOnMainThread(() =>
             {
-                try { LoadOwnHsg(session, MPConfig.StableId); QueueCashApply(hostCash); }
+                try { if (LoadOwnHsg(session, MPConfig.StableId) && hostCashKnown) QueueCashApply(hostCash); }
                 catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] Host load: {ex}"); }
             });
             Plugin.Logger.LogInfo($"[MPSave] HostLoadSession '{session}' → continuing lineage '{lineage}' — {m.Slots.Count} slot(s).");
@@ -484,6 +504,13 @@ namespace BigAmbitionsMP
         public static void ClientHandleLoadData(LoadDataPayload p)
         {
             if (p == null) return;
+            // Review-3 fix: track the joined world's wire identity UNCONDITIONALLY. The
+            // old conditional set left a STALE pid from a previous session in place
+            // across a fresh-start into a different world — the disconnect marker then
+            // stamped the wrong world and the pid gate refused a genuine recovery save.
+            // An empty payload pid (fresh start / special branches / pre-field host)
+            // CLEARS it; the marker then falls back to the mirrored manifest.
+            _wireWorldPid = p.PlaythroughId ?? "";
             // Proposal 2 (2026-06-17): host says our saved character exists but its .hsg can't be read right
             // now — do NOT fresh-start (that abandons the real save). Leave cleanly so the player can reconnect
             // to retry, or the host can recover the file. Checked BEFORE the empty-hsg fresh path below.
@@ -554,7 +581,10 @@ namespace BigAmbitionsMP
                 int aheadDays = localDay - p.WorldDay;
                 if (aheadDays >= 1)
                     Plugin.Logger.LogInfo($"[MPSave] Joining a rolled-back session: our store knows day {localDay}, session is day {p.WorldDay} ({aheadDays} day(s) earlier) — loading it (standard behavior).");
-                else if (p.HostEpoch > 0 && localEpoch > p.HostEpoch)
+                // Independent of the day check (review fix 2026-07-23: an 'else if' hid the
+                // fork warning in its PRIMARY scenario — a separately-hosted fork is
+                // usually days ahead too, so only the routine INFO line ever fired).
+                if (p.HostEpoch > 0 && localEpoch > p.HostEpoch)
                     Plugin.Logger.LogWarning($"[MPSave] FORK SUSPECT: our store records a later host-start of this world (epoch {localEpoch}{(string.IsNullOrEmpty(newerHostName) ? "" : $", by {newerHostName}")}) than the joined session (epoch {p.HostEpoch}) — if that newer session is still played elsewhere, this world now has two versions.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] join rollback facts: {ex.Message}"); }
@@ -595,8 +625,7 @@ namespace BigAmbitionsMP
                         UI.Load.LoadScene.LoadMainMenu(BAModAPI.ModActivationScope.City);
                         return;
                     }
-                    LoadOwnHsg(session, MPConfig.StableId);
-                    QueueCashApply(money);
+                    if (LoadOwnHsg(session, MPConfig.StableId)) QueueCashApply(money);
                 }
                 catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] Client load: {ex}"); }
             });
@@ -632,8 +661,7 @@ namespace BigAmbitionsMP
                     var session = _pendingLoadSession; var cash = _pendingLoadCash;
                     _pendingLoadSession = null;
                     Plugin.Logger.LogInfo($"[MPSave] Menu reached — completing deferred mid-join load ('{session}').");
-                    LoadOwnHsg(session, MPConfig.StableId);
-                    QueueCashApply(cash);
+                    if (LoadOwnHsg(session, MPConfig.StableId)) QueueCashApply(cash);
                 }
                 else if (_pendingFresh)
                 {
@@ -671,21 +699,34 @@ namespace BigAmbitionsMP
         /// <summary>MAIN THREAD: load this player's .hsg out of the MP session folder.
         /// The game's Load() locates saves by re-scanning CurrentVersionFolderPath();
         /// we briefly redirect that to the MP session folder so Load finds + loads our
-        /// save natively — no staging, no single-player-folder pollution.</summary>
-        private static void LoadOwnHsg(string session, string stableId)
+        /// save natively — no staging, no single-player-folder pollution. Returns false
+        /// when nothing was loaded (review-3 fix: callers must not queue a cash overlay
+        /// for a load that never happened — the stale pending cash applied itself to
+        /// the NEXT world that went live).</summary>
+        private static bool LoadOwnHsg(string session, string stableId)
         {
             string sessionFolder = MPSaveManager.MpSessionFolder(session);
             var saves = SaveGamePathHelper.GetAllSaveGamesFromVersion(sessionFolder);
             if (saves == null || saves.Count == 0)
-            { Plugin.Logger.LogWarning($"[MPSave] LoadOwnHsg: no saves under {sessionFolder}."); return; }
+            { Plugin.Logger.LogWarning($"[MPSave] LoadOwnHsg: no saves under {sessionFolder}."); return false; }
 
             string want   = Path.GetFileName(MPSaveManager.MpCharacterFolder(session, stableId).TrimEnd('\\', '/'));
             var    chosen = saves[0];
+            bool   matched = false;
             for (int i = 0; i < saves.Count; i++)
             {
                 var s   = saves[i];
                 string seg = Path.GetFileName((s?.CharacterPath ?? "").TrimEnd('\\', '/'));
-                if (string.Equals(seg, want, StringComparison.OrdinalIgnoreCase)) { chosen = s; break; }
+                if (string.Equals(seg, want, StringComparison.OrdinalIgnoreCase)) { chosen = s; matched = true; break; }
+            }
+            // Review-2 fix: never load ANOTHER MEMBER's character because ours is missing —
+            // with several character folders in the store (mirrors!) the saves[0] fallback
+            // did exactly that (e.g. own self-save failed before hosting a checkpoint).
+            // A single-folder store keeps the fallback for legacy layouts.
+            if (!matched && saves.Count > 1)
+            {
+                Plugin.Logger.LogError($"[MPSave] LoadOwnHsg: no save for THIS character (stable={stableId}) under {sessionFolder} — REFUSING to load another member's character. Pick a different save of this world, or rejoin a session to restore yours.");
+                return false;
             }
 
             Plugin.Logger.LogInfo($"[MPSave] Loading .hsg: char='{chosen.characterId}' day={chosen.day} via redirect → {sessionFolder}");
@@ -698,6 +739,7 @@ namespace BigAmbitionsMP
             finally { LoadRedirectFolder = null; }
             PortraitFolder = MPSaveManager.MpCharacterFolder(session, stableId);
             DiagWrite("LoadOwnHsg: redirect OFF, Load returned");
+            return true;
         }
 
         // Deferred cash overlay — applied a couple of seconds after the loaded
@@ -769,39 +811,57 @@ namespace BigAmbitionsMP
         // (dual-instance testing on one machine) skips applying entirely — matched
         // by HostStoreToken. All pure file/JSON IO + sends — safe off the main thread.
 
-        /// <summary>Hash of this machine's MP store root — identifies a shared
-        /// physical store without disclosing the path (it contains a username).</summary>
+        /// <summary>Hash of this MACHINE + MP store root — identifies a shared physical
+        /// store without disclosing the path (it contains a username). The machine name
+        /// is part of the hash (review fix 2026-07-23): two DIFFERENT machines whose
+        /// Windows usernames match produce identical store paths, and a path-only token
+        /// silently disabled mirroring for that pair.</summary>
         internal static string StoreToken()
         {
             try
             {
                 using var sha = System.Security.Cryptography.SHA1.Create();
                 var bytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(
-                    MPSaveManager.MpVersionFolder().ToLowerInvariant()));
+                    Environment.MachineName + "|" + MPSaveManager.MpVersionFolder().ToLowerInvariant()));
                 return Convert.ToBase64String(bytes);
             }
             catch { return ""; }
         }
 
-        /// <summary>The session's manifest as JSON, preferring the in-memory active copy.
-        /// Read under _lock so a concurrent MergeSlot/WriteManifest can't tear it.</summary>
-        private static string ManifestJsonSnapshot(string session)
+        /// <summary>The session's manifest as JSON + its world identity, preferring the
+        /// in-memory active copy. Read under _lock so a concurrent MergeSlot/WriteManifest
+        /// can't tear it.</summary>
+        private static (string json, string pid) ManifestSnapshot(string session)
         {
             lock (_lock)
             {
                 var m = (_activeManifest != null && _activeSessionName == session)
                         ? _activeManifest : MPSaveManager.ReadManifest(session);
-                return m == null ? "" : Newtonsoft.Json.JsonConvert.SerializeObject(m);
+                return m == null ? ("", "") : (Newtonsoft.Json.JsonConvert.SerializeObject(m), m.PlaythroughId ?? "");
             }
         }
 
+        /// <summary>The lineage's loan ledger as JSON — part of the session store (review
+        /// fix 2026-07-23: it was never mirrored, so a handoff silently lost all loans).
+        /// The ledger lives at the lineage BASE folder (MPHub.LedgerPath). "" = none.</summary>
+        private static string LedgerJsonSnapshot(string session)
+        {
+            try
+            {
+                string p = Path.Combine(MPSaveManager.MpSessionFolder(StripAutoSuffix(session)), MPHub.LedgerFileName);
+                return File.Exists(p) ? File.ReadAllText(p) : "";
+            }
+            catch { return ""; }
+        }
+
         /// <summary>HOST: manifest-only mirror (ledger change between saves — KBs).</summary>
-        private static void MirrorManifestOnly(string session, string manifestJson)
+        private static void MirrorManifestOnly(string session, string manifestJson, string pid)
         {
             if (!MPServer.IsRunning || string.IsNullOrEmpty(manifestJson)) return;
             MPServer.SendStoreMirror(new StoreMirrorPayload
             {
-                SessionName = session, ManifestJson = manifestJson, HostStoreToken = StoreToken(),
+                SessionName = session, ManifestJson = manifestJson, PlaythroughId = pid,
+                LedgerJson = LedgerJsonSnapshot(session), HostStoreToken = StoreToken(),
             }, exceptStable: "");
         }
 
@@ -813,11 +873,12 @@ namespace BigAmbitionsMP
             try
             {
                 string token = StoreToken();
-                string manifestJson = ManifestJsonSnapshot(session);
+                var (manifestJson, pid) = ManifestSnapshot(session);
                 if (!string.IsNullOrEmpty(manifestJson))
                     MPServer.SendStoreMirror(new StoreMirrorPayload
                     {
-                        SessionName = session, ManifestJson = manifestJson, HostStoreToken = token,
+                        SessionName = session, ManifestJson = manifestJson, PlaythroughId = pid,
+                        LedgerJson = LedgerJsonSnapshot(session), HostStoreToken = token,
                     }, exceptStable: "");
 
                 string sessionFolder = MPSaveManager.MpSessionFolder(session);
@@ -840,6 +901,7 @@ namespace BigAmbitionsMP
                             SessionName = session, StableId = stable,
                             SaveName = Path.GetFileNameWithoutExtension(file),
                             HsgGzipBase64 = GzipBase64(raw), RawLength = raw.Length,
+                            PlaythroughId = pid,
                             HostStoreToken = token,   // manifest already sent above
                         }, exceptStable: stable);
                         sent++;
@@ -866,18 +928,27 @@ namespace BigAmbitionsMP
                 if (file == null) return;
                 byte[] raw = File.ReadAllBytes(file);
                 if (raw.Length == 0) return;
+                var (manifestJson, pid) = ManifestSnapshot(session);
                 MPServer.SendStoreMirror(new StoreMirrorPayload
                 {
                     SessionName = session, StableId = stable,
                     SaveName = Path.GetFileNameWithoutExtension(file),
                     HsgGzipBase64 = GzipBase64(raw), RawLength = raw.Length,
-                    ManifestJson = ManifestJsonSnapshot(session),
+                    ManifestJson = manifestJson, PlaythroughId = pid,
                     HostStoreToken = StoreToken(),
                 }, exceptStable: stable);
                 Plugin.Logger.LogInfo($"[MPSave] Mirrored member file (stable={stable}, {raw.Length}B) for '{session}' → other clients.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] MirrorMemberFile '{stable}': {ex.Message}"); }
         }
+
+        /// <summary>Session names already warned about a lineage clash — one line per run.</summary>
+        private static readonly HashSet<string> _mirrorClobberWarned = new();
+
+        /// <summary>CLIENT: the world identity of the session we joined, learned over the
+        /// wire (LoadDataPayload.PlaythroughId). Sticky until the next join — the disconnect
+        /// marker for the session just played stamps it (review-2 fix).</summary>
+        private static volatile string _wireWorldPid = "";
 
         /// <summary>CLIENT: a piece of the session store arrived — write it into our
         /// LOCAL store at the same paths, so this machine holds the complete session
@@ -898,10 +969,40 @@ namespace BigAmbitionsMP
                 string session = SanitizeSession(p.SessionName);
                 if (string.IsNullOrEmpty(session)) return;
 
+                // Clobber guard (review fix 2026-07-23): a SAME-NAMED local session that
+                // belongs to a DIFFERENT world must never be overwritten — a mirror only
+                // applies to its own lineage. Warned once per session name per run.
+                if (!string.IsNullOrEmpty(p.PlaythroughId))
+                {
+                    string localPid = "";
+                    try { localPid = MPSaveManager.ReadManifest(session)?.PlaythroughId ?? ""; } catch { }
+                    // Lineage fallback (review-2 fix): a piece for a sibling we don't hold
+                    // locally (e.g. '-auto-4') must still be judged against the FAMILY's
+                    // identity — without this it slipped past the guard, and its ledger
+                    // write below landed in the shared BASE folder of the other world.
+                    if (string.IsNullOrEmpty(localPid))
+                        try { localPid = InheritedPlaythroughId(session) ?? ""; } catch { }
+                    if (!string.IsNullOrEmpty(localPid) && localPid != p.PlaythroughId)
+                    {
+                        if (_mirrorClobberWarned.Add(session))
+                            Plugin.Logger.LogWarning($"[MPSave] Store mirror REFUSED for '{session}': a local world with this name already exists (different lineage). Rename one of the worlds for this machine to receive the shared copy.");
+                        return;
+                    }
+                }
+
                 if (!string.IsNullOrEmpty(p.ManifestJson))
                 {
                     var m = Newtonsoft.Json.JsonConvert.DeserializeObject<MpManifest>(p.ManifestJson);
                     if (m != null) MPSaveManager.WriteManifest(session, m);
+                }
+
+                // Loan ledger rides the sweep's manifest piece (review fix 2026-07-23) —
+                // written at the lineage BASE folder, where MPHub loads it from.
+                if (!string.IsNullOrEmpty(p.LedgerJson))
+                {
+                    string baseFolder = MPSaveManager.MpSessionFolder(StripAutoSuffix(session));
+                    Directory.CreateDirectory(baseFolder);
+                    File.WriteAllText(Path.Combine(baseFolder, MPHub.LedgerFileName), p.LedgerJson);
                 }
 
                 if (!string.IsNullOrEmpty(p.StableId) && p.StableId != MPConfig.StableId
@@ -1183,7 +1284,7 @@ namespace BigAmbitionsMP
         /// their OWN latest within-session save — manifest-reconciled, no cross-session desync. Connected
         /// members are skipped (they save themselves fresh; skipping also avoids racing their incoming
         /// upload). Pure file/JSON IO — safe off the main thread.</summary>
-        public static void CarryForwardAbsentMembers(string targetSession)
+        public static void CarryForwardAbsentMembers(string targetSession, bool includeConnected = false)
         {
             try
             {
@@ -1237,12 +1338,25 @@ namespace BigAmbitionsMP
                 foreach (var kv in newest)
                 {
                     string stable = kv.Key;
-                    if (connected.Contains(stable)) continue;   // saves itself fresh — don't touch (no race)
-                    var (srcSession, srcDir, _) = kv.Value;
+                    // Normally connected members save themselves fresh this round — don't
+                    // race their incoming upload. The QUIT CHECKPOINT is the exception
+                    // (review-2 fix, includeConnected): it broadcasts no SaveNow, so no
+                    // uploads are coming and connected members' last stored copies must
+                    // be carried or the checkpoint is born without them.
+                    if (!includeConnected && connected.Contains(stable)) continue;
+                    var (srcSession, srcDir, srcWhen) = kv.Value;
                     if (srcSession == targetSession) continue;   // already its own newest
                     // Already captured in the target this round? (check WITHOUT creating the dir)
                     string targetMemberDir = Path.Combine(MPSaveManager.MpSessionFolder(targetSession), stable);
-                    if (Directory.Exists(targetMemberDir) && NewestHsg(targetMemberDir) != null) continue;
+                    string? already = Directory.Exists(targetMemberDir) ? NewestHsg(targetMemberDir) : null;
+                    if (already != null)
+                    {
+                        if (!includeConnected) continue;
+                        // Quit path: a PREVIOUS checkpoint's copy may sit here — replace it
+                        // only when the lineage holds something newer.
+                        DateTime tWhen; try { tWhen = File.GetLastWriteTimeUtc(already); } catch { continue; }
+                        if (tWhen >= srcWhen) continue;
+                    }
                     try
                     {
                         string dstDir = MPSaveManager.MpCharacterFolder(targetSession, stable);
@@ -1292,11 +1406,14 @@ namespace BigAmbitionsMP
                 var slot = PerformLocalSave(baseName + "-disconnect");   // current game → <base>-disconnect/<ourStable>/
                 long nowUnix = 0;
                 try { nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds(); } catch { }
-                // Handoff slice 3: stamp the WORLD identity from our mirrored manifest so a
-                // future host — original or a rotated one — only requests this save for the
-                // same lineage (session names alone can collide across worlds).
-                string pid = "";
-                try { pid = MPSaveManager.ReadManifest(baseName)?.PlaythroughId ?? ""; } catch { }
+                // Handoff slice 3: stamp the WORLD identity so a future host — original or
+                // rotated — only requests this save for the same lineage (session names
+                // alone can collide across worlds). Wire truth first (review-2 fix: the
+                // local base manifest can belong to a same-named DIFFERENT world when the
+                // clobber guard has been refusing mirrors); mirrored manifest as fallback.
+                string pid = _wireWorldPid;
+                if (string.IsNullOrEmpty(pid))
+                    try { pid = MPSaveManager.ReadManifest(baseName)?.PlaythroughId ?? ""; } catch { }
                 var marker = new ClientDisconnectMarker
                 {
                     SessionBase = baseName,
@@ -1389,7 +1506,21 @@ namespace BigAmbitionsMP
         public static bool TryCommitClientDisconnectSave(SaveDataPayload p, string stable)
         {
             if (p == null || string.IsNullOrEmpty(stable) || string.IsNullOrEmpty(p.HsgGzipBase64)) return false;
-            string session     = ActiveSessionName;
+            // Review-2 fix: validate against and commit into the folder that holds the
+            // CURRENT state (loaded variant / latest save target) — the lineage base can
+            // be stale or absent, which skewed the day window in both directions and
+            // stranded the commit where the subsequent mid-join ship wouldn't read it.
+            string session     = MidJoinSourceSession;
+            // Review-3 fix: a frozen legacy checkpoint ('-cp-'/'-cpa-', creation retired
+            // 2026-07-07) is a recorded moment (round-37) — never mutated, and a recovery
+            // save from the live era does not apply to a world deliberately rolled back
+            // onto one. Refuse with a clear line (the old path dropped it as a silent
+            // "session mismatch"); the member joins at the checkpoint's recorded state.
+            if (!string.Equals(MPSaveManager.StripToBase(session), StripAutoSuffix(session), StringComparison.Ordinal))
+            {
+                Plugin.Logger.LogInfo($"[MPSave] Disconnect save not applicable: host is running a frozen checkpoint ('{session}') — member joins at the checkpoint's recorded state.");
+                return false;
+            }
             string baseName    = StripAutoSuffix(session);
             string stageSession = "_dcstage_" + MPSaveManager.Sanitize(stable);
             try
@@ -1569,7 +1700,45 @@ namespace BigAmbitionsMP
                 _activePlaythroughId = InheritedPlaythroughId(sessionName) ?? Guid.NewGuid().ToString("N");
                 _activeManifest.PlaythroughId = _activePlaythroughId;
             }
+            // Review fix 2026-07-23: provenance rides EVERY host-side manifest write.
+            // PersistGrantsNow/MergeSlot used to rewrite + mirror manifests still
+            // carrying the PREVIOUS host's identity/epoch (with fresh timestamps) in
+            // the window between a handoff load and the first coordinated save —
+            // false "shared — last hosted by X" labels and HOST HANDOFF lines. Also
+            // ensures a freshly MINTED manifest (upload landing before the host
+            // lambda) never reaches disk with epoch 0.
+            if (MPServer.IsRunning)
+            {
+                _activeManifest.LastHostStableId = MPConfig.StableId;
+                _activeManifest.HostEpoch        = _activeHostEpoch;
+            }
             return _activeManifest;
+        }
+
+        /// <summary>The ACTIVE world's identity (empty when no session is live). The
+        /// authoritative pid for join-time gates — unlike a re-read of the BASE
+        /// session's manifest, it is correct even when the base folder has no
+        /// manifest (host loaded an '-auto' variant) or holds a same-named
+        /// different world (review fix 2026-07-23).</summary>
+        public static string ActivePlaythroughId
+        {
+            get { lock (_lock) return _activePlaythroughId; }
+        }
+
+        // Review-2 fix (2026-07-23): the folder mid-session joiners are SERVED from.
+        // ActiveSessionName is the lineage BASE (round-37), whose folder can be stale
+        // (world loaded from a newer '-auto'/'-disconnect' variant) or absent entirely
+        // (auto-only worlds) — serving from it rolled a rejoining former host back to
+        // the last manual save, or fresh-started them despite their current copy
+        // sitting in the loaded variant. The source is the LOADED variant until the
+        // first coordinated save, then the latest save target (fresh uploads +
+        // carry-forward land there; a joiner is by definition absent at save time, so
+        // carry-forward has already placed their newest copy in it).
+        private static string _midJoinSource = "";   // under _lock; "" → fall back to the base
+
+        public static string MidJoinSourceSession
+        {
+            get { lock (_lock) return string.IsNullOrEmpty(_midJoinSource) ? _activeSessionName : _midJoinSource; }
         }
 
         /// <summary>A lineage sibling's PlaythroughId, if any manifest in the family carries one —
@@ -1660,7 +1829,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                string session; string manifestJson;
+                string session; string manifestJson; string pid;
                 lock (_lock)
                 {
                     if (string.IsNullOrEmpty(_activeSessionName)) return;
@@ -1676,10 +1845,11 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[MPSave] Persisted {m.Grants.Count} grant(s) + {m.Merger.Count} merger member(s) to '{_activeSessionName}' on change.");
                     session = _activeSessionName;
                     manifestJson = Newtonsoft.Json.JsonConvert.SerializeObject(m);
+                    pid = m.PlaythroughId ?? "";
                 }
                 // Handoff slice 1: ledgers changed → manifest-only mirror (KBs), so
                 // every member's store copy stays ledger-current between saves.
-                MirrorManifestOnly(session, manifestJson);
+                MirrorManifestOnly(session, manifestJson, pid);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] PersistGrantsNow: {ex.Message}"); }
         }

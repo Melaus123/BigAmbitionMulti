@@ -1924,6 +1924,14 @@ namespace BigAmbitionsMP
         public int    RawLength      { get; set; }
         public string ManifestJson   { get; set; } = "";   // full session manifest (small)
         public string HostStoreToken { get; set; } = "";
+        /// <summary>World identity of the mirrored session (review fix 2026-07-23): the
+        /// receiver refuses the piece when a SAME-NAMED local session belongs to a
+        /// DIFFERENT world — a mirror must never clobber an unrelated lineage.</summary>
+        public string PlaythroughId  { get; set; } = "";
+        /// <summary>The lineage's loan ledger (loans.bamp.json, small — review fix
+        /// 2026-07-23): part of the session store, rides the sweep's manifest piece so
+        /// loans survive a host handoff. "" = none.</summary>
+        public string LedgerJson     { get; set; } = "";
     }
 
     /// <summary>

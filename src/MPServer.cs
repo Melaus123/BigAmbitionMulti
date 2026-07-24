@@ -1786,8 +1786,13 @@ namespace BigAmbitionsMP
                         // Either side empty (pre-field marker / unstamped manifest) = legacy name-only.
                         if (offerMatches && !string.IsNullOrEmpty(hello.DisconnectPlaythroughId))
                         {
-                            string hostPid = "";
-                            try { hostPid = MPSaveManager.ReadManifest(MPSaveCoordinator.StripAutoSuffix(session))?.PlaythroughId ?? ""; } catch { }
+                            // The ACTIVE world's identity, not a re-read of the base manifest
+                            // (review fix 2026-07-23: the base folder can lack a manifest —
+                            // host loaded an '-auto' variant — or hold a same-named DIFFERENT
+                            // world; both misjudged the offer).
+                            string hostPid = MPSaveCoordinator.ActivePlaythroughId;
+                            if (string.IsNullOrEmpty(hostPid))
+                                try { hostPid = MPSaveManager.ReadManifest(MPSaveCoordinator.StripAutoSuffix(session))?.PlaythroughId ?? ""; } catch { }
                             if (!string.IsNullOrEmpty(hostPid) && hostPid != hello.DisconnectPlaythroughId)
                             {
                                 offerMatches = false;
@@ -1797,7 +1802,7 @@ namespace BigAmbitionsMP
                         if (offerMatches)
                         {
                             Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
-                            { SessionName = session, AwaitClientDisconnectUpload = true }));
+                            { SessionName = MPSaveCoordinator.StripAutoSuffix(session), AwaitClientDisconnectUpload = true }));
                             sentLoad = true;
                             Plugin.Logger.LogInfo($"[Server] Mid-session join by '{hello.PlayerId}': disconnect save offered (claimed day={hello.DisconnectDay}) — requesting upload for validation.");
                         }
@@ -3179,7 +3184,17 @@ namespace BigAmbitionsMP
         private static bool SendMidJoinLoadData(MPLink peer, string pid, string stable, string session)
         {
             if (peer == null || string.IsNullOrEmpty(session) || string.IsNullOrEmpty(stable)) return false;
-            var data = MPSaveCoordinator.ReadSaveBytesGzip(session, stable);
+            // Review-2 fix: READ from the folder that holds the current state (the loaded
+            // variant until the first save, then the latest save target — carry-forward
+            // has already placed a joiner's newest copy there). The client ADOPTS the
+            // lineage BASE: its ongoing saves must never land in a frozen variant
+            // (round-37 fork semantics). Serving from the base rolled a rejoining former
+            // host back to the last manual save — or fresh-started them when the base
+            // folder never existed (auto-only worlds).
+            string source = MPSaveCoordinator.MidJoinSourceSession;
+            if (string.IsNullOrEmpty(source)) source = session;
+            string adopt = MPSaveCoordinator.StripAutoSuffix(session);
+            var data = MPSaveCoordinator.ReadSaveBytesGzip(source, stable);
             if (data != null)
             {
                 // Reclaim: ownership reserved under the absent owner's stableId re-keys to their live pid.
@@ -3189,30 +3204,30 @@ namespace BigAmbitionsMP
                 foreach (var kv in BuildingRealEstateOwners)   // symmetric: bought real estate reserved under the absent owner's stableId must also re-key to their live pid
                     if (kv.Value == stable) { BuildingRealEstateOwners[kv.Key] = pid; rekeyed++; }
                 if (rekeyed > 0) Plugin.Logger.LogInfo($"[Server] Re-keyed {rekeyed} reserved building(s) to '{pid}'.");
-                var m = MPSaveManager.ReadManifest(session);
+                var m = MPSaveManager.ReadManifest(source);
                 float cash = m != null ? MPSaveCoordinator.BestCashFor(m, stable)
                                        : (CashByStableId.TryGetValue(stable, out var c) ? c : 0f);
                 Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
                 {
-                    SessionName = session, HsgGzipBase64 = data.Value.b64, RawLength = data.Value.raw, Money = cash,
-                    // Handoff slice 4: identity/day/epoch for the joiner's rollback-consent check.
+                    SessionName = adopt, HsgGzipBase64 = data.Value.b64, RawLength = data.Value.raw, Money = cash,
+                    // Handoff slice 4: identity/day/epoch for the joiner's log-only diagnostics.
                     WorldDay = m?.WorldDay ?? 0, PlaythroughId = m?.PlaythroughId ?? "", HostEpoch = m?.HostEpoch ?? 0,
                 }));
-                Plugin.Logger.LogInfo($"[Server] Mid-session join: sent LoadData to '{pid}' (session='{session}', {data.Value.raw}B, ${cash:F0}); world state follows once their scene loads.");
+                Plugin.Logger.LogInfo($"[Server] Mid-session join: sent LoadData to '{pid}' (source='{source}', adopt='{adopt}', {data.Value.raw}B, ${cash:F0}); world state follows once their scene loads.");
                 return true;
             }
-            var mm = MPSaveManager.ReadManifest(session);
+            var mm = MPSaveManager.ReadManifest(source);
             bool hasSavedCharacter = mm?.Slots != null && mm.Slots.Exists(s => s.StableId == stable);
             if (hasSavedCharacter)
             {
                 Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
-                { SessionName = session, HsgGzipBase64 = "", SaveUnavailable = true, FallbackSettings = LastStartSettings }));
+                { SessionName = adopt, HsgGzipBase64 = "", SaveUnavailable = true, FallbackSettings = LastStartSettings }));
                 Plugin.Logger.LogError($"[Server] Mid-session join by '{pid}' (stable={stable}): has a save slot but its .hsg is unreadable — REFUSING to fresh-start. Sent save-unavailable.");
                 return true;
             }
             float kc = GetKnownCash(pid);
             Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
-            { SessionName = session, HsgGzipBase64 = "", Money = Math.Max(0f, kc), FallbackSettings = LastStartSettings }));
+            { SessionName = adopt, HsgGzipBase64 = "", Money = Math.Max(0f, kc), FallbackSettings = LastStartSettings }));
             // 4a diagnostic: fresh-starting someone who OWNS property is the "lost character" smoking gun —
             // they had a session presence but no save survived. Loud ERROR so a bug report pinpoints it;
             // genuinely-new joiners stay at INFO.
@@ -4349,7 +4364,10 @@ namespace BigAmbitionsMP
                     if (!_peerNames.TryGetValue(peer.Id, out var pid)) continue;
                     if (!string.IsNullOrEmpty(exceptStable)
                         && StableIdByPlayer.TryGetValue(pid, out var st) && st == exceptStable) continue;
-                    Send(peer, env);
+                    // Per-peer isolation (review fix 2026-07-23): one throwing peer must
+                    // not skip the remaining peers' mirror piece.
+                    try { Send(peer, env); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendStoreMirror → '{pid}': {ex.Message}"); }
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendStoreMirror: {ex.Message}"); }

@@ -401,13 +401,45 @@ namespace BigAmbitionsMP
         // ── Ledger persistence (loans MUST survive sessions) ─────────────────
         private static bool _ledgerLoaded;
 
+        /// <summary>The ledger file name — shared with the store mirror (handoff review fix
+        /// 2026-07-23: the ledger is part of the session store and must survive a handoff).</summary>
+        internal const string LedgerFileName = "loans.bamp.json";
+
         private static string? LedgerPath()
         {
             try
             {
-                string session = MPSaveCoordinator.ActiveSessionName;
+                // Pinned to the lineage BASE (review-2 fix 2026-07-23): EnsureManifest
+                // re-points ActiveSessionName at the SAVE TARGET during automatic saves,
+                // so the ledger used to follow it into '-auto'/'-recover' folders while
+                // reload AND the store mirror read the base — loans changed since the
+                // last manual save silently vanished on reload or handoff.
+                string session = MPSaveCoordinator.StripAutoSuffix(MPSaveCoordinator.ActiveSessionName);
                 if (string.IsNullOrEmpty(session)) return null;
-                return System.IO.Path.Combine(MPSaveManager.MpSessionFolder(session), "loans.bamp.json");
+                return System.IO.Path.Combine(MPSaveManager.MpSessionFolder(session), LedgerFileName);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Drift self-heal (review-2 fix): older builds scattered the ledger into
+        /// automatic-save sibling folders — find the newest one across the lineage.</summary>
+        private static string? NewestLineageLedger()
+        {
+            try
+            {
+                string baseName = MPSaveCoordinator.StripAutoSuffix(MPSaveCoordinator.ActiveSessionName);
+                if (string.IsNullOrEmpty(baseName)) return null;
+                var names = new System.Collections.Generic.List<string> { baseName + "-auto", baseName + "-disconnect", baseName + "-recover" };
+                for (int i = 2; i <= 10; i++) names.Add(baseName + "-auto-" + i);
+                string? best = null; System.DateTime bestT = System.DateTime.MinValue;
+                foreach (var n in names)
+                {
+                    string p = System.IO.Path.Combine(MPSaveManager.MpSessionFolder(n), LedgerFileName);
+                    if (!System.IO.File.Exists(p)) continue;
+                    var t = System.IO.File.GetLastWriteTimeUtc(p);
+                    if (t > bestT) { bestT = t; best = p; }
+                }
+                return best;
             }
             catch { return null; }
         }
@@ -444,7 +476,14 @@ namespace BigAmbitionsMP
             _ledgerLoaded = true;
             try
             {
-                if (!System.IO.File.Exists(path)) return;
+                if (!System.IO.File.Exists(path))
+                {
+                    // Adopt a drifted sibling ledger once (see LedgerPath) — the next
+                    // SaveLedger writes it back at the base where it belongs.
+                    path = NewestLineageLedger() ?? path;
+                    if (!System.IO.File.Exists(path)) return;
+                    Plugin.Logger.LogInfo("[Hub] ledger adopted from an automatic-save sibling (drift self-heal).");
+                }
                 // Never overwrite a LIVE ledger: the session name can appear
                 // late (first save), and loading an old file then would wipe
                 // loans created meanwhile.
