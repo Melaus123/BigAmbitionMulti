@@ -1207,6 +1207,12 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<string, (string pid, List<StaffInfo> staff, string sig)> _rosterByAddr = new();
         private static readonly Dictionary<string, string> _rosterApplied = new();            // addr → sig actually injected
         private static readonly Dictionary<string, (string addr, EmployeeInstance inst)> _injectedStaff = new();   // real-id records we injected
+
+        /// <summary>Round-62: is this employee id one of OUR injected partner-staff display
+        /// copies? Their complaints belong to the OWNER's machine (which holds the real
+        /// record) — on this machine they are staffing/display puppets. Main thread.</summary>
+        public static bool IsInjectedStaffId(string id)
+            => !string.IsNullOrEmpty(id) && _injectedStaff.ContainsKey(id);
         private static readonly Dictionary<string, string> _rosterSigSent = new();            // owner side: addr → last published sig
         private static float _nextRosterPublishAt, _nextRosterApplyAt;
 

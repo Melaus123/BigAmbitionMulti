@@ -3997,12 +3997,30 @@ namespace BigAmbitionsMP
                     if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;   // single player — run native
                     if (__instance == null) return true;
 
+                    // Round-62 (field: "I see other players' staff issues but not my own,
+                    // and no names" — Just JP group, 2026-07-22): an INJECTED partner-staff
+                    // display copy must never complain here — the OWNER's machine holds the
+                    // real record and delivers the complaint to the right player. The copies
+                    // were prime complainers (no native task assigned) and, when the roster
+                    // carried no name, messaged from a contact literally called "Staff".
+                    try { if (MPRegisterSync.IsInjectedStaffId(__instance.id)) return false; } catch { }
+
+                    // Round-62: a NULL/undefined address is the NATIVE state of a hired-but-
+                    // unassigned employee — vanilla lets them complain ("the company" message;
+                    // e.g. new hires demanding training). The old blanket skip silenced exactly
+                    // those. The rival-poor NRE this guard originally masked is now properly
+                    // shielded at Complaint.GetComplaintMessageData (2026-07-09).
+                    var addr = __instance.assignedAddress;
+                    if (addr == null || string.IsNullOrEmpty(addr.streetName)) return true;   // idle/unassigned — native handles
+
                     BuildingRegistration? reg = null;
-                    try { reg = Helpers.BuildingHelper.GetBuildingRegistration(__instance.assignedAddress); } catch { reg = null; }
+                    try { reg = Helpers.BuildingHelper.GetBuildingRegistration(addr); } catch { reg = null; }
                     if (reg != null) return true;   // normal employee with a resolvable workplace — native runs
 
+                    // The TRUE MP data gap: a real address this machine can't resolve
+                    // (registration not synced) — skip so the hourly tick survives.
                     LogOrphan(__instance);
-                    return false;   // skip this orphan's complaint processing → no NRE → the hourly tick lives
+                    return false;
                 }
                 catch { return true; }   // the guard must never be the thing that breaks the tick
             }
