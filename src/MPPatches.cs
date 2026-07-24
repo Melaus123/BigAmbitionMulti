@@ -390,26 +390,44 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── Round-52: register income during a consensus skip (field 2026-07-22, KuyuSuyu ×2:
-        // "7 customers instead of 40-50 per day") ─────────────────────────────
-        // The game's hourly abstract simulator (BusinessSimulatorHelper.RunHourly, GameManager
-        // hourly tick) simulates every shop the local player rents EXCEPT the one they are
-        // standing in — UNLESS the native time machine is running, in which case it simulates
-        // that one too. That bypass is how SP register fast-forward pays you: the 40-50
-        // customers are bookkept by the sim, not physically served. Our consensus skip drives
-        // RunMainGameTick directly and never engages the time machine, so the one shop the
-        // register-worker occupies was the one shop that earned nothing. Postfix = simulate
-        // exactly the shop native exempted, only while OUR skip is active, per machine for its
-        // own player. Staffing is native-correct for both cases: an ad-hoc worker hits
-        // PlayerHelper.IsPlayerWorkingInEmployeeStation first in GetEmployeeAtStationAndHour,
-        // and a remote helper's register is covered by the synthetic duty employee's blanket
-        // 0-24 station shift. No OnTimeMachineEnd mirror: normal (non-TM) play never calls it
-        // for hourly-simmed shops, and our skip IS normal play at speed. No double income: the
-        // sim and the real customer spawner consume the same CustomerEntry list (completed
-        // flags), so walk-ins served during the skip are simply not re-billed.
+        // ── Round-60: register income during a consensus skip ────────────────
+        // (Round-52 REWRITTEN 2026-07-23 — the original two-patch design was INERT:
+        // the SimScope isRunning-getter fake was INLINED out of the native RunHourly
+        // body by the Mono JIT, and this postfix's own gate read the same fake and
+        // stood down. Field symptom: the shop the register worker occupies earned $0
+        // during every MP skip while vanilla's time machine paid normally — KuyuSuyu
+        // x3; localized by probe runs 1-7, fixed and probe-verified same day: MP skip
+        // income now matches the SP control, ~$2.5-2.8k/day on the test shop.)
+        //
+        // The game's hourly abstract simulator (BusinessSimulatorHelper.RunHourly)
+        // skips the customer-spawning shop the LOCAL player is standing in unless the
+        // native time machine runs — that bypass is how SP register fast-forward pays.
+        // Our consensus skip drives RunMainGameTick directly with the machine stopped,
+        // so this postfix simulates exactly the shop native exempted, per machine for
+        // its own player, while OUR skip is active. Staffing is native-correct (ad-hoc
+        // register worker via IsPlayerWorkingInEmployeeStation; a remote helper's
+        // register via the synthetic duty employee's blanket 0-24 shift). No double
+        // income: the sim and the live spawner share the CustomerEntry list and
+        // per-order-entry processed flags. The real-machine gate reads the isRunning
+        // BACKING FIELD, never the getter — patching or reading a trivial getter is
+        // unreliable on Mono (inlining), the exact trap that broke the original.
         [HarmonyPatch(typeof(BusinessSimulatorHelper), nameof(BusinessSimulatorHelper.RunHourly))]
         public static class Patch_RunHourly_SimulateOccupiedShopDuringSkip
         {
+            private static System.Reflection.FieldInfo _tmBackingField;
+            private static bool TimeMachineReallyRunning()
+            {
+                try
+                {
+                    var tm = InstanceBehavior<UI.UIs>.Instance?.timeMachine;
+                    if (tm == null) return false;
+                    _tmBackingField ??= HarmonyLib.AccessTools.Field(tm.GetType(), "<isRunning>k__BackingField");
+                    if (_tmBackingField == null) return tm.isRunning;   // fallback: the getter
+                    return _tmBackingField.GetValue(tm) is bool b && b;
+                }
+                catch { return false; }
+            }
+
             private static int _simmed;
             static void Postfix()
             {
@@ -422,15 +440,97 @@ namespace BigAmbitionsMP
                     if (!MergerFlip.TrulyMine(current)) return;          // only MY shop — replicas sim on their owner's machine
                     var data = BusinessTypeHelper.GetData(current);
                     if (data?.simulator == null || !data.spawnCustomers) return;   // !spawnCustomers shops already simulated natively
-                    try { if (InstanceBehavior<UI.UIs>.Instance?.timeMachine?.isRunning == true) return; } catch { }   // native TM already covered it
+                    if (TimeMachineReallyRunning()) return;              // a GENUINE machine covers it natively
                     if (!BusinessHelper.IsBusinessOpen(current)) return;
                     data.simulator.SetUp(current, SaveGameManager.Current.Hour);
                     data.simulator.SimulateCurrentHour();
                     _simmed++;
                     if (_simmed == 1 || _simmed % 12 == 0)
-                        Plugin.Logger.LogInfo($"[Rest] occupied-shop hourly sim during skip: '{current.BusinessName}' h{SaveGameManager.Current.Hour} (#{_simmed}) — SP time-machine parity (round-52).");
+                        Plugin.Logger.LogInfo($"[Rest] occupied-shop hourly sim during skip: '{current.BusinessName}' h{SaveGameManager.Current.Hour} (#{_simmed}) — SP time-machine parity (round-60).");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] occupied-shop sim: {ex.Message}"); }
+            }
+        }
+
+        // ── Round-60b: normal-speed customer VISUALS during a consensus skip ─────
+        // During a skip the world stays visible (no native TM blur) while the clock
+        // runs at 25 game-min/s — the interior spawner's 1s check finds every entry
+        // that came due in the last ~25 game-minutes and spawns them ALL, flooding
+        // the shop with bodies that real-time serving can never clear (user report
+        // 2026-07-23). The player moves at normal speed during a skip, so the world
+        // should LOOK like normal speed (user design): bodies arrive at the rate
+        // this shop, this hour, would produce at the NORMAL clock — the hour's
+        // demand spread over the hour, converted through the game's own
+        // MinutesMultiplier. Busy hours look busy, dead hours look dead. The
+        // economy is unaffected: entries denied a body are still consumed by the
+        // native loop and billed by the round-60 hourly sim (per-order-entry flags
+        // dedup the two paths) — income identical, visuals consistent.
+        [HarmonyPatch(typeof(IndoorCustomerSpawner), "CanSpawnCustomer")]
+        public static class Patch_IndoorSpawner_SkipVisualPace
+        {
+            private const float MinSecondsBetween = 1.5f;   // burst guard (rush hours)
+            private const float MaxSecondsBetween = 90f;    // dead-hour ceiling
+
+            private static float _nextAllowed;
+            private static int _cachedHour = -1;
+            private static string _cachedAddr = "";
+            private static float _cachedInterval = 8f;
+            private static System.Reflection.FieldInfo _minMultField;
+
+            /// <summary>The game's normal clock rate (game-minutes per real second) —
+            /// GameManager.MinutesMultiplier, the exact factor normal play runs at.</summary>
+            private static float NormalMinutesPerRealSecond()
+            {
+                try
+                {
+                    _minMultField ??= HarmonyLib.AccessTools.Field(typeof(GameManager), "MinutesMultiplier");
+                    if (_minMultField?.GetValue(null) is float m && m > 0.05f) return m;
+                }
+                catch { }
+                return 1f;
+            }
+
+            /// <summary>Real seconds between arrivals THIS shop/hour would show at normal
+            /// speed: (60 / entries-this-hour) game-minutes between customers, divided by
+            /// the normal game-min-per-real-second rate. Recomputed on shop/hour change.</summary>
+            private static float CurrentNormalPaceInterval()
+            {
+                try
+                {
+                    var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                    if (reg == null) return 8f;
+                    int hour = SaveGameManager.Current.Hour;
+                    string addr = "";
+                    try { addr = GameStateReader.AddressKey(reg); } catch { }
+                    if (hour != _cachedHour || addr != _cachedAddr)
+                    {
+                        _cachedHour = hour; _cachedAddr = addr;
+                        int n = 0;
+                        try
+                        {
+                            foreach (var e in AI.Customers.CustomerEntries.CustomerEntriesHelper.GetEntriesByAddress(reg.Address))
+                                if (e != null && e.spawnTime.Hour == hour) n++;
+                        }
+                        catch { }
+                        float gameMinBetween = 60f / UnityEngine.Mathf.Max(1, n);
+                        _cachedInterval = UnityEngine.Mathf.Clamp(gameMinBetween / NormalMinutesPerRealSecond(), MinSecondsBetween, MaxSecondsBetween);
+                    }
+                    return _cachedInterval;
+                }
+                catch { return 8f; }
+            }
+
+            static void Postfix(ref bool __result)
+            {
+                try
+                {
+                    if (!__result) return;
+                    if (!MPRestSync.SkipActive) return;
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    if (UnityEngine.Time.unscaledTime < _nextAllowed) { __result = false; return; }
+                    _nextAllowed = UnityEngine.Time.unscaledTime + CurrentNormalPaceInterval();
+                }
+                catch { }
             }
         }
 
@@ -3249,54 +3349,6 @@ namespace BigAmbitionsMP
                 // No taxi bypass: the ride machine is stopped instantly (taxi
                 // v2 = instant arrival), so it must never self-advance either.
                 return false;                                  // machine never self-advances in MP
-            }
-        }
-
-        // ── Time-skip economy: simulate the shop the player is STANDING IN ────
-        // During our consensus skip the TimeMachine is stopped (isRunning=false), so the game's
-        // per-hour business sim (BusinessSimulatorHelper.RunHourly) EXCLUDES the customer-spawning
-        // shop the player is physically inside — natively it relies on live customers for that one,
-        // which can't keep pace with the fast clock, so it under-earns. Native fast-forward avoids
-        // this because isRunning=true. We restore that view of isRunning ONLY for the duration of
-        // RunHourly while a skip is active — tightly scoped so the ~two dozen OTHER isRunning
-        // consumers (activity Cancel, hospital faint, energy/UI/tutorials) keep seeing the REAL
-        // value (a global override would re-fire onTimeMachineEnded on the skip's abort path).
-        // Outside a skip the flag is never set, so there is zero effect on normal play.
-        public static bool ForceSimMachineRunning;
-
-        [HarmonyPatch]
-        public static class Patch_BusinessSimulator_RunHourly_SimOwnShop
-        {
-            static System.Reflection.MethodBase? TargetMethod()
-            {
-                var t = VehicleManager.FindGameType("BusinessSimulatorHelper");
-                return t?.GetMethod("RunHourly",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-            }
-
-            static void Prefix()
-            {
-                if (MPRestSync.SkipActive) ForceSimMachineRunning = true;
-            }
-
-            // Finalizer (not Postfix) so the flag is cleared even if the sim throws.
-            static void Finalizer() { ForceSimMachineRunning = false; }
-        }
-
-        [HarmonyPatch]
-        public static class Patch_TimeMachine_isRunning_SimScope
-        {
-            static System.Reflection.MethodBase? TargetMethod()
-            {
-                var t = VehicleManager.FindGameType("Timemachine.TimeMachine")
-                     ?? VehicleManager.FindGameType("TimeMachine");
-                return t?.GetMethod("get_isRunning",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-            }
-
-            static void Postfix(ref bool __result)
-            {
-                if (ForceSimMachineRunning) __result = true;
             }
         }
 
