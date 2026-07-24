@@ -503,6 +503,58 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogInfo($"[Patcher] gi.rivalStates topped up: +{statesAdded} AI entries ({gi.rivalStates.Count} total).");
                 }
 
+                // 1b. gi.specialRivalStates — heal missing special-rival progress
+                //     entries (round-64, Tali report 20260722-210703).  Only native
+                //     GenerateRivals creates these, and on clients that call is
+                //     suppressed/raced (Wave6) — a save created on the losing side
+                //     of the race carries an EMPTY list forever.  The rivalStates
+                //     top-up above then arms the trap: FillData registers the
+                //     special ids in SpecialRivalCache on load, so RivalLeaderboard
+                //     .Load:37 derefs GetSpecialRivalState(id).isActive → null →
+                //     NRE mid-build → leaderboard shows only the rows built before
+                //     the throw ("only 1 rival showing").  Same shape GenerateRivals
+                //     writes (inactive, no story progress) — nothing invented.
+                //     Special ids come from the private SpecialRivalsCache asset
+                //     array (machine-independent addressables); if it isn't loaded
+                //     yet we skip silently — snapshots re-arrive on every join.
+                try
+                {
+                    var srFi = HarmonyLib.AccessTools.Field(typeof(BigAmbitions.Rivals.RivalsHelper), "SpecialRivalsCache");
+                    if (srFi?.GetValue(null) is BigAmbitions.Rivals.SpecialRival[] srAssets && srAssets.Length > 0)
+                    {
+                        var specialIds = new System.Collections.Generic.HashSet<string>();
+                        foreach (var sr in srAssets)
+                        {
+                            string sid = sr?.rivalData?.id;
+                            if (!string.IsNullOrEmpty(sid)) specialIds.Add(sid);
+                        }
+
+                        gi.specialRivalStates ??= new System.Collections.Generic.List<BigAmbitions.Rivals.SpecialRivalState>();
+                        var haveStates = new System.Collections.Generic.HashSet<string>();
+                        foreach (var st in gi.specialRivalStates)
+                        {
+                            string sid = st?.rivalId ?? "";
+                            if (sid.Length > 0) haveStates.Add(sid);
+                        }
+
+                        int specialAdded = 0;
+                        foreach (var r in payload.Rivals)
+                        {
+                            if (string.IsNullOrEmpty(r.Id) || r.IsPlayer) continue;
+                            if (!specialIds.Contains(r.Id) || haveStates.Contains(r.Id)) continue;
+                            gi.specialRivalStates.Add(new BigAmbitions.Rivals.SpecialRivalState
+                            {
+                                rivalId = r.Id,
+                                completedTimelineEntryIds = new System.Collections.Generic.List<string>(),
+                            });
+                            specialAdded++;
+                        }
+                        if (specialAdded > 0)
+                            Plugin.Logger.LogInfo($"[Patcher] gi.specialRivalStates topped up: +{specialAdded} special entries ({gi.specialRivalStates.Count} total) — leaderboard NRE heal.");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] specialRivalStates heal: {ex.Message}"); }
+
                 // 2. RivalsHelper.RivalDataCache — try AccessTools first, then fall back to FillData.
                 int cacheAdded = 0;
                 try
