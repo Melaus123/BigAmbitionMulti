@@ -1349,6 +1349,17 @@ namespace BigAmbitionsMP
                 string active = "";
                 try { active = SaveGameManager.Current?.ActiveVehicleId ?? ""; } catch { }
                 bool activeHere = vc != null && !string.IsNullOrEmpty(active) && vc.vehicleInstance?.id == active;
+                // Round-68: a ghost can die WITHOUT a live VehicleController (scene teardown, destroyed
+                // GameObject) — the checks above both come up false then, and the stale ActiveVehicleId
+                // survives into the save (the trapped-in-building / frozen-ghost poison).  Match the id
+                // directly so the clear runs even when the controller is already gone.
+                if (!activeHere && !string.IsNullOrEmpty(active)
+                    && (active == "BAMP_" + vid || active == vid))
+                {
+                    Plugin.Logger.LogWarning($"[Vehicle] despawning '{vid}' whose ghost id matches ActiveVehicleId '{active}' with no live controller — clearing the stale active state (round-68).");
+                    try { SaveGameManager.Current.ActiveVehicleId = null; } catch { }
+                    return;
+                }
                 if (!driven && !activeHere) return;
                 Plugin.Logger.LogWarning($"[Vehicle] despawning '{vid}' while the local player is USING it (driven={driven}, activeId={activeHere}) — running native exit first.");
                 try { vc!.ExitVehicle(); }

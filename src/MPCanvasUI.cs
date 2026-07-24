@@ -479,6 +479,7 @@ namespace BigAmbitionsMP
             if (next != MPLifecycle.MPPhase.WorldReady) return;
             MPClient.EndJoinQuiesce();
             GameStatePatcher.StripGhostVehicles("world-ready");   // leaked-ghost hygiene (data only)
+            GameStatePatcher.HealStaleActiveVehicleId();   // round-68: BAMP_/unresolvable ActiveVehicleId = trapped-in-building + frozen-ghost poison
             MPRegisterSync.StripOrphanSyntheticEmployees("world-ready");   // clear duty-staff a prior save left behind
             MPSaveIntegrity.RunSweep("world-ready");   // dangling-reference repair/detect (includes duty-shift repair); summary rides bug reports
             GameStatePatcher.SweepLedgerVsRivalBusinesses("world-ready");   // round-50: drop player reservations on AI-rival-run addresses (host-only inside)

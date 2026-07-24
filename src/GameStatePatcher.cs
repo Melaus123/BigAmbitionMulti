@@ -1900,6 +1900,37 @@ namespace BigAmbitionsMP
             return removed;
         }
 
+        /// <summary>Round-68 — heal a STALE ActiveVehicleId at world-ready (already-poisoned saves in
+        /// the field: live artifact 2026-07-24, host save carried ActiveVehicleId="BAMP_&lt;flatbed&gt;" —
+        /// the client's ghost-proxy id, persisted by a pre-fix save).  Consequences until healed:
+        /// IsUsingVehicle=true with GetCurrentVehicle()=null → HasPaidForAllItems (PlayerHelper:110)
+        /// NREs → ExitZoneDespawner dies on every exit attempt (trapped in the building), vehicle CTAs
+        /// NRE, the hand-truck station refuses to spawn, AND the possession check discards the owner's
+        /// position packets for the matching ghost (frozen "not syncing" cart).  At world-ready nobody
+        /// is using anything yet, so a BAMP_ id or an id with no matching VehicleInstance is pure
+        /// poison — clear it.  (PerformLocalSave strips ghost ids at the save boundary going forward;
+        /// this covers every save written before that fix.)</summary>
+        public static void HealStaleActiveVehicleId()
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                string active = gi?.ActiveVehicleId ?? "";
+                if (active.Length == 0) return;
+                bool ghost = active.StartsWith("BAMP_") && !active.StartsWith("BAMP_TESTRIG");
+                bool resolvable = false;
+                if (!ghost && gi!.VehicleInstances != null)
+                    foreach (var v in gi.VehicleInstances)
+                        if (v != null && v.id == active) { resolvable = true; break; }
+                if (!ghost && resolvable) return;   // legitimately saved while driving an own vehicle
+                gi!.ActiveVehicleId = null;
+                Plugin.Logger.LogWarning($"[Vehicle] stale ActiveVehicleId '{active}' cleared at world-ready — "
+                    + $"{(ghost ? "ghost-proxy id (save-cycle leak)" : "no matching vehicle in the save")}; "
+                    + "exit-zone NRE / frozen-ghost heal (round-68).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] ActiveVehicleId heal: {ex.Message}"); }
+        }
+
         /// <summary>
         /// Slice 2 (2026-06-12): a cross-player sale consumes REAL stock.  Runs
         /// on the HOST (interior authority) on the main thread: walks the shop's

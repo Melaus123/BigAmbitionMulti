@@ -1127,6 +1127,28 @@ namespace BigAmbitionsMP
             // VeilPush reverts every flipped reg to native truth for the whole serialization;
             // the finally below re-flips (VeilPop) even if the save throws.
             MergerFlip.VeilPush();
+            // Round-68, same choke point: ActiveVehicleId must never persist a BAMP_ ghost-proxy id
+            // (live save artifact 2026-07-24: the host saved "using" the client's flatbed proxy; on the
+            // next load IsUsingVehicle=true + GetCurrentVehicle()=null → HasPaidForAllItems NREs →
+            // ExitZoneDespawner dies on every exit attempt (player trapped in the building) AND the
+            // possession check silently discards the owner's position packets for that ghost (the
+            // "cart stopped syncing" freeze).  Strip for the serialization only — the player may be
+            // LEGITIMATELY pushing the borrowed ghost right now, so the live value is restored in the
+            // finally.  Borrowed vehicles never follow a save across sessions; "on foot" is the
+            // correct persisted state.
+            string ghostActiveId = "";
+            try
+            {
+                var giAv = SaveGameManager.Current;
+                string av = giAv?.ActiveVehicleId ?? "";
+                if (av.StartsWith("BAMP_") && !av.StartsWith("BAMP_TESTRIG"))
+                {
+                    ghostActiveId = av;
+                    giAv!.ActiveVehicleId = null;
+                    Plugin.Logger.LogInfo($"[Vehicle] ghost ActiveVehicleId '{av}' stripped for save (restored after serialization).");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ActiveVehicleId strip: {ex.Message}"); }
             string charName = "";
             int    day      = 0;
             // Per-player subfolder keyed by the STABLE id (not the game's characterId) so load can find it
@@ -1189,6 +1211,9 @@ namespace BigAmbitionsMP
                 // has returned in every normal/caught path by here, so serialization is done and gi is safe.
                 try { restoreSynthetics(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore synthetics: {ex.Message}"); }
                 try { MergerFlip.VeilPop(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore merger flip: {ex.Message}"); }
+                // Round-68: put the live borrowed-ghost state back (serialization is done by here).
+                try { if (ghostActiveId.Length > 0) SaveGameManager.Current.ActiveVehicleId = ghostActiveId; }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore ActiveVehicleId: {ex.Message}"); }
             }
 
             Plugin.Logger.LogInfo($"[MPSave] Local save '{sessionName}': ok={ok} char='{charName}' day={day} → {folder}");
