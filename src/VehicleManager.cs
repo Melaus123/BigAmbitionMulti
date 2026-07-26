@@ -421,6 +421,16 @@ namespace BigAmbitionsMP
                     // instead — this machine's street data lags their door transitions.
                     string bldg;
                     if (_ownedFollowing.TryGetValue(inst.id, out var fTag)) bldg = fTag.Bldg ?? "";
+                    // Round-88 (user-approved, field-test-confirmed): while *I* push my own open cart,
+                    // the live truth is MY building context — a hand truck's native street data is
+                    // written only at grab (HandTruck:184) and at release-INDOORS (VehicleController:
+                    // 342-347), so a cart grabbed on the street stays tagged "outdoors" through the
+                    // whole indoor push and renders in every same-layout interior on other machines
+                    // ("carts from other people show", field 20260725-000353). Cars are excluded on
+                    // purpose: native maintains their street data through door hooks + underground
+                    // parking and must keep doing so.
+                    else if (vc.controlledByPlayer && IsOpenVehicle(tn ?? ""))
+                        bldg = MPRegisterSync.CurrentShopAddress ?? "";
                     else
                     {
                         try { bldg = string.IsNullOrEmpty(inst.streetName) ? "" : $"{inst.streetNumber} {inst.streetName}"; }

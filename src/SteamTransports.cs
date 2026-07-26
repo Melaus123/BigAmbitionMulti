@@ -166,6 +166,13 @@ namespace BigAmbitionsMP
         private const long HighWaterRearm   = 1L * 1024 * 1024;
         private bool _highWaterLatched;
         private int _refusalsLogged;
+        // Round-88 hygiene (user-approved): per-message retry lines flooded the bug-report ring to a
+        // 19-second window during congestion (field 20260725-000353: 78-deep backlog to one peer).
+        // Summarize to at most one line per 5s. Ticks-based — the pump runs OFF the main thread,
+        // where UnityEngine.Time is unavailable.
+        private long _retryLogNextTicks;
+        private int  _retrySummed;
+        private long _retrySummedBytes;
 
         private static int _nextFragId;
         internal readonly SteamReassembly Reassembly = new("SteamHost");
@@ -245,7 +252,13 @@ namespace BigAmbitionsMP
                     catch { return; }
                     if (r != Result.OK) return;   // still refused — next pump retries
                     _pending.Dequeue(); _pendingBytes -= d.Length;
-                    Plugin.Logger.LogInfo($"[SteamLink] retry to {Describe} accepted ({d.Length}B, {_pending.Count} still pending).");
+                    _retrySummed++; _retrySummedBytes += d.Length;
+                    if (System.DateTime.UtcNow.Ticks >= _retryLogNextTicks)
+                    {
+                        _retryLogNextTicks = System.DateTime.UtcNow.Ticks + System.TimeSpan.TicksPerSecond * 5;
+                        Plugin.Logger.LogInfo($"[SteamLink] retries to {Describe}: {_retrySummed} msg(s)/{_retrySummedBytes}B accepted, {_pending.Count} still pending.");
+                        _retrySummed = 0; _retrySummedBytes = 0;
+                    }
                     if (_highWaterLatched && _pendingBytes < HighWaterRearm)
                     {
                         _highWaterLatched = false;
@@ -421,6 +434,13 @@ namespace BigAmbitionsMP
         private const long HighWaterRearm   = 1L * 1024 * 1024;
         private bool _highWaterLatched;
         private int _refusalsLogged;
+        // Round-88 hygiene (user-approved): per-message retry lines flooded the bug-report ring to a
+        // 19-second window during congestion (field 20260725-000353: 78-deep backlog to one peer).
+        // Summarize to at most one line per 5s. Ticks-based — the pump runs OFF the main thread,
+        // where UnityEngine.Time is unavailable.
+        private long _retryLogNextTicks;
+        private int  _retrySummed;
+        private long _retrySummedBytes;
 
         private static int _nextFragId;
         private readonly SteamReassembly _reassembly = new("SteamClient");
@@ -500,7 +520,13 @@ namespace BigAmbitionsMP
                     catch { return; }
                     if (r != Result.OK) return;   // still refused — next pump retries
                     _pending.Dequeue(); _pendingBytes -= d.Length;
-                    Plugin.Logger.LogInfo($"[SteamClient] retry accepted ({d.Length}B, {_pending.Count} still pending).");
+                    _retrySummed++; _retrySummedBytes += d.Length;
+                    if (System.DateTime.UtcNow.Ticks >= _retryLogNextTicks)
+                    {
+                        _retryLogNextTicks = System.DateTime.UtcNow.Ticks + System.TimeSpan.TicksPerSecond * 5;
+                        Plugin.Logger.LogInfo($"[SteamClient] retries: {_retrySummed} msg(s)/{_retrySummedBytes}B accepted, {_pending.Count} still pending.");
+                        _retrySummed = 0; _retrySummedBytes = 0;
+                    }
                     if (_highWaterLatched && _pendingBytes < HighWaterRearm)
                     {
                         _highWaterLatched = false;

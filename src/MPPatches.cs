@@ -1026,6 +1026,32 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Round-88 (user-approved): street releases clear a hand truck's street data ────────
+        // Native writes street data at grab (HandTruck:184) and at release-INDOORS
+        // (VehicleController:342-347) — but a release on the STREET writes nothing, so a cart
+        // grabbed indoors keeps the building tag while genuinely sitting outdoors, and the
+        // cross-interior mask hides it from every other machine (invisible street cart) until
+        // the next grab re-stamps it. Clear the tag exactly where native would have written it.
+        // MP-gated — single-player keeps vanilla data untouched. Covers Flatbed (a HandTruck
+        // subclass) via the base-type patch.
+        [HarmonyPatch(typeof(HandTruck), nameof(HandTruck.ExitVehicle))]
+        public static class Patch_HandTruckExit_StreetDataClear
+        {
+            static void Postfix(HandTruck __instance)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                    if (BuildingManager.IsInsideBuilding || Parking.UndergroundParking.UndergroundParkingManager.IsInsideParking) return;   // native wrote these cases
+                    var inst = __instance?.vehicleInstance;
+                    if (inst == null || string.IsNullOrEmpty(inst.streetName)) return;   // already street-tagged
+                    inst.SetStreetData(string.Empty, 0);
+                    Plugin.Logger.LogInfo($"[Vehicle] street release: cleared stale building tag on '{inst.id}' (round-88 — native only writes on indoor releases).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] street-release tag clear: {ex.Message}"); }
+            }
+        }
+
         // ── Parked-car overlap: extend the game's ambient cleanup to CLIENT cars ──
         // The game clears ambient parked cars overlapping the LOCAL player's cars
         // (DestroyBlockingParkedVehicles → DestroyBlockingVehicles, iterating AllPlayerVehicles).
