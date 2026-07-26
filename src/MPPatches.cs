@@ -3014,16 +3014,21 @@ namespace BigAmbitionsMP
                   | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly);
             }
 
-            // Throttle: ApplyFilters fires once per toggle click, but the user
-            // may toggle several quickly.  Cap to one dump per 2s so we don't
-            // spam the log.
+            // Round-98 gates (user-approved; the dump measured ~53ms/call): only when a human
+            // is actually LOOKING at the map — our own sync code re-runs ApplyFilters with the
+            // map CLOSED (GameStatePatcher/MergerFlip pin refreshes) and the dump landed as a
+            // mid-drive hitch, in SP too. MP-only (it diagnoses cross-machine state) and at
+            // most one dump per 60s (was 2s).
             private static float _lastDumpAt = -100f;
-            static void Prefix()
+            static void Prefix(object __instance)
             {
                 try
                 {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    var comp = __instance as UnityEngine.Component;
+                    if (comp == null || !comp.gameObject.activeInHierarchy) return;   // map UI not visible
                     float now = UnityEngine.Time.realtimeSinceStartup;
-                    if (now - _lastDumpAt < 2f) return;
+                    if (now - _lastDumpAt < 60f) return;
                     _lastDumpAt = now;
 
                     long _pc = MPPerf.Begin();   // round-97: 826-reg ×3-pass dump inside a native call — patch-cost bracketed

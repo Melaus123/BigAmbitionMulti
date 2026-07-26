@@ -1521,13 +1521,28 @@ namespace BigAmbitionsMP
             if (_synthetics.Count == 0) return;
             if (Time.unscaledTime < _nextEvalAt) return;
             _nextEvalAt = Time.unscaledTime + 5f;
+            // Round-98 (field "lag spike every ~6s", JP report + S7 repro): this pass used to run
+            // FindObjectsOfType — a FULL-SCENE walk — once PER synthetic station, every 5s, even
+            // with no interior loaded (the null-station check came after the scan): ~630ms/pass
+            // on a client in a built-up world. Stations only exist inside the ONE interior loaded
+            // around the local player, so skip the pass unless a synthetic is plausibly near us,
+            // then scan the scene ONCE for all synthetics.
+            Vector3 me;
+            try { me = Helpers.PlayerHelper.GetPosition(); } catch { return; }
+            const float NearRadius2 = 150f * 150f;   // interiors sit on distant coordinate islands — generous
+            bool anyNear = false;
+            foreach (var kv in _synthetics)
+                if ((kv.Value.pos - me).sqrMagnitude <= NearRadius2) { anyNear = true; break; }
+            if (!anyNear) return;   // street/other-island: no synthetic till can be loaded here
+            var stations = UnityEngine.Object.FindObjectsOfType(typeof(EmployeeStationController));
             foreach (var kv in _synthetics)
             {
                 try
                 {
+                    if ((kv.Value.pos - me).sqrMagnitude > NearRadius2) continue;   // its interior can't be the loaded one
                     // Round-30 (WS2): any EmployeeStationController counts — the old CashRegisterController-
                     // only search was the visitor-side twin of the owner-side checkout whitelist.
-                    var st = FindNearestStation(kv.Value.pos, 2f);
+                    var st = NearestStationIn(stations, kv.Value.pos, 2f);
                     if (st == null) continue;                    // interior not loaded here
                     if (st.employeeInstance != null) continue;   // already staffed
                     Plugin.Logger.LogInfo($"[SynthStaff] invoking UpdateEmployee(false) on station at '{kv.Key}'.");
@@ -1537,13 +1552,12 @@ namespace BigAmbitionsMP
             }
         }
 
-        private static EmployeeStationController? FindNearestStation(Vector3 from, float maxDist)
+        private static EmployeeStationController? NearestStationIn(UnityEngine.Object[]? stations, Vector3 from, float maxDist)
         {
             EmployeeStationController? best = null;
             float bestD2 = maxDist * maxDist;
-            var arr = UnityEngine.Object.FindObjectsOfType(typeof(EmployeeStationController));
-            if (arr != null)
-                foreach (var o in arr)
+            if (stations != null)
+                foreach (var o in stations)
                 {
                     var c = o as EmployeeStationController;
                     if (c == null) continue;

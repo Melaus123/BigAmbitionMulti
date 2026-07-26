@@ -541,10 +541,15 @@ namespace BigAmbitionsMP
             if (Input.GetKeyDown(KeyCode.F10))
                 DevRunSteamFrameSelfTest();
 #endif
+            // Round-98: this whole pre-block ran UNMEASURED (modTicks only covered
+            // Drain/WorldSnap/PosSync*) — the 5s duty scan + staff evaluator and the
+            // puppet tick live here. PreTick umbrella + named sub-brackets so a
+            // periodic field hitch is named or cleared by column.
+            long _pre = MPPerf.Begin();
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             TickCrashHeartbeat();    // task #5: stamp the session marker with where-we-are (~30s)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
-            MPRegisterSync.TickDuty();   // mirror the native Work activity into register duty (1s self-throttle)
+            long _sub = MPPerf.Begin(); MPRegisterSync.TickDuty(); MPPerf.End("RegDuty", _sub);   // mirror the native Work activity into register duty (1s self-throttle; contains the 5s employee-duty scan + staff evaluator)
             MPHub.TickSalePopups();      // rising +$ worker feedback (per-frame: smooth rise/fade)
             PassengerRide.Update();      // passenger ride: click-to-board → pin-to-seat → exit + remote riders
             PassengerHud.Tick();         // passenger's in-ride "Exit Vehicle" panel
@@ -552,7 +557,7 @@ namespace BigAmbitionsMP
             TimeSync.TickStartupHold();  // round-36: had NO caller (dead since inception) — the hold's timeScale re-clamp
             GameStateReader.TickPendingNativePause();   // round-36c: converge the pause flag onto the last
                                                         // requested state (rate-limit drops lost it before)
-            CustomerPuppets.Tick();      // round-41: simulator election (host) + puppet stream/render (both-inside shops)
+            _sub = MPPerf.Begin(); CustomerPuppets.Tick(); MPPerf.End("Puppets", _sub);   // round-41: simulator election (host) + puppet stream/render (both-inside shops)
             MergerFlip.Tick();           // merger slice 3: ownership-flip reconcile (1 Hz) + host state push (10s)
             MergerEmployeeSync.Tick();   // merger slice 5: schedule write-back scan on flipped shops (2s)
             MPFreezeProbe.Tick();        // [MoveFreeze] symptom probe: input-without-motion detector (claim-4 backstop)
@@ -571,6 +576,7 @@ namespace BigAmbitionsMP
             TickJoinDialog();        // Phase 5 — connect-dialog input (when open)
             TickLobbyWindow();       // Phase 5 — lobby window input (when open)
             TickSavePicker();        // Phase 5 — save-picker input (when open)
+            MPPerf.End("PreTick", _pre);   // round-98: close the pre-block umbrella
 
             // Overlay-aware freeze gate — freezes once our loading overlay clears
             // (must run BEFORE TickStartupScreen so the wait screen appears the same
@@ -3445,7 +3451,8 @@ namespace BigAmbitionsMP
             _pt = MPPerf.Begin(); GameStatePatcher.DrainPendingLogoRefreshes(); MPPerf.End("LogoRefresh", _pt);
 
             // Send our character appearance once the character is ready.
-            TrySendLocalAppearance();
+            // (Round-98: named sub-bracket — it polls a full appearance read every 5s.)
+            _pt = MPPerf.Begin(); TrySendLocalAppearance(); MPPerf.End("Appearance", _pt);
 
             if (!MPServer.IsRunning && !MPClient.IsConnected)
             {

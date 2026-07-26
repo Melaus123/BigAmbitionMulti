@@ -42,7 +42,18 @@ namespace BigAmbitionsMP
             double ms = (_sw.ElapsedTicks - t0) * 1000.0 / Stopwatch.Frequency;
             if (!_slots.TryGetValue(name, out var s)) { s = new Slot(); _slots[name] = s; }
             s.Total += ms; s.Calls++; if (ms > s.Max) s.Max = ms;
+            // Round-98: tick brackets join the per-frame spike buffer too — RegDuty's 632ms
+            // frames logged "mod share 0.0ms" because only PatchEnd sites were attributed.
+            // The spike SUM counts only top-level brackets (subsets like RegDuty still get
+            // NAMED in the detail, they just don't double into the total).
+            _framePatchCur.TryGetValue(name, out double f);
+            _framePatchCur[name] = f + ms;
         }
+
+        /// <summary>Brackets whose per-frame cost is mutually exclusive (top-level): safe to SUM.
+        /// Everything else in the frame buffer is either a subset of one of these (RegDuty ⊂
+        /// PreTick, Parked ⊂ PosSync*) or a patch site (checked via _patchSlots at spike time).</summary>
+        private static readonly HashSet<string> _topLevel = new HashSet<string> { "Drain", "WorldSnap", "PosSync*", "PreTick" };
 
         // ── Round-97 PATCH-COST attribution (user-mandated after the lag-report audit) ────────
         // The line below admits it: Harmony patch BODIES run inside native calls and land in
@@ -99,7 +110,11 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    double ours = 0; foreach (var kv in _framePatchPrev) ours += kv.Value;
+                    // Sum only top-level tick brackets + patch sites; subset brackets are
+                    // named in the detail below but never double-counted into the share.
+                    double ours = 0;
+                    foreach (var kv in _framePatchPrev)
+                        if (_topLevel.Contains(kv.Key) || _patchSlots.ContainsKey(kv.Key)) ours += kv.Value;
                     var top = new System.Text.StringBuilder();
                     int listed = 0;
                     foreach (var kv in _framePatchPrev)
@@ -135,7 +150,7 @@ namespace BigAmbitionsMP
                     var s = kv.Value;
                     if (s.Calls == 0) continue;
                     double perFrame = s.Total / _frames;
-                    if (kv.Key == "Drain" || kv.Key == "WorldSnap" || kv.Key == "PosSync*") modTicks += perFrame;
+                    if (kv.Key == "Drain" || kv.Key == "WorldSnap" || kv.Key == "PosSync*" || kv.Key == "PreTick") modTicks += perFrame;   // round-98: PreTick is TOP-LEVEL (RegDuty/Puppets are its subsets)
                     double cpf = (double)s.Calls / _frames;   // calls/frame — exposes hot patches fired per-NPC
                     sb.Append(cpf > 1.5
                         ? $" {kv.Key}={perFrame:F2}/{s.Max:F1}/{cpf:F0}x"
