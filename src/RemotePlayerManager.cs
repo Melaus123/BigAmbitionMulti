@@ -407,11 +407,21 @@ namespace BigAmbitionsMP
             }
 
             _remoteBuildings[p.PlayerId] = p.Bldg ?? "";
-            bool sameRoom = (p.Bldg ?? "") == (MPRegisterSync.CurrentShopAddress ?? "");
-            if (go.activeSelf != sameRoom)
+            // Round-87 (user-approved, probe-confirmed): an OUTDOORS player (bldg='') stands at STREET
+            // coordinates and can never overlap an interior island (~x900 detached space) — the mask's
+            // reason doesn't apply to them. Hiding them was a root-level SetActive(false), which removes
+            // their SOLID collider from physics: on the HOST (traffic authority) every outdoor player
+            // became undetectable to Gley the moment the host stood inside ANY building (shop-owner-on-
+            // duty), and traffic ran them over on every screen (AvSense: car through at d=0.6 doing
+            // 13.9 m/s while hidden vs brake-to-stop at d=4.3 once shown; user: "cars stopped once the
+            // host exited the building"). Outdoors → always visible; same building → visible; two
+            // DIFFERENT interiors → hidden (the genuine coordinate-island ghosting case).
+            bool visible = (p.Bldg ?? "") == (MPRegisterSync.CurrentShopAddress ?? "")
+                        || string.IsNullOrEmpty(p.Bldg);
+            if (go.activeSelf != visible)
             {
-                go.SetActive(sameRoom);
-                if (sameRoom && mover != null)
+                go.SetActive(visible);
+                if (visible && mover != null)
                 {
                     // While hidden the mover doesn't run — snap to the live
                     // target so the avatar doesn't glide from its stale spot
@@ -421,7 +431,7 @@ namespace BigAmbitionsMP
                     mover.Velocity = Vector3.zero;
                 }
                 Plugin.Logger.LogInfo(
-                    $"[InteriorMask] '{p.PlayerId}' {(sameRoom ? "shown" : "hidden")} — " +
+                    $"[InteriorMask] '{p.PlayerId}' {(visible ? "shown" : "hidden")} — " +
                     $"their bldg='{p.Bldg}' mine='{MPRegisterSync.CurrentShopAddress}'.");
             }
         }

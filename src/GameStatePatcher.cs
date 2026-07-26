@@ -947,7 +947,8 @@ namespace BigAmbitionsMP
                     // ItemController (and its shuffled look) survives untouched.
                     var changedIds = new HashSet<string>();
                     var removedIds = new HashSet<string>();
-                    var movedIds   = new HashSet<string>();   // transform-only deltas → move in place (round-22)
+                    var movedIds   = new HashSet<string>();   // REAL transform deltas → move in place (round-22; round-86b: cargo-only no longer lands here)
+                    var cargoOnlyIds = new HashSet<string>(); // round-86b: in-place restocks — fully handled at apply time, feed NOTHING downstream
                     try
                     {
                         if (reg.itemInstances != null)
@@ -1034,10 +1035,26 @@ namespace BigAmbitionsMP
                                                 restocked++;
                                             }
                                         }
+                                        // Round-86b (user-approved, MEASURED): the move pass's ONLY effects are a
+                                        // controller rebind (same live object → no-op) and a transform set — so when
+                                        // the position/rotation did NOT actually change, there is provably nothing
+                                        // left to do. Bucketing sales (cargo-only deltas) into movedIds opened the
+                                        // itemWork gate and ran the ~120ms whole-scene ItemController scan every 2s
+                                        // in a busy shop. Only a REAL pose delta feeds movedIds now.
+                                        bool posDelta = false;
+                                        try
+                                        {
+                                            posDelta = prevLive.position.x != ii.position.x
+                                                    || prevLive.position.y != ii.position.y
+                                                    || prevLive.position.z != ii.position.z
+                                                    || prevLive.yRotation  != ii.yRotation;
+                                        }
+                                        catch { posDelta = true; }           // can't compare → conservative: full move pass
                                         prevLive.position  = ii.position;    // data transform follows the wire
                                         prevLive.yRotation = ii.yRotation;
                                         newDict[i.Id] = prevLive;            // KEEP the live object
-                                        movedIds.Add(i.Id);                  // GameObject transform sync pass
+                                        if (posDelta) movedIds.Add(i.Id);    // GameObject transform sync pass
+                                        else cargoOnlyIds.Add(i.Id);         // in-place restock/no-op — nothing to refresh
                                         continue;
                                     }
                                     // Core/stacked changed → respawn below; the shield still applies: the
@@ -1165,7 +1182,7 @@ namespace BigAmbitionsMP
                     }
                     catch { }
 
-                    Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' {InteriorSync.SnapshotSummary(payload)} (changed={changedIds.Count} moved={movedIds.Count} removed={removedIds.Count}).");
+                    Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' {InteriorSync.SnapshotSummary(payload)} (changed={changedIds.Count} moved={movedIds.Count} cargoOnly={cargoOnlyIds.Count} removed={removedIds.Count}).");
 
                     // Trigger a visual refresh of the interior IF the local
                     // player is currently inside THIS building.  Writing to
@@ -1386,6 +1403,18 @@ namespace BigAmbitionsMP
         {
             try
             {
+                // Round-86 (user-approved, MEASURED): this refresh ran UNCONDITIONALLY on every owner-snapshot
+                // apply while the local player stood inside the building — 186-199ms of every ~195ms apply
+                // (two whole-scene FindObjectsOfType scans + an always-scheduled re-staff coroutine + the item
+                // pass), even at changed=0 moved=0 removed=0 (26-apply probe capture, 2026-07-25). Gate every
+                // expensive step on the inputs that justify it. NULL sets keep their historical meaning
+                // ("no diff info → do everything"); only explicitly-EMPTY sets skip work.
+                bool designWork = changedDesignUuids == null || changedDesignUuids.Count > 0;
+                bool itemWork   = (changedIds == null || changedIds.Count > 0)
+                               || (removedIds == null || removedIds.Count > 0)
+                               || (movedIds   == null || movedIds.Count   > 0);
+                if (!layoutChanged && !designWork && !itemWork) return;   // no-op apply → no scene scans at all
+
                 var bms = UnityEngine.Object.FindObjectsOfType(typeof(BuildingManager));
                 if (bms == null || bms.Length == 0) return;
                 BuildingManager? matched = null;
@@ -1430,9 +1459,16 @@ namespace BigAmbitionsMP
                 // has run.  Staffing them the SAME frame the re-load spawns them NREs inside the game's
                 // AssignEmployee (uninitialised item data — Braids and Blowouts, 2026-06-23).  Run on the
                 // building's own MonoBehaviour; ReStaffStationsNow is idempotent (skips already-staffed).
-                try { matched.StartCoroutine(ReStaffAfterInit(matched, addressKey)); }
+                // Round-86: gated on layoutChanged — its stated purpose is staffing stations the re-load
+                // above JUST spawned; scheduling it on every apply was pure overhead.
+                try { if (layoutChanged) matched.StartCoroutine(ReStaffAfterInit(matched, addressKey)); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] schedule re-staff for '{addressKey}': {ex.Message}"); }
 
+                // Round-86: the element walk's FindObjectsOfType scan is the expensive half — run it only
+                // when a design actually changed (or after a layout re-load, whose fresh elements may need
+                // their designs applied). The per-element unchanged-skip inside keeps the flicker fix.
+                if (layoutChanged || designWork)
+                {
                 // UUID → SerializedInteriorDesign dict from the fresh data we just wrote.
                 var dict = new System.Collections.Generic.Dictionary<string, SerializedInteriorDesign>();
                 for (int i = 0; i < reg.interiorDesigns.Count; i++)
@@ -1467,13 +1503,16 @@ namespace BigAmbitionsMP
                     }
                 }
                 Plugin.Logger.LogInfo($"[Patcher] Interior refresh for '{addressKey}': deserialized {deserialized}/{matchedUuids} elements (skipped {skippedUnchanged} unchanged, of {dict.Count} designs).");
+                }
 
                 // ── Item refresh (Phase 2b) ─────────────────────────────────
                 // Per-item diff: only touch the ItemControllers whose data
                 // actually changed (or vanished); unchanged shelves keep their
                 // GameObjects — and with them the game's random stock-visual
                 // shuffle (full rebuilds re-rolled it = flicker, 2026-06-12).
-                RefreshItemsForActiveBuilding(matched, reg, changedIds, removedIds, movedIds);
+                // Round-86: only when some item changed, moved, or vanished.
+                if (itemWork)
+                    RefreshItemsForActiveBuilding(matched, reg, changedIds, removedIds, movedIds);
 
                 // Round-34 (user: a guest-placed register must warn the OWNER about paper bags exactly like
                 // an owner-placed one): adoption skips the native placement tail, so refresh warning icons +
@@ -1481,7 +1520,9 @@ namespace BigAmbitionsMP
                 // the re-staff so the respawned controllers' Start has run.
                 try
                 {
-                    if (reg.RentedByPlayer)
+                    // Round-86: itemWork gate — OwnerWarningRefreshNow already no-ops on empty ids, but
+                    // scheduling the coroutine every apply was still overhead.
+                    if (itemWork && reg.RentedByPlayer)
                         matched.StartCoroutine(OwnerWarningRefreshAfterInit(matched, addressKey, changedIds, movedIds));
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] schedule owner warning refresh: {ex.Message}"); }
