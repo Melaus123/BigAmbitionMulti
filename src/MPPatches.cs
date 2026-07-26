@@ -2143,6 +2143,59 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Round-95 (user-approved, closes the full message-pipeline audit) ─────────────────
+        // The HOURLY employee pass was the ONE remaining pipeline that could message FROM an
+        // injected mirror (quit + low-satisfaction live in EmployeeInstance.RunHourly, driven by
+        // EmployeeHelper.RunHourly's full-roster walk; the daily pass and the complaint pass were
+        // stripped in earlier rounds). Same strip/restore as RunDaily. The Finalizer also purges
+        // the caveat-1 RESIDUE: Employees-category contacts whose id (the contact key IS the
+        // character name) matches a currently-injected mirror — entries minted on this machine
+        // before the pipelines were closed. Native-legal by PRECEDENT (RemoveContactsWithNullId +
+        // RegenerateWronglyGeneratedAIBusinessEmployees both RemoveAll on gi.Contacts). Orphan
+        // husks from long-departed partners are indistinguishable from legitimately-departed own
+        // staff (native deliberately KEEPS ex-employee contacts) and are left alone.
+        [HarmonyPatch(typeof(Helpers.EmployeeHelper), nameof(Helpers.EmployeeHelper.RunHourly))]
+        public static class Patch_EmployeeHelper_RunHourly_SkipModRecords
+        {
+            static void Prefix(out System.Collections.Generic.List<Entities.EmployeeInstance> __state)
+                => __state = StripModEmployeeRecords("the hourly employee pass");
+
+            static Exception? Finalizer(System.Collections.Generic.List<Entities.EmployeeInstance> __state, Exception __exception)
+            {
+                RestoreModEmployeeRecords(__state, "RunHourly");
+                try
+                {
+                    if ((MPServer.IsRunning || MPClient.IsClientInWorld) && __state != null && __state.Count > 0)
+                    {
+                        var names = new System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal);
+                        foreach (var e in __state)
+                            try { if (e != null && MPRegisterSync.IsInjectedStaff(e.id) && !string.IsNullOrEmpty(e.characterData?.name)) names.Add(e.characterData.name); } catch { }
+                        // Round-95b (user-approved) NAME-COLLISION guard: contacts are keyed by character
+                        // NAME, so a contact whose name also belongs to a NON-injected (own) employee holds
+                        // the player's real message history — never purge those. Failure direction flips to
+                        // "kept a phantom half", never "deleted yours".
+                        try
+                        {
+                            var all = Helpers.EmployeeHelper.GetEmployeeInstances();
+                            if (all != null)
+                                foreach (var e in all)
+                                    try { if (e != null && !MPRegisterSync.IsInjectedStaff(e.id) && !string.IsNullOrEmpty(e.characterData?.name)) names.Remove(e.characterData.name); } catch { }
+                        }
+                        catch { }
+                        var contacts = SaveGameManager.Current?.Contacts;
+                        if (names.Count > 0 && contacts != null)
+                        {
+                            int removed = contacts.RemoveAll(c => c != null && c.IsEmployeeContact && c.id != null && names.Contains(c.id));
+                            if (removed > 0)
+                                Plugin.Logger.LogWarning($"[Patcher] purged {removed} stale partner-staff contact(s) (round-95 — minted before the message pipelines were closed; persists at next save).");
+                        }
+                    }
+                }
+                catch { }
+                return __exception;   // never swallow the native pass's own failure
+            }
+        }
+
         /// <summary>Guard family member 8 (field 2026-07-20: "notice from on duty
         /// staff from another player's staff"): employee complaints enumerate the
         /// FULL roster OUTSIDE RunDaily, so the RunDaily strip never covered them —
