@@ -44,6 +44,30 @@ namespace BigAmbitionsMP
             s.Total += ms; s.Calls++; if (ms > s.Max) s.Max = ms;
         }
 
+        // ── Round-97 PATCH-COST attribution (user-mandated after the lag-report audit) ────────
+        // The line below admits it: Harmony patch BODIES run inside native calls and land in
+        // "game+render" — the exact bucket the lag triage kept clearing as "not ours". These
+        // brackets carry a NAME per patch site, aggregate per window, and — the pointing part —
+        // any frame worse than SpikeSnapshotMs logs WHICH instrumented sites ran in that exact
+        // frame and what each cost. A field spike line then reads either "ours=0.1ms" (cleared,
+        // with proof) or "SiteX=490ms" (the fix target, named). Frame alignment: Unity's
+        // unscaledDt at FrameTick describes the PREVIOUS frame, so per-frame site costs rotate
+        // through a prev/cur buffer pair before the spike check reads them.
+        private const double SpikeSnapshotMs = 100.0;
+        private static readonly Dictionary<string, Slot> _patchSlots = new();
+        private static Dictionary<string, double> _framePatchPrev = new();
+        private static Dictionary<string, double> _framePatchCur  = new();
+
+        public static void PatchEnd(string site, long t0)
+        {
+            if (!Enabled || t0 == 0) return;
+            double ms = (_sw.ElapsedTicks - t0) * 1000.0 / Stopwatch.Frequency;
+            if (!_patchSlots.TryGetValue(site, out var s)) { s = new Slot(); _patchSlots[site] = s; }
+            s.Total += ms; s.Calls++; if (ms > s.Max) s.Max = ms;
+            _framePatchCur.TryGetValue(site, out double f);
+            _framePatchCur[site] = f + ms;
+        }
+
         /// <summary>Once per frame (end of Update).  Collects frame stats and emits
         /// a summary when the window elapses.  Runs in SINGLE-PLAYER too — each
         /// window is tagged SP / MP-HOST / MP-CLIENT, so an SP-then-MP session in
@@ -57,7 +81,8 @@ namespace BigAmbitionsMP
             try { inGame = SaveGameManager.Current != null; } catch { }
             if (!inGame)
             {   // menu/loading — don't pollute a window with non-gameplay frames
-                _slots.Clear(); _frames = 0; _frameTotalMs = 0; _frameMaxMs = 0; _spikes = 0;
+                _slots.Clear(); _patchSlots.Clear(); _framePatchPrev.Clear(); _framePatchCur.Clear();
+                _frames = 0; _frameTotalMs = 0; _frameMaxMs = 0; _spikes = 0;
                 _windowStartMs = _sw.Elapsed.TotalMilliseconds;
                 return;
             }
@@ -67,6 +92,24 @@ namespace BigAmbitionsMP
             _frameTotalMs += dtMs;
             if (dtMs > _frameMaxMs) _frameMaxMs = dtMs;
             if (dtMs > 33.4) _spikes++;   // worse than 30 FPS for that frame
+
+            // Round-97: spike snapshot — dt describes the PREVIOUS frame; _framePatchPrev holds
+            // that frame's per-site patch costs. Names the culprit (or exonerates, with numbers).
+            if (dtMs > SpikeSnapshotMs)
+            {
+                try
+                {
+                    double ours = 0; foreach (var kv in _framePatchPrev) ours += kv.Value;
+                    var top = new System.Text.StringBuilder();
+                    int listed = 0;
+                    foreach (var kv in _framePatchPrev)
+                        if (kv.Value >= 1.0 && listed++ < 4) top.Append($" {kv.Key}={kv.Value:F1}ms");
+                    Plugin.Logger.LogInfo($"[PatchCost] SPIKE {dtMs:F0}ms frame — instrumented mod share {ours:F1}ms{(top.Length > 0 ? " |" + top.ToString() : "")}");
+                }
+                catch { }
+            }
+            // rotate: cur becomes prev for the NEXT frame's dt to describe
+            var tmp = _framePatchPrev; _framePatchPrev = _framePatchCur; _framePatchCur = tmp; _framePatchCur.Clear();
 
             double now = _sw.Elapsed.TotalMilliseconds;
             if (_windowStartMs == 0) { _windowStartMs = now; return; }
@@ -102,7 +145,19 @@ namespace BigAmbitionsMP
                 // the frame (game logic + render + our Harmony patch bodies, which
                 // aren't bracketed).  A large gameOther in MP vs SP = cost we INDUCED
                 // in the game (extra NPCs/ghosts it now simulates), not our ticks.
-                sb.Append($" || modTicks={modTicks:F1}ms game+render={(avgFrame - modTicks):F1}ms");
+                // Round-97: instrumented patch-body share (runs INSIDE native calls — invisible
+                // to modTicks). Window summary + a top-offenders line when any site spiked.
+                double patchPerFrame = 0, patchWorst = 0;
+                foreach (var kv in _patchSlots)
+                { patchPerFrame += kv.Value.Total / _frames; if (kv.Value.Max > patchWorst) patchWorst = kv.Value.Max; }
+                sb.Append($" || modTicks={modTicks:F1}ms patch={patchPerFrame:F2}/{patchWorst:F1} game+render={(avgFrame - modTicks - patchPerFrame):F1}ms");
+                if (patchWorst >= 10.0)
+                {
+                    var pt = new System.Text.StringBuilder("[PatchCost] top:");
+                    foreach (var kv in _patchSlots)
+                        if (kv.Value.Max >= 5.0) pt.Append($" {kv.Key}={kv.Value.Calls}x max {kv.Value.Max:F1}ms total {kv.Value.Total:F0}ms");
+                    Plugin.Logger.LogWarning(pt.ToString());
+                }
 
                 // Entity load — correlate frame cost with what we've added to the scene.
                 try
@@ -118,7 +173,7 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo(sb.ToString());
             }
             catch { }
-            _slots.Clear(); _frames = 0; _frameTotalMs = 0; _frameMaxMs = 0; _spikes = 0;
+            _slots.Clear(); _patchSlots.Clear(); _frames = 0; _frameTotalMs = 0; _frameMaxMs = 0; _spikes = 0;
             _windowStartMs = now;
         }
     }

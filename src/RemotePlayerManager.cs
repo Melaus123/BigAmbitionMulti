@@ -676,6 +676,12 @@ namespace BigAmbitionsMP
         public static void TickVehicleCollisionIgnores()
         {
             if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            long _pc = MPPerf.Begin();   // round-97: per-frame sweep, previously invisible to modTicks
+            try { TickVehicleCollisionIgnoresBody(); } finally { MPPerf.PatchEnd("CollisionIgnores", _pc); }
+        }
+
+        private static void TickVehicleCollisionIgnoresBody()
+        {
             VehicleManager.NeutralizeHandCartGhostObstacles();   // FIX(flatbed-push): hand-cart ghosts must not carve+shove traffic; every frame so the HandTruck controller can't re-enable it
 #if BAMP_DEV
             TickAvatarSenseProbe();   // host-side Option-B diagnostic (self-gated host-only + 1 Hz)

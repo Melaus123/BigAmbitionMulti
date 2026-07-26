@@ -1039,6 +1039,7 @@ namespace BigAmbitionsMP
         internal static object? StashInjected(bool alsoMergedPartners)
         {
             if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return null;
+            long _pc = MPPerf.Begin();   // round-97: roster walk inside native calls — patch-cost bracketed
             try
             {
                 var list = Helpers.EmployeeHelper.GetEmployeeInstances();
@@ -1056,10 +1057,12 @@ namespace BigAmbitionsMP
                 return stash;
             }
             catch { return null; }
+            finally { MPPerf.PatchEnd("InjectedStash", _pc); }
         }
 
         internal static void RestoreInjected(object? state)
         {
+            long _pc = MPPerf.Begin();   // round-97: both halves of the stash/restore cycle report as one site
             try
             {
                 if (state is not System.Collections.Generic.List<Entities.EmployeeInstance> stash || stash.Count == 0) return;
@@ -1068,6 +1071,7 @@ namespace BigAmbitionsMP
                 for (int i = 0; i < stash.Count; i++) list.Add(stash[i]);
             }
             catch { }
+            finally { MPPerf.PatchEnd("InjectedStash", _pc); }
         }
 
         // My Employees / HR-manager candidate list (the reported surface). Merged-partner staff
@@ -2091,6 +2095,7 @@ namespace BigAmbitionsMP
         internal static System.Collections.Generic.List<Entities.EmployeeInstance> StripModEmployeeRecords(string context)
         {
             var stripped = new System.Collections.Generic.List<Entities.EmployeeInstance>();
+            long _pc = MPPerf.Begin();   // round-97: full-roster walk inside native passes — patch-cost bracketed
             try
             {
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return stripped;   // records only exist in MP anyway
@@ -2108,11 +2113,13 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[StaffRoster] {stripped.Count} injected/synthetic record(s) sit out {context} (their messages stay on the owner's machine).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] strip ({context}): {ex.Message}"); }
+            finally { MPPerf.PatchEnd("EmployeeStrip", _pc); }
             return stripped;
         }
 
         internal static void RestoreModEmployeeRecords(System.Collections.Generic.List<Entities.EmployeeInstance>? stripped, string context)
         {
+            long _pc = MPPerf.Begin();   // round-97: both halves of the strip/restore cycle report as one site
             try
             {
                 var list = SaveGameManager.Current?.EmployeeInstances;
@@ -2128,6 +2135,7 @@ namespace BigAmbitionsMP
                     }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] restore ({context}): {ex.Message}"); }
+            finally { MPPerf.PatchEnd("EmployeeStrip", _pc); }
         }
 
         [HarmonyPatch(typeof(Helpers.EmployeeHelper), nameof(Helpers.EmployeeHelper.RunDaily))]
@@ -3018,23 +3026,28 @@ namespace BigAmbitionsMP
                     if (now - _lastDumpAt < 2f) return;
                     _lastDumpAt = now;
 
-                    string role = MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
-                    Plugin.Logger.LogInfo($"[Patch_ApplyFilters] === ApplyFilters about to run on {role} ===");
-
-                    var gi = SaveGameManager.Current;
-                    if (gi == null) return;
-
-                    var stats = new BusinessSync.TypeStats();
-                    int total = 0;
-                    foreach (var reg in gi.BuildingRegistrations)
+                    long _pc = MPPerf.Begin();   // round-97: 826-reg ×3-pass dump inside a native call — patch-cost bracketed
+                    try
                     {
-                        if (reg == null) continue;
-                        total++;
-                        stats.AccumulateFromReg(reg);
+                        string role = MPServer.IsRunning ? "HOST" : (MPClient.IsConnected ? "CLIENT" : "SP");
+                        Plugin.Logger.LogInfo($"[Patch_ApplyFilters] === ApplyFilters about to run on {role} ===");
+
+                        var gi = SaveGameManager.Current;
+                        if (gi == null) return;
+
+                        var stats = new BusinessSync.TypeStats();
+                        int total = 0;
+                        foreach (var reg in gi.BuildingRegistrations)
+                        {
+                            if (reg == null) continue;
+                            total++;
+                            stats.AccumulateFromReg(reg);
+                        }
+                        stats.Log($"ApplyFilters.{role}", total);
+                        BusinessSync.LogForSaleAndRealEstate($"ApplyFilters.{role}", gi);
+                        BusinessSync.LogSceneCBCCounts($"ApplyFilters.{role}");
                     }
-                    stats.Log($"ApplyFilters.{role}", total);
-                    BusinessSync.LogForSaleAndRealEstate($"ApplyFilters.{role}", gi);
-                    BusinessSync.LogSceneCBCCounts($"ApplyFilters.{role}");
+                    finally { MPPerf.PatchEnd("ApplyFiltersDump", _pc); }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_ApplyFilters] {ex.Message}"); }
             }
@@ -3903,108 +3916,11 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>HR-manager assign list: Load()'s unassigned branch enumerates
-        /// GetEmployeeInstances() unfiltered, so the partner's INJECTED staff could
-        /// be put under an own HR plan (auto-replacement/training on records that
-        /// aren't ours).  Same treatment as the MyEmployees list: drop injected ids
-        /// unless a merger shares them.  DUMP DRIFT: the type exists in the mono-0.11
-        /// decompile but not in the shipped reference assembly (CS0234), so this
-        /// resolves at runtime; a miss logs one FAILED line and no-ops.</summary>
-        [HarmonyPatch]
-        public static class Patch_HrManagerList_HideInjectedStaff
-        {
-            /// <summary>SIGNATURE-based resolution (field 2026-07-20: the live build
-            /// renamed the class beyond even the name scan — one FAILED line per
-            /// report, filter inert).  The method's SHAPE is the stable identity:
-            /// public instance (List&lt;EmployeeInstance&gt;, bool, string) — the
-            /// employee list, the include-unassigned flag, the manager id.  Any
-            /// rename of class, namespace, or even the method survives this;
-            /// "Load"-named matches are preferred if several types qualify.</summary>
-            static System.Reflection.MethodBase? TargetMethod()
-            {
-                System.Reflection.MethodInfo? best = null;
-                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-                {
-                    string an = asm.GetName().Name ?? "";
-                    if (an.StartsWith("System") || an.StartsWith("mscorlib") || an.StartsWith("netstandard")
-                     || an.StartsWith("Unity") || an.StartsWith("Mono") || an.StartsWith("Newtonsoft")
-                     || an.StartsWith("Steamworks") || an.StartsWith("LiteNetLib") || an.StartsWith("0Harmony")
-                     || an.StartsWith("BigAmbitionsMP")) continue;
-                    Type?[] types;
-                    try { types = asm.GetTypes(); }
-                    catch (System.Reflection.ReflectionTypeLoadException rtle) { types = rtle.Types; }
-                    catch { continue; }
-                    foreach (var t in types)
-                    {
-                        if (t == null || t.IsAbstract || !t.IsClass) continue;
-                        System.Reflection.MethodInfo[] methods;
-                        try { methods = t.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly); }
-                        catch { continue; }
-                        foreach (var m in methods)
-                        {
-                            // Per-method guard (round-65, MIREL report 20260723-030421):
-                            // GetParameters()/ParameterType THROW TypeLoadException on
-                            // methods whose parameter types live in a missing dependency
-                            // (broken third-party mods ship these — 34-mod install killed
-                            // this whole scan and the patch never applied).  One
-                            // unreadable method must skip, not abort the resolution.
-                            try
-                            {
-                                var ps = m.GetParameters();
-                                if (ps.Length != 3) continue;
-                                if (ps[0].ParameterType != typeof(System.Collections.Generic.List<Entities.EmployeeInstance>)) continue;
-                                if (ps[1].ParameterType != typeof(bool) || ps[2].ParameterType != typeof(string)) continue;
-                                if (best == null || (m.Name == "Load" && best.Name != "Load")) best = m;
-                            }
-                            catch { }
-                        }
-                    }
-                }
-                if (best != null)
-                    Plugin.Logger.LogInfo($"[Plugin] HR-list target resolved by signature: {best.DeclaringType?.FullName}.{best.Name} ({best.DeclaringType?.Assembly.GetName().Name}).");
-                return best;
-            }
+        // (Round-96: the signature-scanned Patch_HrManagerList_HideInjectedStaff was RETIRED here —
+        //  superseded by the typed Patch_EmployeesScroller_HideInjected stash (round-94) on the same
+        //  Load(List<EmployeeInstance>, bool, string) target; the scan ALSO threw a HarmonyException
+        //  outright on some installs (field 20260726-034343, Evi) — one FAILED line every launch.)
 
-            static void Postfix(object __instance)
-            {
-                try
-                {
-                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
-                    var data = AccessTools.Field(__instance.GetType(), "data")?.GetValue(__instance) as System.Collections.IList;
-                    if (data == null || data.Count == 0) return;
-                    System.Reflection.FieldInfo? idF = null;
-                    int removed = 0;
-                    for (int i = data.Count - 1; i >= 0; i--)
-                    {
-                        var m = data[i]; if (m == null) continue;
-                        idF ??= AccessTools.Field(m.GetType(), "employeeId");
-                        string id = idF?.GetValue(m) as string ?? "";
-                        if (id.Length == 0 || !MPRegisterSync.IsInjectedStaff(id) || MPRegisterSync.IsInjectedFromMergedPartner(id)) continue;
-                        data.RemoveAt(i); removed++;
-                    }
-                    if (removed > 0)
-                    {
-                        try
-                        {
-                            var sc = AccessTools.Field(__instance.GetType(), "scroller")?.GetValue(__instance);
-                            var mi = sc?.GetType().GetMethod("ReloadData");   // ReloadData(float = 0) — empty-types lookup would miss it
-                            if (mi != null)
-                            {
-                                var ps = mi.GetParameters();
-                                var args = new object?[ps.Length];
-                                for (int k = 0; k < ps.Length; k++)
-                                    args[k] = ps[k].HasDefaultValue ? ps[k].DefaultValue
-                                            : ps[k].ParameterType.IsValueType ? Activator.CreateInstance(ps[k].ParameterType) : null;
-                                mi.Invoke(sc, args);
-                            }
-                        }
-                        catch { }
-                        Plugin.Logger.LogInfo($"[StaffRoster] HR-manager list: hid {removed} injected partner-staff record(s).");
-                    }
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] HR list filter: {ex.Message}"); }
-            }
-        }
 
         // ── Freeze guard: stuck selection/overlay after entity-destroy NRE ────
         // Field 2026-07-16 ("suddenly couldn't move" in the partner's shop) —

@@ -247,6 +247,7 @@ namespace BigAmbitionsMP
         private bool   _crashReportSending;       // an upload is in flight: block re-send + hold the status line
         private string _crashReportResult = "";   // "" = none; else the status line to display (submit/sent/failed)
         private float  _crashReportAutoCloseAt;    // >0 = unscaled time to auto-close the popup after a success
+        private bool   _crashReportSentOk;         // round-96: this popup opening already submitted successfully — block re-sends (field: one prompt submitted twice, 2s apart, in the gap between upload-success and auto-close)
         private TextMeshProUGUI? _crashReportTitleLbl;
         private TextMeshProUGUI? _crashReportBodyLbl;
         private TextMeshProUGUI? _crashReportTagLbl;
@@ -5293,7 +5294,7 @@ namespace BigAmbitionsMP
             _crashReportMessage = "";
             _crashReportAttachments.Clear();
             _bugReportTagIndex = 0;
-            _crashReportSending = false; _crashReportResult = ""; _crashReportAutoCloseAt = 0f;
+            _crashReportSending = false; _crashReportResult = ""; _crashReportAutoCloseAt = 0f; _crashReportSentOk = false;
             _crashReportPopupVisible = true;
             _crashReportFocus = true;
             _crashReportAutoFocusPending = true;
@@ -5382,7 +5383,7 @@ namespace BigAmbitionsMP
 
         private void SendCrashReportPopup()
         {
-            if (_crashReportSending) return;   // already in flight — ignore double-clicks
+            if (_crashReportSending || _crashReportSentOk) return;   // in flight OR already sent this opening — ignore double-clicks (round-96)
             try
             {
                 if (_crashReportInputField != null) _crashReportMessage = _crashReportInputField.text ?? "";
@@ -5397,6 +5398,7 @@ namespace BigAmbitionsMP
                 if (!result.DiscordUploadQueued)   // nothing to upload — report saved locally, done
                 {
                     _crashReportSending = false;
+                    _crashReportSentOk = true;   // round-96: a completed local save is also "sent" for this opening
                     _crashReportResult = "Saved locally (Discord upload not configured).";
                     _crashReportAutoCloseAt = Time.unscaledTime + 2.5f;
                 }
@@ -5416,6 +5418,7 @@ namespace BigAmbitionsMP
             _crashReportSending = false;
             if (ok)
             {
+                _crashReportSentOk = true;   // round-96: latch — no second send from this opening
                 _crashReportResult = "Report sent. You can close this window.";
                 _crashReportAutoCloseAt = Time.unscaledTime + 2f;   // let them see it, then auto-close
             }
@@ -5429,7 +5432,7 @@ namespace BigAmbitionsMP
         private void DismissCrashReportPopup()
         {
             if (_crashReportIsCrash) MPBugReport.AcknowledgePendingCrash();
-            _crashReportSending = false; _crashReportResult = ""; _crashReportAutoCloseAt = 0f;
+            _crashReportSending = false; _crashReportResult = ""; _crashReportAutoCloseAt = 0f; _crashReportSentOk = false;
             _crashReportPopupVisible = false;
             if (_crashReportGO != null) _crashReportGO.SetActive(false);
         }
