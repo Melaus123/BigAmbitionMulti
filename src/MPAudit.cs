@@ -163,6 +163,82 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Audit] drill: {ex.Message}"); }
         }
 
+        /// <summary>Round-89: the drill rows a CLIENT sends back — per-reg hash + the same
+        /// summary LogBizDrill prints, for the diverged bucket(s).</summary>
+        public static List<DrillRegRow> BuildDrillRows(List<int>? bucketIds)
+        {
+            var rows = new List<DrillRegRow>();
+            try
+            {
+                if (bucketIds == null || bucketIds.Count == 0) return rows;
+                var want = new HashSet<int>(bucketIds);
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return rows;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null) continue;
+                    try
+                    {
+                        if (!want.Contains(BucketOf(reg))) continue;
+                        rows.Add(new DrillRegRow
+                        {
+                            AddressKey = GameStateReader.AddressKey(reg),
+                            Hash       = RegHash(reg),
+                            Summary    = $"biz='{reg.BusinessName}' type={reg.businessTypeName} prices={reg.retailPrices?.Count ?? 0} bizOwner='{reg.businessOwnerRivalId}'",
+                        });
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Audit] drill rows: {ex.Message}"); }
+            return rows;
+        }
+
+        /// <summary>Round-89, host main thread: diff a client's drill rows against our own
+        /// registrations and NAME the diverging address(es) — one machine's log now carries
+        /// the whole answer (field reports never include both sides).</summary>
+        public static void HostHandleDrillReply(AuditDrillReplyPayload? p)
+        {
+            if (!MPServer.IsRunning || p == null || p.Regs == null || p.Regs.Count == 0) return;
+            try
+            {
+                var mine = new Dictionary<string, (int hash, string summary)>(StringComparer.Ordinal);
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations != null)
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null) continue;
+                        try
+                        {
+                            mine[GameStateReader.AddressKey(reg)] =
+                                (RegHash(reg), $"biz='{reg.BusinessName}' type={reg.businessTypeName} prices={reg.retailPrices?.Count ?? 0} bizOwner='{reg.businessOwnerRivalId}'");
+                        }
+                        catch { }
+                    }
+
+                int matched = 0, diverged = 0, missingHere = 0, logged = 0;
+                const int LogCap = 16;
+                foreach (var row in p.Regs)
+                {
+                    if (row == null || string.IsNullOrEmpty(row.AddressKey)) continue;
+                    if (!mine.TryGetValue(row.AddressKey, out var h))
+                    {
+                        missingHere++;
+                        if (logged++ < LogCap)
+                            Plugin.Logger.LogWarning($"[Audit] DIVERGED '{p.PlayerId}' reg '{row.AddressKey}': present on client ({row.Summary}) but NOT on host.");
+                        continue;
+                    }
+                    if (h.hash == row.Hash) { matched++; continue; }
+                    diverged++;
+                    if (logged++ < LogCap)
+                        Plugin.Logger.LogWarning($"[Audit] DIVERGED '{p.PlayerId}' reg '{row.AddressKey}': client 0x{row.Hash:X8} ({row.Summary}) vs host 0x{h.hash:X8} ({h.summary}).");
+                }
+                Plugin.Logger.LogWarning(
+                    $"[Audit] drill diff for '{p.PlayerId}': {diverged} diverged, {matched} matched, {missingHere} client-only of {p.Regs.Count} row(s){(logged > LogCap ? $" (first {LogCap} logged)" : "")}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Audit] drill diff: {ex.Message}"); }
+        }
+
         /// <summary>Audit-stable interior hash: layout + designs + price table +
         /// item structure/stock.  EXCLUDES dirt (evolves continuously on the
         /// source; a replica is always one broadcast behind → permanent false

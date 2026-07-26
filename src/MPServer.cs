@@ -1313,6 +1313,16 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.AuditDrillReply:
+                {
+                    // Round-89: the client's per-reg drill hashes — diff on the main
+                    // thread and NAME the diverging address(es) in the host log.
+                    var dr = env.GetPayload<AuditDrillReplyPayload>();
+                    if (dr != null && SenderIs(dr.PlayerId, senderPid, env.Type))
+                        GameStatePatcher.EnqueueOnMainThread(() => MPAudit.HostHandleDrillReply(dr));
+                    break;
+                }
+
                 case MessageType.Chat:
                 {
                     // A client chatted.  PUBLIC → append + relay to everyone (the

@@ -212,6 +212,8 @@ namespace BigAmbitionsMP
         private static System.Reflection.FieldInfo? _sittingOnField;
         private static float _cartBadSince = -1f;   // round-83 tripwire: when cart-mode machinery went bad
         private static float _cartWarnNext;         // round-83 tripwire: re-warn throttle
+        private static readonly Dictionary<NavigationBlocker, float> _foreignHeldSince = new();   // round-90 foreign-blocker watch
+        private static float _foreignWarnNext;
 
         /// <summary>The nine ACTIVITY-class navigation blockers — the IPlayerActivity states whose
         /// UI our dock replaces (and whose lifecycle we therefore own in MP). The nav-heal watchdog
@@ -402,6 +404,7 @@ namespace BigAmbitionsMP
             if (Seated || SkipActive)
             {
                 _notSeatedSince = Time.unscaledTime;
+                if (_foreignHeldSince.Count > 0) _foreignHeldSince.Clear();   // round-90: activities hold keys legitimately
             }
             else if ((MPServer.IsRunning || MPClient.IsClientInWorld)
                      && Time.unscaledTime >= _navHealNext
@@ -420,13 +423,46 @@ namespace BigAmbitionsMP
                         if (_navBlockerSetField?.GetValue(pc) is System.Collections.IEnumerable held)
                         {
                             List<NavigationBlocker>? stranded = null;
+                            List<NavigationBlocker>? foreignNow = null;
                             foreach (var b in held)
                             {
                                 if (b is not NavigationBlocker key) continue;
                                 if (System.Array.IndexOf(ActivityBlockers, key) >= 0)
                                     (stranded ??= new List<NavigationBlocker>()).Add(key);
-                                else foreignHeld = true;
+                                else { foreignHeld = true; (foreignNow ??= new List<NavigationBlocker>()).Add(key); }
                             }
+                            // Round-90 (user-approved) FOREIGN-BLOCKER WATCH — log-only, never heals.
+                            // ANY held blocker silently no-ops the building exit trigger
+                            // (ExitZoneDespawner:18) AND freezes WASD (PlayerController:241-247), and
+                            // the heal below deliberately never touches non-activity keys — so a
+                            // stranded Map/Placement/DeliveryJob/... lock was the last "stuck in the
+                            // building" shape no instrument could see (field 20260725-000353 class).
+                            // Name it after 30s of persistence, re-warn each 60s.
+                            try
+                            {
+                                float nowT = Time.unscaledTime;
+                                if (foreignNow == null)
+                                {
+                                    if (_foreignHeldSince.Count > 0) _foreignHeldSince.Clear();
+                                }
+                                else
+                                {
+                                    foreach (var k in new List<NavigationBlocker>(_foreignHeldSince.Keys))
+                                        if (!foreignNow.Contains(k)) _foreignHeldSince.Remove(k);
+                                    foreach (var k in foreignNow)
+                                        if (!_foreignHeldSince.ContainsKey(k)) _foreignHeldSince[k] = nowT;
+                                    if (nowT >= _foreignWarnNext)
+                                        foreach (var kv in _foreignHeldSince)
+                                            if (nowT - kv.Value >= 30f)
+                                            {
+                                                _foreignWarnNext = nowT + 60f;
+                                                Plugin.Logger.LogWarning(
+                                                    $"[Rest] FOREIGN BLOCKER HELD (round-90, log-only): '{kv.Key}' for {nowT - kv.Value:F0}s outside any activity — building exits silently dead and WASD frozen while it persists. No action taken.");
+                                                break;
+                                            }
+                                }
+                            }
+                            catch { }
                             if (stranded != null)
                                 foreach (var key in stranded)
                                 {

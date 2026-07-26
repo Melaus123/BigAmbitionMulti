@@ -273,7 +273,17 @@ namespace BigAmbitionsMP
             try
             {
                 if (reason != null && reason.Length > 0)
+                {
                     _conn.SendMessage(SteamFrames.WrapClose(reason), SendType.Reliable);
+                    // Round-91 (field 20260725-165954: a relay version-refusal reached the player as a
+                    // bare 'App_Min' and a wordless bounce to the menu): Close() WITHOUT linger discards
+                    // queued reliable data, so the close-tag frame above lost the race on the relay and
+                    // every refusal (version/kick/ban) arrived mute. linger=true flushes the frame first;
+                    // the tag also rides the close debug-string as belt-and-suspenders.
+                    string tag = ""; try { tag = System.Text.Encoding.UTF8.GetString(reason); } catch { }
+                    _conn.Close(true, 1000, tag);
+                    return;
+                }
                 _conn.Close();
             }
             catch { }

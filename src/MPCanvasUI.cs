@@ -4586,7 +4586,11 @@ namespace BigAmbitionsMP
             if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }   // rounded corners
 
             const float W = 440f;
-            ApplyFont(MakeLabel(_joinDialog.transform, "Join Multiplayer", 26, C_WHITE, 0f, -14f, W, 36f, TextAlignmentOptions.Center));
+            // Round-91: version on the join screen too — the exact surface where a mismatch-refused
+            // player lands. Same compiled-in constants the handshake enforces (correct by construction).
+            ApplyFont(MakeLabel(_joinDialog.transform,
+                $"Join Multiplayer  <size=13><color=#9090A8>v{MyPluginInfo.PLUGIN_VERSION} · net v{ProtocolInfo.Version}</color></size>",
+                26, C_WHITE, 0f, -14f, W, 36f, TextAlignmentOptions.Center));
 
             ApplyFont(MakeLabel(_joinDialog.transform, "Host IP", SZ_FLD, C_WHITE, 30f, -74f, 110f, 30f, TextAlignmentOptions.Left));
             var (_, ipLbl, ipRT) = MakeField(_joinDialog.transform, _joinIp, 150f, -74f, 260f, 30f);
@@ -4691,7 +4695,12 @@ namespace BigAmbitionsMP
             if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }
 
             var grey = new Color(0.70f, 0.70f, 0.75f, 1f);
-            ApplyFont(MakeLabel(_lobbyWindow.transform, "Multiplayer Lobby", 26, C_WHITE, 0f, -16f, 540f, 36f, TextAlignmentOptions.Center));
+            // Round-91 (user request): the mod + protocol version, on-screen, CORRECT BY CONSTRUCTION —
+            // these are the same compiled-in constants the join handshake enforces and package.ps1
+            // reads, so the label can never disagree with what this machine actually runs.
+            ApplyFont(MakeLabel(_lobbyWindow.transform,
+                $"Multiplayer Lobby  <size=13><color=#9090A8>v{MyPluginInfo.PLUGIN_VERSION} · net v{ProtocolInfo.Version}</color></size>",
+                26, C_WHITE, 0f, -16f, 540f, 36f, TextAlignmentOptions.Center));
             // Wide + two-line + wrapping: the kick/reject reason was clipped
             // by the old 350×28 single-line field (user, 2026-06-11).
             _lwConnInfo = MakeLabel(_lobbyWindow.transform, "", SZ_FLD, C_WHITE, 28f, -50f, 350f, 44f, TextAlignmentOptions.TopLeft); ApplyFont(_lwConnInfo);

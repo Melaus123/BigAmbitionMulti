@@ -577,9 +577,26 @@ namespace BigAmbitionsMP
                 case MessageType.AuditDrill:
                 {
                     // Host localized a biz divergence to bucket(s) — log our
-                    // per-registration hashes so the two logs diff offline.
+                    // per-registration hashes so the two logs diff offline, and
+                    // (round-89) send them BACK so the host can name the diverging
+                    // address(es) in its own log: field reports only ever carry one
+                    // machine's side, so the offline diff never actually happened.
                     var ad = env.GetPayload<AuditDrillPayload>();
-                    if (ad != null) GameStatePatcher.EnqueueOnMainThread(() => MPAudit.LogBizDrill(ad.Buckets));
+                    if (ad != null) GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        MPAudit.LogBizDrill(ad.Buckets);
+                        try
+                        {
+                            var rows = MPAudit.BuildDrillRows(ad.Buckets);
+                            if (rows.Count > 0 && IsConnected)
+                            {
+                                Send(MessageEnvelope.Create(MessageType.AuditDrillReply, MPConfig.PlayerId,
+                                    new AuditDrillReplyPayload { PlayerId = MPConfig.PlayerId, Regs = rows }));
+                                Plugin.Logger.LogInfo($"[Audit] drill reply sent: {rows.Count} reg hash(es) — the host log names the diverging address(es).");
+                            }
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Audit] drill reply: {ex.Message}"); }
+                    });
                     break;
                 }
 

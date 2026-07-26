@@ -155,6 +155,7 @@ namespace BigAmbitionsMP
         MergerWalletState   = 151,       // Host → All (group-tagged) or targeted (GroupId="" = personal payout on leave): the authoritative shared balance; members set their local mirror to it.
         MergerEmployeeEdit  = 152,       // Member → Host → business owner (slice 5): a routed employee/schedule op on a merger-flipped shop ("fire" an injected partner employee; "schedule" = wholesale hours+shifts write-back). Owner applies natively; roster/business heartbeats republish the truth.
         StoreMirror         = 153,       // Host → all-but-owner (handoff slice 1): one piece of the session store — a member's saved .hsg and/or the manifest — so every member holds the complete session store and can host the world later.
+        AuditDrillReply     = 154,       // Client → Host (round-89): per-registration hashes+summaries for the diverged audit buckets — the host diffs against its own and NAMES the diverging address(es) in one log (field reports only ever carry one machine's log, so offline two-log diffing never happened).
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -1508,6 +1509,23 @@ namespace BigAmbitionsMP
     public class AuditDrillPayload
     {
         public List<int> Buckets { get; set; } = new();
+    }
+
+    /// <summary>Round-89: the client's answer to an AuditDrill — its per-registration audit
+    /// hash + a human summary for every reg in the diverged bucket(s). The host diffs these
+    /// against its own registrations and logs the exact diverging address(es), so a single
+    /// machine's field report names the culprit.</summary>
+    public class AuditDrillReplyPayload
+    {
+        public string PlayerId { get; set; } = "";
+        public List<DrillRegRow> Regs { get; set; } = new();
+    }
+
+    public class DrillRegRow
+    {
+        public string AddressKey { get; set; } = "";
+        public int Hash { get; set; }
+        public string Summary { get; set; } = "";
     }
 
     /// <summary>Host → all: gi.marketEvents serialized wholesale (plain data
