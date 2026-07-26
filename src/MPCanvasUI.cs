@@ -3675,6 +3675,7 @@ namespace BigAmbitionsMP
         private bool  _mpMenuInjected;
         private float _menuCheckTimer;
         private GameObject? _mpButton;                       // the purple "Multiplayer" entry
+        private GameObject? _mpVersionTag;                   // round-91b: bottom-left mod-version tag (MP views only)
         private readonly List<GameObject> _origMenuButtons = new();   // the game's normal buttons (hidden in MP view)
         private readonly List<GameObject> _mpSubmenu       = new();   // Host New / Host Saved / Join / Back
         private readonly List<GameObject> _mpLobby         = new();   // lobby view: status + Start + Leave
@@ -4043,6 +4044,30 @@ namespace BigAmbitionsMP
             if (lob && _lobbyWindow == null) BuildLobbyWindow();
             if (_lobbyWindow != null) { try { _lobbyWindow.SetActive(lob); } catch { } }
             if (lob) RefreshLobbyWindow();
+            // Round-91b (user-placed): the MP mod's version, screen bottom-left just ABOVE the game's
+            // own version line, visible from the moment the Multiplayer button is clicked (submenu +
+            // lobby views; hidden on the plain main menu). Bound to the compiled-in constants the join
+            // handshake enforces and package.ps1 reads — correct by construction, no second copy of
+            // the truth anywhere.
+            try
+            {
+                if (_mpVersionTag == null && _canvasGO != null)
+                {
+                    _mpVersionTag = MakeGO("BAMP_VersionTag", _canvasGO.transform);
+                    var vrt = _mpVersionTag.GetComponent<RectTransform>();
+                    vrt.anchorMin = vrt.anchorMax = vrt.pivot = new Vector2(0f, 0f);
+                    vrt.sizeDelta = new Vector2(620f, 24f);
+                    vrt.anchoredPosition = new Vector2(14f, 50f);   // +8px (half the font size) — 42 partially overlapped the native version line (user, 2026-07-26)
+                    var vt = _mpVersionTag.AddComponent<TextMeshProUGUI>();
+                    vt.text = $"{MyPluginInfo.SHORT_NAME} multiplayer mod  v{MyPluginInfo.PLUGIN_VERSION}  (net v{ProtocolInfo.Version})";
+                    vt.fontSize = 15;
+                    vt.color = new Color(0.75f, 0.78f, 0.90f, 0.95f);
+                    vt.alignment = TextAlignmentOptions.BottomLeft;
+                    ApplyFont(vt);
+                }
+                if (_mpVersionTag != null) _mpVersionTag.SetActive(!main);
+            }
+            catch { }
         }
 
         private void OnMultiplayerClicked() { Plugin.Logger.LogInfo("[MenuUI] Multiplayer → submenu"); ShowView(MpView.Submenu); }
@@ -4586,11 +4611,7 @@ namespace BigAmbitionsMP
             if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }   // rounded corners
 
             const float W = 440f;
-            // Round-91: version on the join screen too — the exact surface where a mismatch-refused
-            // player lands. Same compiled-in constants the handshake enforces (correct by construction).
-            ApplyFont(MakeLabel(_joinDialog.transform,
-                $"Join Multiplayer  <size=13><color=#9090A8>v{MyPluginInfo.PLUGIN_VERSION} · net v{ProtocolInfo.Version}</color></size>",
-                26, C_WHITE, 0f, -14f, W, 36f, TextAlignmentOptions.Center));
+            ApplyFont(MakeLabel(_joinDialog.transform, "Join Multiplayer", 26, C_WHITE, 0f, -14f, W, 36f, TextAlignmentOptions.Center));
 
             ApplyFont(MakeLabel(_joinDialog.transform, "Host IP", SZ_FLD, C_WHITE, 30f, -74f, 110f, 30f, TextAlignmentOptions.Left));
             var (_, ipLbl, ipRT) = MakeField(_joinDialog.transform, _joinIp, 150f, -74f, 260f, 30f);
@@ -4695,12 +4716,7 @@ namespace BigAmbitionsMP
             if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }
 
             var grey = new Color(0.70f, 0.70f, 0.75f, 1f);
-            // Round-91 (user request): the mod + protocol version, on-screen, CORRECT BY CONSTRUCTION —
-            // these are the same compiled-in constants the join handshake enforces and package.ps1
-            // reads, so the label can never disagree with what this machine actually runs.
-            ApplyFont(MakeLabel(_lobbyWindow.transform,
-                $"Multiplayer Lobby  <size=13><color=#9090A8>v{MyPluginInfo.PLUGIN_VERSION} · net v{ProtocolInfo.Version}</color></size>",
-                26, C_WHITE, 0f, -16f, 540f, 36f, TextAlignmentOptions.Center));
+            ApplyFont(MakeLabel(_lobbyWindow.transform, "Multiplayer Lobby", 26, C_WHITE, 0f, -16f, 540f, 36f, TextAlignmentOptions.Center));
             // Wide + two-line + wrapping: the kick/reject reason was clipped
             // by the old 350×28 single-line field (user, 2026-06-11).
             _lwConnInfo = MakeLabel(_lobbyWindow.transform, "", SZ_FLD, C_WHITE, 28f, -50f, 350f, 44f, TextAlignmentOptions.TopLeft); ApplyFont(_lwConnInfo);
