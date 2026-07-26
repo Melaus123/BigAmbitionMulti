@@ -1026,6 +1026,123 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Round-94 (user-approved, by-census closure of the injected-staff leak) ───────────
+        // EmployeeHelper.GetEmployeeInstances() (no-arg) returns the RAW gi.EmployeeInstances —
+        // including the round-30 injected partner-staff mirrors — and it's a trivial getter the
+        // Mono-inlining rule forbids patching. Round-80 filtered the QUERY overload; every other
+        // consumer of the raw list kept leaking (field 20260726-003417: "workers list of rivals
+        // shops" = EmployeesScrollerController). Census of ALL raw-list callers → the five below
+        // get a reentrant STASH: injected records are lifted out for the duration of the native
+        // call and restored in a Finalizer (exception-safe; per-call local stash, nesting-safe).
+        // Sim internals (BusinessEmployeeGenerator, RecruitmentHelper, HeadhunterPlan removal,
+        // EmployeeHelper internals) deliberately keep seeing the injection — that's its purpose.
+        internal static object? StashInjected(bool alsoMergedPartners)
+        {
+            if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return null;
+            try
+            {
+                var list = Helpers.EmployeeHelper.GetEmployeeInstances();
+                if (list == null) return null;
+                List<Entities.EmployeeInstance>? stash = null;
+                for (int i = list.Count - 1; i >= 0; i--)
+                {
+                    var e = list[i];
+                    if (e?.id == null) continue;
+                    if (!MPRegisterSync.IsInjectedStaff(e.id)) continue;
+                    if (!alsoMergedPartners && MPRegisterSync.IsInjectedFromMergedPartner(e.id)) continue;
+                    (stash ??= new System.Collections.Generic.List<Entities.EmployeeInstance>()).Add(e);
+                    list.RemoveAt(i);
+                }
+                return stash;
+            }
+            catch { return null; }
+        }
+
+        internal static void RestoreInjected(object? state)
+        {
+            try
+            {
+                if (state is not System.Collections.Generic.List<Entities.EmployeeInstance> stash || stash.Count == 0) return;
+                var list = Helpers.EmployeeHelper.GetEmployeeInstances();
+                if (list == null) return;
+                for (int i = 0; i < stash.Count; i++) list.Add(stash[i]);
+            }
+            catch { }
+        }
+
+        // My Employees / HR-manager candidate list (the reported surface). Merged-partner staff
+        // stay visible (round-80/62 semantics: a merged company shares its pool).
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HRManagers.EmployeesScrollerController),
+                      nameof(UI.Smartphone.Apps.BizMan.HRManagers.EmployeesScrollerController.Load))]
+        public static class Patch_EmployeesScroller_HideInjected
+        {
+            static void Prefix(out object? __state) => __state = StashInjected(alsoMergedPartners: false);
+            static void Finalizer(object? __state) => RestoreInjected(__state);
+        }
+
+        // HR-plan assign list — same shape, same rule.
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI),
+                      nameof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI.Fill))]
+        public static class Patch_HrManagerPlan_HideInjected
+        {
+            static void Prefix(out object? __state) => __state = StashInjected(alsoMergedPartners: false);
+            static void Finalizer(object? __state) => RestoreInjected(__state);
+        }
+
+        // "Has hired an employee" tutorial/goal counter — injected mirrors must not satisfy it
+        // (merged-partner staff still count, matching round-80's EmployeeMaxLevelGoal semantics).
+        [HarmonyPatch(typeof(Tutorial.HasHiredEmployee), nameof(Tutorial.HasHiredEmployee.CheckIfCompleted))]
+        public static class Patch_HasHiredEmployee_HideInjected
+        {
+            static void Prefix(out object? __state) => __state = StashInjected(alsoMergedPartners: false);
+            static void Finalizer(object? __state) => RestoreInjected(__state);
+        }
+
+        // Business transfer (moving company): MoveEmployees reassigns everything at the origin
+        // address — on a merger-flipped replica that would mutate partner MIRROR records. ALL
+        // injected records excluded (their real owner's machine is the authority).
+        [HarmonyPatch(typeof(Buildings.BuildingTypes.Special.MovingCompany.BizManTransfer),
+                      nameof(Buildings.BuildingTypes.Special.MovingCompany.BizManTransfer.Transfer))]
+        public static class Patch_BizManTransfer_HideInjected
+        {
+            static void Prefix(out object? __state) => __state = StashInjected(alsoMergedPartners: true);
+            static void Finalizer(object? __state) => RestoreInjected(__state);
+        }
+
+        // AI rival poach-defense (the long-standing phantom-poach edge, backlog → closed): under a
+        // merger flip the partner's regs read RentedByPlayer=true, so the AI could select an
+        // injected MIRROR as its poach target — a poach of an employee that only exists as a copy.
+        // ALL injected records excluded from the AI's view.
+        [HarmonyPatch(typeof(BigAmbitions.Rivals.RivalDefenseHelper),
+                      nameof(BigAmbitions.Rivals.RivalDefenseHelper.ActivateHireEmployees))]
+        public static class Patch_RivalDefense_HideInjected
+        {
+            static void Prefix(out object? __state) => __state = StashInjected(alsoMergedPartners: true);
+            static void Finalizer(object? __state) => RestoreInjected(__state);
+        }
+
+        // Round-94 SECOND LOOK (user-mandated "don't revisit"): the census covered helper CALLERS;
+        // a direct-field sweep found two GLOBAL raw accesses bypassing the helper entirely. The
+        // five other direct sites (HeadquartersList, the four plan lists) are address-scoped and
+        // stay per the round-80 rule. The contacts/dictionary family is the SEPARATE round-63
+        // stale-contact class — tracked in the backlog, not silently folded in here.
+
+        // Hourly prompt variables — EMPLOYEE_COUNT was the raw list count.
+        [HarmonyPatch(typeof(Extensions.GamePromptHelper), nameof(Extensions.GamePromptHelper.RunHourly))]
+        public static class Patch_GamePrompt_HideInjected
+        {
+            static void Prefix(out object? __state) => __state = StashInjected(alsoMergedPartners: false);
+            static void Finalizer(object? __state) => RestoreInjected(__state);
+        }
+
+        // Tutorial pointer hide-condition — "any employee training" read the raw list.
+        [HarmonyPatch(typeof(Tutorial.TutorialPointerHideConditionIfPlayerHasEmployeesTraining), "ConditionMetInternal")]
+        public static class Patch_TutorialTrainingPointer_HideInjected
+        {
+            static void Prefix(out object? __state) => __state = StashInjected(alsoMergedPartners: false);
+            static void Finalizer(object? __state) => RestoreInjected(__state);
+        }
+
         // ── Round-88 (user-approved): street releases clear a hand truck's street data ────────
         // Native writes street data at grab (HandTruck:184) and at release-INDOORS
         // (VehicleController:342-347) — but a release on the STREET writes nothing, so a cart

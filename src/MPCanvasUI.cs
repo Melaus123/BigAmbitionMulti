@@ -286,14 +286,12 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo(
                 $"[UI] F8 panel pre-fill: name='{_name}' port={_port} ip={_ip}");
 
+            // Round-93 (user decision 2026-07-26): the crash AUTO-PROMPT is retired — too many false
+            // positives (Task Manager quits filed as "crashes"; e.g. field 20260725-172640, a
+            // frustrated manual quit). Detection still runs: the marker rides every MANUAL report as
+            // PreviousCrashDetected/Hint metadata, and the top-bar Report button is always available.
             if (MPBugReport.PendingCrashDetected)
-            {
-                _crashReportPopupVisible = true;
-                _crashReportIsCrash = true;
-                _crashReportMessage = "Previous game session appears to have crashed.";
-                _crashReportAttachments.Clear();
-                _crashReportAutoFocusPending = true;
-            }
+                Plugin.Logger.LogInfo("[BugReport] previous-session crash marker present — auto-prompt retired (round-93); metadata rides any manual report.");
 
             // Stage-4 migration #1: the join quiesce ends on the lifecycle
             // WorldReady EVENT (replaces the hand-tuned 4s timer).
@@ -4822,8 +4820,25 @@ namespace BigAmbitionsMP
         }
         private void OnToggleShowIp() { _showIp = !_showIp; Plugin.Logger.LogInfo($"[MenuUI] Show IP = {_showIp}"); RefreshLobbyWindow(); }
 
+        // Round-93: transient lobby notice (overlay-disabled etc.) — shown on the conn-info line for a beat.
+        private string _lobbyNotice = "";
+        private float  _lobbyNoticeUntil;
+
         private void OnInviteFriends()
         {
+            // Round-93 (field 20260725-172640): with the Steam overlay disabled, the invite call
+            // silently no-ops — the button read as dead (12+ clicks, then a frustrated quit that
+            // auto-filed as a "crash"). Say why instead.
+            bool overlayOk = false;
+            try { overlayOk = Steamworks.SteamUtils.IsOverlayEnabled; } catch { }
+            if (!overlayOk)
+            {
+                _lobbyNotice = "Steam overlay is disabled — enable it in Steam's settings";
+                _lobbyNoticeUntil = Time.unscaledTime + 10f;
+                Plugin.Logger.LogWarning("[MenuUI] Invite Friends: Steam overlay unavailable — notice shown (round-93).");
+                RefreshLobbyWindow();
+                return;
+            }
             Plugin.Logger.LogInfo("[MenuUI] Invite Friends → Steam invite dialog.");
             MPSteamPresence.OpenInviteDialog();
         }
@@ -4865,6 +4880,9 @@ namespace BigAmbitionsMP
                     string why = MPClient.LastDisconnectReason;
                     info = $"<color=#FF7070>Not connected{(string.IsNullOrEmpty(why) ? "" : " — " + why)}.  Leave and retry.</color>";
                 }
+                // Round-93: a transient notice (e.g. overlay-disabled) briefly overrides the info line.
+                if (!string.IsNullOrEmpty(_lobbyNotice) && Time.unscaledTime < _lobbyNoticeUntil)
+                    info = $"<color=#FFB060>{_lobbyNotice}</color>";
                 try { _lwConnInfo.text = info; } catch { }
             }
             // Show/Hide IP toggle — host only; label reflects state.
