@@ -1285,6 +1285,49 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] TickPendingMarketEvents: {ex.Message}"); }
         }
 
+        /// <summary>MAIN THREAD, per-frame on clients: retry a market payload that arrived before
+        /// the world existed, and WARN when host demand updates have gone quiet — the condition
+        /// that made a field client run a whole session on locally-computed 99-100% demand while
+        /// nothing in the log said so. Cheap: two float compares until something is wrong.</summary>
+        public static void TickDemandHealth()
+        {
+            try
+            {
+                if (!MPClient.IsConnected || MPServer.IsRunning) return;
+
+                var held = _pendingMarketJson;
+                if (held != null && SaveGameManager.Current != null)
+                {
+                    _pendingMarketJson = null;
+                    ApplyMarketSnapshot(held);
+                    return;
+                }
+
+                float now = UnityEngine.Time.unscaledTime;
+                if (now < _nextDemandWatchdogAt) return;
+                _nextDemandWatchdogAt = now + 60f;
+                if (SaveGameManager.Current == null) return;
+
+                // The host sends every 60s of REAL time (round-102h). 180s of silence means the
+                // channel is not delivering, and this client's demand is stale or self-computed.
+                if (!_haveAuthoritativeDemand)
+                {
+                    Plugin.Logger.LogWarning(
+                        "[Demand] no host market data has EVER been applied this session — this client's demand " +
+                        "figures are its own, and a client cannot compute them correctly (its provider counts are " +
+                        "empty, so every product reads ~100%). Expect wrong demand in Market Insider and inflated " +
+                        "customer traffic for this player's shops.");
+                    return;
+                }
+                float age = now - _lastMarketApplyAt;
+                if (age > 180f)
+                    Plugin.Logger.LogWarning(
+                        $"[Demand] no host market update for {age:F0}s (expected every 60s) — demand is going stale. " +
+                        "If the host is paused/in menus this is expected; otherwise the market channel has stopped.");
+            }
+            catch { }
+        }
+
         /// <summary>True when this registration's business belongs to ANY session
         /// player — YOU **or** another connected player.  This is NOT "is this mine?"
         /// (after the rival-translation, businessOwnerRivalId carries the owning
@@ -3341,6 +3384,20 @@ namespace BigAmbitionsMP
             return found;
         }
 
+        // ── Round-102i: demand-sync health (PERMANENT diagnostic) ─────────────────
+        // Demand is host-authoritative; a client that stops receiving it silently falls back to
+        // locally-computed values, which on a client are always 99-100% (its provider counts are
+        // empty). That is exactly what a field report showed and it was invisible in the logs.
+        // These make a recurrence self-identifying.
+        private static volatile string? _pendingMarketJson;   // arrived before the world existed
+        private static float _lastMarketApplyAt;              // real time of the last SUCCESSFUL apply
+        private static bool  _haveAuthoritativeDemand;        // ≥1 host payload applied this session
+        private static float _nextDemandWatchdogAt;
+
+        /// <summary>True once a host market payload has been applied — the client's own demand
+        /// computation is suppressed from that point (it cannot compute correctly).</summary>
+        public static bool HaveAuthoritativeDemand => _haveAuthoritativeDemand;
+
         public static void ApplyMarketSnapshot(string marketJson)
         {
             RunOnMainThread(() =>
@@ -3351,32 +3408,147 @@ namespace BigAmbitionsMP
                     if (dtos == null) return;
 
                     var gi = SaveGameManager.Current;
-                    if (gi == null) return;
+                    if (gi == null)
+                    {
+                        // Round-102i: the join-time payload routinely arrives while the client's
+                        // world is still loading. It used to be dropped here in silence, leaving
+                        // the client on its own 99-100% values until the next periodic send.
+                        _pendingMarketJson = marketJson;
+                        Plugin.Logger.LogInfo("[Demand] market payload arrived before the world was live — held for retry.");
+                        return;
+                    }
 
+                    // PROBE-START: Demand — candidate (a): is this apply INERT? Count what the
+                    // host sent vs what actually landed. entryMissing/rowMissing > 0 means the
+                    // host's values have nowhere to go (add-if-missing is the fix); all-zero
+                    // misses with the symptom still present points at candidate (b), a
+                    // client-side recompute clobbering these values afterwards.
+                    int pEntryHit = 0, pEntryMissing = 0, pRowHit = 0, pRowMissing = 0, pNullRowList = 0;
+                    int pEntryAdded = 0, pRowAdded = 0;   // round-102i: created from the host's payload
+                    // PROBE-END: Demand
                     foreach (var dto in dtos)
                     {
+                        // Round-102i: ADD-IF-MISSING. This used to only UPDATE rows the client
+                        // already had, so anything the client hadn't built yet (its world still
+                        // loading at join) was silently dropped and the host's values landed
+                        // nowhere. With the client's own demand computation now suppressed once
+                        // authoritative data exists, the host's payload is the ONLY source — it
+                        // must be able to create what's missing.
+                        bool haveEntry = false;
+                        foreach (var e in gi.productMarketEntries) if (e != null && e.itemName == dto.ItemName) { haveEntry = true; break; }
+                        if (!haveEntry)
+                        {
+                            try
+                            {
+                                gi.productMarketEntries.Add(new Entities.ProductMarketEntry
+                                {
+                                    itemName     = dto.ItemName,
+                                    demandValues = new List<Entities.NeighborhoodDemand>(),
+                                });
+                                pEntryAdded++;
+                            }
+                            catch { }
+                        }
+
                         // Find matching entry; update import price + per-neighborhood demand (host-authoritative).
+                        bool pFoundEntry = false;   // PROBE: Demand
                         foreach (var entry in gi.productMarketEntries)
                         {
                             if (entry.itemName == dto.ItemName)
                             {
+                                pFoundEntry = true; pEntryHit++;   // PROBE: Demand
+                                if (entry.demandValues == null) entry.demandValues = new List<Entities.NeighborhoodDemand>();
                                 entry.importPriceIndex = dto.ImportPriceIndex;
+                                if (dto.DemandValues != null && entry.demandValues == null) pNullRowList++;   // PROBE: Demand
                                 if (dto.DemandValues != null && entry.demandValues != null)
                                     foreach (var ndDto in dto.DemandValues)
+                                    {
+                                        bool pFoundRow = false;   // PROBE: Demand
                                         foreach (var nd in entry.demandValues)
                                             if (nd != null && nd.neighborhood == ndDto.Neighborhood)
                                             {
+                                                pFoundRow = true;   // PROBE: Demand
                                                 nd.demand                   = ndDto.Demand;
                                                 nd.providers                = ndDto.Providers;
                                                 nd.lastDaySold              = ndDto.LastDaySold;
                                                 nd.lastDayProvidersExceeded = ndDto.LastDayProvidersExceeded;
-                                                nd.hasPlayerMonopoly        = ndDto.HasPlayerMonopoly;
+                                                // Round-102: monopoly is PER PLAYER. The old line copied the
+                                                // host's own bool, handing this machine the host's monopoly
+                                                // (+30% price tolerance / optimal-price index it never earned).
+                                                // The host now stamps the OWNER; we hold it only if it's us.
+                                                // Pre-v5 payloads carry no owner → "" → nobody (conservative).
+                                                nd.hasPlayerMonopoly        = !string.IsNullOrEmpty(ndDto.MonopolyOwnerPlayerId)
+                                                                              && ndDto.MonopolyOwnerPlayerId == MPConfig.PlayerId;
                                                 break;
                                             }
+                                        if (!pFoundRow)
+                                        {
+                                            // Round-102i: create the row the host has and we lack.
+                                            try
+                                            {
+                                                entry.demandValues.Add(new Entities.NeighborhoodDemand
+                                                {
+                                                    neighborhood             = ndDto.Neighborhood,
+                                                    demand                   = ndDto.Demand,
+                                                    providers                = ndDto.Providers,
+                                                    lastDaySold              = ndDto.LastDaySold,
+                                                    lastDayProvidersExceeded = ndDto.LastDayProvidersExceeded,
+                                                    hasPlayerMonopoly        = !string.IsNullOrEmpty(ndDto.MonopolyOwnerPlayerId)
+                                                                               && ndDto.MonopolyOwnerPlayerId == MPConfig.PlayerId,
+                                                });
+                                                pRowAdded++;
+                                            }
+                                            catch { }
+                                        }
+                                        if (pFoundRow) pRowHit++; else pRowMissing++;   // PROBE: Demand
+                                    }
                                 break;
                             }
                         }
+                        if (!pFoundEntry) pEntryMissing++;   // PROBE: Demand
                     }
+                    // PROBE-START: Demand
+                    // Name the CLIENT-ONLY rows: rows this machine holds that the host's payload
+                    // does not mention. Measured at 10 on two different saves; they are the rows
+                    // stuck at ~100% (providers==0) because nothing authoritative ever writes them.
+                    // Knowing WHICH they are decides whether dropping them is safe.
+                    int pOrphan = 0; var pOrphanNames = new System.Text.StringBuilder();
+                    try
+                    {
+                        var sent = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+                        foreach (var dto in dtos)
+                        {
+                            if (!sent.TryGetValue(dto.ItemName ?? "", out var set))
+                                sent[dto.ItemName ?? ""] = set = new HashSet<string>(StringComparer.Ordinal);
+                            if (dto.DemandValues != null)
+                                foreach (var nd in dto.DemandValues) set.Add(nd.Neighborhood ?? "");
+                        }
+                        foreach (var entry in gi.productMarketEntries)
+                        {
+                            if (entry?.demandValues == null) continue;
+                            sent.TryGetValue(entry.itemName ?? "", out var set);
+                            foreach (var nd in entry.demandValues)
+                            {
+                                if (nd == null) continue;
+                                if (set != null && set.Contains(nd.neighborhood ?? "")) continue;
+                                pOrphan++;
+                                if (pOrphan <= 12) pOrphanNames.Append($" [{entry.itemName}@{nd.neighborhood} d={nd.demand} p={nd.providers}]");
+                            }
+                        }
+                    }
+                    catch { }
+                    // PERMANENT one-liner: proves the client's demand is host-derived and current.
+                    _pendingMarketJson = null;
+                    _lastMarketApplyAt = UnityEngine.Time.unscaledTime;
+                    _haveAuthoritativeDemand = true;
+                    Plugin.Logger.LogInfo(
+                        $"[Demand] host market applied: {pRowHit} row(s) updated, {pRowAdded} added, {pEntryAdded} new item entry(s).");
+                    Plugin.Logger.LogInfo(
+                        $"[PROBE] Demand APPLY: entries hit={pEntryHit} missing={pEntryMissing} nullRowList={pNullRowList} " +
+                        $"| demand rows written={pRowHit} missing={pRowMissing} (missing rows are values the host sent that landed NOWHERE)");
+                    if (pOrphan > 0)
+                        Plugin.Logger.LogWarning($"[PROBE] Demand APPLY: {pOrphan} CLIENT-ONLY row(s) the host never sends —{pOrphanNames}");
+                    // PROBE-END: Demand
                 }
                 catch (Exception ex)
                 {

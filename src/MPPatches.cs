@@ -2998,6 +2998,56 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Round-102i: clients never compute product demand themselves ───────
+        // A client's provider counts are empty (it skips the AI-economy pass that fills them),
+        // so the native formula — 100 minus a share based on competitors — collapses to 99-100%
+        // for EVERY product. Demand is not cosmetic: it feeds the customer-traffic calculators,
+        // so a client running on its own numbers gets inflated traffic for its own shops on top
+        // of a wrong Market Insider. The host's values are authoritative and now arrive reliably
+        // (real-time cadence, round-102h) and completely (add-if-missing, round-102i).
+        // Gated on HaveAuthoritativeDemand so the FIRST computation still runs and creates the
+        // rows — suppressing before any host payload has landed would leave the client with no
+        // demand rows at all (the native getter would log an error and substitute 50% per call).
+        [HarmonyPatch(typeof(Helpers.ProductMarketHelper), nameof(Helpers.ProductMarketHelper.UpdateMarketDemands))]
+        public static class Patch_UpdateMarketDemands_HostAuthoritativeOnClient
+        {
+            static bool Prefix()
+            {
+                if (MPServer.IsRunning || !MPClient.IsConnected) return true;    // host / SP → native
+                return !GameStatePatcher.HaveAuthoritativeDemand;                // client → only before host data exists
+            }
+        }
+
+        [HarmonyPatch(typeof(Helpers.ProductMarketHelper), nameof(Helpers.ProductMarketHelper.UpdateMarketDemand))]
+        public static class Patch_UpdateMarketDemand_HostAuthoritativeOnClient
+        {
+            static bool Prefix()
+            {
+                if (MPServer.IsRunning || !MPClient.IsConnected) return true;
+                return !GameStatePatcher.HaveAuthoritativeDemand;
+            }
+        }
+
+        // ── Round-102: the monopoly flag is HOST-STAMPED, per player ──────────
+        // NeighborhoodDemand.RecalculateIfPlayerHasMonopoly decides "am I the only seller here?"
+        // by walking registrations and reading each one's cachedAvailableProducts. In MP that
+        // input is unreliable on BOTH machines — clients hold no product cache for AI shops
+        // (measured 242/242, round-101) and the host holds none for PARTNER shops — so the walk
+        // can find no rival seller and OVER-GRANT the monopoly, worth +30% customer price
+        // tolerance and +30% on the optimal-price index. The authoritative value now arrives
+        // stamped with its OWNER in the market snapshot (GameStateReader.BuildMonopolyOwners),
+        // so in an MP session the native recompute must not overwrite it. Single-player and the
+        // menu are untouched — this is a pass-through there.
+        [HarmonyPatch(typeof(Entities.NeighborhoodDemand), nameof(Entities.NeighborhoodDemand.RecalculateIfPlayerHasMonopoly))]
+        public static class Patch_NeighborhoodDemand_MonopolyIsHostStamped
+        {
+            static bool Prefix()
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return true;   // SP → native
+                return false;                                                   // MP → keep the stamped value
+            }
+        }
+
         // ── Diagnostic: CityMapFilters.ApplyFilters ───────────────────────────
         // The map's "for rent" highlight discrepancy investigation.  Our snapshot
         // apply runs once at sync time and our diagnostic shows host/client state

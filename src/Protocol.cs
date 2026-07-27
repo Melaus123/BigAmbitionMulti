@@ -701,6 +701,11 @@ namespace BigAmbitionsMP
         /// <summary>Game version name (e.g. "EA 0.11") — the host refuses a mismatch
         /// so two players on different game builds can't desync.</summary>
         public string Game     { get; set; } = "";
+        /// <summary>Round-102: fingerprint of the loaded item/business CONTENT. `Game` above is
+        /// only the version-folder name, so two installs a month apart both pass it while
+        /// carrying different item data (our own rig did exactly that). Log-only evidence — the
+        /// host warns on a mismatch and never refuses. Empty from older builds.</summary>
+        public string Content  { get; set; } = "";
         // Phase 3 rejoin offer: set when the client holds a pending DISCONNECT save (un-uploaded progress
         // from its last leave). The host may request it (LoadDataPayload.AwaitClientDisconnectUpload) and,
         // after validating the uploaded save's ACTUAL day, restore it instead of the host's older copy.

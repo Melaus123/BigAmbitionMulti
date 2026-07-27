@@ -338,6 +338,11 @@ namespace BigAmbitionsMP
             // mod (Voogle Route, missing companion DLL) was only inferable from exception text;
             // every report should answer "what else is running?" at a glance.)
             sb.AppendLine($"GameVersion: {Blank(Application.version)}");
+            // Round-102: GameVersion is coarse — two installs a month apart both report the same
+            // string while carrying different item/business data (our own rig did exactly that,
+            // and it read as a mod bug for four rounds). This fingerprint makes "these two players
+            // are not running the same game content" visible at a glance across two reports.
+            sb.AppendLine($"ContentFingerprint: {Blank(MPContentFingerprint.Cached)}");
             sb.AppendLine($"UnityVersion: {Blank(Application.unityVersion)}");
             sb.AppendLine($"Scene: {ActiveSceneName()}");
             sb.AppendLine($"GameRoot: {Blank(MPConfig.GameRootPath)}");

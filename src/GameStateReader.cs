@@ -362,6 +362,70 @@ namespace BigAmbitionsMP
                     "and sessions may hard-lock. A game update likely renamed a field; re-map it in EnsureGSCProbed.");
         }
 
+        /// <summary>Round-102, HOST ONLY: who (if anyone) holds the monopoly on each
+        /// (item, neighborhood). Monopoly = at least one SESSION PLAYER sells it there and NO
+        /// AI rival does; if two players both sell it, nobody has it. Returns the owning
+        /// player's id, or absent/"" for nobody.
+        ///
+        /// Seller evidence per registration: cachedAvailableProducts (native) UNION the retail
+        /// price table (MPPriceSync keeps player shops' tables current on the host, and partner
+        /// shops' product caches are NOT synced — without the union a partner's shop would look
+        /// like it sells nothing and would wrongly hand someone else a monopoly).
+        /// Bias is deliberate: when evidence is thin the result is "nobody", never a bonus.</summary>
+        private static Dictionary<(string, string), string> BuildMonopolyOwners(GameInstance gi)
+        {
+            var result = new Dictionary<(string, string), string>();
+            try
+            {
+                // (item, neighborhood) → owning player id, or "" once disqualified.
+                var claim = new Dictionary<(string, string), string>();
+                var blocked = new HashSet<(string, string)>();
+
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null) continue;
+                    string nb;
+                    try { nb = reg.Neighborhood ?? ""; } catch { continue; }
+                    if (nb.Length == 0) continue;
+
+                    // Who runs this shop?  "" => an AI rival (or nobody).
+                    string ownerPid = "";
+                    try
+                    {
+                        if (MergerFlip.TrulyMine(reg)) ownerPid = MPConfig.PlayerId;
+                        else if (GameStatePatcher.IsAnyPlayerBusiness(reg))
+                        {
+                            // Session players' shops are stamped with their id as the rival id.
+                            var stamp = reg.businessOwnerRivalId?.ToString() ?? "";
+                            ownerPid = stamp.Length > 0 ? stamp : "";
+                        }
+                    }
+                    catch { continue; }
+                    bool isAi = ownerPid.Length == 0 && !string.IsNullOrEmpty(reg.businessOwnerRivalId?.ToString());
+                    if (ownerPid.Length == 0 && !isAi) continue;   // empty / for-rent shell — no seller
+
+                    // What does it sell?  Native cache UNION the synced price table.
+                    var sells = new HashSet<string>(StringComparer.Ordinal);
+                    try { if (reg.cachedAvailableProducts != null) foreach (var p in reg.cachedAvailableProducts) if (!string.IsNullOrEmpty(p)) sells.Add(p); } catch { }
+                    try { if (reg.retailPrices != null) foreach (var rp in reg.retailPrices) if (!string.IsNullOrEmpty(rp?.itemName)) sells.Add(rp.itemName); } catch { }
+                    if (sells.Count == 0) continue;
+
+                    foreach (var item in sells)
+                    {
+                        var key = (item, nb);
+                        if (blocked.Contains(key)) continue;
+                        if (isAi) { blocked.Add(key); claim.Remove(key); continue; }   // a rival sells it → nobody
+                        if (claim.TryGetValue(key, out var held) && held != ownerPid)
+                        { blocked.Add(key); claim.Remove(key); continue; }             // two players → nobody
+                        claim[key] = ownerPid;
+                    }
+                }
+                foreach (var kv in claim) result[kv.Key] = kv.Value;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[GameStateReader] BuildMonopolyOwners: {ex.Message}"); }
+            return result;
+        }
+
         /// <summary>
         /// Returns the current ProductMarketEntry list serialised as JSON.
         /// Called by the host when building a world snapshot or periodic market broadcast.
@@ -372,6 +436,10 @@ namespace BigAmbitionsMP
             {
                 var gi = SaveGameManager.Current;
                 if (gi == null) return "[]";
+
+                // Round-102: build the per-(item, neighborhood) monopoly OWNER map once for this
+                // broadcast (host-side; ~60s cadence, so one pass over the registrations is cheap).
+                var monopolyOwner = BuildMonopolyOwners(gi);
 
                 // IL2CPP List<T> doesn't support LINQ directly — iterate with index
                 var entries = new List<MarketEntryDto>();
@@ -388,6 +456,7 @@ namespace BigAmbitionsMP
                         {
                             var nd = e.demandValues[d];
                             if (nd == null) continue;
+                            monopolyOwner.TryGetValue((dto.ItemName, nd.neighborhood ?? ""), out var mOwner);
                             dto.DemandValues.Add(new NeighborhoodDemandDto
                             {
                                 Neighborhood             = nd.neighborhood ?? "",
@@ -396,6 +465,7 @@ namespace BigAmbitionsMP
                                 LastDaySold              = nd.lastDaySold,
                                 LastDayProvidersExceeded = nd.lastDayProvidersExceeded,
                                 HasPlayerMonopoly        = nd.hasPlayerMonopoly,
+                                MonopolyOwnerPlayerId    = mOwner ?? "",
                             });
                         }
                     entries.Add(dto);
@@ -494,5 +564,13 @@ namespace BigAmbitionsMP
         public int    LastDaySold              { get; set; }
         public int    LastDayProvidersExceeded { get; set; }
         public bool   HasPlayerMonopoly        { get; set; }
+        /// <summary>Round-102: WHICH player holds the monopoly on this item in this neighborhood
+        /// ("" = nobody). The native flag is a single bool computed from the LOCAL machine's
+        /// idea of "mine vs a rival's", so syncing it verbatim handed a client the HOST's
+        /// monopoly — a +30% customer price tolerance and +30% optimal-price index they had not
+        /// earned (ItemHelper.CalculateOptimalPriceByNeighborhood, CitizenData accept-price).
+        /// The host stamps the OWNER here and each machine sets its own bool to owner == me.
+        /// Absent on pre-v5 payloads → "" → nobody, the conservative direction.</summary>
+        public string MonopolyOwnerPlayerId    { get; set; } = "";
     }
 }
