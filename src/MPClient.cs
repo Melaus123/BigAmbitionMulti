@@ -166,7 +166,10 @@ namespace BigAmbitionsMP
                 Version  = MyPluginInfo.PLUGIN_VERSION,
                 StableId = MPConfig.StableId,
                 Protocol = ProtocolInfo.Version,
-                Game     = MPSaveManager.GameVersionNameCached()
+                Game     = MPSaveManager.GameVersionNameCached(),
+                // CACHED read only — OnConnected runs on the LiteNetLib network thread and
+                // computing this touches Unity asset loading (crash 2026-07-27).
+                Content  = MPContentFingerprint.Cached
             };
             // Phase 3: offer any pending disconnect save (un-uploaded progress from our last leave). The
             // host decides whether to request it; it never auto-overrides a host save.

@@ -1693,7 +1693,15 @@ namespace BigAmbitionsMP
             // not-yet-cached host can't wrongly reject; the protocol number always gates.
             bool protocolOk = hello.Protocol == ProtocolInfo.Version;
             bool gameOk = string.IsNullOrEmpty(hello.Game) || string.IsNullOrEmpty(hostGame) || hello.Game == hostGame;
-            if (protocolOk && gameOk) return true;
+            if (protocolOk && gameOk)
+            {
+                // Round-102: `Game` is only the version-FOLDER name, so two installs a month
+                // apart both pass it while carrying different item data. Compare the finer
+                // content fingerprint and record a mismatch in the host log — evidence for a
+                // future bug report, never a refusal.
+                MPContentFingerprint.HostCompare(hello.PlayerId, hello.Content);
+                return true;
+            }
 
             Plugin.Logger.LogWarning(
                 $"[Server] Hello from '{hello.PlayerId}' refused — version mismatch " +

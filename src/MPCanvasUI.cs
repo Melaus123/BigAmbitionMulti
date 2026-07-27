@@ -87,7 +87,7 @@ namespace BigAmbitionsMP
         /// <summary>Counts down to next game-time/speed heartbeat (host, every 3 s).</summary>
         private float _timeSyncTimer = 3f;
         /// <summary>Counts down to next market broadcast (host, ~60 s).</summary>
-        private float _marketSyncTimer = 60f;
+        private float _marketSyncNextAt;   // round-102h: REAL-time deadline (was a scaled-deltaTime countdown)
         // Portrait is written to disk lazily (after we first broadcast the
         // profile), so the initial profile carries portrait=none.  Re-send the
         // profile once the portrait file appears, until it goes out once.
@@ -546,6 +546,7 @@ namespace BigAmbitionsMP
             // puppet tick live here. PreTick umbrella + named sub-brackets so a
             // periodic field hitch is named or cleared by column.
             long _pre = MPPerf.Begin();
+            MPContentFingerprint.EnsureCached();   // MAIN THREAD: compute once, well before any connect (crash 2026-07-27)
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             TickCrashHeartbeat();    // task #5: stamp the session marker with where-we-are (~30s)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
@@ -570,7 +571,9 @@ namespace BigAmbitionsMP
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
             MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion
             GameStatePatcher.TickPendingMarketEvents();   // round-101: market events that arrived pre-world
+            GameStatePatcher.TickDemandHealth();          // round-102i: retry held market payload + stale-demand watchdog
             MPPriceFillProbe.Tick();   // PROBE PriceFill (round-101 item 3) — remove when resolved
+            MPDemandProbe.Tick();      // PROBE Demand (round-102) — remove when resolved
             // (quiesce-off 4s timer RETIRED 2026-06-11 — stage-4 migration #1:
             //  the quiesce now ends on the lifecycle WorldReady EVENT; see
             //  OnLifecyclePhase below.)
@@ -2930,8 +2933,8 @@ namespace BigAmbitionsMP
                 }
 
                 // Trigger a time sync and market sync shortly after game loads.
-                _timeSyncTimer   = 5f;
-                _marketSyncTimer = 8f;
+                _timeSyncTimer     = 5f;
+                _marketSyncNextAt  = Time.unscaledTime + 8f;   // round-102h: real time, not scaled
             }
             else if (!inGame && _wasInGame)
             {
@@ -3542,9 +3545,14 @@ namespace BigAmbitionsMP
         {
             if (!IsInGame() || !MPServer.IsRunning) return;
 
-            _marketSyncTimer -= Time.deltaTime;
-            if (_marketSyncTimer > 0f) return;
-            _marketSyncTimer = 60f;
+            // Round-102h (field-measured): this counted down with Time.deltaTime — SCALED game
+            // time, which STOPS while the host is paused (menus/phone/startup hold) and slows with
+            // game speed. Every other sync channel uses real time (MPPriceSync/MPStockSync:
+            // unscaledTime; BusinessSync market events: realtimeSinceStartup). A field client's
+            // 40-minute session got FOUR market updates — gaps of 250s, 950s and 60s, then 810s of
+            // silence — so its demand table sat uncorrected for most of the session. Real time now.
+            if (Time.unscaledTime < _marketSyncNextAt) return;
+            _marketSyncNextAt = Time.unscaledTime + 60f;
 
             try
             {
