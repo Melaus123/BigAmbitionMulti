@@ -94,8 +94,24 @@ namespace BigAmbitionsMP
             h = Combine(h, StableHash(reg.BusinessName?.ToString()));
             h = Combine(h, StableHash(reg.businessTypeName));
             h = Combine(h, reg.temporarilyClosed ? 1 : 0);
-            h = Combine(h, StableHash(reg.buildingOwnerRivalId));
-            h = Combine(h, StableHash(reg.businessOwnerRivalId));
+            // Round-101 (round-89 drill, first field firing, proved this): the rival-owner fields
+            // are INTENTIONALLY different per machine — a session player's business is TRANSLATED
+            // to rival-owned on every other machine, carrying the owner's id as the rival id
+            // (GameStatePatcher ownership apply, "TRANSLATED, not copied"). Hashing them made
+            // EVERY player-owned business diverge forever, so "biz DIVERGED" fired on healthy
+            // sessions and the alarm carried no information. Hash the OWNERSHIP FACT instead:
+            // "is this owned by some session player" — identical on all machines by design.
+            // (Ownership attribution itself is audited by the roster/business snapshot paths.)
+            bool anyPlayerOwned = false;
+            try { anyPlayerOwned = reg.RentedByPlayer || GameStatePatcher.IsAnyPlayerBusiness(reg); } catch { }
+            h = Combine(h, anyPlayerOwned ? 1 : 0);
+            // Rival ids still hashed for genuinely AI-owned buildings (a real divergence there
+            // means the rival sim disagrees) — but skipped when a player owns it.
+            if (!anyPlayerOwned)
+            {
+                h = Combine(h, StableHash(reg.buildingOwnerRivalId));
+                h = Combine(h, StableHash(reg.businessOwnerRivalId));
+            }
             var prices = reg.retailPrices;
             if (prices != null)
                 for (int i = 0; i < prices.Count; i++)
