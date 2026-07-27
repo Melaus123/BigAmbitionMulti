@@ -22,6 +22,7 @@ namespace BigAmbitionsMP
     {
         private const float IntervalSeconds = 30f;
         private const int   MaxInteriors    = 8;     // bound per-cycle snapshot cost
+        private const int   MaxOwnInteriors = 40;    // round-104: one int per own shop — cheap, but still bounded
         private const int   StreakToReport  = 2;     // consecutive mismatches before alarm
 
         private static float _nextAt;
@@ -71,6 +72,28 @@ namespace BigAmbitionsMP
                     int? ih = InteriorHash(addr);
                     if (ih != null) p.Interiors.Add(new AddressHashInfo { AddressKey = addr, Hash = ih.Value });
                 }
+            }
+            catch { }
+            // Round-104: MY OWN businesses + their item counts. One int each — the whole point is
+            // to stay small enough to ride every 30s audit while still catching "my shop is empty
+            // here but full on the host", the exact divergence that went unseen in the field.
+            try
+            {
+                var gi2 = SaveGameManager.Current;
+                if (gi2?.BuildingRegistrations != null)
+                    foreach (var reg in gi2.BuildingRegistrations)
+                    {
+                        if (reg == null || p.OwnInteriors.Count >= MaxOwnInteriors) continue;
+                        bool mine; try { mine = MergerFlip.TrulyMine(reg); } catch { continue; }
+                        if (!mine) continue;
+                        string type; try { type = reg.businessTypeName ?? ""; } catch { continue; }
+                        if (type.Length == 0 || type == "ba:businesstype_empty") continue;
+                        p.OwnInteriors.Add(new AddressCountInfo
+                        {
+                            AddressKey = GameStateReader.AddressKey(reg),
+                            Items      = reg.itemInstances?.Count ?? 0,
+                        });
+                    }
             }
             catch { }
             return p;
@@ -410,6 +433,36 @@ namespace BigAmbitionsMP
                               $"client 0x{ci.Hash:X8} vs host 0x{mh.Value:X8}")) intOk++;
                 }
 
+                // Round-104: the client's OWN shops vs ours. Compares item COUNTS only, and emits
+                // at most ONE line naming at most 4 addresses — enough to identify the shops without
+                // bloating the ring buffer. This is the check that was missing when a client's four
+                // shops were emptied while the audit reported "interiors 0/0 OK" (field 2026-07-27).
+                int ownChecked = 0, ownDiverged = 0, clientItems = 0, hostItems = 0;
+                var ownDetail = new System.Text.StringBuilder();
+                try
+                {
+                    foreach (var oi in p.OwnInteriors)
+                    {
+                        if (string.IsNullOrEmpty(oi.AddressKey)) continue;
+                        var reg = GameStatePatcher.FindRegistration(oi.AddressKey);
+                        if (reg == null) continue;   // not comparable here
+                        int hostCount = reg.itemInstances?.Count ?? 0;
+                        ownChecked++; clientItems += oi.Items; hostItems += hostCount;
+                        if (oi.Items == hostCount) continue;
+                        ownDiverged++;
+                        if (ownDiverged <= 4) ownDetail.Append($" '{oi.AddressKey}' {oi.Items}/{hostCount}");
+                    }
+                }
+                catch { }
+                if (ownDiverged > 0)
+                    Plugin.Logger.LogWarning(
+                        $"[Audit] MISMATCH '{p.PlayerId}' own-interiors: {ownDiverged} of {ownChecked} shop(s) differ " +
+                        $"(items client {clientItems} vs host {hostItems}) —{ownDetail}" +
+                        (ownDiverged > 4 ? $" (+{ownDiverged - 4} more)" : "") +
+                        (clientItems == 0 && hostItems > 0
+                            ? "  ← client holds NOTHING for its own shops: its character save disagrees with this session's ownership ledger."
+                            : ""));
+
                 // Throttle the routine summary (see _nextSummaryAt): log every cycle
                 // while a divergence is streak-confirmed, otherwise only as a periodic
                 // heartbeat so normal play doesn't crowd the bug-report ring buffer.
@@ -428,6 +481,7 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo(
                         $"[Audit] '{p.PlayerId}': clock {(clockOk ? "OK" : "DRIFT")} biz {(bizOk ? "OK" : "DIVERGED")} " +
                         $"roster {(rosterOk ? "OK" : "DIVERGED")} events {(eventsOk ? "OK" : "DIVERGED")} interiors {intOk}/{intChecked} OK " +
+                        $"own-shops {ownChecked - ownDiverged}/{ownChecked} OK " +
                         $"(${p.Money:F0}, veh {p.VehicleCount}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Audit] HostHandle: {ex.Message}"); }

@@ -1501,12 +1501,24 @@ namespace BigAmbitionsMP
         /// MessageType.MarketEvents — convergence verified here).</summary>
         public int    MarketEventsHash { get; set; }
         public List<AddressHashInfo> Interiors { get; set; } = new();
+        /// <summary>Round-104: the sender's OWN businesses and how many interior items each holds.
+        /// The Interiors list above only covers interiors this machine RECEIVED, so a client's own
+        /// shops — the data actually at risk — were never audited ("interiors 0/0 OK" while a
+        /// client's four shops were being emptied, field 2026-07-27). One int per shop keeps the
+        /// payload tiny; the host compares counts and logs only what diverges.</summary>
+        public List<AddressCountInfo> OwnInteriors { get; set; } = new();
     }
 
     public class AddressHashInfo
     {
         public string AddressKey { get; set; } = "";
         public int    Hash       { get; set; }
+    }
+
+    public class AddressCountInfo
+    {
+        public string AddressKey { get; set; } = "";
+        public int    Items      { get; set; }
     }
 
     /// <summary>Host → client: log your per-registration audit hashes for
