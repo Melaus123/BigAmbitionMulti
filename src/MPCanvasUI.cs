@@ -2900,6 +2900,9 @@ namespace BigAmbitionsMP
                 MPAudit.Reset();          // divergence streaks/throttle die with the session (else stale [Audit] state pollutes the bug-report log across same-process sessions)
                 CustomerPuppets.Reset();  // round-41: puppet bodies + authority table die with the scene
                 MPStockSync.Reset();      // per-shop stock digests die with the session
+                GameStatePatcher.ResetDemandState();   // round-102 statics are per-session: a held market payload must
+                                                       // not reach a different world, and the have-authoritative flag
+                                                       // must not suppress demand computation in the NEXT session
                 _appearanceSig = ""; _appearanceNextAt = 0f;
                 _blackOverlayCanvas = null;     // re-scan on fresh game load (#6)
                 _blackOverlayFindTimer = 0f;

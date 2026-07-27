@@ -3402,6 +3402,19 @@ namespace BigAmbitionsMP
         /// computation is suppressed from that point (it cannot compute correctly).</summary>
         public static bool HaveAuthoritativeDemand => _haveAuthoritativeDemand;
 
+        /// <summary>Per-session teardown for the demand channel. REQUIRED: these are
+        /// process-lifetime statics, and without this (a) a held payload from the previous world
+        /// could be applied to the new one, and (b) the "we already have authoritative demand"
+        /// flag would keep a client from computing demand in a SECOND session until that host's
+        /// data arrived. Found reviewing my own round-102 change before pushing it.</summary>
+        public static void ResetDemandState()
+        {
+            _pendingMarketJson       = null;
+            _haveAuthoritativeDemand = false;
+            _lastMarketApplyAt       = 0f;
+            _nextDemandWatchdogAt    = 0f;
+        }
+
         public static void ApplyMarketSnapshot(string marketJson)
         {
             RunOnMainThread(() =>

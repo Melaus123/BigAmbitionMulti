@@ -55,6 +55,12 @@ namespace BigAmbitionsMP
             _lastPollAt = 0f;
             _lastOwnerPollAt = 0f;
             _localOwnerAddress = "";
+            // Round-106: this one-shot gate was missed when Reset was written, so
+            // PublishAllOwnedInteriors fired only ONCE PER PROCESS. Field-confirmed
+            // (RED ROC 2026-07-27): first join logged "published ALL 9 owned interior(s)",
+            // the second join in the same launch published nothing, so the host received
+            // that client's shop contents only for buildings they physically walked into.
+            _publishedAllOwned = false;
         }
 
         // ── Subscription management ───────────────────────────────────────────

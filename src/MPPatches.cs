@@ -4059,6 +4059,24 @@ namespace BigAmbitionsMP
                         reg.RentedByPlayer = false;
                         (__state ??= new()).Add(reg);
                     }
+                    // Round-105 diagnostic (field 2026-07-27, RED ROC): a client's weekly income went
+                    // $1,362,643 -> $0 with all 15 businesses still present, no reload and no interior
+                    // loss. BOTH zeroed figures read gi.financialSummaries (RivalSelfStats weekly sum
+                    // and BuildingRegistration.GetAvgDailyIncome), so one cause empties both — and this
+                    // veil is the only thing that decides which businesses enter the day's summary.
+                    // It previously logged NOTHING on the success path, so a misclassification here was
+                    // invisible. Now every daily run says what it excluded: if a player's OWN shops
+                    // appear in this list, their own income is being kept out of their own books.
+                    if (__state != null && __state.Count > 0)
+                    {
+                        var sb = new System.Text.StringBuilder();
+                        for (int i = 0; i < __state.Count && i < 4; i++)
+                            sb.Append(' ').Append(GameStateReader.AddressKey(__state[i]));
+                        Plugin.Logger.LogInfo(
+                            $"[Economics] daily summary excludes {__state.Count} business(es) attributed to ANOTHER player —{sb}" +
+                            (__state.Count > 4 ? $" (+{__state.Count - 4} more)" : "") +
+                            ". These are not counted in this machine's own income.");
+                    }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Economics] summary veil: {ex.Message}"); }
             }
