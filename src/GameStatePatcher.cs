@@ -2055,7 +2055,15 @@ namespace BigAmbitionsMP
               .Append(i.LinkedItemName ?? "").Append('|').Append(i.IsSecured).Append('|')
               .Append(i.StateIndex).Append('|').Append(i.Alias ?? "").Append('|')
               .Append(i.CustomValue ?? "").Append('|').Append(i.WorldSpaceTextValue ?? "").Append('|')
-              .Append(i.PriceOnPurchase.ToString(inv)).Append('#');
+              .Append(i.PriceOnPurchase.ToString(inv));
+            // Round-99c (probe-proven): item PAINT is identity. Without it, a color-only delta
+            // classified as transform-only and the colored reconstruction was DISCARDED — grey
+            // furniture on first entry, repaints invisible. In core ⇒ paint change ⇒ respawn ⇒
+            // the native spawn paint path applies it. Both overloads MUST append identically.
+            if (i.CustomColors != null)
+                foreach (var cc in i.CustomColors)
+                    if (cc != null) sb.Append('|').Append(cc.Channel).Append(':').Append(cc.ColorPacked);
+            sb.Append('#');
             if (i.CargoInstances != null)
                 foreach (var c in i.CargoInstances)
                     if (c != null) sb.Append(c.ItemName ?? "").Append(':').Append(c.Amount).Append(':')
@@ -2078,7 +2086,12 @@ namespace BigAmbitionsMP
               .Append(ii.linkedItemName ?? "").Append('|').Append(ii.isSecured).Append('|')
               .Append(ii.stateIndex).Append('|').Append(ii.alias?.ToString() ?? "").Append('|')
               .Append(ii.customValue?.ToString() ?? "").Append('|').Append(ii.worldSpaceTextValue?.ToString() ?? "").Append('|')
-              .Append(ii.priceOnPurchase.ToString(inv)).Append('#');
+              .Append(ii.priceOnPurchase.ToString(inv));
+            // Round-99c: paint is identity — MUST mirror the DTO overload exactly.
+            if (ii.customColors != null)
+                foreach (var cc in ii.customColors)
+                    if (cc != null) sb.Append('|').Append((int)cc.channel).Append(':').Append(cc.color.color);
+            sb.Append('#');
             if (ii.cargoInstances != null)
                 foreach (var c in ii.cargoInstances)
                     if (c != null) sb.Append(c.itemName ?? "").Append(':').Append(c.amount).Append(':')
@@ -2154,9 +2167,11 @@ namespace BigAmbitionsMP
                             c.Amount,
                             price,
                             c.Paid);
-                        if (ci.customColors != null && c.CustomColors != null)
+                        // Round-99: the 4-arg CargoInstance ctor sets customColors = NULL —
+                        // same dead-guard class as the item colors below; assign instead.
+                        if (c.CustomColors != null && c.CustomColors.Count > 0)
                         {
-                            ci.customColors.Clear();
+                            ci.customColors = new List<BigAmbitions.Items.CustomColor>();
                             foreach (var cc in c.CustomColors)
                                 ci.customColors.Add(new BigAmbitions.Items.CustomColor { channel = (BigAmbitions.Items.CustomColorChannel)cc.Channel, color = new SerializableColor(cc.ColorPacked) });
                         }
@@ -2171,9 +2186,10 @@ namespace BigAmbitionsMP
                                     amount       = n.Amount,
                                     pricePerUnit = n.PricePerUnit,
                                 };
-                                if (nci.customColors != null && n.CustomColors != null)
+                                // Round-99: NestedCargoInstance.customColors defaults NULL — same dead guard; assign.
+                                if (n.CustomColors != null && n.CustomColors.Count > 0)
                                 {
-                                    nci.customColors.Clear();
+                                    nci.customColors = new List<BigAmbitions.Items.CustomColor>();
                                     foreach (var cc in n.CustomColors)
                                         nci.customColors.Add(new BigAmbitions.Items.CustomColor { channel = (BigAmbitions.Items.CustomColorChannel)cc.Channel, color = new SerializableColor(cc.ColorPacked) });
                                 }
@@ -2184,25 +2200,30 @@ namespace BigAmbitionsMP
                     }
                 }
 
-                // Dirt spots
-                if (ii.dirtSpotsThatAffects != null && i.DirtSpotsThatAffects != null)
+                // Dirt spots — round-99: same dead-guard class as the colors (native field
+                // has no initializer → the old `ii.dirtSpotsThatAffects != null` never fired).
+                if (i.DirtSpotsThatAffects != null && i.DirtSpotsThatAffects.Count > 0)
                 {
-                    ii.dirtSpotsThatAffects.Clear();
+                    ii.dirtSpotsThatAffects = new List<int>();
                     foreach (var d in i.DirtSpotsThatAffects) ii.dirtSpotsThatAffects.Add(d);
                 }
 
-                // Custom positions
-                if (ii.customPositions != null && i.CustomPositions != null)
+                // Custom positions (multi-element items, e.g. cinema seating) — round-99: same dead guard.
+                if (i.CustomPositions != null && i.CustomPositions.Count > 0)
                 {
-                    ii.customPositions.Clear();
+                    ii.customPositions = new List<SerializableVector3>();
                     foreach (var p in i.CustomPositions)
                         ii.customPositions.Add(new SerializableVector3 { x = p.X, y = p.Y, z = p.Z });
                 }
 
-                // Top-level custom colors
-                if (ii.customColors != null && i.CustomColors != null)
+                // Top-level custom colors — round-99: the native ItemInstance ctor leaves
+                // customColors NULL, so the old `ii.customColors != null` guard was dead code
+                // and every wire color was silently dropped (field: "clients see the object
+                // but not the color"). ASSIGN the list; the replica's ItemController applies
+                // it natively at spawn (it reads ItemInstance.customColors on init).
+                if (i.CustomColors != null && i.CustomColors.Count > 0)
                 {
-                    ii.customColors.Clear();
+                    ii.customColors = new List<BigAmbitions.Items.CustomColor>();
                     foreach (var cc in i.CustomColors)
                         ii.customColors.Add(new BigAmbitions.Items.CustomColor { channel = (BigAmbitions.Items.CustomColorChannel)cc.Channel, color = new SerializableColor(cc.ColorPacked) });
                 }

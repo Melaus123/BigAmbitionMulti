@@ -835,11 +835,24 @@ namespace BigAmbitionsMP
                     h = h * 31 + ((int)System.Math.Round(it.YRotation * 10f)).GetHashCode();
                     h = h * 31 + it.StateIndex;
                     h = h * 31 + MPAudit.StableHash(it.Alias);
+                    // Round-99d: PAINT is visible state — without it a repaint produced no hash
+                    // change, so the push only rode the ~30s re-assert (measured 20-30s color
+                    // latency). Third member of the colors-omitted class (dead guards, IdentitySig).
+                    foreach (var cc in it.CustomColors)
+                    {
+                        h = h * 31 + cc.Channel;
+                        h = h * 31 + cc.ColorPacked;
+                    }
                     foreach (var c in it.CargoInstances)
                     {
                         h = h * 31 + MPAudit.StableHash(c.ItemName);
                         h = h * 31 + c.Amount;
                         h = h * 31 + ((int)System.Math.Round(c.PricePerUnit * 100f)).GetHashCode();
+                        foreach (var cc in c.CustomColors)
+                        {
+                            h = h * 31 + cc.Channel;
+                            h = h * 31 + cc.ColorPacked;
+                        }
                     }
                 }
                 return h;
