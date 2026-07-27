@@ -1049,8 +1049,11 @@ namespace BigAmbitionsMP
                 {
                     var e = list[i];
                     if (e?.id == null) continue;
-                    if (!MPRegisterSync.IsInjectedStaff(e.id)) continue;
-                    if (!alsoMergedPartners && MPRegisterSync.IsInjectedFromMergedPartner(e.id)) continue;
+                    // Round-100: synthetic duty stand-ins strip UNCONDITIONALLY — never real staff,
+                    // no merged exemption. Injected partner records keep the round-94 rules.
+                    bool synthetic = MPRegisterSync.IsSyntheticDuty(e.id);
+                    if (!synthetic && !MPRegisterSync.IsInjectedStaff(e.id)) continue;
+                    if (!synthetic && !alsoMergedPartners && MPRegisterSync.IsInjectedFromMergedPartner(e.id)) continue;
                     (stash ??= new System.Collections.Generic.List<Entities.EmployeeInstance>()).Add(e);
                     list.RemoveAt(i);
                 }
@@ -3709,8 +3712,9 @@ namespace BigAmbitionsMP
                     // pattern match so the null test can't route through an operator surprise.
                     if (__result == null || queryInfo.withAssignedAddress is not null) return;
                     int removed = __result.RemoveAll(e =>
-                        e != null && MPRegisterSync.IsInjectedStaff(e.id)
-                                  && !MPRegisterSync.IsInjectedFromMergedPartner(e.id));
+                        e != null && (MPRegisterSync.IsSyntheticDuty(e.id)   // round-100: stand-ins never answer queries
+                                      || (MPRegisterSync.IsInjectedStaff(e.id)
+                                          && !MPRegisterSync.IsInjectedFromMergedPartner(e.id))));
                     if (removed > 0 && UnityEngine.Time.unscaledTime >= _nextLog)
                     {
                         _nextLog = UnityEngine.Time.unscaledTime + 5f;
@@ -3736,6 +3740,7 @@ namespace BigAmbitionsMP
                     if (list == null) return true;
                     __result = list
                         .Where(e => e?.characterData?.skills != null
+                                    && !MPRegisterSync.IsSyntheticDuty(e.id)   // round-100: stand-in skill can't be "your best employee"
                                     && !(MPRegisterSync.IsInjectedStaff(e.id) && !MPRegisterSync.IsInjectedFromMergedPartner(e.id)))
                         .SelectMany(e => e.characterData.skills)
                         .Select(x => x.value)

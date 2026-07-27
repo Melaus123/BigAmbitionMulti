@@ -1220,6 +1220,13 @@ namespace BigAmbitionsMP
         public static bool IsInjectedStaff(string employeeId)
             => !string.IsNullOrEmpty(employeeId) && _injectedStaff.ContainsKey(employeeId);
 
+        /// <summary>Round-100: is this a synthetic duty stand-in ("On-Duty Staff", BAMP_DUTY_ ids)?
+        /// Synthetics are NEVER anyone's real staff — display/goal filters strip them
+        /// unconditionally (no merged-partner exemption; S7 field report: ten "On-Duty Staff"
+        /// rows in a business-less client's MyEmployees, one per staffed host shop).</summary>
+        public static bool IsSyntheticDuty(string employeeId)
+            => !string.IsNullOrEmpty(employeeId) && employeeId.StartsWith(SyntheticDutyEmployeeIdPrefix);
+
         /// <summary>World-health consumer (2026-07-09): how many partner-staff records are injected.</summary>
         public static int InjectedCount => _injectedStaff.Count;
 
