@@ -288,10 +288,32 @@ namespace BigAmbitionsMP
                 }
 
                 payload.OwnerPlayerId = playerId;
-                payload.ItemInstancesAuthoritative = true;
                 payload.Authoritative = true;   // owner's own push — authoritative for the whole interior
+                // Round-103: same floor as the sender — the host must not PROMOTE an empty item set to
+                // authoritative on the owner's behalf. Older clients (pre-fix) still send empty pushes
+                // stamped authoritative; re-stamping here is what let one join delete a whole shop.
+                payload.ItemInstancesAuthoritative = payload.ItemInstances != null && payload.ItemInstances.Count > 0;
+                if (!payload.ItemInstancesAuthoritative)
+                    Plugin.Logger.LogWarning(
+                        $"[InteriorSync] OwnerSnapshot from '{playerId}' addr='{payload.AddressKey}' carries NO items — " +
+                        "item authority DENIED (it cannot clear the stored interior). Their character save likely disagrees " +
+                        "with this session's ownership ledger; the stored copy is kept.");
                 int hash = ComputeHash(payload);
                 bool changed = !_ownerSnapshotsByAddr.TryGetValue(payload.AddressKey, out var prev) || prev.Hash != hash;
+                // Round-103b: an EMPTY push must not replace a cached NON-EMPTY one either. This cache is
+                // what BuildSnapshotForHostSend serves to everyone who enters the building, so caching the
+                // empty version would keep the world's copy protected while still handing out nothing —
+                // and the owner would never get its own contents back. Keep the good snapshot; the owner
+                // re-syncs from it on entry.
+                bool emptyOverGood = (payload.ItemInstances == null || payload.ItemInstances.Count == 0)
+                                     && prev?.Snapshot?.ItemInstances != null && prev.Snapshot.ItemInstances.Count > 0;
+                if (emptyOverGood)
+                {
+                    Plugin.Logger.LogWarning(
+                        $"[InteriorSync] KEEPING the stored interior for '{payload.AddressKey}': '{playerId}' pushed an empty one " +
+                        $"over {prev!.Snapshot.ItemInstances.Count} stored item(s). They will receive the stored copy when they enter.");
+                    return;
+                }
                 _ownerSnapshotsByAddr[payload.AddressKey] = new OwnerInteriorState
                 {
                     OwnerPlayerId = playerId,
@@ -321,8 +343,23 @@ namespace BigAmbitionsMP
                     return false;
                 }
                 snap.OwnerPlayerId = MPConfig.PlayerId;
-                snap.ItemInstancesAuthoritative = true;
                 snap.Authoritative = true;   // owner's own push — authoritative for the whole interior
+                // Round-103 (field 2026-07-27, Prabaha/RED ROC): an owner push carrying ZERO items
+                // must NEVER claim item authority. A client whose stored character disagrees with the
+                // host's ownership ledger (e.g. it once fresh-started in this lineage) owns shops in
+                // the ledger while its own save holds nothing for them — and PublishAllOwnedInteriors
+                // then broadcast "all nine of my shops are empty, authoritatively" at join. The host
+                // obeyed and DELETED the real contents (removed=128/33/31/6 in that session), which
+                // also emptied cachedAvailableProducts → business requirements failed → zero customer
+                // entries → no revenue. "I have nothing" is almost always absence of knowledge, not
+                // evidence; only a non-empty push may assert item truth. Designs/dirt/prices still
+                // travel, so the heal for everything else is unaffected.
+                snap.ItemInstancesAuthoritative = snap.ItemInstances.Count > 0;
+                if (snap.ItemInstances.Count == 0)
+                    Plugin.Logger.LogWarning(
+                        $"[InteriorSync] owner push for '{addressKey}' ({reason}) carries NO items — sent WITHOUT item authority " +
+                        "so it cannot clear the stored interior. If this shop really is empty on this machine, its contents are " +
+                        "missing locally (stale/mismatched character save) — the host's copy is the good one.");
                 int hash = ComputeHash(snap);
                 if (!force && _lastLocalOwnerHashByAddr.TryGetValue(addressKey, out var prev) && prev == hash)
                     return true;

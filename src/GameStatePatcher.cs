@@ -962,11 +962,15 @@ namespace BigAmbitionsMP
                             }
                             catch { }
 
-                            if (protectPlayerBusiness
-                                && payload.ItemInstances.Count == 0
-                                && !payload.ItemInstancesAuthoritative)
+                            // Round-103 (field 2026-07-27): the authoritative-flag exemption is GONE.
+                            // An empty item set may never clear a player-owned business, whatever it
+                            // claims — that exemption is exactly how one join deleted 128 items from a
+                            // client's cinema (and 33/31/6 from three more shops). Keeping stale items
+                            // is recoverable; deleting real ones is not. Genuine emptying still syncs:
+                            // removals travel as per-item diffs while the owner is inside.
+                            if (protectPlayerBusiness && payload.ItemInstances.Count == 0 && reg.itemInstances.Count > 0)
                             {
-                                Plugin.Logger.LogWarning($"[Patcher] Interior item apply skipped for '{payload.AddressKey}': empty non-authoritative player-business snapshot would clear {reg.itemInstances.Count} local item(s).");
+                                Plugin.Logger.LogWarning($"[Patcher] Interior item apply REFUSED for '{payload.AddressKey}': an empty snapshot (itemAuth={payload.ItemInstancesAuthoritative}) would have cleared {reg.itemInstances.Count} stored item(s) of a player-owned business. Kept the stored interior.");
                             }
                             else
                             {
