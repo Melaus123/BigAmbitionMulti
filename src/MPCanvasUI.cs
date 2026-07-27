@@ -569,6 +569,8 @@ namespace BigAmbitionsMP
             RemotePlayerManager.TickVehicleCollisionIgnores();   // remote avatars must not shove vehicles
             TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
             MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion
+            GameStatePatcher.TickPendingMarketEvents();   // round-101: market events that arrived pre-world
+            MPPriceFillProbe.Tick();   // PROBE PriceFill (round-101 item 3) — remove when resolved
             // (quiesce-off 4s timer RETIRED 2026-06-11 — stage-4 migration #1:
             //  the quiesce now ends on the lifecycle WorldReady EVENT; see
             //  OnLifecyclePhase below.)

@@ -398,6 +398,12 @@ namespace BigAmbitionsMP
         // multipliers locally — without this sync clients never see ANY event.
         private static int _lastMarketEventsHash;
         private static float _nextMarketEventsAt;
+        // Round-101 (S7 audit: "events DIVERGED" every window, all session): the change-gate
+        // alone made a single missed apply PERMANENT — the client's apply silently no-ops while
+        // its world isn't live yet, and an unchanged host list never re-sends. Same periodic
+        // re-assert the price/stock channels use so a dropped update self-heals.
+        private const float MarketEventsReassertSeconds = 30f;
+        private static float _lastMarketEventsSentAt = -1000f;
 
         private static void TickMarketEvents()
         {
@@ -410,10 +416,13 @@ namespace BigAmbitionsMP
                 if (events == null) return;
                 string json = Newtonsoft.Json.JsonConvert.SerializeObject(events);
                 int h = MPAudit.StableHash(json);
-                if (h == _lastMarketEventsHash) return;
+                bool changed = h != _lastMarketEventsHash;
+                bool due     = (now - _lastMarketEventsSentAt) >= MarketEventsReassertSeconds;
+                if (!changed && !due) return;
                 _lastMarketEventsHash = h;
+                _lastMarketEventsSentAt = now;
                 MPServer.BroadcastMarketEvents(json);
-                Plugin.Logger.LogInfo($"[BusinessSync] market events changed ({events.Count} event(s)) — broadcast.");
+                if (changed) Plugin.Logger.LogInfo($"[BusinessSync] market events changed ({events.Count} event(s)) — broadcast.");   // quiet on re-asserts
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] market events: {ex.Message}"); }
         }
@@ -558,6 +567,7 @@ namespace BigAmbitionsMP
             _cycleStartedAt = 0f;
             _lastMarketEventsHash = 0;   // re-emit market events to a fresh session / re-host (don't suppress via a stale hash)
             _nextMarketEventsAt   = 0f;
+            _lastMarketEventsSentAt = -1000f;   // round-101: first pass of a new session always sends
         }
 
         // ── Field reading ─────────────────────────────────────────────────────

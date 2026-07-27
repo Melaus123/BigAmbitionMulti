@@ -1246,14 +1246,43 @@ namespace BigAmbitionsMP
             try
             {
                 var gi = SaveGameManager.Current;
-                if (gi?.marketEvents == null) return;
+                if (gi?.marketEvents == null)
+                {
+                    // Round-101: this used to be a SILENT no-op — the join-time send and the
+                    // first change-broadcast both land while the client's world is still
+                    // loading, and nothing retried, so a client ran a whole session with no
+                    // market events (S7 audit: "events DIVERGED" in every window). Hold the
+                    // payload and let TickPendingMarketEvents apply it once the world is live.
+                    _pendingMarketEventsJson = json;
+                    Plugin.Logger.LogInfo("[Patcher] market events arrived before the world was live — held for retry.");
+                    return;
+                }
                 var list = Newtonsoft.Json.JsonConvert.DeserializeObject<List<MarketEvent>>(json);
                 if (list == null) return;
                 gi.marketEvents.Clear();
                 foreach (var e in list) if (e != null) gi.marketEvents.Add(e);
+                _pendingMarketEventsJson = null;
                 Plugin.Logger.LogInfo($"[Patcher] market events applied: {list.Count} event(s) from host.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyMarketEvents: {ex.Message}"); }
+        }
+
+        // Round-101: payload held because it arrived pre-world; retried from the main tick.
+        private static volatile string? _pendingMarketEventsJson;
+
+        /// <summary>MAIN THREAD, per-frame: apply a market-events payload that arrived before the
+        /// world existed. Cheap (a null check) until there is something held.</summary>
+        public static void TickPendingMarketEvents()
+        {
+            var held = _pendingMarketEventsJson;
+            if (held == null) return;
+            try
+            {
+                if (SaveGameManager.Current?.marketEvents == null) return;   // still not live — keep holding
+                _pendingMarketEventsJson = null;
+                ApplyMarketEvents(held);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] TickPendingMarketEvents: {ex.Message}"); }
         }
 
         /// <summary>True when this registration's business belongs to ANY session
