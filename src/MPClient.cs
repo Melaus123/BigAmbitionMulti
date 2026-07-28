@@ -728,6 +728,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.BuildingDirtEdit:   // host forwarded a helper's cleaning — I'm the owner: adopt it
+                {
+                    var bde = env.GetPayload<DirtEditPayload>();
+                    if (bde != null) GameStatePatcher.EnqueueOnMainThread(() => HelperCleaning.Apply(bde));
+                    break;
+                }
+
                 case MessageType.BuildingInteriorEdit:   // host forwarded a guest's interior edit — I'm the owner: adopt it
                 {
                     var bie = env.GetPayload<InteriorSnapshotPayload>();

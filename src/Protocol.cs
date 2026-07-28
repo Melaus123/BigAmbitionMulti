@@ -88,6 +88,7 @@ namespace BigAmbitionsMP
         // In-game chat (Phase 6: connected-players window + chat).
         Chat                 = 100, // Any → Host → All: a chat line.  Clients send to host; host relays to everyone (incl. sender) so the log is consistent.
         RetailPrices         = 101, // Any → Host → Others: live retail prices of a business the SENDER runs — keeps per-neighbourhood price competition fed with current numbers on every machine.
+        BuildingDirtEdit     = 155, // Helper → Host → Owner: floor cells a HELPER mopped in someone else's business.  Narrow on purpose (only the cells whose dirtiness changed): dirt is owner-authoritative interior state, and the only pre-existing guest→owner interior channel is the whole-snapshot forward on interior-designer close, which mopping never triggers — so without this a helper's cleaning stayed local and was overwritten by the owner's next push.
         RestVote             = 102, // Client → Host: this player started/ended a rest-class activity (consensus time-skip voting).
         RestSkipState        = 103, // Host → All: current votes + whether the consensus skip is running (banner + skip-detector stand-down).
         MoneyTransfer        = 104, // RETIRED (2026-06-12): direct transfers were replaced by accept-required gift offers (LoanOffer Kind="gift"); the host no longer handles this type.  Number stays reserved.
@@ -1640,6 +1641,31 @@ namespace BigAmbitionsMP
         public int   X         { get; set; }
         public int   Z         { get; set; }
         public float Dirtiness { get; set; }
+    }
+
+    /// <summary>One floor cell a helper mopped (MessageType.BuildingDirtEdit).  Carries the INDEX into
+    /// BuildingRegistration.dirtSpots — which is how the game itself addresses cells while mopping
+    /// (MopController.FloorCellClick writes dirtSpots[DirtSpotObject.DirtSpot].dirtiness) — plus X/Z so the
+    /// receiver can verify the index really is the same cell before trusting it.  The lattice is built by
+    /// walking the building's Floors transforms, so the order matches across machines; the X/Z check is the
+    /// cheap guard against that assumption ever breaking.</summary>
+    public class DirtSpotDeltaInfo
+    {
+        public int   Index     { get; set; }
+        public int   X         { get; set; }
+        public int   Z         { get; set; }
+        public float Dirtiness { get; set; }
+    }
+
+    /// <summary>Helper → Host → Owner: the floor cells this player just cleaned in a business they hold a
+    /// grant for.  Deliberately NOT a whole interior snapshot: a broad forward would carry every other bit
+    /// of the helper's local interior replica along with the dirt, which is exactly the class of overwrite
+    /// that has cost us shop contents before.</summary>
+    public class DirtEditPayload
+    {
+        public string AddressKey { get; set; } = "";
+        public string SenderId   { get; set; } = "";
+        public List<DirtSpotDeltaInfo> Spots { get; set; } = new();
     }
 
     /// <summary>

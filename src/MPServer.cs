@@ -1262,6 +1262,22 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.BuildingDirtEdit:
+                {
+                    // Round-112: a helper mopped a floor in someone else's business.  Routing + grant check
+                    // live in HandleBuildingDirtEdit (shared with the host's own local path).
+                    var de = env.GetPayload<DirtEditPayload>();
+                    if (de == null || string.IsNullOrEmpty(de.AddressKey)) break;
+                    if (!SenderIs(de.SenderId, senderPid, env.Type)) break;
+                    if (de.Spots.Count > 2000)
+                    {
+                        Plugin.Logger.LogWarning($"[Cleaning] dirt edit for '{de.AddressKey}' from '{senderPid}': implausible size ({de.Spots.Count} cells) — dropped.");
+                        break;
+                    }
+                    HandleBuildingDirtEdit(de, senderPid);
+                    break;
+                }
+
                 case MessageType.RetailPrices:
                 {
                     // A client's business changed its retail prices: apply to the
@@ -2255,6 +2271,34 @@ namespace BigAmbitionsMP
                     SendHubTo(ownerPid, MessageType.BuildingInteriorEdit, snap);   // forward to the owner's machine to adopt
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] HandleBuildingInteriorEdit: {ex.Message}"); }
+        }
+
+        /// <summary>Round-112 — route a HELPER's cleaning report (MessageType.BuildingDirtEdit) to whoever owns
+        /// the building.  Authorization mirrors HandleBuildingInteriorEdit exactly: the sender must be the owner
+        /// or hold a Housing/Business grant from them.  Deliberately narrow — this carries only floor-cell
+        /// dirtiness, so unlike the whole-snapshot forward it cannot bring anything else with it.</summary>
+        public static void HandleBuildingDirtEdit(DirtEditPayload payload, string senderPid)
+        {
+            try
+            {
+                if (payload == null || string.IsNullOrEmpty(payload.AddressKey) || payload.Spots.Count == 0) return;
+                string owner = (BuildingOwners.TryGetValue(payload.AddressKey, out var o) && !string.IsNullOrEmpty(o)) ? o
+                             : (BuildingRealEstateOwners.TryGetValue(payload.AddressKey, out var r) ? r : "");
+                if (string.IsNullOrEmpty(owner)) return;
+                string ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;
+                if (ownerPid != senderPid
+                    && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, senderPid)
+                    && !GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))
+                {
+                    Plugin.Logger.LogWarning($"[Cleaning] dirt edit for '{payload.AddressKey}' from '{senderPid}' — no grant from '{ownerPid}' — dropped.");
+                    return;
+                }
+                if (ownerPid == MPConfig.PlayerId)
+                    GameStatePatcher.EnqueueOnMainThread(() => HelperCleaning.Apply(payload));
+                else
+                    SendHubTo(ownerPid, MessageType.BuildingDirtEdit, payload);   // the owner's machine adopts it
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Cleaning] HandleBuildingDirtEdit: {ex.Message}"); }
         }
 
         public static void RecordPhaseReport(PhaseReportPayload? p)
