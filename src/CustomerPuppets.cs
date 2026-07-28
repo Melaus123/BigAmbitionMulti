@@ -599,49 +599,279 @@ namespace BigAmbitionsMP
             try { return MPRegisterSync.LocalPersonalDutyKey(); } catch { return ""; }
         }
 
-        private static bool _fetchRunning;
+        // ── Round-146 serve actor ─────────────────────────────────────────────────────────────
+        // The simulator streams the stand-in's REAL serve events (RegisterServeMirror); this actor
+        // performs them on the duty player's own body, strictly in order: each fetch walks to the
+        // actual item position the stand-in grabbed, the end beat walks home and rings up, a
+        // self-service start beat rings up in place for the native duration.  Replaces round-120's
+        // synthesized single fetch trip (field 2026-07-28: the guess never fired — two ring-ups and
+        // a wait — and a guess cannot match per-shop behaviour anyway).  Queue + single runner
+        // because beats arrive on the wire while a previous walk is still playing; the native serve
+        // is sequential and so is this.
+        private enum ServeAct { Fetch, ReturnAndRingUp, RingUpOnly, ReturnOnly }
+        private static readonly System.Collections.Generic.Queue<(ServeAct act, Vector3 pos, float dur)> _serveQueue = new();
+        private static bool _serveActorRunning;
+        private static bool _fetchBeatLogged;
+        private static Vector3 _serveHome;
+        private static Vector3 _serveHomeFace;
+        private static int _fetchesLeft = -1;     // round-151: expected grabs this serve (-1 = unknown)
+        private static bool _returnQueued;        // round-151: home-return already enqueued this serve
 
-        /// <summary>Round-120: walk the working player to a nearby shelf and back, mirroring the native fetch
-        /// trip.  Bounded and self-cancelling: one trip at a time, and it always returns to the till even if
-        /// the walk fails, so a serve cannot leave someone stranded mid-floor.</summary>
-        private static void TryFetchTrip(ThirdPersonCharacter me)
+        /// <summary>Round-150 — the nearest live item to a streamed position (the wire carries the item's
+        /// CENTRE; the approach spot is resolved locally via the item's own native methods).</summary>
+        private static ItemController NearestItem(Vector3 pos, float maxR)
+        {
+            ItemController best = null; float bestD2 = maxR * maxR;
+            try
+            {
+                foreach (var ic in UnityEngine.Object.FindObjectsOfType<ItemController>())
+                {
+                    if (ic == null) continue;
+                    float d2 = (ic.transform.position - pos).sqrMagnitude;
+                    if (d2 < bestD2) { bestD2 = d2; best = ic; }
+                }
+            }
+            catch { }
+            return best;
+        }
+
+        /// <summary>Round-150 — home is the duty REGISTER's own employee position (the native
+        /// GetEmployeePosition the real serve returns to), never "wherever I stood when the serve
+        /// started" — that drifted and could even point at the wrong register (field 2026-07-28).</summary>
+        private static bool TryGetMyDutyHome(out Vector3 home, out Vector3 face)
+        {
+            home = default; face = default;
+            try
+            {
+                string mine = MyDutyStationKey();
+                if (string.IsNullOrEmpty(mine)) return false;
+                var parts = mine.Split(':');
+                var approx = new Vector3(int.Parse(parts[0]), int.Parse(parts[1]), int.Parse(parts[2]));
+                EmployeeStationController best = null; float bestD2 = 4f;
+                foreach (var o in UnityEngine.Object.FindObjectsOfType<EmployeeStationController>())
+                {
+                    if (o == null) continue;
+                    float d2 = (o.transform.position - approx).sqrMagnitude;
+                    if (d2 < bestD2) { bestD2 = d2; best = o; }
+                }
+                if (best == null) return false;
+                home = best.GetEmployeePosition();
+                face = best.transform.position;   // native return-walk looks at the station itself
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private static UnityEngine.Coroutine _serveActorHandle;
+        private static float _actorHardDeadline;
+
+        private static void EnqueueServeAct(ThirdPersonCharacter me, ServeAct act, Vector3 pos, float dur)
+        {
+            _serveQueue.Enqueue((act, pos, dur));
+            // Round-149 watchdog: no single act may hold the runner beyond its hard deadline — a stuck
+            // runner is stopped and a fresh one started (StopCoroutine skips finally, so the flag is
+            // cleared by hand).  The round-146/147 failure mode — one frozen walk silencing the whole
+            // performance forever — is structurally impossible now.
+            if (_serveActorRunning && Time.unscaledTime > _actorHardDeadline)
+            {
+                try { if (_serveActorHandle != null) me.StopCoroutine(_serveActorHandle); } catch { }
+                _serveActorRunning = false;
+                Plugin.Logger.LogWarning("[ServeActor] watchdog: runner exceeded its deadline — restarted.");
+            }
+            if (!_serveActorRunning)
+            {
+                _serveActorRunning = true;
+                _actorHardDeadline = Time.unscaledTime + 15f;
+                _serveActorHandle = me.StartCoroutine(ServeActor(me));
+            }
+        }
+
+        /// <summary>Round-147: every act is HANG-PROOF and EXCEPTION-PROOF.  Field 2026-07-28: routing all
+        /// acts through walk-first coroutines silenced the whole performance ("client does nothing at all") —
+        /// consistent with the walk never completing on a duty-locked body, which ALSO explains why round-120's
+        /// fetch trip never fired while its directly-played animations did.  So: walks are driven manually with
+        /// a deadline and a swallow, a failed walk degrades to performing the animation in place (the pre-146
+        /// behaviour that field-proved visible), the run flag resets in finally, and the FIRST walk logs the
+        /// agent's state so the blocker is named instead of guessed.</summary>
+        private static bool _walkDiagLogged;
+
+        private static System.Collections.IEnumerator BoundedWalk(ThirdPersonCharacter me, Vector3 pos, float arrive)
+        {
+            // Round-149: driving the NATIVE MoveToPosition proved UN-boundable — it yields a WaitUntil
+            // whose predicate can never fire (its stuck-abort is parameter-gated), my coroutine blocked
+            // on that single yield forever, and the deadline between yields never sampled again
+            // (breadcrumbs: act BEGIN Fetch, healthy agent, no act END, no timeout — the frozen runner
+            // silenced every animation queued behind it since round 146).  So the walk is now OURS:
+            // set the destination, poll PER FRAME, deadline enforced every frame; if the body has not
+            // displaced after ~1s the diag prints the agent's path truth (hasPath/status/velocity),
+            // naming the mover-blocker instead of guessing.  A walk that cannot happen simply lapses
+            // and the following animation plays in place — visible either way.
+            if (!_walkDiagLogged)
+            {
+                _walkDiagLogged = true;
+                string agent = "null";
+                try
+                {
+                    var a0 = me.navmeshAgent;
+                    agent = a0 == null ? "null"
+                        : $"enabled={a0.isActiveAndEnabled} onNavMesh={a0.isOnNavMesh} isStopped={a0.isStopped} updatePos={a0.updatePosition} speed={a0.speed:F1}";
+                }
+                catch (Exception ex) { agent = $"read-failed: {ex.Message}"; }
+                Plugin.Logger.LogInfo($"[ServeActor] first walk: target={pos} me={me.transform.position} agent({agent})");
+            }
+            var a = me.navmeshAgent;
+            if (a == null || !a.isActiveAndEnabled) yield break;
+            bool destOk = false;
+            try { destOk = a.SetDestination(pos); } catch { yield break; }
+            float deadline = Time.unscaledTime + 6f;
+            float diagAt   = Time.unscaledTime + 1f;
+            Vector3 startPos = me.transform.position;
+            bool diagDone = false;
+            bool reached = false;
+            while (Time.unscaledTime < deadline)
+            {
+                bool arrived;
+                try
+                {
+                    if (!a.isActiveAndEnabled) break;
+                    arrived = !a.pathPending && a.hasPath && a.remainingDistance <= arrive + 0.05f;
+                    if (!diagDone && Time.unscaledTime >= diagAt)
+                    {
+                        diagDone = true;
+                        if ((me.transform.position - startPos).sqrMagnitude < 0.01f)
+                            Plugin.Logger.LogInfo($"[ServeActor] walk diag (1s in, no displacement): setDest={destOk} "
+                                + $"hasPath={a.hasPath} pathPending={a.pathPending} status={a.pathStatus} "
+                                + $"remaining={(a.hasPath ? a.remainingDistance : -1f):F2} vel={a.velocity.magnitude:F2} "
+                                + "— whatever is false/zero here is the mover-blocker.");
+                    }
+                }
+                catch { break; }
+                if (arrived) { reached = true; break; }
+                yield return null;
+            }
+            // Round-152: the arrival radius is native (MoveToPosition's maxDistance) but natively it only
+            // releases the WAIT — the agent keeps its path and glides to the exact spot.  Cancelling the
+            // path here turned the wait-radius into a stop-radius, which is why the acting stopped short
+            // of where the host stands.  So: leave an arrived agent's path alone (it finishes the last
+            // 0.3m by itself); only a timed-out/aborted walk gets its path cleared.
+            if (!reached)
+                try { if (a.isActiveAndEnabled && a.hasPath) a.ResetPath(); } catch { }
+        }
+
+        private static System.Collections.IEnumerator PlayAnim(ThirdPersonCharacter me, AnimationType anim, float dur)
+        {
+            System.Collections.IEnumerator a = null;
+            try { a = me.animator.RunAnimation(anim, dur); } catch { yield break; }
+            if (a == null) yield break;
+            while (true)
+            {
+                bool step;
+                try { step = a.MoveNext(); } catch { yield break; }
+                if (!step) yield break;
+                yield return a.Current;
+            }
+        }
+
+        /// <summary>Round-153: wait for the arrival glide to settle, THEN turn.  A tween fired while the
+        /// agent is still steering fights its rotation and lands on a wrong facing — native rotates only
+        /// after velocity reaches zero (MoveToPosition's rotate branch).</summary>
+        private static System.Collections.IEnumerator SettleThenFace(ThirdPersonCharacter me, Vector3 face)
+        {
+            float end = Time.unscaledTime + 0.8f;
+            while (Time.unscaledTime < end)
+            {
+                bool moving = false;
+                try { var a = me.navmeshAgent; moving = a != null && a.isActiveAndEnabled && a.velocity.sqrMagnitude > 0.0025f; } catch { }
+                if (!moving) break;
+                yield return null;
+            }
+            try { me.transform.DOLookAt(new Vector3(face.x, me.transform.position.y, face.z), 0.25f); } catch { }
+        }
+
+        private static System.Collections.IEnumerator ServeActor(ThirdPersonCharacter me)
         {
             try
             {
-                if (_fetchRunning || me == null) return;
-
-                // A shelf-ish target: the nearest item with retail cargo, excluding the till itself.
-                Vector3 home = me.transform.position;
-                Transform? target = null; float bestD2 = 9f * 9f;   // stay in-shop; no cross-room hikes
-                foreach (var ic in UnityEngine.Object.FindObjectsOfType<ItemController>())
+                while (_serveQueue.Count > 0)
                 {
-                    if (ic == null || ic.ItemInstance == null) continue;
-                    var t = ic.transform;
-                    float d2 = (t.position - home).sqrMagnitude;
-                    if (d2 < 2.25f || d2 > bestD2) continue;        // not the counter we are standing at
-                    bestD2 = d2; target = t;
+                    var (act, pos, dur) = _serveQueue.Dequeue();
+                    // Round-148: the user reports NOTHING visible while 'served 1' still logs — so either the
+                    // actor stalls between acts or every act runs invisibly.  Breadcrumbs for the first serve
+                    // separate those two worlds; retire with the serve-mirror probes.
+                    _actorHardDeadline = Time.unscaledTime + 15f;   // round-149: per-act watchdog window
+                    if (_servedThisSession == 0)
+                        Plugin.Logger.LogInfo($"[ServeActor] act BEGIN {act} queue={_serveQueue.Count}");
+                    switch (act)
+                    {
+                        case ServeAct.Fetch:
+                        {
+                            // Round-150: the wire carries the item's CENTRE; walking at a centre lands on
+                            // whatever side pathing reaches first (field: "accesses the rear of the
+                            // machine").  Resolve the native approach spot on OUR copy of the item — the
+                            // same two calls the native GrabItem makes — and face the item on arrival.
+                            Vector3 walkTo = pos, face = pos;
+                            try
+                            {
+                                var ic = NearestItem(pos, 2.5f);
+                                if (ic != null)
+                                {
+                                    face = ic.transform.position;
+                                    var v = ic.GetClosestNavMeshTargetPosition(me.transform.position);
+                                    if (v == Vector3.zero) v = ic.GetNavMeshTargetPosition();
+                                    if (v != Vector3.zero) walkTo = v;
+                                }
+                            }
+                            catch { }
+                            yield return BoundedWalk(me, walkTo, 0.3f);
+                            yield return SettleThenFace(me, face);
+                            yield return PlayAnim(me, AnimationType.UsingProducer, 2.5f);
+                            // Round-151: that was the last expected grab → head home NOW (the native serve
+                            // returns before the customer pays; waiting for the finish beat was one full
+                            // return-walk late and the customer left first).
+                            if (_fetchesLeft > 0 && --_fetchesLeft == 0 && !_returnQueued)
+                            {
+                                _returnQueued = true;
+                                _serveQueue.Enqueue((ServeAct.ReturnAndRingUp, Vector3.zero, 0f));
+                            }
+                            // Round-153: the entry count is only the FAST path — the native serve SKIPS
+                            // unfindable items, so grabs can run short of the count and the return then
+                            // waited for the finish beat again (field: "delay reintroduced").  If no
+                            // further beat arrives within a grace second, this grab was the last: go home.
+                            if (_serveQueue.Count == 0 && !_returnQueued)
+                            {
+                                float graceEnd = Time.unscaledTime + 1.0f;
+                                while (Time.unscaledTime < graceEnd && _serveQueue.Count == 0) yield return null;
+                                if (_serveQueue.Count == 0 && !_returnQueued)
+                                {
+                                    _returnQueued = true;
+                                    _serveQueue.Enqueue((ServeAct.ReturnAndRingUp, Vector3.zero, 0f));
+                                }
+                            }
+                            break;
+                        }
+                        case ServeAct.ReturnAndRingUp:
+                            yield return BoundedWalk(me, _serveHome, 0.25f);
+                            yield return SettleThenFace(me, _serveHomeFace);
+                            yield return PlayAnim(me, AnimationType.UsingCashRegister, 2f);
+                            break;
+                        case ServeAct.ReturnOnly:
+                            yield return BoundedWalk(me, _serveHome, 0.25f);
+                            yield return SettleThenFace(me, _serveHomeFace);
+                            break;
+                        case ServeAct.RingUpOnly:
+                            yield return PlayAnim(me, AnimationType.UsingCashRegister, dur);
+                            break;
+                    }
+                    if (_servedThisSession == 0)
+                        Plugin.Logger.LogInfo($"[ServeActor] act END {act} me={me.transform.position}");
                 }
-                if (target == null) return;                          // nothing to fetch from — stay put
-
-                _fetchRunning = true;
-                me.StartCoroutine(FetchRoutine(me, target, home));
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] fetch trip: {ex.Message}"); _fetchRunning = false; }
+            finally { _serveActorRunning = false; }
         }
 
-        private static System.Collections.IEnumerator FetchRoutine(ThirdPersonCharacter me, Transform shelf, Vector3 home)
-        {
-            Vector3 shelfPos = shelf != null ? shelf.position : home;
-            // Out to the shelf, grab, back to the till — the same three beats the native serve performs.
-            yield return me.MoveToPosition(shelfPos, shelfPos, 0.6f, rotateToLookTarget: true);
-            yield return me.animator.RunAnimation(AnimationType.UsingProducer, 2.5f);
-            yield return me.MoveToPosition(home, home, 0.5f, rotateToLookTarget: true);
-            _fetchRunning = false;
-        }
-
-        /// <summary>Round-119: a serve started or finished at some till in my building.  If it is the till I am
-        /// working, perform it.  Beats for any other till are ignored — the simulator broadcasts per building,
-        /// and only the player standing at that specific counter should act it out.</summary>
+        /// <summary>Round-119/146: a serve event at some till in my building.  If it is the till I am
+        /// working, perform it.  Beats for any other till are ignored — the simulator broadcasts per
+        /// building, and only the player standing at that specific counter should act it out.</summary>
         public static void ApplyServe(RegisterServePayload p)
         {
             try
@@ -655,53 +885,69 @@ namespace BigAmbitionsMP
                 var me = Helpers.PlayerHelper.PlayerController?.Character;
                 if (me == null) return;
 
-                if (!p.Finished)
+                switch (p.Kind)
                 {
-                    _servingCustomerId = p.CustomerId ?? "";
-                    // Round-120: also make the FETCH TRIP visible.  A player working a till natively walks off
-                    // to collect each ordered item (FullServiceEmployee.GrabOrderEntryItems) — standing rooted
-                    // at the counter for every sale is the single biggest tell that you are not really working.
-                    // We cannot know WHICH item the simulator's stand-in fetched, so the follower picks a
-                    // plausible one nearby: same trip, same beats, one shelf may differ.  This is the game's
-                    // own MoveToPosition on the player's own body, which is exactly what the native serve does
-                    // to a working player, so it does not fight the WorkActivity navigation blocker.
-                    TryFetchTrip(me);
-                    // Turn to the customer, then play the same "doing something at the station" animation the
-                    // native serve uses.  Deliberately NOT looped: the real serve's length varies with how many
-                    // items are fetched, and a loop that outlives the serve looks worse than a beat that ends.
-                    try
-                    {
-                        if (!string.IsNullOrEmpty(_servingCustomerId)
-                            && _puppets.TryGetValue(_servingCustomerId, out var cp) && cp.go != null)
+                    case 0:   // serve start
+                        _servingCustomerId = p.CustomerId ?? "";
+                        // Round-150: home = MY register's native employee position (never current position).
+                        if (!TryGetMyDutyHome(out _serveHome, out _serveHomeFace))
+                        { _serveHome = me.transform.position; _serveHomeFace = _serveHome; }
+                        // Round-151: return home on our own after this many grabs — native cadence.
+                        _fetchesLeft = (!p.SelfService && p.Entries > 0) ? p.Entries : -1;
+                        _returnQueued = false;
+                        try
                         {
-                            var look = cp.go.transform.position; look.y = me.transform.position.y;
-                            me.transform.DOLookAt(look, 0.2f);
+                            if (!string.IsNullOrEmpty(_servingCustomerId)
+                                && _puppets.TryGetValue(_servingCustomerId, out var cp) && cp.go != null)
+                            {
+                                var look = cp.go.transform.position; look.y = me.transform.position.y;
+                                me.transform.DOLookAt(look, 0.2f);
+                            }
                         }
-                    }
-                    catch { }
-                    try { me.StartCoroutine(me.animator.RunAnimation(AnimationType.UsingProducer, 2.5f)); } catch { }
-                    return;
-                }
+                        catch { }
+                        // A self-service till rings up in place for the native duration — that IS the serve.
+                        if (p.SelfService) EnqueueServeAct(me, ServeAct.RingUpOnly, Vector3.zero, p.Dur > 0f ? p.Dur : 3f);
+                        break;
 
-                // Finished: the customer's own beat + the gendered interaction sound the simulator played, so
-                // both machines end the transaction the same way.
-                if (!string.IsNullOrEmpty(p.CustomerId) && _puppets.TryGetValue(p.CustomerId, out var pup) && pup.tpc != null)
-                {
-                    try { pup.tpc.StartCoroutine(pup.tpc.animator.RunAnimation(AnimationType.UsingProducer, 2.5f)); } catch { }
-                    try
-                    {
-                        InstanceBehavior<SfxManager>.Instance.PlayAudio(
-                            p.Male ? SoundType.NpcMaleProducerInteraction : SoundType.NpcFemaleProducerInteraction,
-                            pup.go != null ? pup.go.transform.position : me.transform.position);
-                    }
-                    catch { }
-                }
-                try { me.StartCoroutine(me.animator.RunAnimation(AnimationType.UsingProducer, 2.5f)); } catch { }
+                    case 1:   // fetch one item — the REAL position the stand-in walked to
+                        if (_servedThisSession == 0 && !_fetchBeatLogged)
+                        {
+                            _fetchBeatLogged = true;
+                            Plugin.Logger.LogInfo($"[Customers] first FETCH beat received (target {p.FX:F1},{p.FY:F1},{p.FZ:F1}).");
+                        }
+                        EnqueueServeAct(me, ServeAct.Fetch, new Vector3(p.FX, p.FY, p.FZ), 0f);
+                        break;
 
-                _servingCustomerId = "";
-                _servedThisSession++;
-                if (_servedThisSession == 1 || _servedThisSession % 10 == 0)
-                    Plugin.Logger.LogInfo($"[Customers] served {_servedThisSession} customer(s) at my till in '{p.AddressKey}' (mirrored performance).");
+                    case 2:   // serve end (or cancel)
+                        if (p.Cancelled)
+                        {
+                            _serveQueue.Clear();
+                            EnqueueServeAct(me, ServeAct.ReturnOnly, Vector3.zero, 0f);
+                            _servingCustomerId = "";
+                            return;
+                        }
+                        // Round-151: the return normally already happened after the last grab; this is
+                        // only the safety net for serves whose grab count never arrived or fell short.
+                        if (!_returnQueued) EnqueueServeAct(me, ServeAct.ReturnAndRingUp, Vector3.zero, 0f);
+                        _returnQueued = true; _fetchesLeft = -1;
+                        // The customer's own beat + the gendered interaction sound the simulator played.
+                        if (!string.IsNullOrEmpty(p.CustomerId) && _puppets.TryGetValue(p.CustomerId, out var pup) && pup.tpc != null)
+                        {
+                            try { pup.tpc.StartCoroutine(pup.tpc.animator.RunAnimation(AnimationType.UsingProducer, 2.5f)); } catch { }
+                            try
+                            {
+                                InstanceBehavior<SfxManager>.Instance.PlayAudio(
+                                    p.Male ? SoundType.NpcMaleProducerInteraction : SoundType.NpcFemaleProducerInteraction,
+                                    pup.go != null ? pup.go.transform.position : me.transform.position);
+                            }
+                            catch { }
+                        }
+                        _servingCustomerId = "";
+                        _servedThisSession++;
+                        if (_servedThisSession == 1 || _servedThisSession % 10 == 0)
+                            Plugin.Logger.LogInfo($"[Customers] served {_servedThisSession} customer(s) at my till in '{p.AddressKey}' (mirrored performance).");
+                        break;
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] apply serve: {ex.Message}"); }
         }

@@ -297,7 +297,23 @@ namespace BigAmbitionsMP
         public string StationKey   { get; set; } = "";
         public string CustomerId   { get; set; } = "";   // matches PuppetRowInfo.Id
         public bool   Finished     { get; set; }         // false = serve started, true = serve completed
-        public bool   Male         { get; set; }         // customer gender — picks the same interaction sound the simulator played
+        public bool   Male         { get; set; }         // customer gender — picks the same interaction
+        // Round-146: the mirror streams the stand-in's REAL serve events instead of synthesizing a
+        // generic performance, so the duty player's actions match whatever THAT shop's serve actually
+        // does (self-service = one ring-up at the counter; full-service = a walk to each ordered item's
+        // real position, then back, then the ring-up).
+        public int    Kind         { get; set; }         // 0 = serve start, 1 = fetch one item, 2 = serve end
+        public bool   SelfService  { get; set; }         // start beat: this till serves without fetching
+        public bool   Cancelled    { get; set; }         // end beat: serve aborted — reset, no ring-up
+        public float  Dur          { get; set; }         // start beat, self-service: native ring-up anim SPEED (RunAnimation's float is a speed multiplier, not seconds)
+        public float  FX           { get; set; }         // fetch beat: the grabbed item's world position
+        public float  FY           { get; set; }
+        public float  FZ           { get; set; }
+        // Round-151: cadence.  The native rhythm is grab-last-item → walk home → THEN the customer pays;
+        // waiting for the finish beat (sent when the serve is fully done) left the acting one
+        // return-walk behind reality, so the customer rang up and left first.  The start beat carries
+        // how many grabs to expect; the receiver returns home BY ITSELF after that many fetch acts.
+        public int    Entries      { get; set; }         // start beat, full-service: order entry count
     }
 
     /// <summary>Slice 3 (round-41): the host's per-building customer-simulator election result.</summary>
@@ -702,7 +718,7 @@ namespace BigAmbitionsMP
         // (PlayerPositionPayload.MlZ + hand-IK anchors grew elbow poles, IkT 8→14),
         // and helper station refills route via new BuildingStorageSync contexts
         // (producerset/producer — an old host silently drops them).
-        public const int Version = 4;
+        public const int Version = 5;   // v5 (round-146): RegisterServePayload gained Kind/SelfService/Cancelled/Dur/FX-FZ
     }
 
     /// <summary>Sent by client on connect.</summary>
