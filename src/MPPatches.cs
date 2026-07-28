@@ -179,7 +179,10 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogInfo($"[Patch] Client bought {key} locally + notifying host.");
                         return;
                     }
-                    MPServer.BuildingRealEstateOwners[key] = "host";
+                    // Round-159: record the REAL id, never the literal "host" — after a host handoff
+                    // "host" means whoever hosts NOW (a previous host's deed would silently transfer),
+                    // and the ledger shield explicitly ignores "host" entries.
+                    MPServer.BuildingRealEstateOwners[key] = MPConfig.PlayerId;
                     MPServer.RefreshBuildingAccess();   // housing: guests granted housing can now enter this newly-bought building
                     Plugin.Logger.LogInfo($"[Patch] Host bought {key} (recorded in ownership registry).");
                 }

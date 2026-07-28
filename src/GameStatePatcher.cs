@@ -3960,6 +3960,35 @@ namespace BigAmbitionsMP
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] tenancy re-assert: {ex.Message}"); }
 
+                    // ROUND-159 — DEED-LEDGER HYGIENE.  Legacy deed entries hold the literal "host",
+                    // which is ambiguous across handoffs and invisible to the ledger shield.  Migrate an
+                    // entry to the current host's id ONLY on native evidence (this machine's world says
+                    // the building is player-owned — true exactly when this host bought it); an entry
+                    // with no such evidence belonged to a previous host and cannot be attributed safely,
+                    // so it is named in the log and left alone.
+                    try
+                    {
+                        int migrated = 0;
+                        foreach (var kv in MPServer.BuildingRealEstateOwners)
+                        {
+                            if (kv.Value != "host") continue;
+                            var reg = FindRegistration(kv.Key);
+                            bool nativeMine = false;
+                            try { nativeMine = reg != null && reg.BuildingOwnedByPlayer; } catch { }
+                            if (nativeMine)
+                            {
+                                MPServer.BuildingRealEstateOwners[kv.Key] = MPConfig.PlayerId;
+                                migrated++;
+                                Plugin.Logger.LogWarning($"[Integrity] ({reason}) deed ledger: '{kv.Key}' migrated \"host\" → '{MPConfig.PlayerId}' (natively owned on this machine).");
+                            }
+                            else
+                                Plugin.Logger.LogWarning($"[Integrity] ({reason}) deed ledger: '{kv.Key}' is recorded as \"host\" but is NOT natively owned here — a previous host's purchase; left as-is (cannot be attributed safely).");
+                        }
+                        if (migrated > 0)
+                            Plugin.Logger.LogWarning($"[Integrity] ({reason}) deed-ledger×{migrated} \"host\" entr(ies) migrated to the current host's id.");
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] deed ledger hygiene: {ex.Message}"); }
+
                     // ROUND-156 (#1) — GHOST-TENANCY RELEASE (the reverse gap).  A member VACATES while
                     // A hosts: A's world clears the reflect and the ledger drops the entry — but B's
                     // file never hears of it.  When B later hosts, the building loads OFF-MARKET with a
