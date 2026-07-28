@@ -572,6 +572,7 @@ namespace BigAmbitionsMP
             MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion
             GameStatePatcher.TickPendingMarketEvents();   // round-101: market events that arrived pre-world
             GameStatePatcher.TickDemandHealth();          // round-102i: retry held market payload + stale-demand watchdog
+            GameStatePatcher.TickActiveVehicleIdHealth();  // round-109 net: an unresolvable ActiveVehicleId NREs every hover CTA = total interaction lock
             MPPriceFillProbe.Tick();   // PROBE PriceFill (round-101 item 3) — remove when resolved
             MPDemandProbe.Tick();      // PROBE Demand (round-102) — remove when resolved
             // (quiesce-off 4s timer RETIRED 2026-06-11 — stage-4 migration #1:
@@ -2903,6 +2904,7 @@ namespace BigAmbitionsMP
                 GameStatePatcher.ResetDemandState();   // round-102 statics are per-session: a held market payload must
                                                        // not reach a different world, and the have-authoritative flag
                                                        // must not suppress demand computation in the NEXT session
+                GameStatePatcher.ResetVehicleIdHealth();   // round-109 net: timer + heal counter are per-session
                 _appearanceSig = ""; _appearanceNextAt = 0f;
                 _blackOverlayCanvas = null;     // re-scan on fresh game load (#6)
                 _blackOverlayFindTimer = 0f;

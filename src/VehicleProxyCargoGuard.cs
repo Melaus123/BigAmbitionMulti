@@ -411,4 +411,59 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] held-deposit redirect: {ex.Message}"); return true; }
         }
     }
+
+    /// <summary>Round-109 SOURCE FIX for the total-interaction lock ("I'm locked and i can't interact with
+    /// nothing in my business", host 'Dawnspear' 2026-07-26).  VehicleController.EnterVehicle is the game's
+    /// ONLY non-null writer of ActiveVehicleId (VehicleController.cs:291) — every other writer assigns null —
+    /// and PlayerHelper.IsUsingVehicle is merely "that field is non-empty" while VehicleHelper
+    /// .GetCurrentVehicle() resolves it through VehiclesCache and then SaveGameManager.VehicleInstances.
+    /// Enter something those two lookups can't find and the field is POISON: HasPaidForAllItems NREs on every
+    /// hover CTA (36 logged crashes in that report), vehicle CTAs NRE, and ExitZoneDespawner dies on every
+    /// exit attempt — the player is locked and trapped until the next load.
+    ///
+    /// PARITY, not new policy: the borrow-a-CAR path already does exactly this one level down —
+    /// VehicleManager.TryDriveGhost seeds VehiclesCache "so every GetCurrentVehicle() caller resolves it",
+    /// because a proxy is deliberately kept OUT of VehicleInstances to dodge tickets/tax.  Carts never got it:
+    /// they are picked up through the game's own EntityController.OnIoLeftClick → WalkOverAndInteract →
+    /// CityBuildingController-style Interact → EnterVehicle path with no BAMP interception at all.  Patching
+    /// the BASE method covers every entry route — HandTruck.EnterVehicle calls base.EnterVehicle() first
+    /// (HandTruck.cs:150-152), so carts are covered, and TryDriveGhost's own seed becomes redundant but
+    /// harmless.  A PREFIX is required: the native body's own HUD hookup calls GetCurrentVehicle(), so the
+    /// seed must already be in place before it runs.
+    ///
+    /// SEEDS ONLY WHAT WOULD OTHERWISE BE UNRESOLVABLE.  If the id is already cached, or is a real entry in
+    /// this save's VehicleInstances, we touch nothing — the native lookup is correct and must stay that way.
+    /// Money is unaffected: charges iterate VehicleInstances, not this cache, which is the whole reason
+    /// proxies are excluded from that list.
+    ///
+    /// This closes route R1 of the poison audit (entering a ghost by any route except TryDriveGhost).  Routes
+    /// R2-R4 — the cache being cleared under an active borrow, and business-level sweeps that delete a
+    /// vehicle's instance while it is still active (MovingServiceHelper.DestroyVehiclesInDestination and
+    /// BizManPresentation.OnTerminateContractConfirm both do so with NO active-vehicle guard) — are covered
+    /// by GameStatePatcher.TickActiveVehicleIdHealth, which clears the field within ~1s and names the id.</summary>
+    [HarmonyPatch(typeof(VehicleController), nameof(VehicleController.EnterVehicle))]
+    public static class Patch_VehicleController_EnterVehicle_SeedProxyLookup
+    {
+        static void Prefix(VehicleController __instance)
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;   // SP — vanilla behaviour
+                var inst = __instance != null ? __instance.vehicleInstance : null;
+                if (inst == null || string.IsNullOrEmpty(inst.id)) return;
+                if (VehicleHelper.VehiclesCache.ContainsKey(inst.id)) return;   // already resolvable
+
+                var list = SaveGameManager.Current?.VehicleInstances;
+                if (list != null)
+                    foreach (var v in list)
+                        if (v != null && v.id == inst.id) return;               // a real vehicle in this save — leave it alone
+
+                VehicleHelper.VehiclesCache[inst.id] = inst;
+                Plugin.Logger.LogInfo($"[Vehicle] entry lookup seeded for '{inst.id}' (type='{inst.vehicleTypeName}') — "
+                    + "not in this save's vehicles, so GetCurrentVehicle() would have returned null and every hover CTA "
+                    + "would have NRE'd (round-109 parity with the borrowed-car path).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] entry lookup seed: {ex.Message}"); }
+        }
+    }
 }

@@ -287,6 +287,13 @@ namespace BigAmbitionsMP
         // Keyed by VehicleId (a player owns several vehicles).
         private static readonly Dictionary<string, RemoteVehicle> _remoteVehicles = new();
 
+        /// <summary>Round-109 — open "orphan-possessed" episodes: a ghost the local player is pushing or
+        /// driving that its own owner has stopped listing in their fleet.  Keyed by vehicle id, so the
+        /// per-tick warning becomes one line + a 30s rollup instead of ~10 lines a SECOND (a field report
+        /// spent its whole ring buffer on 233 copies of that warning and overwrote the crash it was
+        /// supposed to explain).  Cleared per session with the ghosts themselves.</summary>
+        private static readonly Dictionary<string, (float firstAt, int hits, float lastRollupAt)> _orphanPossessed = new();
+
         private static int _lastAmbientCullFrame = -1;
 
         /// <summary>HOST-ONLY. For each PARKED (stationary) remote-vehicle ghost, run the game's OWN
@@ -691,11 +698,46 @@ namespace BigAmbitionsMP
                 var stale = _remoteVehicles
                     .Where(kv => kv.Value.OwnerId == p.OwnerId && !seen.Contains(kv.Key))
                     .Select(kv => kv.Key).ToList();
+                // Round-109: an id that came BACK into the owner's fleet closes its orphan episode.
+                if (_orphanPossessed.Count > 0)
+                    foreach (var id in seen)
+                        if (_orphanPossessed.TryGetValue(id, out var was))
+                        {
+                            _orphanPossessed.Remove(id);
+                            Plugin.Logger.LogInfo($"[Vehicle] orphan-possessed '{id}' RE-LISTED by its owner after "
+                                + $"{Time.unscaledTime - was.firstAt:F0}s ({was.hits} tick(s)) — list flicker, not a sale.");
+                        }
+
                 foreach (var id in stale)
                 {
                     if (_remoteVehicles.TryGetValue(id, out var srv) && srv?.Go != null && PossessedByLocal(srv.Go))
                     {
-                        Plugin.Logger.LogWarning($"[Vehicle] owner's fleet no longer lists '{id}' but WE are pushing/driving it — keeping (no despawn while possessed).");
+                        // Round-109 THROTTLE (field 2026-07-26, host 'Dawnspear'): this fired EVERY fleet tick
+                        // (~10/s, 233 copies) and filled the fixed-size ring buffer, leaving only the last 47
+                        // seconds. The interaction-lock NREs it should have helped explain were ~2400 log lines
+                        // earlier and had been overwritten, along with the pickup that started it. An unthrottled
+                        // per-tick warning in a ring-buffer diagnostic erases the evidence it exists to preserve.
+                        // Now: one full line per id, a rollup every 30s while it persists, and a closing line
+                        // when the id is re-listed (above) or the ghost is finally released (DespawnByVehicleId).
+                        if (!_orphanPossessed.TryGetValue(id, out var st))
+                        {
+                            string vt = "?"; try { vt = srv.TypeName ?? "?"; } catch { }
+                            _orphanPossessed[id] = (Time.unscaledTime, 1, Time.unscaledTime);
+                            Plugin.Logger.LogWarning($"[Vehicle] owner's fleet no longer lists '{id}' (type='{vt}', owner='{srv.OwnerId}') "
+                                + "but WE are pushing/driving it — keeping (no despawn while possessed). Further ticks are "
+                                + "rolled up every 30s so this cannot flood the ring buffer.");
+                        }
+                        else
+                        {
+                            st.hits++;
+                            if (Time.unscaledTime - st.lastRollupAt >= 30f)
+                            {
+                                Plugin.Logger.LogWarning($"[Vehicle] orphan-possessed '{id}' STILL unlisted by its owner — "
+                                    + $"{Time.unscaledTime - st.firstAt:F0}s, {st.hits} tick(s) so far.");
+                                st.lastRollupAt = Time.unscaledTime;
+                            }
+                            _orphanPossessed[id] = st;
+                        }
                         continue;
                     }
                     DespawnByVehicleId(id);
@@ -1461,6 +1503,13 @@ namespace BigAmbitionsMP
         /// <summary>Despawns one ghost by vehicle id.</summary>
         public static void DespawnByVehicleId(string vehicleId)
         {
+            // Round-109: close any open orphan-possessed episode for this id (released, then despawned).
+            if (_orphanPossessed.TryGetValue(vehicleId, out var op))
+            {
+                _orphanPossessed.Remove(vehicleId);
+                Plugin.Logger.LogInfo($"[Vehicle] orphan-possessed '{vehicleId}' episode ENDED at despawn after "
+                    + $"{Time.unscaledTime - op.firstAt:F0}s ({op.hits} tick(s)) — no longer possessed, so the stale ghost was removed.");
+            }
             if (_remoteVehicles.TryGetValue(vehicleId, out var rv))
             {
                 ExitIfLocallyDriven(rv.Go, vehicleId);
@@ -1488,6 +1537,7 @@ namespace BigAmbitionsMP
                     try { UnityEngine.Object.Destroy(kv.Value.Go); } catch { }
                 }
             _remoteVehicles.Clear();
+            _orphanPossessed.Clear();   // round-109: episodes die with the ghosts (per-session, not per-process)
         }
 
         private static bool IsGhostBeingDriven(GameObject go)

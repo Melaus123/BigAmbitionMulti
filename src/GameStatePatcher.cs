@@ -2061,6 +2061,73 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] ActiveVehicleId heal: {ex.Message}"); }
         }
 
+        private static float _nextVehIdCheckAt;
+        private static int   _vehIdHeals;
+
+        /// <summary>Round-109 SAFETY NET — the same poison HealStaleActiveVehicleId cures, but caught
+        /// MID-SESSION.  Field 2026-07-26 (host 'Dawnspear', 0.1.14): the host picked up another player's
+        /// ghost hand cart; the native VehicleController.EnterVehicle wrote the REMOTE vehicle's id into
+        /// ActiveVehicleId (VehicleController.cs:291).  That id resolves nowhere locally, so
+        /// PlayerHelper.IsUsingVehicle (a bare "field is non-empty" test) was TRUE while
+        /// VehicleHelper.GetCurrentVehicle() returned NULL, and PlayerHelper.HasPaidForAllItems NRE'd on
+        /// EVERY mouse-hover CTA evaluation — 36 logged crashes, no CTAs, no overlays: "I'm locked and i
+        /// can't interact with nothing in my business".  Round-68 documents this signature exactly but
+        /// runs only at world-ready, so a poisoning that happened while playing persisted until reload.
+        ///
+        /// RESOLVABILITY IS TESTED THE WAY THE GAME TESTS IT — GetCurrentVehicle() != null — and NOT by
+        /// searching VehicleInstances the way the world-ready heal does.  That difference is load-bearing:
+        /// the car-borrow path (VehicleManager.TryDriveGhost) deliberately seeds VehicleHelper.VehiclesCache
+        /// with a proxy id that is kept OUT of VehicleInstances to dodge tickets/tax.  Reusing the
+        /// world-ready test here would have judged a legitimately borrowed car "unresolvable" and ejected
+        /// the borrower mid-drive.  Testing the game's own resolution means we heal exactly the states that
+        /// would crash and nothing else.
+        ///
+        /// This is a NET, not the repair: it un-sticks the player about a second after a poisoning instead
+        /// of leaving them locked until reload, and its log line names the id so the next report identifies
+        /// whatever route poisoned it.  Known cost: the vehicle leaves their hands, because the game no
+        /// longer counts it as theirs.  Cheap enough to run unbracketed — one dictionary lookup per second.
+        /// The parity fix (give the cart path the cache seed the car path already has) is NOT built.</summary>
+        public static void TickActiveVehicleIdHealth()
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.InMpGame) return;   // sticky gate: survives reconnect
+                if (UnityEngine.Time.unscaledTime < _nextVehIdCheckAt) return;
+                _nextVehIdCheckAt = UnityEngine.Time.unscaledTime + 1f;
+
+                var gi = SaveGameManager.Current;
+                string active = gi?.ActiveVehicleId ?? "";
+                if (active.Length == 0) return;   // not using anything — nothing to heal
+
+                bool resolvable;
+                try { resolvable = Helpers.VehicleHelper.GetCurrentVehicle() != null; }
+                catch (Exception rex)
+                {
+                    // A throwing lookup is NOT proof of poison (VehicleInstances can be null mid-load).
+                    // Say so and leave the field alone rather than ejecting someone on a bad read.
+                    Plugin.Logger.LogWarning($"[Vehicle] ActiveVehicleId resolve threw for '{active}' — left as-is: {rex.Message}");
+                    return;
+                }
+                if (resolvable) return;
+
+                gi!.ActiveVehicleId = null;
+                _vehIdHeals++;
+                Plugin.Logger.LogWarning($"[Vehicle] MID-SESSION stale ActiveVehicleId '{active}' cleared (#{_vehIdHeals}) — "
+                    + "it resolved to no local vehicle, which NREs every hover CTA (PlayerHelper.HasPaidForAllItems) "
+                    + "and traps the player in the building. Likeliest route: possessing another player's ghost vehicle.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] ActiveVehicleId mid-session heal: {ex.Message}"); }
+        }
+
+        /// <summary>Per-session teardown for the mid-session vehicle-id net (round-106 lesson: these are
+        /// process-lifetime statics).  Both are benign across sessions — a past due-time just fires one
+        /// early check, and the counter only numbers log lines — but resetting keeps the log readable.</summary>
+        public static void ResetVehicleIdHealth()
+        {
+            _nextVehIdCheckAt = 0f;
+            _vehIdHeals       = 0;
+        }
+
         /// <summary>
         /// Slice 2 (2026-06-12): a cross-player sale consumes REAL stock.  Runs
         /// on the HOST (interior authority) on the main thread: walks the shop's

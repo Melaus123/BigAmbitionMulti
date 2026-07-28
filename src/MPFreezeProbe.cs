@@ -57,13 +57,22 @@ namespace BigAmbitionsMP
 
                 // Legitimate locks: any of these and the player is EXPECTED to be
                 // still — clear all state so a freeze can't be misattributed.
-                bool legit = false;
-                try { legit |= UI.Load.LoadScene.isLoading; } catch { }
-                try { legit |= Helpers.VehicleHelper.IsInsideVehicle(); } catch { }
-                try { legit |= Helpers.EnergyHelper.goingToHospital; } catch { }
-                try { legit |= Time.timeScale == 0f; } catch { }
-                try { legit |= EventSystem.current != null && EventSystem.current.currentSelectedGameObject != null; } catch { }   // any focused input field: chat, popups, rename…
-                if (legit) { EndEpisode("legit-lock"); _ringN = 0; _wasdHeldSince = -1f; _clicks.Clear(); return; }
+                // Round-107: name WHICH condition stood us down. A field report burned several
+                // exchanges on "were they in a vehicle?" that this string answers outright — the
+                // real reason there was a focused UI element (a stuck player clicking menus),
+                // not a vehicle at all.
+                string legitWhy = "";
+                try { if (UI.Load.LoadScene.isLoading) legitWhy = "loading"; } catch { }
+                try { if (legitWhy.Length == 0 && Helpers.VehicleHelper.IsInsideVehicle()) legitWhy = "in-vehicle"; } catch { }
+                try { if (legitWhy.Length == 0 && Helpers.EnergyHelper.goingToHospital) legitWhy = "hospital"; } catch { }
+                try { if (legitWhy.Length == 0 && Time.timeScale == 0f) legitWhy = "paused"; } catch { }
+                try
+                {
+                    if (legitWhy.Length == 0 && EventSystem.current != null && EventSystem.current.currentSelectedGameObject != null)
+                        legitWhy = "focused-ui:" + EventSystem.current.currentSelectedGameObject.name;
+                }
+                catch { }
+                if (legitWhy.Length > 0) { EndEpisode("legit-lock: " + legitWhy); _ringN = 0; _wasdHeldSince = -1f; _clicks.Clear(); return; }
 
                 Vector3 pos;
                 try { pos = Helpers.PlayerHelper.GetPosition(); } catch { return; }
@@ -93,7 +102,19 @@ namespace BigAmbitionsMP
                 if (disp < 0f) return;   // history not deep enough yet
 
                 bool wasdFrozen  = _wasdHeldSince >= 0f && now - _wasdHeldSince >= WindowSec && disp < MinMoveM;
-                bool clickFrozen = _clicks.Count >= 6 && disp < MinMoveM;
+                // Round-107: only WORLD clicks are movement intent. Clicking UI is the OPPOSITE of
+                // trying to walk somewhere, and counting it manufactured "STUCK" episodes for anyone
+                // browsing their phone while standing still. Field case: episode 1 was genuine
+                // (6 clicks, only 1 on UI → 5 real click-to-move attempts that produced no path),
+                // while episodes 2-3 were all-UI and told us nothing.
+                // Threshold stays at SIX (unchanged from before) — dropping it to 4 was my error:
+                // world clicks are not all movement intent either (shelves, items, NPCs, vehicles
+                // are all clicked while standing still), so a lower bar trades one false-positive
+                // source for another. Excluding UI clicks at the SAME threshold is strictly more
+                // conservative than the original behaviour.
+                int worldClicks = 0;
+                foreach (var c in _clicks) if (!c.overUi) worldClicks++;
+                bool clickFrozen = worldClicks >= 6 && disp < MinMoveM;
 
                 if (!_inEpisode && (wasdFrozen || clickFrozen))
                 {
