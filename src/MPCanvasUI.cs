@@ -565,6 +565,7 @@ namespace BigAmbitionsMP
             MPHousingMorale.Tick();      // shared-residence morale: a Housing grant counts as having a home (10s reconcile)
             MPRegisterSync.TickHideSynthetics();
             MPRegisterSync.TickContextHeal();   // building-context self-heal (hand-vehicle entry skips the entry hook)
+            ContestedTenancy.TickClient();      // round-162: one-shot native-claims report per world session
             MPRegisterSync.TickEconDigest();    // [EconProbe] one line per owned business per game-day (2026-07-09)
             MPRegisterSync.TickDutySummary();   // TEMPORARY: duty-broadcast activation watch, 10m (2026-07-09)
             TickWorldHealth();                  // one-shot world-integrity line ~30s after scene-ready (2026-07-09)

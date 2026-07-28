@@ -477,6 +477,23 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] PushOwnedBuildingImmediate: {ex.Message}"); }
         }
 
+        /// <summary>Round-169 — HOST: send one building's snapshot DIRECTLY to one player, subscription or
+        /// not.  The arbitration hand-over needs the loser's DATA filled even though they are nowhere near
+        /// the building (PushOwnedBuildingImmediate broadcasts to SUBSCRIBERS only, which silently sent to
+        /// nobody — field: the released copy stayed a default shell).  The client applies unconditionally.</summary>
+        public static void SendSnapshotToPlayer(string addressKey, string pid)
+        {
+            try
+            {
+                if (!MPServer.IsRunning || string.IsNullOrEmpty(addressKey) || string.IsNullOrEmpty(pid)) return;
+                var snap = BuildSnapshotForHostSend(addressKey);
+                if (snap == null) { Plugin.Logger.LogWarning($"[InteriorSync] direct send: no snapshot for '{addressKey}'."); return; }
+                MPServer.SendToPlayer(pid, MessageEnvelope.Create(MessageType.InteriorSnapshot, "host", snap));
+                Plugin.Logger.LogInfo($"[InteriorSync] snapshot of '{addressKey}' sent directly to '{pid}' ({SnapshotSummary(snap)}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] direct send: {ex.Message}"); }
+        }
+
         /// <summary>GUEST: forward our just-edited LOCAL interior for this building to the owner, who ADOPTS it
         /// (ApplyInteriorSnapshot) + re-syncs. Called when the interior designer closes (HandleOnClose). Flagged
         /// Authoritative so the owner's apply accepts it as the new truth.</summary>
@@ -511,8 +528,13 @@ namespace BigAmbitionsMP
             // AI/world ones). For anything a PLAYER owns, this is the host's own — possibly blank/stale —
             // replica, so flag the WHOLE snapshot non-authoritative: the receiver must never let it clear
             // their real interior. Only the owner's own push (cached above) is authoritative.
+            // Round-172: "player-owned" here means owned by a REMOTE player — the host's own ledger
+            // entries (legacy "host" OR its real pid, written since round-159 and by arbitration) are
+            // HOST-owned, and the host IS authoritative for its own businesses.  The literal-only check
+            // flagged the host's own shop non-authoritative, and the arbitration loser's machine then
+            // refused to adopt the 754 items it was sent.
             bool playerOwned = MPServer.BuildingOwners.TryGetValue(addressKey, out var owner)
-                               && !string.IsNullOrEmpty(owner) && owner != "host";
+                               && !string.IsNullOrEmpty(owner) && !GameStatePatcher.IsHostLedgerId(owner);
             if (playerOwned)
             {
                 snap.Authoritative              = false;

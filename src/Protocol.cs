@@ -88,6 +88,8 @@ namespace BigAmbitionsMP
         // In-game chat (Phase 6: connected-players window + chat).
         Chat                 = 100, // Any → Host → All: a chat line.  Clients send to host; host relays to everyone (incl. sender) so the log is consistent.
         RetailPrices         = 101, // Any → Host → Others: live retail prices of a business the SENDER runs — keeps per-neighbourhood price competition fed with current numbers on every machine.
+        NativeClaim          = 157, // Any → Host: my save natively claims this building (+ development score) — contested-tenancy arbitration input
+        ReleaseClaim         = 158, // Host → loser: release your native claim on this building (re-verified locally before executing)
         RegisterServe        = 156, // Simulator → Host → All: a customer's serve STARTED / FINISHED at a till.  Lets the player working that till on a FOLLOWER machine perform the job — they are assigned to the station locally and see the queue, but with no real customers there the native serve loop never runs, so without this they stand motionless behind a busy counter.
         BuildingDirtEdit     = 155, // Helper → Host → Owner: floor cells a HELPER mopped in someone else's business.  Narrow on purpose (only the cells whose dirtiness changed): dirt is owner-authoritative interior state, and the only pre-existing guest→owner interior channel is the whole-snapshot forward on interior-designer close, which mopping never triggers — so without this a helper's cleaning stayed local and was overwritten by the owner's next push.
         RestVote             = 102, // Client → Host: this player started/ended a rest-class activity (consensus time-skip voting).
@@ -780,6 +782,13 @@ namespace BigAmbitionsMP
     /// <summary>A single building changed ownership.</summary>
     public class BuildingOwnershipPayload
     {
+        /// <summary>Round-162: development score of the sender's copy (furniture + stocked products) —
+        /// only meaningful on NativeClaim messages; the contested-tenancy arbiter's evidence.</summary>
+        public int Score { get; set; }
+        /// <summary>Round-163: the sender's local BusinessName for that building - forensic context so a
+        /// "my business disappeared" report can be matched to the arbitration event that moved it.</summary>
+        public string BizName { get; set; } = "";
+
         /// <summary>"StreetNumber StreetName" e.g. "14 OakStreet"</summary>
         public string AddressKey  { get; set; } = "";
 

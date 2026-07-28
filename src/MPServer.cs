@@ -876,6 +876,9 @@ namespace BigAmbitionsMP
                     HandleVacateRequest(peer, senderPid, env);
                     break;
 
+                case MessageType.NativeClaim:
+                    ContestedTenancy.HostHandleNativeClaim(senderPid, env.GetPayload<BuildingOwnershipPayload>());
+                    break;
                 case MessageType.BuyRequest:
                     HandleBuyRequest(peer, senderPid, env);
                     break;
@@ -3317,6 +3320,14 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] HandleClientDisconnectUpload: {ex.Message}"); }
             });
+        }
+
+        /// <summary>Round-162: send an envelope to one connected player (no-op if offline).</summary>
+        internal static void SendToPlayer(string pid, MessageEnvelope env)
+        {
+            var peer = PeerForPid(pid);
+            if (peer != null) Send(peer, env);
+            else Plugin.Logger.LogWarning($"[Server] SendToPlayer: '{pid}' is not connected — dropped {env?.Type}.");
         }
 
         /// <summary>Resolve the live MPLink for a player id (null if not connected).</summary>

@@ -276,6 +276,11 @@ namespace BigAmbitionsMP
             try { InteriorSync.PublishAllOwnedInteriors("world live"); } catch { }
         }
 
+        /// <summary>Round-170: the join-quiesce drops Interior*/Market*/Parked* traffic during load —
+        /// contested-tenancy must not START until it lifts, or the arbitration's direct snapshot to a
+        /// just-joined loser dies in this very filter (field: three runs of silent non-delivery).</summary>
+        internal static bool IsJoinQuiescing => _joinQuiesce;
+
         private static void OnReceive(byte[] bytes)
         {
             var env = MessageEnvelope.Deserialize(bytes);
@@ -714,6 +719,9 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.ReleaseClaim:           // contested-tenancy arbitration: we lost — release (re-verified locally)
+                    ContestedTenancy.ClientHandleRelease(env.GetPayload<BuildingOwnershipPayload>());
+                    break;
                 case MessageType.RegisterServe:          // a serve beat — perform it if it is my till
                 {
                     var rs = env.GetPayload<RegisterServePayload>();

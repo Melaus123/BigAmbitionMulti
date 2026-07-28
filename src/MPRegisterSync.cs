@@ -418,6 +418,7 @@ namespace BigAmbitionsMP
 
         public static void TickDuty()
         {
+            TickEmployeeDutySliced();   // round-161: every frame under a ~2ms budget (was a 60-65ms single-frame scan)
             if (Time.unscaledTime < _nextDutyAt) return;
             _nextDutyAt = Time.unscaledTime + 1f;
             try
@@ -487,12 +488,14 @@ namespace BigAmbitionsMP
                     SendToggle(_dutyPos, false);
                 }
 
-                TickEmployeeDuty();                               // employee-staffed stations (data-driven, 5s)
-                TickStaffEvaluator();                             // spawn the visible staff NPC (5s)
-                TickRosterPublish();                              // WS3: publish my businesses' staff rosters (30s, sig-gated)
-                TickRosterApply();                                // WS3: inject/update/remove received rosters (10s + on receipt)
-                MPPatches.Patch_MPOrderFinalizer.TickPending();   // service-moment completion
-                LogStaffDiagOwner();                              // [StaffDiag] owner-side staffing snapshot (60s self-throttle; removable)
+                // (employee-staffed stations now scanned by TickEmployeeDutySliced above — round-161)
+                // Round-164: the 60-70ms worst-frame survived the round-161 slice, so the real consumer
+                // is one of THESE five — sub-bracketed so the perf line names it instead of us guessing.
+                long _s1 = MPPerf.Begin(); TickStaffEvaluator();                           MPPerf.End("StaffEval",  _s1);
+                long _s2 = MPPerf.Begin(); TickRosterPublish();                            MPPerf.End("RosterPub",  _s2);
+                long _s3 = MPPerf.Begin(); TickRosterApply();                              MPPerf.End("RosterApp",  _s3);
+                long _s4 = MPPerf.Begin(); MPPatches.Patch_MPOrderFinalizer.TickPending(); MPPerf.End("OrderFin",   _s4);
+                long _s5 = MPPerf.Begin(); LogStaffDiagOwner();                            MPPerf.End("StaffDiag",  _s5);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] duty: {ex.Message}"); }
         }
@@ -555,17 +558,37 @@ namespace BigAmbitionsMP
         private static float _nextEmpScanAt;
         private static readonly Dictionary<string, Vector3> _empDuty = new();   // posKey → pos
 
-        private static void TickEmployeeDuty()
+        // Round-161 — the 5s scan walked EVERY registration + every owned shop's schedules in ONE
+        // frame: 60-65ms worst-frame on a 28-business save, the recurring hitch both the field pair's
+        // machines and the rig felt.  Same work, same cadence, sliced: a sweep still starts every 5s,
+        // but processes registrations under a ~2ms/frame budget and commits the ON/OFF transitions
+        // when the sweep completes a few frames later — well inside the cadence, and transitions are
+        // computed against a coherent single-sweep snapshot exactly as before.
+        private static List<BuildingRegistration>? _empSweepRegs;
+        private static int _empSweepIx;
+        private static Dictionary<string, (Vector3 pos, string addr, string stationId)>? _empSweepLive;
+        private static readonly System.Diagnostics.Stopwatch _empSweepSw = new();
+
+        private static void TickEmployeeDutySliced()
         {
-            if (Time.unscaledTime < _nextEmpScanAt) return;
-            _nextEmpScanAt = Time.unscaledTime + 5f;
             try
             {
-                var gi = SaveGameManager.Current;
-                if (gi == null) return;
-                var live = new Dictionary<string, (Vector3 pos, string addr, string stationId)>();
-                foreach (var reg in gi.BuildingRegistrations)
+                if (_empSweepRegs == null)
                 {
+                    if (Time.unscaledTime < _nextEmpScanAt) return;
+                    _nextEmpScanAt = Time.unscaledTime + 5f;
+                    var gi = SaveGameManager.Current;
+                    if (gi?.BuildingRegistrations == null) return;
+                    _empSweepRegs = new List<BuildingRegistration>(gi.BuildingRegistrations);
+                    _empSweepIx   = 0;
+                    _empSweepLive = new Dictionary<string, (Vector3 pos, string addr, string stationId)>();
+                }
+                _empSweepSw.Restart();
+                var live = _empSweepLive!;
+                while (_empSweepIx < _empSweepRegs.Count)
+                {
+                    if (_empSweepSw.Elapsed.TotalMilliseconds > 2.0) return;   // budget spent — resume next frame
+                    var reg = _empSweepRegs[_empSweepIx++];
                     if (reg == null) continue;
                     bool mine; try { mine = MergerFlip.TrulyMine(reg); } catch { continue; }   // TrulyMine: no station/duty claims on flipped shops
                     if (!mine || reg.itemInstances == null) continue;
@@ -640,8 +663,13 @@ namespace BigAmbitionsMP
                     _empDuty.Remove(k);
                     Plugin.Logger.LogInfo($"[Register] employee-staffed station OFF at {k}.");
                 }
+                _empSweepRegs = null; _empSweepLive = null;   // sweep complete
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] employee duty: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[Register] employee duty: {ex.Message}");
+                _empSweepRegs = null; _empSweepLive = null;   // abandon this sweep; the next starts fresh
+            }
         }
 
         // ── [StaffDiag] comprehensive staffing diagnostic (2026-06-25) ──────────────────────────────────
@@ -1784,6 +1812,40 @@ namespace BigAmbitionsMP
         /// <summary>Invoke the game's staffing evaluator (UpdateEmployee — the
         /// disasm-mapped spawner) on unstaffed synthetic stations every 5s;
         /// nothing calls it for rival-translated shops natively.</summary>
+        // Round-166 - LIVE STATION REGISTRY: even one cached FindObjectsOfType refresh cost ~60ms
+        // per 30s on the 826-building save (StaffEval bucket).  Stations announce themselves at
+        // Start (Harmony postfix below) and destroyed ones prune lazily on read (Unity's overloaded
+        // null), so the evaluator never scans the scene at all.
+        private static readonly List<EmployeeStationController> _stationRegistry = new();
+        private static UnityEngine.Object[] _stationSnapshot = System.Array.Empty<UnityEngine.Object>();
+        private static bool _stationRegistryDirty = true;
+
+        internal static void RegisterStation(EmployeeStationController st)
+        {
+            try { if (st != null && !_stationRegistry.Contains(st)) { _stationRegistry.Add(st); _stationRegistryDirty = true; } } catch { }
+        }
+
+        /// <summary>The live stations, pruned of destroyed entries - no scene walk, ever.</summary>
+        private static UnityEngine.Object[] GetStationsCached()
+        {
+            bool pruned = _stationRegistry.RemoveAll(st => st == null) > 0;   // Unity null = destroyed
+            if (pruned || _stationRegistryDirty)
+            {
+                _stationSnapshot = _stationRegistry.ToArray();
+                _stationRegistryDirty = false;
+            }
+            return _stationSnapshot;
+        }
+
+        /// <summary>Round-166: every station announces itself when its Start runs (interior load,
+        /// item placement, guest-edit apply alike) - the registry's single producer.</summary>
+        [HarmonyLib.HarmonyPatch(typeof(EmployeeStationController), "Start")]
+        public static class Patch_EmployeeStation_Start_Registry
+        {
+            static void Postfix(EmployeeStationController __instance) => RegisterStation(__instance);
+        }
+
+
         private static void TickStaffEvaluator()
         {
             if (_synthetics.Count == 0) return;
@@ -1802,7 +1864,12 @@ namespace BigAmbitionsMP
             foreach (var kv in _synthetics)
                 if ((kv.Value.pos - me).sqrMagnitude <= NearRadius2) { anyNear = true; break; }
             if (!anyNear) return;   // street/other-island: no synthetic till can be loaded here
-            var stations = UnityEngine.Object.FindObjectsOfType(typeof(EmployeeStationController));
+            // Round-165: FindObjectsOfType here WAS the hitch — StaffEval worst=62ms, convicted by the
+            // named perf buckets (a full-scene walk on an 826-building save, every 5s pass).  Stations
+            // exist only in the loaded interior, which changes when the local player crosses a door —
+            // cache per shop address with a 30s TTL (one refresh hitch per 30s worst case, at the door
+            // it rides the interior-load hitch that exists anyway).
+            var stations = GetStationsCached();
             foreach (var kv in _synthetics)
             {
                 try

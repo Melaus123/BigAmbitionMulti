@@ -1428,6 +1428,13 @@ namespace BigAmbitionsMP
         /// — to a player: a connected player's pid OR an absent owner's stable id held
         /// for reconnect.  "host" and empty are excluded (the host's own buildings are
         /// already native via RentedByPlayer; empty = unowned/AI).</summary>
+        /// <summary>Round-172 — "is this ledger value the HOST'S OWN entry?"  Historically the host
+        /// wrote the literal "host"; since round-159 it writes its real player id — and every consumer
+        /// that special-cased the literal treated the host's own entries as some OTHER player's
+        /// (field: the host's snapshot of its own arbitration-won shop went out flagged
+        /// non-authoritative, so the loser's machine refused the 754 items it was owed).</summary>
+        internal static bool IsHostLedgerId(string v) => v == "host" || v == MPConfig.PlayerId;
+
         private static bool IsLedgerReservedToPlayer(BuildingRegistration reg)
         {
             try
@@ -1436,9 +1443,9 @@ namespace BigAmbitionsMP
                 string addr = GameStateReader.AddressKey(reg);
                 if (string.IsNullOrEmpty(addr)) return false;
                 if (MPServer.BuildingOwners.TryGetValue(addr, out var o)
-                    && !string.IsNullOrEmpty(o) && o != "host") return true;
+                    && !string.IsNullOrEmpty(o) && !IsHostLedgerId(o)) return true;
                 if (MPServer.BuildingRealEstateOwners.TryGetValue(addr, out var r)
-                    && !string.IsNullOrEmpty(r) && r != "host") return true;
+                    && !string.IsNullOrEmpty(r) && !IsHostLedgerId(r)) return true;
                 return false;
             }
             catch { return false; }
@@ -3782,7 +3789,7 @@ namespace BigAmbitionsMP
 
                 var contaminated = new List<string>();
                 foreach (var kv in MPServer.BuildingOwners)
-                    if (!string.IsNullOrEmpty(kv.Value) && kv.Value != "host" && aiBiz.ContainsKey(kv.Key))
+                    if (!string.IsNullOrEmpty(kv.Value) && !IsHostLedgerId(kv.Value) && aiBiz.ContainsKey(kv.Key))
                         contaminated.Add(kv.Key);
                 foreach (var addr in contaminated)
                 {
@@ -3809,7 +3816,7 @@ namespace BigAmbitionsMP
                 var hostTenanted = new List<string>();
                 foreach (var kv in MPServer.BuildingOwners)
                 {
-                    if (string.IsNullOrEmpty(kv.Value) || kv.Value == "host") continue;
+                    if (string.IsNullOrEmpty(kv.Value) || IsHostLedgerId(kv.Value)) continue;   // round-172: the host's own entries are not client reservations
                     try
                     {
                         var reg = FindRegistration(kv.Key);
@@ -3904,10 +3911,22 @@ namespace BigAmbitionsMP
                         foreach (var reg in gi.BuildingRegistrations)
                         {
                             if (reg == null) continue;
-                            bool mine = false; try { mine = reg.RentedByPlayer; } catch { }
+                            // Round-173 safety: TrulyMine - a merger-flipped PARTNER shop reads
+                            // RentedByPlayer=true, and ledgering it as the host's would misattribute
+                            // a partner's business (the test pair has no merger; released pairs do).
+                            bool mine = false; try { mine = MergerFlip.TrulyMine(reg); } catch { }
                             if (!mine) continue;
                             string aKey = ""; try { aKey = GameStateReader.AddressKey(reg); } catch { }
                             if (string.IsNullOrEmpty(aKey) || MPServer.BuildingOwners.ContainsKey(aKey)) continue;
+                            // Round-162: a natively-mine record CARRYING ANOTHER SESSION PLAYER'S tenant
+                            // mark is contradictory evidence ('57 fifthavenue': both files claimed it) —
+                            // never rule here; the contested-tenancy arbiter decides on development scores.
+                            string mark = ""; try { mark = reg.businessOwnerRivalId?.ToString() ?? ""; } catch { }
+                            if (!string.IsNullOrEmpty(mark) && mark != MPConfig.PlayerId && IsSessionPlayerId(mark))
+                            {
+                                Plugin.Logger.LogWarning($"[Integrity] ({reason}) ledger bootstrap SKIPPED '{aKey}' — natively mine but tenant-marked '{mark}' (contradictory; left to contested-tenancy arbitration).");
+                                continue;
+                            }
                             MPServer.BuildingOwners[aKey] = MPConfig.PlayerId;
                             booted++;
                             if (booted <= 10)
@@ -4010,6 +4029,17 @@ namespace BigAmbitionsMP
                                 if (string.IsNullOrEmpty(tid) || !IsSessionPlayerId(tid)) continue;   // only OUR tenant marks
                                 string aKey = GameStateReader.AddressKey(reg);
                                 if (string.IsNullOrEmpty(aKey) || MPServer.BuildingOwners.ContainsKey(aKey)) continue;   // ledgered = legit
+                                // Round-173 safety: a DEVELOPED tenant-marked unledgered building is far
+                                // more likely a LOST LEDGER ENTRY (manifest rollback - observed on the
+                                // rig) than a swallowed vacate.  Releasing it would put a real member
+                                // business on the market for native actors to eat.  Only a KNOWN-empty
+                                // shell releases; anything else is named and left for the round-61
+                                // owner-push adoption to reconcile.
+                                if (!ContestedTenancy.IsKnownEssentiallyEmpty(reg, out int gScore))
+                                {
+                                    Plugin.Logger.LogWarning($"[Integrity] ({reason}) ghost-tenancy SKIPPED '{aKey}' - tenant-marked '{tid}', unledgered, but the copy is {(gScore < 0 ? "UNKNOWN" : $"developed (score {gScore})")} - likely a lost ledger entry, not a swallowed vacate; left for owner-push adoption.");
+                                    continue;
+                                }
                                 reg.AvailableForRent = true;
                                 try { reg.businessOwnerRivalId = ""; } catch { }
                                 released++;
@@ -4023,6 +4053,8 @@ namespace BigAmbitionsMP
                             Plugin.Logger.LogWarning($"[Integrity] ({reason}) ghost-tenancies×{released} released.");
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] ghost tenancy: {ex.Message}"); }
+
+                    ContestedTenancy.HostSeed();   // round-162: the host's native claims enter arbitration
                 }
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Integrity] ledger world-state: {ex.Message}"); }
