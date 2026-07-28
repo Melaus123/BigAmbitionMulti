@@ -437,10 +437,8 @@ namespace BigAmbitionsMP
             // invalidated when the ORDER OBJECT changes, and the id falls back to an order hash when no entry
             // mapping resolves — so either a re-assigned order or a flapping entry lookup renames a customer
             // mid-life.  Say so, once per customer, with which branch produced each id.
-            if (cached.id != null && cached.id != id)
-                Plugin.Logger.LogWarning($"[PuppetChurn] SIMULATOR renamed a live customer: '{cached.id}' → '{id}' "
-                    + $"(entryLookup={(fallback ? "FAILED → order-hash fallback" : "ok")}, sameOrderObject={ReferenceEquals(cached.order, order)}) "
-                    + "— every follower will destroy the old body and spawn a new one.");
+            // (Probe retired round-158: renames here are pooled-body reuse — a recycled body's new
+            // occupant — not identity corruption; the follower-side destroy/respawn handles it.)
             _custEntryIds[iid] = (order!, id);
             return id;
         }
@@ -501,8 +499,7 @@ namespace BigAmbitionsMP
                 if (distinct.Count != p.Rows.Count || p.Rows.Count != live)
                     Plugin.Logger.LogWarning($"[PuppetChurn] STREAM MISMATCH: {live} live customer(s) → {p.Rows.Count} row(s) → "
                         + $"{distinct.Count} DISTINCT id(s). Duplicate ids collapse into one body on every follower.");
-                else
-                    Plugin.Logger.LogInfo($"[PuppetChurn] stream ok: {live} customer(s), {distinct.Count} distinct id(s).");
+                // ("stream ok" success-path line retired round-158 — the mismatch warning stays as a tripwire.)
             }
 
             if (MPServer.IsRunning) MPServer.BroadcastCustomerPuppets(p);
@@ -611,7 +608,6 @@ namespace BigAmbitionsMP
         private enum ServeAct { Fetch, ReturnAndRingUp, RingUpOnly, ReturnOnly }
         private static readonly System.Collections.Generic.Queue<(ServeAct act, Vector3 pos, float dur)> _serveQueue = new();
         private static bool _serveActorRunning;
-        private static bool _fetchBeatLogged;
         private static Vector3 _serveHome;
         private static Vector3 _serveHomeFace;
         private static int _fetchesLeft = -1;     // round-151: expected grabs this serve (-1 = unknown)
@@ -693,7 +689,6 @@ namespace BigAmbitionsMP
         /// a deadline and a swallow, a failed walk degrades to performing the animation in place (the pre-146
         /// behaviour that field-proved visible), the run flag resets in finally, and the FIRST walk logs the
         /// agent's state so the blocker is named instead of guessed.</summary>
-        private static bool _walkDiagLogged;
 
         private static System.Collections.IEnumerator BoundedWalk(ThirdPersonCharacter me, Vector3 pos, float arrive)
         {
@@ -706,19 +701,6 @@ namespace BigAmbitionsMP
             // displaced after ~1s the diag prints the agent's path truth (hasPath/status/velocity),
             // naming the mover-blocker instead of guessing.  A walk that cannot happen simply lapses
             // and the following animation plays in place — visible either way.
-            if (!_walkDiagLogged)
-            {
-                _walkDiagLogged = true;
-                string agent = "null";
-                try
-                {
-                    var a0 = me.navmeshAgent;
-                    agent = a0 == null ? "null"
-                        : $"enabled={a0.isActiveAndEnabled} onNavMesh={a0.isOnNavMesh} isStopped={a0.isStopped} updatePos={a0.updatePosition} speed={a0.speed:F1}";
-                }
-                catch (Exception ex) { agent = $"read-failed: {ex.Message}"; }
-                Plugin.Logger.LogInfo($"[ServeActor] first walk: target={pos} me={me.transform.position} agent({agent})");
-            }
             var a = me.navmeshAgent;
             if (a == null || !a.isActiveAndEnabled) yield break;
             bool destOk = false;
@@ -799,8 +781,6 @@ namespace BigAmbitionsMP
                     // actor stalls between acts or every act runs invisibly.  Breadcrumbs for the first serve
                     // separate those two worlds; retire with the serve-mirror probes.
                     _actorHardDeadline = Time.unscaledTime + 15f;   // round-149: per-act watchdog window
-                    if (_servedThisSession == 0)
-                        Plugin.Logger.LogInfo($"[ServeActor] act BEGIN {act} queue={_serveQueue.Count}");
                     switch (act)
                     {
                         case ServeAct.Fetch:
@@ -862,8 +842,6 @@ namespace BigAmbitionsMP
                             yield return PlayAnim(me, AnimationType.UsingCashRegister, dur);
                             break;
                     }
-                    if (_servedThisSession == 0)
-                        Plugin.Logger.LogInfo($"[ServeActor] act END {act} me={me.transform.position}");
                 }
             }
             finally { _serveActorRunning = false; }
@@ -910,11 +888,6 @@ namespace BigAmbitionsMP
                         break;
 
                     case 1:   // fetch one item — the REAL position the stand-in walked to
-                        if (_servedThisSession == 0 && !_fetchBeatLogged)
-                        {
-                            _fetchBeatLogged = true;
-                            Plugin.Logger.LogInfo($"[Customers] first FETCH beat received (target {p.FX:F1},{p.FY:F1},{p.FZ:F1}).");
-                        }
                         EnqueueServeAct(me, ServeAct.Fetch, new Vector3(p.FX, p.FY, p.FZ), 0f);
                         break;
 
@@ -1124,8 +1097,7 @@ namespace BigAmbitionsMP
             if (Time.unscaledTime < _nextChurnAt) return;
             _nextChurnAt = Time.unscaledTime + 10f;
             if (_puppetSpawns == 0 && _puppetLeaves == 0) return;
-            Plugin.Logger.LogInfo($"[PuppetChurn] follower 10s: spawned={_puppetSpawns} sentAway={_puppetLeaves} "
-                + $"(rowMissingFromBatch={_leaveMissing}, streamGapOver2.5s={_leaveStale}) — live bodies now {_puppets.Count}.");
+            // (10s churn summary retired round-158 — churn was field-explained: pooled bodies + normal turnover.)
             _puppetSpawns = _puppetLeaves = _leaveMissing = _leaveStale = 0;
         }
 
@@ -1297,13 +1269,6 @@ namespace BigAmbitionsMP
                 // is the single funnel it passes through.  One log line per expression pairs each [LeaveProbe]
                 // give-up with its named cause; if give-ups appear WITHOUT a matching complaint here, they are
                 // NOT demand misses and the theory is refuted.
-                try
-                {
-                    var cust = __instance != null ? __instance.GetComponentInParent<Customer>() : null;
-                    if (cust != null && !string.IsNullOrEmpty(MPRegisterSync.CurrentShopAddress))
-                        Plugin.Logger.LogInfo($"[GiveUpProbe] customer expression '{characterEmojiName}' in '{MPRegisterSync.CurrentShopAddress}'.");
-                }
-                catch { }
                 CustomerPuppets.OnLocalCustomerEmote(__instance, (int)characterEmojiName, secondsToShow);
             }
             catch { }

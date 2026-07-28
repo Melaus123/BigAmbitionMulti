@@ -564,7 +564,6 @@ namespace BigAmbitionsMP
             MPFreezeProbe.Tick();        // [MoveFreeze] symptom probe: input-without-motion detector (claim-4 backstop)
             MPHousingMorale.Tick();      // shared-residence morale: a Housing grant counts as having a home (10s reconcile)
             MPRegisterSync.TickHideSynthetics();
-            MPRegisterSync.TickTillDiag();         // round-126: name, per till, why the game will or will not queue there   // round-120: conceal a personal-duty stand-in's body — the player is the visual
             MPRegisterSync.TickContextHeal();   // building-context self-heal (hand-vehicle entry skips the entry hook)
             MPRegisterSync.TickEconDigest();    // [EconProbe] one line per owned business per game-day (2026-07-09)
             MPRegisterSync.TickDutySummary();   // TEMPORARY: duty-broadcast activation watch, 10m (2026-07-09)
