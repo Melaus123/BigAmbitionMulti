@@ -121,6 +121,329 @@ namespace BigAmbitionsMP
         private static string Key(Vector3 p)
             => $"{Mathf.RoundToInt(p.x)}:{Mathf.RoundToInt(p.y)}:{Mathf.RoundToInt(p.z)}";
 
+        // ── Round-120: personal-duty stand-ins whose BODY must stay hidden ──────────────────────────────
+        // stationKey → addressKey.  The game spawns a serving NPC from the roster record a frame or more
+        // after we inject it, so concealment cannot happen at injection time — it is retried on a slow tick
+        // until the body exists.  Hiding uses the game's own ThirdPersonCharacter.ToggleVisibility, NOT a
+        // root SetActive: round-87 proved that deactivating a character at the root strips its collider and
+        // traffic then drives through where it stood.
+        private static readonly Dictionary<string, string> _hideBodyAt = new();
+        private static readonly HashSet<string> _hidden = new();
+        private static readonly HashSet<string> _hideMissLogged = new();   // round-125: one "not present yet" line per station
+        private static readonly Dictionary<string, ThirdPersonCharacter> _hiddenTpc = new();   // round-126: per-frame re-assert target
+        private static readonly List<Renderer> _rendBuf = new();                              // round-126: allocation-free renderer walk
+        private static float _nextHideSweep;
+
+        /// <summary>Round-120: is this player personally working a till (not an employee post)?  Used to drop
+        /// player-to-player physical collision while someone is behind a counter.</summary>
+        internal static bool IsOnPersonalDuty(string playerId)
+        {
+            if (string.IsNullOrEmpty(playerId)) return false;
+            foreach (var kv in _cashiers)
+                if (!kv.Value.employee && kv.Value.playerId == playerId) return true;
+            return false;
+        }
+
+        /// <summary>MAIN THREAD, slow tick: conceal the body of any personal-duty stand-in once the game has
+        /// spawned it.  The record stays — it is what makes customers queue at that till — but the visible
+        /// person there is the actual player's synced avatar, so a second NPC beside them would read as two
+        /// staff at one register.</summary>
+        public static void TickHideSynthetics()
+        {
+            try
+            {
+                if (_hideBodyAt.Count == 0) return;
+
+                // ROUND-126: re-assert the concealment EVERY FRAME for bodies we have already found.
+                // A serve gives the worker a bag (ThirdPersonCharacter.SetHandContent parents the prop UNDER
+                // the character, ThirdPersonCharacter.cs:575), and each grab creates a NEW object — so with a
+                // 1s sweep every bag was visible for up to a second, repeatedly, which reads as "the bag isn't
+                // hidden".  Same for any other held prop in any other shop type.  Allocation-free via the
+                // List overload of GetComponentsInChildren, so per-frame is cheap for one or two stand-ins.
+                foreach (var key in _hidden)
+                {
+                    if (!_hiddenTpc.TryGetValue(key, out var ht) || ht == null) continue;
+                    try
+                    {
+                        _rendBuf.Clear();
+                        ht.GetComponentsInChildren<Renderer>(true, _rendBuf);
+                        for (int i = 0; i < _rendBuf.Count; i++)
+                            if (_rendBuf[i] != null && _rendBuf[i].enabled) _rendBuf[i].enabled = false;
+                    }
+                    catch { }
+                }
+
+                if (Time.unscaledTime < _nextHideSweep) return;
+                _nextHideSweep = Time.unscaledTime + 1f;
+
+                // ROUND-125: search ALL EmployeeStationControllers, not only CashRegisterControllers.
+                // FindNearestRegister is CashRegisterController-only, so a till of any other station type was
+                // invisible to this sweep and its stand-in body was never hidden — field symptom: the hide fired
+                // for one till and not the other, leaving a visible worker standing on that player's avatar.
+                // This is the same mistake round-30 already fixed elsewhere ("any EmployeeStationController
+                // counts — the CashRegisterController-only search was the visitor-side twin of the owner-side
+                // checkout whitelist"), so the all-station scan is the established shape here.
+                var stationObjs = UnityEngine.Object.FindObjectsOfType(typeof(EmployeeStationController));
+                foreach (var kv in _hideBodyAt)
+                {
+                    var reg = NearestStationIn(stationObjs, ParseKey(kv.Key), 2.5f);
+                    var emp = reg?.employee;
+                    var tpc = emp?.employeeTpc;
+                    if (tpc == null)
+                    {
+                        // Say so once per station: a silent skip here is indistinguishable from "the feature
+                        // does not work", which is exactly how the last two rounds were spent.
+                        if (_hideMissLogged.Add(kv.Key))
+                            Plugin.Logger.LogInfo($"[SynthStaff] stand-in body at {kv.Key} not present yet "
+                                + $"(station={(reg == null ? "NOT FOUND" : "found")}, employee={(emp == null ? "none" : "no tpc")}) — retrying each sweep.");
+                        continue;
+                    }
+                    if (emp!.employeeInstance == null
+                        || emp.employeeInstance.id == null
+                        || !emp.employeeInstance.id.StartsWith(SyntheticDutyEmployeeIdPrefix, StringComparison.Ordinal))
+                        continue;                                   // a REAL employee is on this till — never hide them
+                    // ROUND-124 — RENDERERS ONLY.  My first cut called ThirdPersonCharacter.ToggleVisibility(false),
+                    // which I had NOT read: it does navmeshAgent.enabled = false, capsuleCollider.enabled = false,
+                    // gameObject.SetActive(false), isKinematic = true and localScale = zero.  A DEACTIVATED object
+                    // runs no coroutines, so the stand-in could not serve at all — field symptom: "customer went to
+                    // the till and just stood there doing nothing".  I had even written a comment warning against a
+                    // root SetActive and then called a method that performs one internally.
+                    //
+                    // Disabling renderers hides the body while the agent, collider, Update and the serve coroutine
+                    // all keep running.  Re-asserted every sweep rather than once, because the character re-enables
+                    // its own renderers on appearance changes.
+                    int off = 0;
+                    try
+                    {
+                        foreach (var r in tpc.GetComponentsInChildren<Renderer>(true))
+                            if (r != null && r.enabled) { r.enabled = false; off++; }
+                    }
+                    catch { continue; }
+                    _hiddenTpc[kv.Key] = tpc;
+                    if (off > 0 && _hidden.Add(kv.Key))
+                        Plugin.Logger.LogInfo($"[SynthStaff] hid the stand-in body at {kv.Key} in '{kv.Value}' ({off} renderer(s)) — "
+                            + "the player working that till is already visible there as their own avatar; the stand-in stays ACTIVE so it can serve.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] hide sweep: {ex.Message}"); }
+        }
+
+        /// <summary>Round-143 - the ORIGIN-STAGING poison, measured end to end by [QueueInit]: the game
+        /// runs a register's queue-init while the item is IN HAND / being staged (transform AND data position
+        /// both (0,0,0), no queue data yet), which writes a line anchored at the world origin into the item's
+        /// customPositions.  Vanilla heals that locally by re-initializing after placement, but the staged
+        /// intermediate reached the other machine over our wire and froze there (customPositions predated the
+        /// diff hash), and round-137's owner-authoritative sync then kept restoring it.  The signature is
+        /// unambiguous: anchor 0 is the front-of-counter position and always sits within arm's reach of the
+        /// register - the poisoned one is ~950m away.  Data failing this check is dropped so the native
+        /// loader rebuilds the line at the item's true position (the same healing vanilla does).</summary>
+        internal static bool IsPoisonedQueue(System.Collections.Generic.List<SerializableVector3> list, Vector3 itemPos)
+        {
+            if (list == null || list.Count == 0) return false;
+            Vector3 a0 = list[0];
+            return Vector3.Distance(a0, itemPos) > 10f;
+        }
+
+        /// <summary>Round-137 - repair the TRUNCATED-QUEUE signature.  ItemInstance.customPositions encodes a
+        /// drawn queue as [anchors..., Vector3.zero separator, spots...] (WaitingLineData.SplitAnchorsAndSpots).
+        /// A list that decodes to two-or-more anchors with EXACTLY ONE stored spot is the corruption this
+        /// session field-proved (same register: 8 entries on the placing machine, 4 on the receiver): the lone
+        /// stored spot makes the native rebuild guard (spots.Count == 0) skip SetUpWaitingLine, so the till is
+        /// capped at ONE queue place every load, forever.  Dropping that lone spot leaves [anchors + separator],
+        /// which decodes to zero spots - and the native guard then rebuilds the line by pathing between the
+        /// anchors.  A legitimately tiny drawn queue (anchors under 0.8m apart) rebuilds to the same single
+        /// spot, so the repair cannot shrink anything real.</summary>
+        internal static int RepairTruncatedQueue(System.Collections.Generic.List<SerializableVector3> list)
+        {
+            if (list == null || list.Count < 4) return 0;
+            int sep = -1;
+            for (int i = 0; i < list.Count; i++) { Vector3 v = list[i]; if (v == Vector3.zero) { sep = i; break; } }
+            if (sep < 2) return 0;                        // fewer than two anchors -> not the signature
+            if (list.Count - sep - 1 != 1) return 0;      // only the exact one-stored-spot truncation
+            list.RemoveAt(list.Count - 1);
+            return 1;
+        }
+
+        /// <summary>Round-137 - after the in-place item apply copies a changed drawn queue, rebuild the LIVE
+        /// line (the interior is only loaded when the local player is inside; elsewhere the next interior load
+        /// rebuilds from the repaired data anyway).  Uses the game's own SetCustomAnchors -> SetUpWaitingLine.</summary>
+        internal static void RebuildDrawnQueueAt(Vector3 pos, System.Collections.Generic.List<SerializableVector3> customPositions)
+        {
+            try
+            {
+                var stations = UnityEngine.Object.FindObjectsOfType(typeof(EmployeeStationController));
+                var st = NearestStationIn(stations, pos, 2.5f);
+                var wl = (st as EmployeeStations.IWaitingLineHolder)?.GetWaitingLine();
+                if (wl == null) return;
+                var anchors = new System.Collections.Generic.List<Vector3>();
+                if (customPositions != null)
+                    foreach (var sp in customPositions) { Vector3 v = sp; if (v == Vector3.zero) break; anchors.Add(v); }
+                if (anchors.Count < 2) return;
+                // ROUND-140: showChanges:true also runs visuals.Show(), which displays the interior designer's
+                // queue markers (the anchor flag and spot dots) in normal play - the client saw the flag standing
+                // in the shop (field report 2026-07-28).  Those visuals are only ever meant for the queue tool.
+                // Set the data silently, rebuild the spots ourselves, and force the markers hidden.
+                wl.SetCustomAnchors(anchors, showChanges: false);
+                try { wl.creator.SetUpWaitingLine(); } catch { }
+                try { wl.visuals.Hide(); } catch { }
+                Plugin.Logger.LogInfo($"[QueueSync] drawn queue rebuilt at {Key(pos)} from {anchors.Count} anchor(s) - capacity follows the updated data.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[QueueSync] rebuild: {ex.Message}"); }
+        }
+
+        private static readonly System.Collections.Generic.Dictionary<string, string> _anchorSigLogged = new();
+        private static float _nextTillDiagAt;
+
+        /// <summary>Round-126 diagnostic — for every till in the shop I am standing in, print the two things
+        /// the game actually tests before it will send a customer there.  WaitingLinesHelper
+        /// .GetLessCrowdedWaitingLine orders AVAILABLE lines by how many people are already in them, so the
+        /// game DOES spread customers across tills; a line is excluded entirely by IsWaitingLineAvailable when
+        /// its station has no employee, or its employee IsAway, or the item HasAnyMissingRequirements.  If
+        /// customers pile onto one till, one of those is failing for the other till — this says which, instead
+        /// of us guessing for another round.</summary>
+        public static void TickTillDiag()
+        {
+            try
+            {
+                // ROUND-140: MP-gated again.  Round-133b un-gated this so a single-player run of the same
+                // save could answer "is multiplayer suppressing traffic" — that comparison run was never done
+                // and the user asked for the single-player probes to be removed (2026-07-28).
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                if (string.IsNullOrEmpty(CurrentShopAddress)) return;
+                if (Time.unscaledTime < _nextTillDiagAt) return;
+                _nextTillDiagAt = Time.unscaledTime + 10f;
+
+                var stations = UnityEngine.Object.FindObjectsOfType(typeof(EmployeeStationController));
+                if (stations == null || stations.Length == 0) return;
+
+                var sb = new System.Text.StringBuilder();
+                int n = 0;
+                foreach (var o in stations)
+                {
+                    var st = o as EmployeeStationController;
+                    if (st == null) continue;
+                    n++;
+                    string who = "none";
+                    bool away = false;
+                    try
+                    {
+                        var e = st.employee;
+                        if (e != null)
+                        {
+                            away = e.IsAway;
+                            who = e.employeeInstance?.id ?? "?";
+                            if (who.StartsWith(SyntheticDutyEmployeeIdPrefix, StringComparison.Ordinal)) who = "STAND-IN";
+                            else if (e.isPlayer) who = "PLAYER";
+                            else who = "hired";
+                        }
+                    }
+                    catch { }
+                    bool missing = true;
+                    try { missing = ItemHelper.HasAnyMissingRequirements(st.ItemInstance); } catch { }
+                    // ROUND-128: also print the ITEM NAME and the queue capacity.  A customer's objective looks
+                    // for stations by TAG (CustomerJoinQueue → employeeStationTag.AllWithTag), so a till of a
+                    // different item type may not even be a candidate for that customer — which no amount of
+                    // staffing would fix, and which our StaffDiag has hinted at for weeks ("unrecognized
+                    // till-like item type: 'ba:itemname_counter1'").  Spots matter too: CustomerJoinQueue
+                    // COMPLAINS AND LEAVES when usable lines exist but none has a free spot, which is exactly
+                    // the reported "they spawn and instantly walk out".
+                    string item = "?"; int spots = -1;
+                    try { item = st.ItemInstance?.itemName ?? "?"; } catch { }
+                    // ROUND-136 — the queue-capacity divergence (same register: 5 spots on the placing machine,
+                    // 1 on the receiving one, PERSISTENT across sessions, so NOT a transient navmesh race).
+                    // WaitingLineCreator.SetUpWaitingLine builds spots by pathing BETWEEN ANCHORS, and a line
+                    // with a single anchor yields exactly one spot deterministically.  A customPositions list
+                    // with ONE entry is the known way to get a single anchor, and the placing machine dodges it
+                    // because its line was already built at placement (the spots.Count==0 guard skips the
+                    // rebuild).  These three counts name the branch: custPos (the data), anchors (what the line
+                    // was built from), spotCount (the result).  freeSpots stays for queue-occupancy reading.
+                    int custPos = -1, anchors = -1, spotCount = -1;
+                    try { custPos = st.ItemInstance?.customPositions?.Count ?? 0; } catch { }
+                    try
+                    {
+                        var wl = (st as EmployeeStations.IWaitingLineHolder)?.GetWaitingLine();
+                        if (wl?.data != null)
+                        {
+                            spots     = wl.data.GetAmountOfSpotsAvailable();
+                            spotCount = wl.data.spots?.Count ?? -1;
+                            anchors   = wl.data.anchorsPositions?.Count ?? -1;
+
+                            // ROUND-141 [QueueAnchors] — LOCALIZATION, not a fix (attempt count for the
+                            // 1-spot till stands at one failed fix).  Spot capacity is floor(pathDist/0.8)
+                            // sampled along the NAVMESH PATH between the line's two anchors, so a 1-spot
+                            // line means the anchor GEOMETRY is degenerate.  Log, once per till and again
+                            // whenever the values change, the three numbers that name which way it is
+                            // degenerate: collapsed (dist < 0.8m), unreachable (path invalid or no
+                            // corners), or fragmented (corners so short each floors to zero).
+                            try
+                            {
+                                if (wl.data.anchorsPositions != null && wl.data.anchorsPositions.Count >= 2)
+                                {
+                                    var a0 = wl.data.anchorsPositions[0];
+                                    var a1 = wl.data.anchorsPositions[wl.data.anchorsPositions.Count - 1];
+                                    string k2 = Key(st.transform.position);
+                                    string sig = $"{a0}|{a1}|{spotCount}";
+                                    if (!_anchorSigLogged.TryGetValue(k2, out var prevSig) || prevSig != sig)
+                                    {
+                                        _anchorSigLogged[k2] = sig;
+                                        var np = new UnityEngine.AI.NavMeshPath();
+                                        bool calcOk = false;
+                                        try { calcOk = UnityEngine.AI.NavMesh.CalculatePath(a0, a1, -1, np); } catch { }
+                                        int corners = 0; int predicted = 1;   // the creator always seeds anchor 0 as spot 0
+                                        try
+                                        {
+                                            corners = np.corners?.Length ?? 0;
+                                            for (int ci = 0; ci + 1 < corners; ci++)
+                                                predicted += (int)System.Math.Floor(Vector3.Distance(np.corners[ci], np.corners[ci + 1]) / 0.8f);
+                                        }
+                                        catch { }
+                                        Plugin.Logger.LogWarning($"[QueueAnchors] {k2} a0={a0} a1={a1} "
+                                            + $"straightDist={Vector3.Distance(a0, a1):F2}m path={(calcOk ? np.status.ToString() : "CALC-FAILED")} "
+                                            + $"corners={corners} predictedSpots={predicted} actualSpots={spotCount} — "
+                                            + "straightDist<0.8 = anchors collapsed; CALC-FAILED/PathInvalid/corners<2 = anchors unreachable "
+                                            + "on this machine's navmesh; predicted>actual = stored spots are stale.");
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    catch { }
+                    sb.Append($" [{Key(st.transform.position)} item='{item}' emp={who}{(away ? " AWAY" : "")} missingReq={missing} freeSpots={spots} spotCount={spotCount} anchors={anchors} custPos={custPos}]");
+                }
+                if (n > 0)
+                    Plugin.Logger.LogInfo($"[TillDiag] '{CurrentShopAddress}' {n} station(s):{sb} — a line is skipped entirely if emp=none, AWAY, or missingReq=True.");
+
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TillDiag] {ex.Message}"); }
+        }
+
+        /// <summary>Inverse of Key() — the sweep needs a position to find the till again.</summary>
+        private static Vector3 ParseKey(string k)
+        {
+            try
+            {
+                var parts = k.Split(':');
+                if (parts.Length != 3) return Vector3.zero;
+                return new Vector3(float.Parse(parts[0]), float.Parse(parts[1]), float.Parse(parts[2]));
+            }
+            catch { return Vector3.zero; }
+        }
+
+        /// <summary>Round-119: the rounded-position key of the till THIS player is personally working
+        /// ("" = not on personal duty).  Position keys are the identifier that has been verified to match
+        /// across machines, which is why the serve mirror addresses tills this way rather than by station id.</summary>
+        internal static string LocalPersonalDutyKey()
+        {
+            foreach (var kv in _cashiers)
+                if (!kv.Value.employee && kv.Value.playerId == MPConfig.PlayerId) return kv.Key;
+            return "";
+        }
+
+        /// <summary>Round-119: the position key for a station, so the simulator can name the till it just
+        /// served at in the same terms every machine already uses for duty.</summary>
+        internal static string StationKeyOf(Vector3 pos) => Key(pos);
+
         /// <summary>Round-41 (customer puppets): the player on PERSONAL register duty at this address
         /// ("" = none). The simulator election gives the register worker authority — serving requires
         /// simulating (the serve loop needs real customer AI on the serving machine).</summary>
@@ -142,22 +465,39 @@ namespace BigAmbitionsMP
             {
                 _cashiers[k] = (p.PlayerId, pos, p.Employee, p.Address ?? "", p.StationId ?? "");
                 Plugin.Logger.LogInfo($"[Register] '{p.PlayerId}' ON duty at {k}{(p.Employee ? " (employee)" : "")}.");
-                // EMPLOYEE duty on another machine → spawn the visible staff
-                // NPC (immersion; commerce works without it).  Main-thread:
-                // Apply can run on the network poll thread.
-                if (p.Employee && p.PlayerId != MPConfig.PlayerId && !string.IsNullOrEmpty(p.Address))
+                // Duty on ANOTHER machine → stand the till up locally.  Main-thread: Apply can run on the
+                // network poll thread.
+                //
+                // ROUND-120: this used to require p.Employee, i.e. only a shop run by the owner's HIRED staff
+                // got a stand-in.  A PERSONAL duty (a player working the till themselves) sends
+                // Employee=false, so their till was staffed on THEIR machine only — and since exactly one
+                // machine simulates the customers, the simulator saw a single staffed till and queued
+                // everyone there.  Field-confirmed by the user's two-register test: both duties known on both
+                // machines, "synthetics=0" on the host, every customer at one register.
+                //
+                // A personal-duty stand-in is the MECHANISM (it is what makes customers queue and be served);
+                // its BODY is redundant, because the player it stands in for is already visible there as a
+                // synced avatar.  So personal-duty stand-ins are marked for concealment — see TickHideSynthetics.
+                if (p.PlayerId != MPConfig.PlayerId && !string.IsNullOrEmpty(p.Address))
                 {
                     string addr = p.Address; string pid = p.PlayerId; string st = p.StationId;
                     var dutyPos = pos;
-                    GameStatePatcher.EnqueueOnMainThread(() => TryStaffSynthetic(addr, pid, st, dutyPos));
+                    bool personal = !p.Employee;
+                    GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        TryStaffSynthetic(addr, pid, st, dutyPos);
+                        if (personal) _hideBodyAt[Key(dutyPos)] = addr;   // the player's own avatar is the visual
+                    });
                 }
             }
             else if (_cashiers.TryGetValue(k, out var e) && e.playerId == p.PlayerId)
             {
                 _cashiers.TryRemove(k, out _);
                 Plugin.Logger.LogInfo($"[Register] '{p.PlayerId}' OFF duty at {k}.");
-                if (e.employee && p.PlayerId != MPConfig.PlayerId)
-                    GameStatePatcher.EnqueueOnMainThread(() => RemoveSyntheticAtStation(k));
+                // Round-120: mirror the ON gate — a personal-duty stand-in must be torn down too, or the till
+                // stays staffed by a phantom after the player walks away.
+                if (p.PlayerId != MPConfig.PlayerId)
+                    GameStatePatcher.EnqueueOnMainThread(() => { _hideBodyAt.Remove(k); RemoveSyntheticAtStation(k); });
             }
         }
 
@@ -244,7 +584,18 @@ namespace BigAmbitionsMP
                         SendToggle(_empDuty[myKey], false);
                         _empDuty.Remove(myKey);
                     }
-                    SendToggle(_dutyPos, true);
+                    // ROUND-122: carry the till's ITEM-INSTANCE id.  Without it the receiver's stand-in is
+                    // created with "0 shift(s), station ''" — and the work shift is the ONLY thing that tells
+                    // the game which station a worker mans, so the till was never actually staffed on the
+                    // other machine and its customer AI had nothing to queue for.  That is why two players on
+                    // two tills still saw every customer at one register even after the gate, per-till and id
+                    // fixes: those got a stand-in created, this is what puts it BEHIND THE COUNTER.
+                    string myStationId = "";
+                    try { myStationId = reg.ItemInstance?.id ?? ""; } catch { }
+                    if (string.IsNullOrEmpty(myStationId))
+                        Plugin.Logger.LogWarning("[Register] personal duty: could not resolve the till's item-instance id — "
+                            + "the stand-in on other machines will have no shift and that till will not serve.");
+                    SendToggle(_dutyPos, true, stationId: myStationId);
                     // Worker-side price-table snapshot — cross-machine evidence
                     // pairing for any future price dispute.
                     try
@@ -359,7 +710,19 @@ namespace BigAmbitionsMP
                                 if (sd?.workShifts != null)
                                     foreach (var w in sd.workShifts)
                                         if (w != null && !string.IsNullOrEmpty(w.itemInstanceId)
-                                            && !string.IsNullOrEmpty(w.employeeId))
+                                            && !string.IsNullOrEmpty(w.employeeId)
+                                            // ROUND-123: never count OUR OWN stand-in as a hired employee.
+                                            // TryStaffSynthetic gives the stand-in a blanket 0-24h shift on the
+                                            // till so the game staffs it — and this scan reads the schedule
+                                            // structurally, so that shift looked exactly like a real hire.  The
+                                            // result was a FEEDBACK LOOP: a stand-in for player B's till made
+                                            // this machine broadcast the same till as EMPLOYEE-staffed under
+                                            // its own name, the other machine then injected a stand-in for THAT
+                                            // duty, and employee-duty stand-ins are not concealed — so a visible
+                                            // worker appeared standing on top of player B.  Field-confirmed:
+                                            // "[Register] 'melaus' ON duty at 952:1:-2 (employee)" four lines
+                                            // after a stand-in was injected for Client1 at 952.
+                                            && !IsSyntheticDuty(w.employeeId))
                                             stationIds.Add(w.itemInstanceId);
                     }
                     catch { }
@@ -747,7 +1110,8 @@ namespace BigAmbitionsMP
                 }
                 catch { }
                 if (!hasTill) return;   // not a till shop — irrelevant to the no-workers bug
-                bool synthHere = false; try { synthHere = _synthetics.ContainsKey(addr); } catch { }
+                bool synthHere = false;
+                try { foreach (var kv in _synthetics) if (kv.Value.addressKey == addr) { synthHere = true; break; } } catch { }
                 int togglesHere = 0; try { foreach (var kv in _cashiers) if (kv.Value.address == addr) togglesHere++; } catch { }
                 DumpShopStaffing(reg, addr, "[StaffDiag/visit]", forced: true);   // event-driven (one per entry) — keep unconditional
                 Plugin.Logger.LogWarning($"[StaffDiag/visit] '{addr}' synthetic-here={synthHere} duty-toggles-here={togglesHere}");
@@ -793,7 +1157,12 @@ namespace BigAmbitionsMP
         // VISIBLE — it represents the owner's staff.  One synthetic per
         // ADDRESS (v1; multi-station shops get one body).  Commerce never
         // depends on this: self-checkout + RemoteSale run regardless.
-        private static readonly Dictionary<string, (string playerId, EmployeeInstance inst, Vector3 pos)> _synthetics = new();
+        // ROUND-120: keyed by STATION (rounded duty position), NOT by building.  It used to be one entry per
+        // ADDRESS, and TryStaffSynthetic's "already have one here?" guard therefore refused a second stand-in
+        // anywhere in the same shop — so with two players on two tills only the FIRST till was ever staffed on
+        // the other machines, and the simulator queued every customer at the one till it could see.  That was
+        // invisible while the feature only served employee-staffed shops (one stand-in per shop was enough).
+        private static readonly Dictionary<string, (string playerId, string addressKey, EmployeeInstance inst, Vector3 pos)> _synthetics = new();
         private static float _nextEvalAt;
 
         /// <summary>Is this station under EMPLOYEE duty (used by the staffing
@@ -801,11 +1170,26 @@ namespace BigAmbitionsMP
         public static bool IsEmployeeDutyStation(Vector3 pos)
             => _cashiers.TryGetValue(Key(pos), out var e) && e.employee;
 
+        /// <summary>Round-144 - true when this position is a till WE staffed with a stand-in.  Scope guard
+        /// for the ShouldUpdateEmployee ownership bypass (BusinessPatches): only OUR stations get it.</summary>
+        internal static bool HasSyntheticNear(Vector3 pos)
+        {
+            try
+            {
+                string k = Key(pos);
+                foreach (var v in _synthetics.Values)
+                    if (Key(v.pos) == k) return true;
+            }
+            catch { }
+            return false;
+        }
+
         private static void TryStaffSynthetic(string addressKey, string playerId, string stationId, Vector3 dutyPos)
         {
             try
             {
-                if (string.IsNullOrEmpty(addressKey) || _synthetics.ContainsKey(addressKey)) return;
+                string stationKey = Key(dutyPos);
+                if (string.IsNullOrEmpty(addressKey) || _synthetics.ContainsKey(stationKey)) return;
                 var gi = SaveGameManager.Current;
                 if (gi == null) return;
 
@@ -820,7 +1204,13 @@ namespace BigAmbitionsMP
 
                 var inst = Helpers.EmployeeHelper.CreateAIEmployeeInstance("ba:skill_customerservice");
                 if (inst == null) { Plugin.Logger.LogWarning("[SynthStaff] factory returned null."); return; }
-                inst.id = $"{SyntheticDutyEmployeeIdPrefix}{playerId}_{addressKey.Replace(' ', '_')}";
+                // ROUND-121: the id MUST include the station.  It used to be player+address only, which was
+                // unique while the registry allowed one stand-in per shop.  Now that stand-ins are per TILL, a
+                // shop with several staffed stations produces several records with the SAME player and address
+                // — and the duplicate-guard below would delete each previous roster entry as the next was
+                // added, leaving one staffed till and two records pointing at instances no longer in the
+                // roster.  That is the very symptom the per-till re-key was meant to remove.
+                inst.id = $"{SyntheticDutyEmployeeIdPrefix}{playerId}_{addressKey.Replace(' ', '_')}_{stationKey}";
                 inst.hourlyWage = 0f;
                 inst.satisfaction = 100f;
                 inst.assignedAddress = new Address(reg.StreetName, reg.StreetNumber);
@@ -842,7 +1232,7 @@ namespace BigAmbitionsMP
 
                 gi.EmployeeInstances.Add(inst);
                 try { Helpers.EmployeeHelper.EmployeeInstancesDictionary[inst.id] = inst; } catch { }
-                _synthetics[addressKey] = (playerId, inst, dutyPos);
+                _synthetics[stationKey] = (playerId, addressKey, inst, dutyPos);
 
                 int shifts = 0;
                 if (!string.IsNullOrEmpty(stationId) && reg.scheduleDays != null)
@@ -871,18 +1261,16 @@ namespace BigAmbitionsMP
         /// duty position matches.</summary>
         private static void RemoveSyntheticAtStation(string posKey)
         {
-            string? addr = null;
-            foreach (var kv in _synthetics)
-                if (Key(kv.Value.pos) == posKey) { addr = kv.Key; break; }
-            if (addr != null) RemoveSynthetic(addr);
+            RemoveSynthetic(posKey);   // round-120: the registry IS keyed by station now
         }
 
-        private static void RemoveSynthetic(string addressKey)
+        private static void RemoveSynthetic(string stationKey)
         {
             try
             {
-                if (string.IsNullOrEmpty(addressKey) || !_synthetics.TryGetValue(addressKey, out var s)) return;
-                _synthetics.Remove(addressKey);
+                if (string.IsNullOrEmpty(stationKey) || !_synthetics.TryGetValue(stationKey, out var s)) return;
+                _synthetics.Remove(stationKey);
+                string addressKey = s.addressKey;   // round-120: the rest of this method is address-scoped
                 // Freeze-correlation probe (2026-07-16): the record removal below makes
                 // the native engine despawn the serving NPC; if the LOCAL player is
                 // standing in this shop, that despawn is the suspected trigger for the
@@ -936,7 +1324,7 @@ namespace BigAmbitionsMP
                 try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(s.inst.id); } catch { }
                 Plugin.Logger.LogInfo($"[SynthStaff] staff NPC removed at '{addressKey}'.");
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] remove '{addressKey}': {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] remove at station '{stationKey}': {ex.Message}"); }
         }
 
         /// <summary>Remove ORPHANED synthetic duty employees.

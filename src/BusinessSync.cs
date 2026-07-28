@@ -572,6 +572,36 @@ namespace BigAmbitionsMP
 
         // ── Field reading ─────────────────────────────────────────────────────
 
+        /// <summary>Round-122: push ONE business's state to the other machines RIGHT NOW instead of waiting for
+        /// the 2s change-detector.  Opening or closing a shop is a deliberate, immediate act — a couple of
+        /// seconds of the other player seeing the old state is long enough for them to walk a customer into a
+        /// shop that is already shut (or stand outside one that is already open).  Everything else about the
+        /// sweep is unchanged; this just front-runs it for that one registration, and seeds the same sent-cache
+        /// so the sweep then sees no change and stays quiet.</summary>
+        public static void PushBusinessNow(BuildingRegistration reg, string why)
+        {
+            try
+            {
+                if (reg == null) return;
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                var info = ReadInfo(reg);
+                if (info == null || string.IsNullOrEmpty(info.AddressKey)) return;
+
+                if (MPServer.IsRunning)
+                {
+                    _lastSent[info.AddressKey] = info;
+                    MPServer.BroadcastBusinessChange(info);
+                }
+                else
+                {
+                    _lastSentClientAt[info.AddressKey] = UnityEngine.Time.realtimeSinceStartup;
+                    MPClient.SendBusinessChange(info);
+                }
+                Plugin.Logger.LogInfo($"[BusinessSync] immediate push for '{info.AddressKey}' ({why}) — not waiting for the {PollIntervalSeconds:F0}s sweep.");
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] PushBusinessNow: {ex.Message}"); }
+        }
+
         private static BusinessInfo? ReadInfo(BuildingRegistration reg)
         {
             try

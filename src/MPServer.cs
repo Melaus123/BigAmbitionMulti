@@ -1487,6 +1487,17 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.RegisterServe:         // a client simulator's serve beat — apply + relay
+                {
+                    var rs = env.GetPayload<RegisterServePayload>();
+                    if (rs != null && rs.SimulatorPid == senderPid)
+                    {
+                        GameStatePatcher.EnqueueOnMainThread(() => CustomerPuppets.ApplyServe(rs));
+                        BroadcastRegisterServe(rs);
+                    }
+                    break;
+                }
+
                 case MessageType.CustomerPuppetEmote:   // a client simulator's customer emoji — apply + relay
                 {
                     var ce = env.GetPayload<CustomerPuppetEmotePayload>();
@@ -3006,6 +3017,13 @@ namespace BigAmbitionsMP
         {
             if (!_running || p == null) return;
             Broadcast(MessageEnvelope.Create(MessageType.CustomerPuppetState, "host", p));
+        }
+
+        /// <summary>Round-119: relay a serve beat to everyone, so whoever is working that till performs it.</summary>
+        public static void BroadcastRegisterServe(RegisterServePayload p)
+        {
+            if (!_running || p == null) return;
+            Broadcast(MessageEnvelope.Create(MessageType.RegisterServe, "host", p));
         }
 
         public static void BroadcastCustomerEmote(CustomerPuppetEmotePayload p)

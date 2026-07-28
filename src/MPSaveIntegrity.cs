@@ -95,6 +95,45 @@ namespace BigAmbitionsMP
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] vehicle-slots: {ex.Message}"); }
                 if (slotsFixed > 0) parts.Add($"vehicle-slots×{slotsFixed} repaired");
 
+                // -- Class 6: truncated drawn queues (REPAIR, round-137) --------------
+                // customPositions = [anchors..., zero separator, spots...].  A copy frozen mid-build
+                // carries the anchors plus EXACTLY ONE stored spot; that lone spot makes the native
+                // rebuild guard skip SetUpWaitingLine, capping the till at one queue place every load
+                // (field: same register, 8 entries on the placing machine, 4 here).  Dropping the lone
+                // spot lets the native loader rebuild the line by pathing between the anchors.
+                int queueFixed = 0, queueLogged = 0;
+                try
+                {
+                    if (gi.BuildingRegistrations != null)
+                        foreach (var reg in gi.BuildingRegistrations)
+                        {
+                            if (reg?.itemInstances == null) continue;
+                            foreach (var kvq in reg.itemInstances)
+                            {
+                                var iiq = kvq.Value;
+                                if (iiq?.customPositions == null) continue;
+                                // Round-143: the origin-staging poison (head anchor >10m from the item) -
+                                // drop the whole list; the native loader rebuilds the line at the true pose.
+                                if (MPRegisterSync.IsPoisonedQueue(iiq.customPositions, iiq.position))
+                                {
+                                    iiq.customPositions = null;
+                                    queueFixed++;
+                                    if (queueLogged++ < LogCapPerClass)
+                                        Plugin.Logger.LogWarning($"[Integrity] {reason}: '{reg.BusinessName}' item '{iiq.itemName}' had queue data anchored far from the register (origin-staging artifact) - dropped so the line rebuilds at the item's true position.");
+                                    continue;
+                                }
+                                if (MPRegisterSync.RepairTruncatedQueue(iiq.customPositions) > 0)
+                                {
+                                    queueFixed++;
+                                    if (queueLogged++ < LogCapPerClass)
+                                        Plugin.Logger.LogWarning($"[Integrity] {reason}: '{reg.BusinessName}' item '{iiq.itemName}' carried a truncated drawn queue (anchors + one stored spot) - dropped the spot so the line rebuilds at its real length.");
+                                }
+                            }
+                        }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] drawn-queues: {ex.Message}"); }
+                if (queueFixed > 0) parts.Add($"drawn-queues×{queueFixed} repaired");
+
                 // ── Classes 2+3: duty shifts (REPAIR) + real-id shift orphans
                 // (DETECT) — the existing zero-false-positive sweep; its
                 // wider-net pass logs [ScheduleDiag] details for real ids.

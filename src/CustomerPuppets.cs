@@ -4,6 +4,9 @@ using Buildings;
 using Helpers;
 using UnityEngine;
 using UnityEngine.AI;
+using DG.Tweening;                 // DOLookAt — round-119 serve performance
+using BigAmbitions.Characters;    // AnimationType
+using BigAmbitions.SoundSystem;   // SoundType
 
 namespace BigAmbitionsMP
 {
@@ -39,6 +42,7 @@ namespace BigAmbitionsMP
 
         // ── Simulator streaming ──────────────────────────────────────────────────────────────────────
         private static float _nextStreamAt;
+        private static float _nextStreamStatAt;   // round-132: live-customers vs distinct-ids audit
 
         // ── Puppets (follower side) ──────────────────────────────────────────────────────────────────
         private class Puppet
@@ -115,6 +119,7 @@ namespace BigAmbitionsMP
                 SimulatorStreamTick();
                 UpdatePuppets();
                 TickWarpHolds();
+                ChurnTick();
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] puppet tick: {ex.Message}"); }
         }
@@ -141,13 +146,38 @@ namespace BigAmbitionsMP
                 list.Add((pid, _arrival[pid].since));
             }
 
-            // Elect per occupied building: register-duty holder first, else earliest arrival.
+            // Elect per occupied building: INCUMBENT FIRST (round-118), else register-duty holder, else
+            // earliest arrival.
+            //
+            // ROUND-118 STICKY AUTHORITY — field report bamp-bug-20260727-204640 ('Misterxk9x'): the host
+            // could not work his own restaurant while his partner was in it.  Cause: she arrived first so she
+            // held authority; every time he sat at the register he took duty and authority flipped to him,
+            // and every time he stood it flipped straight back.  The log shows ten duty transitions in 28
+            // seconds and at least five full round trips of authority — and a transfer is EXPENSIVE by
+            // design ("the outgoing crowd paths to the exit while the new simulator's spawner repopulates"),
+            // so his customers were torn down and respawned over and over and nobody was ever served.
+            //
+            // The fix is not a debounce, it is not transferring at all while nothing relevant has changed.
+            // A player sitting at a SECOND till does not need authority for that till to work: every other
+            // machine injects a real staffed stand-in at it (MPRegisterSync :789-790), so customers queue and
+            // check out there on the simulator's machine, and those customers stream back as puppets — the
+            // second player sees the queue form at their own counter.  So authority only has to move when the
+            // current simulator genuinely CANNOT do the job any more, i.e. they are no longer in the building
+            // (leaving/disconnecting drops them from `inside`, and an emptied building is cleared below).
+            //
+            // Duty-first still decides the FIRST election for a building — when nobody is simulating yet, the
+            // person working the register is the right choice, because serving does require simulating.
             foreach (var kv in inside)
             {
                 string sim = "";
-                string duty = MPRegisterSync.PersonalDutyHolderAt(kv.Key);
-                if (!string.IsNullOrEmpty(duty))
-                    foreach (var (pid, _) in kv.Value) if (pid == duty) { sim = duty; break; }
+                if (_authority.TryGetValue(kv.Key, out var incumbent) && !string.IsNullOrEmpty(incumbent))
+                    foreach (var (pid, _) in kv.Value) if (pid == incumbent) { sim = incumbent; break; }
+                if (sim.Length == 0)
+                {
+                    string duty = MPRegisterSync.PersonalDutyHolderAt(kv.Key);
+                    if (!string.IsNullOrEmpty(duty))
+                        foreach (var (pid, _) in kv.Value) if (pid == duty) { sim = duty; break; }
+                }
                 if (sim.Length == 0)
                 {
                     float best = float.MaxValue;
@@ -161,7 +191,11 @@ namespace BigAmbitionsMP
                     MPServer.BroadcastCustomerAuthority(new CustomerSimAuthorityPayload { AddressKey = kv.Key, SimulatorPid = sim });
                     if (changed)
                     {
-                        Plugin.Logger.LogInfo($"[Customers] simulator for '{kv.Key}' → '{sim}' ({kv.Value.Count} inside).");
+                        // Round-118: transfers are now RARE by construction (incumbent keeps it while inside),
+                        // so say WHY one happened — a run of these in a field log means the occupancy reading
+                        // is flickering, which is a different bug from the one this stickiness fixed.
+                        Plugin.Logger.LogInfo($"[Customers] simulator for '{kv.Key}' → '{sim}' ({kv.Value.Count} inside) — "
+                            + (string.IsNullOrEmpty(cur) ? "first election for this building." : $"'{cur}' is no longer inside."));
                         if (kv.Key == _myBldg) ReactToAuthority();
                     }
                 }
@@ -393,7 +427,20 @@ namespace BigAmbitionsMP
                 return cached.id;
             string id = "";
             try { id = CustomerEntrySync.EntryIdForOrder(reg, order); } catch { }
-            if (string.IsNullOrEmpty(id)) id = "i" + iid + "-" + (order?.GetHashCode() ?? 0);
+            bool fallback = string.IsNullOrEmpty(id);
+            if (fallback) id = "i" + iid + "-" + (order?.GetHashCode() ?? 0);
+            // ROUND-131: a row id CHANGING for a live customer is invisible here but catastrophic on the
+            // follower — the old id stops appearing in the batch, so its puppet walks to the exit and is
+            // destroyed, while the new id spawns a fresh body.  On screen that is a customer appearing and
+            // immediately leaving, over and over, while the simulator's own customers are perfectly healthy
+            // (this run: 9 joins, 0 complaints, 1 Served departure).  The cache is keyed by instance id and
+            // invalidated when the ORDER OBJECT changes, and the id falls back to an order hash when no entry
+            // mapping resolves — so either a re-assigned order or a flapping entry lookup renames a customer
+            // mid-life.  Say so, once per customer, with which branch produced each id.
+            if (cached.id != null && cached.id != id)
+                Plugin.Logger.LogWarning($"[PuppetChurn] SIMULATOR renamed a live customer: '{cached.id}' → '{id}' "
+                    + $"(entryLookup={(fallback ? "FAILED → order-hash fallback" : "ok")}, sameOrderObject={ReferenceEquals(cached.order, order)}) "
+                    + "— every follower will destroy the old body and spawn a new one.");
             _custEntryIds[iid] = (order!, id);
             return id;
         }
@@ -440,6 +487,24 @@ namespace BigAmbitionsMP
                 }
             }
             catch { }
+            // ROUND-132: the follower was rendering 1-3 bodies while the simulator had a dozen customers
+            // queued (QueueProbe: joined=14, one departure).  Rows are keyed by id on the receiver
+            // (_puppets[r.Id]), so ANY two customers resolving to the SAME id collapse into one body — which
+            // would look exactly like "most customers never appear, and the ones that do keep being replaced".
+            // Count live customers against DISTINCT ids actually sent; if they disagree, identity is the bug.
+            if (Time.unscaledTime >= _nextStreamStatAt)
+            {
+                _nextStreamStatAt = Time.unscaledTime + 5f;
+                int live = 0; try { live = IndoorCustomerSpawner.Customers.Count; } catch { }
+                var distinct = new HashSet<string>();
+                foreach (var r in p.Rows) if (r != null) distinct.Add(r.Id);
+                if (distinct.Count != p.Rows.Count || p.Rows.Count != live)
+                    Plugin.Logger.LogWarning($"[PuppetChurn] STREAM MISMATCH: {live} live customer(s) → {p.Rows.Count} row(s) → "
+                        + $"{distinct.Count} DISTINCT id(s). Duplicate ids collapse into one body on every follower.");
+                else
+                    Plugin.Logger.LogInfo($"[PuppetChurn] stream ok: {live} customer(s), {distinct.Count} distinct id(s).");
+            }
+
             if (MPServer.IsRunning) MPServer.BroadcastCustomerPuppets(p);
             else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.CustomerPuppetState, MPConfig.PlayerId, p));
         }
@@ -502,6 +567,143 @@ namespace BigAmbitionsMP
                 PlayEmoteOn(pup, p.Emoji, p.Seconds);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] apply emote: {ex.Message}"); }
+        }
+
+        /// <summary>Round-119: am I the elected simulator for this building?  Used by the serve mirror to emit
+        /// beats only from the machine actually running the customers.</summary>
+        internal static bool IAmSimulatorFor(string addr)
+            => !string.IsNullOrEmpty(addr) && _authority.TryGetValue(addr, out var s) && s == MPConfig.PlayerId;
+
+        /// <summary>Round-119: the wire id for a live customer — the SAME id the position stream uses, so a
+        /// serve beat names the body the follower already has on screen.</summary>
+        internal static string RowIdForCustomer(Customer c)
+        {
+            try { return c == null ? "" : RowIdOf(c, FindReg(_myBldg)); }
+            catch { return ""; }
+        }
+
+        // ── Round-119: serve performance on a FOLLOWER's till ────────────────────────────────────────────
+        // A player working a register is made the station's EMPLOYEE by the game (WorkActivity.StartWorking →
+        // AssignEmployee(playerController.Character, ...)), so the ordinary employee serve loop runs on their
+        // own body: fetch each item with a 2.5s animation, return, the customer animates, a gendered sound
+        // plays.  On a follower none of that can happen — there are no real Customers, so no serve loop — and
+        // they stand motionless behind a queue that is visibly being served (their till IS staffed by a
+        // stand-in on the simulator's machine, and those customers stream back as puppets).  So we mirror the
+        // real serve's START and FINISH and perform the middle locally.
+        private static string _servingCustomerId = "";
+        private static int    _servedThisSession;
+
+        /// <summary>The rounded-position key of the till THIS player is personally working ("" if none).</summary>
+        private static string MyDutyStationKey()
+        {
+            try { return MPRegisterSync.LocalPersonalDutyKey(); } catch { return ""; }
+        }
+
+        private static bool _fetchRunning;
+
+        /// <summary>Round-120: walk the working player to a nearby shelf and back, mirroring the native fetch
+        /// trip.  Bounded and self-cancelling: one trip at a time, and it always returns to the till even if
+        /// the walk fails, so a serve cannot leave someone stranded mid-floor.</summary>
+        private static void TryFetchTrip(ThirdPersonCharacter me)
+        {
+            try
+            {
+                if (_fetchRunning || me == null) return;
+
+                // A shelf-ish target: the nearest item with retail cargo, excluding the till itself.
+                Vector3 home = me.transform.position;
+                Transform? target = null; float bestD2 = 9f * 9f;   // stay in-shop; no cross-room hikes
+                foreach (var ic in UnityEngine.Object.FindObjectsOfType<ItemController>())
+                {
+                    if (ic == null || ic.ItemInstance == null) continue;
+                    var t = ic.transform;
+                    float d2 = (t.position - home).sqrMagnitude;
+                    if (d2 < 2.25f || d2 > bestD2) continue;        // not the counter we are standing at
+                    bestD2 = d2; target = t;
+                }
+                if (target == null) return;                          // nothing to fetch from — stay put
+
+                _fetchRunning = true;
+                me.StartCoroutine(FetchRoutine(me, target, home));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] fetch trip: {ex.Message}"); _fetchRunning = false; }
+        }
+
+        private static System.Collections.IEnumerator FetchRoutine(ThirdPersonCharacter me, Transform shelf, Vector3 home)
+        {
+            Vector3 shelfPos = shelf != null ? shelf.position : home;
+            // Out to the shelf, grab, back to the till — the same three beats the native serve performs.
+            yield return me.MoveToPosition(shelfPos, shelfPos, 0.6f, rotateToLookTarget: true);
+            yield return me.animator.RunAnimation(AnimationType.UsingProducer, 2.5f);
+            yield return me.MoveToPosition(home, home, 0.5f, rotateToLookTarget: true);
+            _fetchRunning = false;
+        }
+
+        /// <summary>Round-119: a serve started or finished at some till in my building.  If it is the till I am
+        /// working, perform it.  Beats for any other till are ignored — the simulator broadcasts per building,
+        /// and only the player standing at that specific counter should act it out.</summary>
+        public static void ApplyServe(RegisterServePayload p)
+        {
+            try
+            {
+                if (p == null || p.SimulatorPid == MPConfig.PlayerId) return;
+                if (p.AddressKey != _myBldg || !_followerHere) return;
+
+                string mine = MyDutyStationKey();
+                if (string.IsNullOrEmpty(mine) || mine != p.StationKey) return;   // not my counter
+
+                var me = Helpers.PlayerHelper.PlayerController?.Character;
+                if (me == null) return;
+
+                if (!p.Finished)
+                {
+                    _servingCustomerId = p.CustomerId ?? "";
+                    // Round-120: also make the FETCH TRIP visible.  A player working a till natively walks off
+                    // to collect each ordered item (FullServiceEmployee.GrabOrderEntryItems) — standing rooted
+                    // at the counter for every sale is the single biggest tell that you are not really working.
+                    // We cannot know WHICH item the simulator's stand-in fetched, so the follower picks a
+                    // plausible one nearby: same trip, same beats, one shelf may differ.  This is the game's
+                    // own MoveToPosition on the player's own body, which is exactly what the native serve does
+                    // to a working player, so it does not fight the WorkActivity navigation blocker.
+                    TryFetchTrip(me);
+                    // Turn to the customer, then play the same "doing something at the station" animation the
+                    // native serve uses.  Deliberately NOT looped: the real serve's length varies with how many
+                    // items are fetched, and a loop that outlives the serve looks worse than a beat that ends.
+                    try
+                    {
+                        if (!string.IsNullOrEmpty(_servingCustomerId)
+                            && _puppets.TryGetValue(_servingCustomerId, out var cp) && cp.go != null)
+                        {
+                            var look = cp.go.transform.position; look.y = me.transform.position.y;
+                            me.transform.DOLookAt(look, 0.2f);
+                        }
+                    }
+                    catch { }
+                    try { me.StartCoroutine(me.animator.RunAnimation(AnimationType.UsingProducer, 2.5f)); } catch { }
+                    return;
+                }
+
+                // Finished: the customer's own beat + the gendered interaction sound the simulator played, so
+                // both machines end the transaction the same way.
+                if (!string.IsNullOrEmpty(p.CustomerId) && _puppets.TryGetValue(p.CustomerId, out var pup) && pup.tpc != null)
+                {
+                    try { pup.tpc.StartCoroutine(pup.tpc.animator.RunAnimation(AnimationType.UsingProducer, 2.5f)); } catch { }
+                    try
+                    {
+                        InstanceBehavior<SfxManager>.Instance.PlayAudio(
+                            p.Male ? SoundType.NpcMaleProducerInteraction : SoundType.NpcFemaleProducerInteraction,
+                            pup.go != null ? pup.go.transform.position : me.transform.position);
+                    }
+                    catch { }
+                }
+                try { me.StartCoroutine(me.animator.RunAnimation(AnimationType.UsingProducer, 2.5f)); } catch { }
+
+                _servingCustomerId = "";
+                _servedThisSession++;
+                if (_servedThisSession == 1 || _servedThisSession % 10 == 0)
+                    Plugin.Logger.LogInfo($"[Customers] served {_servedThisSession} customer(s) at my till in '{p.AddressKey}' (mirrored performance).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] apply serve: {ex.Message}"); }
         }
 
         /// <summary>Simulator side (called by the ShowExpression patch): stream a customer's emoji.
@@ -600,6 +802,7 @@ namespace BigAmbitionsMP
                     {
                         pup = SpawnPuppet(new Vector3(r.X, r.Y, r.Z), r.Yaw);
                         if (pup == null) continue;
+                        _puppetSpawns++;
                         _puppets[r.Id] = pup;
                         // Round-43: replay an emote that arrived before this body existed (complaints
                         // fire at the customer's spawn instant).
@@ -624,7 +827,7 @@ namespace BigAmbitionsMP
                 }
                 // Rows that vanished = customers who left/were served away → walk out.
                 foreach (var kv in _puppets)
-                    if (!seen.Contains(kv.Key) && !kv.Value.leaving) StartLeaving(kv.Value);
+                    if (!seen.Contains(kv.Key) && !kv.Value.leaving) { _leaveMissing++; StartLeaving(kv.Value); }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] apply puppets: {ex.Message}"); }
         }
@@ -664,8 +867,25 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] puppet spawn: {ex.Message}"); return null; }
         }
 
+        private static int _puppetSpawns, _puppetLeaves, _leaveMissing, _leaveStale;
+        private static float _nextChurnAt;
+
+        /// <summary>Round-131: one line every 10s on the FOLLOWER comparing bodies created against bodies sent
+        /// away, split by cause.  A healthy shop churns very little; spawns ≈ leaves every few seconds means the
+        /// simulator's row ids are not stable, not that customers are misbehaving.</summary>
+        private static void ChurnTick()
+        {
+            if (Time.unscaledTime < _nextChurnAt) return;
+            _nextChurnAt = Time.unscaledTime + 10f;
+            if (_puppetSpawns == 0 && _puppetLeaves == 0) return;
+            Plugin.Logger.LogInfo($"[PuppetChurn] follower 10s: spawned={_puppetSpawns} sentAway={_puppetLeaves} "
+                + $"(rowMissingFromBatch={_leaveMissing}, streamGapOver2.5s={_leaveStale}) — live bodies now {_puppets.Count}.");
+            _puppetSpawns = _puppetLeaves = _leaveMissing = _leaveStale = 0;
+        }
+
         private static void StartLeaving(Puppet pup)
         {
+            _puppetLeaves++;
             pup.leaving = true;
             pup.leaveAt = Time.unscaledTime + 6f;   // hard stop even if no exit is reachable
             try
@@ -687,7 +907,7 @@ namespace BigAmbitionsMP
                 var pup = kv.Value;
                 if (pup.go == null) { dead.Add(kv.Key); continue; }
                 // Stale stream (simulator disconnect / hitch) → walk out rather than freeze mid-stride.
-                if (!pup.leaving && now - pup.lastSeen > 2.5f) StartLeaving(pup);
+                if (!pup.leaving && now - pup.lastSeen > 2.5f) { _leaveStale++; StartLeaving(pup); }
 
                 var tr = pup.go.transform;
                 Vector3 to = pup.target - tr.position;
@@ -826,6 +1046,18 @@ namespace BigAmbitionsMP
             try
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                // ROUND-136 (verify "give-ups are native demand misses"): the emoji IS the reason a customer
+                // gives up — CustomerCantFindItem / CustomerTooHighPrice / CustomerNoPaperbags etc. — and this
+                // is the single funnel it passes through.  One log line per expression pairs each [LeaveProbe]
+                // give-up with its named cause; if give-ups appear WITHOUT a matching complaint here, they are
+                // NOT demand misses and the theory is refuted.
+                try
+                {
+                    var cust = __instance != null ? __instance.GetComponentInParent<Customer>() : null;
+                    if (cust != null && !string.IsNullOrEmpty(MPRegisterSync.CurrentShopAddress))
+                        Plugin.Logger.LogInfo($"[GiveUpProbe] customer expression '{characterEmojiName}' in '{MPRegisterSync.CurrentShopAddress}'.");
+                }
+                catch { }
                 CustomerPuppets.OnLocalCustomerEmote(__instance, (int)characterEmojiName, secondsToShow);
             }
             catch { }

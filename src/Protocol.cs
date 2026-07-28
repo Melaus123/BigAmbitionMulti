@@ -88,6 +88,7 @@ namespace BigAmbitionsMP
         // In-game chat (Phase 6: connected-players window + chat).
         Chat                 = 100, // Any → Host → All: a chat line.  Clients send to host; host relays to everyone (incl. sender) so the log is consistent.
         RetailPrices         = 101, // Any → Host → Others: live retail prices of a business the SENDER runs — keeps per-neighbourhood price competition fed with current numbers on every machine.
+        RegisterServe        = 156, // Simulator → Host → All: a customer's serve STARTED / FINISHED at a till.  Lets the player working that till on a FOLLOWER machine perform the job — they are assigned to the station locally and see the queue, but with no real customers there the native serve loop never runs, so without this they stand motionless behind a busy counter.
         BuildingDirtEdit     = 155, // Helper → Host → Owner: floor cells a HELPER mopped in someone else's business.  Narrow on purpose (only the cells whose dirtiness changed): dirt is owner-authoritative interior state, and the only pre-existing guest→owner interior channel is the whole-snapshot forward on interior-designer close, which mopping never triggers — so without this a helper's cleaning stayed local and was overwritten by the owner's next push.
         RestVote             = 102, // Client → Host: this player started/ended a rest-class activity (consensus time-skip voting).
         RestSkipState        = 103, // Host → All: current votes + whether the consensus skip is running (banner + skip-detector stand-down).
@@ -281,6 +282,22 @@ namespace BigAmbitionsMP
         public string CustomerId   { get; set; } = "";   // entry id (round-43, matches PuppetRowInfo.Id)
         public int    Emoji        { get; set; }   // CharacterEmojiName as int
         public float  Seconds      { get; set; } = 3f;
+    }
+
+    /// <summary>Round-119: a serve beat at one till, so the player working that till on a FOLLOWER machine can
+    /// perform the job in step with the real one.  Only the true START and FINISH are mirrored — the beats in
+    /// between are synthesised locally, which keeps the wire quiet and means latency can shift the performance
+    /// slightly but can never leave it running after the real serve ended.</summary>
+    public class RegisterServePayload
+    {
+        public string AddressKey   { get; set; } = "";
+        public string SimulatorPid { get; set; } = "";
+        /// <summary>Rounded world position of the till, the same key MPRegisterSync uses for duty — verified
+        /// to match across machines (interiors are host-snapshot replicas at identical coordinates).</summary>
+        public string StationKey   { get; set; } = "";
+        public string CustomerId   { get; set; } = "";   // matches PuppetRowInfo.Id
+        public bool   Finished     { get; set; }         // false = serve started, true = serve completed
+        public bool   Male         { get; set; }         // customer gender — picks the same interaction sound the simulator played
     }
 
     /// <summary>Slice 3 (round-41): the host's per-building customer-simulator election result.</summary>

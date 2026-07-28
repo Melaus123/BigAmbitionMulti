@@ -714,6 +714,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.RegisterServe:          // a serve beat — perform it if it is my till
+                {
+                    var rs = env.GetPayload<RegisterServePayload>();
+                    if (rs != null) GameStatePatcher.EnqueueOnMainThread(() => CustomerPuppets.ApplyServe(rs));
+                    break;
+                }
+
                 case MessageType.CustomerPuppetEmote:    // a simulated customer's emoji — replay on the puppet
                 {
                     var ce = env.GetPayload<CustomerPuppetEmotePayload>();

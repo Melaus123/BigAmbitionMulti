@@ -745,6 +745,38 @@ namespace BigAmbitionsMP
                             UnityEngine.Physics.IgnoreCollision(ac, trafCols[i], true);   // don't shove live Gley traffic
                     }
                 }
+                // (3) ROUND-120, HOST only: PLAYER-TO-PLAYER shoving while someone is behind a counter.
+                //     Two players working adjacent tills stand and walk within a metre of each other, and a
+                //     serve sends the worker off to fetch items — so one body physically blocking the other
+                //     turns a normal shift into a shoving match.
+                //
+                //     Only the HOST has this problem at all: a remote avatar carries a collider ONLY on the
+                //     host (kept solid so Gley's raycast senses it and brakes); on a client the avatar is
+                //     visual-only, so client-side player-to-player collision does not exist. Avatars carry no
+                //     NavMeshObstacle either, so nothing is being carved out of the navmesh — this is purely
+                //     rigidbody shoving.
+                //
+                //     Scoped to duty, not blanket: the pair is ignored while EITHER player is personally
+                //     working a till, and restored when neither is. Traffic detection is untouched, because
+                //     that is a different collider pair (and IgnoreCollision does not affect raycasts).
+                if (MPServer.IsRunning && _players.Count > 0)
+                {
+                    var lchar = PlayerHelper.PlayerController?.Character;
+                    if (lchar != null)
+                    {
+                        bool meOnDuty = MPRegisterSync.IsOnPersonalDuty(MPConfig.PlayerId);
+                        var myCols = lchar.GetComponentsInChildren<Collider>(true);
+                        foreach (var kv in _players)
+                        {
+                            if (kv.Value == null) continue;
+                            var ac = kv.Value.GetComponentInChildren<Collider>();
+                            if (ac == null) continue;
+                            bool ignore = meOnDuty || MPRegisterSync.IsOnPersonalDuty(kv.Key);
+                            for (int i = 0; i < myCols.Length; i++)
+                                if (myCols[i] != null) UnityEngine.Physics.IgnoreCollision(myCols[i], ac, ignore);
+                        }
+                    }
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[RemotePlayer] collision-ignore refresh: {ex.Message}"); }
         }

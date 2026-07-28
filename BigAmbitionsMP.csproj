@@ -73,6 +73,12 @@
     <Reference Include="BigAmbitions"><HintPath>$(ManagedDir)BigAmbitions.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="BigAmbitions.Items"><HintPath>$(ManagedDir)BigAmbitions.Items.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="BigAmbitions.Characters"><HintPath>$(ManagedDir)BigAmbitions.Characters.dll</HintPath><Private>false</Private></Reference>
+    <!-- Round-119 serve mirror: the follower performs the job, so it needs the game's own animation/audio calls. -->
+    <Reference Include="BigAmbitions.SoundSystem"><HintPath>$(ManagedDir)BigAmbitions.SoundSystem.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.AudioModule"><HintPath>$(ManagedDir)UnityEngine.AudioModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="DOTween"><HintPath>$(ManagedDir)DOTween.dll</HintPath><Private>false</Private></Reference>
+    <!-- Round-130 queue probe: CustomerJoinQueue is a BehaviorDesigner task. -->
+    <Reference Include="BehaviorDesigner.Runtime"><HintPath>$(ManagedDir)BehaviorDesigner.Runtime.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="BigAmbitions.InteriorDesigner"><HintPath>$(ManagedDir)BigAmbitions.InteriorDesigner.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="BigAmbitions.PlacementSystem"><HintPath>$(ManagedDir)BigAmbitions.PlacementSystem.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="BigAmbitions.AI"><HintPath>$(ManagedDir)BigAmbitions.AI.dll</HintPath><Private>false</Private></Reference>

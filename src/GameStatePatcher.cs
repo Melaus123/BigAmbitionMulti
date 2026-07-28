@@ -1056,6 +1056,34 @@ namespace BigAmbitionsMP
                                         catch { posDelta = true; }           // can't compare → conservative: full move pass
                                         prevLive.position  = ii.position;    // data transform follows the wire
                                         prevLive.yRotation = ii.yRotation;
+                                        // ROUND-137: the drawn queue (customPositions) was FROZEN on every
+                                        // receiver - this branch copied pose+cargo only and the diff hash
+                                        // ignored the field, so each machine kept its own version forever
+                                        // (field-proved: custPos=8 on the placer vs a truncated 4 here, whose
+                                        // lone stored spot then blocked the native rebuild -> a 1-spot till
+                                        // every session).  Copy on change and rebuild the live line.
+                                        try
+                                        {
+                                            var incQ = ii.customPositions;
+                                            if (incQ != null && incQ.Count > 0)
+                                            {
+                                                var curQ = prevLive.customPositions;
+                                                bool qDelta = curQ == null || curQ.Count != incQ.Count;
+                                                if (!qDelta)
+                                                    for (int qi = 0; qi < incQ.Count; qi++)
+                                                    {
+                                                        UnityEngine.Vector3 qa = incQ[qi], qb = curQ[qi];
+                                                        if ((qa - qb).sqrMagnitude > 0.0001f) { qDelta = true; break; }
+                                                    }
+                                                if (qDelta)
+                                                {
+                                                    prevLive.customPositions = incQ;
+                                                    MPRegisterSync.RebuildDrawnQueueAt(
+                                                        new UnityEngine.Vector3(ii.position.x, ii.position.y, ii.position.z), incQ);
+                                                }
+                                            }
+                                        }
+                                        catch { }
                                         newDict[i.Id] = prevLive;            // KEEP the live object
                                         if (posDelta) movedIds.Add(i.Id);    // GameObject transform sync pass
                                         else cargoOnlyIds.Add(i.Id);         // in-place restock/no-op — nothing to refresh
@@ -2357,6 +2385,15 @@ namespace BigAmbitionsMP
                     ii.customPositions = new List<SerializableVector3>();
                     foreach (var p in i.CustomPositions)
                         ii.customPositions.Add(new SerializableVector3 { x = p.X, y = p.Y, z = p.Z });
+                    // Round-137: never let the truncated-queue signature onto this machine, wherever it came from.
+                    MPRegisterSync.RepairTruncatedQueue(ii.customPositions);
+                    // Round-143: refuse ORIGIN-POISONED queue data (head anchor >10m from the item = the
+                    // staging artifact) - dropped, so the line rebuilds at the item's true position.
+                    if (MPRegisterSync.IsPoisonedQueue(ii.customPositions, ii.position))
+                    {
+                        Plugin.Logger.LogWarning($"[QueueSync] incoming queue data for '{i.ItemName}' was anchored far from the item (staging artifact) - dropped; the line rebuilds at the true position.");
+                        ii.customPositions = null;
+                    }
                 }
 
                 // Top-level custom colors — round-99: the native ItemInstance ctor leaves
@@ -2935,7 +2972,28 @@ namespace BigAmbitionsMP
                     // Tier A — name, type, closed.
                     reg.BusinessName        = info.BusinessName;
                     reg.businessTypeName    = info.BusinessTypeName;
+                    // ROUND-122: the open/closed flag needs the game NOTIFIED, not just the field written.
+                    // BuildingRegistration.TemporarilyClose does far more than assign: it fires
+                    // "ba:gameevent_changedbusinessopenstate" and GlobalEvents.onBuildingRegistrationChange
+                    // (which is what refreshes the in-shop panel and anything keyed to open state), and it
+                    // rebuilds the shopper schedule via CustomerEntriesHelper.UpdateCustomerEntriesForPlayerBusiness.
+                    // Writing the bare field left the receiver holding the right value with nothing reacting to
+                    // it — which is exactly the "the toggle didn't convey" report, and no amount of pushing it
+                    // FASTER would have fixed it.
+                    //
+                    // We deliberately do NOT call the native method: it also runs PayLicensingFees when opening,
+                    // which would charge THIS machine for a shop it does not own, and raises a todo task for
+                    // someone else's business.  So: assign, then fire only the notify/rebuild half.
+                    bool closedChanged = reg.temporarilyClosed != info.TemporarilyClosed;
                     reg.temporarilyClosed   = info.TemporarilyClosed;
+                    if (closedChanged)
+                    {
+                        try { GameEvent.Invoke("ba:gameevent_changedbusinessopenstate"); } catch { }
+                        try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
+                        try { AI.Customers.CustomerEntries.CustomerEntriesHelper.UpdateCustomerEntriesForPlayerBusiness(reg, TimeHelper.GetDayOfWeek()); } catch { }
+                        Plugin.Logger.LogInfo($"[Patcher] '{info.AddressKey}' is now {(info.TemporarilyClosed ? "CLOSED" : "OPEN")} — "
+                            + "notified the game (open-state event + registration change + shopper schedule rebuild).");
+                    }
                     // Producer guard (RED ROC 2026-07-13): writing the type directly bypasses
                     // native setup, whose ResetBuildingSpecific sizes Warehouse.vehicleSlots —
                     // a replica typed here with 0 slots becomes a BROKEN factory the moment a

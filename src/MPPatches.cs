@@ -2764,7 +2764,19 @@ namespace BigAmbitionsMP
                 {
                     if (__instance == null) return true;
                     string key = GameStateReader.AddressKey(__instance);
-                    if (!MergerFlip.IsFlipped(key)) return true;   // genuinely mine / not merged → native
+                    // ROUND-124: route for a GRANTED HELPER too, not only a merger-flipped replica.
+                    // Field report: "the host's open/close toggle transmitted instantly, the client's did not."
+                    // Cause: this interception only fired on MergerFlip.IsFlipped, so an ordinary helper
+                    // toggling the owner's shop ran the NATIVE method and mutated their own replica — the owner
+                    // never heard about it, and the round-122 immediate push skips it because TrulyMine is false
+                    // on that machine. Everything needed already existed: RouteTemporarilyClose sends it, the
+                    // host grant-gates it in HostRouteBusinessEdit and applies or relays to the owner, and the
+                    // owner's own TemporarilyClose then runs natively (licensing, customer entries, todo) and
+                    // republishes. So this just widens WHO gets routed.
+                    bool routeAsHelper = false;
+                    try { routeAsHelper = !MergerFlip.TrulyMine(__instance) && GrantSync.IsHelperBusiness(key); }
+                    catch { }
+                    if (!MergerFlip.IsFlipped(key) && !routeAsHelper) return true;   // genuinely mine → native
                     BusinessSync.RouteTemporarilyClose(key, closed);
                     return false;
                 }

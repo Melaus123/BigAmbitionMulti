@@ -433,6 +433,7 @@ namespace BigAmbitionsMP
                 // path component or it can step outside the session folder.
                 string name = MPSaveManager.Sanitize(string.IsNullOrEmpty(data.Slot.SaveName) ? SaveFileName : data.Slot.SaveName);
                 File.WriteAllBytes(Path.Combine(dir, name + ".hsg"), raw);
+                LogHsgWrite(data.SessionName, data.Slot.StableId, raw.Length, $"host stored {data.Slot.DisplayName}'s upload");
                 Plugin.Logger.LogInfo($"[MPSave] Stored '{data.Slot.DisplayName}' .hsg ({raw.Length}B) → {dir}");
                 DiagWrite($"HostHandleSaveData wrote .hsg ({raw.Length}B), merging slot");
             }
@@ -603,6 +604,7 @@ namespace BigAmbitionsMP
                 byte[] raw    = UnGzipBase64(p.HsgGzipBase64);
                 string folder = MPSaveManager.MpCharacterFolder(session, MPConfig.StableId);
                 File.WriteAllBytes(Path.Combine(folder, SaveFileName + ".hsg"), raw);
+                LogHsgWrite(session, MPConfig.StableId, raw.Length, "client received own copy for load");
                 Plugin.Logger.LogInfo($"[MPSave] Received .hsg ({raw.Length}B) for session '{session}' — loading.");
                 ClearClientDisconnectMarker();   // host resolved our join (incl. any validated disconnect save) — offer consumed
             }
@@ -1016,7 +1018,7 @@ namespace BigAmbitionsMP
                         string dir  = MPSaveManager.MpCharacterFolder(session, p.StableId);   // sanitizes the id component
                         string name = MPSaveManager.Sanitize(string.IsNullOrEmpty(p.SaveName) ? SaveFileName : p.SaveName);
                         File.WriteAllBytes(Path.Combine(dir, name + ".hsg"), raw);
-                        Plugin.Logger.LogInfo($"[MPSave] Store mirror: member .hsg (stable={p.StableId}, {raw.Length}B) → '{session}'.");
+                        LogHsgWrite(session, p.StableId, raw.Length, "store mirror");
                     }
                 }
             }
@@ -1103,10 +1105,41 @@ namespace BigAmbitionsMP
         /// <summary>Saves THIS player's full game into the MP session folder via
         /// the game's own SaveGameManager.Save, and returns the slot describing
         /// it.  Must be called on the Unity main thread.</summary>
+        /// <summary>Round-127 — EVERY .hsg write announces itself in one greppable form, and a write that lands
+        /// on a MANUAL BASE session says so loudly.  Reason: the user reported "my save keeps drifting into the
+        /// future even though I haven't saved", and it took a disk inspection to answer — the log accounted for
+        /// the -auto/-recover/-disconnect writes but not for the one that touched the base.  It turned out to be
+        /// a MEMBER's character file (their durable session pointer is deliberately kept on the base, so their
+        /// menu-exit upload lands there) plus the base manifest being rewritten with the current world day —
+        /// the owner's own character file was untouched.  That should have been one grep, not an archaeology
+        /// session.  Two prior leaks of exactly this shape were fixed in round-37; this makes the next one
+        /// self-evident instead of invisible.</summary>
+        private static void LogHsgWrite(string session, string stableId, int bytes, string why)
+        {
+            try
+            {
+                string baseName = StripAutoSuffix(session ?? "");
+                bool isBase = !string.IsNullOrEmpty(session) && session == baseName;
+                string line = $"[MPSave] .hsg WRITE session='{session}' char='{stableId}' {bytes}B ({why})";
+                if (isBase) Plugin.Logger.LogWarning(line + " — this is the MANUAL BASE session, not an automatic sibling.");
+                else        Plugin.Logger.LogInfo(line + ".");
+            }
+            catch { }
+        }
+
         public static MpSlot PerformLocalSave(string sessionName, SaveGameManager.SaveType saveType = SaveGameManager.SaveType.Default)
         {
             DiagArm();
             DiagWrite($"PerformLocalSave START session='{sessionName}' host={MPServer.IsRunning}");
+            // Round-114: time the whole save.  We block the main thread across serialization on purpose
+            // (see the JoinSaveGameThreads comment below), so however long the underlying write takes is
+            // exactly how long the game is frozen — no render, no input.  Field 2026-07-26 ('Crazygamers'):
+            // twenty saves that session ran 75-348ms, the twenty-first took 39,868ms, one frame lasted 51s,
+            // and the session ended with no crash dump — i.e. the player almost certainly killed a game they
+            // had every reason to think had hung.  That stall was environmental (the GAME's own write to a
+            // temp file; >20x the worst save in ~35 collected reports) and nothing here can prevent it, but
+            // it should never again have to be INFERRED from a perf line and a diagnostic timer.
+            var saveClock = System.Diagnostics.Stopwatch.StartNew();
             // Ghost vehicles leak into gi.VehicleInstances via the ghost-spawn
             // registration and snowball one duplicate per save/load cycle
             // (run-17: extra carts/flatbeds frozen at old cargo states).  The
@@ -1216,7 +1249,17 @@ namespace BigAmbitionsMP
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore ActiveVehicleId: {ex.Message}"); }
             }
 
+            LogHsgWrite(sessionName, MPConfig.StableId, 0, $"own save via {saveType} (ok={ok}, day={day})");
             Plugin.Logger.LogInfo($"[MPSave] Local save '{sessionName}': ok={ok} char='{charName}' day={day} → {folder}");
+            // Round-114: 5s is far outside anything healthy — the worst save across ~35 field reports was
+            // 1.9s and a normal one is ~100-400ms — so this only fires when the game really did lock up.
+            saveClock.Stop();
+            if (saveClock.ElapsedMilliseconds >= 5000)
+                Plugin.Logger.LogWarning($"[MPSave] SLOW SAVE: '{sessionName}' took {saveClock.ElapsedMilliseconds / 1000f:F1}s. "
+                    + "The game was FROZEN for that whole time (we hold the main thread across serialization so nothing can "
+                    + "corrupt the save). A healthy save here is ~0.1-0.4s, so this is the disk/antivirus/OS stalling the "
+                    + "game's own write — not the save failing. If a player reports a freeze or a 'crash' around this "
+                    + "timestamp, THIS is it, and they most likely force-quit a game that would have recovered.");
             // 4a diagnostic: a failed save is the upstream cause of most "lost progress" reports — make it
             // LOUD so it stands out in a submitted log (the routine line above is INFO).
             if (!ok) Plugin.Logger.LogError($"[MPSave] SAVE FAILED for '{sessionName}' (char='{charName}', day={day}) — .hsg not written; a later load may fall back to an older copy.");
@@ -1562,6 +1605,7 @@ namespace BigAmbitionsMP
                 try { foreach (var f in Directory.GetFiles(stageDir)) File.Delete(f); } catch { }
                 string name = MPSaveManager.Sanitize(string.IsNullOrEmpty(p.Slot?.SaveName) ? SaveFileName : p.Slot.SaveName);
                 File.WriteAllBytes(Path.Combine(stageDir, name + ".hsg"), raw);
+                LogHsgWrite(stageSession, stable, raw.Length, "staged for day validation");
 
                 int actualDay = ReadSaveDay(MPSaveManager.MpSessionFolder(stageSession), stable);
                 int storedDay = ReadSaveDay(MPSaveManager.MpSessionFolder(session), stable);   // our current copy
@@ -1575,6 +1619,7 @@ namespace BigAmbitionsMP
                 {
                     string dstDir = MPSaveManager.MpCharacterFolder(session, stable);
                     File.WriteAllBytes(Path.Combine(dstDir, name + ".hsg"), raw);
+                    LogHsgWrite(session, stable, raw.Length, $"accepted disconnect save (day {actualDay} vs stored {storedDay})");
                     MergeSlot(session, new MpSlot
                     {
                         StableId = stable, DisplayName = p.Slot?.DisplayName ?? stable, CharacterId = stable,

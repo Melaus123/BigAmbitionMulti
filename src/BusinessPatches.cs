@@ -706,4 +706,65 @@ namespace BigAmbitionsMP
             catch { }
         }
     }
+
+    /// <summary>Round-122 (user request) — the open/closed toggle reaches the other players IMMEDIATELY.
+    /// It used to ride the 2-second business change-detector, so a shop could read open on one screen for a
+    /// couple of seconds after being shut on another.  The routed-toggle path already existed for a MEMBER
+    /// closing an owner's shop (BusinessSync.ApplyRoutedTemporarilyClose); this covers the ordinary case of
+    /// whoever owns it flipping their own switch, on either role.  Postfix, so the flag is already written
+    /// when we read it; the sweep's sent-cache is seeded by the push so it then sees no change and stays quiet.</summary>
+    [HarmonyPatch(typeof(BuildingRegistration), nameof(BuildingRegistration.TemporarilyClose))]
+    public static class Patch_BuildingRegistration_TemporarilyClose_PushNow
+    {
+        static void Postfix(BuildingRegistration __instance, bool closed)
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (__instance == null) return;
+                if (!MergerFlip.TrulyMine(__instance)) return;   // only the true owner announces its own shop
+                BusinessSync.PushBusinessNow(__instance, closed ? "shop closed" : "shop opened");
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] close-toggle push: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>Round-144 - the last link of the "customers won't split between registers" chain, measured
+    /// end to end: a GUEST machine's till never binds its stand-in because UpdateEmployee's gate
+    /// (EmployeeStationController.ShouldUpdateEmployee :412) requires IsPlayerOwnedBusiness, which reads
+    /// false for a visitor in someone else's shop.  The [SynthStaff] sweep invoked the bind 23 times in one
+    /// run and every call silently no-opped ("station=found, employee=none - retrying each sweep"), so
+    /// whenever the GUEST machine simulates the customers it sees ONE staffed till and funnels everyone
+    /// there - the measured "no split" (client QueueProbe: 950 emp=NONE available=False on every decision
+    /// while the host's machine showed both tills available).  This file is the home of that gate's other
+    /// bypasses; this one is scoped to stations MPRegisterSync deliberately staffed with a stand-in.  The
+    /// postfix re-evaluates the native expression with ONLY the ownership term removed - every other check
+    /// kept (active, not-mid-update, assignable, valid address, not in placement mode) - and everything
+    /// downstream (shift lookup, availability, employee body spawn) stays native.</summary>
+    [HarmonyPatch(typeof(EmployeeStationController), "ShouldUpdateEmployee")]
+    public static class Patch_ShouldUpdateEmployee_SyntheticStations
+    {
+        static readonly HarmonyLib.AccessTools.FieldRef<EmployeeStationController, bool> _updating =
+            HarmonyLib.AccessTools.FieldRefAccess<EmployeeStationController, bool>("_isUpdatingEmployee");
+        static readonly System.Reflection.MethodInfo _inPlacement =
+            HarmonyLib.AccessTools.Method(typeof(EmployeeStationController), "IsItemBeingModifiedInPlacementMode");
+
+        static void Postfix(EmployeeStationController __instance, ref bool __result)
+        {
+            try
+            {
+                if (__result) return;                                     // native already said yes
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                if (__instance == null || !MPRegisterSync.HasSyntheticNear(__instance.transform.position)) return;
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                if (bm == null || bm.buildingRegistration == null || !bm.buildingRegistration.HasValidAddress) return;
+                if (!__instance.gameObject.activeInHierarchy) return;
+                if (_updating(__instance)) return;
+                try { if (__instance.Item == null || !__instance.Item.assignable) return; } catch { return; }
+                try { if (_inPlacement != null && (bool)_inPlacement.Invoke(__instance, null)) return; } catch { return; }
+                __result = true;                                          // ownership was the only blocker
+            }
+            catch { }
+        }
+    }
 }

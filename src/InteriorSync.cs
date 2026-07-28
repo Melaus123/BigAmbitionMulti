@@ -794,7 +794,8 @@ namespace BigAmbitionsMP
             }
 
             // Custom positions (used by multi-element items like cinema seating).
-            if (ii.customPositions != null)
+            if (ii.customPositions != null
+                && !MPRegisterSync.IsPoisonedQueue(ii.customPositions, ii.position))   // round-143: never ship the staging artifact
             {
                 for (int i = 0; i < ii.customPositions.Count; i++)
                 {
@@ -876,6 +877,16 @@ namespace BigAmbitionsMP
                     h = h * 31 + ((int)System.Math.Round(it.Py * 100f)).GetHashCode();
                     h = h * 31 + ((int)System.Math.Round(it.Pz * 100f)).GetHashCode();
                     h = h * 31 + ((int)System.Math.Round(it.YRotation * 10f)).GetHashCode();
+                    // Round-137: the drawn queue MUST diff - its omission meant a queue redraw never
+                    // re-broadcast, freezing diverged copies on every machine (the 1-spot-till bug).
+                    var cps = it.CustomPositions;
+                    h = h * 31 + (cps?.Count ?? 0);
+                    if (cps != null)
+                        foreach (var cp in cps)
+                        {
+                            h = h * 31 + ((int)System.Math.Round(cp.X * 10f)).GetHashCode();
+                            h = h * 31 + ((int)System.Math.Round(cp.Z * 10f)).GetHashCode();
+                        }
                     h = h * 31 + it.StateIndex;
                     h = h * 31 + MPAudit.StableHash(it.Alias);
                     // Round-99d: PAINT is visible state — without it a repaint produced no hash
