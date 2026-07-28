@@ -334,6 +334,16 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+                    // Round-157 — BLANK-UPLOAD GUARD, client side.  Field case ('save 2', day 72): a
+                    // SaveNow arrived while this client's world was NOT loaded (mid crash-recovery),
+                    // the save serialized a near-empty GameInstance (254KB vs the real 1.7MB) and the
+                    // host stored it over the member's slot.  A save of a world we are not standing in
+                    // is never valid — skip it loudly; the next coordinated save covers us.
+                    if (!MPClient.IsClientInWorld)
+                    {
+                        Plugin.Logger.LogWarning($"[MPSave] SaveNow for '{session}' arrived while this client is not in-world — SKIPPED (a blank save would have clobbered our slot).");
+                        return;
+                    }
                     var slot   = PerformLocalSave(session);
                     string dir = MPSaveManager.MpCharacterFolder(session, MPConfig.StableId);
                     lock (_pending)
@@ -432,7 +442,22 @@ namespace BigAmbitionsMP
                 // Slot.SaveName is client-supplied — sanitize it like every other
                 // path component or it can step outside the session folder.
                 string name = MPSaveManager.Sanitize(string.IsNullOrEmpty(data.Slot.SaveName) ? SaveFileName : data.Slot.SaveName);
-                File.WriteAllBytes(Path.Combine(dir, name + ".hsg"), raw);
+                string dest = Path.Combine(dir, name + ".hsg");
+                // Round-157 — BLANK-UPLOAD GUARD, host side (defence in depth behind the client's
+                // in-world gate): an upload less than HALF the size of the file it would replace is
+                // the blank-save signature (field: 254KB over 1.7MB), never a legitimate shrink.
+                // Keep the old file; the member's next healthy save replaces it normally.
+                try
+                {
+                    var prev = new FileInfo(dest);
+                    if (prev.Exists && prev.Length > 200_000 && raw.Length < prev.Length / 2)
+                    {
+                        Plugin.Logger.LogWarning($"[MPSave] REFUSED '{data.Slot.DisplayName}' upload ({raw.Length}B) — it would replace a {prev.Length}B save with less than half its size (blank-save signature). Old file kept.");
+                        return;
+                    }
+                }
+                catch { }
+                File.WriteAllBytes(dest, raw);
                 LogHsgWrite(data.SessionName, data.Slot.StableId, raw.Length, $"host stored {data.Slot.DisplayName}'s upload");
                 Plugin.Logger.LogInfo($"[MPSave] Stored '{data.Slot.DisplayName}' .hsg ({raw.Length}B) → {dir}");
                 DiagWrite($"HostHandleSaveData wrote .hsg ({raw.Length}B), merging slot");

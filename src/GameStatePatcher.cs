@@ -3877,6 +3877,128 @@ namespace BigAmbitionsMP
         /// A rival-poor / deed-contaminated world announces itself in the FIRST report instead of being
         /// reverse-engineered from downstream NREs. Called ~30s after scene-ready (the rival cache
         /// fills after load; an at-ready read would false-alarm zero).</summary>
+
+        /// <summary>Round-157 — the ledger→world translation, extracted so it runs EARLY (from the
+        /// world-ready integrity sweep, before anything native can act on a just-loaded world) and
+        /// again at every world-health check (idempotent: every sub-pass skips already-correct
+        /// records).  Order inside: ledger bootstrap → rent-reflect re-assertion → ghost-tenancy
+        /// release.  Running before the zombie detector means detector output only shows what could
+        /// not be healed.</summary>
+        internal static void ReassertLedgerWorldState(string reason)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return;
+                if (MPServer.IsRunning)
+                {
+                    // ROUND-156 (#2) — LEDGER BOOTSTRAP.  The reflect protection below only covers
+                    // buildings the ledger knows; a host's rentals from BEFORE the session existed
+                    // never got entries (the benched round-113 gap), leaving a PREVIOUS host's own
+                    // businesses eatable after a handoff exactly like the RedRoc case.  Natively-rented
+                    // registrations on the host ARE the host's own rentals — enter them.  The next
+                    // manifest write persists them; from then on every machine's load protects them.
+                    try
+                    {
+                        int booted = 0;
+                        foreach (var reg in gi.BuildingRegistrations)
+                        {
+                            if (reg == null) continue;
+                            bool mine = false; try { mine = reg.RentedByPlayer; } catch { }
+                            if (!mine) continue;
+                            string aKey = ""; try { aKey = GameStateReader.AddressKey(reg); } catch { }
+                            if (string.IsNullOrEmpty(aKey) || MPServer.BuildingOwners.ContainsKey(aKey)) continue;
+                            MPServer.BuildingOwners[aKey] = MPConfig.PlayerId;
+                            booted++;
+                            if (booted <= 10)
+                                Plugin.Logger.LogWarning($"[Integrity] ({reason}) ledger bootstrap: '{aKey}' " +
+                                    $"(name='{reg.BusinessName}') is natively rented here but had no ledger entry — recorded as the host's.");
+                        }
+                        if (booted > 0)
+                            Plugin.Logger.LogWarning($"[Integrity] ({reason}) ledger-bootstrap×{booted} host rental(s) entered into the session ledger.");
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] ledger bootstrap: {ex.Message}"); }
+
+                    try
+                    {
+                        int tenancyFixed = 0;
+                        foreach (var reg in gi.BuildingRegistrations)
+                        {
+                            if (reg == null) continue;
+                            if (reg.RentedByPlayer) continue;   // natively rented (the host's own) — healthy
+                            string aKey = "";
+                            try { aKey = GameStateReader.AddressKey(reg); } catch { }
+                            if (string.IsNullOrEmpty(aKey)) continue;
+                            if (!MPServer.BuildingOwners.TryGetValue(aKey, out var owner) || string.IsNullOrEmpty(owner)) continue;
+                            // Round-155b: the repair re-runs HostReflectPlayerRent's OWN writes and
+                            // nothing more — RentedByPlayer deliberately stays false for remote tenants
+                            // (menus/economics are built on that); the eating hazard was ONLY the
+                            // building sitting back on the rent market with the tenant mark lost, which
+                            // is what four host handoffs produced (each new host loads a file that never
+                            // received the old host's reflects).
+                            bool isSelf = false;
+                            try { isSelf = owner == MPConfig.PlayerId || owner == MPConfig.StableId; } catch { }
+                            if (isSelf) continue;   // own rentals are native — never ours to touch
+                            bool marketBad = false, tenantBad = false;
+                            try { marketBad = reg.AvailableForRent; } catch { }
+                            try { tenantBad = (reg.businessOwnerRivalId?.ToString() ?? "") != owner; } catch { }
+                            if (!marketBad && !tenantBad) continue;
+                            try
+                            {
+                                reg.AvailableForRent = false;
+                                try { reg.businessOwnerRivalId = owner; } catch { }
+                                tenancyFixed++;
+                                if (tenancyFixed <= 10)
+                                    Plugin.Logger.LogWarning($"[Integrity] ({reason}) rent reflect RE-ASSERTED: '{aKey}' " +
+                                        $"(name='{reg.BusinessName}') — ledger tenant '{owner}'; the world had it " +
+                                        $"{(marketBad ? "back on the rent market" : "with a lost tenant mark")}.");
+                            }
+                            catch { }
+                        }
+                        if (tenancyFixed > 0)
+                            Plugin.Logger.LogWarning($"[Integrity] ({reason}) rent-reflects×{tenancyFixed} re-asserted from the session ledger.");
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] tenancy re-assert: {ex.Message}"); }
+
+                    // ROUND-156 (#1) — GHOST-TENANCY RELEASE (the reverse gap).  A member VACATES while
+                    // A hosts: A's world clears the reflect and the ledger drops the entry — but B's
+                    // file never hears of it.  When B later hosts, the building loads OFF-MARKET with a
+                    // stale tenant mark and no ledger entry: nobody can rent it, forever.  Release =
+                    // exactly HostReflectPlayerVacate's writes.  Scope guards: only ids that are LIVE
+                    // SESSION PLAYERS (never AI rival ids — a genuine rival's business is untouched
+                    // even when its id fails to resolve, e.g. on a degraded/remapped world), only
+                    // unledgered addresses, only not-natively-rented records.
+                    try
+                    {
+                        int released = 0;
+                        foreach (var reg in gi.BuildingRegistrations)
+                        {
+                            if (reg == null) continue;
+                            try
+                            {
+                                if (reg.RentedByPlayer || reg.AvailableForRent) continue;   // only stuck-off-market records
+                                string tid = reg.businessOwnerRivalId?.ToString() ?? "";
+                                if (string.IsNullOrEmpty(tid) || !IsSessionPlayerId(tid)) continue;   // only OUR tenant marks
+                                string aKey = GameStateReader.AddressKey(reg);
+                                if (string.IsNullOrEmpty(aKey) || MPServer.BuildingOwners.ContainsKey(aKey)) continue;   // ledgered = legit
+                                reg.AvailableForRent = true;
+                                try { reg.businessOwnerRivalId = ""; } catch { }
+                                released++;
+                                if (released <= 10)
+                                    Plugin.Logger.LogWarning($"[Integrity] ({reason}) ghost tenancy RELEASED: '{aKey}' " +
+                                        $"(name='{reg.BusinessName}') — tenant-marked '{tid}' but the ledger says nobody rents it; back on the market.");
+                            }
+                            catch { }
+                        }
+                        if (released > 0)
+                            Plugin.Logger.LogWarning($"[Integrity] ({reason}) ghost-tenancies×{released} released.");
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] ghost tenancy: {ex.Message}"); }
+                }
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Integrity] ledger world-state: {ex.Message}"); }
+        }
+
         public static void LogWorldHealth(string reason)
         {
             try
@@ -3905,6 +4027,8 @@ namespace BigAmbitionsMP
                 if (sick) Plugin.Logger.LogWarning(line + "  ← DEGRADED WORLD (rival-poor and/or deed contamination)");
                 else      Plugin.Logger.LogInfo(line);
 
+                ReassertLedgerWorldState(reason);   // round-157: heal BEFORE detecting — zombie output shows only what could not be healed
+
                 // Round-50 ZOMBIE DETECTOR (approved, log-only): a record with a business NAME but
                 // no tenant while still ON THE RENT MARKET is a state no clean native flow produces
                 // (rent occupies, terminate wipes the name, AI shops are off the market). Field case
@@ -3920,6 +4044,7 @@ namespace BigAmbitionsMP
                         bool named = false;
                         try { named = !string.IsNullOrEmpty(reg.BusinessName?.ToString()); } catch { }
                         if (!named || reg.RentedByPlayer || !reg.AvailableForRent) continue;
+
                         zombies++;
                         if (zombies <= 10)
                             Plugin.Logger.LogWarning($"[WorldHealth] ({reason}) ZOMBIE record: '{GameStateReader.AddressKey(reg)}' " +
@@ -3929,6 +4054,20 @@ namespace BigAmbitionsMP
                     if (zombies > 10) Plugin.Logger.LogWarning($"[WorldHealth] ({reason}) …and {zombies - 10} more zombie record(s).");
                 }
                 catch { }
+
+                // ROUND-155 — LEDGER-DRIVEN TENANCY RE-ASSERTION (host only).  Offline analysis of the
+                // field RedRoc save proved the failure at full scale: the HOST's file carried
+                // rentedByPlayer=False for EVERY member-owned building while the MEMBER's own file said
+                // True — and the worst-hit buildings had ALREADY lost their business name and furniture,
+                // making them invisible to the zombie detector above (it requires a name; the players'
+                // three reported losses were exactly the nameless ones).  The session ledger
+                // (MPServer.BuildingOwners) is the authority the session restore already trusts, so it —
+                // not record evidence — drives the repair: any ledger-owned building whose native flags
+                // read not-rented gets them re-asserted.  Interiors already eaten by native cleanup are
+                // NOT recoverable here; this stops the eating.
+                // round-157: the ledger pass now runs EARLY (world-ready sweep) and before the
+                // zombie detector below — see ReassertLedgerWorldState.
+
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[WorldHealth] {ex.Message}"); }
         }

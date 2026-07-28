@@ -23,6 +23,11 @@ namespace BigAmbitionsMP
 
         public static void RunSweep(string reason)
         {
+            // Round-157: translate the session ledger into the native world FIRST — before anything
+            // native can act on a just-loaded (possibly just-handed-off) world, and before this
+            // sweep's own detectors read state the translation would have fixed.
+            try { GameStatePatcher.ReassertLedgerWorldState(reason); } catch { }
+
             var parts = new List<string>();
             try
             {
