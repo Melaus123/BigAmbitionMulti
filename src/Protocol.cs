@@ -720,7 +720,11 @@ namespace BigAmbitionsMP
         // (PlayerPositionPayload.MlZ + hand-IK anchors grew elbow poles, IkT 8→14),
         // and helper station refills route via new BuildingStorageSync contexts
         // (producerset/producer — an old host silently drops them).
-        public const int Version = 5;   // v5 (round-146): RegisterServePayload gained Kind/SelfService/Cancelled/Dur/FX-FZ
+        // v5 (mod 0.1.15): clean-break bump. Concretely this release: RegisterServePayload became a
+        // serve-event stream (Kind/SelfService/Cancelled/Dur/FX-FZ/Entries), BuildingOwnershipPayload
+        // gained Score/BizName (contested-tenancy arbitration), and NativeClaim/ReleaseClaim message
+        // types were added. A v4 peer would misread all three.
+        public const int Version = 5;
     }
 
     /// <summary>Sent by client on connect.</summary>
