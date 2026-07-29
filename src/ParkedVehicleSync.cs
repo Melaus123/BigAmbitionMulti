@@ -561,6 +561,22 @@ namespace BigAmbitionsMP
 
                 // Iterate _clientKnown — for each, decide whether it should be
                 // an active ghost based on distance to local player.
+                // Round-193 (user-approved, field "cars loading in slow after leaving your
+                // business"): interiors are DISTANT coordinate spaces — entering a shop
+                // teleported the player beyond CullRadius, every parked ghost near the door
+                // was released, and exiting produced a visible pop-in wave while they all
+                // respawned.  While indoors: RETAIN the existing set (metadata deltas keep
+                // applying, and the street isn't rendered from inside) and DEFER new spawns —
+                // the street is already populated the frame the player steps out.  PARKED
+                // ONLY by design (user scoping): moving traffic repopulates via its own
+                // 10 Hz stream within a couple of snapshots of exiting.
+                bool indoors = false;
+                try
+                {
+                    var bmI = InstanceBehavior<BuildingManager>.Instance;
+                    indoors = bmI != null && bmI.buildingRegistration != null;
+                }
+                catch { }
                 var toSpawn = new List<ParkedVehicleDto>();
                 foreach (var kv in _clientKnown)
                 {
@@ -569,13 +585,13 @@ namespace BigAmbitionsMP
                     float sq = dx * dx + dy * dy + dz * dz;
                     bool isGhost = _clientGhosts.ContainsKey(kv.Key);
 
-                    if (!isGhost && sq <= ViewRadiusSq)
+                    if (!isGhost && sq <= ViewRadiusSq && !indoors)
                     {
                         // Came into view — spawn (collect now, instantiate after iteration
                         // to avoid mutating _clientGhosts mid-iteration of _clientKnown).
                         toSpawn.Add(dto);
                     }
-                    else if (isGhost && sq > CullRadiusSq)
+                    else if (isGhost && sq > CullRadiusSq && !indoors)
                     {
                         // Went out of range (with hysteresis) — release. Clear our paint blocks first so
                         // the game's own next rental of this pooled car doesn't inherit them (round-21),

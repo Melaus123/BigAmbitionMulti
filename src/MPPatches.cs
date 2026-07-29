@@ -5546,5 +5546,41 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Round-192: LoudSpeakersManager failure latch ──────────────────────────
+        // TEMPORARY SHIELD (user directive): exists only so a NATIVE bug stops generating
+        // misdirected reports against this mod — REMOVE when Hovgaard fixes the manager's
+        // retry loop (watch the game's changelogs for a LoudSpeakers/radio fix).
+        // SECOND field case of the native speaker retry-storm (first: French SP NRE report;
+        // now bamp-bug-20260729-205106 — KeyNotFoundException 'Dance' ×4,811, a ~350ms frame
+        // every 2s on a streamed session).  LoudSpeakersManager.LateUpdate retries
+        // InitSpeakers forever with NO failure latch; when the station data never loaded
+        // (usually a content-mod conflict breaking the asset catalog) every retry throws,
+        // and Unity's stack capture + logging IS the rhythmic lag.  The latch: after 5
+        // consecutive failures IN AN MP SESSION, disable the manager with one loud line —
+        // speaker radio goes silent (it was broken anyway), the framerate comes back.
+        // Single-player passes the exception through untouched (round-187 directive: the
+        // mod acts only in multiplayer).
+        [HarmonyLib.HarmonyPatch(typeof(Player.Sound.Radio.LoudSpeakersManager), "LateUpdate")]
+        public static class Patch_LoudSpeakers_FailureLatch
+        {
+            private static int _fails;
+            private static bool _latched;
+
+            static Exception? Finalizer(Exception __exception, Player.Sound.Radio.LoudSpeakersManager __instance)
+            {
+                if (__exception == null) { _fails = 0; return null; }
+                if (!MPServer.IsRunning && !MPClient.InMpGame) return __exception;   // SP: native behavior untouched
+                _fails++;
+                if (_fails >= 5 && !_latched)
+                {
+                    _latched = true;
+                    try { __instance.enabled = false; } catch { }
+                    Plugin.Logger.LogError($"[Shield] LoudSpeakersManager DISABLED after {_fails} consecutive LateUpdate failures ({__exception.GetType().Name}: {__exception.Message}) — speaker radio is off for this session. Known native retry-storm (station data failed to load; on modded installs usually a content-mod conflict). Each retry was costing a ~350ms frame.");
+                }
+                else if (!_latched)
+                    Plugin.Logger.LogWarning($"[Shield] LoudSpeakersManager LateUpdate threw ({_fails}/5): {__exception.Message}");
+                return null;   // suppress — the native code would rethrow every cycle forever
+            }
+        }
     }
 }
