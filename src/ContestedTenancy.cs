@@ -92,8 +92,10 @@ namespace BigAmbitionsMP
         internal static void TickClient()
         {
             if (!MPClient.IsClientInWorld && !MPServer.IsRunning) return;
-            if (MPClient.IsClientInWorld && MPClient.IsJoinQuiescing) return;   // round-170: wait out the
-                                                    // join-quiesce — its filter would eat the snapshot reply
+            // Round-179: the settled-gate subsumes the round-170 quiesce wait (IsSettled requires the
+            // quiesce lifted + a settle margin).  Contract-safe: _reported is only set after an actual
+            // send, so a deferral retries next tick.
+            if (!MPWorldReady.AssertSettledFor("contested-tenancy")) return;
 
             // ── Round-171: OFF-MARKET RECONCILE (both roles, 10s) ─────────────────────────────
             // Field: after a completed arbitration (snapshot delivered and applied), the loser's door

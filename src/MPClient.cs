@@ -753,7 +753,7 @@ namespace BigAmbitionsMP
                 case MessageType.BuildingInteriorEdit:   // host forwarded a guest's interior edit — I'm the owner: adopt it
                 {
                     var bie = env.GetPayload<InteriorSnapshotPayload>();
-                    if (bie != null) GameStatePatcher.EnqueueOnMainThread(() => { GameStatePatcher.ApplyInteriorSnapshot(bie); InteriorSync.PushOwnedBuildingNow(bie.AddressKey); }, "interior:" + bie.AddressKey);   // full-state → newest-wins coalescing
+                    if (bie != null) GameStatePatcher.EnqueueOnMainThread(() => { GameStatePatcher.ApplyInteriorSnapshot(bie, grantedEdit: true); InteriorSync.PushOwnedBuildingNow(bie.AddressKey); }, "interior:" + bie.AddressKey);   // full-state → newest-wins coalescing
                     break;
                 }
 

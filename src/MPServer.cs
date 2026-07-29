@@ -2280,7 +2280,7 @@ namespace BigAmbitionsMP
                     && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, senderPid)
                     && !GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid)) return;
                 if (ownerPid == MPConfig.PlayerId)
-                    GameStatePatcher.EnqueueOnMainThread(() => { GameStatePatcher.ApplyInteriorSnapshot(snap); InteriorSync.PushOwnedBuildingNow(snap.AddressKey); }, "interior:" + snap.AddressKey);   // full-state → newest-wins coalescing
+                    GameStatePatcher.EnqueueOnMainThread(() => { GameStatePatcher.ApplyInteriorSnapshot(snap, grantedEdit: true); InteriorSync.PushOwnedBuildingNow(snap.AddressKey); }, "interior:" + snap.AddressKey);   // full-state → newest-wins coalescing
                 else
                     SendHubTo(ownerPid, MessageType.BuildingInteriorEdit, snap);   // forward to the owner's machine to adopt
             }

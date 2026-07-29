@@ -176,6 +176,8 @@ namespace BigAmbitionsMP
 
         public static void TickClientOwner()
         {
+            PublishAllOwnedInteriors("world live (settled retry)");   // round-179: no-op once done; retries a deferral
+
             if (!MPClient.IsConnected || MPServer.IsRunning) return;
             if (string.IsNullOrEmpty(_localOwnerAddress)) return;
             float now = UnityEngine.Time.realtimeSinceStartup;
@@ -348,6 +350,23 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogWarning($"[InteriorSync] OwnerSnapshot not sent ({reason}): no snapshot for '{addressKey}'.");
                     return false;
                 }
+                // Round-177 (field bamp-bug-20260727-184813, 'Jc': fridge/bed despawned from his
+                // market AND apartment "each time he spawns"): the join-time PublishAllOwnedInteriors
+                // raced his world-load and pushed an UNMATERIALIZED registration — all-zero across
+                // items, designs and dirt — as the owner's authoritative truth.  Round-103 stripped
+                // item authority from empty pushes, but designs/dirt still travelled and wiped the
+                // host's renovations.  An all-zero snapshot asserts NO knowledge for EITHER building
+                // type (a residence changes only while occupied and those flows already routed; a
+                // business's ambient stock/dirt lives on the host's simulated copy) — skip it
+                // entirely; the entry-time push carries the real state (field-proven: the same
+                // building pushed dirt=75 later that session once actually loaded).
+                if (snap.ItemInstances.Count == 0 && snap.InteriorDesigns.Count == 0 && snap.DirtSpots.Count == 0)
+                {
+                    Plugin.Logger.LogWarning($"[InteriorSync] owner push for '{addressKey}' ({reason}) SKIPPED — " +
+                        "registration reads all-zero (not yet materialized, or truly bare): nothing to assert; " +
+                        "the entry-time push will carry the real state.");
+                    return false;
+                }
                 snap.OwnerPlayerId = MPConfig.PlayerId;
                 snap.Authoritative = true;   // owner's own push — authoritative for the whole interior
                 // Round-103 (field 2026-07-27, Prabaha/RED ROC): an owner push carrying ZERO items
@@ -397,6 +416,11 @@ namespace BigAmbitionsMP
         public static void PublishAllOwnedInteriors(string reason)
         {
             if (_publishedAllOwned) return;
+            // Round-179: the settled-gate — THIS was the once-per-session action that raced a
+            // client's world-load and published unmaterialized registrations as the owner's truth.
+            // Contract: a deferral does NOT consume the once-flag; TickClientOwner retries until
+            // settled, then this runs exactly once.
+            if (!MPWorldReady.AssertSettledFor("publish-all-owned-interiors")) return;
             _publishedAllOwned = true;
             try
             {

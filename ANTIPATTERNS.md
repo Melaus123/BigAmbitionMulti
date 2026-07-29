@@ -665,3 +665,25 @@ needs a shield — root-cause fixes don't heal old saves.
 - `RivalsHelper.GetRandomRivalForBuilding` — host daily real-estate rotation NRE in the same worlds.
 
 ---
+
+## Acting on unread state ("absence as evidence") — CLASS, gated 2026-07-28
+**The shape:** a subsystem reads, scores, serializes, or PUBLISHES local game state before that
+state is fully loaded/materialized — and treats the absence of data as data ("empty", "unowned",
+"score 0"). Five field incidents in one week were this class: the blank member-save upload
+(crash-recovery serialized an unloaded world), unmaterialized queue scores, arbitration nearly
+ruling on unknown copies, the join-time interior publish deleting a player's furniture on every
+spawn, and ownership claims racing the join-quiesce.
+**The rule:** every publish-class action (asserts local state outward, or scores it for a
+decision) gates on `MPWorldReady.AssertSettledFor("<action>")` — ONE composed readiness authority
+(native loader done + in-world + join-quiesce lifted + settle margin). Never re-derive readiness
+locally.
+**The retry contract:** a gate deferral NEVER consumes a one-shot flag; every gated action is
+either tick-driven (retries until settled, then runs once) or explicitly covered by its own
+recurrence (coordinated saves). Deferrals log throttled `[Settle]` lines — a stuck deferral must
+be as visible as an early fire.
+**Exemption (by design):** the HOST's world-ready integrity/ledger passes run pre-gate — a host's
+own save load completes synchronously before world-ready, and those passes must beat native
+actors to a just-loaded world.
+**Sibling class:** acting before an OBJECT is initialized (the origin-anchor queue capture —
+state derived from a spawned-but-unpositioned item). Same doctrine at object scope; see the
+guest-placement conveyance review (task #28).

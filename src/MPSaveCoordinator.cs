@@ -339,9 +339,13 @@ namespace BigAmbitionsMP
                     // the save serialized a near-empty GameInstance (254KB vs the real 1.7MB) and the
                     // host stored it over the member's slot.  A save of a world we are not standing in
                     // is never valid — skip it loudly; the next coordinated save covers us.
-                    if (!MPClient.IsClientInWorld)
+                    // Round-179: upgraded from in-world to the full settled-gate (loading done, quiesce
+                    // lifted, settle margin) — a save serialized during ANY unsettled window is invalid.
+                    // Deliberate DROP, not a deferral: coordinated saves recur on their own schedule, so
+                    // the next one covers this building of the retry contract.
+                    if (!MPWorldReady.IsSettled)
                     {
-                        Plugin.Logger.LogWarning($"[MPSave] SaveNow for '{session}' arrived while this client is not in-world — SKIPPED (a blank save would have clobbered our slot).");
+                        Plugin.Logger.LogWarning($"[MPSave] SaveNow for '{session}' arrived while this client's world is not settled — SKIPPED (an unsettled save would clobber our slot; the next coordinated save covers us).");
                         return;
                     }
                     var slot   = PerformLocalSave(session);

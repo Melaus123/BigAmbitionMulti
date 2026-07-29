@@ -826,13 +826,56 @@ namespace BigAmbitionsMP
         /// Phase 2a writes Layout / interiorDesigns / retailPrices / dirtSpots.
         /// ItemInstances are NOT yet synced (Phase 2b).
         /// </summary>
-        public static void ApplyInteriorSnapshot(InteriorSnapshotPayload payload)
+        public static void ApplyInteriorSnapshot(InteriorSnapshotPayload payload) => ApplyInteriorSnapshot(payload, grantedEdit: false);
+
+        /// <summary>grantedEdit=true ONLY from the BuildingInteriorEdit adoption sites (a permitted
+        /// helper's renovation, grant-verified upstream) — the single flow allowed to modify a
+        /// building its receiver owns.</summary>
+        public static void ApplyInteriorSnapshot(InteriorSnapshotPayload payload, bool grantedEdit)
         {
             if (payload == null || string.IsNullOrEmpty(payload.AddressKey)) return;
             RunOnMainThread(() =>
             {
                 try
                 {
+                    // Round-178 (user design ruling, 2026-07-28): FOR A BUILDING THIS MACHINE OWNS, a
+                    // generic snapshot may only FILL AN EMPTY COPY — never modify a developed one.  The
+                    // owner is the authority; the generic channel exists to update REPLICAS, and the
+                    // only legitimate inbound edit of your own building is the granted-edit channel
+                    // (its own message type, grant-verified, bypasses via grantedEdit).  Keeping the
+                    // fill-when-empty case preserves the stale-save heal (a player whose save lost its
+                    // interiors receives the host's good copy) and the arbitration hand-over.
+                    if (!grantedEdit)
+                    {
+                        var regO = FindRegistration(payload.AddressKey);
+                        bool mineO = false; try { mineO = regO != null && MergerFlip.TrulyMine(regO); } catch { }
+                        if (mineO && !ContestedTenancy.IsKnownEssentiallyEmpty(regO, out int myScore))
+                        {
+                            Plugin.Logger.LogWarning($"[Patcher] Interior apply REFUSED for '{payload.AddressKey}': this machine OWNS the building and its copy is "
+                                + (myScore < 0 ? "not yet readable" : $"developed (score {myScore})")
+                                + " — a generic snapshot may only fill an empty copy; renovations arrive via the granted-edit channel only.");
+                            return;
+                        }
+                    }
+                    // Round-177 — WHOLE-SNAPSHOT all-zero refusal (approved 2026-07-28).  Round-103
+                    // refused empty ITEM sets but let designs/dirt/prices apply, so an unmaterialized
+                    // sender still wiped the receiver's renovations through the side door.  An
+                    // all-zero payload replacing existing content is absence of knowledge, never
+                    // evidence — refuse it wholesale.  (The send-side guard now skips these pushes at
+                    // the source; this is the belt for older senders and any other snapshot path.)
+                    if (payload.ItemInstances.Count == 0 && payload.InteriorDesigns.Count == 0
+                        && payload.DirtSpots.Count == 0 && payload.RetailPrices.Count == 0)
+                    {
+                        var regZ = FindRegistration(payload.AddressKey);
+                        bool hasContent = false;
+                        try { hasContent = regZ != null && ((regZ.itemInstances?.Count ?? 0) > 0 || (regZ.interiorDesigns?.Count ?? 0) > 0); } catch { }
+                        if (hasContent)
+                        {
+                            Plugin.Logger.LogWarning($"[Patcher] Interior apply REFUSED for '{payload.AddressKey}': an ALL-ZERO snapshot " +
+                                "(no items, designs, dirt or prices) may never replace existing content — absence of knowledge is not evidence.");
+                            return;
+                        }
+                    }
                     var reg = FindRegistration(payload.AddressKey);
                     if (reg == null)
                     {
