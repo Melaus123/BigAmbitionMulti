@@ -724,7 +724,11 @@ namespace BigAmbitionsMP
         // serve-event stream (Kind/SelfService/Cancelled/Dur/FX-FZ/Entries), BuildingOwnershipPayload
         // gained Score/BizName (contested-tenancy arbitration), and NativeClaim/ReleaseClaim message
         // types were added. A v4 peer would misread all three.
-        public const int Version = 5;
+        // v6 (mod 0.1.16): clean-break bump. ItemInstanceInfo gained the factory-workstation
+        // subclass fields (WorkstationType discriminator + recipe/priority/limits), and the
+        // receiver now heals a type-erased workstation by respawning it from the wire copy —
+        // safe only when no v5 peer (which strips those fields) can be in the session.
+        public const int Version = 6;
     }
 
     /// <summary>Sent by client on connect.</summary>
@@ -1812,6 +1816,15 @@ namespace BigAmbitionsMP
         public List<Vector3Info>              CustomPositions { get; set; } = new();
         public List<CustomColorInfo>          CustomColors    { get; set; } = new();
         public PlayerItemPurchaserSettingsInfo? PurchaserSettings { get; set; }
+        // Task-28 fix 1: FactoryWorkstationInstance is an ItemInstance SUBCLASS whose five
+        // config fields were silently dropped (the receiver rebuilt a base ItemInstance —
+        // recipe/priority/limits lost, BizMan Factory casts fail).  WorkstationType is the
+        // discriminator: non-null ⇔ the sender's instance was a FactoryWorkstationInstance.
+        public string? WorkstationType   { get; set; }
+        public string  SelectedRecipeId  { get; set; } = "";
+        public int     WsPriority        { get; set; }
+        public bool    ProduceUpTo       { get; set; }
+        public int     ProduceUpToValue  { get; set; }
     }
 
     public class AttachableChildInfo

@@ -75,6 +75,9 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning("[MPSave] HostSaveNow ignored — not hosting.");
                 return;
             }
+            // Task-28 fix 2: the host serializes its own world in this flow — same
+            // mid-placement hazard as the client leg; defer (tick-retried, 30s cap).
+            if (DeferForPlacement(reason, host: true)) return;
 
             string session;
             lock (_lock)
@@ -117,6 +120,12 @@ namespace BigAmbitionsMP
                 MPServer.BroadcastAny(MessageEnvelope.Create(MessageType.SaveNow, "host", payload));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] SaveNow broadcast: {ex.Message}"); }
+            // Round-184 fix 1 (rig-proven, TEST184-INT2): the immediate carry-forward below skips
+            // CONNECTED members (their upload is expected) — but an upload can fail (crash, drop,
+            // settle-gate skip), leaving the session WITHOUT their .hsg; the next load of it
+            // fresh-starts them.  Backstop: after the upload window, re-run the carry INCLUDING
+            // connected members — it only copies when the target still holds nothing newer.
+            lock (_lock) _pendingCarryBackstops.Add((session, Environment.TickCount));
 
             // Host's own save + manifest base — on the main thread (IL2CPP access).
             // The host's .hsg is written straight into its own MP folder, so there
@@ -228,6 +237,10 @@ namespace BigAmbitionsMP
                 MPServer.BroadcastAny(MessageEnvelope.Create(MessageType.SaveNow, "host", payload));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] HostSaveSync broadcast: {ex.Message}"); }
+            // Round-184 fix 1 (rig-caught, test184-int4): this MANUAL path never queued the
+            // upload backstop — HostSaveNow did — so a save-as followed by a quick quit could
+            // still be born without a member whose upload failed.  Same contract as HostSaveNow.
+            lock (_lock) _pendingCarryBackstops.Add((session, Environment.TickCount));
             try
             {
                 var slot = PerformLocalSave(session);
@@ -330,8 +343,13 @@ namespace BigAmbitionsMP
             string canonical = StripAutoSuffix(session);
             lock (_lock) { _activeSessionName = canonical; }
 
-            GameStatePatcher.EnqueueOnMainThread(() =>
-            {
+            GameStatePatcher.EnqueueOnMainThread(() => ClientSaveBody(session));
+        }
+
+        /// <summary>The client save execution — split out so a placement-deferred save can
+        /// re-enter from TickDeferredSave (task-28 fix 2).  Main thread only.</summary>
+        private static void ClientSaveBody(string session)
+        {
                 try
                 {
                     // Round-157 — BLANK-UPLOAD GUARD, client side.  Field case ('save 2', day 72): a
@@ -348,6 +366,24 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogWarning($"[MPSave] SaveNow for '{session}' arrived while this client's world is not settled — SKIPPED (an unsettled save would clobber our slot; the next coordinated save covers us).");
                         return;
                     }
+                    // Task-28 fix 2: native refuses to autosave during item placement
+                    // (preventAutoSave held true for the whole drag) because the staged item
+                    // sits in the data with a mid-drag pose — a coordinated save must not
+                    // bypass that.  DEFERRAL, not drop: retried per frame for up to 30s,
+                    // then proceeds (a slightly mid-drag pose beats a missing checkpoint).
+                    if (DeferForPlacement(session, host: false)) return;
+                    // DEV TOGGLE (round-184 test rig): drop this client's save+upload to fabricate an
+                    // interrupted coordinated save (host ends up with a partial manifest) without
+                    // having to kill the process.  Armed by creating <ModRoot>\dev-drop-upload.flag.
+                    try
+                    {
+                        if (System.IO.File.Exists(System.IO.Path.Combine(MPConfig.ModRootPath, "dev-drop-upload.flag")))
+                        {
+                            Plugin.Logger.LogWarning($"[MPSave] DEV FLAG: save+upload for '{session}' DROPPED (dev-drop-upload.flag present) — simulating an interrupted coordinated save.");
+                            return;
+                        }
+                    }
+                    catch { }
                     var slot   = PerformLocalSave(session);
                     string dir = MPSaveManager.MpCharacterFolder(session, MPConfig.StableId);
                     lock (_pending)
@@ -355,7 +391,47 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[MPSave] Queued .hsg upload for session '{session}'.");
                 }
                 catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] Client save: {ex}"); }
-            });
+        }
+
+        // ── Task-28 fix 2: no save while an item is mid-placement ────────────────
+        // The being-placed item is live in the registration with a per-frame drag pose;
+        // native holds preventAutoSave for the whole drag for exactly this reason, and
+        // the coordinated SaveNow used to bypass it.  Contract: DEFER and retry (per
+        // frame, from TickPendingUploads) up to PlacementWaitSeconds, then proceed.
+        private const float PlacementWaitSeconds = 30f;
+        private sealed class DeferredSave { public string What = ""; public float Deadline; public bool Host; }
+        private static DeferredSave? _deferredSave;
+        private static bool _placementBypassOnce;
+
+        private static bool PlacementActive()
+        {
+            try { return BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode; } catch { return false; }
+        }
+
+        private static bool DeferForPlacement(string what, bool host)
+        {
+            if (_placementBypassOnce) { _placementBypassOnce = false; return false; }
+            if (!PlacementActive()) return false;
+            _deferredSave = new DeferredSave { What = what, Deadline = UnityEngine.Time.unscaledTime + PlacementWaitSeconds, Host = host };
+            Plugin.Logger.LogInfo($"[MPSave] save '{what}' deferred — an item is being placed on this machine; retrying for up to {PlacementWaitSeconds:F0}s. Will retry.");
+            return true;
+        }
+
+        private static void TickDeferredSave()
+        {
+            var d = _deferredSave;
+            if (d == null) return;
+            bool placing = PlacementActive();
+            if (placing && UnityEngine.Time.unscaledTime < d.Deadline) return;
+            _deferredSave = null;
+            if (placing)
+            {
+                Plugin.Logger.LogWarning($"[MPSave] save '{d.What}' proceeding despite an active placement ({PlacementWaitSeconds:F0}s cap) — one item may persist a mid-drag pose.");
+                _placementBypassOnce = true;   // consumed by the DeferForPlacement re-check below
+            }
+            else Plugin.Logger.LogInfo($"[MPSave] save '{d.What}' resuming — placement ended.");
+            if (d.Host) HostSaveNow(d.What);
+            else ClientSaveBody(d.What);
         }
 
         // ── Client: deferred upload once the save has finished writing ───────────
@@ -373,8 +449,81 @@ namespace BigAmbitionsMP
 
         /// <summary>Call every frame on the MAIN thread.  Ships any finished local
         /// save to the host (the save writer is threaded, so we wait for it).</summary>
+        // Round-184 fix 1: coordinated saves whose upload window is still open.  Each entry
+        // resolves by EARLY COMPLETION (every connected member's .hsg landed — polled at most
+        // every 2s), by the 45s deadline, or by an explicit teardown FLUSH — save-and-quit is
+        // common and the process is often gone long before 45s (user call, 2026-07-29).
+        private static readonly List<(string session, int atMs)> _pendingCarryBackstops = new();
+        private static int _nextBackstopPollMs;
+
+        /// <summary>True when every CONNECTED member already has an .hsg in the session folder —
+        /// the backstop has nothing to add.</summary>
+        private static bool SessionHasAllConnected(string session)
+        {
+            try
+            {
+                foreach (var stable in MPServer.ConnectedStableIds())
+                {
+                    if (stable == MPConfig.StableId) continue;   // the host writes its own directly
+                    string dir = Path.Combine(MPSaveManager.MpSessionFolder(session), stable);
+                    if (!Directory.Exists(dir) || NewestHsg(dir) == null) return false;
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private static void TickCarryBackstops()
+        {
+            if (_pendingCarryBackstops.Count == 0) return;                                // benign unlocked peek
+            if (unchecked(Environment.TickCount - _nextBackstopPollMs) < 0) return;       // 2s IO throttle
+            _nextBackstopPollMs = Environment.TickCount + 2000;
+            List<(string session, int atMs)> snapshot;
+            lock (_lock) snapshot = new List<(string, int)>(_pendingCarryBackstops);
+            var done = new List<(string, int)>();
+            List<string>? carry = null;
+            foreach (var e in snapshot)
+            {
+                if (SessionHasAllConnected(e.session)) { done.Add(e); continue; }         // complete — uploads all landed
+                if (unchecked(Environment.TickCount - e.atMs) > 45_000)
+                {
+                    done.Add(e);
+                    (carry ??= new List<string>()).Add(e.session);
+                }
+            }
+            if (done.Count > 0) lock (_lock) foreach (var e in done) _pendingCarryBackstops.Remove(e);
+            if (carry == null) return;
+            foreach (var s in carry)
+            {
+                Plugin.Logger.LogInfo($"[MPSave] carry-forward backstop for '{s}' — a member's .hsg never landed; carrying their newest lineage copy (round-184).");
+                CarryForwardAbsentMembers(s, includeConnected: true);
+            }
+        }
+
+        /// <summary>Round-184: complete every pending backstop NOW — save-and-quit, a menu
+        /// return, or loading another session must never leave a just-saved session missing a
+        /// member because the 45s window never elapsed.</summary>
+        public static void FlushCarryBackstopsNow(string reason)
+        {
+            List<(string session, int atMs)> all;
+            lock (_lock)
+            {
+                if (_pendingCarryBackstops.Count == 0) return;
+                all = new List<(string, int)>(_pendingCarryBackstops);
+                _pendingCarryBackstops.Clear();
+            }
+            foreach (var e in all)
+            {
+                if (SessionHasAllConnected(e.session)) continue;
+                Plugin.Logger.LogInfo($"[MPSave] carry-forward backstop FLUSH ({reason}) for '{e.session}' — completing before teardown (round-184).");
+                CarryForwardAbsentMembers(e.session, includeConnected: true);
+            }
+        }
+
         public static void TickPendingUploads()
         {
+            TickDeferredSave();   // task-28 fix 2: placement-deferred saves retry here (every frame, main thread)
+            TickCarryBackstops(); // round-184 fix 1: post-upload-window completeness sweep (host-side entries only)
             List<PendingUpload> snapshot;
             lock (_pending)
             {
@@ -484,6 +633,9 @@ namespace BigAmbitionsMP
         public static void HostLoadSession(string session)
         {
             if (!MPServer.IsRunning) return;
+            // Round-184: leaving the current world for another load — complete any save still
+            // waiting on member uploads first (its window may never elapse otherwise).
+            try { FlushCarryBackstopsNow("host load"); } catch { }
             var m = MPSaveManager.ReadManifest(session);
             if (m == null) { Plugin.Logger.LogWarning($"[MPSave] HostLoadSession: no manifest for '{session}'."); return; }
 
@@ -806,6 +958,59 @@ namespace BigAmbitionsMP
             if (MPServer.CashByStableId.TryGetValue(stableId, out var live)) return live;   // a live figure (incl. a genuine $0) wins; only fall back to the slot when we have NO live cash at all
             var slot = m.Slots.Find(s => s.StableId == stableId);
             return slot?.Money ?? 0f;
+        }
+
+        // ── Round-184: the ONE save-serving ladder ───────────────────────────────
+        internal enum ServeVerdict { Served, Rescued, Unavailable, Fresh }
+
+        /// <summary>The single fallback ladder for serving a member their save — exact session →
+        /// lineage rescue → refuse-if-slot-exists → fresh-start-only-if-truly-new.  BOTH serve
+        /// paths (world start + mid-session join) resolve through here: this logic existed twice
+        /// and a fix landed in only one copy (rig-caught 2026-07-29 — the lobby-start rejoin
+        /// still fresh-started after only the mid-join path got the lineage rescue).  On
+        /// Served/Rescued, servedFrom names the session actually read and cash is that session's
+        /// manifest figure (live CashByStableId fallback).  Callers keep their own
+        /// world-identity fields and their own Unavailable/Fresh messaging.</summary>
+        internal static ServeVerdict ResolveMemberSave(string sourceSession, string stableId,
+            out (string b64, int raw)? data, out string servedFrom, out float cash)
+        {
+            servedFrom = sourceSession;
+            cash = 0f;
+            data = ReadSaveBytesGzip(sourceSession, stableId);
+            var verdict = ServeVerdict.Served;
+            if (data == null)
+            {
+                var alt = FindNewestLineageSessionWithHsg(sourceSession, stableId);
+                if (!string.IsNullOrEmpty(alt) && alt != sourceSession)
+                {
+                    data = ReadSaveBytesGzip(alt!, stableId);
+                    if (data != null)
+                    {
+                        verdict = ServeVerdict.Rescued;
+                        servedFrom = alt!;
+                        Plugin.Logger.LogWarning($"[MPSave] serve rescue: no .hsg for stable={stableId} in '{sourceSession}' — adopted their newest lineage copy from '{alt}' ({data.Value.raw}B). The session was missing this member (interrupted save / save-as without them).");
+                    }
+                }
+            }
+            if (data == null)
+            {
+                bool hasSlot = false;
+                try
+                {
+                    var mm = MPSaveManager.ReadManifest(sourceSession);
+                    hasSlot = mm?.Slots != null && mm.Slots.Exists(s => s.StableId == stableId);
+                }
+                catch { }
+                return hasSlot ? ServeVerdict.Unavailable : ServeVerdict.Fresh;
+            }
+            try
+            {
+                var sm = MPSaveManager.ReadManifest(servedFrom);
+                cash = sm != null ? BestCashFor(sm, stableId)
+                     : (MPServer.CashByStableId.TryGetValue(stableId, out var c) ? c : 0f);
+            }
+            catch { }
+            return verdict;
         }
 
         /// <summary>Read a stored .hsg from the host's session folder, gzipped +
@@ -1381,35 +1586,68 @@ namespace BigAmbitionsMP
         /// their OWN latest within-session save — manifest-reconciled, no cross-session desync. Connected
         /// members are skipped (they save themselves fresh; skipping also avoids racing their incoming
         /// upload). Pure file/JSON IO — safe off the main thread.</summary>
+        /// <summary>Round-184: every session name that can hold this WORLD's files — the same-base
+        /// automatic siblings plus every session sharing the world's PlaythroughId (save-as
+        /// renames, forks).  Extracted from CarryForwardAbsentMembers so the mid-join lineage
+        /// rescue (fix 2) resolves the identical set.  Rotation slots swept to a fixed 10 (the
+        /// setting's cap) rather than the live slot count — a lowered setting must not hide
+        /// members whose newest save sits in a now-out-of-range slot; missing folders are
+        /// skipped by every consumer.</summary>
+        internal static List<string> LineageSessions(string aroundSession)
+        {
+            var lineage = new List<string>();
+            string baseName = StripAutoSuffix(aroundSession);
+            lineage.Add(baseName);
+            lineage.Add(baseName + "-auto");
+            for (int slot = 2; slot <= 10; slot++) lineage.Add(baseName + "-auto-" + slot);
+            lineage.Add(baseName + "-disconnect");
+            lineage.Add(baseName + "-recover");
+            try
+            {
+                string pid = MPSaveManager.ReadManifest(aroundSession)?.PlaythroughId
+                          ?? MPSaveManager.ReadManifest(baseName)?.PlaythroughId ?? "";
+                if (!string.IsNullOrEmpty(pid))
+                    foreach (var (name, m) in MPSaveManager.ListSessions())
+                        if (m != null && m.PlaythroughId == pid && !lineage.Contains(name))
+                            lineage.Add(name);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] lineage scan: {ex.Message}"); }
+            return lineage;
+        }
+
+        /// <summary>Round-184 fix 2: the session holding the NEWEST .hsg for a member anywhere in
+        /// the world lineage — the rescue source when the loaded session is missing their save
+        /// (rig-proven TEST184-INT2: an interrupted save fresh-started the rejoining client, whose
+        /// now-authoritative empty save then blanked their developed buildings on both machines).</summary>
+        public static string? FindNewestLineageSessionWithHsg(string aroundSession, string stableId)
+        {
+            try
+            {
+                string? best = null; DateTime bestWhen = DateTime.MinValue;
+                foreach (var s in LineageSessions(aroundSession))
+                {
+                    string dir = Path.Combine(MPSaveManager.MpSessionFolder(s), stableId);
+                    if (!Directory.Exists(dir)) continue;
+                    string? hsg = NewestHsg(dir);
+                    if (hsg == null) continue;
+                    DateTime when; try { when = File.GetLastWriteTimeUtc(hsg); } catch { continue; }
+                    if (when > bestWhen) { bestWhen = when; best = s; }
+                }
+                return best;
+            }
+            catch { return null; }
+        }
+
         public static void CarryForwardAbsentMembers(string targetSession, bool includeConnected = false)
         {
             try
             {
                 if (string.IsNullOrEmpty(targetSession)) return;
                 var connected = MPServer.ConnectedStableIds();
-                string baseName = StripAutoSuffix(targetSession);
-                // Base + every automatic sibling. Rotation slots swept to a fixed 10 (the setting's cap)
-                // rather than the live slot count — a lowered setting must not hide members whose newest
-                // save sits in a now-out-of-range slot. Missing folders are skipped below anyway.
-                var lineage = new List<string> { baseName, baseName + "-auto" };
-                for (int slot = 2; slot <= 10; slot++) lineage.Add(baseName + "-auto-" + slot);
-                lineage.Add(baseName + "-disconnect");
-                // Cross-BASE lineage (field 2026-07-19): a save-as under a NEW NAME starts a
-                // different base, so the same-base sweep above can't see the old chain — the
-                // offline member's newest save lived in 'MP <date>-auto-2' while the target
-                // was 'Kaido_melaus game'. PlaythroughId is the world identity carried across
-                // every rename/fork: sweep every session of the SAME world too. (Manifest-less
-                // self-save folders are still covered by the same-base list above.)
-                try
-                {
-                    string pid = MPSaveManager.ReadManifest(targetSession)?.PlaythroughId
-                              ?? MPSaveManager.ReadManifest(baseName)?.PlaythroughId ?? "";
-                    if (!string.IsNullOrEmpty(pid))
-                        foreach (var (name, m) in MPSaveManager.ListSessions())
-                            if (m != null && m.PlaythroughId == pid && !lineage.Contains(name))
-                                lineage.Add(name);
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] carry-forward lineage scan: {ex.Message}"); }
+                // Round-184: lineage enumeration extracted to LineageSessions (shared with the
+                // mid-join lineage rescue). Now also sweeps '-recover' — the midnight checkpoint
+                // can legitimately hold a member's newest copy.
+                var lineage = LineageSessions(targetSession);
 
                 // Newest save per member across the lineage. Scan the character FOLDERS (not just manifest
                 // slots) so a manifest-less self-save (OnApplicationQuit) is still found; remember which

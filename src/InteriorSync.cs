@@ -150,6 +150,7 @@ namespace BigAmbitionsMP
         {
             if (!MPServer.IsRunning) return;
             if (_subsByBuilding.Count == 0) return;
+            if (PlacementQuiesced("host-subscriber-push")) return;   // task-28 fix 2: hashes not stored — next poll retries
             float now = UnityEngine.Time.realtimeSinceStartup;
             if (now - _lastPollAt < PollIntervalSeconds) return;
             _lastPollAt = now;
@@ -340,10 +341,35 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] HandleOwnerSnapshot: {ex.Message}"); }
         }
 
+        /// <summary>Task-28 fix 2: true while an item is mid-placement on THIS machine.  The staged
+        /// item is already live in reg.itemInstances with a per-frame drag pose (PlacementSystem
+        /// writes ItemInstance.position every frame) and security flags churn around it — a capture
+        /// in that window ships half-placed state.  Callers are tick-driven, so a deferral retries
+        /// until placement ends (retry contract); the throttled log is the tripwire.</summary>
+        private static readonly System.Collections.Generic.Dictionary<string, float> _nextPlacementDeferLogAt = new();
+        internal static bool PlacementQuiesced(string what)
+        {
+            bool placing = false;
+            try { placing = BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode; } catch { }
+            if (!placing) return false;
+            try
+            {
+                float now = UnityEngine.Time.unscaledTime;
+                if (!_nextPlacementDeferLogAt.TryGetValue(what, out var at) || now >= at)
+                {
+                    _nextPlacementDeferLogAt[what] = now + 5f;
+                    Plugin.Logger.LogInfo($"[Settle] '{what}' deferred — an item is being placed on this machine (mid-drag state must not convey). Will retry.");
+                }
+            }
+            catch { }
+            return true;
+        }
+
         private static bool SendLocalOwnerSnapshot(string addressKey, bool force, string reason)
         {
             try
             {
+                if (PlacementQuiesced($"owner-push {addressKey}")) return false;   // before hash-store — retried by the tick
                 var snap = BuildSnapshot(addressKey);
                 if (snap == null)
                 {
@@ -482,6 +508,7 @@ namespace BigAmbitionsMP
         /// push to the host, which rebroadcasts.</summary>
         private static void PushOwnedBuildingImmediate(string addressKey)
         {
+            if (PlacementQuiesced($"immediate-push {addressKey}")) return;   // task-28 fix 2: hash unchanged — the owner tick re-converges post-placement
             try
             {
                 if (MPServer.IsRunning)
@@ -751,7 +778,9 @@ namespace BigAmbitionsMP
                 Id                  = ii.id?.ToString() ?? "",
                 ItemName            = ii.itemName ?? "",
                 Px = ii.position.x,  Py = ii.position.y,  Pz = ii.position.z,
-                Qx = ii.rotation.x,  Qy = ii.rotation.y,  Qz = ii.rotation.z,  Qw = ii.rotation.w,
+                // Task-28 fix 4: Qx..Qw stay 0 — 'rotation' is obsolete since EA 0.11 (native
+                // migrates it away at load, and its property getter MUTATES on read); yRotation
+                // is the one live rotation and the receiver no longer writes the quaternion.
                 YRotation           = ii.yRotation,
                 ParentId            = ii.parentId?.ToString() ?? "",
                 StreetName          = ii.streetName ?? "",
@@ -764,6 +793,17 @@ namespace BigAmbitionsMP
                 CustomValue         = ii.customValue?.ToString() ?? "",
                 PriceOnPurchase     = ii.priceOnPurchase,
             };
+
+            // Task-28 fix 1: carry the factory-workstation subclass config.  WorkstationType
+            // non-null is the discriminator the receiving deserializer keys on.
+            if (ii is FactoryWorkstationInstance fw)
+            {
+                info.WorkstationType  = fw.workstationType ?? "";
+                info.SelectedRecipeId = fw.selectedRecipeId ?? "";
+                info.WsPriority       = fw.priority;
+                info.ProduceUpTo      = fw.produceUpTo;
+                info.ProduceUpToValue = fw.produceUpToValue;
+            }
 
             // Stacked items (sub-items attached to this one).
             if (ii.stackedItems != null)
@@ -935,6 +975,16 @@ namespace BigAmbitionsMP
                         }
                     h = h * 31 + it.StateIndex;
                     h = h * 31 + MPAudit.StableHash(it.Alias);
+                    // Task-28 fix 1: factory config is visible state — a recipe/priority/limit
+                    // edit must trigger a broadcast (it applies in place on the receiver).
+                    if (it.WorkstationType != null)
+                    {
+                        h = h * 31 + MPAudit.StableHash(it.WorkstationType);
+                        h = h * 31 + MPAudit.StableHash(it.SelectedRecipeId);
+                        h = h * 31 + it.WsPriority;
+                        h = h * 31 + (it.ProduceUpTo ? 1 : 0);
+                        h = h * 31 + it.ProduceUpToValue;
+                    }
                     // Round-99d: PAINT is visible state — without it a repaint produced no hash
                     // change, so the push only rode the ~30s re-assert (measured 20-30s color
                     // latency). Third member of the colors-omitted class (dead guards, IdentitySig).

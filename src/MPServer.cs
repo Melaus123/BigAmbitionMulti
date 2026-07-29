@@ -121,6 +121,12 @@ namespace BigAmbitionsMP
         /// CONCURRENT: written on poll + main threads, read on the main thread.</summary>
         public static readonly ConcurrentDictionary<string, float> CashByStableId = new();
 
+        /// <summary>pid → Environment.TickCount at their last lobby join (round-184 fix 3: the
+        /// resurrection window — an essentially-empty owner push shortly after a (re)join is the
+        /// stale/fresh-save signature and must not blank developed copies).  CONCURRENT (poll
+        /// thread writes on Hello, main thread reads in the apply path).</summary>
+        public static readonly ConcurrentDictionary<string, int> JoinedAtByPid = new();
+
         /// <summary>Last-synced cash for a player, or -1 when unknown (unknown
         /// must not block — the Hub treats negative as "can't validate").</summary>
         public static float GetKnownCash(string playerId)
@@ -232,6 +238,7 @@ namespace BigAmbitionsMP
                 var reverse = new Dictionary<string, string>();   // stableId → playerId
                 foreach (var kv in StableIdByPlayer) reverse[kv.Value] = kv.Key;
 
+                int priorOwned = BuildingOwners.Count;   // [Ledger] shrink probe (round-184)
                 BuildingOwners.Clear();
                 foreach (var kv in m.BuildingOwners)
                 {
@@ -255,6 +262,12 @@ namespace BigAmbitionsMP
                     if (slot.Money != 0f) CashByStableId[slot.StableId] = slot.Money;
 
                 Plugin.Logger.LogInfo($"[Server] Restored {BuildingOwners.Count} owned building(s) from manifest ({m.Slots?.Count ?? 0} save slot(s)).");
+                // [Ledger] shrink probe (round-184, field bamp-bug-20260729-150703): a load that
+                // yields fewer entries than the ledger held a moment ago is a SILENT ownership
+                // rollback — the exact shape suspected of eating Curlingg's businesses.  Loud line
+                // so both dev tests and field reports name the shrink moment.
+                if (priorOwned > 0 && BuildingOwners.Count < priorOwned)
+                    Plugin.Logger.LogWarning($"[Ledger] RESTORE SHRANK the ownership ledger: {priorOwned} → {BuildingOwners.Count} entries — this manifest is older/more partial than the world state just left behind (probe, round-184).");
 
                 // 4a diagnostic (read-only): a building owned by a stableId with NO save slot is an ORPHAN —
                 // the owner has no character on the host (legacy save, or a lost/corrupt .hsg). Surfaced at
@@ -339,7 +352,11 @@ namespace BigAmbitionsMP
             {
                 if (!_peerNames.TryGetValue(peer.Id, out var pid)) continue;
                 if (!StableIdByPlayer.TryGetValue(pid, out var stable) || string.IsNullOrEmpty(stable)) continue;
-                var data = MPSaveCoordinator.ReadSaveBytesGzip(session, stable);
+                // Round-184: BOTH serve paths resolve through the ONE ladder (exact session →
+                // lineage rescue → unavailable → fresh) — the duplicated copies drifted and a
+                // fix landed in only one (rig-caught: the lobby-start rejoin still fresh-started
+                // after only the mid-join path got the rescue).
+                var verdict = MPSaveCoordinator.ResolveMemberSave(session, stable, out var data, out var servedFrom, out var cash);
                 if (data == null)
                 {
                     // Proposal 2 (2026-06-17): distinguish a brand-NEW player (no saved character — fresh-start
@@ -348,8 +365,7 @@ namespace BigAmbitionsMP
                     // real character exists but the file is missing/locked/corrupt. Fresh-starting them would
                     // abandon that save (and, once they re-save, overwrite any chance of recovery) — so refuse,
                     // and tell the client so the player can reconnect to retry / the host can recover the file.
-                    bool hasSavedCharacter = m.Slots != null && m.Slots.Exists(s => s.StableId == stable);
-                    if (hasSavedCharacter)
+                    if (verdict == MPSaveCoordinator.ServeVerdict.Unavailable)
                     {
                         Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
                         {
@@ -374,7 +390,8 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogWarning($"[Server] No save slot for new player '{pid}' (stable={stable}) — sent fresh-character fallback.");
                     continue;
                 }
-                float cash = MPSaveCoordinator.BestCashFor(m, stable);
+                // Cash came from the served session's manifest (rescue-aware); world identity
+                // below stays the LOADED session's (m) — the world everyone is jumping to.
                 var payload = new LoadDataPayload
                 {
                     SessionName   = adopt,
@@ -553,6 +570,9 @@ namespace BigAmbitionsMP
             // load-start kick (2026-06-12, cause unresolved) is attributable.
             if (_running)
                 Plugin.Logger.LogWarning($"[Server] STOP called ({_clients.Count} client(s) will see RemoteConnectionClose) from: {Environment.StackTrace}");
+            // Round-184: a save made moments ago may still be waiting on member uploads — those
+            // will never arrive once the transport stops; complete its carry-forward first.
+            try { MPSaveCoordinator.FlushCarryBackstopsNow("server stop"); } catch { }
             _running = false;
             MPNet.RemoveMappingAsync();   // best-effort UPnP cleanup (harmless if it can't run)
             _transport?.Stop();
@@ -1785,6 +1805,7 @@ namespace BigAmbitionsMP
 
             // Add to lobby and tell everyone
             LobbyAdd(hello.PlayerId);
+            try { JoinedAtByPid[hello.PlayerId] = Environment.TickCount; } catch { }   // round-184: resurrection window anchor
             BroadcastLobbyUpdate();
             Plugin.Logger.LogInfo($"[Server] '{hello.PlayerId}' joined lobby. Players: {string.Join(", ", LobbyPlayers)}");
         }
@@ -3354,7 +3375,12 @@ namespace BigAmbitionsMP
             string source = MPSaveCoordinator.MidJoinSourceSession;
             if (string.IsNullOrEmpty(source)) source = session;
             string adopt = MPSaveCoordinator.StripAutoSuffix(session);
-            var data = MPSaveCoordinator.ReadSaveBytesGzip(source, stable);
+            // Round-184: BOTH serve paths resolve through the ONE ladder (exact session → lineage
+            // rescue → unavailable → fresh) — the duplicated copies drifted and a fix landed in
+            // only one.  A missing .hsg here would otherwise fresh-start a returning player,
+            // whose now-authoritative empty save then blanks every building the ledger still
+            // grants them, on BOTH machines (rig-proven, TEST184-INT2).
+            var verdict = MPSaveCoordinator.ResolveMemberSave(source, stable, out var data, out var servedFrom, out var cash);
             if (data != null)
             {
                 // Reclaim: ownership reserved under the absent owner's stableId re-keys to their live pid.
@@ -3364,21 +3390,17 @@ namespace BigAmbitionsMP
                 foreach (var kv in BuildingRealEstateOwners)   // symmetric: bought real estate reserved under the absent owner's stableId must also re-key to their live pid
                     if (kv.Value == stable) { BuildingRealEstateOwners[kv.Key] = pid; rekeyed++; }
                 if (rekeyed > 0) Plugin.Logger.LogInfo($"[Server] Re-keyed {rekeyed} reserved building(s) to '{pid}'.");
-                var m = MPSaveManager.ReadManifest(source);
-                float cash = m != null ? MPSaveCoordinator.BestCashFor(m, stable)
-                                       : (CashByStableId.TryGetValue(stable, out var c) ? c : 0f);
+                var m = MPSaveManager.ReadManifest(servedFrom);
                 Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
                 {
                     SessionName = adopt, HsgGzipBase64 = data.Value.b64, RawLength = data.Value.raw, Money = cash,
                     // Handoff slice 4: identity/day/epoch for the joiner's log-only diagnostics.
                     WorldDay = m?.WorldDay ?? 0, PlaythroughId = m?.PlaythroughId ?? "", HostEpoch = m?.HostEpoch ?? 0,
                 }));
-                Plugin.Logger.LogInfo($"[Server] Mid-session join: sent LoadData to '{pid}' (source='{source}', adopt='{adopt}', {data.Value.raw}B, ${cash:F0}); world state follows once their scene loads.");
+                Plugin.Logger.LogInfo($"[Server] Mid-session join: sent LoadData to '{pid}' (source='{servedFrom}', adopt='{adopt}', {data.Value.raw}B, ${cash:F0}); world state follows once their scene loads.");
                 return true;
             }
-            var mm = MPSaveManager.ReadManifest(source);
-            bool hasSavedCharacter = mm?.Slots != null && mm.Slots.Exists(s => s.StableId == stable);
-            if (hasSavedCharacter)
+            if (verdict == MPSaveCoordinator.ServeVerdict.Unavailable)
             {
                 Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
                 { SessionName = adopt, HsgGzipBase64 = "", SaveUnavailable = true, FallbackSettings = LastStartSettings }));

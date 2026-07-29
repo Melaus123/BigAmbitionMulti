@@ -441,6 +441,10 @@ namespace BigAmbitionsMP
                         // (this direct PerformLocalSave(active) was one of the two "my save advanced
                         // without me saving" leaks; the join-save was the other).
                         Plugin.Logger.LogInfo("[MPSave] OnApplicationQuit — host quit-checkpoint before exit.");
+                        // Round-184: a save made seconds before quitting may still be waiting on
+                        // member uploads — complete its carry-forward NOW or the session exits
+                        // missing a player (save-and-quit is the common flow; user call 2026-07-29).
+                        try { MPSaveCoordinator.FlushCarryBackstopsNow("application quit"); } catch { }
                         MPSaveCoordinator.HostQuitCheckpoint();
                     }
                     else if (MPClient.IsConnected || MPClient.SessionEnded)

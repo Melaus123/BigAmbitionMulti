@@ -857,6 +857,45 @@ namespace BigAmbitionsMP
                             return;
                         }
                     }
+                    // Round-184 fix 3 (rig-proven, TEST184-INT2): EMPTINESS MAY NOT REPLACE
+                    // DEVELOPMENT IN ONE STEP.  A member whose .hsg went missing/stale rejoins
+                    // with a REAL, materialized, genuinely near-empty save — every unread-state
+                    // guard rightly passes it, and its owner-authoritative push blanked the
+                    // developed replica live on the rig (items 9→2, business name gone).  While
+                    // the sender is inside the resurrection window (10 min after joining), a
+                    // wholesale snapshot that is essentially-empty (≤3 non-default items) may not
+                    // replace a positively-developed copy; the developed copy is pushed BACK to
+                    // the owner instead (heal), and their next push carries the restored content.
+                    // A legitimate teardown converges per-change and never presents this cliff;
+                    // after the window, force pushes apply normally.
+                    if (!grantedEdit && MPServer.IsRunning)
+                    {
+                        try
+                        {
+                            string senderPid = payload.OwnerPlayerId ?? "";
+                            if (senderPid.Length > 0 && senderPid != MPConfig.PlayerId
+                                && MPServer.JoinedAtByPid.TryGetValue(senderPid, out var joinedMs)
+                                && unchecked(Environment.TickCount - joinedMs) < ResurrectionWindowMs)
+                            {
+                                int incomingDev = 0;
+                                foreach (var it in payload.ItemInstances)
+                                    if (it != null && !ContestedTenancy.IsDefaultFixture(it.ItemName ?? "")) incomingDev++;
+                                if (incomingDev <= 3)
+                                {
+                                    var regR = FindRegistration(payload.AddressKey);
+                                    int myDev = -1;
+                                    try { if (regR != null) myDev = ContestedTenancy.DevelopmentScore(regR); } catch { }
+                                    if (myDev > 3)
+                                    {
+                                        Plugin.Logger.LogWarning($"[Patcher] Interior apply REFUSED for '{payload.AddressKey}': recently-joined '{senderPid}' pushed an essentially-empty copy ({incomingDev} non-default item(s)) over a developed one (score {myDev}) — the stale/fresh-save signature (round-184). Healing the owner back with our copy instead.");
+                                        try { InteriorSync.SendSnapshotToPlayer(payload.AddressKey, senderPid); } catch { }
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        catch { }
+                    }
                     // Round-177 — WHOLE-SNAPSHOT all-zero refusal (approved 2026-07-28).  Round-103
                     // refused empty ITEM sets but let designs/dirt/prices apply, so an unmaterialized
                     // sender still wiped the receiver's renovations through the side door.  An
@@ -1067,7 +1106,11 @@ namespace BigAmbitionsMP
                                         var np = ns.Split('#'); var lp = ls.Split('#');
                                         cargoOnly = np.Length == 3 && lp.Length == 3 && np[0] == lp[0] && np[2] == lp[2];
                                     }
-                                    if (transformOnly || cargoOnly)
+                                    // Task-28 fix 1: a workstation arriving where a base copy lives (or vice
+                                    // versa) cannot be updated in place — the TYPE is wrong; fall through to
+                                    // destroy+respawn, which heals a previously type-erased copy.
+                                    bool typeMismatch = (ii is FactoryWorkstationInstance) != (prevLive is FactoryWorkstationInstance);
+                                    if (!typeMismatch && (transformOnly || cargoOnly))
                                     {
                                         if (cargoOnly)
                                         {
@@ -1123,6 +1166,54 @@ namespace BigAmbitionsMP
                                                     prevLive.customPositions = incQ;
                                                     MPRegisterSync.RebuildDrawnQueueAt(
                                                         new UnityEngine.Vector3(ii.position.x, ii.position.y, ii.position.z), incQ);
+                                                }
+                                            }
+                                            else if (prevLive.customPositions != null && prevLive.customPositions.Count > 0)
+                                            {
+                                                // Task-28 fix 3: the owner's copy holds NO line data (moving-service
+                                                // reset, or a poison-stripped sender) — follow it.  ResetQueueAt
+                                                // rebuilds the live line at its template position and re-nulls the
+                                                // data copy afterwards (Reset's callback writes the rebuilt line
+                                                // back into the instance), so repeated empty pushes are no-ops.
+                                                prevLive.customPositions = null;
+                                                MPRegisterSync.ResetQueueAt(
+                                                    new UnityEngine.Vector3(ii.position.x, ii.position.y, ii.position.z), prevLive);
+                                            }
+                                        }
+                                        catch { }
+                                        // Task-28 fix 3: the dirt footprint follows the wire — native recomputes it
+                                        // only at placement-confirm on the MOVING machine, so the pose-only copy
+                                        // above left ours stale after moves (dirt kept appearing at the item's OLD
+                                        // footprint on the simulating machine).
+                                        try
+                                        {
+                                            var incD = ii.dirtSpotsThatAffects;
+                                            var curD = prevLive.dirtSpotsThatAffects;
+                                            bool dDelta = (incD?.Count ?? 0) != (curD?.Count ?? 0);
+                                            if (!dDelta && incD != null && curD != null)
+                                                for (int di = 0; di < incD.Count; di++)
+                                                    if (incD[di] != curD[di]) { dDelta = true; break; }
+                                            if (dDelta) prevLive.dirtSpotsThatAffects = incD;
+                                        }
+                                        catch { }
+                                        // Task-28 fix 1 (in-place leg): factory config follows the wire on the LIVE
+                                        // instance — a recipe/priority edit needs no respawn.
+                                        try
+                                        {
+                                            if (prevLive is FactoryWorkstationInstance pfw && ii is FactoryWorkstationInstance nfw)
+                                            {
+                                                bool recipeChanged = pfw.selectedRecipeId != nfw.selectedRecipeId;
+                                                if (recipeChanged || pfw.priority != nfw.priority || pfw.produceUpTo != nfw.produceUpTo
+                                                    || pfw.produceUpToValue != nfw.produceUpToValue || pfw.workstationType != nfw.workstationType)
+                                                {
+                                                    pfw.selectedRecipeId = nfw.selectedRecipeId;
+                                                    pfw.priority         = nfw.priority;
+                                                    pfw.produceUpTo      = nfw.produceUpTo;
+                                                    pfw.produceUpToValue = nfw.produceUpToValue;
+                                                    pfw.workstationType  = nfw.workstationType;
+                                                    // native tools announce recipe edits with exactly this event; the
+                                                    // assembly controller re-reads its config on it
+                                                    if (recipeChanged) try { GameEvent.Invoke("ba:gameevent_onfactorymachinerecipechanged"); } catch { }
                                                 }
                                             }
                                         }
@@ -2000,6 +2091,17 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] item move pass: {ex.Message}"); }
 
+                // Task-28 fix 5: a destroyed/respawned station leaves WaitingLinesHelper's line
+                // cache stale — it only rebuilds when EMPTY, and only interior load or the
+                // producers refresh clears it (read-verified: WaitingLinesHelper.cs:24-33) — so
+                // customers would ignore a respawned till until this machine re-entered the
+                // building.  Nudge the game's own refresh: the exact call native fires at
+                // placement end (onPlacementModeEnd → ScheduleUpdateAvailableProducers →
+                // GetItemControllers + WaitingLinesHelper.Init).  Runs a frame later, after the
+                // deferred Destroys have made the old controllers Unity-null.
+                if (destroyed > 0 || spawned > 0)
+                    try { bm.ScheduleUpdateAvailableProducers(); } catch { }
+
                 Plugin.Logger.LogInfo($"[Patcher] Items refresh: destroyed={destroyed} spawned={spawned} moved={moved} kept={liveById.Count} failed={failed} (dict size {dictCount}{(fullRebuild ? ", FULL rebuild" : "")}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] RefreshItemsForActiveBuilding: {ex.Message}"); }
@@ -2331,24 +2433,43 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var ii = new BigAmbitions.Items.ItemInstance(i.ItemName)
+                // Task-28 fix 1: a factory workstation is an ItemInstance SUBCLASS carrying its
+                // recipe/priority/limit config — constructing the base type here TYPE-ERASED the
+                // workstation on every respawn (config lost, BizMan Factory casts fail, and the
+                // degraded copy could persist in this machine's save).  WorkstationType non-null
+                // on the wire ⇔ the sender's instance was a FactoryWorkstationInstance.
+                BigAmbitions.Items.ItemInstance ii;
+                if (i.WorkstationType != null)
                 {
-                    id                  = i.Id,
-                    itemName            = i.ItemName,
-                    position            = new SerializableVector3 { x = i.Px, y = i.Py, z = i.Pz },
-                    rotation            = new SerializableQuaternion { x = i.Qx, y = i.Qy, z = i.Qz, w = i.Qw },
-                    yRotation           = i.YRotation,
-                    parentId            = i.ParentId,
-                    streetName          = i.StreetName,
-                    streetNumber        = i.StreetNumber,
-                    linkedItemName      = i.LinkedItemName,
-                    isSecured           = i.IsSecured,
-                    worldSpaceTextValue = i.WorldSpaceTextValue,
-                    stateIndex          = i.StateIndex,
-                    alias               = i.Alias,
-                    customValue         = i.CustomValue,
-                    priceOnPurchase     = i.PriceOnPurchase,
-                };
+                    var fw = new FactoryWorkstationInstance(i.ItemName)
+                    {
+                        selectedRecipeId = i.SelectedRecipeId ?? "",
+                        priority         = i.WsPriority,
+                        produceUpTo      = i.ProduceUpTo,
+                        produceUpToValue = i.ProduceUpToValue,
+                    };
+                    // the ctor derives workstationType from the item name — only override with a real value
+                    if (!string.IsNullOrEmpty(i.WorkstationType)) fw.workstationType = i.WorkstationType;
+                    ii = fw;
+                }
+                else ii = new BigAmbitions.Items.ItemInstance(i.ItemName);
+                ii.id                  = i.Id;
+                ii.itemName            = i.ItemName;
+                ii.position            = new SerializableVector3 { x = i.Px, y = i.Py, z = i.Pz };
+                // Task-28 fix 4: the quaternion 'rotation' is obsolete since EA 0.11 (native migrates
+                // it away at load, and its property getter MUTATES on read) — never write it back;
+                // yRotation is the one live rotation.
+                ii.yRotation           = i.YRotation;
+                ii.parentId            = i.ParentId;
+                ii.streetName          = i.StreetName;
+                ii.streetNumber        = i.StreetNumber;
+                ii.linkedItemName      = i.LinkedItemName;
+                ii.isSecured           = i.IsSecured;
+                ii.worldSpaceTextValue = i.WorldSpaceTextValue;
+                ii.stateIndex          = i.StateIndex;
+                ii.alias               = i.Alias;
+                ii.customValue         = i.CustomValue;
+                ii.priceOnPurchase     = i.PriceOnPurchase;
 
                 // Stacked items
                 if (ii.stackedItems != null && i.StackedItems != null)
@@ -2944,6 +3065,10 @@ namespace BigAmbitionsMP
         /// identity-relative, so OwnerPlayerId != host resolves to that player as the
         /// building's owner (buildingOwnerRivalId).  The host's BusinessSync.Tick then
         /// detects the changed reg and relays it to the other clients.  MAIN THREAD.</summary>
+        /// <summary>Round-184 fix 3: how long after a player joins their near-empty wholesale
+        /// pushes are treated as the stale/fresh-save signature rather than as truth.</summary>
+        internal const int ResurrectionWindowMs = 10 * 60 * 1000;
+
         public static void ApplyClientBusinessChange(BusinessInfo info)
         {
             if (info == null) return;
@@ -2962,6 +3087,27 @@ namespace BigAmbitionsMP
                         "refused; the world-ready ledger sweep drops the stale reservation on the next host load.");
                     return;
                 }
+                // Round-184 fix 3 (business leg): an EMPTY business record from a recently-joined
+                // sender may not blank a live one — same stale/fresh-save signature as the
+                // interior leg (rig-proven: Testbiz1's name → '' within seconds of the rejoin).
+                // Push our record back so the owner's machine re-learns its own business.
+                try
+                {
+                    bool incomingEmpty = string.IsNullOrEmpty(info.BusinessName)
+                        && (string.IsNullOrEmpty(info.BusinessTypeName)
+                            || info.BusinessTypeName.EndsWith("_empty", StringComparison.Ordinal));
+                    string curName = ""; try { curName = reg?.BusinessName?.ToString() ?? ""; } catch { }
+                    if (incomingEmpty && curName.Length > 0
+                        && !string.IsNullOrEmpty(info.OwnerPlayerId)
+                        && MPServer.JoinedAtByPid.TryGetValue(info.OwnerPlayerId, out var jMs)
+                        && unchecked(Environment.TickCount - jMs) < ResurrectionWindowMs)
+                    {
+                        Plugin.Logger.LogWarning($"[Patcher/Host] business change REFUSED for '{info.AddressKey}': recently-joined '{info.OwnerPlayerId}' pushed an EMPTY record over live business '{curName}' — stale/fresh-save signature (round-184); pushing ours back.");
+                        try { if (reg != null) BusinessSync.PushBusinessNow(reg, "resurrection-guard heal (round-184)"); } catch { }
+                        return;
+                    }
+                }
+                catch { }
                 bool signObjNull = reg == null || reg.signAppearanceSettings == null;
                 if (ApplyBusinessInfoLocal(info))
                     Plugin.Logger.LogInfo($"[Patcher/Host] Client business applied: {info.AddressKey} = '{info.BusinessName}' sign=type{info.SignType} (owner '{info.OwnerPlayerId}', signObjNull={signObjNull}).");

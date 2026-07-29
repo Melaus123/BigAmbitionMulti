@@ -40,7 +40,7 @@ namespace BigAmbitionsMP
         /// (a default-only copy read 23 and blocked the arbitration that is the ONLY reconciliation
         /// path when the bugged state also blocks manual lease termination).  Defaults and their cargo
         /// are excluded; only player-added development counts.</summary>
-        private static bool IsDefaultFixture(string n)
+        internal static bool IsDefaultFixture(string n)   // round-184: shared with the resurrection guard
         {
             if (string.IsNullOrEmpty(n)) return false;
             if (n.StartsWith("ba:itemname_ceilinglamp", StringComparison.Ordinal)) return true;

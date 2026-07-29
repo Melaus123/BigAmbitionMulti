@@ -291,6 +291,27 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[QueueSync] rebuild: {ex.Message}"); }
         }
 
+        /// <summary>Task-28 fix 3 — the CLEAR counterpart of RebuildDrawnQueueAt: the owner's copy
+        /// carries no line data, so reset the live line to its template at the item's real position
+        /// (the game's own creator.Reset), then re-null the instance copy — Reset's onDataChange
+        /// callback writes the rebuilt template line back into it, and the data must keep matching
+        /// the owner's (null) so repeated empty pushes stay no-ops.</summary>
+        internal static void ResetQueueAt(Vector3 pos, BigAmbitions.Items.ItemInstance owner)
+        {
+            try
+            {
+                var stations = UnityEngine.Object.FindObjectsOfType(typeof(EmployeeStationController));
+                var st = NearestStationIn(stations, pos, 2.5f);
+                var wl = (st as EmployeeStations.IWaitingLineHolder)?.GetWaitingLine();
+                if (wl == null) return;   // interior not loaded here — the nulled data rebuilds the line natively on next load
+                try { wl.creator?.Reset(); } catch { }
+                try { wl.visuals.Hide(); } catch { }
+                try { if (owner != null) owner.customPositions = null; } catch { }
+                Plugin.Logger.LogInfo($"[QueueSync] drawn queue cleared at {Key(pos)} — line reset to its template at the item's position.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[QueueSync] clear: {ex.Message}"); }
+        }
+
         /// <summary>Inverse of Key() — the sweep needs a position to find the till again.</summary>
         private static Vector3 ParseKey(string k)
         {
