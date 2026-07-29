@@ -500,6 +500,8 @@ namespace BigAmbitionsMP
 
         private void Update()
         {
+            TickUiScale();   // round-176: keep the canvas scale tracking resolution + the game's UI Zoom
+
             // Resolve + cache the save version folder on the MAIN thread, unconditionally
             // and as early as possible.  The network poll thread reaches MpCharacterFolder
             // (→ IL2CPP CurrentVersionFolderPath) when it handles a client's uploaded save
@@ -5141,6 +5143,33 @@ namespace BigAmbitionsMP
 
         // ── Canvas construction ───────────────────────────────────────────────
 
+        /// <summary>Round-176 — the main canvas's live pixel scale.  1 canvas unit = 1/UiScale screen
+        /// pixels.  Everything converting between screen pixels and canvas units divides by this.</summary>
+        internal static float UiScale = 1f;
+        private static CanvasScaler? _uiScaler;
+
+        private static float DesiredUiScale()
+        {
+            float zoom = 1f;
+            try { zoom = PlayerPrefSettings.uiZooming; } catch { }
+            if (zoom < 0.25f || zoom > 4f) zoom = 1f;              // unset/garbage pref -> neutral
+            return Mathf.Max(0.5f, (Screen.height / 1080f) * zoom);
+        }
+
+        private static void TickUiScale()
+        {
+            try
+            {
+                if (_uiScaler == null) return;
+                float want = DesiredUiScale();
+                if (Mathf.Abs(_uiScaler.scaleFactor - want) < 0.001f) return;
+                _uiScaler.scaleFactor = want;
+                UiScale = want;
+                Plugin.Logger.LogInfo($"[UI] canvas scale → {want:F2} (screen {Screen.width}x{Screen.height}, game UI zoom {(PlayerPrefSettings.uiZooming):F2}).");
+            }
+            catch { }
+        }
+
         private void BuildCanvas()
         {
             _canvasGO = new GameObject("BAMP_Canvas");
@@ -5151,8 +5180,15 @@ namespace BigAmbitionsMP
             canvas.sortingOrder = 999;
 
             var scaler = _canvasGO.AddComponent<CanvasScaler>();
+            // Round-176 (field: "windows way too small on a larger display"): ConstantPixelSize stays —
+            // the coordinate math depends on pixel units — but the factor is now LIVE: resolution
+            // baseline (screen height / 1080) x the game's own UI Zoom setting.  The native
+            // SetUIZooming sweep overwrites every scaler's factor on a zoom change (ours included);
+            // TickUiScale re-asserts the correct value within a frame.  All screen<->canvas math
+            // divides by UiScale, so windows keep their proportions at any resolution or zoom.
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
-            scaler.scaleFactor = 1f;
+            _uiScaler = scaler;
+            scaler.scaleFactor = UiScale = DesiredUiScale();
 
             _canvasGO.AddComponent<GraphicRaycaster>();
 
@@ -5988,8 +6024,8 @@ namespace BigAmbitionsMP
                 Vector2 d = mp - _mpDragLast;
                 _mpDragLast = mp;
                 var p = _mpWinRT.anchoredPosition + d;
-                p.x = Mathf.Clamp(p.x, -(Screen.width  - 60f), 0f);
-                p.y = Mathf.Clamp(p.y, -(Screen.height - 40f), 0f);
+                p.x = Mathf.Clamp(p.x, -(Screen.width  / UiScale - 60f), 0f);
+                p.y = Mathf.Clamp(p.y, -(Screen.height / UiScale - 40f), 0f);
                 _mpWinRT.anchoredPosition = p;
             }
 
@@ -6411,7 +6447,7 @@ namespace BigAmbitionsMP
 
             float h = -y + PAD;
             crt.sizeDelta        = new Vector2(SET_W, h);
-            crt.anchoredPosition = new Vector2(0f, -Mathf.Round(Mathf.Max(0f, (Screen.height - h) / 2f)));
+            crt.anchoredPosition = new Vector2(0f, -Mathf.Round(Mathf.Max(0f, (Screen.height / UiScale - h) / 2f)));
 
             // Tooltip — follows the cursor while hovering a setting name.
             _tooltipGO = MakeGO("Tooltip", _settingsPanelGO.transform);
@@ -6533,9 +6569,9 @@ namespace BigAmbitionsMP
                     float cx = ms.x - gap - tw;
                     float cy = ms.y - 8f;
                     if (cx < 0f) cx = ms.x + gap + 56f;          // no room left — go well clear to the right
-                    if (cx + tw > Screen.width) cx = Screen.width - tw;
+                    if (cx + tw > Screen.width / UiScale) cx = Screen.width / UiScale - tw;
                     if (cy - th < 0f) cy = th;                   // keep fully on-screen
-                    ttrt.anchoredPosition = new Vector2(cx, cy - Screen.height);
+                    ttrt.anchoredPosition = new Vector2(cx, cy - Screen.height / UiScale);
                     if (!_tooltipGO.activeSelf) _tooltipGO.SetActive(true);
                 }
                 else if (_tooltipGO.activeSelf) _tooltipGO.SetActive(false);
@@ -6902,10 +6938,10 @@ namespace BigAmbitionsMP
         // ── Coordinate helpers ────────────────────────────────────────────────
 
         /// Convert raw Input.mousePosition (y=0 at bottom) to canvas anchoredPosition
-        /// units (y=0 at top of screen, negative downward).
-        /// With ConstantPixelSize/scaleFactor=1 this is: x unchanged, y -= Screen.height.
+        /// units (y=0 at top of screen, negative downward).  Round-176: canvas units are screen
+        /// pixels divided by the live UiScale (resolution x game UI Zoom).
         private static Vector2 ScreenToCanvas(Vector2 screen) =>
-            new Vector2(screen.x, screen.y - Screen.height);
+            new Vector2(screen.x / UiScale, (screen.y - Screen.height) / UiScale);
 
         private static bool RectHit(RectTransform rt, Vector2 screenPos)
         {

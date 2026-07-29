@@ -22,7 +22,10 @@ namespace BigAmbitionsMP
     {
         private const float WindowSec   = 3f;     // input must persist this long
         private const float MinMoveM    = 0.5f;   // less than this over the window = frozen
-        private const int   MaxEpisodes = 5;      // snapshots per session
+        private const int   MaxEpisodes = 25;     // round-175: 5 muted a freeze-prone field session
+                                                  // BEFORE the episode that drove the report ("no move",
+                                                  // 2026-07-28) — silence read as health.  25 covers the
+                                                  // worst observed session several times over.
 
         // Position ring: one sample per 0.5s, 8 slots = 4s of history.
         private static readonly Vector3[] _ring = new Vector3[8];
@@ -53,7 +56,17 @@ namespace BigAmbitionsMP
             try
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                if (_episodesLogged >= MaxEpisodes && !_inEpisode) return;
+                if (_episodesLogged >= MaxEpisodes && !_inEpisode)
+                {
+                    // Round-175: the cap must announce itself ONCE — an unlogged freeze after a silent
+                    // cap is indistinguishable from a healthy session in a report.
+                    if (!_capAnnounced)
+                    {
+                        _capAnnounced = true;
+                        Plugin.Logger.LogWarning($"[MoveFreeze] episode cap ({MaxEpisodes}) reached — further freeze episodes this session will NOT be logged.");
+                    }
+                    return;
+                }
 
                 // Legitimate locks: any of these and the player is EXPECTED to be
                 // still — clear all state so a freeze can't be misattributed.
@@ -125,14 +138,41 @@ namespace BigAmbitionsMP
                 {
                     EndEpisode("moving again");
                 }
+                else if (_inEpisode && now >= _nextStuckBeatAt && now - _episodeStart >= 2f)
+                {
+                    // Round-175: DURING-EPISODE trail (every 2s, max 6 beats).  The 11s field episode
+                    // left no evidence of what held the player between STUCK and its closer — this
+                    // names the wider candidate states while the freeze is live.  (A legit lock can
+                    // never be active here: it would have ended the episode above.)
+                    _nextStuckBeatAt = now + 2f;
+                    if (_beatsThisEpisode < 6)
+                    {
+                        _beatsThisEpisode++;
+                        string act = ""; try { act = MPRestSync.CurrentActivityName() ?? ""; } catch { }
+                        string agent = "?";
+                        try
+                        {
+                            var a = Helpers.PlayerHelper.PlayerController?.Character?.navmeshAgent;
+                            agent = a == null ? "null"
+                                : $"vel={a.velocity.magnitude:F2} hasPath={a.hasPath} stopped={a.isStopped}";
+                        }
+                        catch { }
+                        Plugin.Logger.LogWarning($"[MoveFreeze] still stuck {now - _episodeStart:F0}s: activity='{act}' agent[{agent}] timeScale={Time.timeScale:F2} inputMag={ReadMoveMagnitude():F2}");
+                    }
+                }
             }
             catch { }
         }
+
+        private static bool  _capAnnounced;
+        private static float _nextStuckBeatAt;
+        private static int   _beatsThisEpisode;
 
         private static void EndEpisode(string why)
         {
             if (!_inEpisode) return;
             _inEpisode = false;
+            _beatsThisEpisode = 0; _nextStuckBeatAt = 0f;
             Plugin.Logger.LogWarning($"[MoveFreeze] resolved after {Time.unscaledTime - _episodeStart:F0}s ({why}).");
         }
 
