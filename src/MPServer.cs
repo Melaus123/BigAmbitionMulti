@@ -4501,6 +4501,9 @@ namespace BigAmbitionsMP
         /// Broadcasts the host's current game day and time-of-day to all clients.
         /// Called from MPCanvasUI every few seconds as a drift-alignment heartbeat.
         /// </summary>
+        private static int   _lastLoggedGtsDay   = int.MinValue;   // round-189: log on day/speed transitions only
+        private static float _lastLoggedGtsSpeed = float.MinValue;
+
         public static void BroadcastGameTime(float? speedOverride = null)
         {
             if (!_running) return;
@@ -4514,7 +4517,14 @@ namespace BigAmbitionsMP
                 TuneMorale = MPNeedsTuning.MoralePercent,
             };
             Broadcast(MessageEnvelope.Create(MessageType.GameTimeSync, "host", payload));
-            Plugin.Logger.LogInfo($"[Server] GameTimeSync: day={day} hour={hour:F1} speed={speed:F2}×");
+            // Round-189 (user-approved): the heartbeat logged every send (1,541 lines in one field
+            // log).  It is the triage TIME ANCHOR — keep it, but only on day/speed transitions
+            // (the client side has been day-gated the same way for a while).
+            if (day != _lastLoggedGtsDay || System.Math.Abs(speed - _lastLoggedGtsSpeed) > 0.01f)
+            {
+                _lastLoggedGtsDay = day; _lastLoggedGtsSpeed = speed;
+                Plugin.Logger.LogInfo($"[Server] GameTimeSync: day={day} hour={hour:F1} speed={speed:F2}×");
+            }
         }
 
         private static void Broadcast(MessageEnvelope env)

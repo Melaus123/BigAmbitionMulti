@@ -3517,6 +3517,7 @@ namespace BigAmbitionsMP
                                 foreach (var f in info.LogoFiles)
                                 {
                                     if (string.IsNullOrEmpty(f.Name) || string.IsNullOrEmpty(f.Base64)) continue;
+                                    if (!BusinessSync.IsCanonicalLogoFileName(f.Name)) continue;   // round-190d: never write stray names (also path-safety belt)
                                     var bytes = Convert.FromBase64String(f.Base64);
                                     System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, f.Name), bytes);
                                     total += bytes.Length;

@@ -567,6 +567,7 @@ namespace BigAmbitionsMP
             _sub = MPPerf.Begin(); CustomerPuppets.Tick(); MPPerf.End("Puppets", _sub);   // round-41: simulator election (host) + puppet stream/render (both-inside shops)
             MergerFlip.Tick();           // merger slice 3: ownership-flip reconcile (1 Hz) + host state push (10s)
             MergerEmployeeSync.Tick();   // merger slice 5: schedule write-back scan on flipped shops (2s)
+            BusinessSync.TickOwnerBusinessPublish();   // round-190: one owner-business publish at settle (carries logo files; host adopts + re-broadcasts)
             MPFreezeProbe.Tick();        // [MoveFreeze] symptom probe: input-without-motion detector (claim-4 backstop)
             MPHousingMorale.Tick();      // shared-residence morale: a Housing grant counts as having a home (10s reconcile)
             MPRegisterSync.TickHideSynthetics();

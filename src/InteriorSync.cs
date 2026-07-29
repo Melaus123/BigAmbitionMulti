@@ -975,6 +975,14 @@ namespace BigAmbitionsMP
                         }
                     h = h * 31 + it.StateIndex;
                     h = h * 31 + MPAudit.StableHash(it.Alias);
+                    // Round-190b (rig test: a text-sign RENAME and a product-sign SELECTION never
+                    // reached the host — initial placement conveyed, later edits stale forever):
+                    // the two player-editable sign fields were in IdentitySig but NOT hashed, so
+                    // the change detector never fired — the round-99 colors-omitted class, two
+                    // more members.  Hashed ⇒ push fires ⇒ IdentitySig differs ⇒ receiver
+                    // respawns the item and the binding re-derives natively.
+                    h = h * 31 + MPAudit.StableHash(it.WorldSpaceTextValue);
+                    h = h * 31 + MPAudit.StableHash(it.LinkedItemName);
                     // Task-28 fix 1: factory config is visible state — a recipe/priority/limit
                     // edit must trigger a broadcast (it applies in place on the receiver).
                     if (it.WorkstationType != null)

@@ -562,6 +562,7 @@ namespace BigAmbitionsMP
             OwnerOpenByAddress.Clear();
             _lastClientPollAt = 0f;
             _logoCache.Clear();
+            _publishedOwnedBusinesses = false;   // round-190: re-publish on the next session's settle
             _scanInProgress = false;
             _scanCursor     = 0;
             _cycleStartedAt = 0f;
@@ -600,6 +601,45 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[BusinessSync] immediate push for '{info.AddressKey}' ({why}) — not waiting for the {PollIntervalSeconds:F0}s sweep.");
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] PushBusinessNow: {ex.Message}"); }
+        }
+
+        // ── Round-190 (redesigned after user review): owner business publish at settle ──
+        // The game reads each business's logo image files from disk ONCE at load and caches
+        // them (LogoHelper.GetBusinessLogoTexture — no watcher, no re-read; the BizMan logo
+        // designer WRITES those files, and players overwrite them with custom images between
+        // sessions — field request, Winston 2026-07-29).  The owner's folder is therefore
+        // truth AT WORLD LOAD: the client publishes each owned business once per session at
+        // settle; the host adopts changed logo files (existing apply + LogoFilesEqual diff)
+        // and its sweep re-broadcasts to everyone else.  NO POLLING — a mid-session file swap
+        // is not visible locally either (texture cache), so session-start capture is exact
+        // parity with the game's own semantics.  Retry contract: the once-flag is consumed
+        // only on actual execution; deferrals log and the tick retries.
+        private static bool _publishedOwnedBusinesses;
+
+        public static void TickOwnerBusinessPublish()
+        {
+            if (_publishedOwnedBusinesses) return;
+            if (MPServer.IsRunning) { _publishedOwnedBusinesses = true; return; }   // host: its sweep is the publisher
+            if (!MPClient.IsClientInWorld) return;
+            if (!MPWorldReady.AssertSettledFor("owner-business-publish")) return;
+            _publishedOwnedBusinesses = true;
+            try
+            {
+                var regs = SaveGameManager.Current?.BuildingRegistrations;
+                if (regs == null) return;
+                int n = 0;
+                foreach (var reg in regs)
+                {
+                    if (reg == null || !reg.RentedByPlayer) continue;
+                    bool mine; try { mine = MergerFlip.TrulyMine(reg); } catch { continue; }
+                    if (!mine) continue;
+                    string name = ""; try { name = reg.BusinessName?.ToString() ?? ""; } catch { }
+                    if (name.Length == 0) continue;
+                    try { PushBusinessNow(reg, "world live (owner publish)"); n++; } catch { }
+                }
+                if (n > 0) Plugin.Logger.LogInfo($"[BusinessSync] published {n} owned business(es) at settle — the host adopts changed logo files and re-broadcasts.");
+            }
+            catch { }
         }
 
         private static BusinessInfo? ReadInfo(BuildingRegistration reg)
@@ -954,7 +994,11 @@ namespace BigAmbitionsMP
                 e.NextScanAt = now + LogoRescanSeconds;   // real dir — re-check at 10s, but CHEAPLY
 
                 // Cheap change signature: file name + size + mtime, NO content read.
-                var paths = System.IO.Directory.GetFiles(dir);
+                // Round-190d (user-approved): only the CANONICAL names the game reads ride the
+                // sync (LogoSize enum × ".jpg") — strays (backups, editor droppings) verified to
+                // travel byte-faithfully on the rig, wasting bytes on files no machine displays.
+                var paths = System.Array.FindAll(System.IO.Directory.GetFiles(dir),
+                    p => IsCanonicalLogoFileName(System.IO.Path.GetFileName(p)));
                 System.Array.Sort(paths, System.StringComparer.Ordinal);
                 long sig = 17;
                 foreach (var f in paths)
@@ -990,6 +1034,25 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] Logo dir read for {businessName}: {ex.Message}"); }
             return e.Files;
+        }
+
+        /// <summary>Round-190d: the seven file names the game's logo loader actually reads —
+        /// LogoSize enum members + ".jpg" (LogoHelper.GetBusinessLogoTexture builds paths as
+        /// &lt;size&gt;.jpg).  Shared by the capture (above) and the receive-side write.</summary>
+        internal static bool IsCanonicalLogoFileName(string name)
+        {
+            switch (name)
+            {
+                case "SquareSign.jpg":
+                case "WideSign.jpg":
+                case "Billboard.jpg":
+                case "Billboard2x1.jpg":
+                case "Billboard4x1.jpg":
+                case "Billboard1x2.jpg":
+                case "Billboard1x4.jpg":
+                    return true;
+                default: return false;
+            }
         }
 
         // List comparison — order- and content-sensitive; both produced by

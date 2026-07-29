@@ -59,7 +59,7 @@ namespace BigAmbitionsMP
             // WS3: injected roster records die with the scene too (runtime-only, like the synthetics).
             foreach (var id in new List<string>(_injectedStaff.Keys)) RemoveInjectedStaff(id);
             lock (_rosterByAddr) { _rosterByAddr.Clear(); }
-            _rosterApplied.Clear(); _rosterSigSent.Clear();
+            _rosterApplied.Clear(); _rosterSigSent.Clear(); _rosterLogSig.Clear();
             _cashiers.Clear(); _empDuty.Clear(); _synthetics.Clear(); _crossOwnerLogged.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = "";
         }
 
@@ -1535,6 +1535,7 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<string, string> _rosterApplied = new();            // addr → sig actually injected
         private static readonly Dictionary<string, (string addr, EmployeeInstance inst)> _injectedStaff = new();   // real-id records we injected
         private static readonly Dictionary<string, string> _rosterSigSent = new();            // owner side: addr → last published sig
+        private static readonly Dictionary<string, string> _rosterLogSig  = new();            // round-189: addr → last LOGGED membership (log speaks on hire/fire/rename only)
         private static float _nextRosterPublishAt, _nextRosterApplyAt;
 
         /// <summary>Does this machine hold a synced staff roster for the address? (Gate-override consumer.)</summary>
@@ -1657,7 +1658,19 @@ namespace BigAmbitionsMP
                     var p = new PlayerStaffRosterPayload { PlayerId = MPConfig.PlayerId, AddressKey = addr, Staff = staff };
                     var env = MessageEnvelope.Create(MessageType.PlayerStaffRoster, MPConfig.PlayerId, p);
                     if (MPServer.IsRunning) MPServer.BroadcastAny(env); else MPClient.SendEnvelope(env);
-                    Plugin.Logger.LogInfo($"[StaffRoster] published '{addr}': {staff.Count} staff.");
+                    // Round-189 (user call): the publish sig deliberately includes DRIFTING fields
+                    // (satisfaction, availability) so remote staff panels stay current — but that
+                    // made this line fire on every morale tick (1,407 'published' lines in one
+                    // field log).  The LOG speaks only when membership changes (hire/fire/rename);
+                    // the broadcast above is unchanged.
+                    var logSigSb = new System.Text.StringBuilder();
+                    foreach (var s in staff) logSigSb.Append(s.Id).Append('|').Append(s.Name).Append(';');
+                    string logSig = logSigSb.ToString();
+                    if (!_rosterLogSig.TryGetValue(addr, out var prevLog) || prevLog != logSig)
+                    {
+                        _rosterLogSig[addr] = logSig;
+                        Plugin.Logger.LogInfo($"[StaffRoster] published '{addr}': {staff.Count} staff (membership changed).");
+                    }
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] publish: {ex.Message}"); }
