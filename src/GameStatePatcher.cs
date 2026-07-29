@@ -2272,6 +2272,10 @@ namespace BigAmbitionsMP
             try
             {
                 if (!MPServer.IsRunning && !MPClient.InMpGame) return;   // sticky gate: survives reconnect
+                // Round-188: a SUCCESSFULLY-null resolve mid-load is not poison either — vehicle
+                // instances may simply not be materialized yet; healing then would strip the
+                // player's active vehicle on every load.  Same authority as every other gate.
+                if (!MPWorldReady.IsSettled) return;
                 if (UnityEngine.Time.unscaledTime < _nextVehIdCheckAt) return;
                 _nextVehIdCheckAt = UnityEngine.Time.unscaledTime + 1f;
 

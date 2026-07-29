@@ -299,6 +299,26 @@ namespace BigAmbitionsMP
                     case MessageType.RestSkipState:
                         return;
                     default:
+                        // Round-188: the name filter covered 4 families; these types also WRITE
+                        // world/save state during the load window and are recurrence-covered
+                        // (snapshots/streams re-send; Rent/Buy responses answer actions a loading
+                        // client cannot have pending).  Deliberately NOT dropped: Welcome/LoadData
+                        // (join handshake), BusinessSnapshot (part of the initial world seed),
+                        // ReleaseClaim (a ONE-SHOT arbitration instruction — its handler defers
+                        // internally instead; dropping it would violate the retry contract).
+                        switch (env.Type)
+                        {
+                            case MessageType.BusinessChange:
+                            case MessageType.RivalsSnapshot:
+                            case MessageType.RivalsStatsSnapshot:
+                            case MessageType.RegisterCashier:
+                            case MessageType.PlayerStaffRoster:
+                            case MessageType.RentConfirm:
+                            case MessageType.RentDeny:
+                            case MessageType.BuyDeny:
+                            case MessageType.VacateNotify:
+                                return;
+                        }
                         if (env.Type.ToString().Contains("Parked") || env.Type.ToString().Contains("Traffic")
                             || env.Type.ToString().Contains("Market") || env.Type.ToString().Contains("Interior"))
                             return;
@@ -652,13 +672,17 @@ namespace BigAmbitionsMP
 
                 case MessageType.RegisterCashier:
                 {
-                    MPRegisterSync.Apply(env.GetPayload<RegisterCashierPayload>());
+                    // Round-188: these two applied on the NETWORK thread — the only world-touching
+                    // handlers without main-thread marshalling; duty state is consumed by scene code.
+                    var rcp = env.GetPayload<RegisterCashierPayload>();
+                    GameStatePatcher.EnqueueOnMainThread(() => MPRegisterSync.Apply(rcp));
                     break;
                 }
 
                 case MessageType.PlayerStaffRoster:
                 {
-                    MPRegisterSync.ApplyRoster(env.GetPayload<PlayerStaffRosterPayload>());
+                    var prp = env.GetPayload<PlayerStaffRosterPayload>();
+                    GameStatePatcher.EnqueueOnMainThread(() => MPRegisterSync.ApplyRoster(prp));
                     break;
                 }
 

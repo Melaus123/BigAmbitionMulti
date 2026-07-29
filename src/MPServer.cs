@@ -127,6 +127,31 @@ namespace BigAmbitionsMP
         /// thread writes on Hello, main thread reads in the apply path).</summary>
         public static readonly ConcurrentDictionary<string, int> JoinedAtByPid = new();
 
+        // ── Round-187c: throttled ownership-reject logging ───────────────────────
+        // A stale-ownership desync (round-184 family) turns these rejects into a STORM —
+        // 2,259 identical RegisterCashier warnings in one field log crowded everything else
+        // out of the report's log budget.  The reject BEHAVIOR is unchanged; the log speaks
+        // once per (kind, address) per 5 minutes and carries the suppressed count.
+        private static readonly ConcurrentDictionary<string, (int nextMs, int suppressed)> _rejectLog = new();
+        private static void LogRejectThrottled(string kind, string addr, string detail)
+        {
+            try
+            {
+                string key = kind + "|" + addr;
+                int now = Environment.TickCount;
+                var cur = _rejectLog.TryGetValue(key, out var v) ? v : (nextMs: 0, suppressed: 0);
+                if (cur.nextMs != 0 && unchecked(now - cur.nextMs) < 0)
+                {
+                    _rejectLog[key] = (cur.nextMs, cur.suppressed + 1);
+                    return;
+                }
+                string sup = cur.suppressed > 0 ? $" (+{cur.suppressed} suppressed in the last 5min)" : "";
+                _rejectLog[key] = (now + 300_000, 0);
+                Plugin.Logger.LogWarning($"[Server] {kind} for '{addr}' {detail} — dropped.{sup}");
+            }
+            catch { }
+        }
+
         /// <summary>Last-synced cash for a player, or -1 when unknown (unknown
         /// must not block — the Hub treats negative as "can't validate").</summary>
         public static float GetKnownCash(string playerId)
@@ -1198,7 +1223,7 @@ namespace BigAmbitionsMP
                     if (!SenderIs(bc.Info.OwnerPlayerId, senderPid, env.Type, allowEmpty: true)) break;
                     if (!SenderOwns(bc.Info.AddressKey ?? "", senderPid))
                     {
-                        Plugin.Logger.LogWarning($"[Server] BusinessChange for '{bc.Info.AddressKey}' from '{senderPid}' — sender doesn't own it (incl. AI/unowned) — dropped.");
+                        LogRejectThrottled("BusinessChange", bc.Info.AddressKey, $"from '{senderPid}' — sender doesn't own it (incl. AI/unowned)");
                         // Round-61: unless this is a LEDGER HOLE — the owner's machine runs a
                         // living business the host's ledger knows nothing about. See the method.
                         TryAdoptOrphanedTenancy(bc.Info, senderPid);
@@ -1315,7 +1340,7 @@ namespace BigAmbitionsMP
                     if (!SenderIs(rp.OwnerId, senderPid, env.Type)) break;
                     if (!SenderOwns(rp.AddressKey, senderPid))
                     {
-                        Plugin.Logger.LogWarning($"[Server] RetailPrices for '{rp.AddressKey}' from '{senderPid}' — sender doesn't own it (incl. AI/unowned) — dropped.");
+                        LogRejectThrottled("RetailPrices", rp.AddressKey, $"from '{senderPid}' — sender doesn't own it (incl. AI/unowned)");
                         break;
                     }
                     if (rp.Prices.Count > 500
@@ -1434,7 +1459,7 @@ namespace BigAmbitionsMP
                     }
                     if (!dutyAllowed)
                     {
-                        Plugin.Logger.LogWarning($"[Server] RegisterCashier for '{rc.Address}' from '{senderPid}' — sender neither owns nor is granted — dropped.");
+                        LogRejectThrottled("RegisterCashier", rc.Address, $"from '{senderPid}' — sender neither owns nor is granted");
                         break;
                     }
                     MPRegisterSync.Apply(rc);
@@ -2951,7 +2976,7 @@ namespace BigAmbitionsMP
             if (info == null || string.IsNullOrEmpty(info.AddressKey)) return;
             if (!SenderOwns(info.AddressKey, senderPid))
             {
-                Plugin.Logger.LogWarning($"[Server] ListForSale for '{info.AddressKey}' from '{senderPid}' but the sender doesn't own it — dropped.");
+                LogRejectThrottled("ListForSale", info.AddressKey, $"from '{senderPid}' but the sender doesn't own it");
                 return;
             }
             Plugin.Logger.LogInfo($"[Server] ListForSale: {info.AddressKey} by {senderPid} @ {info.BuildingPrice:F0}.");
@@ -2965,7 +2990,7 @@ namespace BigAmbitionsMP
             if (req == null || string.IsNullOrEmpty(req.AddressKey)) return;
             if (!SenderOwns(req.AddressKey, senderPid))
             {
-                Plugin.Logger.LogWarning($"[Server] CancelSale for '{req.AddressKey}' from '{senderPid}' but the sender doesn't own it — dropped.");
+                LogRejectThrottled("CancelSale", req.AddressKey, $"from '{senderPid}' but the sender doesn't own it");
                 return;
             }
             Plugin.Logger.LogInfo($"[Server] CancelSale: {req.AddressKey} by {senderPid}.");

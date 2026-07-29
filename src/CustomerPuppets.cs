@@ -1055,6 +1055,7 @@ namespace BigAmbitionsMP
         {
             try
             {
+                if (Helpers.PlayerHelper.PlayerController == null) return null;   // round-188: never materialize into an unready scene (stream re-delivers)
                 var tpc = PrefabHelper.CreatePrefab<ThirdPersonCharacter>("Characters/HumanDefinitionLow", null);
                 if (tpc == null) return null;
                 var go = tpc.gameObject;

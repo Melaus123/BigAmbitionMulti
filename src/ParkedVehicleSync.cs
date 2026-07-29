@@ -492,6 +492,8 @@ namespace BigAmbitionsMP
             {
                 if (payload == null) return;
                 if (!ClientApplyEnabled) return;     // CLAUDE-DIAGNOSTIC F5 gate
+                if (SaveGameManager.Current == null) return;   // round-188: parity with the Traffic/Fleet siblings
+                if (!MPWorldReady.CanMaterialize) return;      // round-188: deltas keep streaming + instant resyncs on join/move — drop is covered
 
                 if (payload.IsFullSnapshot)
                 {

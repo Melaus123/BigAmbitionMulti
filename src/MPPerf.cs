@@ -80,16 +80,19 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Once per frame (end of Update).  Collects frame stats and emits
-        /// a summary when the window elapses.  Runs in SINGLE-PLAYER too — each
-        /// window is tagged SP / MP-HOST / MP-CLIENT, so an SP-then-MP session in
-        /// one launch yields directly-comparable baselines for diffing the cost.
-        /// Only accumulates while actually in a game (menus/loading reset).</summary>
+        /// a summary when the window elapses.  MP sessions only (round-187 — the SP
+        /// baseline flavor is retired; windows are tagged MP-HOST / MP-CLIENT).
+        /// Only accumulates while actually in an MP game (SP/menus/loading reset).</summary>
         public static void FrameTick(float unscaledDt)
         {
             if (!Enabled) return;
 
             bool inGame = false;
             try { inGame = SaveGameManager.Current != null; } catch { }
+            // Round-187 (user directive): the mod is MP-only — no telemetry windows in plain
+            // single-player (retires the [Perf/SP] baseline flavor).  An SP world takes the same
+            // reset branch as menu/loading, so a later MP session's first window starts clean.
+            if (inGame && !MPServer.IsRunning && !MPClient.IsConnected) inGame = false;
             if (!inGame)
             {   // menu/loading — don't pollute a window with non-gameplay frames
                 _slots.Clear(); _patchSlots.Clear(); _framePatchPrev.Clear(); _framePatchCur.Clear();

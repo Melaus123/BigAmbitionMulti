@@ -48,6 +48,20 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>Round-188: readiness for MATERIALIZING world objects (ghost vehicles, traffic,
+        /// puppets) — the save is settled AND the local player exists in the scene.  Streaming
+        /// appliers DROP when false: the next packet re-delivers within ~0.1-10s, so a drop is
+        /// recurrence-covered under the retry contract (no queue needed).</summary>
+        internal static bool CanMaterialize
+        {
+            get
+            {
+                if (!IsSettled) return false;
+                try { return InstanceBehavior<GameManager>.Instance?.playerController != null; }
+                catch { return false; }
+            }
+        }
+
         /// <summary>The gate + tripwire.  False logs a throttled deferral line naming the action —
         /// visible on the dev rig AND in field reports, so both early fires and stuck deferrals
         /// surface as log lines instead of eaten data.</summary>

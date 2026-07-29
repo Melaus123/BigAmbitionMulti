@@ -80,6 +80,7 @@ namespace BigAmbitionsMP
 
         // model name → traffic-car prefab, built once from Gley's VehiclePool.
         private static Dictionary<string, GameObject>? _trafficPrefabs;
+        private static float _prefabWaitNextLog;   // round-188: throttles the pool-not-ready deferral line
 
         // Gley/AI/audio components destroyed on a traffic ghost — leaves a prop.
         private static readonly string[] _killTrafficComponents =
@@ -545,6 +546,7 @@ namespace BigAmbitionsMP
             if (snap == null) return;
             if (SaveGameManager.Current == null) return;
             if (!ClientGhostApplyEnabled) return;     // CLAUDE-DIAGNOSTIC kill-switch
+            if (!MPWorldReady.CanMaterialize) return; // round-188: 10 Hz stream — a drop is recurrence-covered
             try
             {
                 // View culling: ghosts only need to exist near OUR player — the
@@ -730,10 +732,25 @@ namespace BigAmbitionsMP
         {
             BuildPrefabMap();
 
+            // Round-188: while the Gley pool isn't up (TrafficComponent.Instance null during
+            // load/fence) the map stays null — treating that as "use the fallback" routed EVERY
+            // car of every 10 Hz packet into the unguarded ghost path (the 13,629-NRE storm).
+            // Not-ready ≠ unknown-model: DEFER the car (the next snapshot retries in ~0.1s).
+            if (_trafficPrefabs == null)
+            {
+                float now = UnityEngine.Time.unscaledTime;
+                if (now >= _prefabWaitNextLog)
+                {
+                    _prefabWaitNextLog = now + 5f;
+                    Plugin.Logger.LogInfo("[TrafficSync] ghost spawns deferred — traffic prefab pool not built yet. Will retry on the next snapshot.");
+                }
+                return null;
+            }
+
             GameObject? prefab = null;
             _trafficPrefabs?.TryGetValue(model, out prefab);
             if (prefab == null)
-                return VehicleManager.SpawnVisualGhost(model, pos, rot);   // fallback
+                return VehicleManager.SpawnVisualGhost(model, pos, rot);   // fallback: UNKNOWN model with the pool up (e.g. Taxi)
 
             GameObject go;
             // Instantiate INACTIVE (field NREs 2026-07-16: AiCarRescueCheck.OnEnable

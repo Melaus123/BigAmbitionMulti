@@ -37,6 +37,11 @@ namespace BigAmbitionsMP
                 var button = HarmonyLib.AccessTools.Field(typeof(UI.Topbar.ReportBugButton), "button")
                                  ?.GetValue(__instance) as UnityEngine.UI.Button;
                 if (button == null) return;
+                // Round-187 (user directive, field 20260729-141854: an offline SP player filed an
+                // empty report through this button): the takeover exists for MULTIPLAYER sessions —
+                // in plain single-player the button keeps its native modded-save behavior, and
+                // offline mod reports stay possible through the mod's own menu entry.
+                if (!MPServer.IsRunning && !MPClient.InMpGame) return;
                 // Native leaves the button ENABLED only on unmodded saves — a state we can't be in
                 // while loaded, but if it ever happens the native flow stays untouched.
                 if (button.interactable) return;

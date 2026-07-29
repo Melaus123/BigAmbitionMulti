@@ -571,6 +571,7 @@ namespace BigAmbitionsMP
             if (p == null || string.IsNullOrEmpty(p.OwnerId)) return;
             if (SaveGameManager.Current == null) return;
             if (!ClientApplyFleetEnabled) return;     // CLAUDE-DIAGNOSTIC F4 gate
+            if (!MPWorldReady.CanMaterialize) return; // round-188: fleets re-send continuously — drop is covered
             try
             {
                 var seen = new HashSet<string>();
@@ -896,6 +897,8 @@ namespace BigAmbitionsMP
         // Round-56b: early-fleet-packet suppression (mirrors RemotePlayerManager's 2026-06-01 guard).
         private static float _earlyGhostNextLog;
         private static int   _earlyGhostCount;
+        private static float _ghostFailNextLog;   // round-188: throttles the spawn-failure error
+        private static int   _ghostFailCount;
 
         private static RemoteVehicle? SpawnRemoteVehicle(string ownerId, VehicleEntry e,
                                                          Vector3 pos, Quaternion rot)
@@ -1135,6 +1138,25 @@ namespace BigAmbitionsMP
         /// </summary>
         public static GameObject? SpawnVisualGhost(string typeName, Vector3 pos, Quaternion rot)
         {
+            // Round-188 (field: 13,629 NREs in one log): the ONE spawn entry that lacked the
+            // round-56b guard — traffic's 10 Hz snapshots routed every car here during the
+            // startup fence and the native spawn NRE'd per car per packet.  Same semantics as
+            // SpawnRemoteVehicle: world not ready → drop (streams re-deliver, a drop is free).
+            try
+            {
+                if (InstanceBehavior<GameManager>.Instance?.playerController == null)
+                {
+                    _earlyGhostCount++;
+                    float nowEg = UnityEngine.Time.unscaledTime;
+                    if (nowEg >= _earlyGhostNextLog)
+                    {
+                        _earlyGhostNextLog = nowEg + 2f;
+                        Plugin.Logger.LogInfo($"[Vehicle] visual-ghost spawn deferred — world not ready (playerController null); {_earlyGhostCount} drop(s). Streams re-deliver.");
+                    }
+                    return null;
+                }
+            }
+            catch { return null; }
             // EA 0.11: vehicleTypeName is a ctor-required string; validate via the
             // game's own lookup so unknown names (e.g. Taxi) fall back cleanly.
             bool known = false;
@@ -1153,7 +1175,14 @@ namespace BigAmbitionsMP
             try { vc = VehicleHelper.CreateAndSpawnVehicle(inst, pos, rot); }
             catch (Exception ex)
             {
-                Plugin.Logger.LogError($"[Vehicle] ghost CreateAndSpawnVehicle failed: {ex.Message}");
+                // Round-188: throttled — this printed once per car per 0.1s packet in the field.
+                _ghostFailCount++;
+                float nowGf = UnityEngine.Time.unscaledTime;
+                if (nowGf >= _ghostFailNextLog)
+                {
+                    _ghostFailNextLog = nowGf + 5f;
+                    Plugin.Logger.LogError($"[Vehicle] ghost CreateAndSpawnVehicle failed ({_ghostFailCount} total this session): {ex.Message}");
+                }
                 return null;
             }
             if (vc == null) return null;

@@ -363,7 +363,9 @@ namespace BigAmbitionsMP
             if (p.On)
             {
                 _cashiers[k] = (p.PlayerId, pos, p.Employee, p.Address ?? "", p.StationId ?? "");
-                Plugin.Logger.LogInfo($"[Register] '{p.PlayerId}' ON duty at {k}{(p.Employee ? " (employee)" : "")}.");
+#if BAMP_DEV
+                Plugin.Logger.LogInfo($"[Register] '{p.PlayerId}' ON duty at {k}{(p.Employee ? " (employee)" : "")}.");   // round-187b: per-toggle detail is dev-only (field logs carried 15k of these; StaffDiag summarizes)
+#endif
                 // Duty on ANOTHER machine → stand the till up locally.  Main-thread: Apply can run on the
                 // network poll thread.
                 //
@@ -392,7 +394,9 @@ namespace BigAmbitionsMP
             else if (_cashiers.TryGetValue(k, out var e) && e.playerId == p.PlayerId)
             {
                 _cashiers.TryRemove(k, out _);
-                Plugin.Logger.LogInfo($"[Register] '{p.PlayerId}' OFF duty at {k}.");
+#if BAMP_DEV
+                Plugin.Logger.LogInfo($"[Register] '{p.PlayerId}' OFF duty at {k}.");   // round-187b: dev-only
+#endif
                 // Round-120: mirror the ON gate — a personal-duty stand-in must be torn down too, or the till
                 // stays staffed by a phantom after the player walks away.
                 if (p.PlayerId != MPConfig.PlayerId)
@@ -444,6 +448,10 @@ namespace BigAmbitionsMP
 
         public static void TickDuty()
         {
+            // Round-187 (user directive, field 20260729-141854: a pure-SP session logged 13,808
+            // [Register] lines): the mod is MULTIPLAYER-ONLY — duty tracking, the employee-station
+            // scan and their logging have no business running in plain single-player.
+            if (!MPServer.IsRunning && !MPClient.InMpGame) return;
             TickEmployeeDutySliced();   // round-161: every frame under a ~2ms budget (was a 60-65ms single-frame scan)
             if (Time.unscaledTime < _nextDutyAt) return;
             _nextDutyAt = Time.unscaledTime + 1f;
@@ -677,7 +685,9 @@ namespace BigAmbitionsMP
                     {
                         _empDuty[kv.Key] = kv.Value.pos;
                         SendToggle(kv.Value.pos, true, kv.Value.addr, employee: true, stationId: kv.Value.stationId);
-                        Plugin.Logger.LogInfo($"[Register] employee-staffed station ON at {kv.Key} ({kv.Value.addr}).");
+#if BAMP_DEV
+                        Plugin.Logger.LogInfo($"[Register] employee-staffed station ON at {kv.Key} ({kv.Value.addr}).");   // round-187b: dev-only
+#endif
                     }
                 var stale = new List<string>();
                 foreach (var kv in _empDuty)
@@ -687,7 +697,9 @@ namespace BigAmbitionsMP
                     // Don't stomp PERSONAL duty at the same register.
                     if (!(_onDuty && Key(_dutyPos) == k)) SendToggle(_empDuty[k], false);
                     _empDuty.Remove(k);
-                    Plugin.Logger.LogInfo($"[Register] employee-staffed station OFF at {k}.");
+#if BAMP_DEV
+                    Plugin.Logger.LogInfo($"[Register] employee-staffed station OFF at {k}.");   // round-187b: dev-only
+#endif
                 }
                 _empSweepRegs = null; _empSweepLive = null;   // sweep complete
             }
