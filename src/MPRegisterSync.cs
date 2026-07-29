@@ -183,7 +183,12 @@ namespace BigAmbitionsMP
                 // This is the same mistake round-30 already fixed elsewhere ("any EmployeeStationController
                 // counts — the CashRegisterController-only search was the visitor-side twin of the owner-side
                 // checkout whitelist"), so the all-station scan is the established shape here.
-                var stationObjs = UnityEngine.Object.FindObjectsOfType(typeof(EmployeeStationController));
+                // Round-186 (field 'laggy as hell when driving', bamp-bug-20260729-133551): this 1Hz
+                // sweep ran a WHOLE-SCENE FindObjectsOfType (~85-95ms with the city streamed) for as
+                // long as any other player sat on personal duty — and with that station's interior
+                // not loaded here, it retried forever finding nothing.  The round-166 registry is
+                // the sweep-free answer: stations announce themselves; this just reads the list.
+                var stationObjs = GetStationsCached();
                 foreach (var kv in _hideBodyAt)
                 {
                     var reg = NearestStationIn(stationObjs, ParseKey(kv.Key), 2.5f);
@@ -271,7 +276,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var stations = UnityEngine.Object.FindObjectsOfType(typeof(EmployeeStationController));
+                var stations = GetStationsCached();   // round-186: registry, never a scene walk
                 var st = NearestStationIn(stations, pos, 2.5f);
                 var wl = (st as EmployeeStations.IWaitingLineHolder)?.GetWaitingLine();
                 if (wl == null) return;
@@ -300,7 +305,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                var stations = UnityEngine.Object.FindObjectsOfType(typeof(EmployeeStationController));
+                var stations = GetStationsCached();   // round-186: registry, never a scene walk
                 var st = NearestStationIn(stations, pos, 2.5f);
                 var wl = (st as EmployeeStations.IWaitingLineHolder)?.GetWaitingLine();
                 if (wl == null) return;   // interior not loaded here — the nulled data rebuilds the line natively on next load
@@ -417,7 +422,7 @@ namespace BigAmbitionsMP
         {
             Controllers.CashRegisterController? best = null;
             float bestD2 = maxDist * maxDist;
-            var arr = UnityEngine.Object.FindObjectsOfType(typeof(Controllers.CashRegisterController));
+            var arr = GetStationsCached();   // round-186: registry (registers are stations); the cast below filters
             if (arr != null)
                 foreach (var o in arr)
                 {
@@ -1767,7 +1772,7 @@ namespace BigAmbitionsMP
                     {
                         if (CurrentShopAddress == addr)
                         {
-                            var arr = UnityEngine.Object.FindObjectsOfType(typeof(EmployeeStationController));
+                            var arr = GetStationsCached();   // round-186: registry, never a scene walk
                             if (arr != null)
                                 foreach (var o in arr)
                                     (o as EmployeeStationController)?.UpdateEmployee(false);

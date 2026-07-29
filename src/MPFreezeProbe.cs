@@ -22,10 +22,13 @@ namespace BigAmbitionsMP
     {
         private const float WindowSec   = 3f;     // input must persist this long
         private const float MinMoveM    = 0.5f;   // less than this over the window = frozen
-        private const int   MaxEpisodes = 25;     // round-175: 5 muted a freeze-prone field session
-                                                  // BEFORE the episode that drove the report ("no move",
-                                                  // 2026-07-28) — silence read as health.  25 covers the
-                                                  // worst observed session several times over.
+        // Round-185 (user ruling: a LIFETIME cap starves the endgame — twice now a field session
+        // spent its whole budget on early false positives and was blind for the episode the report
+        // was about): volume is bounded by RATE (one episode start per minute — a still-stuck
+        // player just opens the episode late) and the cap survives only as a runaway backstop
+        // (~3.3h of CONTINUOUS misfiring to reach it), still announcing itself loudly.
+        private const int   MaxEpisodes      = 200;
+        private const float MinEpisodeGapSec = 60f;
 
         // Position ring: one sample per 0.5s, 8 slots = 4s of history.
         private static readonly Vector3[] _ring = new Vector3[8];
@@ -39,6 +42,7 @@ namespace BigAmbitionsMP
         private static bool  _inEpisode;
         private static float _episodeStart;
         private static int   _episodesLogged;
+        private static float _lastEpisodeStartAt = -999f;   // round-185: rate-limit anchor
 
         // PlayerAction.Move reflection (dump gap).
         private static bool _inputResolved;
@@ -48,7 +52,7 @@ namespace BigAmbitionsMP
         public static void Reset()
         {
             _ringN = 0; _wasdHeldSince = -1f; _clicks.Clear();
-            _inEpisode = false; _episodesLogged = 0;
+            _inEpisode = false; _episodesLogged = 0; _lastEpisodeStartAt = -999f;
         }
 
         public static void Tick()
@@ -129,9 +133,11 @@ namespace BigAmbitionsMP
                 foreach (var c in _clicks) if (!c.overUi) worldClicks++;
                 bool clickFrozen = worldClicks >= 6 && disp < MinMoveM;
 
-                if (!_inEpisode && (wasdFrozen || clickFrozen))
+                // Round-185: rate-limited, not lifetime-starved — a start inside the gap is simply
+                // deferred (a genuinely stuck player is still stuck next tick and opens late).
+                if (!_inEpisode && (wasdFrozen || clickFrozen) && now - _lastEpisodeStartAt >= MinEpisodeGapSec)
                 {
-                    _inEpisode = true; _episodeStart = now; _episodesLogged++;
+                    _inEpisode = true; _episodeStart = now; _episodesLogged++; _lastEpisodeStartAt = now;
                     LogSnapshot(wasdFrozen ? $"move-input held {now - _wasdHeldSince:F1}s" : "click-spam", pos, mag);
                 }
                 else if (_inEpisode && disp >= MinMoveM)
