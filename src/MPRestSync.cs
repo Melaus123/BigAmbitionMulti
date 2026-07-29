@@ -635,6 +635,31 @@ namespace BigAmbitionsMP
                     if (sm != null) ActivityState = Convert.ToInt32(sm.Invoke(act, null));
                 }
                 catch { }
+
+                // Round-194 (field 20260729-220133): a Finished activity stranded in the
+                // slot while the panel GameObject is INACTIVE is a permanent wedge — the
+                // game's teardown (OnActivityFinished: slot clear, mouse reset, time-control
+                // restore) runs ONLY from the panel's own Update, and the native walk-away
+                // cancel (CancelActivityMovement) deactivates the panel while KEEPING the
+                // slot. Any button-invoke that lands Finished in that state (our dock's
+                // CancelRest did) locks out every activity start and vehicle entry.
+                // Reactivate the panel so the game runs its OWN teardown — it deactivates
+                // itself again in the same pass. No out-of-band slot clearing (2026-06-10:
+                // that skips the seat release and bricks the bench).
+                if (ActivityState == (int)PlayerActivityState.Finished
+                    && (MPServer.IsRunning || MPClient.IsClientInWorld))
+                {
+                    try
+                    {
+                        var (ui, _) = GetActivityUiCached();
+                        if (ui is MonoBehaviour mb && !mb.gameObject.activeSelf)
+                        {
+                            mb.gameObject.SetActive(true);
+                            Plugin.Logger.LogWarning("[Rest] WEDGE HEAL: Finished activity stranded with panel inactive — panel reactivated so the game's own teardown runs (round-194).");
+                        }
+                    }
+                    catch { }
+                }
                 try
                 {
                     var gb = act!.GetType().GetMethod("GetButtons");

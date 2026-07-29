@@ -1079,6 +1079,30 @@ namespace BigAmbitionsMP
         private double _skipTarget;
         private bool _restUiHover;
 
+        /// <summary>True while ANY text box owns the keyboard — our chat, the bug-report
+        /// popup, or any focused uGUI input field (the game's sign editor, save name, …).
+        /// The WASD escape hatch must never read typed letters as movement: a report
+        /// typed mid-abandoned-bench-approach clicked CancelRest with the native panel
+        /// GameObject inactive and wedged the activity slot for 46 minutes
+        /// (round-194, field 20260729-220133).</summary>
+        private bool TypingIntoTextField()
+        {
+            if (_mpChatFocus || _crashReportPopupVisible) return true;
+            try
+            {
+                var go = EventSystem.current?.currentSelectedGameObject;
+                if (go != null)
+                {
+                    var tmp = go.GetComponent<TMP_InputField>();
+                    if (tmp != null && tmp.isFocused) return true;
+                    var leg = go.GetComponent<InputField>();
+                    if (leg != null && leg.isFocused) return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
         private void TickRestUI()
         {
             try
@@ -1096,7 +1120,8 @@ namespace BigAmbitionsMP
 
                 // ESCAPE HATCH — independent of any UI existing: movement keys
                 // always stand you up (a half-built dock once trapped a player).
-                if (inActivity && !_mpChatFocus &&
+                // Typed letters are NOT movement (round-194).
+                if (inActivity && !TypingIntoTextField() &&
                     (Input.GetKeyDown(KeyCode.W) || Input.GetKeyDown(KeyCode.A) ||
                      Input.GetKeyDown(KeyCode.S) || Input.GetKeyDown(KeyCode.D)))
                 {
