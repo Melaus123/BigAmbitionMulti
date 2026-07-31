@@ -575,6 +575,7 @@ namespace BigAmbitionsMP
             MPOffers.HostTick();         // round-196: re-send unacked business-transfer finalizes (5s)
             MPTakeover.Tick();           // round-204b: expire an unanswered takeover offer (6s — older host)
             MPClient.TickWorldReadyGate();   // round-205: recurring readiness check (content bar + deadline)
+            MPFrameRhythm.Tick();            // round-207: frame-rhythm capture (oscillation shape/cadence/beat match)
             PassengerRide.Update();      // passenger ride: click-to-board → pin-to-seat → exit + remote riders
             PassengerHud.Tick();         // passenger's in-ride "Exit Vehicle" panel
             VehicleStoragePanel.Tick();  // non-owner shared-storage panel (refresh on cargo change / auto-close)
@@ -2954,6 +2955,7 @@ namespace BigAmbitionsMP
                 }
                 catch { }
                 MPAudit.Reset();          // divergence streaks/throttle die with the session (else stale [Audit] state pollutes the bug-report log across same-process sessions)
+                MPFrameRhythm.Reset();    // round-207: frame ring + beat registry are per-session
                 CustomerPuppets.Reset();  // round-41: puppet bodies + authority table die with the scene
                 MPStockSync.Reset();      // per-shop stock digests die with the session
                 GameStatePatcher.ResetDemandState();   // round-102 statics are per-session: a held market payload must

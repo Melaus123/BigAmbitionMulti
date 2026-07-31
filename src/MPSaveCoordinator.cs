@@ -70,6 +70,7 @@ namespace BigAmbitionsMP
         /// thread.</summary>
         public static void HostSaveNow(string reason = "manual")
         {
+            MPFrameRhythm.MarkBeat("save");   // round-207: save beats are a classic hitch source
             if (!MPServer.IsRunning)
             {
                 Plugin.Logger.LogWarning("[MPSave] HostSaveNow ignored — not hosting.");

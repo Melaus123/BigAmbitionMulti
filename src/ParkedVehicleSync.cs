@@ -248,6 +248,7 @@ namespace BigAmbitionsMP
 
         private static ParkedSnapshotPayload BuildDiffSnapshot()
         {
+            MPFrameRhythm.MarkBeat("parked-diff");   // round-207: 1s host beat
             var snap = new ParkedSnapshotPayload { IsFullSnapshot = false };
             try
             {
@@ -278,6 +279,7 @@ namespace BigAmbitionsMP
 
         private static ParkedSnapshotPayload BuildFullSnapshot()
         {
+            MPFrameRhythm.MarkBeat("parked-full");   // round-207: 30s host beat (the 69ms field beat)
             var snap = new ParkedSnapshotPayload { IsFullSnapshot = true };
             try
             {

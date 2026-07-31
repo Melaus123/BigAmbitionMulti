@@ -216,6 +216,7 @@ namespace BigAmbitionsMP
             try
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                MPFrameRhythm.MarkBeat("demand-all");   // round-207: full market recompute is a rhythmic-stall suspect
                 string role = MPServer.IsRunning ? "HOST" : "CLIENT";
                 Plugin.Logger.LogWarning(
                     $"[PROBE] Demand/{role} RECOMPUTE-ALL (UpdateMarketDemands) providersDict={MPDemandProbe.ProvidersCount()} " +

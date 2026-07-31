@@ -447,6 +447,7 @@ namespace BigAmbitionsMP
             {
                 if (now - _cycleStartedAt < PollIntervalSeconds) return;
                 _cycleStartedAt = now;
+                MPFrameRhythm.MarkBeat("biz-scan");   // round-207: publish-scan cycle start
                 _scanInProgress = true;
                 _scanCursor     = 0;
                 _cycleChanges   = 0;
