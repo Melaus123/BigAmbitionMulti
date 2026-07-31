@@ -149,6 +149,11 @@ namespace BigAmbitionsMP
         /// <summary>Client-side count of spawned parked ghosts — load diagnostics.</summary>
         public static int ClientGhostCount => _clientGhosts.Count;
 
+        /// <summary>Round-205: true once the FIRST parked snapshot has been applied this
+        /// session — the client world-ready gate waits on this (receipt, not count: a
+        /// player in a parked-car desert legitimately applies zero ghosts).</summary>
+        public static bool FirstSnapshotReceived { get; internal set; }
+
         public static void Reset()
         {
             _hostTracked.Clear();
@@ -161,6 +166,7 @@ namespace BigAmbitionsMP
             _lastSentPosByPlayer.Clear();
             _cullTimer = 0f;
             _levelUnscaled = 0f;
+            FirstSnapshotReceived = false;
 
             // Release any leftover client ghosts cleanly back to the pool.
             foreach (var g in _clientGhosts.Values)
@@ -493,6 +499,7 @@ namespace BigAmbitionsMP
                 if (payload == null) return;
                 if (!ClientApplyEnabled) return;     // CLAUDE-DIAGNOSTIC F5 gate
                 if (SaveGameManager.Current == null) return;   // round-188: parity with the Traffic/Fleet siblings
+                FirstSnapshotReceived = true;        // round-205: the world-ready gate waits on this receipt
                 if (!MPWorldReady.CanMaterialize) return;      // round-188: deltas keep streaming + instant resyncs on join/move — drop is covered
 
                 if (payload.IsFullSnapshot)

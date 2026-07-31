@@ -149,6 +149,7 @@ namespace BigAmbitionsMP
             _startupHold = false;
             ApplyNetwork(1f);
             GameStatePatcher.EnqueueOnMainThread(() => GameStateReader.SetNativePause(false));
+            MPCanvasUI.ReleaseHostSoftHold("startup hold released");   // round-205: host movement unlocks with everyone else
             MPLoadProfiler.Mark("FREEZE end — game running");
             Plugin.Logger.LogInfo("[TimeSync] Startup hold released — game running.");
         }

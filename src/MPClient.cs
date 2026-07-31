@@ -1438,6 +1438,7 @@ namespace BigAmbitionsMP
             if (!IsConnected) return;
             _worldReadySent = false;   // re-arm the world-ready ack for this load
             WorldSyncApplied = false;  // re-arm: world sync not yet applied for this load
+            _worldReadyContentDeadlineAt = 0f;   // round-205: content-bar deadline re-arms per load
             var payload = new PlayerInGamePayload { PlayerId = MPConfig.PlayerId };
             Send(MessageEnvelope.Create(MessageType.PlayerInGame, MPConfig.PlayerId, payload));
             Plugin.Logger.LogInfo("[Client] Sent PlayerInGame to host.");
@@ -1474,6 +1475,32 @@ namespace BigAmbitionsMP
             Send(MessageEnvelope.Create(MessageType.WorldReady, MPConfig.PlayerId,
                 new PlayerInGamePayload { PlayerId = MPConfig.PlayerId }));
             Plugin.Logger.LogInfo("[Client] Sent WorldReady to host (world sync applied).");
+        }
+
+        // Round-205: the old readiness bar (overlay gone + business snapshot applied)
+        // released clients into a world still materializing — parked cars visibly
+        // popped in AFTER the unfreeze (user observation). The gate now also waits
+        // for the first parked-vehicle snapshot RECEIPT, with its own deadline so a
+        // lost snapshot can't deadlock the session. Called recurring from the canvas
+        // pre-block (recurrence-covered) AND opportunistically from the old one-shot
+        // call sites.
+        private static float _worldReadyContentDeadlineAt;
+
+        public static void TickWorldReadyGate()
+        {
+            try
+            {
+                if (!IsConnected || _worldReadySent || !WorldSyncApplied) return;
+                if (!ParkedVehicleSync.FirstSnapshotReceived)
+                {
+                    if (_worldReadyContentDeadlineAt == 0f)
+                        _worldReadyContentDeadlineAt = UnityEngine.Time.unscaledTime + 20f;
+                    if (UnityEngine.Time.unscaledTime < _worldReadyContentDeadlineAt) return;
+                    Plugin.Logger.LogWarning("[Client] world-ready content deadline (20s): no parked-vehicle snapshot arrived — reporting ready anyway.");
+                }
+                SendWorldReady();
+            }
+            catch { }
         }
 
         /// <summary>

@@ -476,6 +476,9 @@ namespace BigAmbitionsMP
                                         foreach (var kv in _foreignHeldSince)
                                             if (nowT - kv.Value >= 30f)
                                             {
+                                                // Round-205: the host soft-hold deliberately parks this
+                                                // blocker while the world populates — not a wedge.
+                                                if (kv.Key == NavigationBlocker.CasinoEntrySequence && MPCanvasUI.HostSoftHoldActive) continue;
                                                 _foreignWarnNext = nowT + 60f;
                                                 Plugin.Logger.LogWarning(
                                                     $"[Rest] FOREIGN BLOCKER HELD (round-90, log-only): '{kv.Key}' for {nowT - kv.Value:F0}s outside any activity — building exits silently dead and WASD frozen while it persists. No action taken.");

@@ -2678,8 +2678,7 @@ namespace BigAmbitionsMP
                 // it the moment our overlay clears (covers the apply-before-freeze
                 // ordering).
                 MPClient.WorldSyncApplied = true;
-                if (MPClient.IsConnected && TimeSync.IsStartupHeld)
-                    MPClient.SendWorldReady();
+                MPClient.TickWorldReadyGate();   // round-205: readiness now also waits for the parked-car receipt
                 TimeSync.NotifyWorldSyncApplied();   // fires a release the gate deferred (hot-join world-sync gate)
                 // Round-50 (approved): SECOND world-health census, event-triggered — the +30s line
                 // races slow-link snapshot delivery (field 2026-07-21-204010: "DEGRADED" printed

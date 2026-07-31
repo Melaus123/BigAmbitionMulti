@@ -574,6 +574,7 @@ namespace BigAmbitionsMP
             MPHub.TickSalePopups();      // rising +$ worker feedback (per-frame: smooth rise/fade)
             MPOffers.HostTick();         // round-196: re-send unacked business-transfer finalizes (5s)
             MPTakeover.Tick();           // round-204b: expire an unanswered takeover offer (6s — older host)
+            MPClient.TickWorldReadyGate();   // round-205: recurring readiness check (content bar + deadline)
             PassengerRide.Update();      // passenger ride: click-to-board → pin-to-seat → exit + remote riders
             PassengerHud.Tick();         // passenger's in-ride "Exit Vehicle" panel
             VehicleStoragePanel.Tick();  // non-owner shared-storage panel (refresh on cargo change / auto-close)
@@ -3000,6 +3001,7 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo("[UI] Left game scene — cleaning up remote players.");
                 GameStatePatcher.EnqueueOnMainThread(() => RemotePlayerManager.RemoveAll());
                 _sceneLoadedPendingFreeze = false;
+                ReleaseHostSoftHold("left game scene");   // round-205: state must not survive the world
                 // Per-world apply caches: the CBC objects die with the scene and
                 // the next world's sign states start fresh — stale entries would
                 // wrongly skip (or target dead controllers for) the first repaints.
@@ -3126,6 +3128,23 @@ namespace BigAmbitionsMP
         }
 #endif
 
+        /// <summary>Round-205: true while the HOST's movement is locked during its
+        /// populate window (overlay gone → group release). Time runs; only WASD is
+        /// held, so vehicles can spawn while nobody gets a head start.</summary>
+        internal static bool HostSoftHoldActive;
+
+        internal static void ReleaseHostSoftHold(string why)
+        {
+            if (!HostSoftHoldActive) return;
+            HostSoftHoldActive = false;
+            try
+            {
+                PlayerHelper.PlayerController?.UnsetNavigationBlocker(NavigationBlocker.CasinoEntrySequence);
+                Plugin.Logger.LogInfo($"[FreezeGate] host soft-hold RELEASED ({why}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[FreezeGate] soft-hold release: {ex.Message}"); }
+        }
+
         private void TickOverlayFreezeGate()
         {
             if (!_sceneLoadedPendingFreeze) return;
@@ -3136,7 +3155,9 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning(
                     $"[FreezeGate] pendingFreeze CLEARED by connection check (IsRunning={MPServer.IsRunning} " +
                     $"IsConnected={MPClient.IsConnected}) at elapsed={_pendingFreezeElapsed:F0}s — fail-safe disarmed.");
-                _sceneLoadedPendingFreeze = false; return;
+                _sceneLoadedPendingFreeze = false;
+                ReleaseHostSoftHold("connection check cleared the gate");
+                return;
             }
 
             _pendingFreezeElapsed += Time.unscaledDeltaTime;
@@ -3161,6 +3182,29 @@ namespace BigAmbitionsMP
                 // AND the world is actually populated (driving + parked cars spawned) —
                 // so clients unpause onto a live, fully-loaded world, all together.  The
                 // host runs at normal speed until then (cars can't spawn while frozen).
+                //
+                // Round-205 Fix B (user obs: "host gets released before clients"): the
+                // host used to PLAY unfrozen through this populate window while every
+                // client sat frozen — and when the host loads last (common), the group
+                // release fires the instant it becomes ready, so it never waited at
+                // all.  Soft-hold: lock MOVEMENT via the game's own blocker registry
+                // while time runs so the world can still populate; released at the
+                // group release.  CasinoEntrySequence: never legitimately active at
+                // session start, untouched by the rounds-195/198 blocker heals.
+                if (!HostSoftHoldActive)
+                {
+                    try
+                    {
+                        var pcHold = PlayerHelper.PlayerController;
+                        if (pcHold != null)
+                        {
+                            pcHold.SetNavigationBlocker(NavigationBlocker.CasinoEntrySequence);
+                            HostSoftHoldActive = true;
+                            Plugin.Logger.LogInfo("[FreezeGate] host soft-hold ENGAGED — movement locked while the world populates (round-205).");
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[FreezeGate] soft-hold engage: {ex.Message}"); }
+                }
                 bool carsReady = HostWorldHasVehicles();
                 DiagHostReadiness(overlayGone, carsReady);
                 if (!((overlayGone && carsReady) || fallback)) return;
@@ -3186,8 +3230,7 @@ namespace BigAmbitionsMP
                 _startupHoldElapsed = 0f;
                 MPLoadProfiler.Mark(
                     $"CLIENT overlay gone → frozen, waiting for host (overlayGone={overlayGone}, fallback={fallback}, elapsed {_pendingFreezeElapsed:F1}s)");
-                if (MPClient.WorldSyncApplied)
-                    MPClient.SendWorldReady();
+                MPClient.TickWorldReadyGate();   // round-205: readiness now also waits for the parked-car receipt
             }
         }
 
@@ -6732,7 +6775,9 @@ namespace BigAmbitionsMP
             // single frame (the "~8s flicker").  Only show it once the hold has
             // actually persisted a beat — a genuine multi-player wait lasts seconds.
             // Unscaled time, because it must keep ticking through the timeScale=0 freeze.
-            bool held = (MPServer.IsRunning || MPClient.IsConnected) && TimeSync.IsStartupHeld;
+            // Round-205: the host's soft-hold counts as held too — it sees the same
+            // wait screen everyone else does while its world populates.
+            bool held = ((MPServer.IsRunning || MPClient.IsConnected) && TimeSync.IsStartupHeld) || HostSoftHoldActive;
             if (!held) _startupHeldSince = 0f;
             else if (_startupHeldSince == 0f) _startupHeldSince = Time.unscaledTime;
             bool show = held && (Time.unscaledTime - _startupHeldSince) > 0.3f;
