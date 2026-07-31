@@ -437,7 +437,27 @@ namespace BigAmbitionsMP
                     // purpose: native maintains their street data through door hooks + underground
                     // parking and must keep doing so.
                     else if (vc.controlledByPlayer && IsOpenVehicle(tn ?? ""))
+                    {
                         bldg = MPRegisterSync.CurrentShopAddress ?? "";
+                        // Round-200 Fix A (audit 2026-07-31): ALSO persist the live context into
+                        // the cart's own record, not just the broadcast. Native writes street
+                        // data only at grab + release-indoors — nothing during the push — so an
+                        // abandonment mid-push (crash/quit/disconnect) used to SAVE a cart at
+                        // interior coords still tagged '' (outdoors), which then rendered in
+                        // every same-layout interior forever (mask fails open on ''). Converging
+                        // the record on every fleet tick means abandonment at ANY moment
+                        // persists the truth. Change-gated: writes only on door crossings.
+                        try
+                        {
+                            string cur = string.IsNullOrEmpty(inst.streetName) ? "" : $"{inst.streetNumber} {inst.streetName}";
+                            if (cur != bldg)
+                            {
+                                ApplyStreetData(inst, bldg);
+                                Plugin.Logger.LogInfo($"[Vehicle] push tag converged: '{inst.id}' ({tn}) '{cur}' → '{bldg}' (round-200).");
+                            }
+                        }
+                        catch { }
+                    }
                     else
                     {
                         try { bldg = string.IsNullOrEmpty(inst.streetName) ? "" : $"{inst.streetNumber} {inst.streetName}"; }
@@ -677,9 +697,24 @@ namespace BigAmbitionsMP
                         // owner nears it — cosmetic and self-healing, vs. rendering
                         // through walls which is what the mask exists to stop.
                         bool iPossessIt = PossessedByLocal(rv.Go);   // flag (cars) OR parented-under-Player
-                        bool maskVeh = !iPossessIt
-                                       && !string.IsNullOrEmpty(e.Bldg)
-                                       && e.Bldg != MPRegisterSync.CurrentShopAddress;
+                        // Round-200 Fix B (audit 2026-07-31): '' tags FAIL CLOSED for hand carts
+                        // while the viewer is indoors. The tag is an unverifiable claim: if it's
+                        // honest ('' = street) the cart is unviewable from inside anyway, and if
+                        // it's stale (cart actually at interior coords — the abandonment hole Fix
+                        // A closes going forward, plus legacy saves) showing it paints a phantom
+                        // into every same-layout interior — 309 fail-open decisions in the
+                        // 2026-07-30 field bundles. Matches the PLAYER-ghost mask's fail
+                        // direction. GHOSTS ONLY — the owner-side mask (round-74b) deliberately
+                        // keeps '' own vehicles visible: the owner's real cart is their ground
+                        // truth AND the repair affordance (grabbing re-stamps the tag for
+                        // everyone). Scoped to handtruck/flatbed — the types that can be pushed
+                        // indoors. Stateless: re-evaluated every fleet packet, so any input
+                        // change (step outside, tag repaired, possession) recovers in seconds.
+                        string myBldg = MPRegisterSync.CurrentShopAddress ?? "";
+                        bool maskVeh;
+                        if (iPossessIt) maskVeh = false;
+                        else if (!string.IsNullOrEmpty(e.Bldg)) maskVeh = e.Bldg != myBldg;                // tagged: unchanged rule
+                        else maskVeh = myBldg.Length > 0 && IsHandCartType(e.TypeName ?? "");             // '' + viewer indoors → hide (carts only)
                         if (rv.Go.activeSelf == maskVeh)
                         {
                             rv.Go.SetActive(!maskVeh);
