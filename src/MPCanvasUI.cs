@@ -573,6 +573,7 @@ namespace BigAmbitionsMP
             long _sub = MPPerf.Begin(); MPRegisterSync.TickDuty(); MPPerf.End("RegDuty", _sub);   // mirror the native Work activity into register duty (1s self-throttle; contains the 5s employee-duty scan + staff evaluator)
             MPHub.TickSalePopups();      // rising +$ worker feedback (per-frame: smooth rise/fade)
             MPOffers.HostTick();         // round-196: re-send unacked business-transfer finalizes (5s)
+            MPTakeover.Tick();           // round-204b: expire an unanswered takeover offer (6s — older host)
             PassengerRide.Update();      // passenger ride: click-to-board → pin-to-seat → exit + remote riders
             PassengerHud.Tick();         // passenger's in-ride "Exit Vehicle" panel
             VehicleStoragePanel.Tick();  // non-owner shared-storage panel (refresh on cargo change / auto-close)

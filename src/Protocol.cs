@@ -95,6 +95,8 @@ namespace BigAmbitionsMP
         BizTransferFinalize  = 170, // Host → buyer: the accepted sale is paid + ledgered — claim the business locally (native takeover + staff promotion); re-sent until acked
         BizTransferRelease   = 171, // Host → seller: the sale completed — release tenancy locally + drop your staff records (they transferred)
         BizTransferAck       = 172, // Buyer → Host: local claim done — stop re-sending Finalize
+        TakeoverRequest      = 173, // Client → Host (round-204b): offer on an AI-run business — host arbitrates against LIVE valuation × accept rate; NOTHING happens client-side until the result
+        TakeoverResult       = 174, // Host → Client: verdict — accepted (ledger + tenant reflect already done host-side; charge + native claim now) or denied (carries the host's minimum price)
         RegisterServe        = 156, // Simulator → Host → All: a customer's serve STARTED / FINISHED at a till.  Lets the player working that till on a FOLLOWER machine perform the job — they are assigned to the station locally and see the queue, but with no real customers there the native serve loop never runs, so without this they stand motionless behind a busy counter.
         BuildingDirtEdit     = 155, // Helper → Host → Owner: floor cells a HELPER mopped in someone else's business.  Narrow on purpose (only the cells whose dirtiness changed): dirt is owner-authoritative interior state, and the only pre-existing guest→owner interior channel is the whole-snapshot forward on interior-designer close, which mopping never triggers — so without this a helper's cleaning stayed local and was overwritten by the owner's next push.
         RestVote             = 102, // Client → Host: this player started/ended a rest-class activity (consensus time-skip voting).
@@ -1346,6 +1348,14 @@ namespace BigAmbitionsMP
         public string BusinessOwnerPlayerId{ get; set; } = "";
         public string DeedOwnerPlayerId    { get; set; } = "";
 
+        /// <summary>Round-204b: the HOST's computed takeover valuation for an AI-run
+        /// business (CalculateAiOwnedValuation — needs dailyIncomes, which are
+        /// host-simulated and never exist on clients). Clients show THIS number on the
+        /// BizMan info panel instead of a local reconstruction that bottomed out at $0.
+        /// Display + local pre-check only — the host re-runs the live math at offer
+        /// time. 0 for non-AI businesses; additive field, absent = 0 on old peers.</summary>
+        public float  AiValuation          { get; set; }
+
         /// <summary>AI-business retail prices (host-authoritative).  Clients
         /// suppress the daily rival sim, so without this their AI shops keep
         /// EMPTY price tables and buy at default market prices while the host's
@@ -1491,6 +1501,26 @@ namespace BigAmbitionsMP
     /// via the hub accept (buyer paid, seller credited); this carries the WORLD transfer — the
     /// buyer claims via the native takeover, the seller releases tenancy, and the seller's staff
     /// ride along (user ruling: workers transfer; Staff is the roster wire format).</summary>
+    /// <summary>Round-204b: host-arbitrated AI-business takeover (both directions —
+    /// request carries AddressKey+OfferAmount; result carries Accepted+MinPrice).</summary>
+    public class TakeoverPayload
+    {
+        public string AddressKey  { get; set; } = "";
+        public float  OfferAmount { get; set; }
+        public bool   Accepted    { get; set; }
+        public float  MinPrice    { get; set; }
+        // Round-204c: item count of the host-furnished interior — the buyer defers its
+        // native claim until that many items have landed (or a deadline), so the claim
+        // runs against the furnished registration, not the bare 2-marker one.
+        public int    ItemCount   { get; set; }
+        // Round-204e: the AI shop's pre-rolled employee data (reg.aiEmployees,
+        // host-side only — never syncs). Native GenerateEmployees CONVERTS this list
+        // into real staff and the client's copy is empty, so without it a client
+        // takeover produced a shop with no workers. The buyer injects it before the
+        // native claim so the game mints the staff on the OWNER's machine.
+        public string AiEmployeesJson { get; set; } = "";
+    }
+
     public class BizTransferPayload
     {
         public string OfferId      { get; set; } = "";

@@ -662,6 +662,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.TakeoverResult:        // round-204b: host's verdict on my AI-business offer
+                {
+                    var tv = env.GetPayload<TakeoverPayload>();
+                    if (tv != null) GameStatePatcher.EnqueueOnMainThread(() => MPTakeover.ClientHandleResult(tv));
+                    break;
+                }
+
                 case MessageType.LoanState:
                 {
                     var ls = env.GetPayload<LoanStatePayload>();
@@ -1710,6 +1717,17 @@ namespace BigAmbitionsMP
             };
             Send(MessageEnvelope.Create(MessageType.BuyRequest, MPConfig.PlayerId, payload));
             Plugin.Logger.LogInfo($"[Client] Sent BuyRequest for {addressKey}");
+            return true;
+        }
+
+        /// <summary>Round-204b: offer on an AI-run business — the host arbitrates
+        /// against live data; nothing happens locally until its TakeoverResult.</summary>
+        public static bool SendTakeoverRequest(string addressKey, float offer)
+        {
+            if (!IsConnected) return false;
+            Send(MessageEnvelope.Create(MessageType.TakeoverRequest, MPConfig.PlayerId,
+                new TakeoverPayload { AddressKey = addressKey, OfferAmount = offer }));
+            Plugin.Logger.LogInfo($"[Client] Sent TakeoverRequest for {addressKey} (${offer:N0})");
             return true;
         }
 

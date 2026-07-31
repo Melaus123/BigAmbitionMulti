@@ -37,6 +37,11 @@ namespace BigAmbitionsMP
         /// it from a replicated schedule. Cleared on session reset.</summary>
         public static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> OwnerOpenByAddress = new();
 
+        /// <summary>Round-204b: host-computed takeover valuations for AI-run businesses,
+        /// stashed at BusinessInfo apply time. The client-side valuation shield returns
+        /// these (display + local pre-check); the host re-runs live math at offer time.</summary>
+        public static readonly System.Collections.Concurrent.ConcurrentDictionary<string, float> AiValuationByAddress = new();
+
         /// <summary>
         /// Build the full table — used by Hello/Welcome to bootstrap a connecting
         /// client.  Also populates _lastSent so the first Tick after a connect
@@ -560,6 +565,7 @@ namespace BigAmbitionsMP
             _lastSentClient.Clear();
             _lastSentClientAt.Clear();
             OwnerOpenByAddress.Clear();
+            AiValuationByAddress.Clear();
             _lastClientPollAt = 0f;
             _logoCache.Clear();
             _publishedOwnedBusinesses = false;   // round-190: re-publish on the next session's settle
@@ -673,6 +679,7 @@ namespace BigAmbitionsMP
                     OwnerPlayerId         = ResolveOwnerPlayerId(addr, reg),
                     BusinessOwnerPlayerId = MergerFlip.TrulyMine(reg)    ? MPConfig.PlayerId : "",   // an ownership CLAIM — flip must never make one
                     DeedOwnerPlayerId     = ResolveDeedOwnerPlayerId(addr, reg),
+                    AiValuation           = ResolveAiValuation(reg),
                 };
 
                 // AI-business retail prices (host-authoritative; audit catch
@@ -854,6 +861,23 @@ namespace BigAmbitionsMP
             return "";
         }
 
+        /// <summary>Round-204b: the host's takeover valuation for a genuinely AI-run
+        /// business — clients can't compute it (dailyIncomes host-simulated; the $0-sale
+        /// field failure). Whole-dollar rounded so float noise never churns the publish
+        /// signature; the real change cadence is the daily income roll. 0 elsewhere.</summary>
+        private static float ResolveAiValuation(BuildingRegistration reg)
+        {
+            try
+            {
+                if (!MPServer.IsRunning) return 0f;                              // clients have nothing to contribute
+                string bizOwner = reg.businessOwnerRivalId?.ToString() ?? "";
+                if (string.IsNullOrEmpty(bizOwner) || reg.RentedByPlayer) return 0f;
+                if (GameStatePatcher.IsSessionPlayerId(bizOwner)) return 0f;     // player-run: not takeover-able via this path
+                return (float)Math.Round(Helpers.CompetitionHelper.CalculateAiOwnedValuation(reg));
+            }
+            catch { return 0f; }
+        }
+
         /// <summary>DEED attribution (rent-vs-deed split, 2026-07-07): the player who BOUGHT this
         /// building. Host: the real-estate ledger; any machine: the game's own bought-property check
         /// for its own buildings. Receivers put THIS (and only this) in buildingOwnerRivalId.</summary>
@@ -902,6 +926,7 @@ namespace BigAmbitionsMP
                 && a.RentedByPlayer           == b.RentedByPlayer
                 && a.OwnerPlayerId            == b.OwnerPlayerId          // rent-vs-deed split 2026-07-07:
                 && a.DeedOwnerPlayerId        == b.DeedOwnerPlayerId      // attribution changes must republish
+                && a.AiValuation              == b.AiValuation            // round-204b: daily income roll → republish (whole-dollar rounded at source)
                 && a.OwnerOpenState           == b.OwnerOpenState;
         }
 

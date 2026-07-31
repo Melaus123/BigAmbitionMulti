@@ -3239,6 +3239,10 @@ namespace BigAmbitionsMP
                     reg.lastDeposit         = info.LastDeposit;
                 }
 
+                // Round-204b: stash the host's takeover valuation for the client-side
+                // valuation shield (display + local pre-check; host stays the referee).
+                try { if (info.AiValuation > 0f) BusinessSync.AiValuationByAddress[info.AddressKey] = info.AiValuation; } catch { }
+
                 // AI-business retail prices (host-authoritative; the client's
                 // rival sim is suppressed so its tables stay empty otherwise).
                 // Player shops never carry Prices here — MPPriceSync owns them.

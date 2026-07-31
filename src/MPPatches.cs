@@ -4306,7 +4306,18 @@ namespace BigAmbitionsMP
                 {
                     if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
                     var reg = ___bizManBusiness?.buildingRegistration;
-                    if (reg == null || !GameStatePatcher.IsAnyPlayerBusiness(reg)) return true;   // AI targets: native flow
+                    if (reg == null) return true;
+                    if (!GameStatePatcher.IsAnyPlayerBusiness(reg))
+                    {
+                        // AI-run business. HOST keeps the native instant flow (it owns
+                        // the authoritative data). CLIENTS go through host arbitration
+                        // (round-204b, MPTakeover) — the client-local native flow is the
+                        // replica-mutation bug ("coop partner's taken-over business
+                        // reset") plus the $0-valuation exploit.
+                        if (MPClient.IsConnected)
+                            return MPTakeover.ClientOfferPrefix(reg, ___offerAmountInputField);
+                        return true;
+                    }
 
                     // Round-196 Phase 1: the native offer box, aimed at a PLAYER's shop,
                     // becomes a hub purchase offer — no money moves unless they accept.
@@ -4366,7 +4377,10 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Schedule.BizManSchedule), nameof(UI.Smartphone.Apps.BizMan.Schedule.BizManSchedule.AutoFillSchedule))]
         public static class Patch_AutoFillSchedule_SkipDuringTransfer
         {
-            static bool Prefix() => !MPOffers.TransferInProgress;
+            // Round-204c: also skipped during an arbitrated AI-takeover claim — same
+            // AutoFillSchedule(null) NRE; MPTakeover runs the registration-level
+            // auto-filler itself right after the native claim.
+            static bool Prefix() => !MPOffers.TransferInProgress && !MPTakeover.ClaimInProgress;
         }
 
         [HarmonyPatch(typeof(BizManPresentation), nameof(BizManPresentation.OvertakeBusiness))]
@@ -5700,6 +5714,66 @@ namespace BigAmbitionsMP
                 return true;
             }
         }
+
+        // ── Round-204: client-side AI-business valuation fallback ────────────────
+        // CONFIRMED on the rig (10× in one session): CompetitionHelper.
+        // CalculateAiOwnedValuation does dailyIncomes.Average() — LINQ Average() on an
+        // EMPTY list throws InvalidOperationException. AI business incomes are
+        // host-simulated and never reach clients, so on a CLIENT every rival shop's
+        // BizMan page died inside SetAiOwned BEFORE its final SetActiveView("Info") —
+        // the overtake panel (Info-view-only) never appeared: clients simply could not
+        // take over AI businesses. Fallback replicates native's own zero-income shape
+        // (Mathf.Max clamps to 0) : income term 0 + the layout valuation, exactly what
+        // native computes for a business with no recorded income. The host's accept
+        // check still uses ITS full valuation. InvalidOperationException ONLY; other
+        // failures keep vanilla behavior. MP-gated.
+        [HarmonyPatch(typeof(Helpers.CompetitionHelper), nameof(Helpers.CompetitionHelper.CalculateAiOwnedValuation))]
+        public static class Patch_AiValuation_ClientEmptyIncomeFallback
+        {
+            private static int _n;
+            static Exception? Finalizer(BuildingRegistration registration, ref float __result, Exception __exception)
+            {
+                if (__exception == null) return null;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return __exception;
+                if (!(__exception is InvalidOperationException)) return __exception;
+                try
+                {
+                    // Round-204b: the SYNCED host valuation is the primary source — the
+                    // rig test proved the layout-set data is ALSO absent client-side
+                    // (fallback bottomed at $0 and the client bought a business for
+                    // free). Layout-only remains a last resort for the pre-first-sync
+                    // window; the host arbitrates every actual offer, so a wrong display
+                    // can no longer authorize a sale.
+                    string addr = GameStateReader.AddressKey(registration);
+                    if (!string.IsNullOrEmpty(addr) && BusinessSync.AiValuationByAddress.TryGetValue(addr, out float synced) && synced > 0f)
+                    {
+                        __result = synced;
+                    }
+                    else
+                    {
+                        float layout = 0f;
+                        try
+                        {
+                            var building = BuildingHelper.GetBuilding(registration.Address);
+                            layout = BusinessLayoutSets.BusinessLayoutSetHelper.GetOrLoadBusinessLayoutSet(
+                                         registration.businessTypeName, new Blueprints.BuildingSizeInfo(building), registration.Layout)
+                                     ?.GetValuation() ?? 0f;
+                        }
+                        catch { }
+                        __result = layout;
+                    }
+                    if (_n++ < 3 || _n % 50 == 0)
+                        Plugin.Logger.LogInfo($"[EconShield] AI valuation for '{addr}': dailyIncomes empty on this machine (host-simulated) — using {__result:F0} ({(BusinessSync.AiValuationByAddress.ContainsKey(addr ?? "") ? "host-synced" : "layout fallback")}, round-204b).");
+                }
+                catch { __result = 0f; }
+                return null;
+            }
+        }
+
+        // (Round-204's optimistic OvertakeBusiness→RentRequest relay REMOVED same day:
+        //  rig-refuted — HandleRentRequest correctly refuses occupied buildings, and the
+        //  denial rollback vacated the natively-taken-over business. Replaced by the
+        //  host-ARBITRATED flow in MPTakeover.cs, round-204b.)
 
         // ── Replicated-shop shelf fill (2026-06-12) ───────────────────────────
         // Our buyer-side purchaser enable gives shelves native hover/take, but

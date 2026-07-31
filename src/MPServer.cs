@@ -928,6 +928,14 @@ namespace BigAmbitionsMP
                     HandleBuyRequest(peer, senderPid, env);
                     break;
 
+                case MessageType.TakeoverRequest:       // round-204b: client's AI-business offer — arbitrate on live data
+                {
+                    var tr = env.GetPayload<TakeoverPayload>();
+                    var pidCapture = senderPid;
+                    if (tr != null) GameStatePatcher.EnqueueOnMainThread(() => MPTakeover.HostHandleRequest(pidCapture, tr));
+                    break;
+                }
+
                 case MessageType.ListForSale:
                     HandleListForSale(peer, senderPid, env);
                     break;
@@ -2556,6 +2564,7 @@ namespace BigAmbitionsMP
                     rosters++;
                 }
                 int duty = MPRegisterSync.SendDutyStateTo(pid);
+                MPTakeover.HostHealUnfurnishedShopsFor(pid);   // round-204d: claimed-but-unfurnished takeover shops
                 Plugin.Logger.LogInfo($"[Server] World-ready re-send to '{pid}': rivals + {bsnap.Businesses.Count} businesses + {rosters} stored roster(s) (own publishes nudged) + {duty} duty entr(ies).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] ResendJoinerState: {ex.Message}"); }
