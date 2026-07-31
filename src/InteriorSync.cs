@@ -532,15 +532,26 @@ namespace BigAmbitionsMP
         /// not.  The arbitration hand-over needs the loser's DATA filled even though they are nowhere near
         /// the building (PushOwnedBuildingImmediate broadcasts to SUBSCRIBERS only, which silently sent to
         /// nobody — field: the released copy stayed a default shell).  The client applies unconditionally.</summary>
-        public static void SendSnapshotToPlayer(string addressKey, string pid)
+        /// <summary>forceItemAuthority (round-196 business sale): BuildSnapshotForHostSend flags
+        /// remote-player-owned shops non-authoritative so the host's replica can never clobber the
+        /// live owner's interior — but a SALE re-keys the ledger to the buyer BEFORE this send, so
+        /// the guard mis-read the delivery as "someone else's shop" and the buyer refused to adopt
+        /// the 70 items it was sent (rig 2026-07-30, empty purchased shop). At sale time the seller
+        /// has released and the receiver IS the new owner — vouch, but never for an EMPTY list.</summary>
+        public static void SendSnapshotToPlayer(string addressKey, string pid, bool forceItemAuthority = false)
         {
             try
             {
                 if (!MPServer.IsRunning || string.IsNullOrEmpty(addressKey) || string.IsNullOrEmpty(pid)) return;
                 var snap = BuildSnapshotForHostSend(addressKey);
                 if (snap == null) { Plugin.Logger.LogWarning($"[InteriorSync] direct send: no snapshot for '{addressKey}'."); return; }
+                if (forceItemAuthority && snap.ItemInstances != null && snap.ItemInstances.Count > 0)
+                {
+                    snap.Authoritative              = true;
+                    snap.ItemInstancesAuthoritative = true;
+                }
                 MPServer.SendToPlayer(pid, MessageEnvelope.Create(MessageType.InteriorSnapshot, "host", snap));
-                Plugin.Logger.LogInfo($"[InteriorSync] snapshot of '{addressKey}' sent directly to '{pid}' ({SnapshotSummary(snap)}).");
+                Plugin.Logger.LogInfo($"[InteriorSync] snapshot of '{addressKey}' sent directly to '{pid}' ({SnapshotSummary(snap)}{(forceItemAuthority ? ", sale-authoritative" : "")}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] direct send: {ex.Message}"); }
         }

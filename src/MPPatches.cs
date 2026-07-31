@@ -4241,6 +4241,118 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Round-196 (field 20260730-213942): the acceptRate=MaxValue shield FAILS OPEN when
+        // CompetitionHelper.CalculateAiOwnedValuation returns 0 for the target (untagged building
+        // type → flat 0f; or a mirrored partner business with no local financial/layout data).
+        // The native gate is `offer < valuation × acceptRate` and 0 × MaxValue = 0, so ANY offer
+        // was accepted: $50 claimed a partner's shop locally and the money was deducted. Two
+        // layers, per the design principles (guard the MUTATION, never just a multiplier feeding
+        // a downstream comparison):
+        //   (1) the offer SUBMIT refuses player-owned targets before any money moves, with
+        //       player-visible feedback (round-50 lesson: silent blocks read as "broken");
+        //   (2) OvertakeBusiness itself — the single transfer choke point — refuses player-owned
+        //       targets unless the accepted-offer flow (round-196 Phase 1) has authorized this
+        //       exact address. The guard is the feature's door, not a wall to tear down later.
+        /// <summary>Address key authorized for ONE player-business transfer by the accepted-offer
+        /// flow. Set immediately before the flow invokes OvertakeBusiness on the same call stack;
+        /// consumed by the guard. Null = no transfer authorized.</summary>
+        internal static string? AuthorizedPlayerBusinessTransfer;
+
+        [HarmonyPatch(typeof(BizManPresentation), nameof(BizManPresentation.SendOvertakeOffer))]
+        public static class Patch_SendOvertakeOffer_RouteToPlayerOffer
+        {
+            static bool Prefix(BizManBusiness ___bizManBusiness, TMPro.TMP_InputField ___offerAmountInputField)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
+                    var reg = ___bizManBusiness?.buildingRegistration;
+                    if (reg == null || !GameStatePatcher.IsAnyPlayerBusiness(reg)) return true;   // AI targets: native flow
+
+                    // Round-196 Phase 1: the native offer box, aimed at a PLAYER's shop,
+                    // becomes a hub purchase offer — no money moves unless they accept.
+                    string owner = reg.businessOwnerRivalId?.ToString() ?? "";
+                    string addr  = GameStateReader.AddressKey(reg);
+                    string biz   = ""; try { biz = reg.BusinessName?.ToString() ?? ""; } catch { }
+                    if (!GameStatePatcher.IsSessionPlayerRivalId(owner))
+                    {
+                        // Player-owned per the ledger but no owner stamp to route to — refuse
+                        // rather than let the native flow claim it (the round-196 hole).
+                        Plugin.Logger.LogWarning($"[Offers] offer for '{addr}' refused — player-owned but no resolvable owner id (stamp='{owner}').");
+                        try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, "You can't buy out another player's business."); } catch { }
+                        return false;
+                    }
+                    if (!float.TryParse(___offerAmountInputField?.text, out var amount) || amount <= 0f)
+                    {
+                        try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, "common_notification_invalid_amount"); } catch { }
+                        return false;
+                    }
+                    if (MPHub.OfferBusiness(owner, amount, addr, biz))
+                    {
+                        Plugin.Logger.LogInfo($"[Offers] purchase offer sent: '{biz}' at {addr} to '{owner}' for ${amount:N0}.");
+                        try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Info, $"Offer sent to {owner} — no money moves unless they accept. Track it in the Business app."); } catch { }
+                        try { ___offerAmountInputField.text = ""; } catch { }
+                    }
+                    return false;
+                }
+                catch { }
+                return true;
+            }
+        }
+
+        // Round-196: while our accepted-offer transfer drives the native takeover on the
+        // buyer's machine, the game must neither fabricate fresh staff (the seller's real
+        // workers transfer instead) nor pop BizMan open mid-play.
+        [HarmonyPatch(typeof(Helpers.BusinessEmployeeGenerator), nameof(Helpers.BusinessEmployeeGenerator.GenerateEmployees))]
+        public static class Patch_GenerateEmployees_SkipDuringTransfer
+        {
+            static bool Prefix()
+            {
+                if (!MPOffers.TransferInProgress) return true;
+                Plugin.Logger.LogInfo("[Offers] GenerateEmployees skipped — transferred staff arrive with the sale.");
+                return false;
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.BizMan), nameof(UI.Smartphone.Apps.BizMan.BizMan.Open))]
+        public static class Patch_BizManOpen_SkipDuringTransfer
+        {
+            static bool Prefix() => !MPOffers.TransferInProgress;
+        }
+
+        // OvertakeBusiness ends with AutoFillSchedule(bizManBusiness) — null on our path, and
+        // the method dereferences it unconditionally (rig 2026-07-30: the NRE aborted the whole
+        // post-claim restoration, losing the transferred schedule). We restore the seller's REAL
+        // schedule afterwards anyway — auto-fill must not run at all during a transfer.
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Schedule.BizManSchedule), nameof(UI.Smartphone.Apps.BizMan.Schedule.BizManSchedule.AutoFillSchedule))]
+        public static class Patch_AutoFillSchedule_SkipDuringTransfer
+        {
+            static bool Prefix() => !MPOffers.TransferInProgress;
+        }
+
+        [HarmonyPatch(typeof(BizManPresentation), nameof(BizManPresentation.OvertakeBusiness))]
+        public static class Patch_OvertakeBusiness_GuardPlayerTargets
+        {
+            static bool Prefix(BuildingRegistration buildingRegistration)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
+                    if (buildingRegistration == null || !GameStatePatcher.IsAnyPlayerBusiness(buildingRegistration)) return true;
+                    string key = GameStateReader.AddressKey(buildingRegistration);
+                    if (AuthorizedPlayerBusinessTransfer == key)
+                    {
+                        AuthorizedPlayerBusinessTransfer = null;
+                        Plugin.Logger.LogInfo($"[EconShield] player-business transfer authorized at '{key}' (accepted offer) — native takeover proceeding.");
+                        return true;
+                    }
+                    Plugin.Logger.LogWarning($"[EconShield] OvertakeBusiness BLOCKED at '{key}' — session player's business, no accepted-offer authorization (round-196).");
+                    return false;
+                }
+                catch { return true; }
+            }
+        }
+
         // Round-55 (Westi report 2026-07-22, screenshot-confirmed): the rival "hire your best
         // employees" defense (RivalDefenseHelper.ActivateHireEmployees) ranks poach targets by
         // skill+satisfaction — our synthetic's pinned satisfaction 100 made it the FIRST pick, so

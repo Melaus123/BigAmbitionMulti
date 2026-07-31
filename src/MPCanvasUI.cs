@@ -15,7 +15,11 @@ using UI.Load;
 namespace BigAmbitionsMP
 {
     /// <summary>
-    /// Canvas/uGUI multiplayer panel.  Toggle F8.  Draggable via title bar.
+    /// Canvas/uGUI multiplayer panel.  Opened via the mod's "Business" app button
+    /// in the game's full-screen menu (MPHubNativePage) and the mod's menu
+    /// integration — there is NO release-build hotkey (all F-key bindings in this
+    /// class are dev cheats/probes under BAMP_DEV; "Toggle F8" was the pre-hub
+    /// design and stale as of 2026-07-30).  Draggable via title bar.
     ///
     /// CanvasScaler = ConstantPixelSize/scaleFactor 1 → 1 canvas unit = 1 screen pixel.
     /// All layout dimensions are therefore plain pixels.
@@ -484,6 +488,7 @@ namespace BigAmbitionsMP
             GameStatePatcher.StripGhostVehicles("world-ready");   // leaked-ghost hygiene (data only)
             GameStatePatcher.HealStaleActiveVehicleId();   // round-68: BAMP_/unresolvable ActiveVehicleId = trapped-in-building + frozen-ghost poison
             MPRegisterSync.StripOrphanSyntheticEmployees("world-ready");   // clear duty-staff a prior save left behind
+            MPRegisterSync.DemoteForeignAssignedStaff("world-ready");      // round-196: interrupted-transfer staff residue
             MPSaveIntegrity.RunSweep("world-ready");   // dangling-reference repair/detect (includes duty-shift repair); summary rides bug reports
             GameStatePatcher.SweepLedgerVsRivalBusinesses("world-ready");   // round-50: drop player reservations on AI-rival-run addresses (host-only inside)
             GameStatePatcher.ReconcileLoadedNeedsFlag();   // round-53: the drain dial owns the save's baked energy on/off after load (host-only inside)
@@ -529,6 +534,15 @@ namespace BigAmbitionsMP
                 MPHub.ApplyMoneyDelta(1_000_000f, "DEV cheat (F8)", true);
                 Plugin.Logger.LogInfo("[DevCheat] F8 — +$1,000,000.");
             }
+            // F9: dev travel — open the city map in taxi-destination mode (the native
+            // taxi flow, no cab needed): pick a building, the ride charges + warps you
+            // there; the MP instant-arrival machinery applies. Testing mobility helper.
+            if (Input.GetKeyDown(KeyCode.F9))
+            {
+                Plugin.Logger.LogInfo("[DevCheat] F9 — taxi-destination map (dev travel).");
+                try { InstanceBehavior<CityManager>.Instance.cityMap.ToggleTaxiMode(isOn: true); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[DevCheat] F9: {ex.Message}"); }
+            }
             // F7: dev weather toggle — forces a local rain transition through the
             // SAME apply path the weather sync uses, so the whole loop (host F7 →
             // GameTimeSync → client follows) is testable on one rig without
@@ -558,6 +572,7 @@ namespace BigAmbitionsMP
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
             long _sub = MPPerf.Begin(); MPRegisterSync.TickDuty(); MPPerf.End("RegDuty", _sub);   // mirror the native Work activity into register duty (1s self-throttle; contains the 5s employee-duty scan + staff evaluator)
             MPHub.TickSalePopups();      // rising +$ worker feedback (per-frame: smooth rise/fade)
+            MPOffers.HostTick();         // round-196: re-send unacked business-transfer finalizes (5s)
             PassengerRide.Update();      // passenger ride: click-to-board → pin-to-seat → exit + remote riders
             PassengerHud.Tick();         // passenger's in-ride "Exit Vehicle" panel
             VehicleStoragePanel.Tick();  // non-owner shared-storage panel (refresh on cargo change / auto-close)
@@ -1938,6 +1953,8 @@ namespace BigAmbitionsMP
                             var o = incoming[i];
                             string txt = o.Kind == "gift"
                                 ? $"<color={_colGood}>{o.From}</color>: <b>${o.Principal:N0}</b> gift"
+                                : o.Kind == "business"
+                                ? $"<color={_colGood}>{o.From}</color>: <b>${o.Principal:N0}</b> for '<b>{o.BusinessName}</b>' — business, furniture + your staff transfer"
                                 : $"<color={_colFrom}>{o.From}</color>: <b>${o.Principal:N0}</b> loan · <b>{MPHub.OfferTotalPct(o):F0}%</b> / {MPHub.OfferTermDays(o)}d (${o.DailyInterest:N0}+${o.DailyPayment:N0}/day)";
                             AddHubRow(_hubInContent, _hubInVp, i, InRowH, txt,
                                 ("accept",  new Color(0.24f, 0.50f, 0.33f, 1f), o.Id, (byte)0),
@@ -1962,6 +1979,8 @@ namespace BigAmbitionsMP
                             var o = outs[i];
                             string txt = o.Kind == "gift"
                                 ? $"<b>${o.Principal:N0}</b> gift → <color={_colGood}>{o.To}</color>"
+                                : o.Kind == "business"
+                                ? $"<b>${o.Principal:N0}</b> for '<b>{o.BusinessName}</b>' → <color={_colGood}>{o.To}</color> · waiting"
                                 : $"<b>${o.Principal:N0}</b> loan → <color={_colFrom}>{o.To}</color> · {MPHub.OfferTotalPct(o):F0}% / {MPHub.OfferTermDays(o)}d";
                             AddHubRow(_hubOutContent, _hubOutVp, i, OutRowH, txt,
                                 ("X", new Color(0.45f, 0.24f, 0.22f, 1f), o.Id, (byte)2));

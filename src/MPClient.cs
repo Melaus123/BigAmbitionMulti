@@ -643,6 +643,20 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.BizTransferFinalize:   // round-196: I bought it — claim locally
+                {
+                    var bt = env.GetPayload<BizTransferPayload>();
+                    if (bt != null) GameStatePatcher.EnqueueOnMainThread(() => MPOffers.BuyerApplyFinalize(bt));
+                    break;
+                }
+
+                case MessageType.BizTransferRelease:    // round-196: I sold it — release locally
+                {
+                    var bt = env.GetPayload<BizTransferPayload>();
+                    if (bt != null) GameStatePatcher.EnqueueOnMainThread(() => MPOffers.SellerApplyRelease(bt));
+                    break;
+                }
+
                 case MessageType.LoanState:
                 {
                     var ls = env.GetPayload<LoanStatePayload>();

@@ -90,6 +90,11 @@ namespace BigAmbitionsMP
         RetailPrices         = 101, // Any → Host → Others: live retail prices of a business the SENDER runs — keeps per-neighbourhood price competition fed with current numbers on every machine.
         NativeClaim          = 157, // Any → Host: my save natively claims this building (+ development score) — contested-tenancy arbitration input
         ReleaseClaim         = 158, // Host → loser: release your native claim on this building (re-verified locally before executing)
+
+        // Player-to-player business sale (round-196; rides the hub offer system — LoanOffer Kind="business")
+        BizTransferFinalize  = 170, // Host → buyer: the accepted sale is paid + ledgered — claim the business locally (native takeover + staff promotion); re-sent until acked
+        BizTransferRelease   = 171, // Host → seller: the sale completed — release tenancy locally + drop your staff records (they transferred)
+        BizTransferAck       = 172, // Buyer → Host: local claim done — stop re-sending Finalize
         RegisterServe        = 156, // Simulator → Host → All: a customer's serve STARTED / FINISHED at a till.  Lets the player working that till on a FOLLOWER machine perform the job — they are assigned to the station locally and see the queue, but with no real customers there the native serve loop never runs, so without this they stand motionless behind a busy counter.
         BuildingDirtEdit     = 155, // Helper → Host → Owner: floor cells a HELPER mopped in someone else's business.  Narrow on purpose (only the cells whose dirtiness changed): dirt is owner-authoritative interior state, and the only pre-existing guest→owner interior channel is the whole-snapshot forward on interior-designer close, which mopping never triggers — so without this a helper's cleaning stayed local and was overwritten by the owner's next push.
         RestVote             = 102, // Client → Host: this player started/ended a rest-class activity (consensus time-skip voting).
@@ -728,7 +733,11 @@ namespace BigAmbitionsMP
         // subclass fields (WorkstationType discriminator + recipe/priority/limits), and the
         // receiver now heals a type-erased workstation by respawning it from the wire copy —
         // safe only when no v5 peer (which strips those fields) can be in the session.
-        public const int Version = 6;
+        // v7 (mod 0.1.17, round-196): business sale offers. LoanOffer gained Kind="business"
+        // (+AddressKey/BusinessName) and the BizTransfer* messages execute the transfer. A v6
+        // peer would render a business offer as a malformed LOAN row, accept it into the loan
+        // ledger, and silently drop the transfer messages — mixed sessions must be impossible.
+        public const int Version = 7;
     }
 
     /// <summary>Sent by client on connect.</summary>
@@ -1463,12 +1472,62 @@ namespace BigAmbitionsMP
         public float  DailyInterest { get; set; }
         public float  DailyPayment  { get; set; }
         /// <summary>"loan" or "gift" — gifts also require an accept (no silent
-        /// handouts; acceptance doubles as the read receipt).</summary>
+        /// handouts; acceptance doubles as the read receipt). "business"
+        /// (round-196): a purchase offer for the target's business — From is the
+        /// BUYER (pays Principal on accept, like a gift sender), To is the
+        /// owner; AddressKey/BusinessName identify the shop. Acceptance runs
+        /// the host-orchestrated transfer (BizTransfer* messages).</summary>
         public string Kind          { get; set; } = "loan";
+        /// <summary>Kind=="business" only: the shop being offered for.</summary>
+        public string AddressKey    { get; set; } = "";
+        public string BusinessName  { get; set; } = "";
         /// <summary>Offer lifecycle: "offer" (new), "revoke" (offerer
         /// cancelled), "accepted"/"declined" (host → offerer: result, clears
         /// their outgoing list).</summary>
         public string State         { get; set; } = "offer";
+    }
+
+    /// <summary>Round-196: the execution legs of an accepted business sale. Money already moved
+    /// via the hub accept (buyer paid, seller credited); this carries the WORLD transfer — the
+    /// buyer claims via the native takeover, the seller releases tenancy, and the seller's staff
+    /// ride along (user ruling: workers transfer; Staff is the roster wire format).</summary>
+    public class BizTransferPayload
+    {
+        public string OfferId      { get; set; } = "";
+        public string AddressKey   { get; set; } = "";
+        public string BusinessName { get; set; } = "";
+        public string BuyerId      { get; set; } = "";
+        public string SellerId     { get; set; } = "";
+        public float  Amount       { get; set; }
+        /// <summary>Item count in the host's copy of the shop — the buyer defers its
+        /// claim until its own interior copy has materialized (a client-buyer that
+        /// never visited the shop holds NOTHING until the sale's snapshot lands;
+        /// rig-proven 2026-07-30: bought shop was completely empty).</summary>
+        public int    ItemCount    { get; set; }
+        public List<StaffInfo> Staff { get; set; } = new();
+        /// <summary>The shop's work schedule (real staff only — synthetic duty
+        /// stand-ins never travel). The buyer's local mirror does not reliably
+        /// carry the seller's shifts, so the transfer ships them explicitly
+        /// (rig 2026-07-30: workers arrived unscheduled without this).</summary>
+        public List<ShiftInfo> Shifts { get; set; } = new();
+    }
+
+    public class ShiftInfo
+    {
+        public int    Day            { get; set; }   // DayOfWeekOrdered as int
+        public string EmployeeId     { get; set; } = "";
+        public string ItemInstanceId { get; set; } = "";
+        public int    StartingHour   { get; set; }
+        public int    EndingHour     { get; set; }
+        public int    Type           { get; set; }   // WorkShiftType as int
+        /// <summary>Station identity for cross-machine re-binding: interior item ids
+        /// are PER-MACHINE (rig-proven 2026-07-30: none of the seller's station ids
+        /// existed in the buyer's copy — schedule rendered empty), so the receiver
+        /// re-resolves the station by item name + position.</summary>
+        public string StationItemName { get; set; } = "";
+        public float  StationX       { get; set; }
+        public float  StationY       { get; set; }
+        public float  StationZ       { get; set; }
     }
 
     public class LoanAnswerPayload

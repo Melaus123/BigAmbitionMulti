@@ -1294,6 +1294,14 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.BizTransferAck:   // round-196: buyer's local claim completed
+                {
+                    var bt = env.GetPayload<BizTransferPayload>();
+                    if (bt == null) break;
+                    GameStatePatcher.EnqueueOnMainThread(() => MPOffers.HostHandleAck(bt, senderPid));
+                    break;
+                }
+
                 case MessageType.RestVote:
                 {
                     var rv = env.GetPayload<RestVotePayload>();

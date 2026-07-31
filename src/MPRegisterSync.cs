@@ -1860,6 +1860,199 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] remove '{id}': {ex.Message}"); }
         }
 
+        // ── Round-196: business-sale staff migration (user ruling: workers transfer) ──
+
+        /// <summary>HOST: the sold shop's roster — the stored copy from the seller's
+        /// heartbeat publishes, or built fresh from local records when the seller is
+        /// this machine. A copy, safe to ship in the Finalize payload.</summary>
+        internal static List<StaffInfo> RosterCopyFor(string addr, string sellerPid)
+        {
+            try
+            {
+                if (sellerPid != MPConfig.PlayerId)
+                {
+                    lock (_rosterByAddr)
+                        if (_rosterByAddr.TryGetValue(addr, out var v) && v.pid == sellerPid)
+                            return new List<StaffInfo>(v.staff);
+                    return new List<StaffInfo>();
+                }
+                return BuildLocalRoster(addr);
+            }
+            catch { return new List<StaffInfo>(); }
+        }
+
+        private static List<StaffInfo> BuildLocalRoster(string addr)
+        {
+            var staff = new List<StaffInfo>();
+            try
+            {
+                var gi = SaveGameManager.Current;
+                var reg = GameStatePatcher.FindRegistration(addr);
+                if (gi?.EmployeeInstances == null || reg == null) return staff;
+                foreach (var e in gi.EmployeeInstances)
+                {
+                    if (e == null || string.IsNullOrEmpty(e.id)) continue;
+                    if (e.id.StartsWith(SyntheticDutyEmployeeIdPrefix, StringComparison.Ordinal)) continue;
+                    if (_injectedStaff.ContainsKey(e.id)) continue;
+                    bool here = false;
+                    try { here = e.assignedAddress != null && e.assignedAddress.streetName == reg.StreetName && e.assignedAddress.streetNumber == reg.StreetNumber; } catch { }
+                    if (!here) continue;
+                    bool avail = true; try { avail = e.IsEmployeeAvailable(); } catch { }
+                    int gender = -1;   try { gender = (int)e.characterData.gender; } catch { }
+                    string nm = "";    try { nm = e.characterData?.name ?? ""; } catch { }
+                    var si = new StaffInfo { Id = e.id, Name = nm, Gender = gender, Available = avail };
+                    try { si.Wage = e.hourlyWage; } catch { }
+                    try { si.Satisfaction = e.satisfaction; } catch { }
+                    try { si.AgeDays = e.characterData?.ageInDays ?? 0; } catch { }
+                    try
+                    {
+                        var skills = e.characterData?.skills;
+                        if (skills != null)
+                            foreach (var sk in skills)
+                                if (sk != null && !string.IsNullOrEmpty(sk.name))
+                                    si.Skills.Add(sk.name + "=" + sk.value.ToString("F1", System.Globalization.CultureInfo.InvariantCulture));
+                    }
+                    catch { }
+                    staff.Add(si);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] local roster '{addr}': {ex.Message}"); }
+            return staff;
+        }
+
+        /// <summary>BUYER: the injected mirrors at a purchased shop become OUR real
+        /// employees — same records, same real ids (the synced shifts keep matching),
+        /// just no longer tracked as injected (so payroll, HR, and publishes treat
+        /// them as ours). Roster tracking for the address is cleared so no stale
+        /// partner roster ever re-processes them.</summary>
+        internal static int PromoteInjectedForTransfer(string addr)
+        {
+            int n = 0;
+            try
+            {
+                var promote = new List<string>();
+                foreach (var kv in _injectedStaff)
+                    if (kv.Value.addr == addr) promote.Add(kv.Key);
+                foreach (var id in promote) { _injectedStaff.Remove(id); n++; }
+                lock (_rosterByAddr) { _rosterByAddr.Remove(addr); }
+                _rosterApplied.Remove(addr);
+                if (n > 0) Plugin.Logger.LogInfo($"[StaffRoster] PROMOTED {n} injected record(s) at '{addr}' to real staff (business purchased — round-196).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] promote '{addr}': {ex.Message}"); }
+            return n;
+        }
+
+        /// <summary>BUYER: create real records for wire staff not present locally
+        /// (a buyer who never received the seller's roster — e.g. fresh joiner).
+        /// Appearance regenerates locally (not in the wire format — disclosed gap).</summary>
+        internal static int EnsureRealStaff(string addr, List<StaffInfo>? staff)
+        {
+            int created = 0;
+            try
+            {
+                if (staff == null || staff.Count == 0) return 0;
+                var gi = SaveGameManager.Current;
+                var reg = GameStatePatcher.FindRegistration(addr);
+                if (gi?.EmployeeInstances == null || reg == null) return 0;
+                foreach (var s in staff)
+                {
+                    if (s == null || string.IsNullOrEmpty(s.Id)) continue;
+                    bool exists = false;
+                    try { exists = Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(s.Id); } catch { }
+                    if (!exists)
+                        foreach (var e in gi.EmployeeInstances)
+                            if (e?.id == s.Id) { exists = true; break; }
+                    if (exists) continue;
+                    var inst = Helpers.EmployeeHelper.CreateAIEmployeeInstance("ba:skill_customerservice");
+                    if (inst == null) continue;
+                    inst.id = s.Id;
+                    inst.assignedAddress = new Address(reg.StreetName, reg.StreetNumber);
+                    inst.characterData.name = string.IsNullOrEmpty(s.Name) ? "Staff" : s.Name;
+                    inst.characterData.ageInDays = Helpers.RecruitmentHelper.GetRandomEmployeeAgeInDays();
+                    try { if (s.Gender >= 0) inst.characterData.gender = (BigAmbitions.Characters.Gender)s.Gender; } catch { }
+                    inst.isAbsent = !s.Available; inst.isReplaced = false;
+                    ApplyStaffFidelity(inst, s);
+                    gi.EmployeeInstances.Add(inst);
+                    try { Helpers.EmployeeHelper.EmployeeInstancesDictionary[inst.id] = inst; } catch { }
+                    created++;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] ensure-real '{addr}': {ex.Message}"); }
+            return created;
+        }
+
+        /// <summary>SELLER: real staff records at a sold shop leave this save —
+        /// they live in the buyer's save now (never touches injected/synthetic).</summary>
+        internal static int DropRealStaffAt(string addr)
+        {
+            int n = 0;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                var reg = GameStatePatcher.FindRegistration(addr);
+                if (gi?.EmployeeInstances == null || reg == null) return 0;
+                try { UI.Smartphone.Apps.BizMan.Schedule.BizManSchedule.AbortAutoFillForBusiness(reg); } catch { }
+                for (int i = gi.EmployeeInstances.Count - 1; i >= 0; i--)
+                {
+                    var e = gi.EmployeeInstances[i];
+                    if (e == null || string.IsNullOrEmpty(e.id)) continue;
+                    if (e.id.StartsWith(SyntheticDutyEmployeeIdPrefix, StringComparison.Ordinal)) continue;
+                    if (_injectedStaff.ContainsKey(e.id)) continue;
+                    bool here = false;
+                    try { here = e.assignedAddress != null && e.assignedAddress.streetName == reg.StreetName && e.assignedAddress.streetNumber == reg.StreetNumber; } catch { }
+                    if (!here) continue;
+                    string eid = e.id;
+                    gi.EmployeeInstances.RemoveAt(i);
+                    try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(eid); } catch { }
+                    n++;
+                }
+                _rosterSigSent.Remove(addr);   // this address is no longer ours to publish
+                if (n > 0) Plugin.Logger.LogInfo($"[StaffRoster] transferred out {n} real staff record(s) at '{addr}' (business sold — round-196).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] drop-real '{addr}': {ex.Message}"); }
+            return n;
+        }
+
+        /// <summary>World-ready reconciliation (round-196): a REAL (non-injected,
+        /// non-synthetic) employee assigned to a business this machine does not own
+        /// is residue of an interrupted transfer (e.g. seller crashed after the buyer
+        /// claimed) — the record's home is the owner's save. Remove it, loudly.
+        /// Unknown stays untouched: no registration ⇒ no verdict.</summary>
+        public static int DemoteForeignAssignedStaff(string when)
+        {
+            int n = 0;
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return 0;
+                var gi = SaveGameManager.Current;
+                if (gi?.EmployeeInstances == null || gi.BuildingRegistrations == null) return 0;
+                for (int i = gi.EmployeeInstances.Count - 1; i >= 0; i--)
+                {
+                    var e = gi.EmployeeInstances[i];
+                    if (e == null || string.IsNullOrEmpty(e.id) || e.assignedAddress == null) continue;
+                    if (e.id.StartsWith(SyntheticDutyEmployeeIdPrefix, StringComparison.Ordinal)) continue;
+                    if (_injectedStaff.ContainsKey(e.id)) continue;
+                    BuildingRegistration? reg = null;
+                    foreach (var r in gi.BuildingRegistrations)
+                    {
+                        bool match = false;
+                        try { match = r != null && e.assignedAddress.streetName == r.StreetName && e.assignedAddress.streetNumber == r.StreetNumber; } catch { }
+                        if (match) { reg = r; break; }
+                    }
+                    if (reg == null) continue;   // unknown ≠ foreign — never delete on missing data
+                    bool mine; try { mine = MergerFlip.TrulyMine(reg); } catch { continue; }
+                    if (mine || reg.RentedByPlayer) continue;
+                    string eid = e.id, nm = ""; try { nm = e.characterData?.name ?? ""; } catch { }
+                    gi.EmployeeInstances.RemoveAt(i);
+                    try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(eid); } catch { }
+                    n++;
+                    Plugin.Logger.LogWarning($"[StaffRoster] RECONCILED ({when}): real employee '{nm}' ({eid}) was assigned to '{GameStateReader.AddressKey(reg)}' which this machine does not own — record removed (interrupted-transfer residue, round-196).");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] reconcile: {ex.Message}"); }
+            return n;
+        }
+
         /// <summary>Invoke the game's staffing evaluator (UpdateEmployee — the
         /// disasm-mapped spawner) on unstaffed synthetic stations every 5s;
         /// nothing calls it for rival-translated shops natively.</summary>

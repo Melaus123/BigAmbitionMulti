@@ -38,6 +38,7 @@ namespace BigAmbitionsMP
             _hostLoans.Clear();
             _hostOffers.Clear();
             _lastDay = -1;
+            MPOffers.Reset();   // round-196: pending business-transfer finalizes are session state
             _ledgerLoaded = false;   // next session loads its own ledger file
             Version++;
         }
@@ -97,6 +98,36 @@ namespace BigAmbitionsMP
                 Id = Guid.NewGuid().ToString("N").Substring(0, 8),
                 From = MPConfig.PlayerId, To = to,
                 Principal = amount, Kind = "gift",
+            };
+            OutgoingOffers.Add(p);
+            Version++;
+            if (MPServer.IsRunning) HostRouteOffer(p);
+            else MPClient.SendHub(MessageType.LoanOffer, p);
+            return true;
+        }
+
+        // ── Business purchase offers (round-196; accept-required like gifts — the
+        //    buyer is the offerer and pays on accept; the transfer itself is
+        //    host-orchestrated in MPOffers after the money moves) ─────────────
+        public static bool OfferBusiness(string to, float amount, string addressKey, string businessName)
+        {
+            if (amount <= 0 || string.IsNullOrEmpty(to) || to == MPConfig.PlayerId || string.IsNullOrEmpty(addressKey)) return false;
+            if (OutgoingOffers.Exists(o => o.Kind == "business" && o.AddressKey == addressKey))
+            {
+                MPChat.AddNotice($"you already have a pending offer for '{businessName}'");
+                return false;
+            }
+            if (AvailableMoney() < amount)
+            {
+                MPChat.AddNotice($"not enough uncommitted money for a ${amount:N0} offer (pending offers count)");
+                return false;
+            }
+            var p = new LoanOfferPayload
+            {
+                Id = Guid.NewGuid().ToString("N").Substring(0, 8),
+                From = MPConfig.PlayerId, To = to,
+                Principal = amount, Kind = "business",
+                AddressKey = addressKey, BusinessName = businessName,
             };
             OutgoingOffers.Add(p);
             Version++;
@@ -198,7 +229,7 @@ namespace BigAmbitionsMP
                 // The proposer deserves an explicit answer (user 2026-07-20) — before
                 // this, acceptance was only inferable from the money-movement toast.
                 string verdict = p.State == "accepted" ? "accepted" : "declined";
-                string what = p.Kind == "gift" ? "gift" : "loan offer";
+                string what = p.Kind == "gift" ? "gift" : p.Kind == "business" ? $"offer for '{p.BusinessName}'" : "loan offer";
                 GameStatePatcher.EnqueueOnMainThread(() => PassengerHud.Toast($"{p.To} {verdict} your ${p.Principal:N0} {what}.", 4f));
                 return;
             }
@@ -261,7 +292,27 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning($"[Hub] answer for offer '{a.Id}' from '{a.From}' but it was made to '{offer.To}' — dropped.");
                 return;
             }
-            string what = offer.Kind == "gift" ? "gift" : "loan";
+            string what = offer.Kind == "gift" ? "gift" : offer.Kind == "business" ? $"offer for '{offer.BusinessName}'" : "loan";
+
+            // Round-196: a business sale needs the seller to STILL own the shop per the
+            // session ledger at accept time (live read at commitment — ownership may have
+            // moved since the offer). A stale sale doesn't stay pending; it dies.
+            if (a.Accept && offer.Kind == "business")
+            {
+                string ownerNow = "";
+                try { MPServer.BuildingOwners.TryGetValue(offer.AddressKey ?? "", out ownerNow); } catch { }
+                string sellerKey = offer.To == MPConfig.PlayerId ? "host" : offer.To;
+                if ((ownerNow ?? "") != sellerKey)
+                {
+                    Plugin.Logger.LogWarning($"[Hub] business offer '{a.Id}' for '{offer.AddressKey}' lapsed — ledger owner is '{ownerNow}', not the seller '{sellerKey}'.");
+                    NotifyParty(offer.To, $"the sale of '{offer.BusinessName}' can't complete — the session ledger no longer lists you as its owner.");
+                    _hostOffers.Remove(a.Id);
+                    var lapse = new LoanOfferPayload { Id = offer.Id, From = offer.From, To = offer.To, Kind = offer.Kind, Principal = offer.Principal, AddressKey = offer.AddressKey, BusinessName = offer.BusinessName, State = "declined" };
+                    if (offer.From == MPConfig.PlayerId) ReceiveOffer(lapse);
+                    else MPServer.SendHubTo(offer.From, MessageType.LoanOffer, lapse);
+                    return;
+                }
+            }
 
             // ENFORCEMENT: an offer can't be accepted while the offerer can't
             // cover it (their wallet may have dropped since offering).  The
@@ -284,7 +335,7 @@ namespace BigAmbitionsMP
             }
             _hostOffers.Remove(a.Id);
             // Tell the offerer the outcome (clears their outgoing list).
-            var result = new LoanOfferPayload { Id = offer.Id, From = offer.From, To = offer.To, Kind = offer.Kind, Principal = offer.Principal, State = a.Accept ? "accepted" : "declined" };
+            var result = new LoanOfferPayload { Id = offer.Id, From = offer.From, To = offer.To, Kind = offer.Kind, Principal = offer.Principal, AddressKey = offer.AddressKey, BusinessName = offer.BusinessName, State = a.Accept ? "accepted" : "declined" };
             if (offer.From == MPConfig.PlayerId) ReceiveOffer(result);
             else MPServer.SendHubTo(offer.From, MessageType.LoanOffer, result);
             if (!a.Accept)
@@ -298,6 +349,12 @@ namespace BigAmbitionsMP
             NotifyParty(offer.From, $"{offer.To} accepted your ${offer.Principal:N0} {what}.");
             DeliverMoney(offer.From, -offer.Principal, $"{what} to {offer.To}", silent: true);
             DeliverMoney(offer.To, offer.Principal, $"{what} from {offer.From}", silent: true);
+            if (offer.Kind == "business")
+            {
+                // Money moved (buyer paid, seller credited) — now the world transfer.
+                MPOffers.HostExecuteTransfer(offer);
+                return;
+            }
             if (offer.Kind != "gift")
             {
                 _hostLoans.Add(new LoanEntry
