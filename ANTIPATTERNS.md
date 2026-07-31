@@ -687,3 +687,93 @@ actors to a just-loaded world.
 **Sibling class:** acting before an OBJECT is initialized (the origin-anchor queue capture —
 state derived from a spawned-but-unpositioned item). Same doctrine at object scope; see the
 guest-placement conveyance review (task #28).
+
+## Class 15 — Stale snapshot consumed at commitment time
+
+**Pattern.** An action handler consumes a cached decision input — a button list, an
+index into one, a state flag, a target reference — that was captured by a poll or an
+earlier event, without re-reading the authoritative source at the moment the action
+commits. The cache is correct *for display*; the world moves inside the
+decide-then-act gap.
+
+**Why it bites.** The stale input selects a path that was right at capture time and
+wrong at commit time — typically the cheap/partial path where only the full path is
+still correct. The failure needs a fast transition inside the gap, so it escapes
+rig testing (deliberate inputs are slow) and lands in the field (players spam keys).
+Real symptom (0.1.16, field 20260730-194909): StandUp clicked the NotStarted-era
+'CancelWork' from a ≤0.5s-old DockButtons snapshot after the activity had already
+reached Started — the state-only cancel skipped the entire physical teardown and
+froze the player at their register 64s+ ("stuck in cashier").
+
+**Detection grep.**
+```
+rg -n "InvokeDockButton|ButtonIndex|_last[A-Z]|Cached[A-Z]|Snapshot" src/ -g '!*Test*'
+```
+For each hit inside an input/action handler, ask: **between this cache's refresh and
+this consumption, can the world state it encodes change?** If yes, the handler must
+re-read the live source (GetState/registry/singleton) at invoke time. A grep hit
+with an at-invoke revalidation is fine; a bare `Invoke(cached[i])` in a handler is
+the bug shape.
+
+**Safe fixes (in order of preference).**
+1. **Re-read the authoritative state at commit time** and branch on THAT
+   (round-195 `StandUp`: live `GetState()` decides Cancel vs `Finish()`).
+2. **Make the cache event-invalidated**, not time-refreshed — subscribe to the
+   change and refresh synchronously.
+3. **Choose the action that is correct in every reachable state** (the game's own
+   catch-all — e.g. `Finish()`/`Reset()` — instead of the state-specific shortcut).
+
+**Known instances.**
+- `MPRestSync.StandUp` (`src/MPRestSync.cs`) — stale `CancelButtonIndex` clicked
+  a state-only cancel against an advanced WorkActivity → **live GetState() at
+  invoke; Cancel only for genuine NotStarted**. Fixed round-195 (2026-07-30).
+- Rig-observed benign twin (2026-07-29): 'CancelRest' clicked while state was
+  already MovingTowards — harmless only because the panel GO was still active.
+  Same mechanism, logged as the warning shot.
+
+## Class 16 — Correctness gated on timing
+
+**Pattern.** A fixed delay, settle margin, or "wait then assume" stands in for a
+real condition check — or a one-shot trigger (flag, queued action) is consumed by a
+gate deferral so the action silently never runs. Elapsed time is used as a proxy
+for state.
+
+**Why it bites.** The chosen delay encodes one machine's speed. Slower hardware,
+bigger saves, lag spikes, or a faster player break the assumption — and the failure
+is invisible: nothing throws, the action just didn't happen (or happened against a
+world that wasn't ready). Real symptoms: the autopilot theme-capture wait (June
+2026 — the fix was frontloading, not a longer wait); interior/business publishes
+that originally fired once at a moment their gate could defer — made
+tick-until-settled in round-190; the round-188 audit family (world data applied
+before the world could hold it).
+
+**Detection grep.**
+```
+rg -n "unscaledTime \+ [0-9]|WaitForSeconds|Task\.Delay|settle|margin|_next[A-Z][a-zA-Z]*At" src/
+```
+For each hit, classify: (a) **throttle/cadence** on a recurring tick — fine;
+(b) **deferral** — must show its re-attempt path (who retries until confirmed-done,
+and does it log?); (c) **delay-as-readiness** ("wait N then act") — the bug shape,
+replace with the real condition.
+
+**Safe fixes (in order of preference).**
+1. **Subscribe to the event** that actually flips the condition (patch the source).
+2. **Tick-until-confirmed**: recurring check of the authoritative state with a
+   confirmed exit condition; the trigger survives every deferral (round-184 retry
+   contract) and deferrals log.
+3. **Frontload**: do the work eagerly at startup/load so no runtime flow depends
+   on ordering at all.
+
+**Known instances (fixed).**
+- Interior/business owner publishes — one-shot at a moment the settle gate could
+  defer → **tick-until-settled** (`PublishAllOwnedInteriors`,
+  `TickOwnerBusinessPublish`), round-190.
+- Autopilot theme wait (June 2026) — wait-for-injection band-aid → **eager
+  retry-until-done capture** (`TickThemeCapture`).
+- Carry backstops (round-184) — save-time member uploads awaited by **recurring
+  2s poll with early-completion + deadline + flush-on-exit**, not a fixed wait.
+
+**Deliberate exception (watch-list).** `MPWorldReady.IsSettled` includes a 3s
+margin ON TOP of its real condition checks (loading done + registrations + role
+ready). The margin is defense-in-depth, not the gate itself. Never let a margin
+BE the gate.
