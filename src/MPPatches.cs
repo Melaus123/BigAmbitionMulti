@@ -5629,6 +5629,39 @@ namespace BigAmbitionsMP
             }
         }
 
+        // Round-198b (field 20260730-221621, 2× NRE): the ShouldUpdate gate above can be
+        // bypassed by the PENDING queue — a registration enqueued before its player stamp
+        // arrived is processed later regardless (stale-snapshot shape, ANTIPATTERNS Class 15).
+        // The math itself then asks the AI-archetype table for a PLAYER-NAMED business
+        // (GetBusinessDefault by BusinessName) — which cannot exist — and NREs. Guard the
+        // MUTATION: valuation math never runs for a session player's shop. Verified consumers
+        // all have synced/shielded sources: rival detail incomes are host-synced (the client
+        // can't compute them), leaderboard uses host stats, takeover pricing is intercepted
+        // (round-196), AI shutdown/reprice already shielded.
+        [HarmonyPatch(typeof(Helpers.CompetitionHelper), nameof(Helpers.CompetitionHelper.UpdateDailyValuation))]
+        public static class Patch_NoDailyValuationMathOnPlayerShops
+        {
+            private static float _nextLog;
+            static bool Prefix(BuildingRegistration buildingRegistration)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
+                try
+                {
+                    if (buildingRegistration != null && GameStatePatcher.IsAnyPlayerBusiness(buildingRegistration))
+                    {
+                        if (UnityEngine.Time.unscaledTime >= _nextLog)
+                        {
+                            _nextLog = UnityEngine.Time.unscaledTime + 60f;
+                            Plugin.Logger.LogInfo($"[EconShield] daily-valuation math skipped for session player's shop '{GameStateReader.AddressKey(buildingRegistration)}' (no AI archetype exists for player-named businesses; round-198b).");
+                        }
+                        return false;
+                    }
+                }
+                catch { }
+                return true;
+            }
+        }
+
         // ── Replicated-shop shelf fill (2026-06-12) ───────────────────────────
         // Our buyer-side purchaser enable gives shelves native hover/take, but
         // PlayerItemPurchaser.UpdatePriceInfo then pins NON-rented shelves to
