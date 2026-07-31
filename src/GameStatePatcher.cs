@@ -1237,6 +1237,22 @@ namespace BigAmbitionsMP
                             foreach (var k in reg.itemInstances.Keys)
                                 if (!newDict.ContainsKey(k)) removedIds.Add(k);
 
+                            // Round-198c (field 20260730-235612, user-approved): a SMALL delta names
+                            // its items — an item rhythmically flapping in/out of snapshots was
+                            // undiagnosable because applies only logged counts. ≤3 per bucket keeps
+                            // legitimate bulk applies count-only.
+                            _deltaNames = "";
+                            try
+                            {
+                                if (removedIds.Count > 0 && removedIds.Count <= 3)
+                                    foreach (var k in removedIds)
+                                        _deltaNames += $" -[{(reg.itemInstances.TryGetValue(k, out var oi) ? oi?.itemName : "?")} {k}]";
+                                if (changedIds.Count > 0 && changedIds.Count <= 3)
+                                    foreach (var k in changedIds)
+                                        _deltaNames += $" ~[{(newDict.TryGetValue(k, out var ni) ? ni?.itemName : "?")} {k}]";
+                            }
+                            catch { _deltaNames = ""; }
+
                             // Buyer-side purchasability (2026-06-12): hover highlight
                             // + take-product in a shop come from playerItemPurchaserSettings
                             // (that's what AI shops set; ItemController.Start builds the
@@ -1348,7 +1364,7 @@ namespace BigAmbitionsMP
                     }
                     catch { }
 
-                    Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' {InteriorSync.SnapshotSummary(payload)} (changed={changedIds.Count} moved={movedIds.Count} cargoOnly={cargoOnlyIds.Count} removed={removedIds.Count}).");
+                    Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' {InteriorSync.SnapshotSummary(payload)} (changed={changedIds.Count} moved={movedIds.Count} cargoOnly={cargoOnlyIds.Count} removed={removedIds.Count}){_deltaNames}.");
 
                     // Trigger a visual refresh of the interior IF the local
                     // player is currently inside THIS building.  Writing to
@@ -1386,6 +1402,9 @@ namespace BigAmbitionsMP
         /// <summary>Last-applied serialized form per item id, per address —
         /// the diff baseline that keeps unchanged shelf visuals alive.</summary>
         private static readonly Dictionary<string, Dictionary<string, string>> _lastItemSer = new();
+        /// <summary>Round-198c: names of a SMALL interior-apply delta (≤3 removed/changed),
+        /// built during the apply, appended to its log line. Main-thread only.</summary>
+        private static string _deltaNames = "";
 
         /// <summary>Same baseline for interior-design elements (walls/doors):
         /// UUID → serialized form, per address.  Re-Deserializing all ~120
