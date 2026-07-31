@@ -947,6 +947,58 @@ namespace BigAmbitionsMP
             return _ghostAnchorGO.transform;
         }
 
+        // ── Round-199 anchor validity guard (field 20260730-213942, v0.1.15 host) ──
+        // Vanilla feeds ONLY the local camera into the traffic grid, so Gley's cell
+        // math never sees a position it can't handle.  We feed every player, and the
+        // math (read from GetCellIndex IL) is
+        //     row = FloorToInt(Abs((gridCorner.z - pos.z) / gridCellSize))
+        // with NO bounds check: a position beyond the far grid edge (or NaN, which
+        // floors to int.MinValue) overflows the cell array and TrafficManager.Update
+        // throws EVERY FRAME — 3,679+ IndexOutOfRange filled a 20MB field log.
+        // (Positions slightly outside the NEAR corner are silently Abs-folded back
+        // into the grid by vanilla math — those don't crash and are left alone.)
+        // The guard replays the exact same math against the live grid dimensions and
+        // skips anchors that would overflow, naming the anchor and position so the
+        // next field log identifies WHERE the off-grid player actually was.
+        private static GleyUrbanAssets.CurrentSceneData? _gridScene;
+        private static readonly HashSet<string> _badAnchorLogged = new();
+        private static int _badAnchorSkips;
+
+        private static bool AnchorFeedable(Transform t)
+        {
+            if (t == null) return false;
+            Vector3 p = t.position;
+            if (float.IsNaN(p.x) || float.IsNaN(p.y) || float.IsNaN(p.z)
+                || float.IsInfinity(p.x) || float.IsInfinity(p.y) || float.IsInfinity(p.z))
+                return LogBadAnchor(t, p, "non-finite position");
+            try
+            {
+                if (_gridScene == null) _gridScene = GleyUrbanAssets.CurrentSceneData.GetSceneInstance();
+                var sd = _gridScene;
+                var grid = sd != null ? sd.grid : null;
+                if (grid == null || grid.Length == 0 || sd!.gridCellSize <= 0)
+                    return true;   // no grid to judge against → vanilla behavior (feed)
+                int r = Mathf.FloorToInt(Mathf.Abs((sd.gridCorner.z - p.z) / sd.gridCellSize));
+                int c = Mathf.FloorToInt(Mathf.Abs((sd.gridCorner.x - p.x) / sd.gridCellSize));
+                if (r >= grid.Length || grid[r].row == null || c >= grid[r].row.Length)
+                    return LogBadAnchor(t, p, $"off-grid cell [{r},{c}] vs {grid.Length} rows");
+            }
+            catch { }   // the guard must never break the feed itself
+            return true;
+        }
+
+        private static bool LogBadAnchor(Transform t, Vector3 p, string why)
+        {
+            _badAnchorSkips++;
+            string id = t != null ? t.name : "<null>";
+            if (_badAnchorLogged.Add(id) || _badAnchorSkips % 600 == 0)
+                Plugin.Logger.LogWarning(
+                    $"[TrafficSync] anchor '{id}' NOT fed to the traffic grid: {why} at "
+                    + $"({p.x:F1}, {p.y:F1}, {p.z:F1}) — would IndexOutOfRange TrafficManager.Update "
+                    + $"every frame (round-199, skip #{_badAnchorSkips}).");
+            return false;
+        }
+
         private static void UpdateTrafficAnchors()
         {
             try
@@ -1000,8 +1052,13 @@ namespace BigAmbitionsMP
                     if (t != null) anchors.Add(t);
                 if (anchors.Count == 0) return;
 
-                var arr = new Transform[anchors.Count];
-                for (int i = 0; i < anchors.Count; i++) arr[i] = anchors[i];
+                // Round-199: single choke point — every anchor (local, ghost, ride,
+                // remote) is validated against the live grid before Gley sees it.
+                var feed = new List<Transform>(anchors.Count);
+                foreach (var a in anchors)
+                    if (AnchorFeedable(a)) feed.Add(a);
+                if (feed.Count == 0) return;
+                var arr = feed.ToArray();
 
                 // Feed every player to both anchor APIs — UpdateCamera drives the
                 // active-grid squares (where traffic spawns), UpdateCameraPositions
@@ -1016,16 +1073,16 @@ namespace BigAmbitionsMP
                     { if (!_anchorDiagLogged) Plugin.Logger.LogWarning($"[TrafficSync] UpdateCameraPositions: {e.Message}"); }
                     // Scale the traffic budget with player count — one player's
                     // worth of cars spread over N areas looks sparse.
-                    try { dm.UpdateMaxCars(CarsPerPlayer * anchors.Count); } catch { }
+                    try { dm.UpdateMaxCars(CarsPerPlayer * arr.Length); } catch { }
                 }
 
                 if (!_anchorDiagLogged)
                 {
                     _anchorDiagLogged = true;
                     Plugin.Logger.LogInfo(
-                        $"[TrafficSync] Traffic anchors active: {anchors.Count} player(s); " +
+                        $"[TrafficSync] Traffic anchors active: {arr.Length} fed of {anchors.Count} player(s); " +
                         $"densityManager={(dm != null ? "ok" : "NULL")}; " +
-                        $"maxCars={CarsPerPlayer * anchors.Count}.");
+                        $"maxCars={CarsPerPlayer * arr.Length}.");
                 }
             }
             catch (Exception ex)
