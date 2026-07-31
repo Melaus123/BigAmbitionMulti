@@ -3340,12 +3340,51 @@ namespace BigAmbitionsMP
             private static int _n;
             static bool Prefix(bool disabled)
             {
-                if (!MPServer.IsRunning && !MPClient.InMpGame) return true;   // sticky gate: survives reconnect
-                if (GameStateReader.AllowNativePauseCall) return true;
+                // Round-199 diagnostic: isTimeControlDisabled has exactly ONE writer
+                // (this method — read from GameSpeedController.cs), yet a field client
+                // (20260730-235612) had the lock set 13× with the watchdog cleaning up.
+                // Both ALLOWED paths below can arm it: before the MP gate flips during
+                // load, and inside our own sanctioned-pause window (native onPause
+                // handlers run while we hold the key).  Record WHO on every set that
+                // goes through, so the watchdog's clear line names the grabber.
+                if (!MPServer.IsRunning && !MPClient.InMpGame)
+                {
+                    if (disabled) GameStateReader.LastTimeLockTag = $"{Caller()} [outside MP gate]";
+                    return true;   // sticky gate: survives reconnect
+                }
+                if (GameStateReader.AllowNativePauseCall)
+                {
+                    if (disabled) GameStateReader.LastTimeLockTag = $"{Caller()} [inside sanctioned-pause window]";
+                    return true;
+                }
                 if (!disabled) return true;                  // re-enabling is always fine
                 if (_n++ < 5 || _n % 100 == 0)
-                    Plugin.Logger.LogInfo($"[Pause] time-control lock suppressed (#{_n}).");
+                    Plugin.Logger.LogInfo($"[Pause] time-control lock suppressed (#{_n}) — caller {Caller()}.");
                 return false;
+            }
+
+            /// <summary>Nearest native caller: skips our own frames, Harmony plumbing
+            /// (dynamic-method wrappers have a null DeclaringType), and the patched
+            /// method itself.</summary>
+            private static string Caller()
+            {
+                try
+                {
+                    var st = new System.Diagnostics.StackTrace(1, false);
+                    for (int i = 0; i < st.FrameCount; i++)
+                    {
+                        var m = st.GetFrame(i)?.GetMethod();
+                        var dt = m?.DeclaringType;
+                        if (dt == null) continue;
+                        if (dt.Assembly == typeof(Patch_GSC_DisableTimeControl_Suppress).Assembly) continue;
+                        string full = dt.FullName ?? "";
+                        if (full.StartsWith("HarmonyLib") || full.StartsWith("MonoMod")) continue;
+                        if (m!.Name == "DisableTimeControl") continue;
+                        return $"{dt.Name}.{m.Name}";
+                    }
+                }
+                catch { }
+                return "<unknown>";
             }
         }
 
@@ -5725,6 +5764,50 @@ namespace BigAmbitionsMP
                 else if (!_latched)
                     Plugin.Logger.LogWarning($"[Shield] LoudSpeakersManager LateUpdate threw ({_fails}/5): {__exception.Message}");
                 return null;   // suppress — the native code would rethrow every cycle forever
+            }
+        }
+
+        // ── Round-199: stationary-NPC stuck combined-animation flag ──────────────
+        // TEMPORARY SHIELD for a NATIVE bug (remove when Hovgaard fixes it — same
+        // tracking as the LoudSpeakers latch above).  Field 20260730-194909:
+        // KeyNotFoundException 'TalkingPhone' ×8,170 filled the client's log
+        // (log-erasure class).  Mechanism (StationaryAiBehavior.cs, read):
+        // GetRandomPermanentAnimation sets _isPlayingCombinedAnimation=true when it
+        // rolls a combined animation but NEVER clears it when a later re-roll lands
+        // on a plain one — re-rolls fire on umbrella add/remove, i.e. rain
+        // transitions, which MP weather sync makes more frequent.  Update() then
+        // looks the plain anim up in the combined table every frame forever.
+        // Heal = clear the stuck flag on the throwing NPC: exactly the state a
+        // plain roll was meant to leave (the pose keeps playing; only the bogus
+        // combined lookup stops).  KeyNotFoundException ONLY — anything else keeps
+        // vanilla behavior.  MP-gated; single-player untouched.
+        [HarmonyLib.HarmonyPatch(typeof(Entities.StationaryAiBehavior), "Update")]
+        public static class Patch_StationaryAi_HealStuckCombinedFlag
+        {
+            private static System.Reflection.FieldInfo? _flag;
+            private static int _n;
+            private static float _nextLog;
+
+            static Exception? Finalizer(Entities.StationaryAiBehavior __instance, Exception __exception)
+            {
+                if (__exception == null) return null;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return __exception;   // SP: vanilla
+                if (!(__exception is KeyNotFoundException)) return __exception;             // unknown failure: vanilla
+                try
+                {
+                    _flag ??= AccessTools.Field(typeof(Entities.StationaryAiBehavior), "_isPlayingCombinedAnimation");
+                    _flag?.SetValue(__instance, false);
+                    _n++;
+                    if (_n <= 5 || UnityEngine.Time.unscaledTime >= _nextLog)
+                    {
+                        _nextLog = UnityEngine.Time.unscaledTime + 60f;
+                        Plugin.Logger.LogWarning(
+                            $"[Shield] StationaryAiBehavior stuck combined-animation flag cleared "
+                            + $"(vanilla one-way flag bug, event #{_n}) — per-frame KeyNotFound spam stopped.");
+                    }
+                }
+                catch { }
+                return null;
             }
         }
     }

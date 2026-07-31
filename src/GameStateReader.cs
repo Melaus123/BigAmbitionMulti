@@ -230,6 +230,12 @@ namespace BigAmbitionsMP
         /// <summary>True while OUR code is intentionally driving the pause state —
         /// the only key through the MP blanket pause-suppression patches.</summary>
         public static bool AllowNativePauseCall;
+
+        /// <summary>Round-199 diagnostic: who last set the time-control lock (recorded
+        /// by the DisableTimeControl suppression prefix on every set that passes
+        /// through), so the watchdog's clear line names the grabber instead of just
+        /// cleaning up after an anonymous one.</summary>
+        public static string? LastTimeLockTag;
         private static float _lastPauseToggleAt;
 
         /// <summary>Watchdog (rest-v3): nothing may freeze time in MP outside the
@@ -250,7 +256,7 @@ namespace BigAmbitionsMP
                         AllowNativePauseCall = true;
                         try { m.Invoke(_gscInstance, new object[] { false }); }
                         finally { AllowNativePauseCall = false; }
-                        Plugin.Logger.LogWarning("[GSC] WATCHDOG: time-control lock cleared (nothing may freeze time outside the vote system).");
+                        Plugin.Logger.LogWarning($"[GSC] WATCHDOG: time-control lock cleared (nothing may freeze time outside the vote system). Lock was last set by: {LastTimeLockTag ?? "<not recorded>"}.");
                     }
                 }
             }
