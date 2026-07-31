@@ -2527,6 +2527,38 @@ namespace BigAmbitionsMP
             // A player whose world just loaded missed any earlier loan-state
             // broadcast (session-load ledger, joins mid-loan) — re-broadcast.
             GameStatePatcher.EnqueueOnMainThread(MPHub.BroadcastLoansIfAny);
+            // Round-197 (drop-list audit): re-send every event-driven one-shot this
+            // joiner's quiesce window may have eaten. The round-188 drop list claimed
+            // "everything dropped is recurrence-covered" — false for these four, each
+            // a field bug or a bug-in-waiting (rivals roster: field 2026-07-31; staff
+            // rosters: unstaffed partner shops; business deltas + duty state: silent
+            // divergence until the next edit/toggle). WorldReady is the first moment
+            // provably AFTER the drop window — the loans line above pioneered this
+            // anchor; now everything one-shot uses it.
+            GameStatePatcher.EnqueueOnMainThread(() => ResendJoinerState(senderPid));
+        }
+
+        /// <summary>Round-197: everything a joiner's load-window drop list may have
+        /// discarded, re-sent to that one client at WorldReady. Idempotent applies.</summary>
+        private static void ResendJoinerState(string pid)
+        {
+            try
+            {
+                var peer = PeerForPid(pid);
+                if (peer == null) return;
+                SendRivalsSnapshotTo(peer);
+                var bsnap = BusinessSync.BuildFullSnapshot();
+                SendToPlayer(pid, MessageEnvelope.Create(MessageType.BusinessSnapshot, "host", bsnap));
+                int rosters = 0;
+                foreach (var r in MPRegisterSync.SnapshotRosters())   // stored client rosters; also nudges the host's own publishes
+                {
+                    SendToPlayer(pid, MessageEnvelope.Create(MessageType.PlayerStaffRoster, r.PlayerId, r));
+                    rosters++;
+                }
+                int duty = MPRegisterSync.SendDutyStateTo(pid);
+                Plugin.Logger.LogInfo($"[Server] World-ready re-send to '{pid}': rivals + {bsnap.Businesses.Count} businesses + {rosters} stored roster(s) (own publishes nudged) + {duty} duty entr(ies).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] ResendJoinerState: {ex.Message}"); }
         }
 
         /// <summary>True once the host's own game world has loaded (PlayerController

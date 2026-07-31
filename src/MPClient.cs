@@ -300,9 +300,14 @@ namespace BigAmbitionsMP
                         return;
                     default:
                         // Round-188: the name filter covered 4 families; these types also WRITE
-                        // world/save state during the load window and are recurrence-covered
-                        // (snapshots/streams re-send; Rent/Buy responses answer actions a loading
-                        // client cannot have pending).  Deliberately NOT dropped: Welcome/LoadData
+                        // world/save state during the load window.  Round-197 CORRECTION: the
+                        // original claim "everything dropped is recurrence-covered" was FALSE for
+                        // the event-driven one-shots in this list (RivalsSnapshot, PlayerStaffRoster,
+                        // BusinessChange deltas, RegisterCashier toggles, Rent/Vacate ownership
+                        // events) — each is now re-sent by the host at this client's WorldReady
+                        // (MPServer.ResendJoinerState), the first moment provably after this window.
+                        // Rent/Buy DENIES stay drop-safe (they answer actions a loading client
+                        // cannot have pending).  Deliberately NOT dropped: Welcome/LoadData
                         // (join handshake), BusinessSnapshot (part of the initial world seed),
                         // ReleaseClaim (a ONE-SHOT arbitration instruction — its handler defers
                         // internally instead; dropping it would violate the retry contract).

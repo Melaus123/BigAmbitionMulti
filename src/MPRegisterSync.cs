@@ -2013,6 +2013,31 @@ namespace BigAmbitionsMP
             return n;
         }
 
+        /// <summary>Round-197: the CURRENT register-duty state, sent to one player —
+        /// duty toggles are one-shot events a joiner's quiesce window may have
+        /// dropped (the shop then looks unstaffed until the next toggle).</summary>
+        internal static int SendDutyStateTo(string pid)
+        {
+            int n = 0;
+            try
+            {
+                foreach (var kv in _cashiers)
+                {
+                    var (playerId, pos, employee, address, stationId) = kv.Value;
+                    if (playerId == pid) continue;   // their own duty state died with their session
+                    var p = new RegisterCashierPayload
+                    {
+                        PlayerId = playerId, X = pos.x, Y = pos.y, Z = pos.z,
+                        On = true, Address = address, StationId = stationId, Employee = employee,
+                    };
+                    MPServer.SendToPlayer(pid, MessageEnvelope.Create(MessageType.RegisterCashier, "host", p));
+                    n++;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] duty re-send: {ex.Message}"); }
+            return n;
+        }
+
         /// <summary>World-ready reconciliation (round-196): a REAL (non-injected,
         /// non-synthetic) employee assigned to a business this machine does not own
         /// is residue of an interrupted transfer (e.g. seller crashed after the buyer

@@ -112,7 +112,15 @@ namespace BigAmbitionsMP
                     var (p, _) = _pendingFinalize[id];
                     _pendingFinalize[id] = (p, Time.unscaledTime + 5f);
                     if (p.BuyerId == MPConfig.PlayerId) BuyerApplyFinalize(p);   // host bought it — local claim, same recurrence
-                    else MPServer.SendHubTo(p.BuyerId, MessageType.BizTransferFinalize, p);
+                    else
+                    {
+                        // Round-197: the sale's interior snapshot is Interior-family traffic —
+                        // a buyer still inside its join-quiesce window DROPS it, and the claim
+                        // then defers forever on an empty shop. Re-send it with every finalize
+                        // beat until acked; the apply is idempotent.
+                        try { InteriorSync.SendSnapshotToPlayer(p.AddressKey, p.BuyerId, forceItemAuthority: true); } catch { }
+                        MPServer.SendHubTo(p.BuyerId, MessageType.BizTransferFinalize, p);
+                    }
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Offers] HostTick: {ex.Message}"); }
