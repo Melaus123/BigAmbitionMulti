@@ -126,7 +126,21 @@ namespace BigAmbitionsMP
             // "is this owned by some session player" — identical on all machines by design.
             // (Ownership attribution itself is audited by the roster/business snapshot paths.)
             bool anyPlayerOwned = false;
-            try { anyPlayerOwned = reg.RentedByPlayer || GameStatePatcher.IsAnyPlayerBusiness(reg); } catch { }
+            try
+            {
+                // Round-204 (rig: DIVERGED '36 thirdstreet' after a client bought a
+                // rival-tenanted building): the ledger arm of IsAnyPlayerBusiness is
+                // HOST-only, so a client-bought building read "player-owned" on the host
+                // but "AI-owned" on every client — different hash COMPOSITION (rival ids
+                // hashed on one side only), a guaranteed false alarm. The ownership fact
+                // must include the DEED dimension from each machine's own viewpoint:
+                // native realEstate for my own purchase, the translated session-player
+                // id in the deed field for everyone else's.
+                anyPlayerOwned = reg.RentedByPlayer || GameStatePatcher.IsAnyPlayerBusiness(reg)
+                    || reg.BuildingOwnedByPlayer
+                    || GameStatePatcher.IsSessionPlayerId(reg.buildingOwnerRivalId?.ToString() ?? "");
+            }
+            catch { }
             h = Combine(h, anyPlayerOwned ? 1 : 0);
             // Rival ids still hashed for genuinely AI-owned buildings (a real divergence there
             // means the rival sim disagrees) — but skipped when a player owns it.

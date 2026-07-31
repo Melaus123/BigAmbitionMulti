@@ -777,3 +777,38 @@ replace with the real condition.
 margin ON TOP of its real condition checks (loading done + registrations + role
 ready). The margin is defense-in-depth, not the gate itself. Never let a margin
 BE the gate.
+
+## Audit 2026-07-31 (round-200): full Class-15/16 sweep of src/ (user-requested)
+
+Method: grep-harvest of timer gates + cached-decision fields, then targeted context reads.
+59k lines, 31 files. Verdicts below; anything not listed classified benign (log throttles,
+send pacing, recurring ticks with live-state exits, display caches, per-type name keys).
+
+**Tier 1 (stuck family: MPRestSync, MPCanvasUI dock, GameStateReader) — CLEAN.**
+Rounds 194–198 were the retrofit: nav-heal reads live state on a recurring tick; StandUp
+live-reads (round-195); pause converges via stored intent + tick (rate limiter only paces);
+activity-UI cache is Type-only (instance caching was itself a bug, fixed 2026-06-22).
+Outstanding stuck reports are unlikely to be Class-15/16 violations in this layer as it
+exists now.
+
+**Tier 2 (cart family) — HEADLINE: vehicle interior-mask fail direction + stale tag.**
+1. CONFIRMED (field logs, 309 decisions across 2026-07-30 bundles): vehicles tagged ''
+   (outdoors) are SHOWN to viewers standing INSIDE buildings — VehicleManager mask
+   (`!IsNullOrEmpty(e.Bldg) && e.Bldg != mine`) fails OPEN on '', while the PLAYER-ghost
+   mask fails CLOSED (field lines: `hidden — their bldg='' mine='8 ba:…'`). Two masks,
+   same job, opposite fail directions.
+2. READ: tag lifecycle hole — native writes street data at grab + release-indoors/parking
+   ONLY (HandTruck.EnterVehicle; VehicleController.ExitVehicle); round-88 added the
+   release-on-street clear; NOTHING writes during the push itself. Abandonment mid-push
+   (crash/quit/disconnect) persists tag='' + interior coords into the SAVE → the cart
+   renders in every same-layout interior forever (interior volumes are spatially packed,
+   round-74) until re-grab + release. Owner-side mask (round-74b) has the same '' fail-open.
+3. Fix direction (proposed, pending approval): (a) event-driven tag stamp on building
+   enter/exit while pushing an open cart — the write native forgot, keeps the tag live
+   through the whole push; (b) align both vehicle masks with the player mask: viewer
+   inside a building hides ''-tagged non-possessed ghosts (possession exemption stands).
+
+**Minor (accepted, no action):** BuildingStorageSync take-by-itemName picks any same-type
+slot (fungible — cosmetic slot-layout drift at worst); GameStatePatcher logo refresh is a
+one-shot 0.5s delay but the fired action re-reads disk (cosmetic generic logo at worst,
+no recurrence).
