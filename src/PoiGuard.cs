@@ -74,13 +74,7 @@ namespace BigAmbitionsMP
                 //    from the master list, then queue the game's own cache rebuild.
                 if (dead > 0)
                 {
-                    int purged = 0;
-                    try
-                    {
-                        var pois = InstanceBehavior<CityManager>.Instance?.cityMap?.pois;
-                        if (pois != null) purged = pois.RemoveAll(p => p is not null && !p);
-                    }
-                    catch { }
+                    int purged = PurgeMasterList();
                     UI.PermanentPointsOfInterest.UpdatePermanentPointsOfInterest();
                     if (verbose)
                         Plugin.Logger.LogWarning(
@@ -93,6 +87,95 @@ namespace BigAmbitionsMP
                         $"[PoiGuard] HandlePermanentPOIs threw but NO dead pins found — different failure "
                         + $"(event #{_eventCount}): {__exception.GetType().Name}: {__exception.Message}");
                 }
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>Round-198: purge TRUE nulls AND Unity-dead corpses from cityMap.pois.
+        /// (Round-84 purged corpses only; field 20260730-221621 proved true nulls exist and
+        /// NRE the map's own iteration paths.) Logs each corpse's surviving identity so a
+        /// field log can finally name the null-producer.</summary>
+        internal static int PurgeMasterList()
+        {
+            int purged = 0;
+            try
+            {
+                var pois = InstanceBehavior<CityManager>.Instance?.cityMap?.pois;
+                if (pois == null) return 0;
+                for (int i = pois.Count - 1; i >= 0; i--)
+                {
+                    var p = pois[i];
+                    if (p is null) { pois.RemoveAt(i); purged++; continue; }
+                    if (!p)
+                    {
+                        string addr = "<none>";
+                        try { if (p.targetAddress is not null && !p.targetAddress.IsUndefined()) addr = p.targetAddress.ToFormattedString(); } catch { }
+                        Plugin.Logger.LogWarning($"[PoiGuard] purging dead pin from master list: targetAddress='{addr}' isGuider={p.isGuider} hidden={p.hidden}.");
+                        pois.RemoveAt(i); purged++;
+                    }
+                }
+            }
+            catch { }
+            return purged;
+        }
+    }
+
+    /// <summary>
+    /// Round-198 (field 20260730-221621, 'frozen after subway with cart'): CityMap's OWN two
+    /// iteration paths had no guard. A null/dead entry in cityMap.pois:
+    ///   * NREd CityMap.LateUpdate every frame (1,556 in one field log — the round-84 log-erasure
+    ///     class on a different cache), and
+    ///   * NREd CityMap.TogglePois inside the map-CLOSE coroutine, killing it one step BEFORE
+    ///     UnsetNavigationBlocker(Map) — the subway ride then waits forever on the dead close:
+    ///     Map + Subway blockers stranded, game stays paused, total movement lock.
+    /// Heal = purge the bad entries, queue both cache rebuilds, SUPPRESS the throw — for
+    /// TogglePois suppression lets the close coroutine CONTINUE to the blocker release, which is
+    /// the actual un-freeze. MP-gated; SP keeps vanilla behavior.
+    /// </summary>
+    [HarmonyPatch(typeof(CityMap), "LateUpdate")]
+    public static class PoiGuard_CityMapLateUpdate
+    {
+        private static System.Reflection.FieldInfo? _rebuildFlag;
+        private static int _eventCount;
+        private static float _nextVerboseLog;
+
+        static Exception? Finalizer(CityMap __instance, Exception __exception)
+        {
+            if (__exception == null) return null;
+            if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return __exception;
+            try
+            {
+                _eventCount++;
+                bool verbose = _eventCount <= 5 || Time.unscaledTime >= _nextVerboseLog;
+                if (verbose) _nextVerboseLog = Time.unscaledTime + 60f;
+                int purged = PoiGuard.PurgeMasterList();
+                try
+                {
+                    _rebuildFlag ??= AccessTools.Field(typeof(CityMap), "_requirePOIRebuild");
+                    _rebuildFlag?.SetValue(__instance, true);   // rebuild _pointOfInterests from the now-clean master list
+                }
+                catch { }
+                UI.PermanentPointsOfInterest.UpdatePermanentPointsOfInterest();
+                if (verbose)
+                    Plugin.Logger.LogWarning($"[PoiGuard] CityMap.LateUpdate threw ({__exception.GetType().Name}) — purged {purged} bad pin(s), caches queued for rebuild (event #{_eventCount}).");
+            }
+            catch { }
+            return null;
+        }
+    }
+
+    [HarmonyPatch(typeof(CityMap), "TogglePois")]
+    public static class PoiGuard_CityMapTogglePois
+    {
+        static Exception? Finalizer(Exception __exception)
+        {
+            if (__exception == null) return null;
+            if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return __exception;
+            try
+            {
+                int purged = PoiGuard.PurgeMasterList();
+                Plugin.Logger.LogWarning($"[PoiGuard] CityMap.TogglePois threw ({__exception.GetType().Name}) — purged {purged} bad pin(s); throw suppressed so the map close reaches its blocker release (round-198).");
             }
             catch { }
             return null;

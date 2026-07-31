@@ -481,6 +481,31 @@ namespace BigAmbitionsMP
                                                     $"[Rest] FOREIGN BLOCKER HELD (round-90, log-only): '{kv.Key}' for {nowT - kv.Value:F0}s outside any activity — building exits silently dead and WASD frozen while it persists. No action taken.");
                                                 break;
                                             }
+
+                                    // Round-198 (field 20260730-221621): the two TRANSIT keys upgrade from
+                                    // log-only to HEAL under provably-safe conditions — a dead map-close
+                                    // coroutine (null POI, or any other mid-close death) strands 'Map'
+                                    // (and, via the subway ride waiting on that close, 'Subway' + the
+                                    // riding flag + the pause) FOREVER; nothing legitimately holds Map
+                                    // with the map closed for 30s, and no real ride lasts 2 minutes.
+                                    // The heal mirrors what the dead completion would have done — never
+                                    // warps, never touches a pushed cart.
+                                    if (_foreignHeldSince.TryGetValue(NavigationBlocker.Map, out var mapSince)
+                                        && nowT - mapSince >= 30f && !CityMap.IsOpen)
+                                    {
+                                        pc.UnsetNavigationBlocker(NavigationBlocker.Map);
+                                        _foreignHeldSince.Remove(NavigationBlocker.Map);
+                                        Plugin.Logger.LogWarning("[Rest] TRANSIT HEAL: released stranded 'Map' blocker (held 30s+ with the map closed — a dead map-close skipped its release; round-198). Movement restored.");
+                                    }
+                                    if (_foreignHeldSince.TryGetValue(NavigationBlocker.Subway, out var subSince)
+                                        && nowT - subSince >= 120f)
+                                    {
+                                        pc.UnsetNavigationBlocker(NavigationBlocker.Subway);
+                                        _foreignHeldSince.Remove(NavigationBlocker.Subway);
+                                        try { pc.Character?.ToggleVisibility(show: true); } catch { }
+                                        try { HarmonyLib.AccessTools.PropertySetter(typeof(SubwaySystem), "IsRiding")?.Invoke(null, new object[] { false }); } catch { }
+                                        Plugin.Logger.LogWarning("[Rest] TRANSIT HEAL: released stranded 'Subway' blocker (held 120s+ — the ride's completion never ran; visibility restored, riding flag cleared; round-198). Movement restored.");
+                                    }
                                 }
                             }
                             catch { }
