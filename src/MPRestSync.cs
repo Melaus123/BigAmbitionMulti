@@ -210,6 +210,7 @@ namespace BigAmbitionsMP
         private static System.Reflection.FieldInfo? _navBlockerSetField;
         private static System.Reflection.FieldInfo? _navAgentField;
         private static System.Reflection.FieldInfo? _sittingOnField;
+        private static System.Reflection.FieldInfo? _charRbField;   // round-195: kinematic-wedge check
         private static float _cartBadSince = -1f;   // round-83 tripwire: when cart-mode machinery went bad
         private static float _cartWarnNext;         // round-83 tripwire: re-warn throttle
         private static readonly Dictionary<NavigationBlocker, float> _foreignHeldSince = new();   // round-90 foreign-blocker watch
@@ -240,17 +241,37 @@ namespace BigAmbitionsMP
                 // the game keeps it half-alive (walk-away wedge).
                 _suppressedActRef = _curActRef;
 
-                if (CancelButtonIndex >= 0) InvokeDockButton(CancelButtonIndex);
-                else
+                // Decide from the activity's LIVE state, never the poll snapshot:
+                // DockButtons/CancelButtonIndex can be up to 0.5s stale, and auto-start
+                // + already-standing-at-the-station advances NotStarted→Started within
+                // milliseconds. The Cancel button (CancelResting/CancelWorking) is
+                // STATE-ONLY — clicked against an advanced activity it skips the whole
+                // physical teardown (employee brain left on the player character,
+                // station occupied, blocker armed: round-195, field 20260730-194909
+                // 'stuck in cashier', 64s+ frozen). Only a still-NotStarted activity
+                // may use Cancel; anything further along gets the game's own full
+                // teardown, Finish() (identical to the Stop button).
+                var act = _curAct;
+                int liveState = -1;
+                try
                 {
-                    var act = _curAct;
-                    // Mono: the object IS its concrete type — call Finish directly.
                     if (act != null)
                     {
-                        act.GetType().GetMethod("Finish")?.Invoke(act, null);
-                        Plugin.Logger.LogInfo("[Rest] StandUp via Finish() fallback.");
+                        var sm = act.GetType().GetMethod("GetState");
+                        if (sm != null) liveState = Convert.ToInt32(sm.Invoke(act, null));
                     }
                 }
+                catch { }
+
+                if (liveState == (int)PlayerActivityState.NotStarted && CancelButtonIndex >= 0)
+                    InvokeDockButton(CancelButtonIndex);
+                else if (act != null)
+                {
+                    // Mono: the object IS its concrete type — call Finish directly.
+                    act.GetType().GetMethod("Finish")?.Invoke(act, null);
+                    Plugin.Logger.LogInfo($"[Rest] StandUp via Finish() (live state {liveState}).");
+                }
+                else if (CancelButtonIndex >= 0) InvokeDockButton(CancelButtonIndex);   // no activity readable — legacy path
 
                 // NO force-clearing of the UI's activity slot here: the movement
                 // lock it tried to fix was actually the input-suppression latch
@@ -486,11 +507,15 @@ namespace BigAmbitionsMP
                             var ch = pc.Character;
                             if (ch != null)
                             {
-                                bool agentOff = false, seatHeld = false;
+                                bool agentOff = false, seatHeld = false, posOff = false, kinematic = false;
                                 try
                                 {
                                     _navAgentField ??= HarmonyLib.AccessTools.Field(ch.GetType(), "navmeshAgent");
-                                    if (_navAgentField?.GetValue(ch) is UnityEngine.AI.NavMeshAgent ag) agentOff = !ag.enabled;
+                                    if (_navAgentField?.GetValue(ch) is UnityEngine.AI.NavMeshAgent ag)
+                                    {
+                                        agentOff = !ag.enabled;
+                                        posOff = ag.enabled && !ag.updatePosition;   // round-195: ForceToTransform leaves this off
+                                    }
                                 }
                                 catch { }
                                 try
@@ -499,10 +524,37 @@ namespace BigAmbitionsMP
                                     seatHeld = _sittingOnField?.GetValue(ch) is UnityEngine.Object o && o != null;
                                 }
                                 catch { }
-                                if (agentOff || seatHeld)
+                                try
                                 {
+                                    _charRbField ??= HarmonyLib.AccessTools.Field(ch.GetType(), "characterRigidbody");
+                                    if (_charRbField?.GetValue(ch) is Rigidbody rb) kinematic = rb.isKinematic;
+                                }
+                                catch { }
+                                // Round-195 (field 20260730-194909 'stuck in cashier'): a raced
+                                // CancelWorking leaves the STATION's Employee brain component ON the
+                                // player's character (WorkActivity Started assigns the player as the
+                                // station's employee; only Finish() unassigns). Outside any activity
+                                // that component is always residue — the game never staffs the player
+                                // without a WorkActivity in the slot. Release through the game's own
+                                // UnassignEmployee (destroys the component player-safely, restores
+                                // appearance/hands, frees the station) exactly as Finish() would.
+                                Employee emp = null;
+                                try { emp = ch.GetComponent<Employee>(); } catch { }
+                                if (agentOff || seatHeld || posOff || kinematic || emp != null)
+                                {
+                                    if (emp != null)
+                                    {
+                                        try
+                                        {
+                                            var st = emp.employeeStationController;
+                                            if (st != null && ReferenceEquals(st.employee, emp)) st.UnassignEmployee();
+                                            else UnityEngine.Object.Destroy(emp);   // station lost the back-ref — remove the brain directly
+                                        }
+                                        catch { }
+                                        try { Helpers.EnergyHelper.RemoveEnergySpender("work"); } catch { }
+                                    }
                                     ch.Reset();
-                                    Plugin.Logger.LogWarning($"[Rest] NAV HEAL: physical restore via Character.Reset() (agentOff={agentOff} seatHeld={seatHeld}) — the raced cancel skipped the native stand-up teardown (round-73b).");
+                                    Plugin.Logger.LogWarning($"[Rest] NAV HEAL: physical restore via Character.Reset() (agentOff={agentOff} seatHeld={seatHeld} posOff={posOff} kinematic={kinematic} employeeResidue={emp != null}) — a raced cancel skipped the native teardown (round-73b/195).");
                                 }
                             }
                         }
