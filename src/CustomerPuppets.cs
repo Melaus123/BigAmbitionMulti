@@ -1171,6 +1171,26 @@ namespace BigAmbitionsMP
                 var clone = RemotePlayerManager.CloneHeldPropFor(held);
                 if (clone == null) return;
                 pup.heldGo = clone;
+                // Round-214: native colors a pulled basket by copying the RACK's custom
+                // colors (Customer.SetBasket → SetCustomColors(rack.customColors), one
+                // frame deferred); our template clone skipped that line, so mirrored
+                // shoppers carried the default blue in a shop with a recolored rack
+                // (rig 2026-08-01: owner and the puller saw brown, only puppets blue).
+                // Same recipe, same source: the rack in THIS shop.
+                if (held.IndexOf("ShoppingBasket", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    try
+                    {
+                        var rack = InstanceBehavior<BuildingManager>.Instance?.allItemControllers?
+                            .FirstOrDefault(x => x != null && x.itemName == "ba:itemname_stackofshoppingbaskets");
+                        var ic = clone.GetComponent<ItemController>();
+                        // (Native defers this a frame because ITS basket is freshly built;
+                        // our clone comes from a fully-instantiated template — direct is safe.)
+                        if (rack != null && ic != null && rack.customColors != null && rack.customColors.Count > 0)
+                            ic.SetCustomColors(rack.customColors);
+                    }
+                    catch { }
+                }
                 // SetHandContent requires an ItemController on the prop and derefs its members
                 // (TogglePhysics, Item.playerMountPosition, IK points) — keep the LOUD catch permanently:
                 // a silent throw here cost three diagnosis rounds (2026-07-07).
