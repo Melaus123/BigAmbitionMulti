@@ -39,6 +39,7 @@ namespace BigAmbitionsMP
         private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<CustomerEntry, string> _ownerIds = new();
         private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Order, string> _seededOrderIds = new();
         private static readonly Dictionary<string, int> _lastSeedLogged = new();   // DIAG(econ-verify)
+        private static readonly Dictionary<string, int> _lastCapacitySig = new();  // round-213: capacity recompute only on real seed changes
         private static int _idCounter;
 
         private static string IdOf(CustomerEntry e)
@@ -225,7 +226,22 @@ namespace BigAmbitionsMP
 
                 // The spawner refuses when customerCapacity is 0 — the replica's is often unset (the
                 // native computation runs owner-side). Data-level recompute from the synced items.
-                try { BusinessHelper.UpdateCustomerCapacity(reg); } catch { }
+                // Round-213: the recompute tail (→ RemoveUnusedRetailPrices → demand recomputes) ran
+                // on EVERY re-push — pure churn while the interior re-send loop was live. Only when
+                // the seeded set actually changed, or capacity is still unset (the reason it exists).
+                try
+                {
+                    int sig = fresh.Count;
+                    foreach (var f in fresh) if (f?.order != null) sig = sig * 31 + f.order.entries.Count;
+                    string akCap = GameStateReader.AddressKey(reg);
+                    bool capacityUnset = false; try { capacityUnset = reg.customerCapacity <= 0; } catch { }
+                    if (capacityUnset || !_lastCapacitySig.TryGetValue(akCap, out var prevSig) || prevSig != sig)
+                    {
+                        _lastCapacitySig[akCap] = sig;
+                        BusinessHelper.UpdateCustomerCapacity(reg);
+                    }
+                }
+                catch { }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] seed: {ex.Message}"); }
         }

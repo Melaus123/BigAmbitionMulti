@@ -1365,6 +1365,7 @@ namespace BigAmbitionsMP
                     catch { }
 
                     Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' {InteriorSync.SnapshotSummary(payload)} (changed={changedIds.Count} moved={movedIds.Count} cargoOnly={cargoOnlyIds.Count} removed={removedIds.Count}){_deltaNames}.");
+                    InteriorSync.NoteSnapshotApply(payload.AddressKey);   // round-213: re-send-loop detector
 
                     // Trigger a visual refresh of the interior IF the local
                     // player is currently inside THIS building.  Writing to

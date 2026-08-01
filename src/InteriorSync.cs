@@ -52,6 +52,12 @@ namespace BigAmbitionsMP
             _lastHashByAddr.Clear();
             _ownerSnapshotsByAddr.Clear();
             _lastLocalOwnerHashByAddr.Clear();
+            _lastStructHashByAddr.Clear();
+            _volatileSentAtByAddr.Clear();
+            _lastLocalOwnerStructByAddr.Clear();
+            _lastLocalOwnerVolatileAt.Clear();
+            _applyTimes.Clear();
+            _loopWarnedAt.Clear();
             _lastPollAt = 0f;
             _lastOwnerPollAt = 0f;
             _localOwnerAddress = "";
@@ -163,9 +169,21 @@ namespace BigAmbitionsMP
                 {
                     var snap = BuildSnapshotForHostSend(addr);
                     if (snap == null) continue;
-                    int hash = ComputeHash(snap);
-                    if (_lastHashByAddr.TryGetValue(addr, out var prev) && prev == hash) continue;
-                    _lastHashByAddr[addr] = hash;
+                    // Round-213: split gate. Structure changes (owner edits) send at the
+                    // 2s beat as before; VOLATILE-only churn (cargo as customers buy,
+                    // dirt underfoot, item state) coalesces - the rig 2026-08-01 loop
+                    // shipped the full 754-item interior every beat for one visitor.
+                    var (hs, hv) = ComputeHashes(snap);
+                    bool fullChanged = !_lastHashByAddr.TryGetValue(addr, out var pf) || pf != hv;
+                    if (!fullChanged) continue;
+                    bool structChanged = !_lastStructHashByAddr.TryGetValue(addr, out var ps) || ps != hs;
+                    if (!structChanged
+                        && _volatileSentAtByAddr.TryGetValue(addr, out var tSent)
+                        && now - tSent < VolatileCoalesceSeconds)
+                        continue;
+                    _lastHashByAddr[addr] = hv;
+                    _lastStructHashByAddr[addr] = hs;
+                    _volatileSentAtByAddr[addr] = now;
                     if (_subsByBuilding.TryGetValue(addr, out var set))
                         MPServer.BroadcastInteriorSnapshotTo(set, snap);
                 }
@@ -411,10 +429,24 @@ namespace BigAmbitionsMP
                         $"[InteriorSync] owner push for '{addressKey}' ({reason}) carries NO items — sent WITHOUT item authority " +
                         "so it cannot clear the stored interior. If this shop really is empty on this machine, its contents are " +
                         "missing locally (stale/mismatched character save) — the host's copy is the good one.");
-                int hash = ComputeHash(snap);
-                if (!force && _lastLocalOwnerHashByAddr.TryGetValue(addressKey, out var prev) && prev == hash)
-                    return true;
-                _lastLocalOwnerHashByAddr[addressKey] = hash;
+                // Round-213: same split gate as the host subscriber tick - an owner
+                // standing in their own busy shop pushed the full interior every 2s
+                // beat on cargo/dirt churn; the host relayed each to every visitor.
+                var (ohs, ohv) = ComputeHashes(snap);
+                float onow = UnityEngine.Time.realtimeSinceStartup;
+                if (!force)
+                {
+                    bool fullChanged = !_lastLocalOwnerHashByAddr.TryGetValue(addressKey, out var prev) || prev != ohv;
+                    if (!fullChanged) return true;
+                    bool structChanged = !_lastLocalOwnerStructByAddr.TryGetValue(addressKey, out var pStruct) || pStruct != ohs;
+                    if (!structChanged
+                        && _lastLocalOwnerVolatileAt.TryGetValue(addressKey, out var tSent)
+                        && onow - tSent < VolatileCoalesceSeconds)
+                        return true;
+                }
+                _lastLocalOwnerHashByAddr[addressKey] = ohv;
+                _lastLocalOwnerStructByAddr[addressKey] = ohs;
+                _lastLocalOwnerVolatileAt[addressKey] = onow;
                 MPClient.SendInteriorOwnerSnapshot(snap);
 #if BAMP_DEV
                 // Change-gated already (hash-skip above), but still ~290 lines/session in one capture —
@@ -932,99 +964,104 @@ namespace BigAmbitionsMP
         /// Order-sensitive hash over the snapshot's contents.  Collisions just
         /// mean one missed broadcast, recoverable on the next change.
         /// </summary>
-        internal static int ComputeHash(InteriorSnapshotPayload snap)
+        internal static int ComputeHash(InteriorSnapshotPayload snap) => ComputeHashes(snap).full;
+
+        // Round-213 state: split-gate bookkeeping (subscriber + owner ticks) and the
+        // re-send-loop detector.
+        private const float VolatileCoalesceSeconds = 12f;
+        private static readonly Dictionary<string, int>   _lastStructHashByAddr       = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, float> _volatileSentAtByAddr       = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, int>   _lastLocalOwnerStructByAddr = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, float> _lastLocalOwnerVolatileAt   = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, Queue<float>> _applyTimes   = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, float>        _loopWarnedAt = new(StringComparer.Ordinal);
+
+        /// <summary>Round-213 detector: repeated full snapshots for one address are the
+        /// SILENT re-send loop - no exception, no warning, invisible to every triage
+        /// lens until someone eyeballs a grep (rig 2026-08-01: 15x the same 754-item
+        /// interior). Called from the receiver apply; warns loudly, throttled.</summary>
+        internal static void NoteSnapshotApply(string addr)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addr)) return;
+                float now = UnityEngine.Time.realtimeSinceStartup;
+                if (!_applyTimes.TryGetValue(addr, out var q)) _applyTimes[addr] = q = new Queue<float>();
+                q.Enqueue(now);
+                while (q.Count > 0 && now - q.Peek() > 60f) q.Dequeue();
+                // Threshold 10: the COALESCED steady state is ~6/min (five 12s volatile
+                // beats + the on-entry send — rig-measured 2026-08-01, exactly 6 fired a
+                // false warn); a genuine loop runs ~30/min. 10 splits them cleanly.
+                if (q.Count >= 10 && (!_loopWarnedAt.TryGetValue(addr, out var w) || now - w > 120f))
+                {
+                    _loopWarnedAt[addr] = now;
+                    Plugin.Logger.LogWarning($"[InteriorSync] RESEND LOOP: '{addr}' received {q.Count} interior snapshots in 60s - volatile churn is supposed to coalesce (round-213); include this log in a report.");
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>Round-213: one pass, two hashes. `structure` covers owner-meaningful
+        /// state - layout, designs, retail prices, the item set with positions, queue
+        /// points (round-137), aliases, sign text/product (round-190b), factory config
+        /// (task-28), paint (round-99d). `full` additionally folds the VOLATILE fields
+        /// that churn continuously in a customer-filled shop: dirt values (the X/Z
+        /// lattice itself is fixed), item StateIndex, and cargo. All rounding rules are
+        /// unchanged from the single-hash version this replaces.</summary>
+        internal static (int structure, int full) ComputeHashes(InteriorSnapshotPayload snap)
         {
             unchecked
             {
-                int h = 17;
-                h = h * 31 + MPAudit.StableHash(snap.Layout);
+                int hs = 17, hv = 17;
+                void S(int v) { hs = hs * 31 + v; hv = hv * 31 + v; }   // structure -> both
+                void V(int v) { hv = hv * 31 + v; }                     // volatile -> full only
+
+                S(MPAudit.StableHash(snap.Layout));
                 foreach (var d in snap.InteriorDesigns)
                 {
-                    h = h * 31 + MPAudit.StableHash(d.UUID);
-                    foreach (var m in d.Materials)
-                    {
-                        h = h * 31 + MPAudit.StableHash(m.MaterialID);
-                        h = h * 31 + m.MaterialIndex;
-                        h = h * 31 + m.ColorIndex;
-                    }
+                    S(MPAudit.StableHash(d.UUID));
+                    foreach (var m in d.Materials) { S(MPAudit.StableHash(m.MaterialID)); S(m.MaterialIndex); S(m.ColorIndex); }
                 }
-                foreach (var rp in snap.RetailPrices)
-                {
-                    h = h * 31 + MPAudit.StableHash(rp.ItemName);
-                    h = h * 31 + rp.Price.GetHashCode();
-                }
+                foreach (var rp in snap.RetailPrices) { S(MPAudit.StableHash(rp.ItemName)); S(rp.Price.GetHashCode()); }
                 foreach (var ds in snap.DirtSpots)
                 {
-                    h = h * 31 + ds.X;
-                    h = h * 31 + ds.Z;
-                    // Round Dirtiness to 1 decimal place so micro-fluctuations
-                    // from NPCs walking around don't trigger broadcasts every
-                    // poll cycle.  We still see meaningful changes (0.1 step).
-                    h = h * 31 + ((int)System.Math.Round(ds.Dirtiness * 10f)).GetHashCode();
+                    S(ds.X); S(ds.Z);
+                    V(((int)System.Math.Round(ds.Dirtiness * 10f)).GetHashCode());   // 0.1 steps, as before
                 }
-                // Items — hash core identity + position so adds/moves/removes
-                // trigger broadcasts.  Cargo amounts/prices are part of items'
-                // visible state and worth hashing too.
                 foreach (var it in snap.ItemInstances)
                 {
-                    h = h * 31 + MPAudit.StableHash(it.Id);
-                    h = h * 31 + MPAudit.StableHash(it.ItemName);
-                    // Round positions to nearest cm so 0.001f jitter doesn't trigger.
-                    h = h * 31 + ((int)System.Math.Round(it.Px * 100f)).GetHashCode();
-                    h = h * 31 + ((int)System.Math.Round(it.Py * 100f)).GetHashCode();
-                    h = h * 31 + ((int)System.Math.Round(it.Pz * 100f)).GetHashCode();
-                    h = h * 31 + ((int)System.Math.Round(it.YRotation * 10f)).GetHashCode();
-                    // Round-137: the drawn queue MUST diff - its omission meant a queue redraw never
-                    // re-broadcast, freezing diverged copies on every machine (the 1-spot-till bug).
+                    S(MPAudit.StableHash(it.Id));
+                    S(MPAudit.StableHash(it.ItemName));
+                    S(((int)System.Math.Round(it.Px * 100f)).GetHashCode());
+                    S(((int)System.Math.Round(it.Py * 100f)).GetHashCode());
+                    S(((int)System.Math.Round(it.Pz * 100f)).GetHashCode());
+                    S(((int)System.Math.Round(it.YRotation * 10f)).GetHashCode());
                     var cps = it.CustomPositions;
-                    h = h * 31 + (cps?.Count ?? 0);
+                    S(cps?.Count ?? 0);
                     if (cps != null)
-                        foreach (var cp in cps)
-                        {
-                            h = h * 31 + ((int)System.Math.Round(cp.X * 10f)).GetHashCode();
-                            h = h * 31 + ((int)System.Math.Round(cp.Z * 10f)).GetHashCode();
-                        }
-                    h = h * 31 + it.StateIndex;
-                    h = h * 31 + MPAudit.StableHash(it.Alias);
-                    // Round-190b (rig test: a text-sign RENAME and a product-sign SELECTION never
-                    // reached the host — initial placement conveyed, later edits stale forever):
-                    // the two player-editable sign fields were in IdentitySig but NOT hashed, so
-                    // the change detector never fired — the round-99 colors-omitted class, two
-                    // more members.  Hashed ⇒ push fires ⇒ IdentitySig differs ⇒ receiver
-                    // respawns the item and the binding re-derives natively.
-                    h = h * 31 + MPAudit.StableHash(it.WorldSpaceTextValue);
-                    h = h * 31 + MPAudit.StableHash(it.LinkedItemName);
-                    // Task-28 fix 1: factory config is visible state — a recipe/priority/limit
-                    // edit must trigger a broadcast (it applies in place on the receiver).
+                        foreach (var cp in cps) { S(((int)System.Math.Round(cp.X * 10f)).GetHashCode()); S(((int)System.Math.Round(cp.Z * 10f)).GetHashCode()); }
+                    V(it.StateIndex);
+                    S(MPAudit.StableHash(it.Alias));
+                    S(MPAudit.StableHash(it.WorldSpaceTextValue));
+                    S(MPAudit.StableHash(it.LinkedItemName));
                     if (it.WorkstationType != null)
                     {
-                        h = h * 31 + MPAudit.StableHash(it.WorkstationType);
-                        h = h * 31 + MPAudit.StableHash(it.SelectedRecipeId);
-                        h = h * 31 + it.WsPriority;
-                        h = h * 31 + (it.ProduceUpTo ? 1 : 0);
-                        h = h * 31 + it.ProduceUpToValue;
+                        S(MPAudit.StableHash(it.WorkstationType));
+                        S(MPAudit.StableHash(it.SelectedRecipeId));
+                        S(it.WsPriority);
+                        S(it.ProduceUpTo ? 1 : 0);
+                        S(it.ProduceUpToValue);
                     }
-                    // Round-99d: PAINT is visible state — without it a repaint produced no hash
-                    // change, so the push only rode the ~30s re-assert (measured 20-30s color
-                    // latency). Third member of the colors-omitted class (dead guards, IdentitySig).
-                    foreach (var cc in it.CustomColors)
-                    {
-                        h = h * 31 + cc.Channel;
-                        h = h * 31 + cc.ColorPacked;
-                    }
+                    foreach (var cc in it.CustomColors) { S(cc.Channel); S(cc.ColorPacked); }
                     foreach (var c in it.CargoInstances)
                     {
-                        h = h * 31 + MPAudit.StableHash(c.ItemName);
-                        h = h * 31 + c.Amount;
-                        h = h * 31 + ((int)System.Math.Round(c.PricePerUnit * 100f)).GetHashCode();
-                        foreach (var cc in c.CustomColors)
-                        {
-                            h = h * 31 + cc.Channel;
-                            h = h * 31 + cc.ColorPacked;
-                        }
+                        V(MPAudit.StableHash(c.ItemName));
+                        V(c.Amount);
+                        V(((int)System.Math.Round(c.PricePerUnit * 100f)).GetHashCode());
+                        foreach (var cc in c.CustomColors) { V(cc.Channel); V(cc.ColorPacked); }
                     }
                 }
-                return h;
+                return (hs, hv);
             }
         }
     }
