@@ -812,3 +812,44 @@ exists now.
 slot (fungible — cosmetic slot-layout drift at worst); GameStatePatcher logo refresh is a
 one-shot 0.5s delay but the fired action re-reads disk (cosmetic generic logo at worst,
 no recurrence).
+
+## Class 17 — Scene scan on a recurring path (principle 3: registries over sweeps)
+
+**Shape:** `FindObjectsOfType` / `FindObjectOfType` / broad `GetComponentsInChildren`
+reached from a per-frame tick or a short-interval timer. A whole-scene search costs
+~tens of ms in a loaded city and its stutter is invisible to per-frame averages —
+it presents as rhythmic fps sawtooth whose period equals the caller's cadence.
+
+**Field instance (the proof):** round-207f — IsLoadingOverlayUp ran
+FindObjectOfType(LoadingScreen) on a 0.25s recheck = 4×60ms scans/second = the
+period≈0.24s oscillation reported by the user, streamers, and two Tali bundles,
+repeatedly mis-triaged as "machine struggling". Fixed via the game's own singleton
+(InstanceBehavior<LoadingScreen>.Instance). Secondary: MPLifecycle.IntroActive
+scanned per frame through menus/creation/pre-spawn — fixed via an Awake-hook
+registry (Unity fake-null auto-deregisters; no OnDestroy needed).
+
+**Grep:** `grep -n "FindObjectsOfType\|FindObjectOfType" src/*.cs` then classify
+each site's CALLING CADENCE (the site itself never tells you; walk to the caller).
+
+**Audit 2026-08-01 (full classification, 20 sites):**
+- FIXED: MPCanvasUI overlay check (singleton); MPLifecycle intro check (registry).
+- Cached-with-lazy-fill (safe): GameStatePatcher FindCBC (_cbcCache, positions
+  immutable per load); MPCanvasUI black-overlay canvas (cached + loss-timer);
+  GameStateReader GSC instance (null-guarded fill).
+- Event/one-shot (safe): interior/business/leaderboard/map-filter apply sites,
+  MPHubNativePage app-open, MPPhoneButton injection, MPPatches PurchaseUI,
+  BusinessSync LogSceneCBCCounts (snapshot bootstrap), CustomerPuppets duty-home.
+- Menu-scene only (safe): MPCanvasUI theme capture trio + MainMenuController finds.
+- Bounded-retry by design (accepted): MPBugReport button recycle (1s until
+  success, self-disarming, per-world reset).
+- WATCH: CustomerPuppets.NearestItem — FindObjectsOfType<ItemController> per
+  serve-FETCH (event-driven but frequent in a busy both-inside shop). Puppets
+  perf bracket measures ~0.02ms avg today; revisit if it climbs.
+
+**Safe-fix ladder:** (1) native singleton/instance accessor if one exists;
+(2) self-registration at spawn via Harmony hook + fake-null deregistration;
+(3) cache + re-find only on loss, at a slow timer;
+(4) if a scan must stay: bound it (until-success latch) and document why.
+
+**Standing detector:** MPFrameRhythm ships in every build — a new recurring scan
+presents as named-bracket hitches with a measured period within one session.
