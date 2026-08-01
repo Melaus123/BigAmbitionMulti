@@ -3884,6 +3884,11 @@ namespace BigAmbitionsMP
         private float  _spScroll, _spContentH;
         private string _spExpanded   = "";   // base name of the expanded playthrough (accordion)
         private string _spSelSession = "";   // session selected to host
+        // Store v2: what the picker LISTED each session name as (name → playthrough id;
+        // "" = ambiguous, two playthroughs list the same name). Pinned at load-click so
+        // the load resolves to the world the player was actually shown.
+        private readonly System.Collections.Generic.Dictionary<string, string> _spPidBySession =
+            new(StringComparer.OrdinalIgnoreCase);
         private bool   _spShowRecovery;      // native-parity: automatic saves hidden behind a toggle,
                                              // like vanilla's "show recover saves" (2026-07-07)
         // Plain ref type (NOT a [Serializable] ValueTuple) — a List<ValueTuple<RectTransform,string>>
@@ -4495,7 +4500,7 @@ namespace BigAmbitionsMP
         private void RefreshSavePicker()
         {
             if (_spContent == null) return;
-            _spHeaderHits.Clear(); _spVarHits.Clear();
+            _spHeaderHits.Clear(); _spVarHits.Clear(); _spPidBySession.Clear();
             for (int i = _spContent.childCount - 1; i >= 0; i--)
             { try { var c = _spContent.GetChild(i).gameObject; c.SetActive(false); Destroy(c); } catch { } }
 
@@ -4557,6 +4562,16 @@ namespace BigAmbitionsMP
                 ApplyFont(MakeLabel(hgo.transform, $"{dayPart}{vis.Count} save{(vis.Count == 1 ? "" : "s")}",
                     12, C_LD_MUT, CARD_W - 152f, 0f, 140f, HROW, TextAlignmentOptions.Right));
                 _spHeaderHits.Add(new SpHit(hrt, run.Base));
+                // Store v2: remember which world each listed name belongs to (all variants,
+                // expanded or not); a name shown by two playthroughs maps to "" = ambiguous.
+                foreach (var pv in run.Variants)
+                {
+                    if (string.IsNullOrEmpty(pv.PlaythroughId)) continue;
+                    if (_spPidBySession.TryGetValue(pv.SessionName, out var prev) && prev != pv.PlaythroughId)
+                        _spPidBySession[pv.SessionName] = "";
+                    else
+                        _spPidBySession[pv.SessionName] = pv.PlaythroughId;
+                }
 
                 if (expanded)
                 {
@@ -4694,6 +4709,18 @@ namespace BigAmbitionsMP
         {
             if (string.IsNullOrEmpty(_spSelSession)) { SetStatus("Pick a save first.", true); return; }
             string name = _spSelSession;
+            // Store v2: pin the picked save's world BEFORE any manifest read below, so a
+            // name shared by two playthroughs resolves to the one the player clicked.
+            // Ambiguous ("") or unmapped names fall back to newest-wins with a loud log.
+            try
+            {
+                if (_spPidBySession.TryGetValue(name, out var pickedPid) && !string.IsNullOrEmpty(pickedPid))
+                {
+                    MPSaveManager.NoteSessionPid(name, pickedPid);
+                    MPSaveManager.NoteSessionPid(MPSaveManager.StripToBase(name), pickedPid);
+                }
+            }
+            catch { }
             Plugin.Logger.LogInfo($"[MenuUI] Save picker → host session '{name}'.");
             ShowSavePicker(false);
             _lobbyLoadMode = true;
@@ -4974,8 +5001,18 @@ namespace BigAmbitionsMP
         private void OnToggleShowIp() { _showIp = !_showIp; Plugin.Logger.LogInfo($"[MenuUI] Show IP = {_showIp}"); RefreshLobbyWindow(); }
 
         // Round-93: transient lobby notice (overlay-disabled etc.) — shown on the conn-info line for a beat.
-        private string _lobbyNotice = "";
-        private float  _lobbyNoticeUntil;
+        private static string _lobbyNotice = "";
+        private static float  _lobbyNoticeUntil;
+
+        /// <summary>Round-215: let non-UI code (e.g. the server's version-mismatch
+        /// refusal) surface a transient notice on the lobby's info strip. Before
+        /// this, a refused joiner was explained on the JOINER's screen only — the
+        /// host saw nothing and filed "impossible to join" reports.</summary>
+        internal static void PostLobbyNotice(string msg, float seconds = 12f)
+        {
+            _lobbyNotice = msg;
+            _lobbyNoticeUntil = Time.unscaledTime + seconds;
+        }
 
         private void OnInviteFriends()
         {

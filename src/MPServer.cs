@@ -411,6 +411,11 @@ namespace BigAmbitionsMP
                         HsgGzipBase64    = "",
                         Money            = Math.Max(0f, kc),
                         FallbackSettings = LastStartSettings,
+                        // Round-217: a fresh character still joins a NAMED world — identity
+                        // at birth means this is never blank (the rig case: blank here left
+                        // the client with no active playthrough, and its first save landed
+                        // in '_unresolved').
+                        PlaythroughId    = MPSaveCoordinator.ActivePlaythroughId,
                     }));
                     Plugin.Logger.LogWarning($"[Server] No save slot for new player '{pid}' (stable={stable}) — sent fresh-character fallback.");
                     continue;
@@ -426,7 +431,9 @@ namespace BigAmbitionsMP
                     // Handoff slice 4: world identity/day/epoch for the joiner's
                     // rollback-consent check.
                     WorldDay      = m.WorldDay,
-                    PlaythroughId = m.PlaythroughId ?? "",
+                    // Round-217: never send a blank identity — a pre-first-save manifest
+                    // may not be stamped yet, but the live world always knows itself.
+                    PlaythroughId = !string.IsNullOrEmpty(m.PlaythroughId) ? m.PlaythroughId : MPSaveCoordinator.ActivePlaythroughId,
                     HostEpoch     = m.HostEpoch,
                 };
                 Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", payload));
@@ -622,6 +629,9 @@ namespace BigAmbitionsMP
             if (!_running) return;
             LastStartSettings = settings;
             MPLoadProfiler.Mark($"HOST StartNewGame ({settings.Difficulty}) — {_clients.Count} client(s)");
+            // Round-217: identity at birth — mint the playthrough BEFORE anything can be
+            // sent to a joiner, so no welcome package ever says "world: (blank)".
+            MPSaveCoordinator.HostBeginNewWorldIdentity();
             IsInLobby = false;
             GrantSync.ResetStore();   // fresh world — no grants; flush any store left by a previously loaded
                                       // session (the scene reset no longer wipes the store, 2026-06-30)
@@ -1798,6 +1808,17 @@ namespace BigAmbitionsMP
                 $"[Server] Hello from '{hello.PlayerId}' refused — version mismatch " +
                 $"(client mod {hello.Version}/p{hello.Protocol}/{hello.Game} vs host {MyPluginInfo.PLUGIN_VERSION}/p{ProtocolInfo.Version}/{hostGame}).");
             try { peer.Disconnect(System.Text.Encoding.UTF8.GetBytes($"BAMP:version:{MyPluginInfo.PLUGIN_VERSION}|{hostGame}")); } catch { }
+            // Round-215: tell the HOST too — they only saw "friend never appeared"
+            // and filed "impossible to join" (field report 2026-07-31, host 0.1.14
+            // vs joiner 0.1.16). Name whichever side is the mismatch we detected.
+            try
+            {
+                string detail = !protocolOk
+                    ? $"they have mod {hello.Version}, you have {MyPluginInfo.PLUGIN_VERSION}"
+                    : $"they have game {hello.Game}, you have {hostGame}";
+                MPCanvasUI.PostLobbyNotice($"{hello.PlayerId} can't join — {detail}. Both need the same version.");
+            }
+            catch { }
             return false;
         }
 
@@ -3469,7 +3490,7 @@ namespace BigAmbitionsMP
                 {
                     SessionName = adopt, HsgGzipBase64 = data.Value.b64, RawLength = data.Value.raw, Money = cash,
                     // Handoff slice 4: identity/day/epoch for the joiner's log-only diagnostics.
-                    WorldDay = m?.WorldDay ?? 0, PlaythroughId = m?.PlaythroughId ?? "", HostEpoch = m?.HostEpoch ?? 0,
+                    WorldDay = m?.WorldDay ?? 0, PlaythroughId = !string.IsNullOrEmpty(m?.PlaythroughId) ? m.PlaythroughId : MPSaveCoordinator.ActivePlaythroughId, HostEpoch = m?.HostEpoch ?? 0,
                 }));
                 Plugin.Logger.LogInfo($"[Server] Mid-session join: sent LoadData to '{pid}' (source='{servedFrom}', adopt='{adopt}', {data.Value.raw}B, ${cash:F0}); world state follows once their scene loads.");
                 return true;
@@ -3483,7 +3504,8 @@ namespace BigAmbitionsMP
             }
             float kc = GetKnownCash(pid);
             Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
-            { SessionName = adopt, HsgGzipBase64 = "", Money = Math.Max(0f, kc), FallbackSettings = LastStartSettings }));
+            { SessionName = adopt, HsgGzipBase64 = "", Money = Math.Max(0f, kc), FallbackSettings = LastStartSettings,
+              PlaythroughId = MPSaveCoordinator.ActivePlaythroughId }));   // round-217: identity always travels
             // 4a diagnostic: fresh-starting someone who OWNS property is the "lost character" smoking gun —
             // they had a session presence but no save survived. Loud ERROR so a bug report pinpoints it;
             // genuinely-new joiners stay at INFO.

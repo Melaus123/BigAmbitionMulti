@@ -57,7 +57,7 @@ namespace BigAmbitionsMP
                     _activeManifest = null;
                     // Reset (new lobby) drops the world identity; a RENAME (non-empty) keeps it —
                     // saving under a new name is still the same world.
-                    if (string.IsNullOrEmpty(_activeSessionName)) { _activePlaythroughId = ""; _activeHostEpoch = 1; _midJoinSource = ""; PortraitFolder = null; }
+                    if (string.IsNullOrEmpty(_activeSessionName)) { _activePlaythroughId = ""; _activeHostEpoch = 1; _midJoinSource = ""; PortraitFolder = null; MPSaveManager.ClearActivePlaythrough(); }
                 }
             }
         }
@@ -87,6 +87,7 @@ namespace BigAmbitionsMP
                     _activeSessionName = DefaultSessionName();
                 session = _activeSessionName;
             }
+            EnsureActivePid(session);   // round-216: BEFORE any rotation/lineage probe
 
             // AUTOMATIC saves write SIBLING sessions so they never overwrite the player's
             // MANUAL save (the base).  Only genuinely user-initiated saves (pause-menu /
@@ -117,7 +118,7 @@ namespace BigAmbitionsMP
 
             try
             {
-                var payload = new SaveNowPayload { SessionName = session, Reason = reason };
+                var payload = new SaveNowPayload { SessionName = session, Reason = reason, PlaythroughId = ActivePlaythroughId };
                 MPServer.BroadcastAny(MessageEnvelope.Create(MessageType.SaveNow, "host", payload));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] SaveNow broadcast: {ex.Message}"); }
@@ -231,10 +232,11 @@ namespace BigAmbitionsMP
             // relocates it during automatic saves and after a disconnect-save commit) — a
             // MANUAL save must always land on the lineage base, like HostSaveNow's strip.
             session = StripAutoSuffix(session);
+            EnsureActivePid(session);   // round-216: BEFORE any path probe
             Plugin.Logger.LogInfo($"[MPSave] HostSaveSync session='{session}' reason={reason} (inline).");
             try
             {
-                var payload = new SaveNowPayload { SessionName = session, Reason = reason };
+                var payload = new SaveNowPayload { SessionName = session, Reason = reason, PlaythroughId = ActivePlaythroughId };
                 MPServer.BroadcastAny(MessageEnvelope.Create(MessageType.SaveNow, "host", payload));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] HostSaveSync broadcast: {ex.Message}"); }
@@ -332,6 +334,17 @@ namespace BigAmbitionsMP
         {
             if (payload == null || string.IsNullOrEmpty(payload.SessionName)) return;
             string session = payload.SessionName;   // where THIS save goes (may be "<base>-auto")
+            // Round-217: the order names its world — pin BEFORE writing a byte, so a
+            // session name this client has never seen still files under the right
+            // playthrough (the rig case: host's manual save under a brand-new name
+            // reached the client ahead of any mirror piece for it, and the client's
+            // own save landed in '_unresolved' → the upload then found nothing).
+            if (!string.IsNullOrEmpty(payload.PlaythroughId))
+            {
+                MPSaveManager.SetActivePlaythrough(payload.PlaythroughId);
+                MPSaveManager.NoteSessionPid(session, payload.PlaythroughId);
+                MPSaveManager.NoteSessionPid(StripAutoSuffix(session), payload.PlaythroughId);
+            }
             // Keep the client's durable session pointer on the manual BASE, mirroring
             // the host (HostSaveNow leaves _activeSessionName on the base and only
             // suffixes the per-save copy).  If an automatic sibling name ("-auto",
@@ -631,6 +644,27 @@ namespace BigAmbitionsMP
         /// <summary>Host: (re)load an MP session — restore the ownership map, ship
         /// each connected client its stored .hsg, and load the host's own.  Safe
         /// from any thread.</summary>
+        /// <summary>Round-217: a world's identity is born WITH the world, not at its
+        /// first save. Host calls this when beginning a brand-NEW world (StartNewGame)
+        /// so every LoadData/SaveNow sent afterwards — including to mid-join clients
+        /// while the world is still loading — names the playthrough. Always mints
+        /// fresh: a new world is never the previous one, so any lingering identity
+        /// from an earlier session must not leak into it. Loaded worlds adopt their
+        /// identity in HostLoadSession instead.</summary>
+        public static void HostBeginNewWorldIdentity()
+        {
+            lock (_lock)
+            {
+                _activePlaythroughId = Guid.NewGuid().ToString("N");
+                _activeManifest      = null;   // a new world never continues an old manifest
+                _activeSessionName   = "";     // named at first save (DefaultSessionName)
+                _activeHostEpoch     = 1;
+                _midJoinSource       = "";
+                MPSaveManager.SetActivePlaythrough(_activePlaythroughId);
+                Plugin.Logger.LogInfo($"[MPSave] New world — playthrough {_activePlaythroughId} minted at world start.");
+            }
+        }
+
         public static void HostLoadSession(string session)
         {
             if (!MPServer.IsRunning) return;
@@ -651,6 +685,10 @@ namespace BigAmbitionsMP
             // (works identically on the original host and on a member hosting from their
             // MIRRORED copy of the store; every save stamps the new value + our identity).
             lock (_lock) { _activeSessionName = lineage; _activeManifest = m; _activePlaythroughId = m.PlaythroughId ?? ""; _activeHostEpoch = Math.Max(1, m.HostEpoch + 1); _midJoinSource = session; }
+            // Store v2: the loaded world's identity becomes the active playthrough folder
+            // (name-only writes for this family land there). Empty pid = legacy world —
+            // the first EnsureManifest mint below will stamp + activate it.
+            if (!string.IsNullOrEmpty(m.PlaythroughId)) MPSaveManager.SetActivePlaythrough(m.PlaythroughId);
 
             // One greppable line so any submitted log answers "did the host change hands?"
             // (user 2026-07-23) — the manifest records who hosted last; compare to this machine.
@@ -694,6 +732,15 @@ namespace BigAmbitionsMP
             // An empty payload pid (fresh start / special branches / pre-field host)
             // CLEARS it; the marker then falls back to the mirrored manifest.
             _wireWorldPid = p.PlaythroughId ?? "";
+            // Store v2: the join tells us exactly which world this session is — pin the
+            // name and activate the playthrough so every local write (own slot, ledger,
+            // disconnect save) lands in the right folder from the first byte.
+            MPSaveManager.SetActivePlaythrough(_wireWorldPid);
+            if (!string.IsNullOrEmpty(_wireWorldPid) && !string.IsNullOrEmpty(p.SessionName))
+            {
+                MPSaveManager.NoteSessionPid(p.SessionName, _wireWorldPid);
+                MPSaveManager.NoteSessionPid(StripAutoSuffix(p.SessionName), _wireWorldPid);
+            }
             // Proposal 2 (2026-06-17): host says our saved character exists but its .hsg can't be read right
             // now — do NOT fresh-start (that abandons the real save). Leave cleanly so the player can reconnect
             // to retry, or the host can recover the file. Checked BEFORE the empty-hsg fresh path below.
@@ -1206,10 +1253,31 @@ namespace BigAmbitionsMP
                 string session = SanitizeSession(p.SessionName);
                 if (string.IsNullOrEmpty(session)) return;
 
-                // Clobber guard (review fix 2026-07-23): a SAME-NAMED local session that
-                // belongs to a DIFFERENT world must never be overwritten — a mirror only
-                // applies to its own lineage. Warned once per session name per run.
-                if (!string.IsNullOrEmpty(p.PlaythroughId))
+                if (MPSaveManager.StoreFormat() == 2 && !string.IsNullOrEmpty(p.PlaythroughId))
+                {
+                    // Store v2: the payload names its world — pin BOTH the piece's session
+                    // and its family base so every write below lands in <pid>/<session>.
+                    // A same-named world in another playthrough is a different folder,
+                    // so the v1 collision cannot occur (decision F: host overwrites
+                    // propagate; no refusal path for same-lineage updates).
+                    MPSaveManager.NoteSessionPid(session, p.PlaythroughId);
+                    MPSaveManager.NoteSessionPid(StripAutoSuffix(session), p.PlaythroughId);
+                    // Corruption assert, LOUD per decision F: a manifest already at the
+                    // target path claiming a DIFFERENT world means the store itself is
+                    // damaged — refuse and say so on screen, never silently.
+                    string atTarget = "";
+                    try { atTarget = MPSaveManager.ReadManifest(session)?.PlaythroughId ?? ""; } catch { }
+                    if (!string.IsNullOrEmpty(atTarget) && atTarget != p.PlaythroughId)
+                    {
+                        Plugin.Logger.LogWarning($"[MPSave] Store mirror BLOCKED for '{session}': the folder for world {p.PlaythroughId} holds a manifest claiming world {atTarget} — save store corruption. Nothing was overwritten; report this.");
+                        try { MPCanvasUI.PostLobbyNotice($"Save-store problem detected for '{session}' — shared copy NOT updated. Please send a bug report."); } catch { }
+                        return;
+                    }
+                }
+                // v1 clobber guard (review fix 2026-07-23), pre-migration stores only: a
+                // SAME-NAMED local session that belongs to a DIFFERENT world must never be
+                // overwritten — a mirror only applies to its own lineage.
+                else if (!string.IsNullOrEmpty(p.PlaythroughId))
                 {
                     string localPid = "";
                     try { localPid = MPSaveManager.ReadManifest(session)?.PlaythroughId ?? ""; } catch { }
@@ -1222,7 +1290,12 @@ namespace BigAmbitionsMP
                     if (!string.IsNullOrEmpty(localPid) && localPid != p.PlaythroughId)
                     {
                         if (_mirrorClobberWarned.Add(session))
+                        {
                             Plugin.Logger.LogWarning($"[MPSave] Store mirror REFUSED for '{session}': a local world with this name already exists (different lineage). Rename one of the worlds for this machine to receive the shared copy.");
+                            // Decision F (2026-08-01): a refusal the player can't see reads as
+                            // "the transfer never arrived" — say it on screen too.
+                            try { MPCanvasUI.PostLobbyNotice($"Shared save NOT stored: you already have a different world named '{session}'. Rename one of them."); } catch { }
+                        }
                         return;
                     }
                 }
@@ -1515,6 +1588,35 @@ namespace BigAmbitionsMP
         /// the host's CURRENT world day before it's rejected as edited (a small window absorbs a legit
         /// midnight crossing in the un-synced final minutes without false-positives).</summary>
         public const int DisconnectDayWindow = 2;
+
+        /// <summary>Round-216: make the playthrough identity exist BEFORE any save-path
+        /// probe. The first save of a NEW world used to reach the rotation/lineage
+        /// probes with no active pid — every probed name minted its own folder (14 on
+        /// the rig, 2026-08-01) and the world scattered across them. Resolution order:
+        /// live id → v2 disk family → sibling manifest inheritance → mint (genuinely
+        /// new world). Cheap when already resolved.</summary>
+        private static void EnsureActivePid(string session)
+        {
+            lock (_lock)
+            {
+                if (string.IsNullOrEmpty(_activePlaythroughId))
+                {
+                    string baseName = StripAutoSuffix(session);
+                    string pid = "";
+                    try { pid = MPSaveManager.FindFamilyPidOnDisk(baseName); } catch { }
+                    if (string.IsNullOrEmpty(pid))
+                        try { pid = InheritedPlaythroughId(session) ?? ""; } catch { }
+                    if (string.IsNullOrEmpty(pid))
+                    {
+                        pid = Guid.NewGuid().ToString("N");
+                        Plugin.Logger.LogInfo($"[MPSave] New world '{baseName}' — playthrough {pid} minted at first save.");
+                    }
+                    _activePlaythroughId = pid;
+                }
+                MPSaveManager.SetActivePlaythrough(_activePlaythroughId);
+                MPSaveManager.NoteSessionPid(StripAutoSuffix(session), _activePlaythroughId);
+            }
+        }
 
         /// <summary>Strip a trailing automatic-save suffix ('-auto' / '-auto-N' / '-disconnect' /
         /// '-recover') to get the base session name shared by a session and its automatic siblings.</summary>
@@ -2038,6 +2140,12 @@ namespace BigAmbitionsMP
                 _activePlaythroughId = InheritedPlaythroughId(sessionName) ?? Guid.NewGuid().ToString("N");
                 _activeManifest.PlaythroughId = _activePlaythroughId;
             }
+            // Store v2: whichever branch resolved the id, it names the active playthrough
+            // folder from here on (idempotent when already set). The pin makes the name
+            // resolve correctly even for writes AFTER session teardown (carry-forward
+            // flush ordering) — pins outlive the active-pid clear.
+            MPSaveManager.SetActivePlaythrough(_activePlaythroughId);
+            MPSaveManager.NoteSessionPid(sessionName, _activePlaythroughId);
             // Review fix 2026-07-23: provenance rides EVERY host-side manifest write.
             // PersistGrantsNow/MergeSlot used to rewrite + mirror manifests still
             // carrying the PREVIOUS host's identity/epoch (with fresh timestamps) in

@@ -2050,6 +2050,10 @@ namespace BigAmbitionsMP
         public string SessionName { get; set; } = "";
         /// <summary>Why the save fired — for logging only ("manual"/"autosave"/"disconnect").</summary>
         public string Reason      { get; set; } = "";
+        /// <summary>Round-217 (store v2): WHICH world this session name belongs to, so a
+        /// client told to save under a name it has never seen files it correctly — the
+        /// order and the identity travel together (decision F: no guessing).</summary>
+        public string PlaythroughId { get; set; } = "";
     }
 
     /// <summary>One chat line.  Clients send it to the host; the host relays it to

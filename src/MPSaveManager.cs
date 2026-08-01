@@ -196,9 +196,180 @@ namespace BigAmbitionsMP
             return Path.Combine(root, RootName, version);
         }
 
+        // ── Store format v2 (playthrough-scoped layout, 2026-08-01) ──────────────
+        // v1 (flat):        <version>/<session>/...            — session NAME is the
+        //                   machine-wide key; same-named worlds from different
+        //                   playthroughs collide (the structural defect).
+        // v2 (pid-scoped):  <version>/<pid>/<session>/...      — vanilla-shaped: one
+        //                   folder per playthrough, named saves inside it.
+        // A store carrying legacy flat sessions runs in v1 mode UNCHANGED until the
+        // M2 migrator converts it; empty/new stores are born v2 (marker written).
+        // Everything here is pure file/string IO — poll-thread safe (M0 constraint).
+
+        private const string StoreFormatMarkerName = "storeformat.bamp.json";
+        private static int _fmtCache;   // 0 unknown, 1 flat, 2 pid-scoped
+        private static readonly object _fmtLock = new();
+        private static readonly Dictionary<string, string> _pidBySession =
+            new(StringComparer.OrdinalIgnoreCase);
+        private static volatile string _activePid = "";
+
+        /// <summary>The live session's playthrough folder — set at host load / client
+        /// join, cleared with the session. Name-only writes for the active family
+        /// resolve here when no folder exists yet.</summary>
+        public static void SetActivePlaythrough(string pid) => _activePid = pid ?? "";
+        public static void ClearActivePlaythrough() => _activePid = "";
+
+        /// <summary>Pin a session name to a playthrough folder — called where the pid
+        /// is KNOWN (picker selection, wire payloads, mirror pieces) so name-only
+        /// lookups afterwards are deterministic instead of scan-guessed.</summary>
+        public static void NoteSessionPid(string sessionName, string pid)
+        {
+            if (string.IsNullOrEmpty(sessionName) || string.IsNullOrEmpty(pid)) return;
+            lock (_pidBySession) _pidBySession[Sanitize(sessionName)] = Sanitize(pid);
+        }
+
+        /// <summary>Forget cached name→pid mappings (migration / tests).</summary>
+        public static void ResetPidCache()
+        {
+            lock (_pidBySession) _pidBySession.Clear();
+            _fmtCache = 0;
+        }
+
+        /// <summary>1 = legacy flat store (pre-migration; byte-identical behavior),
+        /// 2 = playthrough-scoped. Unresolvable version folder → act v1, don't cache.</summary>
+        public static int StoreFormat()
+        {
+            if (_fmtCache != 0) return _fmtCache;
+            lock (_fmtLock)
+            {
+                if (_fmtCache != 0) return _fmtCache;
+                string root = MpVersionFolder();
+                if (string.IsNullOrEmpty(root)) return 1;
+                try
+                {
+                    if (File.Exists(Path.Combine(root, StoreFormatMarkerName))) return _fmtCache = 2;
+                    if (Directory.Exists(root))
+                    {
+                        foreach (var d in Directory.GetDirectories(root))
+                        {
+                            string n = Path.GetFileName(d);
+                            if (n.StartsWith("_")) continue;
+                            // A flat session: manifest directly inside, or a manifest-less
+                            // legacy base holding character folders.
+                            if (File.Exists(Path.Combine(d, ManifestName))) return _fmtCache = 1;
+                            try
+                            {
+                                foreach (var c in Directory.GetDirectories(d))
+                                {
+                                    string cn = Path.GetFileName(c);
+                                    if (cn.StartsWith("guid-") || cn.StartsWith("steam-")) return _fmtCache = 1;
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    Directory.CreateDirectory(root);
+                    File.WriteAllText(Path.Combine(root, StoreFormatMarkerName),
+                        "{\"format\":2,\"born\":\"v2\",\"createdUnix\":" + DateTimeOffset.UtcNow.ToUnixTimeSeconds() + "}");
+                    Plugin.Logger.LogInfo("[MPSave] Store format: new store initialized as v2 (playthrough-scoped).");
+                    return _fmtCache = 2;
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogWarning($"[MPSave] StoreFormat probe: {ex.Message} — behaving as v1 this run.");
+                    return _fmtCache = 1;
+                }
+            }
+        }
+
+        /// <summary>v2: which playthrough folder a session name lives in. Order:
+        /// pinned mapping → existing folder on disk (active playthrough's copy wins;
+        /// else newest, LOUD on ambiguity per decision F) → the active playthrough
+        /// (write for the live family) → minted last resort (loud).</summary>
+        private static string ResolvePidFolder(string sanitizedSession)
+        {
+            string s = sanitizedSession;
+            lock (_pidBySession) { if (_pidBySession.TryGetValue(s, out var hit)) return hit; }
+            string ap = _activePid;
+            try
+            {
+                string root = MpVersionFolder();
+                if (Directory.Exists(root))
+                {
+                    string found = ""; long foundAt = -1; int matches = 0;
+                    foreach (var d in Directory.GetDirectories(root))
+                    {
+                        string pidName = Path.GetFileName(d);
+                        if (pidName.StartsWith("_")) continue;
+                        if (!Directory.Exists(Path.Combine(d, s))) continue;
+                        matches++;
+                        if (pidName == ap && ap.Length > 0) { found = pidName; foundAt = long.MaxValue; continue; }
+                        long t = 0;
+                        try { t = new DateTimeOffset(Directory.GetLastWriteTimeUtc(Path.Combine(d, s))).ToUnixTimeSeconds(); } catch { }
+                        if (t > foundAt) { found = pidName; foundAt = t; }
+                    }
+                    if (matches > 1)
+                        Plugin.Logger.LogWarning($"[MPSave] Session name '{s}' exists in {matches} playthroughs — using '{found}'. Name-only lookup; the caller should pin the playthrough (NoteSessionPid).");
+                    if (matches > 0)
+                    {
+                        lock (_pidBySession) _pidBySession[s] = found;
+                        return found;
+                    }
+                }
+            }
+            catch { }
+            if (!string.IsNullOrEmpty(ap)) return ap;   // new write for the live family
+            // Full miss with NO active session: NEVER invent state — round-216 root
+            // cause was minting+caching here on mere existence probes (auto-rotation
+            // and lineage checks), which scattered one new world across 14 folders.
+            // Reads of this path are harmless (File.Exists=false); a WRITE landing in
+            // '_unresolved' is itself the loud defect signal (walkers skip "_").
+            if (_unresolvedWarned.Add(s))
+                Plugin.Logger.LogWarning($"[MPSave] No playthrough context for session '{s}' — resolving under '_unresolved' (not cached; reads harmless, a write here is a defect).");
+            return "_unresolved";
+        }
+        private static readonly HashSet<string> _unresolvedWarned = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>v2: find the playthrough folder already holding any member of a
+        /// session FAMILY (base name + variant suffixes) — the disk-truth fallback for
+        /// activating a world whose own manifest is missing. Newest wins on a tie,
+        /// loudly. Pure IO, writes nothing, caches nothing. "" = family not on disk.</summary>
+        public static string FindFamilyPidOnDisk(string baseName)
+        {
+            try
+            {
+                if (StoreFormat() != 2 || string.IsNullOrEmpty(baseName)) return "";
+                string root = MpVersionFolder();
+                if (!Directory.Exists(root)) return "";
+                string found = ""; long foundAt = -1; int matches = 0;
+                foreach (var pidDir in Directory.GetDirectories(root))
+                {
+                    string pid = Path.GetFileName(pidDir);
+                    if (pid.StartsWith("_")) continue;
+                    foreach (var dir in Directory.GetDirectories(pidDir))
+                    {
+                        if (!string.Equals(StripToBase(Path.GetFileName(dir)), baseName, StringComparison.OrdinalIgnoreCase)) continue;
+                        matches++;
+                        long t = 0;
+                        try { t = new DateTimeOffset(Directory.GetLastWriteTimeUtc(dir)).ToUnixTimeSeconds(); } catch { }
+                        if (t > foundAt) { found = pid; foundAt = t; }
+                        break;   // one hit per pid dir is enough
+                    }
+                }
+                if (matches > 1)
+                    Plugin.Logger.LogWarning($"[MPSave] Family '{baseName}' found in {matches} playthrough folders — activating '{found}' (newest). If this recurs, the store needs repair.");
+                return found;
+            }
+            catch { return ""; }
+        }
+
         /// <summary>Folder for one named MP save session.</summary>
         public static string MpSessionFolder(string sessionName)
-            => Path.Combine(MpVersionFolder(), Sanitize(sessionName));
+        {
+            string s = Sanitize(sessionName);
+            if (StoreFormat() == 1) return Path.Combine(MpVersionFolder(), s);
+            return Path.Combine(MpVersionFolder(), ResolvePidFolder(s), s);
+        }
 
         /// <summary>Per-player character folder inside a session (where their .hsg
         /// goes).  Keyed by the player's character id so it mirrors the game's own
@@ -248,16 +419,60 @@ namespace BigAmbitionsMP
             {
                 string root = MpVersionFolder();
                 if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return result;
-                foreach (var dir in Directory.GetDirectories(root))
+                foreach (var (name, dir, pid) in WalkSessionDirs(root))
                 {
-                    string name = Path.GetFileName(dir);
-                    var m = ReadManifest(name);
-                    if (m != null) result.Add((name, m));
+                    var m = ReadManifestAt(dir);
+                    if (m == null) continue;
+                    // v2: the folder is the identity's ground truth — backfill a legacy
+                    // manifest so every consumer can disambiguate same-named sessions.
+                    if (pid.Length > 0 && string.IsNullOrEmpty(m.PlaythroughId)) m.PlaythroughId = pid;
+                    result.Add((name, m));
                 }
                 result.Sort((a, b) => b.Item2.SavedAtUnix.CompareTo(a.Item2.SavedAtUnix));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ListSessions: {ex.Message}"); }
             return result;
+        }
+
+        /// <summary>Session directories of the store in its CURRENT format —
+        /// (name, fullPath, pidFolder) with pidFolder "" on a v1 store. "_"-prefixed
+        /// folders (staging, migration, backup) are skipped at every level.</summary>
+        private static IEnumerable<(string Name, string Dir, string Pid)> WalkSessionDirs(string root)
+        {
+            if (StoreFormat() == 1)
+            {
+                foreach (var dir in Directory.GetDirectories(root))
+                {
+                    string name = Path.GetFileName(dir);
+                    if (name.StartsWith("_")) continue;
+                    yield return (name, dir, "");
+                }
+                yield break;
+            }
+            foreach (var pidDir in Directory.GetDirectories(root))
+            {
+                string pid = Path.GetFileName(pidDir);
+                if (pid.StartsWith("_")) continue;
+                foreach (var dir in Directory.GetDirectories(pidDir))
+                {
+                    string name = Path.GetFileName(dir);
+                    if (name.StartsWith("_")) continue;
+                    yield return (name, dir, pid);
+                }
+            }
+        }
+
+        /// <summary>Read a manifest by exact folder path (walkers use this so a
+        /// same-named session in another playthrough can never be confused in).</summary>
+        private static MpManifest? ReadManifestAt(string sessionDir)
+        {
+            try
+            {
+                string p = Path.Combine(sessionDir, ManifestName);
+                if (!File.Exists(p)) return null;
+                return Newtonsoft.Json.JsonConvert.DeserializeObject<MpManifest>(File.ReadAllText(p));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ReadManifestAt '{sessionDir}': {ex.Message}"); return null; }
         }
 
         // ── Playthrough grouping (load-screen model) ───────────────────────────
@@ -300,15 +515,16 @@ namespace BigAmbitionsMP
             {
                 string root = MpVersionFolder();
                 if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return new List<MpPlaythrough>();
-                foreach (var dir in Directory.GetDirectories(root))
+                foreach (var (name, dir, pidFolder) in WalkSessionDirs(root))
                 {
-                    string name = Path.GetFileName(dir);
-                    if (name.StartsWith("_")) continue;   // internal/staging folders (_dcstage_*, etc.)
                     var v = new MpVariant { SessionName = name, Kind = ClassifyVariant(name) };
-                    var m = ReadManifest(name);
+                    var m = ReadManifestAt(dir);
                     if (m != null)
                     {
                         v.Day = m.WorldDay; v.SavedAtUnix = m.SavedAtUnix; v.PlaythroughId = m.PlaythroughId ?? "";
+                        // v2: the containing folder IS the world identity — it wins over a
+                        // stale/empty manifest field, so grouping can never straddle folders.
+                        if (pidFolder.Length > 0) v.PlaythroughId = pidFolder;
                         var names = new List<string>();
                         if (m.Slots != null) foreach (var s in m.Slots) names.Add(string.IsNullOrEmpty(s.CharacterName) ? s.DisplayName : s.CharacterName);
                         v.Players = names.Count > 0 ? string.Join(", ", names) : "";
@@ -321,7 +537,13 @@ namespace BigAmbitionsMP
                             if (hs != null) v.LastHostName = string.IsNullOrEmpty(hs.CharacterName) ? hs.DisplayName : hs.CharacterName;
                         }
                     }
-                    else { try { v.SavedAtUnix = new DateTimeOffset(Directory.GetLastWriteTimeUtc(dir)).ToUnixTimeSeconds(); } catch { } }
+                    else
+                    {
+                        try { v.SavedAtUnix = new DateTimeOffset(Directory.GetLastWriteTimeUtc(dir)).ToUnixTimeSeconds(); } catch { }
+                        // v2: a manifest-less variant (recover folders) still groups with its
+                        // family — the folder it sits in names the world.
+                        if (pidFolder.Length > 0) v.PlaythroughId = pidFolder;
+                    }
 
                     string baseName = StripToBase(name);
                     if (!byBase.TryGetValue(baseName, out var pt)) { pt = new MpPlaythrough { Base = baseName }; byBase[baseName] = pt; }
