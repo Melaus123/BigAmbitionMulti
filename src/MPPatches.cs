@@ -5418,6 +5418,26 @@ namespace BigAmbitionsMP
                     }
                     catch (Exception ux) { Plugin.Logger.LogWarning($"[MPSale] UI close: {ux.Message}"); }
 
+                    // Round-211b (field 20260731-215117 + rig repro): THE bug — this
+                    // finalize marked the basket's cargo PAID but never converted the
+                    // container, so the buyer walked off with a paid basket instead of
+                    // a bag. (Both field cases were THIS path: the [Hub] money line is
+                    // ApplyMoneyDelta's signature — the native serve branches never
+                    // charged at all.) Native's own conversion, gated on the held-item
+                    // DATA carrying the shopping-container tag.
+                    try
+                    {
+                        var hands = Helpers.PlayerHelper.ItemInstanceInHands;
+                        var it = hands?.ItemCached;
+                        if (it != null && it.HasTag(BigAmbitions.Tags.TagRef.Itemtag.isshoppingcontainer)
+                            && (hands.cargoInstances?.Count ?? 0) > 0)
+                        {
+                            SelfServiceEmployee.ConvertPlayerShoppingContainerToPaperBag();
+                            Plugin.Logger.LogInfo("[MPSale] held container converted to a paper bag (round-211b).");
+                        }
+                    }
+                    catch (Exception cx) { Plugin.Logger.LogWarning($"[MPSale] bag conversion: {cx.Message}"); }
+
                     string act1 = "none";
                     try { act1 = MPRestSync.CurrentActivityName() ?? "none"; } catch { }
                     Plugin.Logger.LogInfo(
@@ -5440,6 +5460,60 @@ namespace BigAmbitionsMP
         // MakeFullServiceSelfPurchase) instead of the employee-service queue
         // that cannot be served locally.  Native UI, native payment, native
         // bagging — the worker's avatar stands at the counter throughout. ─────
+        // ── Round-211: charged-but-unbagged backstop (field 20260731-215117) ─────
+        // Tali paid $15,500 in Just JP's staffed shop and kept the full basket — no
+        // bag, no exception. The only branch fitting all evidence: the staffed-serve
+        // routine's "holding a shopping container?" check reads the VISUAL hand
+        // transform for a tagged ItemController at serve start; when it misses
+        // (intermittent, trigger unnamed — the carry-template suspect was read and
+        // exonerated), Pay still runs and the bag conversion is silently skipped.
+        // UpdatePlayerPurchase executes on EVERY successful player charge, in both
+        // flag outcomes — so this postfix checks the DATA (the held ItemInstance's
+        // container tag, the check native should have used): container still in
+        // hands after a completed purchase ⇒ run native's own conversion, and log
+        // the visual-hand state loudly so the next occurrence names the trigger.
+        // Healthy purchases hold a BAG by now → early return, zero behavior change.
+        [HarmonyPatch(typeof(SelfServiceEmployee), nameof(SelfServiceEmployee.UpdatePlayerPurchase))]
+        public static class Patch_PurchaseBagBackstop
+        {
+            static void Postfix()
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;   // SP: native's own ground
+                    var hands = PlayerHelper.ItemInstanceInHands;
+                    if (hands == null) return;
+                    BigAmbitions.Items.Item? item = null;
+                    try { item = hands.ItemCached; } catch { }
+                    if (item == null || !item.HasTag(BigAmbitions.Tags.TagRef.Itemtag.isshoppingcontainer)) return;   // bag/nothing — healthy
+
+                    int cargo = 0, unpaid = 0;
+                    try
+                    {
+                        cargo = hands.cargoInstances?.Count ?? 0;
+                        if (hands.cargoInstances != null)
+                            foreach (var c in hands.cargoInstances) if (c != null && !c.paid) unpaid++;
+                    }
+                    catch { }
+                    // The exact input the native serve check consumed — captured at the
+                    // failure moment so the intermittent trigger names itself.
+                    string handGo = "<null>"; bool hasIc = false;
+                    try
+                    {
+                        var hc = InstanceBehavior<GameManager>.Instance?.playerController?.Character?.GetHandContent();
+                        if (hc != null) { handGo = hc.name; hasIc = hc.TryGetComponent<ItemController>(out _); }
+                    }
+                    catch { }
+                    Plugin.Logger.LogWarning(
+                        $"[SelfCheckout] BAG BACKSTOP (round-211): purchase completed but hands still hold container "
+                        + $"'{hands.itemName}' (cargo={cargo}, unpaid={unpaid}; visual hand GO='{handGo}' itemController={hasIc}) "
+                        + $"— running the native conversion.");
+                    if (cargo > 0) SelfServiceEmployee.ConvertPlayerShoppingContainerToPaperBag();   // native semantics: whole container bags
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[SelfCheckout] bag backstop: {ex.Message}"); }
+            }
+        }
+
         [HarmonyPatch]
         public static class Patch_RegisterInteract_SelfCheckout
         {
