@@ -30,7 +30,36 @@ namespace BigAmbitionsMP
     {
         private static readonly Color ModPurple = new Color(0.35f, 0.31f, 0.81f, 1f);
 
-        static void Postfix(UI.Topbar.ReportBugButton __instance)
+        // Round-209 (rex's missing purple button): OnEnable is a ONE-SHOT, and on a
+        // CLIENT it fires before InMpGame flips at scene-ready — the gate ate the only
+        // attempt (the round-197 class, in a UI hook the network-era fix never covered).
+        // Recurrence: a 1s retry tick runs while in an MP world until the takeover
+        // succeeds; the OnEnable postfix stays for native re-enables. Reset per scene.
+        private static bool  _recycled;
+        private static float _retryNextAt;
+
+        public static void ResetForScene() { _recycled = false; _retryNextAt = 0f; }
+
+        /// <summary>Called from the canvas pre-block. Cheap: exits on a flag once
+        /// recycled; searches at most once per second until then.</summary>
+        public static void TickRetry()
+        {
+            try
+            {
+                if (_recycled) return;
+                if (!MPServer.IsRunning && !MPClient.InMpGame) return;
+                float now = UnityEngine.Time.unscaledTime;
+                if (now < _retryNextAt) return;
+                _retryNextAt = now + 1f;
+                var inst = UnityEngine.Object.FindObjectOfType(typeof(UI.Topbar.ReportBugButton)) as UI.Topbar.ReportBugButton;
+                if (inst != null) TryTakeover(inst);
+            }
+            catch { }
+        }
+
+        static void Postfix(UI.Topbar.ReportBugButton __instance) => TryTakeover(__instance);
+
+        static void TryTakeover(UI.Topbar.ReportBugButton __instance)
         {
             try
             {
@@ -44,7 +73,15 @@ namespace BigAmbitionsMP
                 if (!MPServer.IsRunning && !MPClient.InMpGame) return;
                 // Native leaves the button ENABLED only on unmodded saves — a state we can't be in
                 // while loaded, but if it ever happens the native flow stays untouched.
-                if (button.interactable) return;
+                // Round-209: logged — this silent return was one of two candidate causes for
+                // rex's missing purple button; if it ever fires it names itself now.
+                if (button.interactable)
+                {
+                    if (!_recycled)
+                        Plugin.Logger.LogWarning("[BugReport] top-bar button already interactable in an MP session — native flow left untouched (unexpected; takeover skipped).");
+                    _recycled = true;   // stop the retry tick — native owns it
+                    return;
+                }
 
                 button.interactable = true;
                 button.onClick = new UnityEngine.UI.Button.ButtonClickedEvent();   // wholesale replace — see summary
@@ -67,6 +104,7 @@ namespace BigAmbitionsMP
                     tooltip.titleKey = "Report a " + MyPluginInfo.SHORT_NAME + " bug";
                     tooltip.descriptionKey = "Opens the multiplayer mod's bug report,Your logs are attached automatically";
                 }
+                _recycled = true;   // round-209: stop the retry tick
                 Plugin.Logger.LogInfo("[BugReport] Native top-bar report button recycled as the mod's report entry point.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] top-bar button takeover: {ex.Message}"); }
@@ -190,7 +228,16 @@ namespace BigAmbitionsMP
                 marker["LastAlive"] = DateTime.Now.ToString("O");
                 marker["Phase"] = phase ?? "";
                 marker["UptimeSeconds"] = ((int)(Time.unscaledTime - _sessionStartedAt + 0.5f)).ToString(CultureInfo.InvariantCulture);
-                File.WriteAllText(_markerPath, JsonConvert.SerializeObject(marker, Formatting.Indented));
+                // Round-207g: serialize on the main thread (small object), WRITE on the
+                // pool — the synchronous 30s disk write was the occasional ~70ms Pre.A
+                // hitch. A lost heartbeat on crash costs ≤30s of "last alive" precision;
+                // the open/close markers stay synchronous (crash-order-critical).
+                string json = JsonConvert.SerializeObject(marker, Formatting.Indented);
+                string path = _markerPath;
+                System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    try { File.WriteAllText(path, json); } catch { }
+                });
             }
             catch { }
         }

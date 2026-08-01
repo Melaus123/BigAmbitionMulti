@@ -122,17 +122,25 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>True while the intro/character-creation scene is up.
-        /// DIRECT typed lookup — the string FindGameType("IntroCharacter…")
-        /// returned null (namespace) and latched "missing", so intro kept
-        /// classifying as Menu (fence excused a creating client, 2026-06-11).</summary>
+        /// Round-207g (principle-3 sweep): this was FindObjectOfType EVERY FRAME
+        /// through the whole menu/creation/pre-spawn phase — a per-frame
+        /// whole-scene scan (the Pre.A load-phase cost). Registry instead: the
+        /// Awake patch below stashes the instance; Unity's destroyed-object null
+        /// semantics deregister it automatically when the intro scene unloads.
+        /// (No OnDestroy exists on the native class to hook — the fake-null
+        /// check IS the deregistration.)</summary>
+        internal static IntroCharacterCustomizer? IntroInstance;
+
         private static bool IntroActive()
         {
-            try
-            {
-                var obj = UnityEngine.Object.FindObjectOfType(typeof(IntroCharacterCustomizer));
-                return obj != null;
-            }
+            try { return IntroInstance != null; }   // Unity overload: destroyed → null
             catch { return false; }
+        }
+
+        [HarmonyLib.HarmonyPatch(typeof(IntroCharacterCustomizer), "Awake")]
+        private static class Patch_IntroCustomizer_Register
+        {
+            static void Postfix(IntroCharacterCustomizer __instance) => IntroInstance = __instance;
         }
 
         private static void Set(MPPhase next, string why)

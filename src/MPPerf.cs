@@ -109,6 +109,7 @@ namespace BigAmbitionsMP
 
             // Round-97: spike snapshot — dt describes the PREVIOUS frame; _framePatchPrev holds
             // that frame's per-site patch costs. Names the culprit (or exonerates, with numbers).
+            // Round-207b: MPFrameRhythm reads the same prev-frame data per hitch (PrevFrameModShare).
             if (dtMs > SpikeSnapshotMs)
             {
                 try
@@ -193,6 +194,25 @@ namespace BigAmbitionsMP
             catch { }
             _slots.Clear(); _patchSlots.Clear(); _frames = 0; _frameTotalMs = 0; _frameMaxMs = 0; _spikes = 0;
             _windowStartMs = now;
+        }
+
+        /// <summary>Round-207b: the PREVIOUS frame's instrumented mod share (the same sum
+        /// the SPIKE line prints) plus its heaviest bracket — per-hitch attribution for
+        /// MPFrameRhythm. ±1-frame alignment with the rhythm recorder's dt is possible
+        /// depending on tick order; irrelevant at hitch magnitudes.</summary>
+        public static (double ms, string top) PrevFrameModShare()
+        {
+            double ours = 0, topV = 0; string top = "";
+            try
+            {
+                foreach (var kv in _framePatchPrev)
+                {
+                    if (_topLevel.Contains(kv.Key) || _patchSlots.ContainsKey(kv.Key)) ours += kv.Value;
+                    if (kv.Value > topV) { topV = kv.Value; top = kv.Key; }
+                }
+            }
+            catch { }
+            return (ours, topV >= 1.0 ? $"{top}={topV:F1}ms" : "");
         }
     }
 }

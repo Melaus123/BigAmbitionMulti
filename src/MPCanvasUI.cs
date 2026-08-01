@@ -565,27 +565,39 @@ namespace BigAmbitionsMP
             // Drain/WorldSnap/PosSync*) — the 5s duty scan + staff evaluator and the
             // puppet tick live here. PreTick umbrella + named sub-brackets so a
             // periodic field hitch is named or cleared by column.
+            // Round-207c: PreTick named as the sawtooth's dominant cost (48–75ms hitches,
+            // modHeavy=26/33 on the rig) — the umbrella is split into six group brackets
+            // so the next run names the hot GROUP; the winner gets split further.
             long _pre = MPPerf.Begin();
+            long _sub = MPPerf.Begin();
             MPContentFingerprint.EnsureCached();   // MAIN THREAD: compute once, well before any connect (crash 2026-07-27)
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             TickCrashHeartbeat();    // task #5: stamp the session marker with where-we-are (~30s)
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
-            long _sub = MPPerf.Begin(); MPRegisterSync.TickDuty(); MPPerf.End("RegDuty", _sub);   // mirror the native Work activity into register duty (1s self-throttle; contains the 5s employee-duty scan + staff evaluator)
+            MPPerf.End("Pre.A", _sub);
+            _sub = MPPerf.Begin(); MPRegisterSync.TickDuty(); MPPerf.End("RegDuty", _sub);   // mirror the native Work activity into register duty (1s self-throttle; contains the 5s employee-duty scan + staff evaluator)
+            _sub = MPPerf.Begin();
             MPHub.TickSalePopups();      // rising +$ worker feedback (per-frame: smooth rise/fade)
             MPOffers.HostTick();         // round-196: re-send unacked business-transfer finalizes (5s)
             MPTakeover.Tick();           // round-204b: expire an unanswered takeover offer (6s — older host)
             MPClient.TickWorldReadyGate();   // round-205: recurring readiness check (content bar + deadline)
             MPFrameRhythm.Tick();            // round-207: frame-rhythm capture (oscillation shape/cadence/beat match)
+            MPPerf.End("Pre.B", _sub);
+            _sub = MPPerf.Begin();
             PassengerRide.Update();      // passenger ride: click-to-board → pin-to-seat → exit + remote riders
             PassengerHud.Tick();         // passenger's in-ride "Exit Vehicle" panel
             VehicleStoragePanel.Tick();  // non-owner shared-storage panel (refresh on cargo change / auto-close)
             TimeSync.TickStartupHold();  // round-36: had NO caller (dead since inception) — the hold's timeScale re-clamp
             GameStateReader.TickPendingNativePause();   // round-36c: converge the pause flag onto the last
                                                         // requested state (rate-limit drops lost it before)
+            MPPerf.End("Pre.C", _sub);
             _sub = MPPerf.Begin(); CustomerPuppets.Tick(); MPPerf.End("Puppets", _sub);   // round-41: simulator election (host) + puppet stream/render (both-inside shops)
+            _sub = MPPerf.Begin();
             MergerFlip.Tick();           // merger slice 3: ownership-flip reconcile (1 Hz) + host state push (10s)
             MergerEmployeeSync.Tick();   // merger slice 5: schedule write-back scan on flipped shops (2s)
             BusinessSync.TickOwnerBusinessPublish();   // round-190: one owner-business publish at settle (carries logo files; host adopts + re-broadcasts)
+            MPPerf.End("Pre.D", _sub);
+            _sub = MPPerf.Begin();
             MPFreezeProbe.Tick();        // [MoveFreeze] symptom probe: input-without-motion detector (claim-4 backstop)
             MPHousingMorale.Tick();      // shared-residence morale: a Housing grant counts as having a home (10s reconcile)
             MPRegisterSync.TickHideSynthetics();
@@ -594,21 +606,28 @@ namespace BigAmbitionsMP
             MPRegisterSync.TickEconDigest();    // [EconProbe] one line per owned business per game-day (2026-07-09)
             MPRegisterSync.TickDutySummary();   // TEMPORARY: duty-broadcast activation watch, 10m (2026-07-09)
             TickWorldHealth();                  // one-shot world-integrity line ~30s after scene-ready (2026-07-09)
-            RemotePlayerManager.TickVehicleCollisionIgnores();   // remote avatars must not shove vehicles
-            TickMenuIntegration();   // Phase 5 — inject native "Multiplayer" button on the main menu
-            MPSaveCoordinator.TickPendingLoad();   // mid-join menu detour completion
-            GameStatePatcher.TickPendingMarketEvents();   // round-101: market events that arrived pre-world
-            GameStatePatcher.TickDemandHealth();          // round-102i: retry held market payload + stale-demand watchdog
-            GameStatePatcher.TickActiveVehicleIdHealth();  // round-109 net: an unresolvable ActiveVehicleId NREs every hover CTA = total interaction lock
-            MPPriceFillProbe.Tick();   // PROBE PriceFill (round-101 item 3) — remove when resolved
-            MPDemandProbe.Tick();      // PROBE Demand (round-102) — remove when resolved
+            MPPerf.End("Pre.E", _sub);
+            // Round-207d: Pre.F named as the hot group (4.4ms avg / 57ms worst in the
+            // heavy window ≈ all of PreTick) — split per call for the final naming run.
+            _sub = MPPerf.Begin(); RemotePlayerManager.TickVehicleCollisionIgnores(); MPPerf.End("F.CollIgn", _sub);   // per-frame over ent parked≈2200 — prime sweep suspect
+            _sub = MPPerf.Begin(); TickMenuIntegration(); MPPerf.End("F.MenuInt", _sub);
+            _sub = MPPerf.Begin(); MPSaveCoordinator.TickPendingLoad(); MPPerf.End("F.PendLoad", _sub);
+            _sub = MPPerf.Begin(); GameStatePatcher.TickPendingMarketEvents(); MPPerf.End("F.MktEvt", _sub);
+            _sub = MPPerf.Begin(); GameStatePatcher.TickDemandHealth(); MPPerf.End("F.DemHealth", _sub);
+            _sub = MPPerf.Begin(); GameStatePatcher.TickActiveVehicleIdHealth(); MPPerf.End("F.VehIdH", _sub);
+            // Round-207e: F.rest carried the cost (4.3ms/frame avg, 65ms worst) — final
+            // per-call split. Suspicion: a dialog tick doing per-frame work while its
+            // window is open (the lobby window is typically open all session).
+            _sub = MPPerf.Begin(); MPPriceFillProbe.Tick(); MPPerf.End("F.PriceP", _sub);   // PROBE PriceFill (round-101 item 3) — remove when resolved
+            _sub = MPPerf.Begin(); MPDemandProbe.Tick(); MPPerf.End("F.DemP", _sub);        // PROBE Demand (round-102) — remove when resolved
             // (quiesce-off 4s timer RETIRED 2026-06-11 — stage-4 migration #1:
             //  the quiesce now ends on the lifecycle WorldReady EVENT; see
             //  OnLifecyclePhase below.)
-            TickOverlayWatchdog();   // stuck loading screen over a live world → force-dismiss
-            TickJoinDialog();        // Phase 5 — connect-dialog input (when open)
-            TickLobbyWindow();       // Phase 5 — lobby window input (when open)
-            TickSavePicker();        // Phase 5 — save-picker input (when open)
+            _sub = MPPerf.Begin(); TickOverlayWatchdog(); MPPerf.End("F.OverW", _sub);      // stuck loading screen over a live world → force-dismiss
+            _sub = MPPerf.Begin(); TickJoinDialog(); MPPerf.End("F.JoinD", _sub);           // Phase 5 — connect-dialog input (when open)
+            _sub = MPPerf.Begin(); TickLobbyWindow(); MPPerf.End("F.Lobby", _sub);          // Phase 5 — lobby window input (when open)
+            _sub = MPPerf.Begin(); TickSavePicker(); MPPerf.End("F.SaveP", _sub);           // Phase 5 — save-picker input (when open)
+            Patch_ReportBugButton_ModTakeover.TickRetry();   // round-209: recycle retry until success (1s; flag-gated once done)
             MPPerf.End("PreTick", _pre);   // round-98: close the pre-block umbrella
 
             // Overlay-aware freeze gate — freezes once our loading overlay clears
@@ -2956,6 +2975,7 @@ namespace BigAmbitionsMP
                 catch { }
                 MPAudit.Reset();          // divergence streaks/throttle die with the session (else stale [Audit] state pollutes the bug-report log across same-process sessions)
                 MPFrameRhythm.Reset();    // round-207: frame ring + beat registry are per-session
+                Patch_ReportBugButton_ModTakeover.ResetForScene();   // round-209: re-arm the recycle retry per world
                 CustomerPuppets.Reset();  // round-41: puppet bodies + authority table die with the scene
                 MPStockSync.Reset();      // per-shop stock digests die with the session
                 GameStatePatcher.ResetDemandState();   // round-102 statics are per-session: a held market payload must
@@ -3276,6 +3296,9 @@ namespace BigAmbitionsMP
         //  same way — "twice a second, forever … rhythmic car stutter"; this is
         //  the twin that was missed.)
         private static bool _overlayConfirmedGone;
+        private static LoadingScreen? _overlayLs;   // round-207f: cached singleton + fade group
+        private static CanvasGroup?   _overlayCg;
+
         internal static bool IsLoadingOverlayUp()
         {
             bool worldUp = false;
@@ -3290,17 +3313,25 @@ namespace BigAmbitionsMP
             bool up;
             try
             {
-                var lsObj = UnityEngine.Object.FindObjectOfType(typeof(LoadingScreen));
-                if (lsObj == null) up = false;                  // no active LoadingScreen → gone
+                // Round-207f — THE SAWTOOTH ROOT CAUSE. This used FindObjectOfType
+                // (whole-scene search, ~60ms in a loaded city) at the 0.25s recheck
+                // cadence — 4 scans/second = exactly the period≈0.24s hitch rhythm
+                // the frame telemetry measured, mod-heavy on BOTH machines, worst on
+                // weak hardware where the settle phase (and the scans) run longest.
+                // LoadingScreen is the game's OWN singleton — no search was ever
+                // needed. The fade CanvasGroup is cached per instance too.
+                var ls = InstanceBehavior<LoadingScreen>.Instance;
+                if (ls == null) up = false;                     // no LoadingScreen → gone
                 else
                 {
-                    var go = (lsObj as LoadingScreen)?.gameObject;
-                    if (go == null || !go.activeInHierarchy) up = false;
+                    var go = ls.gameObject;
+                    if (!go.activeInHierarchy) up = false;
                     else
                     {
                         // Present — but a fully faded-out CanvasGroup means it's gone.
-                        var cg = go.GetComponentInChildren<CanvasGroup>(true);
-                        up = (cg == null) ? true : (cg.alpha >= 0.05f);
+                        if (!ReferenceEquals(ls, _overlayLs) || _overlayCg == null)
+                        { _overlayLs = ls; _overlayCg = go.GetComponentInChildren<CanvasGroup>(true); }
+                        up = (_overlayCg == null) ? true : (_overlayCg.alpha >= 0.05f);
                     }
                 }
             }
