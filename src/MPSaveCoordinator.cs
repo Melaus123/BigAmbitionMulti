@@ -57,7 +57,7 @@ namespace BigAmbitionsMP
                     _activeManifest = null;
                     // Reset (new lobby) drops the world identity; a RENAME (non-empty) keeps it —
                     // saving under a new name is still the same world.
-                    if (string.IsNullOrEmpty(_activeSessionName)) { _activePlaythroughId = ""; _activeHostEpoch = 1; _midJoinSource = ""; PortraitFolder = null; MPSaveManager.ClearActivePlaythrough(); }
+                    if (string.IsNullOrEmpty(_activeSessionName)) { _activePlaythroughId = ""; _activeHostEpoch = 1; _midJoinSource = ""; PortraitFolder = null; MPSaveManager.ClearActivePlaythrough(); MPSaveManager.ResetSessionPins(); }
                 }
             }
         }
@@ -341,7 +341,7 @@ namespace BigAmbitionsMP
             // own save landed in '_unresolved' → the upload then found nothing).
             if (!string.IsNullOrEmpty(payload.PlaythroughId))
             {
-                MPSaveManager.SetActivePlaythrough(payload.PlaythroughId);
+                MPSaveManager.SetActivePlaythrough(payload.PlaythroughId, StripAutoSuffix(session));
                 MPSaveManager.NoteSessionPid(session, payload.PlaythroughId);
                 MPSaveManager.NoteSessionPid(StripAutoSuffix(session), payload.PlaythroughId);
             }
@@ -660,7 +660,8 @@ namespace BigAmbitionsMP
                 _activeSessionName   = "";     // named at first save (DefaultSessionName)
                 _activeHostEpoch     = 1;
                 _midJoinSource       = "";
-                MPSaveManager.SetActivePlaythrough(_activePlaythroughId);
+                MPSaveManager.ResetSessionPins();   // round-218: nothing from a previous world survives
+                MPSaveManager.SetActivePlaythrough(_activePlaythroughId, "");   // base named at first save
                 Plugin.Logger.LogInfo($"[MPSave] New world — playthrough {_activePlaythroughId} minted at world start.");
             }
         }
@@ -671,6 +672,12 @@ namespace BigAmbitionsMP
             // Round-184: leaving the current world for another load — complete any save still
             // waiting on member uploads first (its window may never elapse otherwise).
             try { FlushCarryBackstopsNow("host load"); } catch { }
+            // Round-218: entering a different world — stale name pins and the previous
+            // world's active identity must not survive into it (the rig cross-world
+            // write: the auto-rotation reused another world's same-named slots). The
+            // clicked world's own pins (set by the picker) are preserved.
+            MPSaveManager.ResetSessionPinsExceptFamily(MPSaveManager.StripToBase(session));
+            MPSaveManager.ClearActivePlaythrough();
             var m = MPSaveManager.ReadManifest(session);
             if (m == null) { Plugin.Logger.LogWarning($"[MPSave] HostLoadSession: no manifest for '{session}'."); return; }
 
@@ -688,7 +695,7 @@ namespace BigAmbitionsMP
             // Store v2: the loaded world's identity becomes the active playthrough folder
             // (name-only writes for this family land there). Empty pid = legacy world —
             // the first EnsureManifest mint below will stamp + activate it.
-            if (!string.IsNullOrEmpty(m.PlaythroughId)) MPSaveManager.SetActivePlaythrough(m.PlaythroughId);
+            if (!string.IsNullOrEmpty(m.PlaythroughId)) MPSaveManager.SetActivePlaythrough(m.PlaythroughId, lineage);
 
             // One greppable line so any submitted log answers "did the host change hands?"
             // (user 2026-07-23) — the manifest records who hosted last; compare to this machine.
@@ -735,7 +742,8 @@ namespace BigAmbitionsMP
             // Store v2: the join tells us exactly which world this session is — pin the
             // name and activate the playthrough so every local write (own slot, ledger,
             // disconnect save) lands in the right folder from the first byte.
-            MPSaveManager.SetActivePlaythrough(_wireWorldPid);
+            MPSaveManager.ResetSessionPins();   // round-218: a join replaces the world context wholesale
+            MPSaveManager.SetActivePlaythrough(_wireWorldPid, StripAutoSuffix(p.SessionName ?? ""));
             if (!string.IsNullOrEmpty(_wireWorldPid) && !string.IsNullOrEmpty(p.SessionName))
             {
                 MPSaveManager.NoteSessionPid(p.SessionName, _wireWorldPid);
@@ -1613,7 +1621,7 @@ namespace BigAmbitionsMP
                     }
                     _activePlaythroughId = pid;
                 }
-                MPSaveManager.SetActivePlaythrough(_activePlaythroughId);
+                MPSaveManager.SetActivePlaythrough(_activePlaythroughId, StripAutoSuffix(session));
                 MPSaveManager.NoteSessionPid(StripAutoSuffix(session), _activePlaythroughId);
             }
         }
@@ -2144,7 +2152,7 @@ namespace BigAmbitionsMP
             // folder from here on (idempotent when already set). The pin makes the name
             // resolve correctly even for writes AFTER session teardown (carry-forward
             // flush ordering) — pins outlive the active-pid clear.
-            MPSaveManager.SetActivePlaythrough(_activePlaythroughId);
+            MPSaveManager.SetActivePlaythrough(_activePlaythroughId, StripAutoSuffix(sessionName));
             MPSaveManager.NoteSessionPid(sessionName, _activePlaythroughId);
             // Review fix 2026-07-23: provenance rides EVERY host-side manifest write.
             // PersistGrantsNow/MergeSlot used to rewrite + mirror manifests still

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Store v2 M3 failure-matrix harness: drives the REAL migrator code
+       (MPStoreMigration inside the mod DLL) against scratch stores, so crash /
+       resume / anomaly cases run in milliseconds without game launches. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <GameDir>C:\Program Files (x86)\Steam\steamapps\common\Big Ambitions\</GameDir>
+    <ManagedDir>$(GameDir)Big Ambitions_Data\Managed\</ManagedDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="BigAmbitionsMP"><HintPath>..\..\bin\Debug\net48\BigAmbitionsMP.dll</HintPath></Reference>
+    <Reference Include="BigAmbitions.ModAPI"><HintPath>$(ManagedDir)BigAmbitions.ModAPI.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="Newtonsoft.Json"><HintPath>$(ManagedDir)Newtonsoft.Json.dll</HintPath><Private>true</Private></Reference>
+  </ItemGroup>
+</Project>

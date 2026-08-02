@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 
 namespace BigAmbitionsMP
 {
@@ -125,7 +126,23 @@ namespace BigAmbitionsMP
             }
             return _simRoot == 1;
         }
-        private static string RootName => SimSeparateRoot() ? MpRootNameSim : MpRootName;
+        // Store v2 M2 sandbox: BAMP_STORE_ROOT_OVERRIDE=<folderName> points the ENTIRE
+        // MP store at a sibling root (e.g. a copy of the real store) so the migration
+        // can be rehearsed and kill-tested without touching live data. Dev builds only;
+        // takes precedence over the sim-client root.
+        private static string? _rootOverride; private static int _rootOverrideState = -1;
+        private static string? RootOverride()
+        {
+            if (_rootOverrideState < 0)
+            {
+                try { _rootOverride = Environment.GetEnvironmentVariable("BAMP_STORE_ROOT_OVERRIDE"); } catch { _rootOverride = null; }
+                _rootOverrideState = string.IsNullOrEmpty(_rootOverride) ? 0 : 1;
+                if (_rootOverrideState == 1)
+                    Plugin.Logger.LogWarning($"[MPSave] DEV: store root OVERRIDDEN to '{_rootOverride}' (migration sandbox).");
+            }
+            return _rootOverrideState == 1 ? _rootOverride : null;
+        }
+        private static string RootName => RootOverride() ?? (SimSeparateRoot() ? MpRootNameSim : MpRootName);
 #else
         private static string RootName => MpRootName;
 #endif
@@ -206,18 +223,47 @@ namespace BigAmbitionsMP
         // M2 migrator converts it; empty/new stores are born v2 (marker written).
         // Everything here is pure file/string IO — poll-thread safe (M0 constraint).
 
-        private const string StoreFormatMarkerName = "storeformat.bamp.json";
+        internal const string StoreFormatMarkerName = "storeformat.bamp.json";
         private static int _fmtCache;   // 0 unknown, 1 flat, 2 pid-scoped
         private static readonly object _fmtLock = new();
         private static readonly Dictionary<string, string> _pidBySession =
             new(StringComparer.OrdinalIgnoreCase);
         private static volatile string _activePid = "";
 
-        /// <summary>The live session's playthrough folder — set at host load / client
-        /// join, cleared with the session. Name-only writes for the active family
-        /// resolve here when no folder exists yet.</summary>
-        public static void SetActivePlaythrough(string pid) => _activePid = pid ?? "";
-        public static void ClearActivePlaythrough() => _activePid = "";
+        private static volatile string _activeBase = "";
+
+        /// <summary>The live session's playthrough folder + lineage BASE name — set at
+        /// host load / client join, cleared with the session. Round-218: any name in
+        /// the active family resolves to the active folder UNCONDITIONALLY (no cache,
+        /// no disk hunt) — the rig cross-world write happened because the auto-save
+        /// rotation found a same-named sibling slot in ANOTHER world's folder.</summary>
+        public static void SetActivePlaythrough(string pid, string baseName)
+        {
+            _activePid  = pid ?? "";
+            _activeBase = baseName ?? "";
+        }
+        public static void ClearActivePlaythrough() { _activePid = ""; _activeBase = ""; }
+
+        /// <summary>Round-218: forget every name→folder pin. Called when the world
+        /// context changes (load / new world / join / session end) — a session name
+        /// only means something inside one world, so pins must never outlive it.</summary>
+        public static void ResetSessionPins()
+        {
+            lock (_pidBySession) _pidBySession.Clear();
+        }
+
+        /// <summary>Round-218: forget all pins EXCEPT the given family's — used at
+        /// host load, where the picker has just pinned the clicked world and that pin
+        /// must survive while everything from the previous world is dropped.</summary>
+        public static void ResetSessionPinsExceptFamily(string baseName)
+        {
+            lock (_pidBySession)
+            {
+                var drop = _pidBySession.Keys
+                    .Where(k => !string.Equals(StripToBase(k), baseName, StringComparison.OrdinalIgnoreCase)).ToList();
+                foreach (var k in drop) _pidBySession.Remove(k);
+            }
+        }
 
         /// <summary>Pin a session name to a playthrough folder — called where the pid
         /// is KNOWN (picker selection, wire payloads, mirror pieces) so name-only
@@ -289,6 +335,13 @@ namespace BigAmbitionsMP
         private static string ResolvePidFolder(string sanitizedSession)
         {
             string s = sanitizedSession;
+            // Round-218: the ACTIVE world's own family NEVER resolves anywhere else —
+            // checked before cache and disk, so a same-named session in another
+            // world's folder can never capture a sibling read or write.
+            string ap0 = _activePid, ab0 = _activeBase;
+            if (ap0.Length > 0 && ab0.Length > 0
+                && string.Equals(StripToBase(s), ab0, StringComparison.OrdinalIgnoreCase))
+                return ap0;
             lock (_pidBySession) { if (_pidBySession.TryGetValue(s, out var hit)) return hit; }
             string ap = _activePid;
             try
@@ -329,6 +382,7 @@ namespace BigAmbitionsMP
             return "_unresolved";
         }
         private static readonly HashSet<string> _unresolvedWarned = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> _pidMismatchWarned = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>v2: find the playthrough folder already holding any member of a
         /// session FAMILY (base name + variant suffixes) — the disk-truth fallback for
@@ -464,7 +518,7 @@ namespace BigAmbitionsMP
 
         /// <summary>Read a manifest by exact folder path (walkers use this so a
         /// same-named session in another playthrough can never be confused in).</summary>
-        private static MpManifest? ReadManifestAt(string sessionDir)
+        internal static MpManifest? ReadManifestAt(string sessionDir)
         {
             try
             {
@@ -522,6 +576,11 @@ namespace BigAmbitionsMP
                     if (m != null)
                     {
                         v.Day = m.WorldDay; v.SavedAtUnix = m.SavedAtUnix; v.PlaythroughId = m.PlaythroughId ?? "";
+                        // Round-218 watchdog: contents claiming a different world than the
+                        // folder they sit in = cross-world write or legacy contamination.
+                        if (pidFolder.Length > 0 && !string.IsNullOrEmpty(m.PlaythroughId) && m.PlaythroughId != pidFolder
+                            && _pidMismatchWarned.Add(pidFolder + "/" + name))
+                            Plugin.Logger.LogWarning($"[MPSave] STORE MISMATCH: '{name}' sits in playthrough folder {pidFolder} but its manifest claims {m.PlaythroughId} — cross-world write or legacy contamination.");
                         // v2: the containing folder IS the world identity — it wins over a
                         // stale/empty manifest field, so grouping can never straddle folders.
                         if (pidFolder.Length > 0) v.PlaythroughId = pidFolder;

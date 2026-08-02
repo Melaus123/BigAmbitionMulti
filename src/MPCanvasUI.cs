@@ -518,6 +518,7 @@ namespace BigAmbitionsMP
             // arrive before it is in-game.  Caching here, every frame from the start,
             // guarantees the path is ready so NO poll-thread handler ever calls IL2CPP.
             MPSaveManager.EnsureVersionCached();
+            MPStoreMigration.RunIfNeeded();   // store v2 M2: one-time flat→pid migration, first frame the version resolves
             TickSteamJoin();   // consume a queued Steam invite/join (menu only)
 #if BAMP_DEV
             // DIAG:INVESTIGATION(passenger-doors) — F6 spawns a visible row of the next few
