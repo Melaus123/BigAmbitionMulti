@@ -591,6 +591,13 @@ namespace BigAmbitionsMP
         /// network (background) thread; file IO + manifest are pure C#, safe here.</summary>
         public static void HostHandleSaveData(SaveDataPayload data)
         {
+            // Round-222: the upload names its world — pin before any path resolution so
+            // late/teardown arrivals file correctly even with no active session.
+            if (data != null && !string.IsNullOrEmpty(data.PlaythroughId) && !string.IsNullOrEmpty(data.SessionName))
+            {
+                MPSaveManager.NoteSessionPid(data.SessionName, data.PlaythroughId);
+                MPSaveManager.NoteSessionPid(StripAutoSuffix(data.SessionName), data.PlaythroughId);
+            }
             if (data == null || data.Slot == null) return;
             if (!data.Success || string.IsNullOrEmpty(data.HsgGzipBase64))
             {
@@ -847,7 +854,7 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] ClientHandleLoadData write: {ex}"); return; }
 
-            float money = p.Money;
+            float money = p.MoneyKnown ? p.Money : float.NaN;   // round-224: NaN = no overlay
             GameStatePatcher.EnqueueOnMainThread(() =>
             {
                 try
@@ -987,7 +994,12 @@ namespace BigAmbitionsMP
         private static bool  _hasPendingCash;   // explicit sentinel — a legitimate $0 / negative (overdraft) is a real authoritative balance, not "nothing pending"
         private static int   _cashApplyDwell;
 
-        public static void QueueCashApply(float money) { _pendingCashApply = money; _hasPendingCash = true; _cashApplyDwell = 0; }
+        public static void QueueCashApply(float money)
+        {
+            // Round-224: NaN = "host has no trustworthy figure" — the .hsg's own wallet stands.
+            if (float.IsNaN(money)) { Plugin.Logger.LogInfo("[MPSave] cash overlay skipped — host sent no-overlay; keeping the save's own wallet."); return; }
+            _pendingCashApply = money; _hasPendingCash = true; _cashApplyDwell = 0;
+        }
 
         /// <summary>MAIN THREAD, per-frame while in an MP game: overlay the host's
         /// restored cash once the loaded game has settled.</summary>
@@ -1589,6 +1601,7 @@ namespace BigAmbitionsMP
                 SaveName      = SaveFileName,
                 IsHost        = MPServer.IsRunning,
                 Day           = day,
+                Money         = LocalWalletOr0(),   // round-224: kill the $0 placeholder at birth
             };
         }
 
@@ -1914,11 +1927,13 @@ namespace BigAmbitionsMP
                 {
                     StableId = MPConfig.StableId, DisplayName = MPConfig.PlayerId, CharacterId = MPConfig.StableId,
                     SaveName = Path.GetFileNameWithoutExtension(file), Day = marker.Day, IsHost = false,
+                    Money = LocalWalletOr0(),   // round-224
                 };
                 MPClient.SendClientDisconnectUpload(new SaveDataPayload
                 {
                     SessionName = baseName, Success = true, Slot = slot,
                     HsgGzipBase64 = GzipBase64(raw), RawLength = raw.Length,
+                    PlaythroughId = _wireWorldPid,   // round-222: sticky through disconnect by design
                 });
                 Plugin.Logger.LogInfo($"[MPSave] Uploaded disconnect save for '{baseName}' (claimed day={marker.Day}, {raw.Length}B).");
             }
@@ -1951,6 +1966,11 @@ namespace BigAmbitionsMP
 
         public static bool TryCommitClientDisconnectSave(SaveDataPayload p, string stable)
         {
+            if (p != null && !string.IsNullOrEmpty(p.PlaythroughId) && !string.IsNullOrEmpty(p.SessionName))
+            {
+                MPSaveManager.NoteSessionPid(p.SessionName, p.PlaythroughId);            // round-222
+                MPSaveManager.NoteSessionPid(StripAutoSuffix(p.SessionName), p.PlaythroughId);
+            }
             if (p == null || string.IsNullOrEmpty(stable) || string.IsNullOrEmpty(p.HsgGzipBase64)) return false;
             // Review-2 fix: validate against and commit into the folder that holds the
             // CURRENT state (loaded variant / latest save target) — the lineage base can
@@ -2356,6 +2376,14 @@ namespace BigAmbitionsMP
         /// <summary>Stamp each slot with the host's most-current known cash for
         /// that player (live-streamed), so even a slot whose .hsg is stale (e.g. a
         /// player who dropped) carries near-current money to restore on reconnect.</summary>
+        /// <summary>Round-224: the local player's live wallet (0 if unreadable) — slots
+        /// are born with the real figure instead of a $0 placeholder. Main thread.</summary>
+        private static float LocalWalletOr0()
+        {
+            try { var gi = SaveGameManager.Current; if (gi != null) return gi.Money; } catch { }
+            return 0f;
+        }
+
         private static void RefreshSlotCash(MpManifest m)
         {
             try

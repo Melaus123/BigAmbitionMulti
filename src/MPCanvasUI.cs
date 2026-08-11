@@ -3883,8 +3883,9 @@ namespace BigAmbitionsMP
         private RectTransform? _rtSpLoad, _rtSpBack, _rtSpRecov;
         private RectTransform? _spViewport, _spContent, _spTrack, _spThumb;
         private float  _spScroll, _spContentH;
-        private string _spExpanded   = "";   // base name of the expanded playthrough (accordion)
+        private string _spExpanded   = "";   // round-221: CARD KEY (worldId|base) of the expanded playthrough — base name alone stopped being unique once two worlds could headline the same save name
         private string _spSelSession = "";   // session selected to host
+        private string _spSelPid     = "";   // round-219: WHICH world the selected row belongs to — the click carries the identity, like vanilla's row-is-the-file
         // Store v2: what the picker LISTED each session name as (name → playthrough id;
         // "" = ambiguous, two playthroughs list the same name). Pinned at load-click so
         // the load resolves to the world the player was actually shown.
@@ -3895,7 +3896,7 @@ namespace BigAmbitionsMP
         // Plain ref type (NOT a [Serializable] ValueTuple) — a List<ValueTuple<RectTransform,string>>
         // field on a MonoBehaviour trips Unity's type processing at load and the whole mod assembly
         // fails to load.  A non-serializable class field is skipped cleanly.
-        private sealed class SpHit { public readonly RectTransform Rt; public readonly string Key; public SpHit(RectTransform rt, string key) { Rt = rt; Key = key; } }
+        private sealed class SpHit { public readonly RectTransform Rt; public readonly string Key; public readonly string Pid; public SpHit(RectTransform rt, string key, string pid = "") { Rt = rt; Key = key; Pid = pid; } }
         private readonly System.Collections.Generic.List<SpHit> _spHeaderHits = new();
         private readonly System.Collections.Generic.List<SpHit> _spVarHits   = new();
         private TextMeshProUGUI? _lwLoadInfo;   // "Resuming save: …" line in the lobby (load mode)
@@ -4520,17 +4521,25 @@ namespace BigAmbitionsMP
 
             if (runs.Count > 0)
             {
-                if (string.IsNullOrEmpty(_spExpanded) || !runs.Exists(r => r.Base == _spExpanded)) _spExpanded = runs[0].Base;
-                if (string.IsNullOrEmpty(_spSelSession) || !SessionListed(runs, _spSelSession)) _spSelSession = FirstVariantOf(runs, _spExpanded);
+                if (string.IsNullOrEmpty(_spExpanded) || !runs.Exists(r => CardKeyOf(r) == _spExpanded)) _spExpanded = CardKeyOf(runs[0]);
+                // Round-221: a still-listed (name, world) selection is NEVER re-aimed —
+                // the old repair re-derived the pid on every refresh and silently
+                // re-targeted the selection to whichever same-named row the newly
+                // expanded card held (the rig wrong-world load).
+                if (string.IsNullOrEmpty(_spSelSession) || !PairListed(runs, _spSelSession, _spSelPid))
+                {
+                    _spSelSession = FirstVariantOf(runs, _spExpanded);
+                    _spSelPid     = PidOfListed(runs, _spSelSession, _spExpanded);
+                }
             }
-            else { _spExpanded = ""; _spSelSession = ""; }
+            else { _spExpanded = ""; _spSelSession = ""; _spSelPid = ""; }
 
             const float CARD_X = 8f, CARD_W = 576f, HROW = 52f, VINDENT = 28f, VROW = 36f, VGAP = 5f, VPAD_TOP = 4f, VPAD_BOT = 8f, CARD_GAP = 8f;
             float rowW = CARD_W - VINDENT - 12f;
             float y = -8f;   // top inset inside the list
             foreach (var run in runs)
             {
-                bool expanded = run.Base == _spExpanded;
+                bool expanded = CardKeyOf(run) == _spExpanded;
                 var vis = VisibleVariants(run);
                 int nv = expanded ? vis.Count : 0;
                 float cardH = HROW + (nv > 0 ? VPAD_TOP + nv * VROW + (nv - 1) * VGAP + VPAD_BOT : 0f);
@@ -4562,7 +4571,7 @@ namespace BigAmbitionsMP
                 string dayPart = run.NewestDay >= 1 ? $"Day {run.NewestDay} · " : "";
                 ApplyFont(MakeLabel(hgo.transform, $"{dayPart}{vis.Count} save{(vis.Count == 1 ? "" : "s")}",
                     12, C_LD_MUT, CARD_W - 152f, 0f, 140f, HROW, TextAlignmentOptions.Right));
-                _spHeaderHits.Add(new SpHit(hrt, run.Base));
+                _spHeaderHits.Add(new SpHit(hrt, CardKeyOf(run)));
                 // Store v2: remember which world each listed name belongs to (all variants,
                 // expanded or not); a name shown by two playthroughs maps to "" = ambiguous.
                 foreach (var pv in run.Variants)
@@ -4585,7 +4594,10 @@ namespace BigAmbitionsMP
                     float vy = HROW + VPAD_TOP;
                     foreach (var v in vis)
                     {
-                        bool sel = v.SessionName == _spSelSession;
+                        // Round-220 belt: a row is selected only if BOTH halves match —
+                        // name AND world — so same-named rows can never co-highlight.
+                        bool sel = v.SessionName == _spSelSession
+                                   && (string.IsNullOrEmpty(_spSelPid) || string.IsNullOrEmpty(v.PlaythroughId) || v.PlaythroughId == _spSelPid);
                         var vgo = MakeGO("SpVar", cardGO.transform); var vrt = vgo.GetComponent<RectTransform>();
                         SetAnchored(vrt, VINDENT, -vy, rowW, VROW);
                         AddRoundedBG(vgo, sel ? C_LD_SEL : C_LD_VAR);
@@ -4600,7 +4612,7 @@ namespace BigAmbitionsMP
                         var icImg = icGO.AddComponent<Image>(); icImg.sprite = IconSprite(v.Kind); icImg.color = sel ? C_LD_ACC : C_LD_MUT;
                         ApplyFont(MakeLabel(vgo.transform, SpRowLabel(v, multiName), 14, C_LD_TXT, 38f, 0f, rowW - 210f, VROW, TextAlignmentOptions.Left));
                         ApplyFont(MakeLabel(vgo.transform, VariantMeta(v), 12, C_LD_MUT, rowW - 172f, 0f, 162f, VROW, TextAlignmentOptions.Right));
-                        _spVarHits.Add(new SpHit(vrt, v.SessionName));
+                        _spVarHits.Add(new SpHit(vrt, v.SessionName, v.PlaythroughId ?? ""));
                         vy += VROW + VGAP;
                     }
                 }
@@ -4655,10 +4667,44 @@ namespace BigAmbitionsMP
         private static bool IsRecoveryKind(string kind)
             => kind == "Autosave" || kind == "Auto checkpoint" || kind == "Disconnect" || kind == "Recover";
 
-        private string FirstVariantOf(List<MPSaveManager.MpPlaythrough> runs, string baseName)
+        private string FirstVariantOf(List<MPSaveManager.MpPlaythrough> runs, string cardKey)
         {
-            foreach (var r in runs) if (r.Base == baseName && r.Variants.Count > 0) return VisibleVariants(r)[0].SessionName;
+            foreach (var r in runs) if (CardKeyOf(r) == cardKey && r.Variants.Count > 0) return VisibleVariants(r)[0].SessionName;
             return runs.Count > 0 && runs[0].Variants.Count > 0 ? VisibleVariants(runs[0])[0].SessionName : "";
+        }
+
+        /// <summary>Round-219: the world id of a listed session — the expanded card's
+        /// copy wins when the same name is listed by several worlds.</summary>
+        private string PidOfListed(List<MPSaveManager.MpPlaythrough> runs, string session, string preferCardKey)
+        {
+            if (string.IsNullOrEmpty(session)) return "";
+            string any = "";
+            foreach (var r in runs)
+                foreach (var v in VisibleVariants(r))
+                    if (v.SessionName == session)
+                    {
+                        if (CardKeyOf(r) == preferCardKey) return v.PlaythroughId ?? "";
+                        if (any.Length == 0) any = v.PlaythroughId ?? "";
+                    }
+            return any;
+        }
+
+        /// <summary>Round-221: a card's unique identity — its world id plus its base
+        /// name. In v2 every variant of a card shares one world id; in v1 stores the
+        /// id half is empty and the key degrades to the base name, as before.</summary>
+        private static string CardKeyOf(MPSaveManager.MpPlaythrough r)
+            => (r.Variants.Count > 0 ? (r.Variants[0].PlaythroughId ?? "") : "") + "|" + r.Base;
+
+        /// <summary>Round-221: is the SELECTED (name, world) pair still listed? A pid-less
+        /// selection (legacy) degrades to a name-only check.</summary>
+        private bool PairListed(List<MPSaveManager.MpPlaythrough> runs, string session, string pid)
+        {
+            foreach (var r in runs)
+                foreach (var v in VisibleVariants(r))
+                    if (v.SessionName == session
+                        && (string.IsNullOrEmpty(pid) || string.IsNullOrEmpty(v.PlaythroughId) || v.PlaythroughId == pid))
+                        return true;
+            return false;
         }
 
         private bool SessionListed(List<MPSaveManager.MpPlaythrough> runs, string session)
@@ -4703,7 +4749,7 @@ namespace BigAmbitionsMP
             foreach (var h in _spHeaderHits)
                 if (RectHit(h.Rt, mp)) { _spExpanded = (_spExpanded == h.Key) ? "" : h.Key; RefreshSavePicker(); return; }
             foreach (var v in _spVarHits)
-                if (RectHit(v.Rt, mp)) { _spSelSession = v.Key; RefreshSavePicker(); return; }
+                if (RectHit(v.Rt, mp)) { _spSelSession = v.Key; _spSelPid = v.Pid; RefreshSavePicker(); return; }
         }
 
         private void OnSpLoad()
@@ -4712,10 +4758,14 @@ namespace BigAmbitionsMP
             string name = _spSelSession;
             // Store v2: pin the picked save's world BEFORE any manifest read below, so a
             // name shared by two playthroughs resolves to the one the player clicked.
-            // Ambiguous ("") or unmapped names fall back to newest-wins with a loud log.
+            // Round-219: the clicked ROW's identity wins outright (click-exact, vanilla
+            // semantics); the name map is only a fallback for legacy paths, and a name
+            // ambiguous there ("") falls back to newest-wins with a loud log.
             try
             {
-                if (_spPidBySession.TryGetValue(name, out var pickedPid) && !string.IsNullOrEmpty(pickedPid))
+                string pickedPid = _spSelPid;
+                if (string.IsNullOrEmpty(pickedPid)) _spPidBySession.TryGetValue(name, out pickedPid);
+                if (!string.IsNullOrEmpty(pickedPid))
                 {
                     MPSaveManager.NoteSessionPid(name, pickedPid);
                     MPSaveManager.NoteSessionPid(MPSaveManager.StripToBase(name), pickedPid);

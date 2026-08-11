@@ -515,8 +515,14 @@ namespace BigAmbitionsMP
                 var bm = InstanceBehavior<BuildingManager>.Instance;
                 if (bm?.buildingRegistration == null) return;
                 if (GameStateReader.AddressKey(bm.buildingRegistration) != addressKey) return;
-                if (!HousingFurniture.LocalGuestHere()) return;
-                HousingFurniture.Enter();
+                // Round-223 (field 20260801-012503): BUSINESS HELPERS paint too — this
+                // gate only accepted residence guests, so a helper's designer close
+                // forwarded a snapshot with the OLD walls/floors (their paint was never
+                // serialized into the reg) and the owner's adopt reverted it on re-entry.
+                // The Enter flip is scoped to this single serialize call — not the
+                // blanket residence behaviors round-32 warns against giving helpers.
+                if (!HousingFurniture.LocalGuestHere() && !HousingFurniture.LocalHelperHere()) return;
+                HousingFurniture.Enter(includeHelper: true);
                 try { bm.SerializeInteriorDesign(); }
                 finally { HousingFurniture.Exit(); }
             }

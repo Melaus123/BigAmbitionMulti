@@ -2093,6 +2093,10 @@ namespace BigAmbitionsMP
     /// folds the slot into the manifest.</summary>
     public class SaveDataPayload
     {
+        /// <summary>Round-222 (store v2): WHICH world this upload belongs to — a save
+        /// arriving after the host's session context is gone (late/teardown uploads)
+        /// must still file into the right playthrough folder.</summary>
+        public string PlaythroughId { get; set; } = "";
         public string SessionName    { get; set; } = "";
         public bool   Success        { get; set; }
         public MpSlot Slot           { get; set; } = new();
@@ -2116,6 +2120,10 @@ namespace BigAmbitionsMP
     /// current known cash for this player, overlaid after the load completes.</summary>
     public class LoadDataPayload
     {
+        /// <summary>Round-224: false = the host has NO trustworthy cash figure for this
+        /// player (placeholder slot + never streamed) — the client must keep the wallet
+        /// inside its .hsg instead of applying a fake $0 overlay.</summary>
+        public bool MoneyKnown { get; set; } = true;
         public string SessionName    { get; set; } = "";
         public string HsgGzipBase64  { get; set; } = "";
         public int    RawLength      { get; set; }

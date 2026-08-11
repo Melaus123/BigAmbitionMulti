@@ -422,12 +422,18 @@ namespace BigAmbitionsMP
                 }
                 // Cash came from the served session's manifest (rescue-aware); world identity
                 // below stays the LOADED session's (m) — the world everyone is jumping to.
+                // Round-224: zero cash with no live stream = UNKNOWN, not broke — the
+                // overlay must stand down so the .hsg's own wallet survives (rig: a
+                // placeholder $0 slot zeroed a returning client's wallet).
+                bool moneyKnown = cash != 0f || GetKnownCash(pid) >= 0f;
+                if (!moneyKnown) Plugin.Logger.LogInfo($"[Server] cash unknown for '{pid}' — serving no-overlay; their save's own wallet stands.");
                 var payload = new LoadDataPayload
                 {
                     SessionName   = adopt,
                     HsgGzipBase64 = data.Value.b64,
                     RawLength     = data.Value.raw,
                     Money         = cash,
+                    MoneyKnown    = moneyKnown,
                     // Handoff slice 4: world identity/day/epoch for the joiner's
                     // rollback-consent check.
                     WorldDay      = m.WorldDay,
@@ -710,9 +716,18 @@ namespace BigAmbitionsMP
             if (sessions.Count > 0)
             {
                 // Use the session the host picked in the save list; else newest.
-                string session = !string.IsNullOrEmpty(ChosenLoadSession)
-                                 && sessions.Exists(s => s.Name == ChosenLoadSession)
-                                 ? ChosenLoadSession : sessions[0].Name;
+                string session;
+                if (!string.IsNullOrEmpty(ChosenLoadSession) && sessions.Exists(s => s.Name == ChosenLoadSession))
+                {
+                    session = ChosenLoadSession;   // the picker's round-219 pin targets the exact world
+                }
+                else
+                {
+                    // Round-222: the legacy "resume newest" branch chooses by LIST position —
+                    // carry that entry's identity so a duplicated name can't resolve elsewhere.
+                    session = sessions[0].Name;
+                    try { MPSaveManager.NoteSessionPid(session, sessions[0].Manifest?.PlaythroughId ?? ""); } catch { }
+                }
                 Plugin.Logger.LogInfo($"[Server] StartLoadGame → resuming MP session '{session}'.");
                 MPSaveCoordinator.HostLoadSession(session);
                 return;
@@ -1862,6 +1877,14 @@ namespace BigAmbitionsMP
             if (!string.IsNullOrEmpty(hello.StableId))
             {
                 StableIdByPlayer[hello.PlayerId] = hello.StableId;
+                // Round-224: a CashSync that arrived BEFORE this mapping filed under the
+                // display name — re-key it now or it stays invisible to every stable-id
+                // lookup forever (the on-change gate never re-sends an unchanged wallet).
+                if (CashByStableId.TryRemove(hello.PlayerId, out var earlyCash))
+                {
+                    CashByStableId[hello.StableId] = earlyCash;
+                    Plugin.Logger.LogInfo($"[Server] cash re-keyed from early-join alias '{hello.PlayerId}' → stable id.");
+                }
                 GrantSync.NoteName(hello.StableId, hello.PlayerId);   // remember the name for owners' grantee lists
             }
 
@@ -1885,6 +1908,14 @@ namespace BigAmbitionsMP
                 if (!string.IsNullOrEmpty(hello.StableId))
                 {
                     StableIdByPlayer[hello.PlayerId] = hello.StableId;
+                // Round-224: a CashSync that arrived BEFORE this mapping filed under the
+                // display name — re-key it now or it stays invisible to every stable-id
+                // lookup forever (the on-change gate never re-sends an unchanged wallet).
+                if (CashByStableId.TryRemove(hello.PlayerId, out var earlyCash))
+                {
+                    CashByStableId[hello.StableId] = earlyCash;
+                    Plugin.Logger.LogInfo($"[Server] cash re-keyed from early-join alias '{hello.PlayerId}' → stable id.");
+                }
                     GrantSync.NoteName(hello.StableId, hello.PlayerId);
                 }
                 // Late join — keep the roster current for everyone (the in-game F9
@@ -3489,6 +3520,7 @@ namespace BigAmbitionsMP
                 Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
                 {
                     SessionName = adopt, HsgGzipBase64 = data.Value.b64, RawLength = data.Value.raw, Money = cash,
+                    MoneyKnown = cash != 0f || GetKnownCash(pid) >= 0f,   // round-224: 0-and-unstreamed = unknown
                     // Handoff slice 4: identity/day/epoch for the joiner's log-only diagnostics.
                     WorldDay = m?.WorldDay ?? 0, PlaythroughId = !string.IsNullOrEmpty(m?.PlaythroughId) ? m.PlaythroughId : MPSaveCoordinator.ActivePlaythroughId, HostEpoch = m?.HostEpoch ?? 0,
                 }));

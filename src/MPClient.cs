@@ -1546,6 +1546,7 @@ namespace BigAmbitionsMP
                 Slot          = slot,
                 HsgGzipBase64 = hsgGzipBase64,
                 RawLength     = rawLength,
+                PlaythroughId = MPSaveManager.ActivePlaythrough,   // round-222: identity travels
             };
             Send(MessageEnvelope.Create(MessageType.SaveData, MPConfig.PlayerId, p));
             Plugin.Logger.LogInfo($"[Client] Sent SaveData: session='{sessionName}' raw={rawLength}B day={slot?.Day}.");

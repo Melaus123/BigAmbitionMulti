@@ -243,6 +243,8 @@ namespace BigAmbitionsMP
             _activeBase = baseName ?? "";
         }
         public static void ClearActivePlaythrough() { _activePid = ""; _activeBase = ""; }
+        /// <summary>Round-222: the live world's folder id, for wire senders ("" between sessions).</summary>
+        public static string ActivePlaythrough => _activePid;
 
         /// <summary>Round-218: forget every name→folder pin. Called when the world
         /// context changes (load / new world / join / session end) — a session name
@@ -605,7 +607,13 @@ namespace BigAmbitionsMP
                     }
 
                     string baseName = StripToBase(name);
-                    if (!byBase.TryGetValue(baseName, out var pt)) { pt = new MpPlaythrough { Base = baseName }; byBase[baseName] = pt; }
+                    // Round-220: in v2 the name-family bundle must stay WITHIN its world —
+                    // keying by base name alone fused same-named sessions from different
+                    // worlds onto one card (rig: two 'save' rows, day 2 + day 131, on the
+                    // test-playthrough card, both highlighting). The later pid-merge step
+                    // still folds one world's many base-groups into its single card.
+                    string groupKey = pidFolder.Length > 0 ? pidFolder + "|" + baseName : baseName;
+                    if (!byBase.TryGetValue(groupKey, out var pt)) { pt = new MpPlaythrough { Base = baseName }; byBase[groupKey] = pt; }
                     pt.Variants.Add(v);
                 }
 
