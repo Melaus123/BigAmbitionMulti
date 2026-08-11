@@ -17,7 +17,14 @@ namespace BigAmbitionsMP
     /// it), and AddModifier self-gates on the disableHappiness setting.
     /// Shared residences are NOT RentedByPlayer on the guest's machine
     /// (HousingMapCues.IsSharedWithMe), so the native rent checks stay
-    /// untouched by this — the reconcile is purely additive.</summary>
+    /// untouched by this — the reconcile is purely additive.
+    ///
+    /// Round-228 adds the mirror invariant: "has a home ⇒ NO no_home".
+    /// Native removes the penalty ONLY inside the rent transaction
+    /// (BizManPresentation), so a crash-restore that rolls the character
+    /// behind the world state leaves a permanent stale penalty on a player
+    /// who provably rents (field 20260801-172213). Vanilla can never hold
+    /// that pair, so removing it is always a heal, never a cheat.</summary>
     public static class MPHousingMorale
     {
         private const string NoHome = "ba:happinessmodifier_no_home";
@@ -50,7 +57,12 @@ namespace BigAmbitionsMP
 
                 bool hasPenalty = gi.happinessModifiers.Exists(m => m != null && m.type == NoHome);
 
-                if (!ownHome && sharedHome && hasPenalty)
+                if (ownHome && hasPenalty)
+                {
+                    Helpers.HappinessHelper.RemoveModifier(NoHome);
+                    Plugin.Logger.LogInfo("[Morale] own residence rented but a stale no-home penalty was present — removed (round-228 heal).");
+                }
+                else if (!ownHome && sharedHome && hasPenalty)
                 {
                     Helpers.HappinessHelper.RemoveModifier(NoHome);
                     if (!_liftedLogged) { _liftedLogged = true; _restoredLogged = false; Plugin.Logger.LogInfo("[Morale] a shared residence counts as home — no-home penalty lifted."); }
