@@ -5265,6 +5265,18 @@ namespace BigAmbitionsMP
         private void TickLobbyWindow()
         {
             if (_lobbyWindow == null || !_lobbyWindow.activeSelf) { _btnDiagLogged = false; return; }
+            // Round-226c (user): the cash/age boxes had NO visible caret. Typing in
+            // them only ever appends/backspaces at the end, so an end-of-text blinking
+            // bar is honest. Rendered per frame while focused; the normal refresh
+            // repaints the plain value on blur.
+            {
+                bool caretOn = Time.unscaledTime % 1f < 0.5f;
+                int cf = _lwRowCashFocus, af = _lwRowAgeFocus;
+                if (cf >= 0 && cf < _lwRowCashLbl.Length && _lwRowCashLbl[cf] != null)
+                    { try { _lwRowCashLbl[cf].text = _lwRowCash[cf] + (caretOn ? "|" : ""); } catch { } }
+                if (af >= 0 && af < _lwRowAgeLbl.Length && _lwRowAgeLbl[af] != null)
+                    { try { _lwRowAgeLbl[af].text = _lwRowAge[af] + (caretOn ? "|" : ""); } catch { } }
+            }
             // One-shot geometry diagnostic (2026-07-10 invite-button report): name
             // the actual hit rects so a bad one is identified from the field log
             // instead of anchor theory.  Logs once per lobby open, first frame
@@ -5346,15 +5358,21 @@ namespace BigAmbitionsMP
             else if (_lwRowAgeFocus >= 0 && Input.inputString.Length > 0)
             {
                 int i = _lwRowAgeFocus;
-                string s = TypeDigits(_lwRowAge[i], 3);
+                // Round-226b (user design): the age field HOLDS two digits — a third
+                // keystroke simply never goes in ("189" stays "18"), so the box always
+                // shows what will apply. A complete 2-digit entry above 79 becomes 79
+                // on screen AND in effect (the game zombie-walks at 80, kills at 90).
+                string s = TypeDigits(_lwRowAge[i], 2);
                 _lwRowAge[i] = s;
-                if (_lwRowAgeLbl[i] != null) _lwRowAgeLbl[i].text = s;
                 if (int.TryParse(s, out int v))
                 {
-                    v = Mathf.Clamp(v, 16, 99);
+                    if (s.Length == 2 && v > 79) { v = 79; s = "79"; _lwRowAge[i] = s; }
+                    if (_lwRowAgeLbl[i] != null) _lwRowAgeLbl[i].text = s;
+                    v = Mathf.Clamp(v, 16, 79);
                     if (MPServer.IsRunning) MPServer.SetStartingAge(MPConfig.PlayerId, v);   // host's own age (+ broadcast)
                     else { MPClient.ChosenStartingAge = v; MPClient.SendLobbyPref(v); }       // client reports its age
                 }
+                else if (_lwRowAgeLbl[i] != null) _lwRowAgeLbl[i].text = s;   // backspaced empty — show it
             }
         }
 

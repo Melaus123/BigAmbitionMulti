@@ -89,7 +89,12 @@ namespace BigAmbitionsMP
         public static readonly ConcurrentDictionary<string, int> StartingAgeByPlayer = new();
 
         public static int StartingAgeFor(string playerId, int baseAge)
-            => (!string.IsNullOrEmpty(playerId) && StartingAgeByPlayer.TryGetValue(playerId, out var v) && v > 0) ? v : baseAge;
+        {
+            int age = (!string.IsNullOrEmpty(playerId) && StartingAgeByPlayer.TryGetValue(playerId, out var v) && v > 0) ? v : baseAge;
+            // Round-226 belt: whatever the source, never hand the game an age in its
+            // zombie-walk (80+) or instant-death (90+) range.
+            return Math.Max(16, Math.Min(79, age));
+        }
 
         /// <summary>Records a player's chosen starting age and re-broadcasts the lobby
         /// so everyone sees it.  Called for the host's own age (from the lobby UI) and
@@ -1270,7 +1275,7 @@ namespace BigAmbitionsMP
                 {
                     var lp = env.GetPayload<LobbyPrefPayload>();
                     if (lp == null || !SenderIs(lp.PlayerId, senderPid, env.Type)) break;
-                    if (lp.Age < 16 || lp.Age > 99)   // mirrors the lobby UI's own clamp
+                    if (lp.Age < 16 || lp.Age > 79)   // round-226: above 79 = native zombie-walk (80) / death (90) territory
                     {
                         Plugin.Logger.LogWarning($"[Server] LobbyPref from '{senderPid}': age {lp.Age} out of range — dropped.");
                         break;
