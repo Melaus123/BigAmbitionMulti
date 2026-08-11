@@ -268,6 +268,11 @@ namespace BigAmbitionsMP
         /// Harmony patches can reach instance state (e.g. chat typing focus).</summary>
         public static MPCanvasUI? Instance { get; private set; }
 
+        /// <summary>Round-225b: the mod's UI canvas root ("BAMP_Canvas") — cloned native
+        /// panels must parent HERE to render (the manager component itself lives on a
+        /// plain object; a RectTransform outside a Canvas draws nothing, rig-proven).</summary>
+        internal GameObject? CanvasRoot => _canvasGO;
+
         /// <summary>Clear chat typing-focus + input suppression.  Called from the
         /// HandleEscapeClick guard so Escape always escapes our input block instead
         /// of crashing the game's escape handler.</summary>
@@ -519,6 +524,10 @@ namespace BigAmbitionsMP
             // guarantees the path is ready so NO poll-thread handler ever calls IL2CPP.
             MPSaveManager.EnsureVersionCached();
             MPStoreMigration.RunIfNeeded();   // store v2 M2: one-time flat→pid migration, first frame the version resolves
+            // Round-225f lock-safety: the load window hides the MP menu while open (native
+            // behavior) — Escape ALWAYS closes it and restores the menu, so no render
+            // failure can ever strand the player without interactables.
+            if (MPLoadWindow.IsOpen && Input.GetKeyDown(KeyCode.Escape)) { MPLoadWindow.Close(); OnLoadWindowClosed(); }
             TickSteamJoin();   // consume a queued Steam invite/join (menu only)
 #if BAMP_DEV
             // DIAG:INVESTIGATION(passenger-doors) — F6 spawns a visible row of the next few
@@ -2976,6 +2985,7 @@ namespace BigAmbitionsMP
                 catch { }
                 MPAudit.Reset();          // divergence streaks/throttle die with the session (else stale [Audit] state pollutes the bug-report log across same-process sessions)
                 MPFrameRhythm.Reset();    // round-207: frame ring + beat registry are per-session
+                MPLoadWindow.ResetForScene();   // round-225: the clone borrows menu-scene assets
                 Patch_ReportBugButton_ModTakeover.ResetForScene();   // round-209: re-arm the recycle retry per world
                 CustomerPuppets.Reset();  // round-41: puppet bodies + authority table die with the scene
                 MPStockSync.Reset();      // per-shop stock digests die with the session
@@ -4241,8 +4251,32 @@ namespace BigAmbitionsMP
 
         private void OnMpHostSaved()
         {
-            Plugin.Logger.LogInfo("[MenuUI] Host Saved Game → save picker");
+            // Round-225: the native-style load window (vanilla layout + delete). The
+            // classic picker stays as the loud fallback if the clone can't build.
+            if (MPLoadWindow.Open()) { Plugin.Logger.LogInfo("[MenuUI] Host Saved Game → native-style load window"); return; }
+            Plugin.Logger.LogInfo("[MenuUI] Host Saved Game → classic save picker (fallback)");
             ShowSavePicker(true);   // choose WHICH save first (local disk; no server needed yet)
+        }
+
+        /// <summary>Round-225: the load window picked a save — reuse the classic flow
+        /// (pin → tuning mirror → host → lobby) with the exact (name, world) pair.</summary>
+        internal void LoadPickedSession(string session, string pid)
+        {
+            _spSelSession = session;
+            _spSelPid     = pid ?? "";
+            OnSpLoad();
+        }
+
+        /// <summary>Round-225: load window closed without picking — back to the MP submenu.</summary>
+        internal void OnLoadWindowClosed() { try { ShowView(MpView.Submenu); } catch { } }
+
+        /// <summary>Round-225e: the load window sits at the NATIVE canvas layer (below
+        /// BAMP_Canvas) so vanilla dialogs stack above it — hide our submenu while it is
+        /// open so nothing of ours draws over it; restoring replays the current view.</summary>
+        internal void SetMpMenuHiddenForLoadWindow(bool hidden)
+        {
+            if (hidden) { foreach (var m in _mpSubmenu) { try { m.SetActive(false); } catch { } } }
+            else { try { ShowView(_view); } catch { } }
         }
 
         // ── Save picker (lists MP sessions to choose which to host) ────────────

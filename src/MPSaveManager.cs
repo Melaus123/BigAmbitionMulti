@@ -556,6 +556,7 @@ namespace BigAmbitionsMP
             public long   SavedAtUnix;
             public string Players       = "";
             public string PlaythroughId = "";   // world identity from the manifest ("" = legacy/manifest-less)
+            public string SessionDir    = "";   // round-225: the EXACT folder this variant was walked from (delete/portrait use this, never name resolution)
             public string LastHostStableId = "";   // handoff slice 2: manifest provenance
             public string LastHostName     = "";
         }
@@ -573,7 +574,7 @@ namespace BigAmbitionsMP
                 if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return new List<MpPlaythrough>();
                 foreach (var (name, dir, pidFolder) in WalkSessionDirs(root))
                 {
-                    var v = new MpVariant { SessionName = name, Kind = ClassifyVariant(name) };
+                    var v = new MpVariant { SessionName = name, Kind = ClassifyVariant(name), SessionDir = dir };
                     var m = ReadManifestAt(dir);
                     if (m != null)
                     {
