@@ -358,6 +358,7 @@ namespace BigAmbitionsMP
             catch { phase = "unknown"; }
             MPBugReport.Heartbeat(phase);
             TickDuplicateInstallWarning();
+            TickPatchFailureWarning();
             TickSteamProbe();
         }
 
@@ -402,6 +403,29 @@ namespace BigAmbitionsMP
             {
                 UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error,
                     $"{MyPluginInfo.SHORT_NAME} is installed twice (Steam Workshop + local mods). The extra copy was disabled — please remove one install.");
+            }
+            catch { }
+        }
+
+        private bool _patchFailWarned;
+        /// <summary>Round-229 two-tier boot-health announcement, once per run. A
+        /// systemic hook collapse (>= ModEntry.PatchFailHardBlock) also refuses MP
+        /// entry (gates in MPServer.Start / MPClient.Connect / ConnectSteam); a
+        /// handful of failures only warns — MP stays enabled. Self-diagnosis first
+        /// by design: verify game files, then remove other mods — the message
+        /// deliberately does NOT steer them to the report button (players report
+        /// at their own discretion; that path stays alive regardless — it needs
+        /// no game hooks).</summary>
+        private void TickPatchFailureWarning()
+        {
+            if (_patchFailWarned || !ModEntry.PatchesDegraded) return;
+            _patchFailWarned = true;
+            try
+            {
+                if (ModEntry.MpDisabledByPatchFailure)
+                    UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, ModEntry.PatchFailureNotice);
+                else
+                    UI.Notification.Notifications.Show(UI.Notification.NotificationType.Warning, ModEntry.PatchDegradedNotice);
             }
             catch { }
         }

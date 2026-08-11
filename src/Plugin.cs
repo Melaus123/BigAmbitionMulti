@@ -34,6 +34,34 @@ namespace BigAmbitionsMP
         /// days). Rides every bug report so the field self-reports it.</summary>
         public static readonly System.Collections.Generic.List<string> PatchIssues = new();
 
+        /// <summary>Round-229 (field 20260801-193731): count of OUR patch classes that THREW
+        /// during boot patching (the loop walks this assembly only — other mods' hook failures
+        /// never enter this number). One machine had all 253 fail (TypeLoadException storm,
+        /// machine-local environment) yet the mod offered Host/Join as healthy — the host's own
+        /// world load silently bounced while clients were sent into the world.</summary>
+        public static int PatchFailCount;
+
+        /// <summary>Two-tier response (user-directed light touch): a few failures WARN but
+        /// never block (a game hotfix nicking one optional hook must not lock everyone out —
+        /// the retired Escape guard shipped harmlessly dead for five weeks); at this many the
+        /// failure is systemic (broken install, conflicting mod, or a game update newer than
+        /// the mod) and MP entry is refused to protect shared saves.</summary>
+        public const int PatchFailHardBlock = 10;
+
+        public static bool MpDisabledByPatchFailure => PatchFailCount >= PatchFailHardBlock;
+        public static bool PatchesDegraded => PatchFailCount > 0;
+
+        public static string PatchFailureNotice =>
+            $"{MyPluginInfo.SHORT_NAME} could not attach to the game ({PatchFailCount} hook(s) failed) — " +
+            "multiplayer is disabled to protect your saves. Verify the game files in Steam " +
+            "(right-click the game > Properties > Installed Files), and check for a mod update; " +
+            "if neither fixes it, remove other mods and retry.";
+
+        public static string PatchDegradedNotice =>
+            $"{MyPluginInfo.SHORT_NAME}: {PatchFailCount} game hook(s) failed to install. Multiplayer will run, " +
+            "but some features may misbehave. If you notice problems, verify the game files in Steam " +
+            "and check for a mod update.";
+
         private Harmony? _harmony;
         private GameObject? _uiHost;
 
@@ -116,9 +144,23 @@ namespace BigAmbitionsMP
                     failClasses++;
                     PatchIssues.Add($"{t.Name}: {ex.GetType().Name}: {ex.Message}{inner}");
                     Plugin.Logger.LogError($"[Plugin] Patch class {t.Name} FAILED: {ex.GetType().Name}: {ex.Message}{inner}");
+                    // Round-229: the root Message alone can be nameless ("Failure has occurred
+                    // while loading a type") — for the first few failures keep the FULL root
+                    // (stack + TypeLoadException.TypeName when present) so a field bundle
+                    // names what would not load. Capped: 253 identical stacks help nobody.
+                    if (failClasses <= 3)
+                    {
+                        string? tln = (root as TypeLoadException)?.TypeName;
+                        Plugin.Logger.LogError($"[Plugin] {t.Name} root detail{(string.IsNullOrEmpty(tln) ? "" : $" (type '{tln}')")}: {root}");
+                    }
                 }
             }
+            PatchFailCount = failClasses;
             Plugin.Logger.LogInfo($"[Plugin] Patch summary: {okClasses} class(es) OK, {failClasses} failed, {deadClasses} dead, {totalPatched} method(s) patched total.");
+            if (MpDisabledByPatchFailure)
+                Plugin.Logger.LogError($"[Plugin] {failClasses} patch class(es) FAILED (>= {PatchFailHardBlock}) — systemic; multiplayer entry is DISABLED this run (broken install, conflicting mod, or game update newer than the mod).");
+            else if (PatchesDegraded)
+                Plugin.Logger.LogWarning($"[Plugin] {failClasses} patch class(es) FAILED (< {PatchFailHardBlock}) — multiplayer stays ENABLED; affected features may misbehave.");
 
             Plugin.Logger.LogInfo($"{MyPluginInfo.DISPLAY_NAME} (BigAmbitionsMP) v{MyPluginInfo.PLUGIN_VERSION} ({MyPluginInfo.BuildTag}) loaded. Canvas UI active.");
             return Task.CompletedTask;

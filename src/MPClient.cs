@@ -86,6 +86,13 @@ namespace BigAmbitionsMP
 
         public static void Connect(string hostIp, int port)
         {
+            // Round-229: unreliable hooks — refuse to join (see MPServer.Start).
+            if (ModEntry.MpDisabledByPatchFailure)
+            {
+                Plugin.Logger.LogError($"[Client] Join refused: {ModEntry.PatchFailureNotice}");
+                try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, ModEntry.PatchFailureNotice); } catch { }
+                return;
+            }
             // A previous session/attempt may still be live (exited to the menu
             // without disconnecting, or an autopilot retry).  Tear it down so we
             // never run two transports/poll threads at once.
@@ -111,6 +118,13 @@ namespace BigAmbitionsMP
         /// path from the Hello onward; the seam hides the transport.</summary>
         public static bool ConnectSteam(ulong hostSteamId)
         {
+            // Round-229: unreliable hooks — refuse to join (see MPServer.Start).
+            if (ModEntry.MpDisabledByPatchFailure)
+            {
+                Plugin.Logger.LogError($"[Client] Steam join refused: {ModEntry.PatchFailureNotice}");
+                try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, ModEntry.PatchFailureNotice); } catch { }
+                return false;
+            }
             if (_transport != null) Disconnect();
             LastDisconnectReason = "";
             SessionEnded = false;

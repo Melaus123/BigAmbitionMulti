@@ -539,6 +539,17 @@ namespace BigAmbitionsMP
 
         public static bool Start(int port)
         {
+            // Round-229: with a SYSTEMIC boot patch failure (>= ModEntry.PatchFailHardBlock
+            // classes threw) the game hooks are unreliable — hosting would half-work
+            // (lobby up, host's own load bounces, clients sent into a world the host
+            // never reaches). Refuse up front, loudly. A handful of failures only
+            // warns at the menu; MP stays enabled (light touch, user-directed).
+            if (ModEntry.MpDisabledByPatchFailure)
+            {
+                Plugin.Logger.LogError($"[Server] Hosting refused: {ModEntry.PatchFailureNotice}");
+                try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, ModEntry.PatchFailureNotice); } catch { }
+                return false;
+            }
             // A previous session may still be live (e.g. the host exited to the
             // menu without Leave — nothing stops the server on scene exit prior
             // to this guard).  Tear it down first: the old transport still holds
