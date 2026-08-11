@@ -833,6 +833,9 @@ namespace BigAmbitionsMP
         /// building its receiver owns.</summary>
         public static void ApplyInteriorSnapshot(InteriorSnapshotPayload payload, bool grantedEdit)
         {
+            // Round-227: the piggybacked speaker state lands first — cheap, and the
+            // entering player hears the right station from the first frame.
+            try { if (payload != null) MPRadioSync.ApplyFromSnapshot(payload.AddressKey, payload.RadioStation, payload.RadioVolume); } catch { }
             if (payload == null || string.IsNullOrEmpty(payload.AddressKey)) return;
             RunOnMainThread(() =>
             {

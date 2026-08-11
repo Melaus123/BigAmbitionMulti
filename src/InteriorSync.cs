@@ -736,6 +736,9 @@ namespace BigAmbitionsMP
                 catch { }
 
                 // Interior designs
+                // Round-227: speaker radio state rides along (raw fields, not the
+                // owner-gated getters — the snapshot must carry the STORED truth).
+                try { snap.RadioStation = (int)reg.radioStation; snap.RadioVolume = reg.radioVolume; } catch { }
                 if (reg.interiorDesigns != null)
                 {
                     for (int i = 0; i < reg.interiorDesigns.Count; i++)
@@ -1017,6 +1020,7 @@ namespace BigAmbitionsMP
                 void V(int v) { hv = hv * 31 + v; }                     // volatile -> full only
 
                 S(MPAudit.StableHash(snap.Layout));
+                S(snap.RadioStation); S(((int)System.Math.Round(snap.RadioVolume * 100f)));   // round-227
                 foreach (var d in snap.InteriorDesigns)
                 {
                     S(MPAudit.StableHash(d.UUID));

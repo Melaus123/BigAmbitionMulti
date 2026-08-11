@@ -97,6 +97,7 @@ namespace BigAmbitionsMP
         BizTransferAck       = 172, // Buyer → Host: local claim done — stop re-sending Finalize
         TakeoverRequest      = 173, // Client → Host (round-204b): offer on an AI-run business — host arbitrates against LIVE valuation × accept rate; NOTHING happens client-side until the result
         TakeoverResult       = 174, // Host → Client: verdict — accepted (ledger + tenant reflect already done host-side; charge + native claim now) or denied (carries the host's minimum price)
+        RadioState           = 175, // Any → Host → All (round-227): a building's speaker radio state (station + signed volume; sign = on/off) — light and precise so a radio click can never clobber concurrent interior edits
         RegisterServe        = 156, // Simulator → Host → All: a customer's serve STARTED / FINISHED at a till.  Lets the player working that till on a FOLLOWER machine perform the job — they are assigned to the station locally and see the queue, but with no real customers there the native serve loop never runs, so without this they stand motionless behind a busy counter.
         BuildingDirtEdit     = 155, // Helper → Host → Owner: floor cells a HELPER mopped in someone else's business.  Narrow on purpose (only the cells whose dirtiness changed): dirt is owner-authoritative interior state, and the only pre-existing guest→owner interior channel is the whole-snapshot forward on interior-designer close, which mopping never triggers — so without this a helper's cleaning stayed local and was overwritten by the owner's next push.
         RestVote             = 102, // Client → Host: this player started/ended a rest-class activity (consensus time-skip voting).
@@ -1823,6 +1824,10 @@ namespace BigAmbitionsMP
         // snapshot clear a player business's interior. Default true = owner push / AI / world (apply normally).
         public bool                       Authoritative   { get; set; } = true;
         public List<InteriorDesignInfo>   InteriorDesigns { get; set; } = new();
+        // Round-227: speaker radio rides the snapshot so entering players + late
+        // joiners inherit it. -1 / -999 = absent (old-format peers).
+        public int                        RadioStation    { get; set; } = -1;
+        public float                      RadioVolume     { get; set; } = -999f;
         public List<RetailPriceInfo>      RetailPrices    { get; set; } = new();
         public List<DirtSpotInfo>         DirtSpots       { get; set; } = new();
         public List<ItemInstanceInfo>     ItemInstances   { get; set; } = new();
@@ -2118,6 +2123,15 @@ namespace BigAmbitionsMP
     /// it can load (or reconnect into) the session.  The .hsg lives on the host
     /// (centralized persistence); this ships it back.  Money is the host's most
     /// current known cash for this player, overlaid after the load completes.</summary>
+    /// <summary>Round-227: one building's speaker radio state. Volume is SIGNED —
+    /// negative means muted/off (the native convention).</summary>
+    public class RadioStatePayload
+    {
+        public string AddressKey { get; set; } = "";
+        public int    Station    { get; set; } = -1;
+        public float  Volume     { get; set; }
+    }
+
     public class LoadDataPayload
     {
         /// <summary>Round-224: false = the host has NO trustworthy cash figure for this

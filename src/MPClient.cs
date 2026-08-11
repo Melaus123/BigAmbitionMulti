@@ -662,6 +662,10 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.RadioState:            // round-227: a building's speaker state
+                    MPRadioSync.Apply(env.GetPayload<RadioStatePayload>(), "from host");
+                    break;
+
                 case MessageType.TakeoverResult:        // round-204b: host's verdict on my AI-business offer
                 {
                     var tv = env.GetPayload<TakeoverPayload>();

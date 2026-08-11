@@ -524,6 +524,7 @@ namespace BigAmbitionsMP
             // guarantees the path is ready so NO poll-thread handler ever calls IL2CPP.
             MPSaveManager.EnsureVersionCached();
             MPStoreMigration.RunIfNeeded();   // store v2 M2: one-time flat→pid migration, first frame the version resolves
+            MPRadioSync.Tick();   // round-227: debounced volume-drag flush
             // Round-225f lock-safety: the load window hides the MP menu while open (native
             // behavior) — Escape ALWAYS closes it and restores the menu, so no render
             // failure can ever strand the player without interactables.

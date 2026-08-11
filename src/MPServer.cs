@@ -958,6 +958,10 @@ namespace BigAmbitionsMP
                     HandleBuyRequest(peer, senderPid, env);
                     break;
 
+                case MessageType.RadioState:            // round-227: relay a member's speaker change
+                    MPRadioSync.HostHandle(env.GetPayload<RadioStatePayload>(), senderPid);
+                    break;
+
                 case MessageType.TakeoverRequest:       // round-204b: client's AI-business offer — arbitrate on live data
                 {
                     var tr = env.GetPayload<TakeoverPayload>();

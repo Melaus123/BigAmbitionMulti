@@ -5878,6 +5878,125 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Round-227 DIAGNOSTICS: music-station change crash (field 20260801-012525) ──
+        // "Players with permission attempting to change music station crashes game."
+        // The native station-cycling mesh (static PlayNextStation / instance
+        // PlayNextStation / instance PlayStation) retries with NO exhaustion guard —
+        // on installs with broken station data it may spiral to a StackOverflow,
+        // which kills the process before normal logs flush. PROBES ONLY (no behavior
+        // change): a shared depth counter across all three methods logs milestones
+        // through MPSaveCoordinator.DiagWrite (per-line flushed file, BAMP_DEV) so a
+        // hard crash still leaves the spiral on disk; the overlay buttons log who
+        // pressed and every station's data state at that moment.
+        internal static class RadioMeshDiag
+        {
+            internal static int Depth;
+            internal static void Milestone(string where)
+            {
+                if (Depth == 8 || Depth == 16 || Depth == 32 || Depth == 64 || Depth == 128 || Depth == 256)
+                {
+                    string msg = $"[RadioDiag] mesh depth {Depth} at {where} — {Snapshot()}";
+                    Plugin.Logger.LogWarning(msg);
+                    MPSaveCoordinator.DiagWrite(msg);
+                }
+            }
+            internal static string Snapshot()
+            {
+                try
+                {
+                    var rp = InstanceBehavior<GameManager>.Instance?.radioPlayer;
+                    if (rp == null) return "radioPlayer=null";
+                    var sb = new System.Text.StringBuilder();
+                    try
+                    {
+                        var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                        sb.Append($"bldgStation={(reg != null ? reg.GetBusinessRadioStation().ToString() : "?")} ");
+                    }
+                    catch { sb.Append("bldgStation=ERR "); }
+                    foreach (RadioStation st in Enum.GetValues(typeof(RadioStation)))
+                    {
+                        try
+                        {
+                            var d = rp.GetRadioStationData(st);
+                            sb.Append(d == null ? $"{st}=NULL " : $"{st}={(d.IsLoading ? "LOADING" : "ok")}/{d.radioClips?.Length ?? -1} ");
+                        }
+                        catch (Exception ex) { sb.Append($"{st}=ERR({ex.GetType().Name}) "); }
+                    }
+                    return sb.ToString();
+                }
+                catch (Exception ex) { return "snapshot failed: " + ex.Message; }
+            }
+        }
+
+        [HarmonyLib.HarmonyPatch(typeof(Player.Sound.Radio.LoudSpeakersManager), "PlayNextStation", new Type[0])]
+        public static class Patch_Radio227_StaticPNS
+        {
+            static bool Prefix(out bool __state)
+            {
+                // Round-227 belt: healthy cycling never exceeds a handful — 64 means a
+                // runaway (the rig crash spiraled here). Abort loudly instead of dying.
+                if (RadioMeshDiag.Depth >= 64)
+                {
+                    __state = false;
+                    Plugin.Logger.LogError($"[RadioDiag] runaway station cycle ABORTED at depth {RadioMeshDiag.Depth} — {RadioMeshDiag.Snapshot()}");
+                    return false;
+                }
+                __state = true; RadioMeshDiag.Depth++; RadioMeshDiag.Milestone("static PlayNextStation"); return true;
+            }
+            static Exception? Finalizer(Exception __exception, bool __state)
+            {
+                if (__state) RadioMeshDiag.Depth--;
+                if (__exception != null)
+                {
+                    Plugin.Logger.LogError($"[RadioDiag] static PlayNextStation threw {__exception.GetType().Name}: {__exception.Message} — {RadioMeshDiag.Snapshot()}");
+                    MPSaveCoordinator.DiagWrite($"[RadioDiag] static PNS threw {__exception.GetType().Name}");
+                }
+                return __exception;   // probes only — rethrow unchanged
+            }
+        }
+
+        [HarmonyLib.HarmonyPatch(typeof(Player.Sound.Radio.LoudSpeakersManager), "PlayNextStation", new[] { typeof(RadioStation) })]
+        public static class Patch_Radio227_InstPNS
+        {
+            static bool Prefix(out bool __state)
+            {
+                if (RadioMeshDiag.Depth >= 64) { __state = false; return false; }   // round-227 belt
+                __state = true; RadioMeshDiag.Depth++; RadioMeshDiag.Milestone("instance PlayNextStation"); return true;
+            }
+            static Exception? Finalizer(Exception __exception, bool __state) { if (__state) RadioMeshDiag.Depth--; return __exception; }
+        }
+
+        [HarmonyLib.HarmonyPatch(typeof(Player.Sound.Radio.LoudSpeakersManager), "PlayStation", new[] { typeof(RadioStation) })]
+        public static class Patch_Radio227_InstPlay
+        {
+            static bool Prefix(out bool __state)
+            {
+                if (RadioMeshDiag.Depth >= 64) { __state = false; return false; }   // round-227 belt
+                __state = true; RadioMeshDiag.Depth++; RadioMeshDiag.Milestone("instance PlayStation"); return true;
+            }
+            static Exception? Finalizer(Exception __exception, bool __state) { if (__state) RadioMeshDiag.Depth--; return __exception; }
+        }
+
+        [HarmonyLib.HarmonyPatch(typeof(Player.HUD.ItemInfoOverlays.RadioOverlay), "NextStation")]
+        public static class Patch_Radio227_OverlayNext
+        {
+            static void Prefix()
+            {
+                string msg = $"[RadioDiag] NextStation PRESSED — guest={HousingFurniture.LocalGuestHere()} helper={HousingFurniture.LocalHelperHere()}; {RadioMeshDiag.Snapshot()}";
+                Plugin.Logger.LogInfo(msg);
+                MPSaveCoordinator.DiagWrite(msg);
+            }
+        }
+
+        [HarmonyLib.HarmonyPatch(typeof(Player.HUD.ItemInfoOverlays.RadioOverlay), "ToggleRadio")]
+        public static class Patch_Radio227_OverlayToggle
+        {
+            static void Prefix()
+            {
+                Plugin.Logger.LogInfo($"[RadioDiag] ToggleRadio PRESSED — guest={HousingFurniture.LocalGuestHere()} helper={HousingFurniture.LocalHelperHere()}");
+            }
+        }
+
         // ── Round-192: LoudSpeakersManager failure latch ──────────────────────────
         // TEMPORARY SHIELD (user directive): exists only so a NATIVE bug stops generating
         // misdirected reports against this mod — REMOVE when Hovgaard fixes the manager's
