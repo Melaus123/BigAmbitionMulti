@@ -263,15 +263,36 @@ namespace BigAmbitionsMP
                 }
                 catch { }
 
-                if (liveState == (int)PlayerActivityState.NotStarted && CancelButtonIndex >= 0)
+                // Round-234 (field 20260802-221740 'stuck in my bed', revised design): the native
+                // Cancel button is a STATE-FLIP with zero cleanup (no blocker unset, no
+                // ResetNavigation, no seat release) — safe ONLY on an activity whose Start was
+                // never pressed. The reflected state read alone chose Cancel against a
+                // starting activity in the field (branch unexplained — hence the log line
+                // below), so the routing no longer trusts it alone: auto-start stamps the
+                // instance it started (_lastAutoStartedActRef), and that LOCAL fact vetoes
+                // Cancel outright. Finish() is the game's own Stop — correct teardown from
+                // every post-press state, including MovingTowards (ResetNavigation stops the
+                // walk). Zero delay on every path; the round-73 nav heal stays as backstop.
+                bool startPressed = _curActRef != null && ReferenceEquals(_curActRef, _lastAutoStartedActRef);
+                string branch;
+                if (!startPressed && liveState == (int)PlayerActivityState.NotStarted && CancelButtonIndex >= 0)
+                {
+                    branch = "native-cancel (never started)";
                     InvokeDockButton(CancelButtonIndex);
+                }
                 else if (act != null)
                 {
+                    branch = "Finish";
                     // Mono: the object IS its concrete type — call Finish directly.
                     act.GetType().GetMethod("Finish")?.Invoke(act, null);
-                    Plugin.Logger.LogInfo($"[Rest] StandUp via Finish() (live state {liveState}).");
                 }
-                else if (CancelButtonIndex >= 0) InvokeDockButton(CancelButtonIndex);   // no activity readable — legacy path
+                else if (CancelButtonIndex >= 0)
+                {
+                    branch = "legacy cached-cancel (no activity readable)";
+                    InvokeDockButton(CancelButtonIndex);
+                }
+                else branch = "no lever (heal backstops)";
+                Plugin.Logger.LogInfo($"[Rest] StandUp: liveState={liveState} startPressed={startPressed} → {branch}.");
 
                 // NO force-clearing of the UI's activity slot here: the movement
                 // lock it tried to fix was actually the input-suppression latch
