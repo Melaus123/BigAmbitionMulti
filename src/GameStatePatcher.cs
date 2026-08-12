@@ -440,7 +440,28 @@ namespace BigAmbitionsMP
                     // checks ClientRivalsInjected to ensure this is the ONLY
                     // successful run; subsequent calls (e.g. from the natural
                     // new-game flow) are skipped to preserve our cache.
-                    if (!ClientRivalsInjected)
+                    //
+                    // Round-235 (field 20260802-230906, MrsLunaris rejoin): GENERATION IS FOR
+                    // UNGENERATED WORLDS ONLY. Native GenerateRivals opens with
+                    // RivalDataCache.Clear() and never refills it (the refill belongs to the
+                    // city-generation flow that only follows on a FRESH world) — and it also
+                    // REBUILDS gi.rivalStates and mints fresh random wholesale/import rival
+                    // ids. Fired on a rejoin into an already-built world it wiped the 19
+                    // rivals EnsureRivalCachesPopulated had just installed → leaderboard
+                    // showed only the teammate. On a generated world the populate above is
+                    // the whole job. CRITICAL for 0.1.17: the round-197 world-ready re-send
+                    // delivers this snapshot on EVERY join — without this gate every join
+                    // into a loaded world would wipe its rivals.
+                    // Discriminator: wholesaleRivalIds is written ONLY by native GenerateRivals
+                    // (our populate above tops up rivalStates, so THAT field can't tell a
+                    // generated world from a just-populated one).
+                    bool worldGenerated = false;
+                    try { var g0 = SaveGameManager.Current; worldGenerated = g0?.wholesaleRivalIds != null && g0.wholesaleRivalIds.Length > 0; } catch { }
+                    if (worldGenerated)
+                    {
+                        Plugin.Logger.LogInfo("[Patcher] World already has rival state — cache populate only, GenerateRivals NOT triggered (round-235).");
+                    }
+                    else if (!ClientRivalsInjected)
                     {
                         try
                         {
