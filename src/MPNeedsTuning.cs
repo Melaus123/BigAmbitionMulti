@@ -56,9 +56,43 @@ namespace BigAmbitionsMP
         private static void Set(int drain, int rest, int morale, string source)
         {
             drain = Math.Max(0, drain); rest = Math.Max(0, rest); morale = Math.Max(1, morale);
+            // Round-236: BEFORE the no-change early-return — the flag re-align must run on
+            // every heartbeat, not only on value changes (a heartbeat landing during load,
+            // before the world exists, would otherwise converge the values once and the
+            // flag would never get its turn).
+            AlignBakedFlag(drain);
             if (drain == DrainPercent && rest == RestPercent && morale == MoralePercent) return;
             DrainPercent = drain; RestPercent = rest; MoralePercent = morale;
             Plugin.Logger.LogInfo($"[Needs] tuning ({source}): drain={drain}% rest={rest}% moraleTempo={morale}% (buffs ×{BuffDurationFactor:0.#}, sad roll {morale}% of native).");
+        }
+
+        /// <summary>Round-236 (field 20260802-231834 "the host is the only person who's hungry",
+        /// a many-reports class): the save-baked energy on/off flag silently deadens ALL needs
+        /// (hunger drains only inside energy spending) and old MP saves baked it TRUE as the
+        /// era's default. The round-53 reconcile un-bakes it — but only on the HOST
+        /// (ReconcileLoadedNeedsFlag returns unless MPServer.IsRunning), so every client
+        /// character from that era stayed needs-dead forever: hosts hungry, clients never.
+        /// Unreproducible on fresh rigs — the flag is state in old saves, not a code path.
+        ///
+        /// The dial owns the flag on EVERY machine now: each apply (host: host/load/settings;
+        /// client: the 3s heartbeat) re-aligns gv.disableEnergy with drain==0. Recurrence-
+        /// covered by the heartbeat, so a deliberate drain=0 group keeps needs OFF everywhere
+        /// too (a one-shot client fix would have created the inverse asymmetry for them).
+        /// The correction re-bakes into the client's save at their next upload — permanent
+        /// self-heal, no player action. SP untouched (InMp gate).</summary>
+        private static void AlignBakedFlag(int drainPercent)
+        {
+            try
+            {
+                if (!InMp) return;
+                var gv = SaveGameManager.Current?.gameVariables;
+                if (gv == null) return;
+                bool want = drainPercent == 0;
+                if (gv.disableEnergy == want) return;
+                gv.disableEnergy = want;
+                Plugin.Logger.LogInfo($"[Needs] baked disableEnergy → {want} (drain dial {drainPercent}% is the authority on every machine — round-236; heals into the save on next upload).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Needs] align flag: {ex.Message}"); }
         }
 
         // ── Drain: the single native sink (enum overload delegates here).  Hunger
