@@ -1583,25 +1583,64 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>Despawns every ghost vehicle owned by a player (they disconnected).</summary>
+        /// <summary>Round-231: a despawn sweep must never DESTROY a ghost the local player is
+        /// driving (field 20260802-125303: the owner toggled a permission mid-borrow and the
+        /// respawn deleted the car — with its cargo — under the driver). Sweeps that merely
+        /// REFRESH state (grant changes, owner disconnect) skip driven ghosts and set this
+        /// flag; the drive-end funnel in the tick (the release sender — it always runs, on
+        /// exit or timeout) applies the full despawn then, and the next fleet broadcast
+        /// respawns whatever should still exist. Scene teardowns still despawn everything
+        /// (ExitIfLocallyDriven keeps that crash-safe).</summary>
+        private static bool _pendingGhostReconcile;
+
+        /// <summary>Despawns every ghost vehicle owned by a player (they disconnected).
+        /// A ghost the local player is DRIVING survives until their drive ends.</summary>
         public static void DespawnAllOwnedBy(string ownerId)
         {
             var ids = _remoteVehicles.Where(kv => kv.Value.OwnerId == ownerId)
                                      .Select(kv => kv.Key).ToList();
-            foreach (var id in ids) DespawnByVehicleId(id);
+            foreach (var id in ids)
+            {
+                if (_remoteVehicles.TryGetValue(id, out var rv) && rv?.Go != null && IsGhostBeingDriven(rv.Go))
+                {
+                    _pendingGhostReconcile = true;
+                    Plugin.Logger.LogInfo($"[Drive] ghost '{id}' kept alive through its owner's disconnect — local player is driving it; reconcile at drive end.");
+                    continue;
+                }
+                DespawnByVehicleId(id);
+            }
         }
 
         /// <summary>Despawns every ghost vehicle (disconnect / scene unload).</summary>
-        public static void DespawnAll()
+        public static void DespawnAll() => DespawnAll(skipDriven: false);
+
+        public static void DespawnAll(bool skipDriven)
         {
+            List<string> kept = null;
             foreach (var kv in _remoteVehicles)
                 if (kv.Value.Go != null)
                 {
+                    if (skipDriven && IsGhostBeingDriven(kv.Value.Go))
+                    {
+                        (kept ??= new List<string>()).Add(kv.Key);
+                        continue;
+                    }
                     ExitIfLocallyDriven(kv.Value.Go, kv.Key);
                     try { UnityEngine.Object.Destroy(kv.Value.Go); } catch { }
                 }
+            if (kept == null)
+            {
+                _remoteVehicles.Clear();
+                _orphanPossessed.Clear();   // round-109: episodes die with the ghosts (per-session, not per-process)
+                _pendingGhostReconcile = false;
+                return;
+            }
+            var survivors = kept.Where(_remoteVehicles.ContainsKey)
+                                .ToDictionary(k => k, k => _remoteVehicles[k]);
             _remoteVehicles.Clear();
-            _orphanPossessed.Clear();   // round-109: episodes die with the ghosts (per-session, not per-process)
+            foreach (var kv in survivors) _remoteVehicles[kv.Key] = kv.Value;
+            _pendingGhostReconcile = true;
+            Plugin.Logger.LogInfo($"[Drive] {survivors.Count} driven ghost(s) kept alive through the sweep — deferred reconcile at drive end.");
         }
 
         private static bool IsGhostBeingDriven(GameObject go)
@@ -1692,13 +1731,32 @@ namespace BigAmbitionsMP
                         X = pose.position.x, Y = pose.position.y, Z = pose.position.z,
                         Qx = pose.rotation.x, Qy = pose.rotation.y, Qz = pose.rotation.z, Qw = pose.rotation.w,
                         Fuel = fuel, Damage = dmg, Released = false, T = Time.unscaledTime,
-                        Bldg = MPRegisterSync.CurrentShopAddress ?? "" });   // owner's follow holds at the door while we're indoors
+                        Bldg = MPRegisterSync.CurrentShopAddress ?? "" });   // truthful-follow tag (door-hold removed round-74): visibility masks + dormant releases key on it
                 }
                 else if (!string.IsNullOrEmpty(_drivingRealVid))
                 {
-                    SendDrive(new VehicleDrivePayload { VehicleId = _drivingRealVid, OwnerId = _drivingOwner, DriverId = MPConfig.PlayerId, Released = true, T = Time.unscaledTime });
-                    Plugin.Logger.LogInfo($"[Drive] exited borrowed '{_drivingRealVid}' — sent release.");
+                    // Round-232: carry the borrower's native parking verdict for where the car now
+                    // rests — the owner's copy otherwise keeps the PICKUP spot's legality forever
+                    // (tickets in a legal spot / none in an illegal one). The proxy still exists at
+                    // this tick (reconcile runs after the send), so read its instance directly.
+                    int parkState = -1;
+                    try
+                    {
+                        var pt = GhostTransform(_drivingRealVid)?.GetComponentInChildren<VehicleController>()?.vehicleInstance;
+                        if (pt != null) parkState = (int)pt.parkingState;
+                    }
+                    catch { }
+                    SendDrive(new VehicleDrivePayload { VehicleId = _drivingRealVid, OwnerId = _drivingOwner, DriverId = MPConfig.PlayerId, Released = true, ParkState = parkState, T = Time.unscaledTime });
+                    Plugin.Logger.LogInfo($"[Drive] exited borrowed '{_drivingRealVid}' — sent release (parkState={parkState}).");
                     _drivingRealVid = ""; _drivingOwner = "";
+                    // Round-231: a grant change / owner disconnect happened mid-drive and the sweep
+                    // spared this ghost. The drive is over — apply the full despawn now; the next
+                    // fleet broadcast respawns whatever should still exist, with current drivability.
+                    if (_pendingGhostReconcile)
+                    {
+                        Plugin.Logger.LogInfo("[Drive] drive ended — applying the deferred ghost reconcile now.");
+                        DespawnAll();
+                    }
                 }
 
                 if (_ownedFollowing.Count > 0)
@@ -1762,7 +1820,25 @@ namespace BigAmbitionsMP
                     DataFollow(p);
                     return;
                 }
-                if (p.Released) { ReleaseOwnedFollow(p.VehicleId); return; }
+                if (p.Released)
+                {
+                    // Round-232: adopt the borrower's parking verdict BEFORE the release persists
+                    // the pose — the resting car then resumes vanilla fine behavior for where it
+                    // actually is, not where it was picked up.
+                    if (p.ParkState >= 0)
+                        try
+                        {
+                            var ri = ownedGo.GetComponentInChildren<VehicleController>()?.vehicleInstance;
+                            if (ri != null && (int)ri.parkingState != p.ParkState)
+                            {
+                                Plugin.Logger.LogInfo($"[Drive] '{p.VehicleId}' parking state {ri.parkingState} → {(Helpers.ParkingState)p.ParkState} (borrower's exit verdict).");
+                                ri.parkingState = (Helpers.ParkingState)p.ParkState;
+                            }
+                        }
+                        catch { }
+                    ReleaseOwnedFollow(p.VehicleId);
+                    return;
+                }
                 if (!_ownedFollowing.TryGetValue(p.VehicleId, out var f))
                 {
                     f = new DrivenFollow(); _ownedFollowing[p.VehicleId] = f; BeginOwnedFollow(ownedGo, p.VehicleId);
@@ -1878,6 +1954,7 @@ namespace BigAmbitionsMP
                 if (inst == null) { _dataFollow.Remove(p.VehicleId); return; }   // not my vehicle
                 if (p.Released)
                 {
+                    if (p.ParkState >= 0) try { inst.parkingState = (Helpers.ParkingState)p.ParkState; } catch { }   // round-232: borrower's exit verdict
                     if (_dataFollow.TryGetValue(p.VehicleId, out var df) && df.Has)
                         Plugin.Logger.LogInfo($"[Drive] dormant-borrowed '{p.VehicleId}' released at '{(string.IsNullOrEmpty(df.Bldg) ? "outdoors" : df.Bldg)}' — save data holds the parked state.");
                     _dataFollow.Remove(p.VehicleId);
@@ -2027,7 +2104,7 @@ namespace BigAmbitionsMP
                 if (sig == _lastGrantorSig) return;
                 _lastGrantorSig = sig;
                 Plugin.Logger.LogInfo($"[Drive] granted-by set changed → respawning ghosts (drivable owners: '{sig}').");
-                DespawnAll();   // re-sync from the next fleet broadcast, drivable-or-not per current grants
+                DespawnAll(skipDriven: true);   // re-sync from the next fleet broadcast; a ghost being DRIVEN survives until drive end (round-231)
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Drive] OnGrantsChanged: {ex.Message}"); }
         }

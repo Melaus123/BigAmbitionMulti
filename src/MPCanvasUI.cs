@@ -549,6 +549,30 @@ namespace BigAmbitionsMP
             MPSaveManager.EnsureVersionCached();
             MPStoreMigration.RunIfNeeded();   // store v2 M2: one-time flat→pid migration, first frame the version resolves
             MPRadioSync.Tick();   // round-227: debounced volume-drag flush
+#if BAMP_DEV
+            // DIAG:DEVTOOL (round-228 test, registered in 04-probes.md): the game's native
+            // debug console ships in retail but its hotkey is compiled off (IsDevMode=false).
+            // Dev builds only: Ctrl+F9 toggles it, giving the rig the game's own commands
+            // (addHappinessModifier etc.) with autocomplete. Never present in Release.
+            if (Input.GetKeyDown(KeyCode.F9) && (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)))
+            {
+                try
+                {
+                    // Reflection: DebugLogManager lives in the IngameDebugConsole plugin assembly,
+                    // which the mod doesn't reference — a dev key doesn't earn a csproj reference.
+                    var t = HarmonyLib.AccessTools.TypeByName("IngameDebugConsole.DebugLogManager");
+                    var dlm = t?.GetProperty("Instance", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null);
+                    if (dlm != null)
+                    {
+                        bool visible = (bool)(t.GetProperty("IsLogWindowVisible")?.GetValue(dlm) ?? false);
+                        t.GetMethod(visible ? "HideLogWindow" : "ShowLogWindow", System.Type.EmptyTypes)?.Invoke(dlm, null);
+                        Plugin.Logger.LogInfo($"[DevTool] native debug console {(visible ? "closed" : "OPENED")} (Ctrl+F9).");
+                    }
+                    else Plugin.Logger.LogWarning("[DevTool] DebugLogManager not found — console unavailable in this build.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[DevTool] console toggle: {ex.Message}"); }
+            }
+#endif
             // Round-225f lock-safety: the load window hides the MP menu while open (native
             // behavior) — Escape ALWAYS closes it and restores the menu, so no render
             // failure can ever strand the player without interactables.

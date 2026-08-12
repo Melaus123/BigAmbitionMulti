@@ -587,6 +587,10 @@ namespace BigAmbitionsMP
         public float  Fuel { get; set; }
         public float  Damage { get; set; }   // 0..1 — the borrower's accrued damage, applied to the owner's real car
         public bool   Released { get; set; }
+        // Round-232: on Released, the borrower's native parking verdict for where they left the car
+        // (Helpers.ParkingState as int; -1 = absent/old sender). Without it the owner's copy keeps the
+        // legality of the PICKUP spot — a car returned to a legal spot kept drawing tickets, and vice versa.
+        public int    ParkState { get; set; } = -1;
         // The borrower's current building ("" = outdoors). While set, the OWNER's follow HOLDS at the
         // last exterior pose instead of chasing into interior coordinates — a space that may not even
         // be loaded on the owner's machine, where the real cart gets deregistered (CartTrace 2026-07-07).

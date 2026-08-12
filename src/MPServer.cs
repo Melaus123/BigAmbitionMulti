@@ -3332,20 +3332,34 @@ namespace BigAmbitionsMP
 
         // Cars currently being driven by a borrower (vehicleId → last VehicleDrive time) so HostCanBoard lets
         // the OWNER ride their own car as a passenger while it's borrowed.
-        private static readonly System.Collections.Generic.Dictionary<string, float> _drivenCars = new();
+        // Round-232b: driver-aware + thread-safe (the grace check below reads it on the POLL thread;
+        // Environment.TickCount instead of Time.unscaledTime because Unity time is main-thread-only).
+        private sealed class DrivenRec { public string Driver = ""; public int TickMs; }
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DrivenRec> _drivenCars = new();
         public static bool IsCarDriven(string vid)
-            => !string.IsNullOrEmpty(vid) && _drivenCars.TryGetValue(vid, out var t) && (UnityEngine.Time.unscaledTime - t) < 2f;
+            => !string.IsNullOrEmpty(vid) && _drivenCars.TryGetValue(vid, out var r) && unchecked(Environment.TickCount - r.TickMs) < 2000;
 
         private static void HandleVehicleDrive(string senderPid, MessageEnvelope env)
         {
             var p = env.GetPayload<VehicleDrivePayload>();
             if (p == null || !SenderIs(p.DriverId, senderPid, MessageType.VehicleDrive)) return;
-            if (!GrantSync.IsGranted(p.OwnerId, senderPid)) return;   // only a granted borrower may move someone's car
-            GameStatePatcher.EnqueueOnMainThread(() =>
+            if (!GrantSync.IsGranted(p.OwnerId, senderPid))
             {
-                if (p.Released) _drivenCars.Remove(p.VehicleId); else _drivenCars[p.VehicleId] = UnityEngine.Time.unscaledTime;
-                VehicleManager.ApplyDriveSync(p);   // host applies (it may be the owner)
-            });
+                // Round-232b (user-approved): a mid-drive revoke must not cut the stream — the despawn
+                // guard (231a) lets the borrower finish the drive, so the owner's follow has to keep
+                // tracking it or the car freezes at the revoke pose and teleports at hand-back (rig,
+                // 2026-08-11). Grace: the vid's CURRENT driver stays accepted until Released or 5s of
+                // silence. A never-granted sender can't enter the table (this gate ran first).
+                bool grace = _drivenCars.TryGetValue(p.VehicleId, out var g)
+                             && g.Driver == senderPid
+                             && unchecked(Environment.TickCount - g.TickMs) < 5000;
+                if (!grace) return;
+                if (p.Released)
+                    Plugin.Logger.LogInfo($"[Drive] revoked driver '{senderPid}' handed back '{p.VehicleId}' — grace stream ends.");
+            }
+            if (p.Released) _drivenCars.TryRemove(p.VehicleId, out _);
+            else _drivenCars[p.VehicleId] = new DrivenRec { Driver = senderPid, TickMs = Environment.TickCount };
+            GameStatePatcher.EnqueueOnMainThread(() => VehicleManager.ApplyDriveSync(p));   // host applies (it may be the owner)
             Broadcast(MessageEnvelope.Create(MessageType.VehicleDrive, MPConfig.PlayerId, p));   // to all (the driver ignores its echo)
         }
 
