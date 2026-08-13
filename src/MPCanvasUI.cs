@@ -550,6 +550,7 @@ namespace BigAmbitionsMP
             MPStoreMigration.RunIfNeeded();   // store v2 M2: one-time flat→pid migration, first frame the version resolves
             MPRadioSync.Tick();   // round-227: debounced volume-drag flush
 #if BAMP_DEV
+            TestDrive.Tick();   // round-239 (registered in 04-probes.md): file-drop test command channel — inert until <DataRoot>\testdrive\ exists
             // DIAG:DEVTOOL (round-228 test, registered in 04-probes.md): the game's native
             // debug console ships in retail but its hotkey is compiled off (IsDevMode=false).
             // Dev builds only: Ctrl+F9 toggles it, giving the rig the game's own commands

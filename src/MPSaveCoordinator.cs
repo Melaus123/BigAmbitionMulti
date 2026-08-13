@@ -461,6 +461,12 @@ namespace BigAmbitionsMP
         /// the four known conditions.  The probes ARE the gate if reflection ever fails.</summary>
         private static string? SaveBlockedBy()
         {
+#if BAMP_DEV
+            // Round-239 test driver: lets a rig test exercise the round-237 deferral machinery
+            // (defer → heartbeat → resume → ship) without a human holding the designer open.
+            if (UnityEngine.Time.unscaledTime < TestDrive.SimulateSaveBlockUntil)
+                return "a TestDrive-simulated no-save state";
+#endif
             bool nativeSaysNo = false, nativeAsked = false;
             try
             {
