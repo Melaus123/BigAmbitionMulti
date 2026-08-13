@@ -87,7 +87,10 @@ namespace BigAmbitionsMP
                     try { sb.Append($"settled={MPWorldReady.IsSettled} "); } catch { }
                     try { sb.Append($"session='{MPSaveCoordinator.ActiveSessionName}' "); } catch { }
                     try { var t = GameStateReader.GetGameTime(); sb.Append($"day={t.day} hour={t.hourOfDay:0.0} "); } catch { }
-                    try { sb.Append($"ledger={MPServer.BuildingOwners.Count}"); } catch { }
+                    try { sb.Append($"ledger={MPServer.BuildingOwners.Count} "); } catch { }
+                    // Round-240: clientConn above is THIS instance's own outbound link, not a peer
+                    // count — agents misread it. pendingJoins>0 means 'acceptjoin' is needed.
+                    try { if (MPServer.IsRunning) sb.Append($"pendingJoins={MPServer.PendingJoinList.Count}"); } catch { }
                     return sb.ToString();
                 }
 
@@ -107,10 +110,31 @@ namespace BigAmbitionsMP
                         ? "OK server started" : "ERR MPServer.Start returned false";
 
                 case "hostload":
+                {
+                    // Round-240 (batch run 1 root cause): calling HostLoadSession directly skipped
+                    // StartLoadGame's lobby-exit (IsInLobby stayed true) — every later joiner was
+                    // routed to the LOBBY path and sat there forever, because the mid-game join
+                    // path (approval + LoadData) only runs when IsInLobby is false.  Mirror the
+                    // UI's button entry exactly; verbs must never call inner functions the UI
+                    // wraps with state transitions.
                     if (!MPServer.IsRunning) return "ERR start the server first ('host')";
                     if (arg.Length == 0) return "ERR session name required";
-                    MPSaveCoordinator.HostLoadSession(arg);
-                    return $"OK HostLoadSession('{arg}') invoked — verify via [MPSave] log lines";
+                    if (!MPSaveManager.ListSessions().Exists(s => s.Name == arg))
+                        return $"ERR session '{arg}' not in the session list";
+                    MPServer.ChosenLoadSession = arg;
+                    MPServer.StartLoadGame();
+                    return $"OK StartLoadGame('{arg}') invoked (lobby clients are served their saves; later joiners need 'acceptjoin')";
+                }
+
+                case "acceptjoin":
+                {
+                    // Round-240: mid-game joins park for the host's approval popup — a UI click no
+                    // agent can make. Same entry the popup button calls; accepts ALL pending.
+                    if (!MPServer.IsRunning) return "ERR host only";
+                    var pending = MPServer.PendingJoinList;
+                    foreach (var (peerId, _) in pending) MPServer.AcceptPendingJoin(peerId);
+                    return pending.Count == 0 ? "OK none pending" : $"OK accepted {pending.Count} pending join(s): {string.Join(", ", pending.ConvertAll(p => p.playerId))}";
+                }
 
                 case "join":
                 {
@@ -158,13 +182,16 @@ namespace BigAmbitionsMP
                 {
                     if (!MPServer.IsRunning) return "ERR host only";
                     if (arg.Length == 0) return "ERR addressKey required (e.g. '31 ba:street_fourthavenue')";
+                    // Deliberately does NOT name the heal's log tag in this message — the RedRoc run
+                    // proved a result string containing the tag text pollutes whole-log tag greps
+                    // (the inert check counted this OK line as a heal emission).
                     return MPServer.BuildingOwners.TryRemove(arg, out var was)
-                        ? $"OK ledger entry '{arg}' → '{was}' REMOVED (synthetic zombie; expect [LedgerHeal] ADOPTED after the owner's next claim report)"
+                        ? $"OK ledger entry '{arg}' → '{was}' REMOVED (synthetic zombie; expect adoption after the owner's next claim report)"
                         : $"ERR no ledger entry for '{arg}'";
                 }
 
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostload|join|save|autosave|blocksave|energyflag|ledgerdrop)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop)";
             }
         }
     }
