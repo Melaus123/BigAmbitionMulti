@@ -3163,6 +3163,9 @@ namespace BigAmbitionsMP
             });
         }
 
+        // Round-247: capped counter for the own-tenancy runner-stamp guard's log line.
+        private static int _ownRunnerGuardLogged;
+
         private static bool ApplyBusinessInfoLocal(BusinessInfo info)
         {
             try
@@ -3413,6 +3416,31 @@ namespace BigAmbitionsMP
                         && info.BusinessOwnerPlayerId != MPConfig.PlayerId)
                     {
                         newBusinessOwner = info.BusinessOwnerPlayerId;
+                    }
+                    // ROUND-247 fix A (field 20260806-160214 'BANGER'): a reg the LOCAL player
+                    // natively rents is THIS save's authority — no runner stamp may land on it
+                    // unless the host POSITIVELY attributes the tenancy to another player (the
+                    // branches above; that contested case is arbitration's domain).  The host's
+                    // world had rolled back past the client's rental: its UN-attributed record
+                    // (owner='') still carried the AI occupant's rival id, and the verbatim
+                    // mirror stamped the client's OWN shop foreign — IsForeignPlayerBusiness
+                    // then hid it from every list and the class-6 sweep unassigned its 12
+                    // employees.  Same doctrine as the rented-flag guard above, extended from
+                    // the FLAG to the STAMP.  Writing '' (not priorBusinessOwner) also heals a
+                    // scar an earlier version already persisted: my own shop has no rival
+                    // runner, by definition.
+                    bool attributedToOther =
+                           (!string.IsNullOrEmpty(info.OwnerPlayerId)         && info.OwnerPlayerId         != MPConfig.PlayerId)
+                        || (!string.IsNullOrEmpty(info.BusinessOwnerPlayerId) && info.BusinessOwnerPlayerId != MPConfig.PlayerId);
+                    if (!attributedToOther && !string.IsNullOrEmpty(newBusinessOwner))
+                    {
+                        bool mineNow = false; try { mineNow = MergerFlip.TrulyMine(reg); } catch { }
+                        if (mineNow)
+                        {
+                            if (newBusinessOwner != priorBusinessOwner && _ownRunnerGuardLogged++ < 8)
+                                Plugin.Logger.LogInfo($"[Patcher] runner stamp '{newBusinessOwner}' REFUSED on own tenancy '{info.AddressKey}' — host record is un-attributed (round-247).");
+                            newBusinessOwner = "";
+                        }
                     }
                     // INVARIANT (echo-loop family, 2026-07-13): my own pid must NEVER land in
                     // my runner field — my tenancy is RentedByPlayer, not a rival entry.  The

@@ -205,6 +205,21 @@ namespace BigAmbitionsMP
                             BuildingRegistration? reg = null;
                             try { reg = Helpers.BuildingHelper.GetBuildingRegistration(emp.assignedAddress); } catch { }
                             if (!GameStatePatcher.IsForeignPlayerBusiness(reg)) continue;
+                            // ROUND-247 fix B (field 20260806-160214 'BANGER'): this repair DESTROYS
+                            // data (unassigns staff), so the "another player's business" verdict must
+                            // PROVE itself — the runner stamp has to resolve to an actual session
+                            // player (the cross-save assignment case this class was built for).  In
+                            // the field the stamp was an unresolvable AI rival id mirrored over the
+                            // player's OWN shop by a host rollback record (pre-247-fix-A), and this
+                            // sweep stripped 12 of their employees, twice.  Unresolvable stamp =
+                            // detect-only: name it, touch nothing.
+                            string stamp = ""; try { stamp = reg!.businessOwnerRivalId?.ToString() ?? ""; } catch { }
+                            if (!GameStatePatcher.IsSessionPlayerId(stamp))
+                            {
+                                if (crossLogged++ < LogCapPerClass)
+                                    Plugin.Logger.LogWarning($"[Integrity] {reason}: employee assigned to '{reg!.BusinessName}' whose owner stamp '{stamp}' resolves to NO session player — left in place (round-247; likely a scarred own shop, not a cross-owner assignment).");
+                                continue;
+                            }
                             try { UI.Smartphone.Apps.BizMan.Schedule.BizManSchedule.AbortAutoFillForBusiness(reg); } catch { }
                             try { Helpers.EmployeeHelper.UnassignEmployeeFromAllWorkshifts(emp); } catch { }
                             emp.assignedAddress = null;
