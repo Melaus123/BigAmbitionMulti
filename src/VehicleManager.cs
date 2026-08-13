@@ -177,6 +177,18 @@ namespace BigAmbitionsMP
         public static string OwnerIdFor(string vid)
             => _remoteVehicles.TryGetValue(vid, out var rv) && rv != null ? rv.OwnerId : "";
 
+        /// <summary>Round-243: the LIVE VehicleController of a spawned ghost (null if unknown,
+        /// unspawned, or controller-stripped — only DRIVABLE ghosts keep theirs).  The
+        /// GetCurrentVehicleBase parity postfix reads this: ghosts are deliberately absent
+        /// from AllPlayerVehicles, so the native controller walk returns null while a
+        /// borrowed cart is possessed and every controller-level site breaks (release,
+        /// collider checks, hover CTAs — field 20260804-162422 "can't let it go").</summary>
+        public static VehicleController? GhostControllerFor(string vid)
+        {
+            if (string.IsNullOrEmpty(vid) || !_remoteVehicles.TryGetValue(vid, out var rv) || rv?.Go == null) return null;
+            try { return rv.Go.GetComponentInChildren<VehicleController>(true); } catch { return null; }
+        }
+
         /// <summary>The vehicle-type id of a ghost (empty if unknown).</summary>
         public static string TypeNameFor(string vid)
             => _remoteVehicles.TryGetValue(vid, out var rv) && rv != null ? rv.TypeName : "";
