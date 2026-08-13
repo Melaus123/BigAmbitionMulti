@@ -82,7 +82,23 @@ namespace BigAmbitionsMP
 
         private static bool _reported;
         private static bool _seedLogged;
-        internal static void ResetSession() { _reported = false; }
+
+        /// <summary>Round-238: session state dies with the scene.  Declared in round-162 but never
+        /// WIRED to the scene-ready reset (pre-existing defect, found building the orphan heal):
+        /// _reported stayed true for the whole process — a client's SECOND world in one launch never
+        /// re-reported claims — and _claims/_resolved bled across worlds, where a stale claim could
+        /// fake a contest in an unrelated world.  Wired + widened now; the orphan adoption below
+        /// depends on fresh per-world claims.</summary>
+        internal static void ResetSession()
+        {
+            _reported = false;
+            _seedLogged = false;
+            _claims.Clear();
+            _resolved.Clear();
+            _pendingAdopt.Clear();
+            _adoptDeferrals.Clear();
+            _nextAdoptAt = 0f;
+        }
 
         /// <summary>Called from the client tick loop; sends each natively-claimed building once per
         /// session, after the world is loaded.  Rent/vacate changes after this are routed and
@@ -137,6 +153,13 @@ namespace BigAmbitionsMP
                 catch { }
             }
 
+            // ── Round-238: orphan-claim adoption pass (host only, 15s cadence) ────────────────
+            if (MPServer.IsRunning && Time.unscaledTime >= _nextAdoptAt)
+            {
+                _nextAdoptAt = Time.unscaledTime + 15f;
+                TickOrphanAdoptions();
+            }
+
             if (_reported || !MPClient.IsClientInWorld) return;
             var gi = SaveGameManager.Current;
             if (gi?.BuildingRegistrations == null) return;
@@ -154,8 +177,12 @@ namespace BigAmbitionsMP
                     string addr = ""; try { addr = GameStateReader.AddressKey(reg); } catch { }
                     if (string.IsNullOrEmpty(addr)) continue;
                     string bn = ""; try { bn = reg.BusinessName?.ToString() ?? ""; } catch { }
+                    // Round-238: carry the tenancy's money figures — an orphan-claim adoption
+                    // broadcasts a normal RentConfirm and needs them for a well-formed payload.
+                    float rent = 0f, dep = 0f;
+                    try { rent = reg.RentPerDay; dep = reg.lastDeposit; } catch { }
                     MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.NativeClaim, MPConfig.PlayerId,
-                        new BuildingOwnershipPayload { AddressKey = addr, OwnerPlayerId = MPConfig.PlayerId, Score = DevelopmentScore(reg), BizName = bn }));
+                        new BuildingOwnershipPayload { AddressKey = addr, OwnerPlayerId = MPConfig.PlayerId, Score = DevelopmentScore(reg), BizName = bn, DailyRent = rent, LastDeposit = dep }));
                     sent++;
                 }
                 if (sent > 0) Plugin.Logger.LogInfo($"[Contested] reported {sent} native claim(s) to the host.");
@@ -165,8 +192,9 @@ namespace BigAmbitionsMP
 
         // ── Host side: seed + resolve ────────────────────────────────────────────────────
 
-        /// <summary>addr → (claimant pid, that machine's development score, its local business name)</summary>
-        private static readonly Dictionary<string, (string pid, int score, string name)> _claims = new();
+        /// <summary>addr → (claimant pid, that machine's development score, its local business name,
+        /// its rent figures — round-238: an adoption's RentConfirm broadcast needs them)</summary>
+        private static readonly Dictionary<string, (string pid, int score, string name, float rent, float dep)> _claims = new();
         /// <summary>Round-165: addresses already arbitrated this session (any outcome incl. left-in-place)
         /// — the seed re-enters its claims every health tick and must not re-fight settled contests.
         /// Deferred (unknown-score) contests are NOT added, so they retry once data materializes.</summary>
@@ -209,10 +237,19 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Host: a machine reported a native claim.  First claim registers; a second claim
-        /// for the same address is a CONTEST and resolves per the policy.</summary>
+        /// for the same address is a CONTEST and resolves per the policy.
+        /// Round-238b: the whole body runs on the MAIN THREAD — network dispatch used to write
+        /// _claims/_resolved directly while the seed (and now the adoption pass) read them on the
+        /// main thread: the same race class round-50 moved the rent grant/deny decision for.
+        /// Single-threading the tables beats locking them.</summary>
         internal static void HostHandleNativeClaim(string senderPid, BuildingOwnershipPayload p)
         {
             if (!MPServer.IsRunning || p == null || string.IsNullOrEmpty(p.AddressKey)) return;
+            GameStatePatcher.EnqueueOnMainThread(() => HostHandleNativeClaimBody(senderPid, p));
+        }
+
+        private static void HostHandleNativeClaimBody(string senderPid, BuildingOwnershipPayload p)
+        {
             try
             {
                 string addr = p.AddressKey;
@@ -223,9 +260,20 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Contested] claim received: '{addr}' from '{senderPid}' (score {p.Score}, name='{p.BizName}').");
                 if (!_claims.TryGetValue(addr, out var prior) || prior.pid == senderPid)
                 {
-                    _claims[addr] = (senderPid, p.Score, p.BizName ?? "");
+                    _claims[addr] = (senderPid, p.Score, p.BizName ?? "", p.DailyRent, p.LastDeposit);
+                    // Round-238 (field 20260803-022659, second zombie-ledger report): an unopposed
+                    // CLIENT claim used to be recorded here and then NOTHING happened — if the host's
+                    // ledger had lost the entry, the host kept telling everyone the building was
+                    // nobody's, and its own economy could move an AI rival in over the player.
+                    // Nominate it for the adoption pass, which re-verifies everything live at
+                    // commitment; a counter-claim at any time converts this into a normal contest.
+                    if (senderPid != MPConfig.PlayerId)
+                        _pendingAdopt.Add(addr);
                     return;                                   // sole claimant so far — nothing to resolve
                 }
+                // A real contest exists — arbitration owns this address; the orphan heal stands down.
+                _pendingAdopt.Remove(addr);
+                _adoptDeferrals.Remove(addr);
 
                 int a = prior.score, b = p.Score;
                 // FORENSIC LINE (round-163): every fact needed to trace a "my business disappeared"
@@ -260,7 +308,8 @@ namespace BigAmbitionsMP
 
                 _resolved.Add(addr);
                 MPServer.BuildingOwners[addr] = winner;
-                _claims[addr] = (winner, Math.Max(a, b), winner == senderPid ? (p.BizName ?? "") : prior.name);
+                _claims[addr] = (winner, Math.Max(a, b), winner == senderPid ? (p.BizName ?? "") : prior.name,
+                                 winner == senderPid ? p.DailyRent : prior.rent, winner == senderPid ? p.LastDeposit : prior.dep);
                 Plugin.Logger.LogWarning($"[Contested] '{addr}' resolved → '{winner}' (development evidence); "
                     + $"'{loser}' releases its claim (score {loserScore}, its local name was '{loserName}'). "
                     + "If a player reports a business missing at this address, THIS event is the culprit to check.");
@@ -315,6 +364,135 @@ namespace BigAmbitionsMP
                     MPServer.SendToPlayer(loser, MessageEnvelope.Create(MessageType.ReleaseClaim, "host", release));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Contested] resolve: {ex.Message}"); }
+        }
+
+        // ── Round-238: ORPHAN-CLAIM ADOPTION (the zombie-ledger heal) ────────────────────
+        // Field shape (two reports, different groups: 20260802-121103 + 20260803-022659): the
+        // host's BuildingOwners ledger loses a client's entry (deleter still unnamed).  From then
+        // on every publish tells the world the building is nobody's, and the host's own economy
+        // can move an AI rival in over the player's business (022659: a fruit shop landed on the
+        // claimant's gym).  The claim pipeline above already carries the evidence — the client
+        // reports the building natively-claimed, and NOBODY contests it — so the repair rides it:
+        // an unopposed client claim against an empty ledger is adopted through the SAME writes
+        // a normal approved rent performs (no new write path).  AI squatters are
+        // closed with the game's own routine (user ruling 2026-08-12: AI eviction yes; host's or
+        // another player's holdings NEVER — log only).  Inert on healthy saves: every claim there
+        // is already ledgered, and the pass no-ops.
+
+        // Round-238b (user challenge, events-over-timers): NO maturity clock. The original 30s
+        // wait was elapsed time standing in for "counter-claims have arrived" — exactly the
+        // forbidden proxy. Every safety it pretended to give comes from real state instead:
+        // the host's own tenancy is read LIVE from the registration at commitment (that IS the
+        // host's claim, read at the source), and a counter-claim landing at ANY time — before
+        // or after adoption — still contests through arbitration (adoptions are never marked
+        // _resolved). The 15s pass below is the allowed recurring poll of authoritative state.
+        /// <summary>Bounded patience with a host copy that reads rented but never forms a contest.</summary>
+        private const int AdoptMaxDeferrals = 20;
+        /// <summary>Work queue: addresses whose sole claim awaits the next adoption pass.</summary>
+        private static readonly HashSet<string> _pendingAdopt = new();
+        private static readonly Dictionary<string, int> _adoptDeferrals = new();
+        private static float _nextAdoptAt;
+
+        private static void TickOrphanAdoptions()
+        {
+            if (_pendingAdopt.Count == 0) return;
+            var work = new List<string>(_pendingAdopt);   // AdoptOrphanClaim removes as it goes
+            foreach (var addr in work) AdoptOrphanClaim(addr);
+        }
+
+        /// <summary>Host, main thread. Re-verifies EVERYTHING live at commitment — the claim table
+        /// only nominates; the ledger and the host's registration decide.</summary>
+        private static void AdoptOrphanClaim(string addr)
+        {
+            try
+            {
+                if (_resolved.Contains(addr)) { _pendingAdopt.Remove(addr); _adoptDeferrals.Remove(addr); return; }
+                if (!_claims.TryGetValue(addr, out var c) || string.IsNullOrEmpty(c.pid) || c.pid == MPConfig.PlayerId)
+                { _pendingAdopt.Remove(addr); _adoptDeferrals.Remove(addr); return; }
+
+                // Ledger already speaks → nothing orphaned here.
+                if (MPServer.BuildingOwners.TryGetValue(addr, out var cur) && !string.IsNullOrEmpty(cur))
+                {
+                    if (cur != c.pid)
+                        Plugin.Logger.LogWarning($"[LedgerHeal] '{addr}': claim by '{c.pid}' but the ledger credits '{cur}' — hands off (player-vs-player belongs to arbitration, round-238).");
+                    _pendingAdopt.Remove(addr); _adoptDeferrals.Remove(addr);
+                    return;
+                }
+
+                var reg = GameStatePatcher.FindRegistration(addr);
+                if (reg == null)
+                {
+                    Plugin.Logger.LogWarning($"[LedgerHeal] '{addr}': claim by '{c.pid}' but the host has no such registration — dropped.");
+                    _pendingAdopt.Remove(addr); _adoptDeferrals.Remove(addr);
+                    return;
+                }
+
+                // The host's own native tenancy enters arbitration via HostSeed — if its claim
+                // hasn't landed yet, WAIT for the contest to form rather than adopt over it.
+                if (reg.RentedByPlayer)
+                {
+                    int n = _adoptDeferrals.TryGetValue(addr, out var d) ? d + 1 : 1;
+                    _adoptDeferrals[addr] = n;
+                    if (n == 1)
+                        Plugin.Logger.LogInfo($"[LedgerHeal] '{addr}': claim by '{c.pid}' deferred — the host's copy reads rented; waiting for the host's own claim to enter arbitration.");
+                    if (n >= AdoptMaxDeferrals)
+                    {
+                        Plugin.Logger.LogWarning($"[LedgerHeal] '{addr}': host copy still reads rented after {n} checks and no contest formed — left alone (log-only; user rule: never touch the host's holding).");
+                        _pendingAdopt.Remove(addr); _adoptDeferrals.Remove(addr);
+                    }
+                    return;
+                }
+
+                string mk = ""; try { mk = reg.businessOwnerRivalId?.ToString() ?? ""; } catch { }
+                if (!string.IsNullOrEmpty(mk) && mk != c.pid && GameStatePatcher.IsSessionPlayerId(mk))
+                {
+                    Plugin.Logger.LogWarning($"[LedgerHeal] '{addr}': claim by '{c.pid}' but the host shows session player '{mk}' as tenant — hands off (user rule: another player's holding is never evicted).");
+                    _pendingAdopt.Remove(addr); _adoptDeferrals.Remove(addr);
+                    return;
+                }
+
+                // AI (or ownerless) business debris in the way → close it exactly the way the
+                // game's own economy closes AI shops daily.  Rival aggregates are DERIVED —
+                // RefreshRivals rebuilds ownedBusinesses from the registrations and auto-clears
+                // rival tags on player-rented regs — so nothing is left dangling.
+                bool hasBusiness = false; string bizName = "", bizType = "";
+                try
+                {
+                    bizName = reg.BusinessName?.ToString() ?? "";
+                    bizType = reg.businessTypeName ?? "";
+                    hasBusiness = !string.IsNullOrEmpty(bizName) || (!string.IsNullOrEmpty(bizType) && bizType != "ba:businesstype_empty");
+                }
+                catch { }
+                if ((hasBusiness || !string.IsNullOrEmpty(mk)) && mk != c.pid)
+                {
+                    if (hasBusiness && !string.IsNullOrEmpty(mk))
+                        try
+                        {
+                            // The same news-feed event the sim posts for an organic closure.
+                            SaveGameManager.Current.marketEvents.Add(new Entities.MarketEvent(
+                                Entities.MarketEventType.BusinessClosed, SaveGameManager.Current.Day,
+                                reg.BusinessName, reg.Address, BigAmbitions.Rivals.RivalsHelper.GetRivalName(mk),
+                                reg.businessTypeName, reg.Neighborhood));
+                        }
+                        catch { }
+                    try { reg.ShutDownAIBusiness(); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[LedgerHeal] '{addr}': ShutDownAIBusiness: {ex.Message}"); }
+                    Plugin.Logger.LogWarning($"[LedgerHeal] '{addr}': AI business '{bizName}' ({bizType}, rival '{mk}') CLOSED — it was squatting on '{c.pid}'s building (the zombie-ledger landmine detonating; round-238).");
+                }
+
+                // ADOPT — the same writes a normal approved rent performs (HandleRentRequest's
+                // grant block), so every downstream consumer sees an ordinary ownership event.
+                MPServer.BuildingOwners[addr] = c.pid;
+                GameStatePatcher.HostReflectPlayerRent(addr, c.pid);
+                MPServer.BroadcastRentConfirmExcept(c.pid, addr, c.rent, c.dep);
+                MPServer.RefreshBuildingAccess();
+                try { BigAmbitions.Rivals.RivalsHelper.RefreshRivals(); } catch { }
+                _pendingAdopt.Remove(addr); _adoptDeferrals.Remove(addr);
+                // NOT added to _resolved: a later counter-claim must still be able to contest this
+                // adoption through the normal arbitration path.
+                Plugin.Logger.LogWarning($"[LedgerHeal] '{addr}' ADOPTED for '{c.pid}' (score {c.score}, name='{c.name}'): the ledger had no entry and nobody else claims it — ledger + host tenancy restored, other clients informed (round-238). The claimant's own sync repopulates the business content.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[LedgerHeal] adopt '{addr}': {ex.Message}"); }
         }
 
         // ── Release (either side) ────────────────────────────────────────────────────────

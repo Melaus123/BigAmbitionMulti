@@ -2991,6 +2991,7 @@ namespace BigAmbitionsMP
                 MPServer.RebuildGrantsAfterSceneReset();  // host: immediate store→runtime rebuild + re-broadcast, so
                                               // enforcement never depends on which machine's scene finishes first
                 InteriorSync.Reset();     // interior subs + owner-snapshot caches die with the scene — a prior session's Authoritative=true snapshot must not bleed into a new world (was never wired up)
+                ContestedTenancy.ResetSession();   // round-238: claims/resolutions/pending adoptions are per-world — declared in round-162, never wired until now (a client's 2nd world in one launch never re-reported; stale claims could fake contests)
                 GameStatePatcher.SweepPurchaserPollution("scene ready");   // heal saves polluted by the pre-round-34 purchaser injectio
                 GameStatePatcher.SweepRivalFieldContamination("scene ready");   // heal renters written into the DEED field (rent-vs-deed split 2026-07-09)
                 _worldHealthAt = Time.unscaledTime + 30f;   // world-integrity line AFTER the rival cache fills (30s)

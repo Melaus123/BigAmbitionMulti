@@ -4566,6 +4566,26 @@ namespace BigAmbitionsMP
             Broadcast(MessageEnvelope.Create(MessageType.RentConfirm, "host", payload));
         }
 
+        /// <summary>Round-238 (orphan-claim adoption): RentConfirm naming <paramref name="ownerPid"/>
+        /// to every client EXCEPT the owner — the owner's copy already holds the tenancy (its native
+        /// claim is the heal's evidence), the same exclusion a HandleRentRequest grant uses.</summary>
+        public static void BroadcastRentConfirmExcept(string ownerPid, string addressKey, float dailyRent, float lastDeposit)
+        {
+            var payload = new BuildingOwnershipPayload
+            {
+                AddressKey    = addressKey,
+                OwnerPlayerId = ownerPid,
+                DailyRent     = dailyRent,
+                LastDeposit   = lastDeposit
+            };
+            var env = MessageEnvelope.Create(MessageType.RentConfirm, "host", payload);
+            int sentTo = 0;
+            foreach (var peer in _clients.Keys)
+                if (!_peerNames.TryGetValue(peer.Id, out var pid) || pid != ownerPid)
+                { Send(peer, env); sentTo++; }
+            Plugin.Logger.LogInfo($"[Server] RentConfirm for '{addressKey}' → '{ownerPid}' relayed to {sentTo} other client(s) (round-238 adoption).");
+        }
+
         private static void BroadcastLobbyUpdate()
         {
             var payload = new LobbyUpdatePayload
