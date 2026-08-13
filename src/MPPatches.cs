@@ -5878,6 +5878,49 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Round-249 HARDENING: a PARTIAL radio-station table self-heals (field 20260807-200348) ──
+        // A content mod's asset fired RadioStationSource.OnEnable during GameManager.Awake's
+        // synchronous bundle load — BEFORE GlobalReferences existed — so the native fill
+        // (RadioPlayer.FillRadioStationsData) NRE'd mid-loop AFTER latching _isDataLoaded=true:
+        // the station table stayed PARTIAL for the whole session.  Every later lookup of a
+        // missing station threw KeyNotFoundException through native code with no safety net —
+        // VehicleController invokes onEnterVehicle BARE, so ENTERING A VEHICLE aborted ("can't
+        // access the vehicle I buy"); pause ducks and station cycling (the round-227 family
+        // below) die the same way.  The latch exists for performance, not semantics: when a
+        // lookup is about to miss and the fill's precondition (GlobalReferences.
+        // radioStationClips) now holds, unlatch it and let the game's own fill run again
+        // inside the SAME call — the table repairs in place and the lookup proceeds normally.
+        // Mod-compat shield: on healthy installs the dictionary always contains every enum
+        // key once filled, so this prefix never acts.
+        [HarmonyLib.HarmonyPatch(typeof(RadioPlayer), nameof(RadioPlayer.GetRadioStationData))]
+        public static class Patch_RadioPlayer_GetRadioStationData_HealPartialTable
+        {
+            private static readonly HarmonyLib.AccessTools.FieldRef<RadioPlayer, System.Collections.Generic.Dictionary<RadioStation, RadioStationData>>
+                _data = HarmonyLib.AccessTools.FieldRefAccess<RadioPlayer, System.Collections.Generic.Dictionary<RadioStation, RadioStationData>>("_radioStationsData");
+            private static readonly HarmonyLib.AccessTools.FieldRef<RadioPlayer, bool>
+                _loaded = HarmonyLib.AccessTools.FieldRefAccess<RadioPlayer, bool>("_isDataLoaded");
+            private static int _logged;
+
+            static void Prefix(RadioPlayer __instance, RadioStation radioStation)
+            {
+                try
+                {
+                    if (!_loaded(__instance)) return;                    // native fills anyway — nothing to heal
+                    var dict = _data(__instance);
+                    if (dict == null || dict.ContainsKey(radioStation)) return;
+                    // Partial table (an Awake-time fill died mid-loop).  Unlatch ONLY when the
+                    // refill's precondition now holds — otherwise native behavior stays untouched
+                    // (an unlatch that refails would just re-latch partial, same as today).
+                    var gr = InstanceBehavior<GlobalReferences>.Instance;
+                    if (gr == null || gr.radioStationClips == null) return;
+                    _loaded(__instance) = false;
+                    if (_logged++ < 4)
+                        Plugin.Logger.LogWarning($"[Radio] station table PARTIAL ({dict.Count} filled, '{radioStation}' missing) — fill latch reset; the game's own refill repairs it (round-249, mod-compat shield).");
+                }
+                catch { }   // the shield must never make a lookup worse
+            }
+        }
+
         // ── Round-227 DIAGNOSTICS: music-station change crash (field 20260801-012525) ──
         // "Players with permission attempting to change music station crashes game."
         // The native station-cycling mesh (static PlayNextStation / instance
