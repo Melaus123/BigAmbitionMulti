@@ -617,6 +617,7 @@ namespace BigAmbitionsMP
         {
             TickDeferredSave();   // task-28 fix 2: placement-deferred saves retry here (every frame, main thread)
             TickCarryBackstops(); // round-184 fix 1: post-upload-window completeness sweep (host-side entries only)
+            TickTornNotice();     // round-251B: deliver the torn-read warning once the world is visible
             List<PendingUpload> snapshot;
             lock (_pending)
             {
@@ -1060,11 +1061,91 @@ namespace BigAmbitionsMP
             // duration of the (synchronous) Load re-scan, then restore it.  Tightly
             // gated to this one main-thread call so nothing else sees the redirect.
             LoadRedirectFolder = sessionFolder;
-            try   { SaveGameManager.Load(chosen, true); }
+            bool ok;
+            try   { ok = GuardedNativeLoad(chosen, true, "member .hsg (LoadOwnHsg)", session); }
             finally { LoadRedirectFolder = null; }
+            if (!ok) { DiagWrite("LoadOwnHsg: Load returned FALSE — round-251A containment ran"); return false; }
             PortraitFolder = MPSaveManager.MpCharacterFolder(session, stableId);
             DiagWrite("LoadOwnHsg: redirect OFF, Load returned");
             return true;
+        }
+
+        // ── Round-251: every native Load we invoke goes through this wrapper ─────
+        // Rig batch-2 (T245, 2026-08-13) proved round-245's Finalizer guards the
+        // wrong layer: SaveGameManager.Load CATCHES its own deserialize/compat
+        // exceptions (SaveGameManager.cs:301-318), logs them, and returns FALSE —
+        // with Current already holding the PARTIALLY deserialized world.  Vanilla's
+        // own caller honors that bool (TransitionToSave.cs:20-24 → error flag +
+        // main menu); our direct calls ignored it and marched a 16-of-29-shops
+        // half-world straight to gameplay.  Two detectors here:
+        //   A (ENFORCE)      — Load returned false → run the containment (vanilla
+        //                      parity: loud error, session stopped, main menu).
+        //   B (DETECT-ONLY)  — the save reader printed its cut-off-data complaint
+        //                      ("Reading array went wrong") but Load still returned
+        //                      true: the fully-silent amputation.  User ruling
+        //                      2026-08-13: do NOT block — warn the player loudly so
+        //                      they are less inclined to continue, stamp the bug
+        //                      report, and leave the decision to them.  Measured
+        //                      base rate before shipping: the complaint appears in
+        //                      6/6 known torn loads (field 20260805-123035 + both
+        //                      rig tears) and 0 times across every healthy field
+        //                      and rig log on hand.
+        /// <summary>Sticky for bug reports (report.md TornSaveReads line).</summary>
+        public static string LastTornRead = "";
+        private static string? _pendingTornNotice;
+
+        public static bool GuardedNativeLoad(SaveGameManager.SaveGameStruct save, bool loadScene, string context, string displayName = "")
+        {
+            // T245 validation finding (2026-08-13): SaveGameStruct.name is the FILE alias —
+            // for MP member saves that is literally 'save', useless in a player-facing
+            // message. Callers pass the name the player actually knows (session / alias).
+            string name = ""; try { name = save?.name ?? ""; } catch { }
+            string shown = string.IsNullOrEmpty(displayName) ? name : displayName;
+            int torn = 0;
+            UnityEngine.Application.LogCallback probe = (cond, _, _) =>
+            { try { if (cond != null && cond.Contains("Reading array went wrong")) torn++; } catch { } };
+            bool ok = false;
+            UnityEngine.Application.logMessageReceived += probe;
+            try { ok = SaveGameManager.Load(save, loadScene); }
+            finally { UnityEngine.Application.logMessageReceived -= probe; }
+
+            if (!ok)
+            {
+                Plugin.Logger.LogError($"[MPSave] native Load returned FALSE for '{shown}' (file '{name}'; {context}; torn-read lines during load: {torn}) — "
+                    + "the file is damaged or unreadable; running containment instead of continuing on a half-initialized world (round-251A).");
+                SaveLoadGuard.ContainFailedLoad(shown);
+                return false;
+            }
+            if (torn > 0)
+            {
+                LastTornRead = $"torn-read×{torn} '{shown}'";
+                Plugin.Logger.LogError($"[MPSave] TORN-READ detected: the save reader hit cut-off data {torn}× while loading '{shown}' ({context}) "
+                    + "yet the load reported success — parts of the world may be MISSING. Detect-only by user ruling 2026-08-13 (round-251B): warning the player, not blocking.");
+                _pendingTornNotice = $"WARNING: save '{shown}' loaded with damaged data — parts of the world may be missing. "
+                    + "Playing on can bake the damage into new saves. Consider loading an earlier save or autosave.";
+            }
+            return true;
+        }
+
+        /// <summary>MAIN THREAD, per-frame (TickPendingUploads): the round-251B warning
+        /// is queued at Load time but shown only once the world is actually on screen —
+        /// a toast during the load screen is never seen.  Recurring check with a
+        /// confirmed exit condition (world present + not loading), then one-shot.</summary>
+        private static void TickTornNotice()
+        {
+            if (_pendingTornNotice == null) return;
+            try
+            {
+                if (SaveGameManager.Current == null || UI.Load.LoadScene.isLoading) return;
+                // 30s (user ruling 2026-08-13: hold much longer than the 2s default / 10s
+                // important tier).  The toast slot is single-occupancy — any later toast
+                // replaces it — so the lobby notice below is the durable copy.
+                try { PassengerHud.Toast(_pendingTornNotice, 30f); } catch { }
+                try { MPCanvasUI.PostLobbyNotice(_pendingTornNotice); } catch { }
+                Plugin.Logger.LogWarning("[MPSave] torn-read warning shown to the player (30s toast + lobby notice).");
+                _pendingTornNotice = null;
+            }
+            catch { }
         }
 
         // Deferred cash overlay — applied a couple of seconds after the loaded

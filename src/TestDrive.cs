@@ -190,8 +190,39 @@ namespace BigAmbitionsMP
                         : $"ERR no ledger entry for '{arg}'";
                 }
 
+                // ── round-249 radio-shield test: corrupt the station table, then look up ──
+                // Reproduces the field damage (a mod-broken install's PARTIAL station table:
+                // one key missing + the fill-once latch set) and immediately performs the
+                // lookup that used to throw KeyNotFoundException through vehicle entry.
+                // With the shield, the lookup's prefix unlatches and the native refill
+                // repairs the table inside the same call — expect "OK healed" here plus a
+                // "[Radio] station table PARTIAL" warning in the log. Without it: "ERR".
+                case "radiobreak":
+                {
+                    var rp = InstanceBehavior<GameManager>.Instance?.radioPlayer;
+                    if (rp == null) return "ERR no radioPlayer (load into the city first)";
+                    var dataF   = HarmonyLib.AccessTools.Field(typeof(RadioPlayer), "_radioStationsData");
+                    var loadedF = HarmonyLib.AccessTools.Field(typeof(RadioPlayer), "_isDataLoaded");
+                    if (dataF?.GetValue(rp) is not System.Collections.Generic.Dictionary<RadioStation, RadioStationData> dict)
+                        return "ERR could not read _radioStationsData";
+                    var stations = (RadioStation[])Enum.GetValues(typeof(RadioStation));
+                    var victim = stations[stations.Length - 1];
+                    dict.Remove(victim);
+                    loadedF!.SetValue(rp, true);           // the field latch: partial table, marked complete
+                    int before = dict.Count;
+                    try
+                    {
+                        var d = rp.GetRadioStationData(victim);   // the lookup that aborted vehicle entry in the field
+                        int after = ((System.Collections.Generic.Dictionary<RadioStation, RadioStationData>)dataF.GetValue(rp)!).Count;
+                        return d != null
+                            ? $"OK healed: '{victim}' returned after corrupt ({before}->{after} stations)"
+                            : $"ERR lookup returned null for '{victim}' ({before}->{after} stations)";
+                    }
+                    catch (Exception ex) { return $"ERR still throwing: {ex.GetType().Name} for '{victim}' ({before} stations)"; }
+                }
+
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak)";
             }
         }
     }

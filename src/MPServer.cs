@@ -775,7 +775,7 @@ namespace BigAmbitionsMP
                     // Load the most recent save (list is sorted newest-first by the game)
                     var save = saves[0];
                     Plugin.Logger.LogInfo($"[Server] Loading save: {save.alias}");
-                    SaveGameManager.Load(save, true);
+                    MPSaveCoordinator.GuardedNativeLoad(save, true, "host latest-save fallback", save.alias);   // round-251
                 }
                 catch (Exception ex)
                 {

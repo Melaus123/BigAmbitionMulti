@@ -384,6 +384,7 @@ namespace BigAmbitionsMP
             // What the save-integrity sweep repaired/detected on this save — even when the
             // player reports something unrelated, the field self-reports data health (2026-07-12).
             sb.AppendLine($"IntegrityFindings: {(string.IsNullOrEmpty(MPSaveIntegrity.LastSummary) ? "none" : MPSaveIntegrity.LastSummary)}");
+            sb.AppendLine($"TornSaveReads: {(string.IsNullOrEmpty(MPSaveCoordinator.LastTornRead) ? "none" : MPSaveCoordinator.LastTornRead)}");   // round-251B detect-only signal
             sb.AppendLine();
             sb.AppendLine("## Runtime");
             // (InstalledMods below — round-57, Rialgame report 2026-07-22: a broken third-party

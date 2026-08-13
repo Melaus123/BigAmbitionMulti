@@ -936,7 +936,7 @@ namespace BigAmbitionsMP
 
                         var save = saves[0];
                         Plugin.Logger.LogInfo($"[Client] Loading save: {save.alias}");
-                        SaveGameManager.Load(save, true);
+                        MPSaveCoordinator.GuardedNativeLoad(save, true, "client latest-save fallback", save.alias);   // round-251
                     }
                 }
                 catch (Exception ex)
