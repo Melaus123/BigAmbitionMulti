@@ -78,7 +78,7 @@ namespace BigAmbitionsMP
             }
             // Task-28 fix 2: the host serializes its own world in this flow — same
             // mid-placement hazard as the client leg; defer (tick-retried, 30s cap).
-            if (DeferForPlacement(reason, host: true)) return;
+            if (DeferWhileSaveBlocked(reason, host: true)) return;
 
             string session;
             lock (_lock)
@@ -136,11 +136,15 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    var slot = PerformLocalSave(session);
+                    var slot = PerformLocalSave(session, out bool saved);
                     DiagPhase("host lambda: PerformLocalSave done → SetSessionMetadata");
+                    // Session metadata (owners ledger + live day + timestamp) reflects the LIVE
+                    // world and stays valid for the members' incoming uploads even when the
+                    // host's own .hsg write failed — only the host's SLOT claim is the lie.
                     SetSessionMetadata(session, slot.Day);   // owners + day + timestamp
                     DiagPhase("host lambda: SetSessionMetadata done → MergeSlot");
-                    MergeSlot(session, slot);                 // host's own slot
+                    if (saved) MergeSlot(session, slot);      // host's own slot
+                    else Plugin.Logger.LogError($"[MPSave] host save '{session}' FAILED — own slot NOT advertised (round-237); the load-time lineage rescue fills it honestly. Members' uploads still land.");
                     // Carry forward anyone who isn't here to save themselves (a member who just left, or
                     // was offline) so a save never silently drops them → a load that would otherwise
                     // fresh-start them as a brand-new player. (2026-06-23; field 2026-07-19: the
@@ -181,9 +185,10 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[MPSave] HostQuitCheckpoint → '{dc}' (manual base untouched).");
             try
             {
-                var slot = PerformLocalSave(dc);
+                var slot = PerformLocalSave(dc, out bool saved);
                 SetSessionMetadata(dc, slot.Day);
-                MergeSlot(dc, slot);
+                if (saved) MergeSlot(dc, slot);
+                else Plugin.Logger.LogError($"[MPSave] quit checkpoint '{dc}' save FAILED — own slot NOT advertised (round-237); members still carried forward below.");
                 // Same carry-forward as every other save path (review 2026-07-20) — but
                 // INCLUDING connected members (review-2 fix 2026-07-23): unlike every
                 // other save, the quit checkpoint broadcasts NO SaveNow, so no uploads
@@ -246,9 +251,10 @@ namespace BigAmbitionsMP
             lock (_lock) _pendingCarryBackstops.Add((session, Environment.TickCount));
             try
             {
-                var slot = PerformLocalSave(session);
+                var slot = PerformLocalSave(session, out bool saved);
                 SetSessionMetadata(session, slot.Day);
-                MergeSlot(session, slot);
+                if (saved) MergeSlot(session, slot);
+                else Plugin.Logger.LogError($"[MPSave] menu save '{session}' FAILED — own slot NOT advertised (round-237); members' uploads and carry-forward still run.");
                 // Field 2026-07-19 (the unintended character reset): this MANUAL path —
                 // which is exactly where a save-as under a new name lands — never carried
                 // absent members, so the new store was born without the offline player's
@@ -310,7 +316,15 @@ namespace BigAmbitionsMP
             if (string.IsNullOrEmpty(session)) return;   // no session yet — the request above is all we can do
             try
             {
-                var slot = PerformLocalSave(session);
+                var slot = PerformLocalSave(session, out bool saved);
+                // Round-237 fix B: on failure NewestHsg below would find the PREVIOUS save
+                // and ship it under today's slot — skip; the host round-trip requested
+                // above is the remaining carrier of this exit.
+                if (!saved)
+                {
+                    Plugin.Logger.LogError($"[MPSave] exit self-save '{session}' FAILED — inline ship SKIPPED (round-237).");
+                    return;
+                }
                 string folder = MPSaveManager.MpCharacterFolder(session, MPConfig.StableId);
                 string? file = NewestHsg(folder);
                 if (file != null)
@@ -380,12 +394,11 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogWarning($"[MPSave] SaveNow for '{session}' arrived while this client's world is not settled — SKIPPED (an unsettled save would clobber our slot; the next coordinated save covers us).");
                         return;
                     }
-                    // Task-28 fix 2: native refuses to autosave during item placement
-                    // (preventAutoSave held true for the whole drag) because the staged item
-                    // sits in the data with a mid-drag pose — a coordinated save must not
-                    // bypass that.  DEFERRAL, not drop: retried per frame for up to 30s,
-                    // then proceeds (a slightly mid-drag pose beats a missing checkpoint).
-                    if (DeferForPlacement(session, host: false)) return;
+                    // Round-237 (subsumes task-28 fix 2): the game hard-refuses saves in four
+                    // states (designer/casino/school/placement) — DEFER until the state
+                    // clears; see DeferWhileSaveBlocked.  Retried per frame; a newer SaveNow
+                    // supersedes the deferred one.
+                    if (DeferWhileSaveBlocked(session, host: false)) return;
                     // DEV TOGGLE (round-184 test rig): drop this client's save+upload to fabricate an
                     // interrupted coordinated save (host ends up with a partial manifest) without
                     // having to kill the process.  Armed by creating <ModRoot>\dev-drop-upload.flag.
@@ -398,7 +411,17 @@ namespace BigAmbitionsMP
                         }
                     }
                     catch { }
-                    var slot   = PerformLocalSave(session);
+                    var slot = PerformLocalSave(session, out bool saved);
+                    // Round-237 fix B: a failed save must never ship.  The upload reads the
+                    // folder's newest .hsg — on failure that is the PREVIOUS save's bytes —
+                    // and the host would store them under this slot's fresh Day stamp.  The
+                    // last genuine upload stays authoritative; the next coordinated save
+                    // covers us (field 20260803-022659 shipped five of these).
+                    if (!saved)
+                    {
+                        Plugin.Logger.LogError($"[MPSave] save '{session}' FAILED — upload SKIPPED so the older on-disk .hsg cannot travel under today's day label (round-237).");
+                        return;
+                    }
                     string dir = MPSaveManager.MpCharacterFolder(session, MPConfig.StableId);
                     lock (_pending)
                         _pending.Add(new PendingUpload { Session = session, Slot = slot, Folder = dir });
@@ -407,27 +430,74 @@ namespace BigAmbitionsMP
                 catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] Client save: {ex}"); }
         }
 
-        // ── Task-28 fix 2: no save while an item is mid-placement ────────────────
-        // The being-placed item is live in the registration with a per-frame drag pose;
-        // native holds preventAutoSave for the whole drag for exactly this reason, and
-        // the coordinated SaveNow used to bypass it.  Contract: DEFER and retry (per
-        // frame, from TickPendingUploads) up to PlacementWaitSeconds, then proceed.
-        private const float PlacementWaitSeconds = 30f;
-        private sealed class DeferredSave { public string What = ""; public float Deadline; public bool Host; }
+        // ── Round-237 (subsumes task-28 fix 2): no save while native CanSave() says no ─
+        // The game refuses to save in four states (SaveGameManager.CanSave :490): casino
+        // boat, Interior Designer, the school activity panel, item placement.  Vanilla
+        // never collides with them at save time because it PAUSES in those UIs; the MP
+        // clock keeps running, so a coordinated save can land inside any of them (field
+        // 20260803-022659: five midnight saves failed inside the designer, with the
+        // native "save not allowed" error on that player's screen each time).
+        // Contract: DEFER and retry per frame (TickDeferredSave) until the state clears.
+        // Proceeding early is a GUARANTEED failure — the gate sits inside
+        // SaveGameManager.Save itself, not ours to bypass — which retires task-28's 30s
+        // "proceed anyway" placement escape hatch: CanSave hard-blocks placement too, so
+        // that branch could only ever produce a failed save (whose stale bytes then
+        // uploaded — see the round-237 guard in ClientSaveBody).  A newer SaveNow
+        // overwrites the deferred slot (the latest checkpoint supersedes); a 60s
+        // heartbeat log keeps a long wait diagnosable.
+        private sealed class DeferredSave { public string What = ""; public bool Host; public string Why = ""; public float NextBeat; }
         private static DeferredSave? _deferredSave;
-        private static bool _placementBypassOnce;
+        private static System.Reflection.MethodInfo? _canSaveMi;
+        private static bool _canSaveMiSearched;
 
         private static bool PlacementActive()
         {
             try { return BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode; } catch { return false; }
         }
 
-        private static bool DeferForPlacement(string what, bool host)
+        /// <summary>Null when saving is allowed, else a short reason.  Asks the game's own
+        /// (private) CanSave when reachable — drift-proof: a no-save state added in a future
+        /// game build defers here instead of failing there — and names the state by probing
+        /// the four known conditions.  The probes ARE the gate if reflection ever fails.</summary>
+        private static string? SaveBlockedBy()
         {
-            if (_placementBypassOnce) { _placementBypassOnce = false; return false; }
-            if (!PlacementActive()) return false;
-            _deferredSave = new DeferredSave { What = what, Deadline = UnityEngine.Time.unscaledTime + PlacementWaitSeconds, Host = host };
-            Plugin.Logger.LogInfo($"[MPSave] save '{what}' deferred — an item is being placed on this machine; retrying for up to {PlacementWaitSeconds:F0}s. Will retry.");
+            bool nativeSaysNo = false, nativeAsked = false;
+            try
+            {
+                if (!_canSaveMiSearched)
+                {
+                    _canSaveMiSearched = true;
+                    _canSaveMi = HarmonyLib.AccessTools.Method(typeof(SaveGameManager), "CanSave");
+                    if (_canSaveMi == null)
+                        Plugin.Logger.LogWarning("[MPSave] native CanSave not found — save gate falls back to the four known states (round-237).");
+                }
+                if (_canSaveMi != null && _canSaveMi.Invoke(null, null) is bool allowed)
+                {
+                    nativeSaysNo = !allowed;
+                    nativeAsked = true;
+                }
+            }
+            catch { }
+            string? why = null;
+            try { if (UI.InteriorDesigner.InteriorDesignerUI.IsOpen) why = "the Interior Designer is open"; } catch { }
+            if (why == null) try { if (CasinoBoatManager.IsOnCasinoBoat) why = "the player is on the casino boat"; } catch { }
+            if (why == null) try { if (PlacementActive()) why = "an item is being placed"; } catch { }
+            if (why == null) try
+            {
+                if (PlayerActivity.PlayerActivityUI.IsPanelOpen && BuildingManager.IsInsideBuilding
+                    && InstanceBehavior<BuildingManager>.Instance?.buildingRegistration?.businessTypeName == "ba:businesstype_school")
+                    why = "the school activity panel is open";
+            } catch { }
+            if (nativeAsked) return nativeSaysNo ? (why ?? "a native no-save state (unrecognized — new game build?)") : null;
+            return why;
+        }
+
+        private static bool DeferWhileSaveBlocked(string what, bool host)
+        {
+            string? why = SaveBlockedBy();
+            if (why == null) return false;
+            _deferredSave = new DeferredSave { What = what, Host = host, Why = why, NextBeat = UnityEngine.Time.unscaledTime + 60f };
+            Plugin.Logger.LogInfo($"[MPSave] save '{what}' deferred — {why} on this machine and the game refuses saves in that state; retrying every frame until it clears (round-237).");
             return true;
         }
 
@@ -435,15 +505,18 @@ namespace BigAmbitionsMP
         {
             var d = _deferredSave;
             if (d == null) return;
-            bool placing = PlacementActive();
-            if (placing && UnityEngine.Time.unscaledTime < d.Deadline) return;
-            _deferredSave = null;
-            if (placing)
+            string? why = SaveBlockedBy();
+            if (why != null)
             {
-                Plugin.Logger.LogWarning($"[MPSave] save '{d.What}' proceeding despite an active placement ({PlacementWaitSeconds:F0}s cap) — one item may persist a mid-drag pose.");
-                _placementBypassOnce = true;   // consumed by the DeferForPlacement re-check below
+                if (UnityEngine.Time.unscaledTime >= d.NextBeat)
+                {
+                    d.NextBeat = UnityEngine.Time.unscaledTime + 60f;
+                    Plugin.Logger.LogInfo($"[MPSave] save '{d.What}' still deferred — {why}.");
+                }
+                return;
             }
-            else Plugin.Logger.LogInfo($"[MPSave] save '{d.What}' resuming — placement ended.");
+            _deferredSave = null;
+            Plugin.Logger.LogInfo($"[MPSave] save '{d.What}' resuming — {d.Why} no longer holds.");
             if (d.Host) HostSaveNow(d.What);
             else ClientSaveBody(d.What);
         }
@@ -1458,6 +1531,14 @@ namespace BigAmbitionsMP
         }
 
         public static MpSlot PerformLocalSave(string sessionName, SaveGameManager.SaveType saveType = SaveGameManager.SaveType.Default)
+            => PerformLocalSave(sessionName, out _, saveType);
+
+        /// <summary>Round-237 overload: <paramref name="saved"/> reports whether the .hsg was
+        /// actually written.  Every caller that ADVERTISES or SHIPS the result (upload queue,
+        /// manifest slot, disconnect marker, inline exit-send) must check it — on a failed save
+        /// the folder still holds the PREVIOUS .hsg, and shipping that under today's Day stamp
+        /// is stale data wearing a fresh label (it also defeats the round-233 manifest-day fence).</summary>
+        public static MpSlot PerformLocalSave(string sessionName, out bool saved, SaveGameManager.SaveType saveType = SaveGameManager.SaveType.Default)
         {
             DiagArm();
             DiagWrite($"PerformLocalSave START session='{sessionName}' host={MPServer.IsRunning}");
@@ -1594,6 +1675,7 @@ namespace BigAmbitionsMP
             // LOUD so it stands out in a submitted log (the routine line above is INFO).
             if (!ok) Plugin.Logger.LogError($"[MPSave] SAVE FAILED for '{sessionName}' (char='{charName}', day={day}) — .hsg not written; a later load may fall back to an older copy.");
 
+            saved = ok;
             return new MpSlot
             {
                 StableId      = MPConfig.StableId,
@@ -1909,7 +1991,14 @@ namespace BigAmbitionsMP
             {
                 string baseName = StripAutoSuffix(ActiveSessionName);
                 if (string.IsNullOrEmpty(baseName)) return;
-                var slot = PerformLocalSave(baseName + "-disconnect");   // current game → <base>-disconnect/<ourStable>/
+                var slot = PerformLocalSave(baseName + "-disconnect", out bool saved);   // current game → <base>-disconnect/<ourStable>/
+                // Round-237 fix B: a marker for a failed save would offer a rejoin snapshot
+                // whose bytes are the OLDER save wearing today's Day — skip both.
+                if (!saved)
+                {
+                    Plugin.Logger.LogError("[MPSave] disconnect save FAILED — marker NOT written (round-237); rejoin will use the host's stored copy.");
+                    return;
+                }
                 long nowUnix = 0;
                 try { nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds(); } catch { }
                 // Handoff slice 3: stamp the WORLD identity so a future host — original or
