@@ -225,8 +225,12 @@ namespace BigAmbitionsMP
                 // staff that wasn't the player's.  ANY todo referencing an
                 // injected/synthetic employee id or a partner-owned business is
                 // wrong by definition — native todo generation has no concept of
-                // "someone else's staff/shop".  Native-legal removal: the game's
-                // own compat fixes prune TodoTasks by direct RemoveAll/RemoveAt.
+                // "someone else's staff/shop".  ROUND-246 restructure: creation
+                // is now REFUSED at the native chokepoint (see the AddNewTodoTask
+                // gate below), so this purge only heals todos persisted by older
+                // versions — and it removes via the game's row+data routine, not
+                // data-only (data-only removal live-orphaned sidebar rows: the
+                // 20260806-010308 permanent "On-Duty Staff" alerts).
                 int todosFixed = PurgeForeignTodos(reason);
                 if (todosFixed > 0) parts.Add($"foreign-todos×{todosFixed} repaired");
             }
@@ -254,22 +258,29 @@ namespace BigAmbitionsMP
                 {
                     var t = gi.TodoTasks[i];
                     if (t == null) continue;
-                    bool foreign = false;
                     string eid = "";
                     try { eid = t.employeeId ?? ""; } catch { }
-                    if (eid.Length > 0 && (eid.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix) || MPRegisterSync.IsInjectedStaff(eid)))
-                        foreign = true;
-                    if (!foreign)
+                    if (!IsForeignTodoRef(eid, t.address)) continue;
+                    // ROUND-246 (field 20260806-010308): removal must go through the game's own
+                    // routine, which destroys the sidebar ROW together with the DATA.  This loop
+                    // used to RemoveAt the data directly — native-legal at LOAD time (the game's
+                    // compat fixes do the same, before the sidebar is built), but this method also
+                    // runs LIVE on the 10-min tick, and a data-only removal there orphans the row:
+                    // the native completion checker iterates the DATA list, so an orphaned row can
+                    // never be struck through or removed — the field report's "permanent" alerts,
+                    // and clicking one NREs the My Employees app on the dead synthetic id.
+                    bool removedViaUi = false;
+                    try
                     {
-                        try
+                        var ui = InstanceBehavior<UI.UIs>.Instance != null ? InstanceBehavior<UI.UIs>.Instance.tasksUI : null;
+                        if (ui != null)
                         {
-                            var reg = t.address != null ? Helpers.BuildingHelper.GetBuildingRegistration(t.address) : null;
-                            if (GameStatePatcher.HideFromOwnAssetLists(reg)) foreign = true;
+                            ui.InstantlyCompleteTodoTask(t);   // row + data + panel height, atomically
+                            removedViaUi = !gi.TodoTasks.Contains(t);
                         }
-                        catch { }
                     }
-                    if (!foreign) continue;
-                    gi.TodoTasks.RemoveAt(i);
+                    catch { }
+                    if (!removedViaUi) gi.TodoTasks.Remove(t); // headless (menu/load) — no row exists yet
                     removed++;
                     if (logged++ < LogCapPerClass)
                         Plugin.Logger.LogWarning($"[Integrity] {reason}: todo '{t.type}' referenced another player's staff/business — removed (objectives are own-only).");
@@ -277,6 +288,59 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] foreign-todos: {ex.Message}"); }
             return removed;
+        }
+
+        /// <summary>Round-246 shared predicate — the ONE definition of "foreign todo
+        /// reference", used by both the purge above and the creation gate below so the
+        /// two can never drift apart.  Foreign = the employee id is one of our synthetic
+        /// duty stand-ins or an injected partner-roster copy, OR the address resolves to
+        /// a business owned by another session player (persisted stamp — works offline).
+        /// A player's own staff and shops can never match; on a vanilla SP save nothing
+        /// matches.</summary>
+        internal static bool IsForeignTodoRef(string employeeId, Address? address)
+        {
+            string eid = employeeId ?? "";
+            if (eid.Length > 0)
+            {
+                if (eid.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix)) return true;
+                try { if (MPRegisterSync.IsInjectedStaff(eid)) return true; } catch { }
+            }
+            try
+            {
+                var reg = address != null ? Helpers.BuildingHelper.GetBuildingRegistration(address) : null;
+                if (GameStatePatcher.HideFromOwnAssetLists(reg)) return true;
+            }
+            catch { }
+            return false;
+        }
+    }
+
+    /// <summary>Round-246 fix A — FOREIGN TODOS NEVER GET CREATED (field 20260806-010308
+    /// "On-Duty Staff ... Permanent").  Native todo generation has no concept of "someone
+    /// else's staff/shop": walking into a partner's business (item events regenerate the
+    /// current building's todos) or any employee sweep can mint alerts about our duty
+    /// stand-ins or the partner's shops.  Class-7's periodic purge then removed the DATA
+    /// and orphaned the sidebar ROW — the report's permanent, click-to-crash entries.
+    /// Gating here, at TasksUI.AddNewTodoTask — the single construction chokepoint every
+    /// creation path funnels through (CreateTodoTask wraps it; TaxHelper calls it
+    /// directly) — means no data AND no row, atomically: nothing to sweep later.  The
+    /// purge stays as the healer for todos already persisted in older saves.</summary>
+    [HarmonyLib.HarmonyPatch(typeof(UI.Tasks.TasksUI), nameof(UI.Tasks.TasksUI.AddNewTodoTask))]
+    public static class Patch_TasksUI_AddNewTodoTask_ForeignGate
+    {
+        private static int _logged;
+
+        static bool Prefix(ref Entities.TodoTask? __result, Entities.TodoTaskType type, Address address, string employeeId)
+        {
+            try
+            {
+                if (!MPSaveIntegrity.IsForeignTodoRef(employeeId, address)) return true;
+            }
+            catch { return true; }   // our failure must never block a legit todo
+            __result = null;         // callers already handle null (duplicate-exists path)
+            if (_logged++ < 12)
+                Plugin.Logger.LogInfo($"[Integrity] todo '{type}' about another player's staff/business refused at creation (round-246; emp='{employeeId ?? ""}').");
+            return false;
         }
     }
 }
