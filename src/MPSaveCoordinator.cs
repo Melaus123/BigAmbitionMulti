@@ -1607,6 +1607,11 @@ namespace BigAmbitionsMP
             // ALWAYS runs even if the save work throws (a failed save must never leave the session un-staffed).
             string folder   = MPSaveManager.MpCharacterFolder(sessionName, MPConfig.StableId);
             bool   ok        = false;
+            // Round-245 note: a post-write integrity verify (backup + gunzip check + restore)
+            // was built here and REMOVED by user decision 2026-08-14 — a transient read failure
+            // (AV lock on the fresh file) could have rolled a GOOD save back to the older copy,
+            // and the auto-save rotation is the intended failsafe for torn files.  The load-side
+            // containment (SaveLoadGuard, fix A) is the shipped answer to damaged .hsg files.
             try
             {
                 try
