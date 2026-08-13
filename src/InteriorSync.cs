@@ -1061,6 +1061,13 @@ namespace BigAmbitionsMP
                     {
                         V(MPAudit.StableHash(c.ItemName));
                         V(c.Amount);
+                        // Round-242 (field 20260803-224740, FOURTH member of the round-99
+                        // attribute-omitted class): paying at a register flips ONLY this flag —
+                        // with it absent here the publisher saw "no change", never re-sent, and
+                        // every other machine kept the buyer's boxes unpaid until some other
+                        // cargo change forced a publish. Serializer/deserializer/IdentitySig all
+                        // carried it already; this hash was the one blind layer.
+                        V(c.Paid ? 1 : 0);
                         V(((int)System.Math.Round(c.PricePerUnit * 100f)).GetHashCode());
                         foreach (var cc in c.CustomColors) { V(cc.Channel); V(cc.ColorPacked); }
                     }

@@ -103,6 +103,23 @@ namespace BigAmbitionsMP
 
             // Apply Harmony patches per-class so a single bad class can't take
             // down the rest (PatchAll aborts on the first throw).
+            //
+            // Round-241 provenance probe (field 20260803-222126: 253/253 classes threw
+            // TypeLoadException on a byte-correct game install with 34 mods — the shape of a
+            // SHARED-HARMONY VERSION CONFLICT, but the bundle could not name the culprit).
+            // One line settles it in the next such bundle: which 0Harmony actually loaded,
+            // from whose folder, versus the version we compiled against.
+            try
+            {
+                var loaded = typeof(Harmony).Assembly;
+                string compiledAgainst = "?";
+                foreach (var r in typeof(ModEntry).Assembly.GetReferencedAssemblies())
+                    if (r.Name == "0Harmony") { compiledAgainst = r.Version?.ToString() ?? "?"; break; }
+                string loc = "";
+                try { loc = loaded.Location; } catch { }
+                Plugin.Logger.LogInfo($"[Plugin] Harmony provenance: loaded v{loaded.GetName().Version} from '{(string.IsNullOrEmpty(loc) ? "(in-memory)" : loc)}', compiled against v{compiledAgainst}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plugin] Harmony provenance probe: {ex.Message}"); }
             _harmony = new Harmony("com.bamp.bigambitionsmp");
             int okClasses = 0, failClasses = 0, deadClasses = 0, totalPatched = 0;
             foreach (var t in typeof(ModEntry).Assembly.GetTypes())
