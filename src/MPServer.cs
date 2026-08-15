@@ -636,6 +636,11 @@ namespace BigAmbitionsMP
             MPSteamPresence.ClearAdvertise();
             IsInLobby = true;
             LobbyClear();
+            // Round-253e (user test: the mismatch notice outlived the client AND a re-host):
+            // a stopped lobby is a fresh start — drop the per-player mismatch records (a
+            // rejoining client re-diffs at Hello anyway) and any notice still on the strip.
+            ModMismatchByPlayer.Clear();
+            try { MPCanvasUI.ClearLobbyNotice(); } catch { }
             _peerNames.Clear();
             _clients.Clear();
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
@@ -809,6 +814,9 @@ namespace BigAmbitionsMP
             // Remove from lobby player list
             if (_peerNames.TryGetValue(peer.Id, out leftPlayer))
             {
+                // Round-253e: the mismatch record is ABOUT this player — it leaves with them
+                // (the strip line derives from the dict, so it disappears the same frame).
+                ModMismatchByPlayer.TryRemove(leftPlayer, out _);
                 LobbyRemove(leftPlayer);
                 _peerNames.TryRemove(peer.Id, out _);
                 BroadcastLobbyUpdate();   // keep everyone's roster (incl. the in-game F9 list) current
@@ -1836,6 +1844,55 @@ namespace BigAmbitionsMP
                 // content fingerprint and record a mismatch in the host log — evidence for a
                 // future bug report, never a refusal.
                 MPContentFingerprint.HostCompare(hello.PlayerId, hello.Content);
+                // Round-253 (user-directed 2026-08-13): diff the joiner's installed-mod list
+                // against ours and INFORM both sides on a mismatch — players were blind to
+                // install deltas (divergent prices/content read as mod bugs, and a player's
+                // own missing/extra mod silently changes their game). Never a gate.
+                try
+                {
+                    string mine = MPContentFingerprint.CachedMods, theirsMods = hello.Mods ?? "";
+                    if (string.IsNullOrEmpty(theirsMods))
+                        Plugin.Logger.LogInfo($"[Content] '{hello.PlayerId}' sent no mod list (older build) — mod diff skipped.");
+                    else if (!string.IsNullOrEmpty(mine)
+                             && MPContentFingerprint.DiffMods(mine, theirsMods, out var onlyMine, out var onlyTheirs, out int nMine, out int nTheirs))
+                    {
+                        ModMismatchByPlayer[hello.PlayerId] = (nTheirs, nMine);   // round-253b: feeds the lobby start-gate popup
+                        string detail = $"only on host ({nMine}): {(nMine > 0 ? onlyMine : "-")} | only on '{hello.PlayerId}' ({nTheirs}): {(nTheirs > 0 ? onlyTheirs : "-")}";
+                        Plugin.Logger.LogWarning($"[Content] MOD MISMATCH: '{hello.PlayerId}' runs a different mod set — {detail}. "
+                            + "Different game content can change prices, items and behavior between machines; informational only, join proceeds.");
+                        // (No posted lobby notice — round-253f: the host's strip line is DERIVED
+                        // live from ModMismatchByPlayer ∩ LobbyPlayers, no timer to manage.)
+                        // Round-253b (user test: the in-world host saw NOTHING — the lobby
+                        // strip is invisible in-world): a mid-game host gets a toast instead.
+                        try
+                        {
+                            GameStatePatcher.EnqueueOnMainThread(() =>
+                            {
+                                try
+                                {
+                                    if (!IsInLobby)
+                                        PassengerHud.Toast($"{hello.PlayerId} is joining with DIFFERENT mods ({nTheirs} extra / {nMine} missing vs yours) — game content may differ.", 20f);
+                                }
+                                catch { }
+                            });
+                        }
+                        catch { }
+                        try
+                        {
+                            Send(peer, MessageEnvelope.Create(MessageType.ModMismatch, "host", new ModMismatchPayload
+                            {
+                                Summary = $"Your mods differ from the host's ({nTheirs} extra / {nMine} missing) — game content may differ.",
+                                Detail  = detail
+                            }));
+                        }
+                        catch { }
+                    }
+                    else
+                    {
+                        ModMismatchByPlayer.TryRemove(hello.PlayerId, out _);   // round-253b: a rejoin with aligned mods clears the record
+                    }
+                }
+                catch { }
                 return true;
             }
 
@@ -1855,6 +1912,40 @@ namespace BigAmbitionsMP
             }
             catch { }
             return false;
+        }
+
+        /// <summary>Round-253b: per-player mod-mismatch records (extra = mods only they have,
+        /// missing = mods only the host has), written at Hello, cleared when a rejoin arrives
+        /// with aligned lists. Read by the lobby start-gate popup.</summary>
+        internal static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (int extra, int missing)> ModMismatchByPlayer = new();
+
+        /// <summary>Multi-line summary of mismatched CURRENTLY-PRESENT players ("" = none).</summary>
+        internal static string ModMismatchSummary()
+        {
+            try
+            {
+                var parts = new System.Collections.Generic.List<string>();
+                foreach (var kv in ModMismatchByPlayer)
+                    if (LobbyPlayers.Contains(kv.Key))
+                        parts.Add($"• {kv.Key}: {kv.Value.extra} mod(s) you don't have, missing {kv.Value.missing} of yours");
+                return string.Join("\n", parts);
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>Round-253f: compact one-liner for the lobby strip — a LIVE READ (events
+        /// over timers, user ruling): present exactly while a mismatched player is.</summary>
+        internal static string ModMismatchStripLine()
+        {
+            try
+            {
+                var parts = new System.Collections.Generic.List<string>();
+                foreach (var kv in ModMismatchByPlayer)
+                    if (LobbyPlayers.Contains(kv.Key))
+                        parts.Add($"{kv.Key} ({kv.Value.extra} extra / {kv.Value.missing} missing)");
+                return parts.Count == 0 ? "" : "Mods differ vs " + string.Join(", ", parts);
+            }
+            catch { return ""; }
         }
 
         private static void HandleHello(MPLink peer, MessageEnvelope env)

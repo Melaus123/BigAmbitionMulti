@@ -536,8 +536,23 @@ namespace BigAmbitionsMP
 
         // ── Update ────────────────────────────────────────────────────────────
 
+        // ── Round-254: Harmony-bootstrap failure banner ───────────────────────
+        // Set by Plugin when the shared patching library was poisoned by another
+        // mod (incomplete package or outdated version). In that state this
+        // component does EXACTLY ONE thing — show the banner naming the culprit —
+        // and everything else stays off: with zero patches applied, any normal MP
+        // activity would be a half-alive hazard.
+        internal static string? FatalBootBanner;
+        private GameObject? _fatalGO;
+        private bool _fatalDismissed;
+
         private void Update()
         {
+            if (FatalBootBanner != null)
+            {
+                if (!_fatalDismissed) EnsureFatalBanner();
+                return;
+            }
             TickUiScale();   // round-176: keep the canvas scale tracking resolution + the game's UI Zoom
 
             // Resolve + cache the save version folder on the MAIN thread, unconditionally
@@ -876,6 +891,7 @@ namespace BigAmbitionsMP
 
         private void LateUpdate()
         {
+            if (FatalBootBanner != null) return;   // round-254: banner-only mode
             // SOLE OWNER of the input-suppression flag: computed fresh every
             // frame from live contributions — a stale latch once locked a
             // player's keyboard permanently (2026-06-10).
@@ -1727,9 +1743,10 @@ namespace BigAmbitionsMP
                     bg.color = new Color(0.10f, 0.11f, 0.15f, 0.97f);
                     if (sprite != null) { try { bg.sprite = sprite; bg.type = Image.Type.Sliced; } catch { } }
                 }
-                // Rebuild rows when the queue changes.
+                // Rebuild rows when the queue changes. Round-253b: the mismatch marker is
+                // part of the signature so a row rebuilds if the mod-diff state changes.
                 string sig = "";
-                foreach (var p in pending) sig += p.peerId + "|" + p.playerId + ";";
+                foreach (var p in pending) sig += p.peerId + "|" + p.playerId + "|" + (MPServer.ModMismatchByPlayer.ContainsKey(p.playerId) ? "m" : "") + ";";
                 if (sig != _joinPopSig)
                 {
                     bool newcomer = sig.Length > _joinPopSig.Length;
@@ -1744,7 +1761,11 @@ namespace BigAmbitionsMP
                     for (int i = 0; i < shown; i++)
                     {
                         float y = -32f - i * 40f;
-                        var nm = MakeLabel(_joinPop.transform, $"<b>{pending[i].playerId}</b>", 13, C_WHITE, 14f, y - 6f, 170f, 26f, TextAlignmentOptions.Left);
+                        // Round-253b (user test): the approval row now carries the mod-diff
+                        // verdict inline, so a mid-game host decides with the info in view.
+                        string mm = MPServer.ModMismatchByPlayer.TryGetValue(pending[i].playerId, out var md)
+                            ? $"\n<size=10><color=#E8B858>mods differ: +{md.extra} / -{md.missing}</color></size>" : "";
+                        var nm = MakeLabel(_joinPop.transform, $"<b>{pending[i].playerId}</b>{mm}", 13, C_WHITE, 14f, y - 6f, 176f, mm.Length > 0 ? 34f : 26f, TextAlignmentOptions.Left);
                         ApplyFont(nm);
                         var (aRT, aLbl) = MakeHubButton("accept", Vector2.zero, 78f, new Color(0.24f, 0.50f, 0.33f, 1f), 28f, sprite, _joinPop.transform);
                         SetTopLeft(aRT, 196f, y); aLbl.fontSize = 12;
@@ -5150,6 +5171,16 @@ namespace BigAmbitionsMP
             _lobbyNoticeUntil = Time.unscaledTime + seconds;
         }
 
+        /// <summary>Round-253e: retract the transient notice (lobby closed). The mod-mismatch
+        /// line no longer goes through here at all — round-253f made it a LIVE READ in the
+        /// strip render (events over timers, user ruling): it exists exactly while a
+        /// mismatched player is present, with no timer and nothing to retract.</summary>
+        internal static void ClearLobbyNotice()
+        {
+            _lobbyNotice = "";
+            _lobbyNoticeUntil = 0f;
+        }
+
         private void OnInviteFriends()
         {
             // Round-93 (field 20260725-172640): with the Steam overlay disabled, the invite call
@@ -5209,6 +5240,13 @@ namespace BigAmbitionsMP
                 // Round-93: a transient notice (e.g. overlay-disabled) briefly overrides the info line.
                 if (!string.IsNullOrEmpty(_lobbyNotice) && Time.unscaledTime < _lobbyNoticeUntil)
                     info = $"<color=#FFB060>{_lobbyNotice}</color>";
+                // Round-253f (user ruling: events over timers): the mod-mismatch line is a
+                // LIVE READ of current state — shown exactly while a mismatched player is
+                // present (host) / while connected to a mismatched host (client). No timer.
+                string standing = "";
+                try { standing = host ? MPServer.ModMismatchStripLine() : MPClient.ModMismatchVsHost; } catch { }
+                if (!string.IsNullOrEmpty(standing))
+                    info += $"\n<color=#FFB060>{standing}</color>";
                 try { _lwConnInfo.text = info; } catch { }
             }
             // Show/Hide IP toggle — host only; label reflects state.
@@ -7108,12 +7146,142 @@ namespace BigAmbitionsMP
             SetStatus("Connecting...", false);
         }
 
+        // ── Round-253b (user-directed): lobby START GATE on mod mismatch ──────────
+        // Before the host launches (new game or load) with connected players whose
+        // installed-mod lists differ from the host's, a popup names the mismatched
+        // players and asks Continue / Cancel. The PLAYER decides — never an automatic
+        // refusal (the standing never-force doctrine). Records come from the Hello
+        // diff (MPServer.ModMismatchByPlayer); a rejoin with aligned mods clears them.
+        private GameObject? _modGateGO;
+        private TextMeshProUGUI? _modGateLbl;
+        private Action? _modGatePending;
+
+        /// <summary>True = the popup now owns the decision; the caller must NOT proceed.
+        /// False = no mismatch among present players (or UI unavailable) — proceed.</summary>
+        private bool GateStartOnModMismatch(Action proceed, string verb)
+        {
+            try
+            {
+                if (!MPServer.IsRunning) return false;
+                string sum = MPServer.ModMismatchSummary();
+                if (string.IsNullOrEmpty(sum)) return false;
+                if (_modGateGO == null) BuildModGate();
+                if (_modGateGO == null || _modGateLbl == null) return false;   // our own UI failure must never block a start
+                _modGatePending = proceed;
+                _modGateLbl.text = $"Players in this lobby run DIFFERENT mods than you:\n\n{sum}\n\n"
+                    + $"Different game content can change prices, items and behavior between machines.\n{verb} anyway?";
+                _modGateGO.SetActive(true);
+                ModalMouseAcquire();   // round-253c: every manual RectHit dispatcher goes dead until release
+                Plugin.Logger.LogWarning($"[Content] start gate: mod-mismatch popup shown before '{verb}' — {sum.Replace("\n", " | ")}");
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private void BuildModGate()
+        {
+            if (_modGateGO != null || _canvasGO == null) return;
+            // User test 2026-08-13: the first version was the bare box — clicking Cancel ALSO
+            // hit the native lobby button behind it. Root is now a FULL-SCREEN SCRIM whose
+            // Image swallows every raycast behind the box (the merger-confirm pattern); the
+            // manual click ticks additionally early-out while the gate is open.
+            _modGateGO = MakeGO("BAMP_ModGate", _canvasGO.transform);
+            var prt = _modGateGO.GetComponent<RectTransform>();
+            prt.anchorMin = Vector2.zero; prt.anchorMax = Vector2.one;
+            prt.offsetMin = Vector2.zero; prt.offsetMax = Vector2.zero;
+            _modGateGO.AddComponent<Image>().color = new Color(0f, 0f, 0f, 0.62f);   // raycast-blocking scrim
+
+            var box = MakeGO("Box", _modGateGO.transform);
+            var brt = box.GetComponent<RectTransform>();
+            brt.anchorMin = brt.anchorMax = brt.pivot = new Vector2(0.5f, 0.5f);
+            brt.sizeDelta = new Vector2(520f, 300f);
+            brt.anchoredPosition = Vector2.zero;
+            var bg = box.AddComponent<Image>();
+            bg.color = new Color(0.10f, 0.10f, 0.13f, 0.97f);
+            if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }
+            ApplyFont(MakeLabel(box.transform, "Mod mismatch", 26, C_WHITE, 0f, -14f, 520f, 36f, TextAlignmentOptions.Center));
+            _modGateLbl = MakeLabel(box.transform, "", 14, C_WHITE, 24f, -56f, 472f, 170f, TextAlignmentOptions.TopLeft);
+            ApplyFont(_modGateLbl); _modGateLbl.enableWordWrapping = true;
+            CloneButtonInto(box.transform, "BAMP_ModGateGo",   "Continue", OnModGateContinue, 90f,  -240f, 160f, 44f);
+            CloneButtonInto(box.transform, "BAMP_ModGateStop", "Cancel",   OnModGateCancel,   270f, -240f, 160f, 44f);
+            _modGateGO.SetActive(false);
+        }
+
+        /// <summary>Round-254: the ONLY UI the mod shows when the Harmony bootstrap died.
+        /// Pure uGUI, zero native-object dependencies (the native menu may not even be
+        /// built yet), retried each frame until the canvas exists.</summary>
+        private void EnsureFatalBanner()
+        {
+            if (_fatalGO != null || _canvasGO == null) return;
+            try
+            {
+                _fatalGO = MakeGO("BAMP_FatalBanner", _canvasGO.transform);
+                var prt = _fatalGO.GetComponent<RectTransform>();
+                prt.anchorMin = Vector2.zero; prt.anchorMax = Vector2.one;
+                prt.offsetMin = Vector2.zero; prt.offsetMax = Vector2.zero;
+                _fatalGO.AddComponent<Image>().color = new Color(0f, 0f, 0f, 0.55f);   // scrim
+
+                var box = MakeGO("Box", _fatalGO.transform);
+                var brt = box.GetComponent<RectTransform>();
+                brt.anchorMin = brt.anchorMax = brt.pivot = new Vector2(0.5f, 0.5f);
+                brt.sizeDelta = new Vector2(680f, 420f);
+                box.AddComponent<Image>().color = new Color(0.10f, 0.10f, 0.13f, 0.98f);
+
+                ApplyFont(MakeLabel(box.transform, "Multiplayer disabled", 26, new Color(1f, 0.72f, 0.35f, 1f), 0f, -16f, 680f, 36f, TextAlignmentOptions.Center));
+                var body = MakeLabel(box.transform, FatalBootBanner ?? "", 14, C_WHITE, 28f, -62f, 624f, 280f, TextAlignmentOptions.TopLeft);
+                ApplyFont(body); body.enableWordWrapping = true;
+
+                var okGO = MakeGO("OK", box.transform);
+                var okRT = okGO.GetComponent<RectTransform>();
+                okRT.anchorMin = okRT.anchorMax = okRT.pivot = new Vector2(0.5f, 0f);
+                okRT.anchoredPosition = new Vector2(0f, 22f); okRT.sizeDelta = new Vector2(180f, 40f);
+                var okImg = okGO.AddComponent<Image>(); okImg.color = new Color(0.30f, 0.32f, 0.44f, 1f);
+                var okBtn = okGO.AddComponent<Button>(); okBtn.targetGraphic = okImg;
+                var okLbl = MakeLabel(okGO.transform, "OK", 15, C_WHITE, 0f, 0f, 180f, 40f, TextAlignmentOptions.Center);
+                ApplyFont(okLbl);
+                okBtn.onClick.AddListener(() =>
+                {
+                    _fatalDismissed = true;
+                    try { _fatalGO?.SetActive(false); } catch { }
+                });
+            }
+            catch { _fatalGO = null; }   // canvas mid-build — retry next frame
+        }
+
+        private void OnModGateContinue()
+        {
+            try { _modGateGO?.SetActive(false); } catch { }
+            ModalMouseRelease();   // round-253c: also swallows THIS frame's click for manual ticks
+            var act = _modGatePending; _modGatePending = null;
+            Plugin.Logger.LogInfo("[Content] start gate: user chose CONTINUE despite the mod mismatch.");
+            try { act?.Invoke(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Content] start gate continue: {ex.Message}"); }
+        }
+
+        private void OnModGateCancel()
+        {
+            try { _modGateGO?.SetActive(false); } catch { }
+            ModalMouseRelease();   // round-253c: also swallows THIS frame's click for manual ticks
+            _modGatePending = null;
+            Plugin.Logger.LogInfo("[Content] start gate: user CANCELED after the mod-mismatch popup.");
+            SetStatus("Start canceled.", false);
+        }
+
         private void OnStartNew()
+        {
+            if (GateStartOnModMismatch(StartNewNow, "Start new game")) return;
+            StartNewNow();
+        }
+        private void StartNewNow()
         {
             MPServer.StartNewGame(_hostSettings);
             SetStatus($"Starting new game ({_hostSettings.Difficulty})...", false);
         }
         private void OnStartLoad()
+        {
+            if (GateStartOnModMismatch(StartLoadNow, "Load")) return;
+            StartLoadNow();
+        }
+        private void StartLoadNow()
         {
             // Round-53: the lobby's (possibly customized) dials are the save's NEW authority —
             // apply them for this session and write them back to the manifest before loading.
@@ -7262,8 +7430,26 @@ namespace BigAmbitionsMP
         private static Vector2 ScreenToCanvas(Vector2 screen) =>
             new Vector2(screen.x / UiScale, (screen.y - Screen.height) / UiScale);
 
+        // ── Round-253c RESTRUCTURE (bandaid ceiling): modal mouse ownership ──────
+        // Two rounds of per-tick ModGateOpen guards still click-through'd — the user's
+        // second test hit the LOBBY window's manual tick (:5377+), which the first
+        // sweep missed, and this file has ~ten such Input.GetMouseButtonDown+RectHit
+        // dispatchers (chat, crash popup, rest dock, hub, tooltips …). Every one of
+        // them funnels through THIS primitive, so the modal check lives here, ONCE:
+        // while a modal popup owns the mouse, every manual hit test in the file says
+        // "miss". The modal's own buttons are real uGUI Buttons on the EventSystem
+        // path — unaffected. _modalSwallowFrame additionally eats the very frame the
+        // modal CLOSES: Update-vs-EventSystem order within a frame is undefined, so
+        // without it the click that dismissed the popup could still reach a manual
+        // dispatcher running later that same frame (the user's frozen-window repro).
+        private static bool _modalOwnsMouse;
+        private static int  _modalSwallowFrame = -1;
+        internal static void ModalMouseAcquire() { _modalOwnsMouse = true; }
+        internal static void ModalMouseRelease() { _modalOwnsMouse = false; _modalSwallowFrame = Time.frameCount; }
+
         private static bool RectHit(RectTransform rt, Vector2 screenPos)
         {
+            if (_modalOwnsMouse || Time.frameCount <= _modalSwallowFrame) return false;
             if (rt == null) return false;
             RectTransformUtility.ScreenPointToLocalPointInRectangle(
                 rt, screenPos, null, out var local);

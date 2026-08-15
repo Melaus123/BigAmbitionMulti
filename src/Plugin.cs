@@ -51,6 +51,101 @@ namespace BigAmbitionsMP
         public static bool MpDisabledByPatchFailure => PatchFailCount >= PatchFailHardBlock;
         public static bool PatchesDegraded => PatchFailCount > 0;
 
+        /// <summary>Round-254: the Harmony version this build compiled against (set by the
+        /// provenance probe) and our own install root — both feed the culprit line when the
+        /// SHARED Harmony copy another mod loaded first turns out broken or outdated.</summary>
+        public static string CompiledHarmonyVersion = "?";
+        internal static string ModRootForDiag = "";
+
+        /// <summary>Round-254: name the loaded 0Harmony's ORIGIN so a player can self-diagnose
+        /// which mod to remove. Load order is deterministic (workshop id ascending, decompile-
+        /// verified ModDiscoveryRegistry:188), our id is young/high, so a broken OLDER mod wins
+        /// the race every launch — the culprit is whoever's folder the loaded copy sits in.</summary>
+        internal static string DescribeLoadedHarmony()
+        {
+            try
+            {
+                System.Reflection.Assembly? h = null;
+                foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+                    if (a.GetName().Name == "0Harmony") { h = a; break; }
+                if (h == null) return "no Harmony library is loaded at all";
+                string loc = ""; try { loc = h.Location ?? ""; } catch { }
+                string ver = h.GetName().Version?.ToString() ?? "?";
+                string mod = "an unknown mod";
+                try
+                {
+                    if (!string.IsNullOrEmpty(ModRootForDiag)
+                        && loc.StartsWith(ModRootForDiag, StringComparison.OrdinalIgnoreCase))
+                        mod = "this multiplayer mod's own copy";
+                    else
+                    {
+                        var wm = System.Text.RegularExpressions.Regex.Match(loc, @"[\\/]workshop[\\/]content[\\/]1331550[\\/](\d+)[\\/]");
+                        if (wm.Success)
+                            mod = $"Workshop mod {wm.Groups[1].Value} (steamcommunity.com/sharedfiles/filedetails/?id={wm.Groups[1].Value})";
+                        else
+                        {
+                            var lm = System.Text.RegularExpressions.Regex.Match(loc, @"[\\/]ModsLocal[\\/]([^\\/]+)[\\/]");
+                            if (lm.Success) mod = $"locally installed mod '{lm.Groups[1].Value}'";
+                        }
+                    }
+                }
+                catch { }
+                return $"Harmony v{ver}, loaded from {mod}\nFile: {loc}";
+            }
+            catch (Exception ex) { return $"(could not inspect the loaded Harmony: {ex.Message})"; }
+        }
+
+        /// <summary>Round-254b (user ruling: the banner names the mod, nothing else — the
+        /// remedy is identical either way). Returns the short culprit line, and whether it
+        /// actually points at ANOTHER mod (naming ourselves or nothing = generic message).</summary>
+        internal static string CulpritShort(out bool isOtherMod)
+        {
+            isOtherMod = false;
+            try
+            {
+                System.Reflection.Assembly? h = null;
+                foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+                    if (a.GetName().Name == "0Harmony") { h = a; break; }
+                string loc = ""; try { loc = h?.Location ?? ""; } catch { }
+                if (string.IsNullOrEmpty(loc)) return "";
+                if (!string.IsNullOrEmpty(ModRootForDiag)
+                    && loc.StartsWith(ModRootForDiag, StringComparison.OrdinalIgnoreCase)) return "";
+                var wm = System.Text.RegularExpressions.Regex.Match(loc, @"[\\/]workshop[\\/]content[\\/]1331550[\\/](\d+)[\\/]");
+                if (wm.Success)
+                {
+                    isOtherMod = true;
+                    string folder = "";
+                    try { folder = loc.Substring(0, wm.Index + wm.Length).TrimEnd('\\', '/'); } catch { }
+                    return $"Workshop mod {wm.Groups[1].Value}\nsteamcommunity.com/sharedfiles/filedetails/?id={wm.Groups[1].Value}"
+                         + (folder.Length > 0 ? $"\nFolder: {folder}" : "");
+                }
+                var lm = System.Text.RegularExpressions.Regex.Match(loc, @"^(.*[\\/]ModsLocal[\\/][^\\/]+)");
+                if (lm.Success)
+                {
+                    isOtherMod = true;
+                    string folder = lm.Groups[1].Value;
+                    return $"Local mod '{System.IO.Path.GetFileName(folder)}'\nFolder: {folder}";
+                }
+                return "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>Round-254b: the ONE banner text for every Harmony-conflict shape —
+        /// concise, names the conflicting mod, presents both removals neutrally. The
+        /// window itself never times out (dismiss-on-OK), so it is read at leisure.
+        /// All classification detail (incomplete vs outdated, versions, file paths)
+        /// stays in the LOG lines the callers emit.</summary>
+        internal static string BuildConflictBanner()
+        {
+            // Round-254c: EXACT user-specified wording (2026-08-13) — name the culprit,
+            // nothing else. No remedy text, no technical detail (all of that is in the log).
+            string culprit = CulpritShort(out bool other);
+            return other
+                ? $"Another installed mod is incompatible with {MyPluginInfo.DISPLAY_NAME}:\n\n{culprit}"
+                : $"{MyPluginInfo.DISPLAY_NAME} failed to load and is disabled. Details are in the game log.";
+        }
+
         public static string PatchFailureNotice =>
             $"{MyPluginInfo.SHORT_NAME} could not attach to the game ({PatchFailCount} hook(s) failed) — " +
             "multiplayer is disabled to protect your saves. Verify the game files in Steam " +
@@ -89,6 +184,7 @@ namespace BigAmbitionsMP
                 return Task.CompletedTask;
             }
             AppDomain.CurrentDomain.SetData("BAMP_SINGLETON_ROOT", context.ModRootPath ?? "unknown");
+            ModRootForDiag = context.ModRootPath ?? "";   // round-254: culprit-vs-own-copy check
 
             Plugin.Logger.LogInfo($"BigAmbitionsMP loading (official loader, modId='{context.ModId}', root='{context.ModRootPath}')...");
 
@@ -115,13 +211,27 @@ namespace BigAmbitionsMP
                 string compiledAgainst = "?";
                 foreach (var r in typeof(ModEntry).Assembly.GetReferencedAssemblies())
                     if (r.Name == "0Harmony") { compiledAgainst = r.Version?.ToString() ?? "?"; break; }
+                CompiledHarmonyVersion = compiledAgainst;   // round-254: reused by the failure banner
                 string loc = "";
                 try { loc = loaded.Location; } catch { }
                 Plugin.Logger.LogInfo($"[Plugin] Harmony provenance: loaded v{loaded.GetName().Version} from '{(string.IsNullOrEmpty(loc) ? "(in-memory)" : loc)}', compiled against v{compiledAgainst}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plugin] Harmony provenance probe: {ex.Message}"); }
-            _harmony = new Harmony("com.bamp.bigambitionsmp");
+            // ── Round-254: the Harmony BOOTSTRAP itself can die before any patching ──
+            // Field 2026-08-13 (Vitinhoooo): an OLDER mod (load order = workshop id
+            // ascending, always beats our young id) shipped 0Harmony without
+            // MonoMod.RuntimeDetour — Harmony's type initializer threw ONCE, stayed
+            // poisoned, and our unwrapped `new Harmony(...)` rethrew it, killing
+            // OnLoadAsync entirely: no mod, no button, no explanation. Now: catch,
+            // CLASSIFY (incomplete package vs anything else), name the culprit's
+            // folder, and return NORMALLY — the canvas (built above, Harmony-free)
+            // survives purely to show the player which mod to remove (user ruling
+            // 2026-08-13: identify the incompatible mod; the player decides which
+            // of the two goes).
             int okClasses = 0, failClasses = 0, deadClasses = 0, totalPatched = 0;
+            try
+            {
+            _harmony = new Harmony("com.bamp.bigambitionsmp");
             foreach (var t in typeof(ModEntry).Assembly.GetTypes())
             {
                 if (!t.GetCustomAttributes(typeof(HarmonyPatch), true).Any()) continue;
@@ -175,9 +285,39 @@ namespace BigAmbitionsMP
             PatchFailCount = failClasses;
             Plugin.Logger.LogInfo($"[Plugin] Patch summary: {okClasses} class(es) OK, {failClasses} failed, {deadClasses} dead, {totalPatched} method(s) patched total.");
             if (MpDisabledByPatchFailure)
+            {
                 Plugin.Logger.LogError($"[Plugin] {failClasses} patch class(es) FAILED (>= {PatchFailHardBlock}) — systemic; multiplayer entry is DISABLED this run (broken install, conflicting mod, or game update newer than the mod).");
+                // Round-254 case B (the round-241 shape): Harmony STARTED but our patches
+                // failed en masse — classic OUTDATED shared copy loaded first. Full
+                // classification goes to the LOG; the banner just names the mod (254b).
+                string src = DescribeLoadedHarmony();
+                MPCanvasUI.FatalBootBanner = BuildConflictBanner();
+                Plugin.Logger.LogError($"[Plugin] Harmony origin for the failure above: {src.Replace("\n", " | ")} (we compiled against v{CompiledHarmonyVersion}).");
+            }
             else if (PatchesDegraded)
                 Plugin.Logger.LogWarning($"[Plugin] {failClasses} patch class(es) FAILED (< {PatchFailHardBlock}) — multiplayer stays ENABLED; affected features may misbehave.");
+            }
+            catch (Exception bootEx)
+            {
+                // Round-254 case A: the shared Harmony never initialized at all.
+                Exception root = bootEx;
+                while (root.InnerException != null) root = root.InnerException;
+                string src = DescribeLoadedHarmony();
+                string what;
+                if (root is System.IO.FileNotFoundException fnf)
+                {
+                    string missing = fnf.FileName ?? fnf.Message;
+                    int comma = missing.IndexOf(',');                       // 'MonoMod.RuntimeDetour, Version=...' → short name
+                    if (comma > 0) missing = missing.Substring(0, comma);
+                    what = $"an INCOMPLETE copy of Harmony (the patching library all mods share): its companion file '{missing}' is missing";
+                }
+                else
+                    what = $"a broken copy of Harmony (the patching library all mods share) — it failed to start ({root.GetType().Name}: {root.Message})";
+                PatchFailCount = 9999;   // every existing "MP disabled" gate engages
+                MPCanvasUI.FatalBootBanner = BuildConflictBanner();   // 254b: concise, mod-naming only
+                Plugin.Logger.LogError($"[Plugin] HARMONY BOOTSTRAP FAILED (round-254): {what}. Origin: {src.Replace("\n", " | ")}. "
+                    + $"Multiplayer is disabled this session; the on-screen banner names the culprit. Root: {root}");
+            }
 
             Plugin.Logger.LogInfo($"{MyPluginInfo.DISPLAY_NAME} (BigAmbitionsMP) v{MyPluginInfo.PLUGIN_VERSION} ({MyPluginInfo.BuildTag}) loaded. Canvas UI active.");
             return Task.CompletedTask;

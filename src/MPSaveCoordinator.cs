@@ -1138,8 +1138,9 @@ namespace BigAmbitionsMP
             {
                 if (SaveGameManager.Current == null || UI.Load.LoadScene.isLoading) return;
                 // 30s (user ruling 2026-08-13: hold much longer than the 2s default / 10s
-                // important tier).  The toast slot is single-occupancy — any later toast
-                // replaces it — so the lobby notice below is the durable copy.
+                // important tier).  Toasts STACK as of round-253d (own clock per row;
+                // eviction prefers short-lived rows), and the lobby notice below is the
+                // durable copy either way.
                 try { PassengerHud.Toast(_pendingTornNotice, 30f); } catch { }
                 try { MPCanvasUI.PostLobbyNotice(_pendingTornNotice); } catch { }
                 Plugin.Logger.LogWarning("[MPSave] torn-read warning shown to the player (30s toast + lobby notice).");

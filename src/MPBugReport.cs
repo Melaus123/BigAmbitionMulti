@@ -508,7 +508,7 @@ namespace BigAmbitionsMP
         /// <summary>Round-57: enumerate installed mod folders — Workshop items (with the inner mod
         /// folder named when present) + ModsLocal — so a report answers "what else is running?"
         /// without exception archaeology. Best-effort: any failure yields a partial/empty list.</summary>
-        private static string ListInstalledMods()
+        internal static string ListInstalledMods()   // round-253: also feeds the join-time mod-mismatch info (MPContentFingerprint.CachedMods)
         {
             var parts = new System.Collections.Generic.List<string>();
             try

@@ -98,6 +98,7 @@ namespace BigAmbitionsMP
         TakeoverRequest      = 173, // Client → Host (round-204b): offer on an AI-run business — host arbitrates against LIVE valuation × accept rate; NOTHING happens client-side until the result
         TakeoverResult       = 174, // Host → Client: verdict — accepted (ledger + tenant reflect already done host-side; charge + native claim now) or denied (carries the host's minimum price)
         RadioState           = 175, // Any → Host → All (round-227): a building's speaker radio state (station + signed volume; sign = on/off) — light and precise so a radio click can never clobber concurrent interior edits
+        ModMismatch          = 176, // Host → joiner (round-253, user-directed 2026-08-13): your installed-mod list differs from the host's. INFORMATIONAL ONLY — never a gate; the joiner shows a lobby notice + logs the diff so players stop being blind to install deltas (divergent prices/content read as mod bugs otherwise).
         RegisterServe        = 156, // Simulator → Host → All: a customer's serve STARTED / FINISHED at a till.  Lets the player working that till on a FOLLOWER machine perform the job — they are assigned to the station locally and see the queue, but with no real customers there the native serve loop never runs, so without this they stand motionless behind a busy counter.
         BuildingDirtEdit     = 155, // Helper → Host → Owner: floor cells a HELPER mopped in someone else's business.  Narrow on purpose (only the cells whose dirtiness changed): dirt is owner-authoritative interior state, and the only pre-existing guest→owner interior channel is the whole-snapshot forward on interior-designer close, which mopping never triggers — so without this a helper's cleaning stayed local and was overwritten by the owner's next push.
         RestVote             = 102, // Client → Host: this player started/ended a rest-class activity (consensus time-skip voting).
@@ -748,6 +749,14 @@ namespace BigAmbitionsMP
     }
 
     /// <summary>Sent by client on connect.</summary>
+    /// <summary>Round-253: host → joiner on a mod-list mismatch. Summary is the short
+    /// player-facing notice; Detail is the capped diff for the joiner's log.</summary>
+    public class ModMismatchPayload
+    {
+        public string Summary { get; set; } = "";
+        public string Detail  { get; set; } = "";
+    }
+
     public class HelloPayload
     {
         public string PlayerId { get; set; } = "";
@@ -766,6 +775,10 @@ namespace BigAmbitionsMP
         /// carrying different item data (our own rig did exactly that). Log-only evidence — the
         /// host warns on a mismatch and never refuses. Empty from older builds.</summary>
         public string Content  { get; set; } = "";
+        /// <summary>Round-253: this machine's installed-mod list (same comma format as the bug
+        /// report's InstalledMods line). The host diffs it against its own and INFORMS both
+        /// sides on a mismatch — never refuses. Empty from older builds.</summary>
+        public string Mods     { get; set; } = "";
         // Phase 3 rejoin offer: set when the client holds a pending DISCONNECT save (un-uploaded progress
         // from its last leave). The host may request it (LoadDataPayload.AwaitClientDisconnectUpload) and,
         // after validating the uploaded save's ACTUAL day, restore it instead of the host's older copy.

@@ -23,9 +23,15 @@ namespace BigAmbitionsMP
         private static GameObject? _canvas;
         private static GameObject? _buttonPanel;     // bare fallback container
         private static GameObject? _clonedPanel;     // preferred: a clone of the driver's ItemPanelUI panel
-        private static GameObject? _toast;
-        private static TextMeshProUGUI? _toastLabel;
-        private static float _toastUntil;
+        // Round-253d (user test: the 20s mod-mismatch warning and the 3s "reconnected"
+        // notice fought over ONE slot — the later message stomped the earlier one's
+        // text AND clock). Toasts now STACK: each row has its own label and expiry,
+        // newest slides in below, and when the stack is full the row CLOSEST TO
+        // EXPIRY is evicted — so a long important warning survives a burst of
+        // short notices instead of dying to the first one.
+        private sealed class ToastRow { public GameObject Go = null!; public TextMeshProUGUI Lbl = null!; public RectTransform Rt = null!; public float Until; }
+        private static readonly System.Collections.Generic.List<ToastRow> _toasts = new();
+        private const int MaxToasts = 4;
         private static bool _baseBuilt;
         private static bool _buttonsBuilt;
 
@@ -42,8 +48,16 @@ namespace BigAmbitionsMP
             var panel = _clonedPanel != null ? _clonedPanel : _buttonPanel;   // cloned driver panel if we got one
             if (panel != null && panel.activeSelf != seated) panel.SetActive(seated);
 
-            bool toastOn = Time.unscaledTime < _toastUntil;
-            if (_toast != null && _toast.activeSelf != toastOn) _toast.SetActive(toastOn);
+            // Expire toast rows — each has its own clock; reflow only when one leaves.
+            bool removed = false;
+            for (int i = _toasts.Count - 1; i >= 0; i--)
+                if (Time.unscaledTime >= _toasts[i].Until)
+                {
+                    try { UnityEngine.Object.Destroy(_toasts[i].Go); } catch { }
+                    _toasts.RemoveAt(i);
+                    removed = true;
+                }
+            if (removed) LayoutToasts();
         }
 
         /// <summary>Toast a host board-rejection reason ("vehicle full" → "Vehicle full.").</summary>
@@ -58,9 +72,36 @@ namespace BigAmbitionsMP
         public static void Toast(string msg, float seconds = 2f)
         {
             if (!_baseBuilt) BuildBase();
-            if (_toastLabel != null) _toastLabel.text = msg;
-            _toastUntil = Time.unscaledTime + seconds;
-            if (_toast != null) _toast.SetActive(true);
+            if (_canvas == null || string.IsNullOrEmpty(msg)) return;
+            try
+            {
+                foreach (var t in _toasts)                       // same text again = refresh its clock, no duplicate row
+                    if (t.Lbl.text == msg) { t.Until = Time.unscaledTime + seconds; return; }
+                if (_toasts.Count >= MaxToasts)
+                {
+                    int k = 0;                                    // evict the row closest to expiry
+                    for (int i = 1; i < _toasts.Count; i++) if (_toasts[i].Until < _toasts[k].Until) k = i;
+                    try { UnityEngine.Object.Destroy(_toasts[k].Go); } catch { }
+                    _toasts.RemoveAt(k);
+                }
+                var row = BuildToastRow(_canvas.transform, msg);
+                row.Until = Time.unscaledTime + seconds;
+                _toasts.Add(row);
+                LayoutToasts();
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[PassengerHud] toast: {ex.Message}"); }
+        }
+
+        /// <summary>Oldest row keeps the classic toast anchor; newer rows stack below it.</summary>
+        private static void LayoutToasts()
+        {
+            float top = 188f;                                     // top edge of the original single toast (centre 160 + 28)
+            foreach (var t in _toasts)
+            {
+                float h = t.Rt.sizeDelta.y;
+                t.Rt.anchoredPosition = new Vector2(0f, top - h * 0.5f);
+                top -= h + 8f;
+            }
         }
 
         private static void OnSleep()
@@ -103,8 +144,6 @@ namespace BigAmbitionsMP
                 panelBg.color = new Color(0f, 0f, 0f, 0.55f);
                 _buttonPanel.SetActive(false);
 
-                _toast = BuildToast(canvasGO.transform);
-                _toast.SetActive(false);
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[PassengerHud] base build: {ex.Message}"); }
         }
@@ -398,7 +437,7 @@ namespace BigAmbitionsMP
             AddLabel(btnGO.transform, "Exit Vehicle", 24f);
         }
 
-        private static GameObject BuildToast(Transform parent)
+        private static ToastRow BuildToastRow(Transform parent, string msg)
         {
             var toastGO = new GameObject("Toast");
             toastGO.transform.SetParent(parent, false);
@@ -406,10 +445,14 @@ namespace BigAmbitionsMP
             img.color = new Color(0f, 0f, 0f, 0.78f);
             var rt = toastGO.GetComponent<RectTransform>();
             rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0.5f, 0.5f);
-            rt.anchoredPosition = new Vector2(0f, 160f);
-            rt.sizeDelta = new Vector2(360f, 56f);
-            _toastLabel = AddLabel(toastGO.transform, "", 26f);
-            return toastGO;
+            var lbl = AddLabel(toastGO.transform, msg, 26f);
+            lbl.enableWordWrapping = true;
+            // Size to content: long lines (the mod-mismatch warning) wrap inside a capped
+            // width instead of spilling past the old fixed 360×56 box.
+            float w = Mathf.Min(560f, lbl.GetPreferredValues(msg).x + 28f); if (w < 240f) w = 240f;
+            float h = lbl.GetPreferredValues(msg, w - 20f, 0f).y + 18f;    if (h < 56f)  h = 56f;
+            rt.sizeDelta = new Vector2(w, h);
+            return new ToastRow { Go = toastGO, Lbl = lbl, Rt = rt };
         }
 
         private static TextMeshProUGUI AddLabel(Transform parent, string text, float size)

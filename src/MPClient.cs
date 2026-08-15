@@ -84,8 +84,14 @@ namespace BigAmbitionsMP
         // teardown, reconnect guard) never triggers the session-over lock.
         private static bool _voluntaryDisconnect;
 
+        /// <summary>Round-253f: the host's mod-diff verdict for THIS connection ("" = none).
+        /// A LIVE-READ display source (events over timers, user ruling): the lobby strip
+        /// shows it exactly while connected; Connect/Disconnect reset it — no timer.</summary>
+        public static string ModMismatchVsHost = "";
+
         public static void Connect(string hostIp, int port)
         {
+            ModMismatchVsHost = "";   // fresh connection, fresh verdict (round-253f)
             // Round-229: unreliable hooks — refuse to join (see MPServer.Start).
             if (ModEntry.MpDisabledByPatchFailure)
             {
@@ -149,6 +155,7 @@ namespace BigAmbitionsMP
             if (_transport is { IsRunning: true })
                 Plugin.Logger.LogWarning($"[Client] DISCONNECT called from: {Environment.StackTrace}");
             _voluntaryDisconnect = true;   // deliberate — never the session-over lock
+            ModMismatchVsHost = "";        // round-253f: the verdict dies with the connection
             _transport?.Disconnect();
             _transport = null;
             _connected = false;
@@ -183,7 +190,8 @@ namespace BigAmbitionsMP
                 Game     = MPSaveManager.GameVersionNameCached(),
                 // CACHED read only — OnConnected runs on the LiteNetLib network thread and
                 // computing this touches Unity asset loading (crash 2026-07-27).
-                Content  = MPContentFingerprint.Cached
+                Content  = MPContentFingerprint.Cached,
+                Mods     = MPContentFingerprint.CachedMods   // round-253: host diffs + informs on mismatch
             };
             // Phase 3: offer any pending disconnect save (un-uploaded progress from our last leave). The
             // host decides whether to request it; it never auto-overrides a host save.
@@ -679,6 +687,17 @@ namespace BigAmbitionsMP
                 case MessageType.RadioState:            // round-227: a building's speaker state
                     MPRadioSync.Apply(env.GetPayload<RadioStatePayload>(), "from host");
                     break;
+
+                case MessageType.ModMismatch:           // round-253: host says our mod list differs from theirs — informational, never a gate
+                {
+                    var mm = env.GetPayload<ModMismatchPayload>();
+                    if (mm != null)
+                    {
+                        Plugin.Logger.LogWarning($"[Content] MOD MISMATCH vs host: {mm.Detail}");
+                        ModMismatchVsHost = mm.Summary ?? "";   // round-253f: live-read strip line, no timer
+                    }
+                    break;
+                }
 
                 case MessageType.TakeoverResult:        // round-204b: host's verdict on my AI-business offer
                 {

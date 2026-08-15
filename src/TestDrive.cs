@@ -221,8 +221,29 @@ namespace BigAmbitionsMP
                     catch (Exception ex) { return $"ERR still throwing: {ex.GetType().Name} for '{victim}' ({before} stations)"; }
                 }
 
+                // ── round-253 mod-mismatch test fixture ───────────────────────
+                // Imitation mods WITHOUT touching disk: both rig instances read the
+                // SAME LocalLow ModsLocal folder, so a real folder there changes both
+                // lists equally and can never produce a mismatch. This appends to the
+                // CACHED list the Hello handshake sends. Run BEFORE the client joins —
+                // the diff happens at Hello, so changes after connect need a rejoin.
+                case "fakemod":
+                {
+                    if (arg.StartsWith("add ", StringComparison.Ordinal))
+                    {
+                        MPContentFingerprint.TestAddFakeMod(arg.Substring(4).Trim());
+                        return $"OK mod list now: {MPContentFingerprint.CachedMods}";
+                    }
+                    if (arg == "clear")
+                    {
+                        MPContentFingerprint.TestClearFakeMods();
+                        return $"OK mod list restored: {MPContentFingerprint.CachedMods}";
+                    }
+                    return "ERR usage: fakemod add <name> | fakemod clear";
+                }
+
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod)";
             }
         }
     }
