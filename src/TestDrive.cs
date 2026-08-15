@@ -340,8 +340,39 @@ namespace BigAmbitionsMP
                 {
                     var gv = SaveGameManager.Current?.gameVariables;
                     if (gv == null) return "ERR no loaded game";
+                    // Round-261 test: no arg = READ ONLY (assert the birth default without touching it).
+                    if (arg.Length == 0) return $"OK gv.disableEnergy={gv.disableEnergy} (read-only)";
                     gv.disableEnergy = arg == "on" || arg == "true";
                     return $"OK gv.disableEnergy={gv.disableEnergy} (heartbeat should re-align it within ~3s in MP)";
+                }
+
+                case "schedfilter":
+                {
+                    // Round-263 headless check: inject a duty synthetic, then run the two
+                    // patched queries directly. Expect rows(list)=0, dict>=1, probeStationShifts=0.
+                    if (arg.Length == 0) return "ERR address key required";
+                    var freg = GameStatePatcher.FindRegistration(arg);
+                    if (freg == null) return $"ERR no registration for '{arg}'";
+                    string stationKey = MPRegisterSync.TestInjectSynthetic(arg);
+                    UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.FetchEmployees(freg.Address);
+                    int inList = 0, inDict = 0;
+                    var emps = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.Employees;
+                    if (emps != null)
+                        foreach (var e in emps)
+                            if (e?.id != null && e.id.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix, StringComparison.Ordinal)) inList++;
+                    var dict = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.EmployeesById;
+                    if (dict != null)
+                        foreach (var kv in dict)
+                            if (kv.Key.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix, StringComparison.Ordinal)) inDict++;
+                    UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.AddShiftToCache(new WorkShift
+                    {
+                        startingHour = 0, endingHour = 24,
+                        employeeId = MPRegisterSync.SyntheticDutyEmployeeIdPrefix + "PROBE",
+                        itemInstanceId = "BAMP_PROBE_STATION", type = WorkShiftType.Default,
+                    });
+                    int stationShifts = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.GetWorkShiftsByWorkstationId("BAMP_PROBE_STATION").Count;
+                    MPRegisterSync.TestRemoveSynthetic(stationKey);
+                    return $"OK rows(list)={inList} dict={inDict} probeStationShifts={stationShifts} (expect 0/>=1/0 with round-263)";
                 }
 
                 // ── round-238 zombie-ledger synthesis ─────────────────────────

@@ -121,6 +121,20 @@ namespace BigAmbitionsMP
         private static string Key(Vector3 p)
             => $"{Mathf.RoundToInt(p.x)}:{Mathf.RoundToInt(p.y)}:{Mathf.RoundToInt(p.z)}";
 
+#if BAMP_DEV
+        /// <summary>Round-263 test hooks (TestDrive 'schedfilter'): inject/remove a duty
+        /// synthetic at a fabricated station so the schedule-surface filter can be
+        /// exercised headlessly. Same code path as real duty (TryStaffSynthetic /
+        /// RemoveSynthetic) — no separate write path.</summary>
+        internal static string TestInjectSynthetic(string addressKey)
+        {
+            var pos = new Vector3(-9999f, -9999f, -9999f);
+            TryStaffSynthetic(addressKey, "TESTDUTY", "BAMP_TESTSTATION", pos);
+            return Key(pos);
+        }
+        internal static void TestRemoveSynthetic(string stationKey) => RemoveSynthetic(stationKey);
+#endif
+
         // ── Round-120: personal-duty stand-ins whose BODY must stay hidden ──────────────────────────────
         // stationKey → addressKey.  The game spawns a serving NPC from the roster record a frame or more
         // after we inject it, so concealment cannot happen at injection time — it is retried on a slow tick

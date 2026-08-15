@@ -3810,6 +3810,81 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Round-263: hide duty synthetics from the SCHEDULE surface ─────────
+        // Field 20260811-224028: the BizMan schedule was the one staff surface
+        // never filtered (MyEmployees, global queries, asset lists all are) — the
+        // owner saw an editable "On-Duty Staff" row, fought our inject/remove
+        // cycle, and the editor's drag state desynced. Three chokepoints, duty
+        // synthetics (BAMP_DUTY_) ONLY — a merged partner's REAL staff must stay
+        // visible and schedulable (merger map §20):
+        //   (1) FetchEmployees      — strip the row LIST; EmployeesById KEEPS the
+        //       synthetic (GetEmployeeColor etc. index the dict — removal = KeyNotFound).
+        //   (2) GetEmployeesForDay  — strip day rows (rows derive from SHIFTS, not
+        //       the list, so (1) alone leaves the row).
+        //   (3) GetWorkShiftsByWorkstationId — return a FILTERED COPY (the dict
+        //       holds the live list — never mutate it): the placement math's
+        //       overlap walk (CalculateEndingHour :536) then ignores the
+        //       synthetic's 0-24 till shift, so the owner can schedule real staff
+        //       onto a till a player currently mans — WITHOUT this half, hiding
+        //       the row makes that till an invisibly-blocked trap (user concern,
+        //       confirmed in code).
+        private static bool IsDutySyntheticId(string? id) =>
+            !string.IsNullOrEmpty(id) && id!.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix, StringComparison.Ordinal);
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper),
+                      nameof(UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.FetchEmployees))]
+        public static class Patch_ScheduleFetchEmployees_HideDutySynthetics
+        {
+            private static int _n;
+            static void Postfix()
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                    int removed = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.Employees?.RemoveAll(e => IsDutySyntheticId(e?.id)) ?? 0;
+                    if (removed > 0 && _n++ < 4)
+                        Plugin.Logger.LogInfo($"[StaffRoster] schedule: hid {removed} duty synthetic(s) from the employee list (round-263).");
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper),
+                      nameof(UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.GetEmployeesForDay))]
+        public static class Patch_ScheduleEmployeesForDay_HideDutySynthetics
+        {
+            static void Postfix(System.Collections.Generic.List<Entities.EmployeeInstance> __result)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                    __result?.RemoveAll(e => IsDutySyntheticId(e?.id));   // fresh LINQ list — safe to mutate
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper),
+                      nameof(UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.GetWorkShiftsByWorkstationId))]
+        public static class Patch_ScheduleWorkstationShifts_IgnoreDutySynthetics
+        {
+            static void Postfix(ref System.Collections.Generic.List<WorkShift> __result)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                    if (__result == null || __result.Count == 0) return;
+                    bool any = false;
+                    foreach (var s in __result) if (IsDutySyntheticId(s?.employeeId)) { any = true; break; }
+                    if (!any) return;
+                    var filtered = new System.Collections.Generic.List<WorkShift>(__result.Count);
+                    foreach (var s in __result) if (!IsDutySyntheticId(s?.employeeId)) filtered.Add(s);
+                    __result = filtered;   // COPY — the dict's live list stays intact
+                }
+                catch { }
+            }
+        }
+
         // ── Global employee queries hide injected partner staff (round-80) ────
         // cdawg 20260724-165131: the partner's PURCHASING AGENTS appeared in the
         // import dialog / HQ specialist pages. Full survey of the query API
