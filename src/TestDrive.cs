@@ -44,6 +44,12 @@ namespace BigAmbitionsMP
         internal static bool HoldRivalsSnapshot;
         internal static RivalsSnapshotPayload? HeldRivalsSnapshot;
 
+        /// <summary>Round-260 "rentdeny" verb state — while true, the host denies every
+        /// RentRequest with a TestDrive reason, letting an agent exercise the client's
+        /// optimistic-rent rollback (the starter-item leak) without needing a genuinely
+        /// occupied building.</summary>
+        internal static bool ForceRentDeny;
+
         /// <summary>"charconfirm" verb state — the autopilot that used to click past the
         /// character customizer was deleted with 4bc256a (T256 agent run hit the wall);
         /// this re-creates ONLY that piece: while armed, the tick watches for
@@ -133,6 +139,96 @@ namespace BigAmbitionsMP
                     if (!MPServer.IsRunning) return "ERR start the server first ('host')";
                     MPServer.StartNewGame(new GameVariablesDto());
                     return "OK StartNewGame invoked (default settings)";
+
+                case "rentdeny":
+                    // Round-260 test switch: host-side. 'arm' → every RentRequest denied
+                    // (exercises the client rollback); 'off' → normal arbitration.
+                    if (arg == "arm") { ForceRentDeny = true;  return "OK every RentRequest will be DENIED (host-side)"; }
+                    if (arg == "off") { ForceRentDeny = false; return "OK rent arbitration back to normal"; }
+                    return "ERR rentdeny arm|off";
+
+                case "rent":
+                {
+                    // Round-260 test driver: rent a building via the SAME native entry the
+                    // for-rent sign flow calls (BuildingHelper.RentBuilding — the choke point
+                    // Patch_RentBuilding hooks, so the MP request fires exactly like a UI
+                    // rent). No money is charged (the charge lives in the UI layer) — fine
+                    // for rollback tests. Arg = address key, e.g. 'rent 12 ba:street_x'.
+                    if (arg.Length == 0) return "ERR address key required";
+                    var rreg = GameStatePatcher.FindRegistration(arg);
+                    if (rreg == null) return $"ERR no registration for '{arg}'";
+                    bool free = false; try { free = rreg.AvailableForRent && !rreg.RentedByPlayer; } catch { }
+                    if (!free) return $"ERR '{arg}' is not on the for-rent market on this machine";
+                    var bld = Helpers.BuildingHelper.GetBuilding(rreg.Address);
+                    if (bld == null) return $"ERR no Building for '{arg}'";
+                    float rent = 0f; try { rent = bld.GetBuildingDailyMarketRent(); } catch { }
+                    if (rent <= 0f) rent = 100f;
+                    Helpers.BuildingHelper.RentBuilding(bld, rent, rent * 90f);
+                    int spots = 0, spawners = 0;
+                    try
+                    {
+                        foreach (var kv in rreg.itemInstances)
+                        {
+                            string n = kv.Value?.itemName?.ToString() ?? "";
+                            if (n == "ba:itemname_deliveryspot") spots++;
+                            else if (n == "ba:itemname_handtruckspawner") spawners++;
+                        }
+                    }
+                    catch { }
+                    return $"OK RentBuilding invoked for '{arg}' (rent {rent:F0}); instances now: deliveryspot={spots} handtruckspawner={spawners}";
+                }
+
+                case "itemcount":
+                {
+                    // Round-260 assertion helper: counts the two starter items on a reg.
+                    if (arg.Length == 0) return "ERR address key required";
+                    var creg = GameStatePatcher.FindRegistration(arg);
+                    if (creg == null) return $"ERR no registration for '{arg}'";
+                    int cspots = 0, cspawners = 0;
+                    try
+                    {
+                        foreach (var kv in creg.itemInstances)
+                        {
+                            string n = kv.Value?.itemName?.ToString() ?? "";
+                            if (n == "ba:itemname_deliveryspot") cspots++;
+                            else if (n == "ba:itemname_handtruckspawner") cspawners++;
+                        }
+                    }
+                    catch { }
+                    bool availv = false, rentedv = false; string bn = "", bt = "";
+                    try { availv = creg.AvailableForRent; rentedv = creg.RentedByPlayer; bn = creg.BusinessName?.ToString() ?? ""; bt = creg.businessTypeName?.ToString() ?? ""; } catch { }
+                    return $"OK '{arg}': deliveryspot={cspots} handtruckspawner={cspawners} avail={availv} rented={rentedv} name='{bn}' type='{bt}'";
+                }
+
+                case "forrent":
+                {
+                    // Round-260 helper: list up to 8 for-rent addresses on this machine.
+                    var found = new StringBuilder(); int nFound = 0;
+                    try
+                    {
+                        var gi = SaveGameManager.Current;
+                        if (gi?.BuildingRegistrations != null)
+                            foreach (var r2 in gi.BuildingRegistrations)
+                            {
+                                if (r2 == null) continue;
+                                bool ok2 = false; try { ok2 = r2.AvailableForRent && !r2.RentedByPlayer; } catch { }
+                                if (!ok2) continue;
+                                if (nFound++ > 0) found.Append(" | ");
+                                found.Append(GameStateReader.AddressKey(r2));
+                                if (nFound >= 8) break;
+                            }
+                    }
+                    catch (Exception exF) { return "ERR " + exF.Message; }
+                    return nFound == 0 ? "OK none for rent" : $"OK {nFound} for-rent: {found}";
+                }
+
+                case "vacate":
+                    // Round-260: client-side — sends the SAME VacateRequest the terminate
+                    // patch sends, exercising the host's vacate reflect (the wedge fix).
+                    if (arg.Length == 0) return "ERR address key required";
+                    if (!MPClient.IsConnected) return "ERR client only (host terminates natively)";
+                    MPClient.RequestVacateBuilding(arg);
+                    return $"OK VacateRequest sent for '{arg}'";
 
                 case "charconfirm":
                     ConfirmCustomizerArmed = true;
@@ -290,7 +386,7 @@ namespace BigAmbitionsMP
                 }
 
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount)";
             }
         }
 

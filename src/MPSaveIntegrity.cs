@@ -200,6 +200,45 @@ namespace BigAmbitionsMP
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] rival-refs: {ex.Message}"); }
                 if (rivalRefs > 0) parts.Add($"rival-refs×{rivalRefs} logged");
 
+                // ── Class 9: stacked starter items (REPAIR, round-260) ───────
+                // A denied optimistic rent used to leak one delivery spot + one
+                // hand-truck spawner per attempt (field 20260810-232704: 4 denials
+                // → 5 stacked delivery spots). The source leak is fixed in
+                // RollbackRent; this repairs saves that already carry the ghosts.
+                // SAFETY: only duplicates at the SAME position are removed (the
+                // leak stacks at the layout default) — large layouts may define
+                // several legitimate spots at distinct positions, and a player
+                // may have dragged a leaked ghost elsewhere; those are left.
+                try
+                {
+                    int stackRemoved = 0, stackLogged = 0;
+                    if (gi.BuildingRegistrations != null)
+                        foreach (var reg in gi.BuildingRegistrations)
+                        {
+                            if (reg?.itemInstances == null) continue;
+                            try
+                            {
+                                var seen = new HashSet<string>();
+                                var drop = new List<string>();
+                                foreach (var kv in reg.itemInstances)
+                                {
+                                    string n = kv.Value?.itemName?.ToString() ?? "";
+                                    if (n != "ba:itemname_deliveryspot" && n != "ba:itemname_handtruckspawner") continue;
+                                    var p = kv.Value!.position;
+                                    string sig = $"{n}|{p.x:F2}|{p.y:F2}|{p.z:F2}";
+                                    if (!seen.Add(sig)) drop.Add(kv.Key);
+                                }
+                                int before = drop.Count;
+                                foreach (var k in drop) if (reg.itemInstances.Remove(k)) stackRemoved++;
+                                if (before > 0 && stackLogged++ < LogCapPerClass)
+                                    Plugin.Logger.LogWarning($"[Integrity] {reason}: '{GameStateReader.AddressKey(reg)}' had {before} starter item(s) stacked at identical positions — removed (round-260 leak repair).");
+                            }
+                            catch { }
+                        }
+                    if (stackRemoved > 0) parts.Add($"stacked-starter-items×{stackRemoved} repaired");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] starter-item dedupe: {ex.Message}"); }
+
                 // ── Class 6: cross-owner staff (REPAIR) ──────────────────────
                 // An OWN employee whose assignedAddress points at ANOTHER
                 // player's business (2026-07-16 report: the native assign-to-

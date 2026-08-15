@@ -167,6 +167,7 @@ namespace BigAmbitionsMP
                 // actively rents (only the owner vacates, and they already cleared it
                 // natively before this notify arrives).
                 var reg = FindRegistration(addressKey);
+                bool guarded = false;
                 if (reg != null)
                 {
                     try
@@ -181,11 +182,17 @@ namespace BigAmbitionsMP
                             reg.BusinessName          = null;
                             reg.businessTypeName      = "ba:businesstype_empty";
                         }
+                        else guarded = true;
                     }
                     catch { }
                 }
                 else MarkBuildingAvailable(addressKey);
-                Plugin.Logger.LogInfo($"[Patcher] Building {addressKey} is now available.");
+                // Round-260 (T260 agent finding): the old line claimed "is now available"
+                // even when the guard refused the writes — a log asserting state the data
+                // doesn't have. Say which path ran.
+                Plugin.Logger.LogInfo(guarded
+                    ? $"[Patcher] Vacate notify for {addressKey} SKIPPED — the local player actively rents this copy (guard; the native terminate owns local cleanup)."
+                    : $"[Patcher] Building {addressKey} is now available.");
             });
         }
 
@@ -2964,6 +2971,7 @@ namespace BigAmbitionsMP
                 try
                 {
                     var reg = FindRegistration(addressKey);
+                    int removedItems = 0;
                     if (reg != null && reg.RentedByPlayer)
                     {
                         reg.RentedByPlayer   = false;
@@ -2971,6 +2979,26 @@ namespace BigAmbitionsMP
                         reg.BusinessName     = null;
                         reg.businessTypeName = "ba:businesstype_empty";
                         try { reg.RentPerDay = 0f; reg.lastDeposit = 0f; } catch { }
+
+                        // Round-260 (field 20260810-232704: 4 denials → 5 stacked delivery
+                        // spots): the optimistic rent ran the FULL native flow, and
+                        // RentBuilding itself materializes the empty layout's starter items
+                        // (InsertBusinessLayoutSet → delivery spot + hand-truck spawner) into
+                        // reg.itemInstances. A field-level revert that skips them leaks one
+                        // set per denial — the "optimistic native flow, partial rollback"
+                        // class (07-bug-classes.md).
+                        try
+                        {
+                            var keys = new System.Collections.Generic.List<string>();
+                            foreach (var kv in reg.itemInstances)
+                            {
+                                string n = kv.Value?.itemName?.ToString() ?? "";
+                                if (n == "ba:itemname_deliveryspot" || n == "ba:itemname_handtruckspawner") keys.Add(kv.Key);
+                            }
+                            foreach (var k in keys) if (reg.itemInstances.Remove(k)) removedItems++;
+                        }
+                        catch (Exception exItems) { Plugin.Logger.LogWarning($"[Patcher] rent-rollback starter-item removal: {exItems.Message}"); }
+
                         try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
                         try { InstanceBehavior<UI.UIs>.Instance?.mapFilters?.ApplyFilters(); } catch { }
                     }
@@ -2982,7 +3010,7 @@ namespace BigAmbitionsMP
                         MergerWallet.ForwardExternal(lastDeposit, "rent-rollback refund");
                     }
                     PassengerHud.Toast("The host denied that rental — the building isn't available. Deposit refunded.", 6f);
-                    Plugin.Logger.LogInfo($"[Patcher] Rolled back rent of {addressKey} (deposit {lastDeposit:F0} refunded).");
+                    Plugin.Logger.LogInfo($"[Patcher] Rolled back rent of {addressKey} (deposit {lastDeposit:F0} refunded; starter items removed: {removedItems}, round-260).");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] RollbackRent: {ex.Message}"); }
             });
@@ -4189,11 +4217,26 @@ namespace BigAmbitionsMP
             {
                 var reg = FindRegistration(addressKey);
                 if (reg == null) { Plugin.Logger.LogWarning($"[Patcher/Host] vacate reflect: no reg for '{addressKey}'."); return; }
-                reg.AvailableForRent = true;                       // back into the for-rent pool
-                try { reg.businessOwnerRivalId = ""; } catch { }   // no tenant any more (landlord untouched)
-                Plugin.Logger.LogInfo($"[Patcher/Host] {addressKey} vacated — back on the for-rent market.");
+                MakeRegVacant(reg);
+                Plugin.Logger.LogInfo($"[Patcher/Host] {addressKey} vacated — back on the for-rent market (name/type cleared, round-260).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher/Host] HostReflectPlayerVacate: {ex.Message}"); }
+        }
+
+        /// <summary>Round-260 (field 20260810-232704): the ONE definition of "this reg is
+        /// vacant" — used by the vacate reflect above and the ghost-tenancy healer. The
+        /// field wedge: the reflect cleared only AvailableForRent + tenant id, while the
+        /// rent-availability check (HostRentUnavailableReason) ALSO refuses on
+        /// BusinessName/businessTypeName — the leftovers denied every re-rent until the
+        /// host cycled the building natively. Shape mirrors what native rent/terminate
+        /// leave behind (ResetRegistrationOnRent: name null, type empty).</summary>
+        internal static void MakeRegVacant(BuildingRegistration reg)
+        {
+            reg.AvailableForRent = true;
+            try { reg.businessOwnerRivalId = ""; } catch { }
+            try { reg.BusinessName = null; } catch { }
+            try { reg.businessTypeName = "ba:businesstype_empty"; } catch { }
+            try { reg.RentPerDay = 0f; reg.lastDeposit = 0f; } catch { }
         }
 
         /// <summary>Is this id one of the session's HUMAN players? (Rent-vs-deed repair: a player id
@@ -4368,12 +4411,12 @@ namespace BigAmbitionsMP
                                     Plugin.Logger.LogWarning($"[Integrity] ({reason}) ghost-tenancy SKIPPED '{aKey}' - tenant-marked '{tid}', unledgered, but the copy is {(gScore < 0 ? "UNKNOWN" : $"developed (score {gScore})")} - likely a lost ledger entry, not a swallowed vacate; left for owner-push adoption.");
                                     continue;
                                 }
-                                reg.AvailableForRent = true;
-                                try { reg.businessOwnerRivalId = ""; } catch { }
+                                string ghostName = ""; try { ghostName = reg.BusinessName?.ToString() ?? ""; } catch { }
+                                MakeRegVacant(reg);   // round-260: full vacant shape — a half-cleared reg wedges re-rents
                                 released++;
                                 if (released <= 10)
                                     Plugin.Logger.LogWarning($"[Integrity] ({reason}) ghost tenancy RELEASED: '{aKey}' " +
-                                        $"(name='{reg.BusinessName}') — tenant-marked '{tid}' but the ledger says nobody rents it; back on the market.");
+                                        $"(name='{ghostName}') — tenant-marked '{tid}' but the ledger says nobody rents it; back on the market.");
                             }
                             catch { }
                         }

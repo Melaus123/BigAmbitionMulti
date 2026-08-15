@@ -2999,6 +2999,17 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+#if BAMP_DEV
+                    // Round-260 test switch ('rentdeny arm'): force the deny path so the
+                    // client's optimistic-rent rollback can be exercised on demand.
+                    if (TestDrive.ForceRentDeny)
+                    {
+                        req.DenyReason = "TestDrive forced deny (round-260 test)";
+                        Send(peer, MessageEnvelope.Create(MessageType.RentDeny, "host", req));
+                        Plugin.Logger.LogWarning($"[Server] Rent denied — {req.AddressKey}: TestDrive forced deny.");
+                        return;
+                    }
+#endif
                     // (1) Player ledger — some player already holds it.
                     if (BuildingOwners.TryGetValue(req.AddressKey, out var currentOwner) && currentOwner != "")
                     {
