@@ -4336,9 +4336,21 @@ namespace BigAmbitionsMP
                 var seen = new System.Collections.Generic.HashSet<string>();
                 foreach (var r in snap.Rivals) if (!string.IsNullOrEmpty(r.Id)) seen.Add(r.Id);
 
+                // Round-257: ship the wholesale/import id arrays verbatim — the client
+                // seeds its UUID queue from THESE (slot-exact), never from list order.
+                try
+                {
+                    if (gi?.wholesaleRivalIds != null)
+                        foreach (var w in gi.wholesaleRivalIds) { var s = w?.ToString() ?? ""; if (!string.IsNullOrEmpty(s)) snap.WholesaleIds.Add(s); }
+                    if (gi?.importRivalIds != null)
+                        foreach (var im in gi.importRivalIds) { var s = im?.ToString() ?? ""; if (!string.IsNullOrEmpty(s)) snap.ImportIds.Add(s); }
+                }
+                catch { }
+
                 // Host itself — marked IsPlayer so client renders via Postfix-injected
-                // button instead of consuming a slot in the UUID queue (which is sized
-                // to the AI-rival template count exactly).
+                // button instead of consuming a slot in the UUID queue (which never held
+                // the special-rival ids to begin with — round-257; the old "sized exactly"
+                // comment here was never true and caused the wave-6 shift bug).
                 if (!string.IsNullOrEmpty(MPConfig.PlayerId) && seen.Add(MPConfig.PlayerId))
                     snap.Rivals.Add(new RivalInfo { Id = MPConfig.PlayerId, Name = DisplayNameFor(MPConfig.PlayerId), IsPlayer = true });
                 // All connected/known peers

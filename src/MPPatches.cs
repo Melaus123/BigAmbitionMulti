@@ -2568,6 +2568,22 @@ namespace BigAmbitionsMP
                 if (!GameStatePatcher.RivalsGenerateRunning) return;
                 GameStatePatcher.RivalsGenerateRunning = false;
 
+                // Round-257: after an injected client run the queue must be EMPTY —
+                // every seeded id dequeued into its slot. Leftovers mean the game's
+                // mint count no longer matches what the host shipped (e.g. a game
+                // update changed the wholesale/import block sizes, or specials
+                // started minting): name them so the drift diagnoses itself.
+                if (MPClient.IsConnected && GameStatePatcher.PendingRivalIdQueue.Count > 0)
+                {
+                    try
+                    {
+                        var left = new System.Collections.Generic.List<string>();
+                        foreach (var id in GameStatePatcher.PendingRivalIdQueue) { left.Add(id); if (left.Count >= 6) break; }
+                        Plugin.Logger.LogWarning($"[Wave6] UUID queue has {GameStatePatcher.PendingRivalIdQueue.Count} LEFTOVER id(s) after GenerateRivals — mint count vs host id count drifted (round-257 alignment broken by a game change?): {string.Join(", ", left)}");
+                    }
+                    catch { }
+                }
+
                 // Host broadcasts rivals AS SOON as its GenerateRivals completes
                 // (during SaveGameManager.New, in the load sequence) so clients
                 // have the ids before their own GenerateRivals fires.  This is

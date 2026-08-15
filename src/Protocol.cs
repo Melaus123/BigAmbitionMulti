@@ -2005,6 +2005,15 @@ namespace BigAmbitionsMP
     public class RivalsSnapshotPayload
     {
         public List<RivalInfo> Rivals { get; set; } = new();
+
+        /// <summary>Round-257: the host's gi.wholesaleRivalIds / importRivalIds VERBATIM,
+        /// in slot order. The client's GenerateRivals mints exactly these (wholesale block
+        /// first, then import) — feeding the queue from these arrays gives exact-slot
+        /// alignment regardless of rivalStates list order (which top-ups can pollute).
+        /// Specials never mint and must never enter the queue (the wave-6 shift bug:
+        /// 4 duplicated identities + the last 4 ids never landing on the client).</summary>
+        public List<string> WholesaleIds { get; set; } = new();
+        public List<string> ImportIds    { get; set; } = new();
     }
 
     /// <summary>

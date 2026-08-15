@@ -412,23 +412,42 @@ namespace BigAmbitionsMP
                     }
                     Plugin.Logger.LogInfo($"[Patcher] ClientRivalNames populated: {added} rival(s).");
 
-                    // Populate the UUID queue with AI rivals ONLY.  Player IDs are
-                    // segregated into ClientPlayerRoster; they get their own
-                    // leaderboard rows injected via Patch_RivalLeaderboard_Load_AddPlayers,
-                    // matching how the local player is rendered (separate from
-                    // RivalDataCache).  Putting player IDs in the queue would
-                    // misalign them with AI templates and produce wrong names.
+                    // Round-257: the UUID queue must hold EXACTLY the ids the client's
+                    // GenerateRivals will mint — the wholesale block then the import block,
+                    // slot for slot. It previously held every non-player id including the
+                    // SPECIAL rivals, which never mint: every dequeue was shifted by the
+                    // special count, duplicating the specials into wholesale slots and
+                    // dropping the host's last ids entirely (rig-measured 19/15 + 127
+                    // dangling refs). Primary source = the payload's verbatim arrays;
+                    // fallback (arrays absent) = old order-inference minus specials.
                     PendingRivalIdQueue.Clear();
                     ClientPlayerRoster.Clear();
                     foreach (var r in payload.Rivals)
                     {
                         if (string.IsNullOrEmpty(r.Id)) continue;
-                        if (r.IsPlayer)
-                            ClientPlayerRoster[r.Id] = r.Name ?? r.Id;
-                        else
-                            PendingRivalIdQueue.Enqueue(r.Id);
+                        if (r.IsPlayer) ClientPlayerRoster[r.Id] = r.Name ?? r.Id;
                     }
-                    Plugin.Logger.LogInfo($"[Patcher] PendingRivalIdQueue seeded with {PendingRivalIdQueue.Count} AI id(s); ClientPlayerRoster has {ClientPlayerRoster.Count} player(s).");
+                    int wsN = payload.WholesaleIds?.Count ?? 0, imN = payload.ImportIds?.Count ?? 0;
+                    if (wsN + imN > 0)
+                    {
+                        foreach (var id in payload.WholesaleIds!) if (!string.IsNullOrEmpty(id)) PendingRivalIdQueue.Enqueue(id);
+                        foreach (var id in payload.ImportIds!)    if (!string.IsNullOrEmpty(id)) PendingRivalIdQueue.Enqueue(id);
+                        Plugin.Logger.LogInfo($"[Patcher] PendingRivalIdQueue seeded slot-exact: {wsN} wholesale + {imN} import id(s); ClientPlayerRoster has {ClientPlayerRoster.Count} player(s) (round-257).");
+                    }
+                    else
+                    {
+                        // Old-shape payload: infer order, but never enqueue specials.
+                        int skippedSpecials = 0;
+                        foreach (var r in payload.Rivals)
+                        {
+                            if (string.IsNullOrEmpty(r.Id) || r.IsPlayer) continue;
+                            bool special = false;
+                            try { special = BigAmbitions.Rivals.RivalsHelper.IsSpecialRival(r.Id); } catch { }
+                            if (special) { skippedSpecials++; continue; }
+                            PendingRivalIdQueue.Enqueue(r.Id);
+                        }
+                        Plugin.Logger.LogInfo($"[Patcher] PendingRivalIdQueue seeded by order inference: {PendingRivalIdQueue.Count} id(s), {skippedSpecials} special(s) excluded (round-257 fallback — payload carried no id arrays).");
+                    }
                     ClientRivalsReady = true;
 
                     EnsureRivalCachesPopulated(payload);
