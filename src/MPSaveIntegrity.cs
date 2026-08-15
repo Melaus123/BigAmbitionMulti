@@ -149,6 +149,26 @@ namespace BigAmbitionsMP
                 int realOrphans = MPRegisterSync.LastRealIdOrphans;
                 if (realOrphans > 0) parts.Add($"shift-employees×{realOrphans} logged");
 
+                // ── Class 4b: rival-less world (DETECT-ONLY, round-256) ──────
+                // gi.rivalStates is the id list ALL rival identity derives from
+                // (native load: FillData(rivalStates ids)); native GenerateRivals
+                // always writes 34 entries and can never leave it empty. Empty +
+                // a populated world = generation ran without rivals (lost id
+                // race at a client new-game start, field 20260809-132321) or an
+                // externally damaged save. Detect-only by user ruling 2026-08-15
+                // — no heal until more field pictures accumulate.
+                try
+                {
+                    int rivalStates = 0; try { rivalStates = gi.rivalStates?.Count ?? 0; } catch { }
+                    int regsTotal   = 0; try { regsTotal   = gi.BuildingRegistrations?.Count ?? 0; } catch { }
+                    if (rivalStates == 0 && regsTotal > 0)
+                    {
+                        parts.Add("rivalStates EMPTY (rival-less world)");
+                        Plugin.Logger.LogError($"[Integrity] {reason}: gi.rivalStates is EMPTY with {regsTotal} building registration(s) — this world generated WITHOUT rivals (round-256 family: lost id race at world creation, or external save damage). Detect-only; expect unresolvable rival refs below.");
+                    }
+                }
+                catch { }
+
                 // ── Class 4: rival-refs (DETECT-ONLY) ────────────────────────
                 // Registration owner-rival ids that resolve to no rival and no
                 // session player — the rival-poor / contamination families.
@@ -254,6 +274,11 @@ namespace BigAmbitionsMP
             LastSummary = string.Join("; ", parts);
             if (LastSummary.Length > 0)
                 Plugin.Logger.LogWarning($"[Integrity] {reason}: {LastSummary}.");
+            else
+                // Round-256 (T256 agent finding): a clean sweep must SAY it ran —
+                // every pass-if-absent check on integrity lines is vacuous unless
+                // the log proves the sweep executed.
+                Plugin.Logger.LogInfo($"[Integrity] {reason}: sweep clean.");
         }
 
         /// <summary>Class 7's worker, ALSO called periodically (the 10-min duty

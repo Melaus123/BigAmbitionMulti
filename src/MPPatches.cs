@@ -2528,7 +2528,14 @@ namespace BigAmbitionsMP
                     //       host-sourced cache).
                     if (!GameStatePatcher.ClientRivalsReady)
                     {
-                        Plugin.Logger.LogInfo("[Wave6] GenerateRivals suppressed on client (queue not yet populated).");
+                        // Round-256 (field 20260809-132321): this same suppression also fires
+                        // for the routine startup default-load call, so no WARN here — but when
+                        // it swallows the natural NEW-GAME call, city generation proceeds
+                        // RIVAL-LESS (a save written from that state has gi.rivalStates EMPTY
+                        // forever: rivals=0 world, rival-refs×1093 dangling). The snapshot
+                        // handler repairs that ordering when the ids arrive: late
+                        // GenerateRivals + cache refill, discriminated there by regs>0.
+                        Plugin.Logger.LogInfo("[Wave6] GenerateRivals suppressed on client (host ids not yet arrived; round-256: a new-game generation in this state builds rival-less until the snapshot lands).");
                         return false;
                     }
                     if (GameStatePatcher.ClientRivalsInjected)
@@ -5873,6 +5880,78 @@ namespace BigAmbitionsMP
         //  rig-refuted — HandleRentRequest correctly refuses occupied buildings, and the
         //  denial rollback vacated the natively-taken-over business. Replaced by the
         //  host-ARBITRATED flow in MPTakeover.cs, round-204b.)
+
+        // ── Round-256: vehicle-store empty-picker diagnostic (DETECT-ONLY) ───────
+        // Field 20260809-132321: "when i go into van dealership nothing is showing."
+        // Native SetListOfVehiclesForSale has FOUR silent-empty exits (no reg / empty
+        // businessTypeName / empty Layout / vehicle types unresolved) and logs none of
+        // them. This names the failing stage the moment the picker builds empty, so
+        // any future report carries its own diagnosis. Inert on healthy stores (only
+        // fires when the list is empty). MP-gated; capped ×4 per session.
+        [HarmonyPatch(typeof(Buildings.VehicleContractSettings), "SetVehicleDropdown")]
+        public static class Patch_VehicleStorePicker_EmptyDiag
+        {
+            private static int _n;
+            static void Postfix(Buildings.VehicleContractSettings __instance)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                    var vehicles = AccessTools.Field(typeof(Buildings.VehicleContractSettings), "_vehicles")
+                                       ?.GetValue(__instance) as System.Collections.ICollection;
+                    if (vehicles == null || vehicles.Count > 0) return;
+                    if (_n++ >= 4) return;
+
+                    string why = "unknown", addrKey = "?";
+                    try
+                    {
+                        var addr = DialogController.current?.contact?.Address;
+                        if (addr == null) why = "no contact address";
+                        else
+                        {
+                            var reg = BuildingHelper.GetBuildingRegistration(addr);
+                            if (reg == null) { why = "no building registration"; addrKey = addr.ToString() ?? "?"; }
+                            else
+                            {
+                                addrKey = GameStateReader.AddressKey(reg);
+                                string btn = ""; try { btn = reg.businessTypeName?.ToString() ?? ""; } catch { }
+                                string lay = ""; try { lay = reg.Layout?.ToString() ?? ""; } catch { }
+                                if (string.IsNullOrEmpty(btn)) why = "reg.businessTypeName EMPTY (half-generated/damaged reg)";
+                                else if (string.IsNullOrEmpty(lay)) why = "reg.Layout EMPTY (half-generated/damaged reg)";
+                                else
+                                {
+                                    var building = BuildingHelper.GetBuilding(reg.Address);
+                                    var set = BusinessLayoutSets.BusinessLayoutSetHelper.GetOrLoadBusinessLayoutSet(
+                                                  btn, new Blueprints.BuildingSizeInfo(building), lay.ToLower(), false);
+                                    if (set?.Items == null) why = $"layout set missing for '{btn}'/'{lay}' (asset/content problem)";
+                                    else
+                                    {
+                                        int purchaser = 0, resolved = 0;
+                                        foreach (var item in set.Items)
+                                        {
+                                            var pip = item?.playerItemPurchaserSettings;
+                                            if (pip == null || !pip.enabled) continue;
+                                            purchaser++;
+                                            try
+                                            {
+                                                var it = BigAmbitions.Items.ItemsGetter.GetByName(pip.itemName);
+                                                if (it != null && Vehicles.VehicleTypes.VehicleTypeHelper.GetVehicleType(it.vehicleType) != null)
+                                                    resolved++;
+                                            }
+                                            catch { }
+                                        }
+                                        why = $"layout OK but purchaser items={purchaser}, vehicle types resolved={resolved} (vehicle-type assets missing/broken)";
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception exIn) { why = $"diag itself failed: {exIn.Message}"; }
+                    Plugin.Logger.LogWarning($"[VehStoreDiag] vehicle picker built EMPTY at '{addrKey}' — {why} (round-256).");
+                }
+                catch { }
+            }
+        }
 
         // ── Replicated-shop shelf fill (2026-06-12) ───────────────────────────
         // Our buyer-side purchaser enable gives shelves native hover/take, but

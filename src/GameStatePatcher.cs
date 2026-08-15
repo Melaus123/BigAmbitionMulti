@@ -470,6 +470,38 @@ namespace BigAmbitionsMP
                             {
                                 Plugin.Logger.LogInfo("[Patcher] Manually triggering RivalsHelper.GenerateRivals to consume the queue.");
                                 BigAmbitions.Rivals.RivalsHelper.GenerateRivals(gi);
+
+                                // Round-256 (field 20260809-132321: rivals=0 world, rival-refs×1093):
+                                // when this manual run happens AFTER city generation (the natural call
+                                // was suppressed mid-generation because the ids lost the network race),
+                                // NOTHING downstream refills the caches — city-gen's FillData already
+                                // came and went, and GenerateRivals itself opens with RivalDataCache
+                                // .Clear(). Refill from the just-written rivalStates, the exact call
+                                // the native load path makes (GameManager init). Harmless in the
+                                // won-race ordering: city-gen's own FillData simply redoes it.
+                                try
+                                {
+                                    var ids = new System.Collections.Generic.List<string>();
+                                    if (gi.rivalStates != null)
+                                        foreach (var s in gi.rivalStates)
+                                        {
+                                            string sid = s?.rivalId?.ToString() ?? "";
+                                            if (!string.IsNullOrEmpty(sid)) ids.Add(sid);
+                                        }
+                                    BigAmbitions.Rivals.RivalsHelper.FillData(ids);
+                                    int cacheN = 0;
+                                    try { var all = BigAmbitions.Rivals.RivalsHelper.GetAllRivalData(); if (all != null) cacheN = System.Linq.Enumerable.Count(all); } catch { }
+                                    // Discriminator (measured here, at the right layer): a world
+                                    // with building registrations but no wholesale ids already
+                                    // generated WITHOUT rivals — the ids arrived late (lost race).
+                                    int regsN = 0; try { regsN = gi.BuildingRegistrations?.Count ?? 0; } catch { }
+                                    Plugin.Logger.LogInfo(
+                                        $"[Patcher] rival caches refilled after manual GenerateRivals: rivalStates={ids.Count} cache={cacheN}" +
+                                        (regsN > 0
+                                            ? $" — LATE ids ({regsN} regs already generated rival-less; lost-race world repaired, round-256)."
+                                            : " (pre-generation; city-gen finishes the job, round-256)."));
+                                }
+                                catch (Exception exFill) { Plugin.Logger.LogWarning($"[Patcher] round-256 cache refill: {exFill.Message}"); }
                             }
                         }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] Manual GenerateRivals: {ex.Message}"); }

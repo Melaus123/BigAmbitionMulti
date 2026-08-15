@@ -37,6 +37,21 @@ namespace BigAmbitionsMP
         /// itself is code-verified (SaveGameManager.CanSave :490); this simulates only the state.</summary>
         internal static float SimulateSaveBlockUntil;
 
+        /// <summary>Round-256 "rivalrace" verb state — while true, MPClient stashes an arriving
+        /// RivalsSnapshot instead of applying it, so a new-game start reproduces the field's
+        /// lost id race (world generates rival-less); 'release' applies the stashed payload
+        /// late, exercising the repair path. Harmless on the host (handler is client-only).</summary>
+        internal static bool HoldRivalsSnapshot;
+        internal static RivalsSnapshotPayload? HeldRivalsSnapshot;
+
+        /// <summary>"charconfirm" verb state — the autopilot that used to click past the
+        /// character customizer was deleted with 4bc256a (T256 agent run hit the wall);
+        /// this re-creates ONLY that piece: while armed, the tick watches for
+        /// IntroCharacterCustomizer and reflect-invokes StartGame() after the deleted
+        /// autopilot's proven 2s settle (invoking earlier leaves the customizer UI broken).</summary>
+        internal static bool ConfirmCustomizerArmed;
+        private static float _customizerFirstSeen = -1f;
+
         internal static void Tick()
         {
             if (UnityEngine.Time.unscaledTime < _nextPoll) return;
@@ -45,6 +60,7 @@ namespace BigAmbitionsMP
             {
                 _dir ??= Path.Combine(MPConfig.DataRootPath, "testdrive");
                 if (!Directory.Exists(_dir)) return;   // channel not armed — fully inert
+                if (ConfirmCustomizerArmed) TickCustomizerConfirm();
                 if (!_armedLogged)
                 {
                     _armedLogged = true;
@@ -108,6 +124,37 @@ namespace BigAmbitionsMP
                     if (MPServer.IsRunning) return "OK server already running";
                     return MPServer.Start(int.TryParse(arg, out var port) ? port : 7777)
                         ? "OK server started" : "ERR MPServer.Start returned false";
+
+                case "hostnew":
+                    // Round-256: start a NEW game from the lobby — same entry the UI's
+                    // Start button calls (StartNewNow → MPServer.StartNewGame). Needed
+                    // for the rivalrace test: the lost id race only exists on a client
+                    // present during a new-game start.
+                    if (!MPServer.IsRunning) return "ERR start the server first ('host')";
+                    MPServer.StartNewGame(new GameVariablesDto());
+                    return "OK StartNewGame invoked (default settings)";
+
+                case "charconfirm":
+                    ConfirmCustomizerArmed = true;
+                    _customizerFirstSeen = -1f;
+                    return "OK armed — confirms the character screen when it appears (2s settle)";
+
+                case "rivalrace":
+                    // Round-256 forced lost-race: run on the CLIENT (c-*.cmd).
+                    if (arg == "hold")
+                    {
+                        HoldRivalsSnapshot = true;
+                        return "OK next RivalsSnapshot will be HELD (client-side)";
+                    }
+                    if (arg == "release")
+                    {
+                        HoldRivalsSnapshot = false;
+                        var held = HeldRivalsSnapshot; HeldRivalsSnapshot = null;
+                        if (held == null) return "ERR nothing held";
+                        GameStatePatcher.ApplyRivalsSnapshot(held);
+                        return $"OK held RivalsSnapshot applied late ({held.Rivals?.Count ?? 0} rival(s))";
+                    }
+                    return "ERR rivalrace hold|release";
 
                 case "hostload":
                 {
@@ -243,7 +290,47 @@ namespace BigAmbitionsMP
                 }
 
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm)";
+            }
+        }
+
+        /// <summary>Armed by 'charconfirm'. Runs on the 0.5s tick cadence: waits for
+        /// IntroCharacterCustomizer to exist, lets it settle 2s (the deleted autopilot's
+        /// proven minimum — invoking during its Start()/coroutines leaves the UI broken),
+        /// then reflect-invokes StartGame(). Disarms after one confirm or on a missing
+        /// method; a customizer that disappears before confirm resets the settle clock.</summary>
+        private static void TickCustomizerConfirm()
+        {
+            try
+            {
+                var found = UnityEngine.Object.FindObjectsOfType(typeof(Intro.IntroCharacterCustomizer));
+                var cust = (found != null && found.Length > 0) ? found[0] : null;
+                if (cust == null) { _customizerFirstSeen = -1f; return; }
+                if (_customizerFirstSeen < 0f)
+                {
+                    _customizerFirstSeen = UnityEngine.Time.unscaledTime;
+                    Plugin.Logger.LogInfo("[TestDrive] charconfirm: customizer seen — settling 2s.");
+                    return;
+                }
+                if (UnityEngine.Time.unscaledTime - _customizerFirstSeen < 2f) return;
+                var m = cust.GetType().GetMethod("StartGame",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                  | System.Reflection.BindingFlags.Instance);
+                if (m == null)
+                {
+                    ConfirmCustomizerArmed = false;
+                    Plugin.Logger.LogWarning("[TestDrive] charconfirm: StartGame not found on IntroCharacterCustomizer — disarmed.");
+                    return;
+                }
+                ConfirmCustomizerArmed = false;
+                _customizerFirstSeen = -1f;
+                m.Invoke(cust, null);
+                Plugin.Logger.LogWarning("[TestDrive] charconfirm: IntroCharacterCustomizer.StartGame invoked.");
+            }
+            catch (Exception ex)
+            {
+                ConfirmCustomizerArmed = false;
+                Plugin.Logger.LogWarning($"[TestDrive] charconfirm: {ex.Message} — disarmed.");
             }
         }
     }

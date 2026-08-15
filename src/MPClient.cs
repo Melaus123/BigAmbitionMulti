@@ -1190,6 +1190,17 @@ namespace BigAmbitionsMP
             var payload = env.GetPayload<RivalsSnapshotPayload>();
             if (payload == null) return;
             Plugin.Logger.LogInfo($"[Client] Received rivals snapshot: {payload.Rivals.Count} rival(s).");
+#if BAMP_DEV
+            // Round-256 forced-race hook: 'rivalrace hold' makes a new-game start
+            // generate rival-less (the real field ordering); 'rivalrace release'
+            // delivers the snapshot late so the repair path can be exercised.
+            if (TestDrive.HoldRivalsSnapshot)
+            {
+                TestDrive.HeldRivalsSnapshot = payload;
+                Plugin.Logger.LogWarning("[TestDrive] rivalrace: RivalsSnapshot HELD (not applied) — 'rivalrace release' to deliver it late.");
+                return;
+            }
+#endif
             GameStatePatcher.ApplyRivalsSnapshot(payload);
         }
 
