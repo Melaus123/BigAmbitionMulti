@@ -26,18 +26,30 @@ foreach ($p in @($Source, $Target)) {
 
 # Compare the files that carry game CONTENT. Name+size is enough to catch a content
 # update; timestamps alone give false alarms after a re-copy.
+#
+# 2026-08-15 (T260 agent finding): the old walk covered only the install root and the
+# TOP LEVEL of Big Ambitions_Data — never Managed\ — so the two installs ran GAME CODE
+# a month apart (Managed\BigAmbitions.dll 3,872,256B vs 3,869,696B) and -Check passed.
+# That is the exact masquerade this script exists to prevent. The data folder is now
+# walked RECURSIVELY.
 function Get-ContentDiff {
     param($SrcRoot, $DstRoot)
     $diff = @()
-    foreach ($sub in @("Big Ambitions_Data", "")) {
-        $s = if ($sub) { Join-Path $SrcRoot $sub } else { $SrcRoot }
-        $d = if ($sub) { Join-Path $DstRoot $sub } else { $DstRoot }
-        if (-not (Test-Path $s)) { continue }
-        foreach ($f in Get-ChildItem $s -File) {
-            if ($f.Name -in @("launch_client.bat")) { continue }
-            $t = Join-Path $d $f.Name
-            if (-not (Test-Path $t)) { $diff += "$sub\$($f.Name) : missing in copy" }
-            elseif ((Get-Item $t).Length -ne $f.Length) { $diff += "$sub\$($f.Name) : size differs" }
+    foreach ($f in Get-ChildItem $SrcRoot -File) {
+        if ($f.Name -in @("launch_client.bat")) { continue }
+        $t = Join-Path $DstRoot $f.Name
+        if (-not (Test-Path $t)) { $diff += "$($f.Name) : missing in copy" }
+        elseif ((Get-Item $t).Length -ne $f.Length) { $diff += "$($f.Name) : size differs" }
+    }
+    $dataS = Join-Path $SrcRoot "Big Ambitions_Data"
+    $dataD = Join-Path $DstRoot "Big Ambitions_Data"
+    if (Test-Path $dataS) {
+        $srcLen = $dataS.Length
+        foreach ($f in Get-ChildItem $dataS -File -Recurse) {
+            $rel = $f.FullName.Substring($srcLen).TrimStart('\')
+            $t = Join-Path $dataD $rel
+            if (-not (Test-Path $t)) { $diff += "Big Ambitions_Data\$rel : missing in copy" }
+            elseif ((Get-Item $t).Length -ne $f.Length) { $diff += "Big Ambitions_Data\$rel : size differs" }
         }
     }
     return $diff
