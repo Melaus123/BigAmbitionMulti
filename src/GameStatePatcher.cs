@@ -3268,7 +3268,15 @@ namespace BigAmbitionsMP
 
                 // Round-204b: stash the host's takeover valuation for the client-side
                 // valuation shield (display + local pre-check; host stays the referee).
-                try { if (info.AiValuation > 0f) BusinessSync.AiValuationByAddress[info.AddressKey] = info.AiValuation; } catch { }
+                // Round-255: a publish WITHOUT a valuation (business no longer AI-run)
+                // must also clear the stale entry, or the display override would keep
+                // quoting the last AI-era price for it.
+                try
+                {
+                    if (info.AiValuation > 0f) BusinessSync.AiValuationByAddress[info.AddressKey] = info.AiValuation;
+                    else BusinessSync.AiValuationByAddress.TryRemove(info.AddressKey, out _);
+                }
+                catch { }
 
                 // AI-business retail prices (host-authoritative; the client's
                 // rival sim is suppressed so its tables stay empty otherwise).

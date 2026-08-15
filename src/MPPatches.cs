@@ -5801,10 +5801,35 @@ namespace BigAmbitionsMP
         // native computes for a business with no recorded income. The host's accept
         // check still uses ITS full valuation. InvalidOperationException ONLY; other
         // failures keep vanilla behavior. MP-gated.
+        // Round-255 (field 20260808-111258): the exception shield above is NOT enough —
+        // a client who joined an ESTABLISHED save carries stale-but-non-empty dailyIncomes
+        // (frozen at join; the host's keep rolling daily), so the local computation
+        // succeeds and quotes a price that drifts further from the host's every game day.
+        // The player-facing symptom: BizMan shows $X, the host arbitrates at $Y — "prices
+        // severely desync, can't buy unless it matches what the host sees." The Postfix
+        // makes the HOST-SYNCED valuation the primary source on clients whenever one is
+        // present (republished on every daily roll), so the display and the referee agree.
+        // Player-run businesses never appear in the dict (host publishes 0 → round-255
+        // removal at apply), and the host itself is never overridden.
         [HarmonyPatch(typeof(Helpers.CompetitionHelper), nameof(Helpers.CompetitionHelper.CalculateAiOwnedValuation))]
         public static class Patch_AiValuation_ClientEmptyIncomeFallback
         {
             private static int _n;
+            private static int _o;
+            static void Postfix(BuildingRegistration registration, ref float __result)
+            {
+                try
+                {
+                    if (MPServer.IsRunning || !MPClient.IsClientInWorld) return;   // clients only; host stays authoritative
+                    string addr = GameStateReader.AddressKey(registration);
+                    if (string.IsNullOrEmpty(addr)) return;
+                    if (!BusinessSync.AiValuationByAddress.TryGetValue(addr, out float synced) || synced <= 0f) return;
+                    if (_o++ < 3 || _o % 50 == 0)
+                        Plugin.Logger.LogInfo($"[EconShield] AI valuation for '{addr}': host-synced ${synced:F0} replaces local ${__result:F0} (stale-income display fix, round-255).");
+                    __result = synced;
+                }
+                catch { }
+            }
             static Exception? Finalizer(BuildingRegistration registration, ref float __result, Exception __exception)
             {
                 if (__exception == null) return null;
