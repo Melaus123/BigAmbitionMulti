@@ -525,7 +525,22 @@ namespace BigAmbitionsMP
                             {
                                 string id = Path.GetFileName(item), inner = "";
                                 try { var subs = Directory.GetDirectories(item); if (subs.Length > 0) inner = Path.GetFileName(subs[0]); } catch { }
-                                parts.Add(string.IsNullOrEmpty(inner) ? $"workshop:{id}" : $"workshop:{id}({inner})");
+                                // Round-258: the workshop also carries shared building-LAYOUT
+                                // blueprints (Layout.json + Metadata.json, no code, no content
+                                // dirs) — pure save-side templates that cannot desync gameplay.
+                                // Tag them so reports still show them but the join-time mod
+                                // comparison (DiffMods) can skip them: a layout subscriber must
+                                // not trip mismatch warnings against a non-subscriber.
+                                bool blueprint = false;
+                                try
+                                {
+                                    blueprint = File.Exists(Path.Combine(item, "Layout.json"))
+                                             && Directory.GetFiles(item, "*.dll", SearchOption.TopDirectoryOnly).Length == 0
+                                             && string.IsNullOrEmpty(inner);
+                                }
+                                catch { }
+                                if (blueprint) parts.Add($"layout:{id}");
+                                else parts.Add(string.IsNullOrEmpty(inner) ? $"workshop:{id}" : $"workshop:{id}({inner})");
                             }
                     }
                 }

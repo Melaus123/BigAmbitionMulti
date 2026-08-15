@@ -188,7 +188,11 @@ namespace BigAmbitionsMP
 #endif
 
         /// <summary>Diff two comma-separated mod lists (the report.md InstalledMods format).
-        /// Returns true when they differ, with capped human-readable only-lists.</summary>
+        /// Returns true when they differ, with capped human-readable only-lists.
+        /// Round-258: entries tagged "layout:" (shared building-layout blueprints, pure
+        /// save-side templates) are excluded from the comparison — they cannot desync
+        /// gameplay, and comparing them made every layout subscriber trip mismatch
+        /// warnings against non-subscribers (rig 2026-08-15, workshop:3428251077).</summary>
         public static bool DiffMods(string mine, string theirs, out string onlyMine, out string onlyTheirs, out int onlyMineCount, out int onlyTheirsCount)
         {
             onlyMine = onlyTheirs = ""; onlyMineCount = onlyTheirsCount = 0;
@@ -196,6 +200,8 @@ namespace BigAmbitionsMP
             {
                 var setMine   = ParseModList(mine);
                 var setTheirs = ParseModList(theirs);
+                setMine.RemoveWhere(s => s.StartsWith("layout:", StringComparison.OrdinalIgnoreCase));
+                setTheirs.RemoveWhere(s => s.StartsWith("layout:", StringComparison.OrdinalIgnoreCase));
                 var om = new System.Collections.Generic.List<string>();
                 var ot = new System.Collections.Generic.List<string>();
                 foreach (var s in setMine)   if (!setTheirs.Contains(s)) om.Add(s);
