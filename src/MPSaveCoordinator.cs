@@ -1065,6 +1065,21 @@ namespace BigAmbitionsMP
             try   { ok = GuardedNativeLoad(chosen, true, "member .hsg (LoadOwnHsg)", session); }
             finally { LoadRedirectFolder = null; }
             if (!ok) { DiagWrite("LoadOwnHsg: Load returned FALSE — round-251A containment ran"); return false; }
+
+            // Round-262 (field 20260811-210603): the "Loading .hsg ... day=N" label above
+            // comes from the folder CATALOG; the world that actually deserialized can be
+            // something else entirely (that field client: label day=31, loaded state day=6
+            // — a stale member copy served on every rejoin read as self-consistent in
+            // every bundle). Measure at the definitive layer: the loaded world itself.
+            // Detect-only; the WARN self-stamps every future bundle of this class.
+            try
+            {
+                int loadedDay = SaveGameManager.Current?.Day ?? -1;
+                if (loadedDay >= 0 && chosen.day >= 0 && loadedDay != chosen.day)
+                    Plugin.Logger.LogWarning($"[MPSave] LOADED-DAY MISMATCH: catalog said day={chosen.day} but the loaded world is day={loadedDay} — a stale/mismatched member copy was loaded (round-262).");
+            }
+            catch { }
+
             PortraitFolder = MPSaveManager.MpCharacterFolder(session, stableId);
             DiagWrite("LoadOwnHsg: redirect OFF, Load returned");
             return true;

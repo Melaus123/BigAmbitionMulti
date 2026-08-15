@@ -902,7 +902,14 @@ namespace BigAmbitionsMP
         public string Difficulty                       { get; set; } = "Normal";
         public int    StartingAge                      { get; set; } = 18;
         public bool   DisableAging                     { get; set; } = false;
-        public bool   DisableEnergy                    { get; set; } = true;   // MP: no sleep-skip
+        // Round-261 (field 20260811-022559): default FALSE — the old true default was a
+        // stale pre-dials design ("MP: no sleep-skip") that contradicted NeedsDrainPercent's
+        // default 10. The lobby only corrects this bool when the drain dial is TOUCHED, and
+        // world creation ORs it in (MPServer StartNewGame apply) — so every untouched-default
+        // new world was born needs-off (round-236's heartbeat then rescued it ~3s later; a
+        // birth defect a later mechanism silently compensates is the rivals-saga pattern).
+        // drain==0 still drives the flag through the dial + creation paths.
+        public bool   DisableEnergy                    { get; set; } = false;
         public bool   DisableHappiness                 { get; set; } = false;
         public bool   AllCoursesUnlocked               { get; set; } = false;
         public int    StartingMoney                    { get; set; } = 10000;  // vanilla Normal (was a $100k dev leftover)
