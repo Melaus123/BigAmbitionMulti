@@ -222,6 +222,30 @@ namespace BigAmbitionsMP
                     return nFound == 0 ? "OK none for rent" : $"OK {nFound} for-rent: {found}";
                 }
 
+                case "setbiz":
+                {
+                    // Round-260b: stamp a business name+type onto a reg — synthesizes the
+                    // host-side state BusinessSync writes when a client runs a NAMED
+                    // business (the exact wedge precondition from field 20260810-232704),
+                    // no naming UI needed. Makes the T260 name/type leg FIXTURE-INDEPENDENT
+                    // (T260 run 1 failed its own precondition: the chosen fixture had no
+                    // client-owned named business — tests must create what they assert on).
+                    var tk = arg.Split(' ');
+                    if (tk.Length < 3) return "ERR usage: setbiz <num> <ba:street_x> <name...>";
+                    string sAddr = tk[0] + " " + tk[1];
+                    string sName = string.Join(" ", tk, 2, tk.Length - 2);
+                    var sreg = GameStatePatcher.FindRegistration(sAddr);
+                    if (sreg == null) return $"ERR no registration for '{sAddr}'";
+                    try
+                    {
+                        sreg.BusinessName     = sName;
+                        sreg.businessTypeName = "ba:businesstype_fastfoodrestaurant";
+                        sreg.AvailableForRent = false;
+                    }
+                    catch (Exception exS) { return "ERR " + exS.Message; }
+                    return $"OK '{sAddr}' now reads name='{sName}' type=fastfoodrestaurant avail=False";
+                }
+
                 case "vacate":
                     // Round-260: client-side — sends the SAME VacateRequest the terminate
                     // patch sends, exercising the host's vacate reflect (the wedge fix).
