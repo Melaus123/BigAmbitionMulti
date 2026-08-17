@@ -190,6 +190,7 @@ namespace BigAmbitionsMP
 
             MPConfig.Init(context.ModRootPath);
             MPBugReport.MarkSessionStarted();
+            MPBugReport.CachePaths();   // bug-report v2: persistentDataPath is main-thread-only; the peer-log responder runs off-thread
 
             // Persistent host object for our UI component (Mono: custom
             // MonoBehaviours need no registration — AddComponent just works).

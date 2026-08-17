@@ -699,6 +699,19 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.PeerLogRequest:        // bug-report v2 (task #40): another player is filing a bug bundle — contribute this machine's logs
+                {
+                    var plr = env.GetPayload<PeerLogRequestPayload>();
+                    if (plr != null && !string.IsNullOrEmpty(plr.RequestId))
+                        Task.Run(() => MPBugReport.RespondToPeerLogRequest(plr.RequestId,
+                            p => SendEnvelope(MessageEnvelope.Create(MessageType.PeerLogReply, MPConfig.PlayerId, p))));
+                    break;
+                }
+
+                case MessageType.PeerLogReply:          // the host's log arriving for a bundle THIS machine is assembling
+                    MPBugReport.HandlePeerLogReply(env.GetPayload<PeerLogReplyPayload>());
+                    break;
+
                 case MessageType.TakeoverResult:        // round-204b: host's verdict on my AI-business offer
                 {
                     var tv = env.GetPayload<TakeoverPayload>();

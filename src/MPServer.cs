@@ -372,6 +372,14 @@ namespace BigAmbitionsMP
             return set;
         }
 
+        /// <summary>Display PlayerIds of every currently connected client (bug-report v2:
+        /// how many peer-log replies a host-side report should wait for).</summary>
+        internal static List<string> ConnectedPids()
+        {
+            try { return new List<string>(_peerNames.Values); }
+            catch { return new List<string>(); }
+        }
+
         // Round-37: `session` = the folder the .hsg bytes are READ from (may be a frozen checkpoint);
         // `lineageName` = the session name the CLIENTS adopt as active (the playthrough base), so their
         // later uploads/disconnect saves continue the lineage and never mutate the loaded checkpoint.
@@ -1035,6 +1043,24 @@ namespace BigAmbitionsMP
 
                 case MessageType.ClientDisconnectUpload:
                     HandleClientDisconnectUpload(senderPid, env);
+                    break;
+
+                case MessageType.PeerLogRequest:
+                {
+                    // Bug-report v2 (task #40): a client is filing a bug bundle — contribute the
+                    // host's logs. Pure file IO + redaction → background thread; the reply routes
+                    // back to the requester only.
+                    var req = env.GetPayload<PeerLogRequestPayload>();
+                    string reqPid = senderPid;
+                    if (req != null && !string.IsNullOrEmpty(req.RequestId))
+                        Task.Run(() => MPBugReport.RespondToPeerLogRequest(req.RequestId,
+                            p => SendToPlayer(reqPid, MessageEnvelope.Create(MessageType.PeerLogReply, "host", p))));
+                    break;
+                }
+
+                case MessageType.PeerLogReply:
+                    // A client's log arriving for a bundle THIS machine is assembling.
+                    MPBugReport.HandlePeerLogReply(env.GetPayload<PeerLogReplyPayload>());
                     break;
 
                 case MessageType.VehicleLockSet:

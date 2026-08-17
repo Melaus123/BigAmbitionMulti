@@ -275,15 +275,18 @@ namespace BigAmbitionsMP
 
             string root = SafeRoot();
             Directory.CreateDirectory(root);
+            PruneOldReports(root);   // user directive 2026-08-16: only the last report is kept
 
             string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
             string dir = Path.Combine(root, "bamp-bug-" + stamp);
             Directory.CreateDirectory(dir);
+            MarkReportBusy(dir);   // released in the terminal path below — the prune skips busy dirs
 
             string ring = MPLog.Dump("manual bug report: " + reason);
             WriteDescription(Path.Combine(dir, "description.txt"), reason);
             WriteReport(Path.Combine(dir, "report.md"), reason);
             CopyPlayerLogs(dir);
+            WriteSaveStore(dir);   // bug-report v2 (task #40): active-session saves + full store listing
             CopyIfExists(ring, Path.Combine(dir, "bamp-ring.log"), MaxCopiedLogBytes);
             // Task #5: the actual crash evidence lives OUTSIDE Player.log — but only CRASH reports
             // carry it (a stale Crash_* folder on an unrelated manual report is misleading noise).
@@ -293,6 +296,12 @@ namespace BigAmbitionsMP
             WriteSubmitNotes(Path.Combine(dir, "README-submit.txt"));
 
             var result = new BugReportResult { DirectoryPath = dir };
+
+            // Bug-report v2 (task #40): ask every connected peer for its logs. Third-party
+            // reports ("my friend crashed", bundle 20260811-225015) carried only the
+            // reporter's half of the evidence. Null when not in an MP session — menu
+            // reports proceed exactly as before.
+            string? peerGatherId = StartPeerLogGather(dir);
 
             // Submit to the RELAY by default (it holds the Discord webhook server-side).  A direct
             // webhook in config overrides it (maintainer local testing) and posts straight to Discord.
@@ -305,15 +314,63 @@ namespace BigAmbitionsMP
                 string[] tags = CleanDiscordTagIds(discordTagIds);
                 Task.Run(() =>
                 {
-                    bool ok = UploadReport(target, direct, dir, reason, tags);
-                    try { onUploadComplete?.Invoke(ok, dir); } catch { }
+                    try
+                    {
+                        // Bounded wait: completes EARLY when every peer's last file lands; the
+                        // deadline is the failure path (peer offline/slow) and peer-logs.txt
+                        // says so honestly. The upload then ships whatever arrived.
+                        WaitForPeerLogs(peerGatherId);
+                        bool ok = UploadReport(target, direct, dir, reason, tags);
+                        try { onUploadComplete?.Invoke(ok, dir); } catch { }
+                    }
+                    finally { MarkReportDone(dir); }
                 });
             }
+            else if (peerGatherId != null)
+                // No upload configured — still collect the peer logs into the local folder.
+                Task.Run(() => { try { WaitForPeerLogs(peerGatherId); } finally { MarkReportDone(dir); } });
+            else
+                MarkReportDone(dir);   // nothing async touches this folder — releasable immediately
 
             Plugin.Logger.LogInfo($"[BugReport] Created report at {dir}");
             if (openFolder) TryOpenFolder(dir);
             return result;
         }
+
+        /// <summary>User directive 2026-08-16: keep only the LAST report — folders now carry
+        /// saves + the zip (2–5MB each) and were never cleaned up. Runs as each NEW report is
+        /// created and deletes every other bamp-bug-* folder, EXCEPT any whose background work
+        /// (peer-log wait / upload) is still running — read LIVE from the busy registry at the
+        /// moment of deletion, never inferred from folder age (a timer here was called out and
+        /// replaced 2026-08-16: elapsed time is not a proxy for "upload finished"). A folder
+        /// left busy by a crashed process is not in the fresh registry and prunes normally.
+        /// Only exact-pattern folders are touched — the crash marker and anything a player
+        /// parked in the root survive.</summary>
+        private static void PruneOldReports(string root)
+        {
+            try
+            {
+                var rx = new System.Text.RegularExpressions.Regex(@"^bamp-bug-\d{8}-\d{6}$");
+                int pruned = 0;
+                foreach (var d in Directory.GetDirectories(root))
+                {
+                    if (!rx.IsMatch(Path.GetFileName(d))) continue;
+                    if (IsReportBusy(d)) continue;   // live in-flight check — the event-driven guard
+                    try { Directory.Delete(d, recursive: true); pruned++; }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] prune '{Path.GetFileName(d)}': {ex.Message}"); }
+                }
+                if (pruned > 0) Plugin.Logger.LogInfo($"[BugReport] Pruned {pruned} old report folder(s) — only the latest report is kept.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] report prune: {ex.Message}"); }
+        }
+
+        // Busy registry: every report dir with background work still running (peer-log wait,
+        // upload stream). Registered at creation, released in the terminal path's finally —
+        // the prune reads this LIVE instead of guessing from timestamps.
+        private static readonly HashSet<string> _reportDirsInUse = new();
+        private static void MarkReportBusy(string dir) { lock (_reportDirsInUse) _reportDirsInUse.Add(dir); }
+        private static void MarkReportDone(string dir) { lock (_reportDirsInUse) _reportDirsInUse.Remove(dir); }
+        private static bool IsReportBusy(string dir)   { lock (_reportDirsInUse) return _reportDirsInUse.Contains(dir); }
 
         private static string SafeRoot()
         {
@@ -557,8 +614,15 @@ namespace BigAmbitionsMP
         {
             try
             {
+                // T-BR2 run 2026-08-17 defect: this read the DEFAULT location while the peer-send
+                // path honored consoleLogPath — a client with a -logFile redirect attached the
+                // wrong machine-half's log (its own live log lives at consoleLogPath). Both paths
+                // now choose the same way: the real live log first, default-location fallback.
                 string baseDir = Application.persistentDataPath;
-                CopyIfExists(Path.Combine(baseDir, "Player.log"), Path.Combine(dir, "Player.log"), MaxCopiedLogBytes);
+                string live = "";
+                try { live = Application.consoleLogPath ?? ""; } catch { }
+                if (string.IsNullOrEmpty(live) || !File.Exists(live)) live = Path.Combine(baseDir, "Player.log");
+                CopyIfExists(live, Path.Combine(dir, "Player.log"), MaxCopiedLogBytes);
                 CopyIfExists(Path.Combine(baseDir, "Player-prev.log"), Path.Combine(dir, "Player-prev.log"), MaxCopiedLogBytes);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] Player log copy failed: {ex.Message}"); }
@@ -593,6 +657,315 @@ namespace BigAmbitionsMP
                 input.CopyTo(output);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] Copy '{source}': {ex.Message}"); }
+        }
+
+        // ── Bug-report v2 (task #40, user-directed 2026-08-15) ─────────────────────────────
+        // Bundle 20260811-225015 (a 3-day rollback diagnosed by hand-correlating ~30k log
+        // lines of save sizes across two sessions) is the template case: the evidence the
+        // logs only imply, the save store STATES. Attach the active session's saves (one
+        // .hsg per player — loadable first-hand on the rig) + a listing of EVERY copy in
+        // the lineage (size/time/day — where stale-copy bugs are visible for ~1KB), and
+        // pull connected peers' logs so third-party reports carry both halves.
+
+        /// <summary>Total bytes of .hsg/.json save files attached per report. Saves are
+        /// already compressed — they add full weight to the zip (logs don't). The Discord
+        /// relay accepts 24MB; 6MB leaves room for logs and old multi-player worlds.</summary>
+        private const long SaveAttachBudgetBytes = 6L * 1024 * 1024;
+
+        /// <summary>Write save-store.md (every lineage copy: player, day, size, mtime) and
+        /// copy the ACTIVE session's files under saves/ — plus any copy whose manifest day
+        /// disagrees with the active session's by more than the ±1 midnight-straddle the
+        /// round-233 fence tolerates (those are exactly the stale/future copies rollback
+        /// bugs live in). Local file IO only: the host holds the store natively and
+        /// clients hold the mirrored copy, so this works even for menu reports.</summary>
+        private static void WriteSaveStore(string dir)
+        {
+            try
+            {
+                string session = "";
+                try { session = MPSaveCoordinator.ActiveSessionName ?? ""; } catch { }
+                var sb = new StringBuilder();
+                sb.AppendLine("# Save store at report time");
+                if (string.IsNullOrWhiteSpace(session))
+                {
+                    sb.AppendLine("No active MP session — no saves attached (menu report or a world that has never saved).");
+                    File.WriteAllText(Path.Combine(dir, "save-store.md"), sb.ToString());
+                    return;
+                }
+                int fmt = 0; try { fmt = MPSaveManager.StoreFormat(); } catch { }
+                sb.AppendLine($"ActiveSession: {session}   StoreFormat: v{fmt}");
+                sb.AppendLine();
+                sb.AppendLine("| session | player | day | .hsg bytes | written (UTC) | attached |");
+                sb.AppendLine("|---|---|---|---|---|---|");
+
+                long budget = SaveAttachBudgetBytes;
+                string savesDir = Path.Combine(dir, "saves");
+
+                // The anomaly reference: each member's day in the ACTIVE session's manifest.
+                var activeManifest = MPSaveManager.ReadManifest(session);
+                var activeDays = new Dictionary<string, int>();
+                if (activeManifest?.Slots != null)
+                    foreach (var s in activeManifest.Slots) activeDays[s.StableId] = s.Day;
+
+                foreach (var s in MPSaveCoordinator.LineageSessions(session))
+                {
+                    string folder = "";
+                    try { folder = MPSaveManager.MpSessionFolder(s); } catch { }
+                    if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder)) continue;
+                    bool isActive = s == session;
+                    var manifest = isActive ? activeManifest : MPSaveManager.ReadManifest(s);
+
+                    // Session-root json (manifest + ledgers) rides along for the active
+                    // session — without it the attached .hsg set isn't loadable.
+                    if (isActive)
+                        foreach (var j in Directory.GetFiles(folder, "*.json"))
+                        {
+                            long len = 0; try { len = new FileInfo(j).Length; } catch { }
+                            if (AttachSaveFile(j, Path.Combine(savesDir, s, Path.GetFileName(j)), budget)) budget -= len;
+                        }
+
+                    foreach (var memberDir in Directory.GetDirectories(folder))
+                    {
+                        string stable = Path.GetFileName(memberDir);
+                        if (!stable.StartsWith("guid-") && !stable.StartsWith("steam-")) continue;   // character folders only
+                        string? hsg = null; DateTime newest = DateTime.MinValue;
+                        foreach (var f in Directory.GetFiles(memberDir, "*.hsg"))
+                        {
+                            DateTime w; try { w = File.GetLastWriteTimeUtc(f); } catch { continue; }
+                            if (w > newest) { newest = w; hsg = f; }
+                        }
+                        if (hsg == null) continue;
+                        var slot = manifest?.Slots?.Find(x => x.StableId == stable);
+                        int day = slot?.Day ?? -1;
+                        string who = !string.IsNullOrEmpty(slot?.DisplayName) ? slot!.DisplayName : stable;
+                        long bytes = 0; try { bytes = new FileInfo(hsg).Length; } catch { }
+
+                        bool anomaly = !isActive && day >= 0 && activeDays.TryGetValue(stable, out int ad) && Math.Abs(day - ad) > 1;
+                        string attachNote = "-";
+                        if (isActive || anomaly)
+                        {
+                            string dest = Path.Combine(savesDir, isActive ? s : "anomaly-" + s, stable, Path.GetFileName(hsg));
+                            if (AttachSaveFile(hsg, dest, budget)) { budget -= bytes; attachNote = anomaly ? "ANOMALY-ATTACHED" : "yes"; }
+                            else attachNote = "over size budget";
+                        }
+                        sb.AppendLine($"| {s} | {who} | {(day >= 0 ? day.ToString(CultureInfo.InvariantCulture) : "?")} | {bytes:N0} | {newest:yyyy-MM-dd HH:mm:ss} | {attachNote} |");
+                    }
+                }
+                sb.AppendLine();
+                sb.AppendLine("Rows without files are metadata only — stale/mismatched copies are visible without uploading them.");
+                File.WriteAllText(Path.Combine(dir, "save-store.md"), sb.ToString());
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] save store attach: {ex.Message}"); }
+        }
+
+        /// <summary>Copy one save file under the budget. Share-tolerant read (the .hsg may
+        /// be mid-rotation); any failure = not attached, the listing row says so.</summary>
+        private static bool AttachSaveFile(string source, string dest, long budgetLeft)
+        {
+            try
+            {
+                if (new FileInfo(source).Length > budgetLeft) return false;
+                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                using var src = File.Open(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var dst = File.Create(dest);
+                src.CopyTo(dst);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // ── Peer log pull ────────────────────────────────────────────────────────────────
+
+        private sealed class PeerGather
+        {
+            public string Dir = "";
+            public int ExpectedPeers;
+            public int CompletedPeers;
+            public readonly Dictionary<string, int> Remaining = new();   // pid → files still expected
+            public readonly List<string> Notes = new();
+            public readonly System.Threading.ManualResetEventSlim Done = new(false);
+            public readonly object Lock = new();
+        }
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, PeerGather> _peerGathers = new();
+
+        /// <summary>Ask every connected peer for its logs. Returns the gather id the upload
+        /// task waits on, or null when there is nobody to ask (menu / solo / offline).</summary>
+        private static string? StartPeerLogGather(string dir)
+        {
+            try
+            {
+                int expected;
+                bool asHost = false;
+                try { asHost = MPServer.IsRunning; } catch { }
+                if (asHost) expected = MPServer.ConnectedPids().Count;
+                else expected = MPClient.IsConnected ? 1 : 0;   // a client's one peer is the host
+                if (expected == 0) return null;
+
+                string id = Guid.NewGuid().ToString("N");
+                _peerGathers[id] = new PeerGather { Dir = dir, ExpectedPeers = expected };
+                var payload = new PeerLogRequestPayload { RequestId = id };
+                if (asHost) MPServer.BroadcastAny(MessageEnvelope.Create(MessageType.PeerLogRequest, "host", payload));
+                else MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.PeerLogRequest, MPConfig.PlayerId, payload));
+                Plugin.Logger.LogInfo($"[BugReport] Requested logs from {expected} connected player(s) for this report.");
+                return id;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] peer log request: {ex.Message}"); return null; }
+        }
+
+        /// <summary>Block the UPLOAD TASK (never the game) until every peer's last file
+        /// lands or the 12s deadline passes, then write peer-logs.txt naming exactly what
+        /// arrived and what didn't. The event completes early on the last reply — the
+        /// deadline is only the failure bound for offline/slow peers.</summary>
+        private static void WaitForPeerLogs(string? gatherId)
+        {
+            if (string.IsNullOrEmpty(gatherId) || !_peerGathers.TryGetValue(gatherId!, out var g)) return;
+            bool all = false;
+            try { all = g.Done.Wait(TimeSpan.FromSeconds(12)); } catch { }
+            _peerGathers.TryRemove(gatherId!, out _);
+            try
+            {
+                var sb = new StringBuilder();
+                lock (g.Lock)
+                {
+                    sb.AppendLine($"Peer log collection: {g.CompletedPeers}/{g.ExpectedPeers} player(s) replied" +
+                                  (all ? "." : " before the 12s deadline — missing players were offline or slow (their machine can file its own report)."));
+                    foreach (var n in g.Notes) sb.AppendLine("- " + n);
+                    if (g.Notes.Count == 0) sb.AppendLine("- no files received");
+                }
+                File.WriteAllText(Path.Combine(g.Dir, "peer-logs.txt"), sb.ToString());
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] peer log status: {ex.Message}"); }
+        }
+
+        /// <summary>Receiver side of PeerLogReply (both roles): store the file under peer/
+        /// and complete the gather when every expected peer has delivered its last file.</summary>
+        internal static void HandlePeerLogReply(PeerLogReplyPayload? p)
+        {
+            if (p == null || string.IsNullOrEmpty(p.RequestId) || !_peerGathers.TryGetValue(p.RequestId, out var g)) return;
+            try
+            {
+                lock (g.Lock)
+                {
+                    string pid = string.IsNullOrWhiteSpace(p.FromPid) ? "peer" : p.FromPid;
+                    if (p.TotalFiles <= 0)
+                    {
+                        if (!g.Remaining.ContainsKey(pid)) { g.Remaining[pid] = 0; g.CompletedPeers++; g.Notes.Add($"{pid}: no readable log on their machine"); }
+                    }
+                    else
+                    {
+                        if (!g.Remaining.ContainsKey(pid)) g.Remaining[pid] = p.TotalFiles;
+                        if (!string.IsNullOrEmpty(p.FileName) && !string.IsNullOrEmpty(p.GzipBase64))
+                        {
+                            string peerDir = Path.Combine(g.Dir, "peer");
+                            Directory.CreateDirectory(peerDir);
+                            string name = pid + "-" + p.FileName;
+                            foreach (var c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
+                            File.WriteAllText(Path.Combine(peerDir, name), GunzipToText(p.GzipBase64));
+                            g.Notes.Add($"{pid}: {p.FileName} ({p.RawLength:N0} chars{(p.Truncated ? ", head+tail capped" : "")})");
+                        }
+                        if (--g.Remaining[pid] <= 0) g.CompletedPeers++;
+                    }
+                    if (g.CompletedPeers >= g.ExpectedPeers) g.Done.Set();
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] peer log reply: {ex.Message}"); }
+        }
+
+        /// <summary>Sender side of PeerLogRequest (both roles, background thread): read this
+        /// machine's logs with the same 4MB head+tail cap the reporter's own copies get,
+        /// redact HERE (raw text never crosses the wire), gzip, and hand each file to
+        /// <paramref name="send"/>. A peer with nothing readable still replies (TotalFiles=0)
+        /// so the reporter's wait completes without eating the deadline.</summary>
+        internal static void RespondToPeerLogRequest(string requestId, Action<PeerLogReplyPayload> send)
+        {
+            try
+            {
+                // consoleLogPath is the ACTUAL live log — it follows -logFile redirects
+                // (players with Steam launch options; the rig's second instance writes
+                // Player-instance2.log). persistentDataPath\Player.log is the default-
+                // location fallback; Player-prev.log only exists at the default location.
+                var files = new List<string>();
+                string live = _consoleLogPath;
+                string baseDir = PersistentDataPathSafe();
+                if (!string.IsNullOrEmpty(live) && File.Exists(live)) files.Add(live);
+                else if (!string.IsNullOrEmpty(baseDir) && File.Exists(Path.Combine(baseDir, "Player.log"))) files.Add(Path.Combine(baseDir, "Player.log"));
+                string prev = string.IsNullOrEmpty(baseDir) ? "" : Path.Combine(baseDir, "Player-prev.log");
+                if (prev.Length > 0 && File.Exists(prev) && !files.Contains(prev)) files.Add(prev);
+                if (files.Count == 0)
+                {
+                    send(new PeerLogReplyPayload { RequestId = requestId, FromPid = MPConfig.PlayerId, TotalFiles = 0 });
+                    return;
+                }
+                foreach (var f in files)
+                {
+                    string text = RedactSensitive(ReadLogTextCapped(f, MaxCopiedLogBytes, out bool truncated));
+                    send(new PeerLogReplyPayload
+                    {
+                        RequestId = requestId, FromPid = MPConfig.PlayerId, FileName = Path.GetFileName(f),
+                        GzipBase64 = GzipToBase64(text), RawLength = text.Length, TotalFiles = files.Count, Truncated = truncated,
+                    });
+                }
+                Plugin.Logger.LogInfo($"[BugReport] Sent {files.Count} redacted log file(s) for a report being filed by another player.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] peer log respond: {ex.Message}"); }
+        }
+
+        /// <summary>Unity's Application.persistentDataPath/consoleLogPath are main-thread
+        /// APIs; the peer responder runs on a background thread. Cached from Plugin init.</summary>
+        private static string _persistentDataPath = "";
+        private static string _consoleLogPath = "";
+        internal static void CachePaths()
+        {
+            try { _persistentDataPath = Application.persistentDataPath ?? ""; } catch { }
+            try { _consoleLogPath = Application.consoleLogPath ?? ""; } catch { }
+        }
+        private static string PersistentDataPathSafe()
+        {
+            if (!string.IsNullOrEmpty(_persistentDataPath)) return _persistentDataPath;
+            try { _persistentDataPath = Application.persistentDataPath ?? ""; } catch { }
+            return _persistentDataPath;
+        }
+
+        /// <summary>Same head+tail cap as CopyIfExists, returning text instead of a file.</summary>
+        private static string ReadLogTextCapped(string source, int maxBytes, out bool truncated)
+        {
+            truncated = false;
+            var fi = new FileInfo(source);
+            using var input = File.Open(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            if (fi.Length <= maxBytes)
+            {
+                using var sr = new StreamReader(input, Encoding.UTF8);
+                return sr.ReadToEnd();
+            }
+            truncated = true;
+            int headBytes = Math.Min(256 * 1024, maxBytes / 4);
+            int tailBytes = maxBytes - headBytes;
+            var head = new byte[headBytes];
+            int headRead = input.Read(head, 0, headBytes);
+            input.Seek(-tailBytes, SeekOrigin.End);
+            var tail = new byte[tailBytes];
+            int tailRead = input.Read(tail, 0, tailBytes);
+            return Encoding.UTF8.GetString(head, 0, headRead)
+                 + $"\r\n\r\n# ---- middle omitted: kept first {headRead} and last {tailRead} of {fi.Length} bytes ----\r\n\r\n"
+                 + Encoding.UTF8.GetString(tail, 0, tailRead);
+        }
+
+        private static string GzipToBase64(string text)
+        {
+            var raw = Encoding.UTF8.GetBytes(text);
+            using var ms = new MemoryStream();
+            using (var gz = new System.IO.Compression.GZipStream(ms, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
+                gz.Write(raw, 0, raw.Length);
+            return Convert.ToBase64String(ms.ToArray());
+        }
+
+        private static string GunzipToText(string b64)
+        {
+            using var ms = new MemoryStream(Convert.FromBase64String(b64));
+            using var gz = new System.IO.Compression.GZipStream(ms, System.IO.Compression.CompressionMode.Decompress);
+            using var sr = new StreamReader(gz, Encoding.UTF8);
+            return sr.ReadToEnd();
         }
 
         private static void CopyUserAttachments(string dir, IEnumerable<string>? attachments)
@@ -725,6 +1098,15 @@ namespace BigAmbitionsMP
                 }
 
                 try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
+
+                // One zip per report (2026-07-08) — the redaction already happened inside the
+                // bundle, and WriteFilePart streams .zip as binary. Loose files only as fallback.
+                // Built BEFORE the connection opens (task #40, user-directed 2026-08-16): a
+                // refused/failed connection then still leaves the REDACTED zip in the report
+                // folder — the file an offline player should share manually (the loose files
+                // are raw by design) — and the rig can verify the zip without a live relay.
+                string zip = BuildUploadZip(dir);
+
                 string boundary = "----BAMPBugReport" + Guid.NewGuid().ToString("N");
                 var req = (HttpWebRequest)WebRequest.Create(url);
                 req.Method = "POST";
@@ -751,9 +1133,6 @@ namespace BigAmbitionsMP
                     var payload = JsonConvert.SerializeObject(payloadObj);
                     WriteStringPart(stream, boundary, "payload_json", payload, "application/json");
 
-                    // One zip per report (2026-07-08) — the redaction already happened inside the
-                    // bundle, and WriteFilePart streams .zip as binary. Loose files only as fallback.
-                    string zip = BuildUploadZip(dir);
                     if (zip.Length > 0)
                     {
                         WriteFilePart(stream, boundary, "files[0]", zip);
@@ -849,7 +1228,7 @@ namespace BigAmbitionsMP
 
         private static IEnumerable<string> UploadFiles(string dir)
         {
-            foreach (var name in new[] { "description.txt", "report.md", "Player.log", "Player-prev.log", "bamp-ring.log", "config-redacted.json" })
+            foreach (var name in new[] { "description.txt", "report.md", "save-store.md", "peer-logs.txt", "Player.log", "Player-prev.log", "bamp-ring.log", "config-redacted.json" })
             {
                 string path = Path.Combine(dir, name);
                 if (File.Exists(path)) yield return path;
@@ -858,6 +1237,17 @@ namespace BigAmbitionsMP
             string crashDir = Path.Combine(dir, "unity-crash");
             if (Directory.Exists(crashDir))
                 foreach (var path in Directory.GetFiles(crashDir)) yield return path;
+
+            // Bug-report v2 (task #40): attached saves + peer logs, nested structure intact
+            // (saves/<session>/<stable>/save.hsg restores by straight copy). The .hsg files
+            // are binary → the zip streams them raw; the .log/.json entries go through the
+            // text redaction like everything else.
+            foreach (var sub in new[] { "saves", "peer" })
+            {
+                string d = Path.Combine(dir, sub);
+                if (Directory.Exists(d))
+                    foreach (var path in Directory.GetFiles(d, "*", SearchOption.AllDirectories)) yield return path;
+            }
 
             string attachDir = Path.Combine(dir, "attachments");
             if (!Directory.Exists(attachDir)) yield break;
@@ -897,7 +1287,7 @@ namespace BigAmbitionsMP
                                  || ext.Equals(".md", StringComparison.OrdinalIgnoreCase) || ext.Equals(".json", StringComparison.OrdinalIgnoreCase);
                         if (text)
                         {
-                            var bytes = Encoding.UTF8.GetBytes(RedactIps(File.ReadAllText(file)));
+                            var bytes = Encoding.UTF8.GetBytes(RedactSensitive(File.ReadAllText(file)));
                             es.Write(bytes, 0, bytes.Length);
                         }
                         else
@@ -936,7 +1326,7 @@ namespace BigAmbitionsMP
             {
                 // Redact IPv4 addresses from TEXT uploads so the host's public IP is never published to Discord
                 //   (the local report folder keeps the un-redacted originals). Maintainer decision 2026-06-16.
-                WriteBytes(stream, Encoding.UTF8.GetBytes(RedactIps(File.ReadAllText(path))));
+                WriteBytes(stream, Encoding.UTF8.GetBytes(RedactSensitive(File.ReadAllText(path))));
             }
             else
             {
@@ -949,7 +1339,15 @@ namespace BigAmbitionsMP
         // Replace IPv4 addresses with a placeholder — hides the host's public IP from uploaded logs.
         private static readonly System.Text.RegularExpressions.Regex _ipv4 =
             new System.Text.RegularExpressions.Regex(@"\b(?:\d{1,3}\.){3}\d{1,3}\b", System.Text.RegularExpressions.RegexOptions.Compiled);
-        private static string RedactIps(string s) => string.IsNullOrEmpty(s) ? s : _ipv4.Replace(s, "[redacted-ip]");
+        // Bug-report v2 (task #40): the Windows account name in file paths is often a real
+        // name (bundle 20260811-225015 showed the host's) and carries zero diagnostic value —
+        // players are identified by in-game name + stable id, never by the account segment.
+        // [\\/]+ (not [\\/]) so JSON-escaped paths (C:\\Users\\name) redact too; the segment
+        // itself (8.3 short forms included) is replaced, everything after it is preserved.
+        private static readonly System.Text.RegularExpressions.Regex _userPath =
+            new System.Text.RegularExpressions.Regex(@"(?i)([A-Z]:[\\/]+Users[\\/]+)([^\\/\r\n""']+)", System.Text.RegularExpressions.RegexOptions.Compiled);
+        internal static string RedactSensitive(string s)
+            => string.IsNullOrEmpty(s) ? s : _userPath.Replace(_ipv4.Replace(s, "[redacted-ip]"), "$1[user]");
 
         private static void WriteAscii(Stream stream, string value) => WriteBytes(stream, Encoding.ASCII.GetBytes(value));
 

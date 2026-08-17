@@ -336,6 +336,17 @@ namespace BigAmbitionsMP
                 }
 
                 // ── round-236 needs-flag test ─────────────────────────────────
+                case "bugreport":
+                {
+                    // Bug-report v2 (task #40) harness: file a real report through the full
+                    // pipeline (save-store attach + peer-log pull + zip). Point the config's
+                    // BugReportRelayUrl at an unreachable address first so nothing posts to
+                    // the live Discord — the zip still gets built before the upload fails.
+                    string why = arg.Length > 0 ? arg : "testdrive report";
+                    var rep = MPBugReport.Create("testdrive: " + why, openFolder: false);
+                    return $"OK report dir={rep.DirectoryPath} uploadQueued={rep.DiscordUploadQueued}";
+                }
+
                 case "energyflag":
                 {
                     var gv = SaveGameManager.Current?.gameVariables;

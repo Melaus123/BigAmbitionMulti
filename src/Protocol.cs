@@ -99,6 +99,8 @@ namespace BigAmbitionsMP
         TakeoverResult       = 174, // Host → Client: verdict — accepted (ledger + tenant reflect already done host-side; charge + native claim now) or denied (carries the host's minimum price)
         RadioState           = 175, // Any → Host → All (round-227): a building's speaker radio state (station + signed volume; sign = on/off) — light and precise so a radio click can never clobber concurrent interior edits
         ModMismatch          = 176, // Host → joiner (round-253, user-directed 2026-08-13): your installed-mod list differs from the host's. INFORMATIONAL ONLY — never a gate; the joiner shows a lobby notice + logs the diff so players stop being blind to install deltas (divergent prices/content read as mod bugs otherwise).
+        PeerLogRequest       = 177, // Reporter → connected peers (bug-report v2, user-directed 2026-08-15): a bug bundle is being filed on my machine — contribute your logs. Third-party reports ("my friend crashed") used to carry only the reporter's half of the evidence.
+        PeerLogReply         = 178, // Peer → reporter: ONE log file, redacted (IPs + Windows usernames) ON THE OWNER'S MACHINE before it crosses the wire, then gzipped. TotalFiles replies per peer; TotalFiles=0 = nothing readable. The reporter's upload waits ≤12s then ships with whatever arrived.
         RegisterServe        = 156, // Simulator → Host → All: a customer's serve STARTED / FINISHED at a till.  Lets the player working that till on a FOLLOWER machine perform the job — they are assigned to the station locally and see the queue, but with no real customers there the native serve loop never runs, so without this they stand motionless behind a busy counter.
         BuildingDirtEdit     = 155, // Helper → Host → Owner: floor cells a HELPER mopped in someone else's business.  Narrow on purpose (only the cells whose dirtiness changed): dirt is owner-authoritative interior state, and the only pre-existing guest→owner interior channel is the whole-snapshot forward on interior-designer close, which mopping never triggers — so without this a helper's cleaning stayed local and was overwritten by the owner's next push.
         RestVote             = 102, // Client → Host: this player started/ended a rest-class activity (consensus time-skip voting).
@@ -755,6 +757,26 @@ namespace BigAmbitionsMP
     {
         public string Summary { get; set; } = "";
         public string Detail  { get; set; } = "";
+    }
+
+    /// <summary>Bug-report v2 (2026-08-15): ask every connected peer for its logs while a
+    /// bug bundle is being assembled. RequestId pairs the replies with the waiting bundle.</summary>
+    public class PeerLogRequestPayload
+    {
+        public string RequestId { get; set; } = "";
+    }
+
+    /// <summary>One log file for a bug bundle. Redacted (IPs + Windows usernames) on the
+    /// OWNER'S machine before sending, then gzipped — raw log text never crosses the wire.</summary>
+    public class PeerLogReplyPayload
+    {
+        public string RequestId  { get; set; } = "";
+        public string FromPid    { get; set; } = "";   // sender's display PlayerId — names the file in the bundle
+        public string FileName   { get; set; } = "";   // "Player.log" / "Player-prev.log"; "" when TotalFiles=0
+        public string GzipBase64 { get; set; } = "";
+        public int    RawLength  { get; set; }          // redacted text length before gzip
+        public int    TotalFiles { get; set; }          // how many replies this peer sends for the request (0 = none readable)
+        public bool   Truncated  { get; set; }          // head+tail capped (same 4MB cap as the reporter's own logs)
     }
 
     public class HelloPayload

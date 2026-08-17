@@ -37,7 +37,7 @@ Every player installs the same way.
 
 ## Reporting bugs
 
-This beta exists to find bugs, so please report them. The easiest way is in-game: type **`/bug <what happened>`** in chat, or click **Report** in the chat window — it packages your logs and session details into a folder (and can upload them to Discord if a webhook is configured; your IP is stripped from uploads). You can also [open an issue](https://github.com/Melaus123/BigAmbitionMulti/issues) with:
+This beta exists to find bugs, so please report them. The easiest way is in-game: type **`/bug <what happened>`** in chat, or click **Report** in the chat window — it packages your logs and session details into a folder (and can upload them to Discord if a webhook is configured; IP addresses and Windows account names are stripped from uploads). A report filed during a multiplayer session may also include session data from the connected players — their game logs (stripped the same way, on their machine, before anything is sent) and the session's save files — so a report about another player's problem carries the evidence needed to fix it. You can also [open an issue](https://github.com/Melaus123/BigAmbitionMulti/issues) with:
 
 - What happened and what you expected.
 - Whether you were the **host** or a **client**.
