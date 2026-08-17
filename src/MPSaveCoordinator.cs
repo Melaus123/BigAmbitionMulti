@@ -1768,7 +1768,11 @@ namespace BigAmbitionsMP
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore ActiveVehicleId: {ex.Message}"); }
             }
 
-            LogHsgWrite(sessionName, MPConfig.StableId, 0, $"own save via {saveType} (ok={ok}, day={day})");
+            // Measure the real on-disk size — a hardcoded 0 here read as a failed write in field
+            // log analysis (bundle 20260811-225015); the file is complete once JoinSaveGameThreads returned.
+            int ownBytes = 0;
+            try { string? ownHsg = ok ? NewestHsg(folder) : null; if (ownHsg != null) ownBytes = (int)new FileInfo(ownHsg).Length; } catch { }
+            LogHsgWrite(sessionName, MPConfig.StableId, ownBytes, $"own save via {saveType} (ok={ok}, day={day})");
             Plugin.Logger.LogInfo($"[MPSave] Local save '{sessionName}': ok={ok} char='{charName}' day={day} → {folder}");
             // Round-114: 5s is far outside anything healthy — the worst save across ~35 field reports was
             // 1.9s and a normal one is ~100-400ms — so this only fires when the game really did lock up.
