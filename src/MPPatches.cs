@@ -81,6 +81,28 @@ namespace BigAmbitionsMP
 
             static void Postfix(Building building, float dailyRent, float lastDeposit)
             {
+                // Round-267 (field 20260815-134731): the owner-interior publisher enrolls on
+                // BUILDING ENTRY — a client renting the building they were ALREADY INSIDE fired
+                // the entry edge before ownership, so nothing they placed ever published and the
+                // host copy froze at the starter set ("23/0" audit) until a leave+re-enter.
+                // Live-read the current building at the commitment instead of trusting the
+                // stale entry edge; a rent from outside changes nothing (next entry enrolls).
+                if (MPClient.IsConnected && !MPServer.IsRunning)
+                {
+                    try
+                    {
+                        var curReg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                        if (curReg != null)
+                        {
+                            string curAddr = GameStateReader.AddressKey(curReg);
+                            if (!string.IsNullOrEmpty(curAddr) && curAddr == GameStateReader.AddressKey(building)
+                                && InteriorSync.TrySendOwnerSnapshotOnEntry(curReg, curAddr))
+                                Plugin.Logger.LogInfo($"[InteriorSync] owner publisher enrolled at RENT for '{curAddr}' — rented while inside (round-267).");
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] rent-time enroll: {ex.Message}"); }
+                }
+
                 if (!MPServer.IsRunning) return;
                 if (SuppressNextRentRequest) return;   // already handled
 
