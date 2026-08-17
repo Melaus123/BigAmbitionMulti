@@ -372,6 +372,31 @@ namespace BigAmbitionsMP
             return set;
         }
 
+        /// <summary>Round-269: route a granted guest's conveyed grab to the shop's OWNER —
+        /// their apply + next owner-push propagates everywhere. Owner offline (ledger holds
+        /// a stable id, no peer) or the host owns it → apply to the host's world copy, the
+        /// source every future sync serves. Also called host-locally for the host's own
+        /// grabs in a client's shop.</summary>
+        internal static void HandleGuestCargoGrab(string senderPid, GuestCargoGrabPayload? p)
+        {
+            if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(p.ItemInstanceId)) return;
+            try
+            {
+                string ownerLedger = BuildingOwners.TryGetValue(p.AddressKey, out var o) ? (o ?? "") : "";
+                if (!GameStatePatcher.IsHostLedgerId(ownerLedger) && !string.IsNullOrEmpty(ownerLedger) && ownerLedger != senderPid)
+                {
+                    var peer = PeerForPid(ownerLedger);
+                    if (peer != null)
+                    {
+                        Send(peer, MessageEnvelope.Create(MessageType.GuestCargoGrab, senderPid, p));
+                        return;
+                    }
+                }
+                GameStatePatcher.ApplyGuestCargoGrab(p);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] GuestCargoGrab: {ex.Message}"); }
+        }
+
         /// <summary>Display PlayerIds of every currently connected client (bug-report v2:
         /// how many peer-log replies a host-side report should wait for).</summary>
         internal static List<string> ConnectedPids()
@@ -1061,6 +1086,10 @@ namespace BigAmbitionsMP
                 case MessageType.PeerLogReply:
                     // A client's log arriving for a bundle THIS machine is assembling.
                     MPBugReport.HandlePeerLogReply(env.GetPayload<PeerLogReplyPayload>());
+                    break;
+
+                case MessageType.GuestCargoGrab:
+                    HandleGuestCargoGrab(senderPid, env.GetPayload<GuestCargoGrabPayload>());
                     break;
 
                 case MessageType.VehicleLockSet:

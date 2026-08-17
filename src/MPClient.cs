@@ -712,6 +712,10 @@ namespace BigAmbitionsMP
                     MPBugReport.HandlePeerLogReply(env.GetPayload<PeerLogReplyPayload>());
                     break;
 
+                case MessageType.GuestCargoGrab:        // round-269: a granted guest grabbed something in THIS machine's shop — apply the removal
+                    GameStatePatcher.ApplyGuestCargoGrab(env.GetPayload<GuestCargoGrabPayload>());
+                    break;
+
                 case MessageType.TakeoverResult:        // round-204b: host's verdict on my AI-business offer
                 {
                     var tv = env.GetPayload<TakeoverPayload>();

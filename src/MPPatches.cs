@@ -4336,8 +4336,16 @@ namespace BigAmbitionsMP
         public static class Patch_ItemController_TryToGrabItem_ForeignShopGate
         {
             private static int _logged;
-            static bool Prefix(ref bool __result)
+            // Round-269 (field 20260816-101747, approved 2026-08-18): the ALLOWED foreign
+            // grabs (Business grant / merger flip) still ran native-local only — the owner's
+            // next push restored the item and a granted partner could repeat-sell it (the
+            // same mint the gate blocks for strangers). Stash the identity in the Prefix
+            // (the native body may remove the reg entry), convey in the Postfix.
+            private static string? _grabAddr, _grabId, _grabName;
+
+            static bool Prefix(ItemController __instance, ref bool __result)
             {
+                _grabAddr = _grabId = _grabName = null;
                 try
                 {
                     if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
@@ -4345,8 +4353,20 @@ namespace BigAmbitionsMP
                     if (reg == null || !GameStatePatcher.IsForeignPlayerBusiness(reg)) return true;
                     string owner = MPRegisterSync.CurrentShopOwner;
                     if (string.IsNullOrEmpty(owner)) { try { owner = reg.businessOwnerRivalId?.ToString() ?? ""; } catch { } }
-                    if (!string.IsNullOrEmpty(owner) && GrantSync.IsGranted(GrantKind.Business, owner, MPConfig.PlayerId)) return true;
-                    try { if (MergerFlip.IsFlipped(GameStateReader.AddressKey(reg))) return true; } catch { }
+                    bool granted = !string.IsNullOrEmpty(owner) && GrantSync.IsGranted(GrantKind.Business, owner, MPConfig.PlayerId);
+                    bool flipped = false;
+                    try { flipped = MergerFlip.IsFlipped(GameStateReader.AddressKey(reg)); } catch { }
+                    if (granted || flipped)
+                    {
+                        try
+                        {
+                            _grabAddr = GameStateReader.AddressKey(reg);
+                            _grabId   = __instance?.ItemInstance?.id;
+                            _grabName = __instance?.ItemInstance?.itemName ?? "";
+                        }
+                        catch { }
+                        return true;
+                    }
                     __result = false;
                     PassengerHud.Toast($"This belongs to {(string.IsNullOrEmpty(owner) ? "another player" : owner)} — you need permission to take items here.");
                     if (_logged++ < 10)
@@ -4354,6 +4374,37 @@ namespace BigAmbitionsMP
                     return false;
                 }
                 catch { return true; }   // never break native pickup on a guard error
+            }
+
+            static void Postfix(bool __result)
+            {
+                string? addr = _grabAddr, id = _grabId, name = _grabName;
+                _grabAddr = _grabId = _grabName = null;
+                if (!__result || string.IsNullOrEmpty(addr) || string.IsNullOrEmpty(id)) return;
+                try
+                {
+                    // Which native semantic ran? A shelf-stock take DRAINS the shelf but keeps
+                    // the instance in the reg; a box/item grab removes it. Mirror exactly —
+                    // deleting the owner's shelf for a stock take would be its own bug.
+                    bool stillThere = false;
+                    try
+                    {
+                        var reg = GameStatePatcher.FindRegistration(addr!);
+                        if (reg?.itemInstances != null)
+                            foreach (var kv in reg.itemInstances)
+                                if (kv.Value?.id == id) { stillThere = true; break; }
+                    }
+                    catch { }
+                    var p = new GuestCargoGrabPayload
+                    {
+                        AddressKey = addr!, ItemInstanceId = id!, ItemName = name ?? "",
+                        StockOnly = stillThere, TakerPid = MPConfig.PlayerId,
+                    };
+                    if (MPServer.IsRunning) MPServer.HandleGuestCargoGrab(MPConfig.PlayerId, p);
+                    else MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.GuestCargoGrab, MPConfig.PlayerId, p));
+                    Plugin.Logger.LogInfo($"[PickupGate] granted grab conveyed: '{name}' ({(stillThere ? "stock drained" : "item removed")}) at '{addr}' (round-269).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[PickupGate] grab convey: {ex.Message}"); }
             }
         }
 

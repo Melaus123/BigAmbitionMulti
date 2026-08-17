@@ -101,6 +101,7 @@ namespace BigAmbitionsMP
         ModMismatch          = 176, // Host → joiner (round-253, user-directed 2026-08-13): your installed-mod list differs from the host's. INFORMATIONAL ONLY — never a gate; the joiner shows a lobby notice + logs the diff so players stop being blind to install deltas (divergent prices/content read as mod bugs otherwise).
         PeerLogRequest       = 177, // Reporter → connected peers (bug-report v2, user-directed 2026-08-15): a bug bundle is being filed on my machine — contribute your logs. Third-party reports ("my friend crashed") used to carry only the reporter's half of the evidence.
         PeerLogReply         = 178, // Peer → reporter: ONE log file, redacted (IPs + Windows usernames) ON THE OWNER'S MACHINE before it crosses the wire, then gzipped. TotalFiles replies per peer; TotalFiles=0 = nothing readable. The reporter's upload waits ≤12s then ships with whatever arrived.
+        GuestCargoGrab       = 179, // Taker → Host → Owner (round-269, field 20260816-101747 sell-loop exploit): a Business-granted guest grabbed an item (or drained shelf stock) in another player's business — convey it so the owner's copy loses it too. Ungranted grabs are BLOCKED by the pickup gate; this closes the dup for the granted flow. Routed to the online owner (their apply + next owner-push propagates), applied host-side when the owner is offline or is the host.
         RegisterServe        = 156, // Simulator → Host → All: a customer's serve STARTED / FINISHED at a till.  Lets the player working that till on a FOLLOWER machine perform the job — they are assigned to the station locally and see the queue, but with no real customers there the native serve loop never runs, so without this they stand motionless behind a busy counter.
         BuildingDirtEdit     = 155, // Helper → Host → Owner: floor cells a HELPER mopped in someone else's business.  Narrow on purpose (only the cells whose dirtiness changed): dirt is owner-authoritative interior state, and the only pre-existing guest→owner interior channel is the whole-snapshot forward on interior-designer close, which mopping never triggers — so without this a helper's cleaning stayed local and was overwritten by the owner's next push.
         RestVote             = 102, // Client → Host: this player started/ended a rest-class activity (consensus time-skip voting).
@@ -764,6 +765,18 @@ namespace BigAmbitionsMP
     public class PeerLogRequestPayload
     {
         public string RequestId { get; set; } = "";
+    }
+
+    /// <summary>Round-269: a Business-granted guest's grab in another player's business.
+    /// StockOnly=true mirrors the native shelf-stock take (the shelf STAYS, its stock
+    /// drains — the whole-instance removal would delete the owner's shelf).</summary>
+    public class GuestCargoGrabPayload
+    {
+        public string AddressKey     { get; set; } = "";
+        public string ItemInstanceId { get; set; } = "";
+        public string ItemName       { get; set; } = "";   // stock-clear matching + logs
+        public bool   StockOnly      { get; set; }          // true = drain matching stock, keep the instance
+        public string TakerPid       { get; set; } = "";
     }
 
     /// <summary>One log file for a bug bundle. Redacted (IPs + Windows usernames) on the

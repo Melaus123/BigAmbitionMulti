@@ -196,6 +196,61 @@ namespace BigAmbitionsMP
             });
         }
 
+        /// <summary>Round-269: apply a granted guest's conveyed grab on the OWNER's (or the
+        /// host's) world copy. StockOnly mirrors the native shelf-stock semantic — drain the
+        /// matching stock entries, keep the shelf. Idempotent: an instance already gone (the
+        /// parity-slice channels can convey the same take) logs and returns. MAIN THREAD.</summary>
+        public static void ApplyGuestCargoGrab(GuestCargoGrabPayload? p)
+        {
+            if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(p.ItemInstanceId)) return;
+            RunOnMainThread(() =>
+            {
+                try
+                {
+                    var reg = FindRegistration(p.AddressKey);
+                    if (reg?.itemInstances == null) return;
+                    string? key = null;
+                    foreach (var kv in reg.itemInstances)
+                        if (kv.Value?.id == p.ItemInstanceId) { key = kv.Key; break; }
+                    if (key == null)
+                    {
+                        Plugin.Logger.LogInfo($"[PickupGate] conveyed grab at '{p.AddressKey}': '{p.ItemName}' already gone (converged; round-269).");
+                        return;
+                    }
+                    if (p.StockOnly)
+                    {
+                        var inst = reg.itemInstances[key];
+                        int cleared = 0;
+                        try
+                        {
+                            if (inst?.cargoInstances != null)
+                                foreach (var c in inst.cargoInstances)
+                                    if (c != null && c.itemName == p.ItemName && c.amount > 0) { c.amount = 0; c.itemName = null; cleared++; }
+                        }
+                        catch { }
+                        Plugin.Logger.LogInfo($"[PickupGate] conveyed STOCK take at '{p.AddressKey}': '{p.ItemName}' drained ({cleared} entr(ies), taker '{p.TakerPid}', round-269).");
+                    }
+                    else
+                    {
+                        reg.itemInstances.Remove(key);
+                        // Standing in the building right now → remove the live object too;
+                        // otherwise the next interior instantiation simply won't spawn it.
+                        try
+                        {
+                            var bm = InstanceBehavior<BuildingManager>.Instance;
+                            if (bm != null && bm.buildingRegistration == reg && bm.allItemControllers != null)
+                                foreach (var ic in bm.allItemControllers)
+                                    if (ic != null && ic.ItemInstance?.id == p.ItemInstanceId)
+                                    { try { UnityEngine.Object.Destroy(ic.gameObject); } catch { } break; }
+                        }
+                        catch { }
+                        Plugin.Logger.LogInfo($"[PickupGate] conveyed grab at '{p.AddressKey}': '{p.ItemName}' removed (taker '{p.TakerPid}', round-269).");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[PickupGate] apply grab: {ex.Message}"); }
+            });
+        }
+
         public static void ApplyGameTime(GameTimeSyncPayload payload)
         {
             RunOnMainThread(() =>
