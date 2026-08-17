@@ -663,6 +663,7 @@ namespace BigAmbitionsMP
             PassengerHud.Tick();         // passenger's in-ride "Exit Vehicle" panel
             VehicleStoragePanel.Tick();  // non-owner shared-storage panel (refresh on cargo change / auto-close)
             TimeSync.TickStartupHold();  // round-36: had NO caller (dead since inception) — the hold's timeScale re-clamp
+            MPClient.TickJoinDownloadReport();   // round-270: throttled world-download percent → host → everyone's overlay
             GameStateReader.TickPendingNativePause();   // round-36c: converge the pause flag onto the last
                                                         // requested state (rate-limit drops lost it before)
             MPPerf.End("Pre.C", _sub);
@@ -5227,7 +5228,19 @@ namespace BigAmbitionsMP
                             info = $"Others join at:   {MPConfig.HostIP} : {port}{lanLine}";
                     }
                 }
-                else if (MPClient.IsConnected)   info = "Connected to host";
+                else if (MPClient.IsConnected)
+                {
+                    info = "Connected to host";
+                    // Round-270: the joiner's world download, as a status line in the spot
+                    // they are already watching. 4s freshness window so slow-relay gaps
+                    // between chunks do not blink the line. Direct-UDP joins never report
+                    // (internal fragmentation) — accepted; the line simply never appears.
+                    if (SteamXferProgress.ActiveWithin(4000) && SteamXferProgress.Tag == "SteamClient" && SteamXferProgress.Cnt > 0)
+                    {
+                        int dlPct = Mathf.Min(100, SteamXferProgress.Got * 100 / SteamXferProgress.Cnt);
+                        info += "\n" + ComposeDownloadLine(dlPct, SteamXferProgress.Got, SteamXferProgress.Cnt, SteamXferProgress.KBytes);
+                    }
+                }
                 else if (MPClient.IsConnecting)  info = "Connecting…";
                 else
                 {
@@ -5240,6 +5253,14 @@ namespace BigAmbitionsMP
                 // Round-93: a transient notice (e.g. overlay-disabled) briefly overrides the info line.
                 if (!string.IsNullOrEmpty(_lobbyNotice) && Time.unscaledTime < _lobbyNoticeUntil)
                     info = $"<color=#FFB060>{_lobbyNotice}</color>";
+#if BAMP_DEV
+                // Round-270 /uipreview dl: dev preview slot — deliberately SEPARATE from
+                // _lobbyNotice, which session teardown rightly clears (round-253e) and which
+                // wiped the first preview attempt on the exact exit-to-menu path it needed.
+                // Rendered raw (no orange wrap) so it shows exactly what the live path shows.
+                if (!string.IsNullOrEmpty(_previewNotice) && Time.unscaledTime < _previewNoticeUntil)
+                    info = _previewNotice;
+#endif
                 // Round-253f (user ruling: events over timers): the mod-mismatch line is a
                 // LIVE READ of current state — shown exactly while a mismatched player is
                 // present (host) / while connected to a mismatched host (client). No timer.
@@ -6514,6 +6535,21 @@ namespace BigAmbitionsMP
             }
 
 #if BAMP_DEV
+            // Round-270: /uipreview dl|wait — force-render the join-progress overlay states
+            // with sample data for visual verification (12s each, auto-expires; "off" clears).
+            if (t.StartsWith("/uipreview", StringComparison.OrdinalIgnoreCase))
+            {
+                string which = t.Length > 10 ? t.Substring(10).Trim().ToLowerInvariant() : "";
+                switch (which)
+                {
+                    case "dl":   PreviewJoinerDownload(); MPChat.AddNotice("preview armed for 2 min — exit to menu, then Host New Game: the download line shows on the lobby panel"); break;
+                    case "wait": PreviewWaitList();       MPChat.AddNotice("previewing: waiting-for-players list (12s)"); break;
+                    case "off":  SetStartupPreview("", 0f); _previewNotice = ""; _previewNoticeUntil = 0f; MPChat.AddNotice("preview cleared"); break;
+                    default:     MPChat.AddNotice("usage: /uipreview dl | wait | off"); break;
+                }
+                return;
+            }
+
             // Dev builds ONLY (maintainer decision 2026-06-16): the intentional-crash test never ships in Release.
             if (t.Equals("/bugcrash", StringComparison.OrdinalIgnoreCase) ||
                 t.StartsWith("/bugcrash ", StringComparison.OrdinalIgnoreCase))
@@ -6969,9 +7005,91 @@ namespace BigAmbitionsMP
         private bool  _startupScreenWasShown;
         private float _startupHeldSince;
 
+        // ── Round-270: per-player world-download progress (display-only) ─────────
+        // pid → (percent, unscaled time received). Fresh (<4s) = downloading; a row
+        // gone quiet but not yet world-ready = the native load is running — the
+        // staleness IS the phase, no phase field to desync. Cleared lazily when no
+        // session is active. Direct-UDP joiners never report → they render as
+        // "loading world…" throughout (accepted limitation).
+        private static readonly Dictionary<string, (int pct, float at)> _joinDl = new();
+        public static void ReportJoinProgress(string pid, int pct)
+        {
+            if (string.IsNullOrEmpty(pid)) return;
+            lock (_joinDl) _joinDl[pid] = (Mathf.Clamp(pct, 0, 100), Time.unscaledTime);
+        }
+        private static string JoinProgressSuffix(string pid)
+        {
+            try
+            {
+                lock (_joinDl)
+                    if (_joinDl.TryGetValue(pid, out var e))
+                        return Time.unscaledTime - e.at < 4f
+                            ? $" — downloading world {e.pct}%"
+                            : " — loading world…";
+            }
+            catch { }
+            return " — loading world…";
+        }
+
+        // Round-270: the display texts, extracted so the /uipreview dev command renders
+        // EXACTLY what the live path renders (a preview that drifts is a UI-vs-behavior lie).
+        /// <summary>The joiner's download status — two MENU-STYLED lines appended to the
+        /// lobby panel's info text. Never a screen takeover (user review 2026-08-17).</summary>
+        private static string ComposeDownloadLine(int pct, int got, int cnt, int kbytes) =>
+            $"<color=#FFD24A>Downloading world — {pct}% (chunk {got} of {cnt} · {kbytes / 1024f:F1} MB)</color>\n" +
+            "<size=15><color=#AAAAAA>Stay on this screen — cancelling restarts the download.</color></size>";
+
+        private static string ComposeWaitRow(string pid) =>
+            $"<color=#FFD24A>{MPNames.Resolve(pid)}</color><color=#CFCFCF>{JoinProgressSuffix(pid)}</color>";
+
+#if BAMP_DEV
+        // /uipreview (dev chat command): force the startup overlay into each round-270
+        // state with sample data so the layout can be verified visually without a
+        // Steam-relay session. Overrides the tick for its duration; auto-expires.
+        private static float  _previewUntil;
+        private static string _previewText = "";
+        internal static void SetStartupPreview(string text, float seconds)
+        { _previewText = text ?? ""; _previewUntil = Time.unscaledTime + seconds; }
+
+        /// <summary>Arm the LOBBY PANEL's download line with sample numbers for 2 minutes —
+        /// exit to the menu, then host or join so the lobby panel is visible; the line
+        /// renders in place via a dev-only preview slot that survives session teardown
+        /// (the ordinary notice slot is wiped by MPServer.Stop — first attempt's bug).</summary>
+        private static string _previewNotice = "";
+        private static float  _previewNoticeUntil;
+        internal static void PreviewJoinerDownload()
+        {
+            _previewNotice      = "Connected to host\n" + ComposeDownloadLine(64, 3, 4, 1229);
+            _previewNoticeUntil = Time.unscaledTime + 120f;
+        }
+
+        internal static void PreviewWaitList()
+        {
+            ReportJoinProgress("PreviewFriend", 64);
+            lock (_joinDl) _joinDl["PreviewSlowpoke"] = (12, Time.unscaledTime - 10f);   // stale → "loading world…"
+            string body = "Waiting for these players to finish loading:\n\n" +
+                          ComposeWaitRow("PreviewFriend") + "\n" + ComposeWaitRow("PreviewSlowpoke");
+            SetStartupPreview(
+                "<size=36><b>Multiplayer</b></size>\n\n" + body +
+                "\n\n<size=20><color=#FFD24A>Auto-start in 2:41</color></size>" +
+                "\n\n<size=17><color=#AAAAAA>The game starts automatically once everyone is ready.</color></size>", 12f);
+        }
+#endif
+
         private void TickStartupScreen()
         {
             if (_startupScreenGO == null) return;
+
+#if BAMP_DEV
+            // Round-270 /uipreview: dev-only forced render for visual verification.
+            if (Time.unscaledTime < _previewUntil)
+            {
+                _startupScreenGO.SetActive(true);
+                _startupScreenWasShown = true;
+                if (_startupScreenTxt != null) _startupScreenTxt.text = _previewText;
+                return;
+            }
+#endif
 
             // Host-loss notice (set on involuntary in-game disconnect) reuses this
             // overlay — checked first so it wins over the startup-wait text.  The
@@ -7031,6 +7149,17 @@ namespace BigAmbitionsMP
                 return;
             }
 
+            // Round-270 redesign (user review 2026-08-17: the first cut put a FULL-SCREEN
+            // raycast-blocking overlay over the MENU — trapping the joiner's clicks, in
+            // in-game styling, flickering between slow chunks). The joiner's download
+            // progress lives on the LOBBY PANEL's info line instead (see the
+            // "Connected to host" branch) — non-blocking, menu-styled, in the exact
+            // spot the waiting player is already looking. This overlay serves only its
+            // original in-world states.
+            // Session over → forget stale download rows (lazy cleanup).
+            if (!MPServer.IsRunning && !MPClient.IsConnected)
+                lock (_joinDl) if (_joinDl.Count > 0) _joinDl.Clear();
+
             // Suppress the one-frame flash on an INSTANT-release hold: hosting alone
             // (no one to wait for) begins AND ends the startup hold within ~1 frame,
             // so the full-screen "waiting for players" overlay would flash for that
@@ -7071,7 +7200,9 @@ namespace BigAmbitionsMP
 
             string body = (waiting != null && waiting.Count > 0)
                 ? "Waiting for these players to finish loading:\n\n" +
-                  string.Join("\n", waiting.Select(n => $"<color=#FFD24A>{MPNames.Resolve(n)}</color>"))
+                  // Round-270: each waiting player carries their live download percent
+                  // (or "loading world…" once their reports go quiet / never came).
+                  string.Join("\n", waiting.Select(ComposeWaitRow))
                 : "Waiting for all players to finish loading…";
 
             // Countdown to the force-release (host knows the elapsed time;

@@ -85,6 +85,24 @@ namespace BigAmbitionsMP
         }
     }
 
+    /// <summary>Round-270 (join progress, field 20260816-112127 "friend cannot join" =
+    /// players cancelling silent multi-MB relay downloads): live snapshot of the newest
+    /// in-flight fragment assembly, read by the join UI and the progress reporter.
+    /// Written from the receive pump, read from the main thread — plain volatile fields,
+    /// display-grade freshness only.</summary>
+    internal static class SteamXferProgress
+    {
+        public static volatile int Got, Cnt;
+        public static volatile int KBytes;
+        public static long AtMs;
+        public static string Tag = "";
+        public static void Report(string tag, int got, int cnt, int bytes)
+        { Tag = tag; Got = got; Cnt = cnt; KBytes = bytes / 1024; AtMs = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; }
+        public static void Done() { Got = 0; Cnt = 0; }
+        public static bool ActiveWithin(int ms)
+            => Cnt > 0 && (DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond) - AtMs < ms;
+    }
+
     /// <summary>Per-connection reassembly of fragmented Steam messages.  Fed
     /// from the receive path (pump thread); lock-protected; stale assemblies
     /// (lost fragment / dead peer) pruned after 120s.</summary>
@@ -117,6 +135,7 @@ namespace BigAmbitionsMP
                         _pending[id] = e = new Entry { Parts = new byte[cnt][], AtMs = now };
                     if (e.Parts.Length != cnt) { _pending.Remove(id); return true; }    // inconsistent — drop
                     if (e.Parts[idx] == null) { e.Parts[idx] = chunk; e.Got++; e.Bytes += chunk.Length; e.AtMs = now; }
+                    SteamXferProgress.Report(_tag, e.Got, cnt, e.Bytes);   // round-270: live download progress
                     if (e.Got < cnt) return true;
 
                     var full = new byte[e.Bytes];
@@ -124,6 +143,7 @@ namespace BigAmbitionsMP
                     foreach (var p in e.Parts) { Array.Copy(p!, 0, full, off, p!.Length); off += p!.Length; }
                     _pending.Remove(id);
                     complete = full;
+                    SteamXferProgress.Done();   // round-270: assembly finished — UI falls back to "loading"
                     Plugin.Logger.LogInfo($"[{_tag}] reassembled large message: {cnt} fragment(s), {full.Length}B.");
                     return true;
                 }

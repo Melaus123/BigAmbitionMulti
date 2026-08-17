@@ -716,6 +716,13 @@ namespace BigAmbitionsMP
                     GameStatePatcher.ApplyGuestCargoGrab(env.GetPayload<GuestCargoGrabPayload>());
                     break;
 
+                case MessageType.JoinProgress:          // round-270: another joiner's download percent (host rebroadcast) — overlay display
+                {
+                    var jp = env.GetPayload<JoinProgressPayload>();
+                    if (jp != null && !string.IsNullOrEmpty(jp.Pid)) MPCanvasUI.ReportJoinProgress(jp.Pid, jp.Percent);
+                    break;
+                }
+
                 case MessageType.TakeoverResult:        // round-204b: host's verdict on my AI-business offer
                 {
                     var tv = env.GetPayload<TakeoverPayload>();
@@ -1861,6 +1868,33 @@ namespace BigAmbitionsMP
         private static void Send(MessageEnvelope env)
         {
             _transport?.Send(env.Serialize(), reliable: true);
+        }
+
+        // ── Round-270: world-download progress reporter (called each frame from the canvas) ──
+        private static float _jpNextAt;
+        private static int   _jpLastPct = -1;
+
+        /// <summary>While THIS client is downloading the world (Steam-relay fragments in
+        /// flight, not yet in-game), report the percent to the host — throttled to a change
+        /// of ≥2% and ≥0.7s. Direct-UDP joins never report (fragmentation is internal to
+        /// that transport — accepted limitation); silence is what the overlay renders as
+        /// "loading world…", so no report is never wrong, only less informative.</summary>
+        public static void TickJoinDownloadReport()
+        {
+            try
+            {
+                if (!IsConnected || MPServer.IsRunning || InMpGame) { _jpLastPct = -1; return; }
+                if (!SteamXferProgress.ActiveWithin(2000) || SteamXferProgress.Tag != "SteamClient") return;
+                int cnt = SteamXferProgress.Cnt;
+                if (cnt <= 0) return;
+                int pct = Math.Min(100, SteamXferProgress.Got * 100 / cnt);
+                float now = UnityEngine.Time.unscaledTime;
+                if (Math.Abs(pct - _jpLastPct) < 2 || now < _jpNextAt) return;
+                _jpLastPct = pct; _jpNextAt = now + 0.7f;
+                SendEnvelope(MessageEnvelope.Create(MessageType.JoinProgress, MPConfig.PlayerId,
+                    new JoinProgressPayload { Pid = MPConfig.PlayerId, Percent = pct }));
+            }
+            catch { }
         }
 
         /// <summary>Reliable send for modules that build their own envelope.</summary>

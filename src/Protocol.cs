@@ -102,6 +102,7 @@ namespace BigAmbitionsMP
         PeerLogRequest       = 177, // Reporter → connected peers (bug-report v2, user-directed 2026-08-15): a bug bundle is being filed on my machine — contribute your logs. Third-party reports ("my friend crashed") used to carry only the reporter's half of the evidence.
         PeerLogReply         = 178, // Peer → reporter: ONE log file, redacted (IPs + Windows usernames) ON THE OWNER'S MACHINE before it crosses the wire, then gzipped. TotalFiles replies per peer; TotalFiles=0 = nothing readable. The reporter's upload waits ≤12s then ships with whatever arrived.
         GuestCargoGrab       = 179, // Taker → Host → Owner (round-269, field 20260816-101747 sell-loop exploit): a Business-granted guest grabbed an item (or drained shelf stock) in another player's business — convey it so the owner's copy loses it too. Ungranted grabs are BLOCKED by the pickup gate; this closes the dup for the granted flow. Routed to the online owner (their apply + next owner-push propagates), applied host-side when the owner is offline or is the host.
+        JoinProgress         = 180, // Client → Host → All (round-270, field 20260816-112127 "cannot join" = silent relay downloads cancelled): the joiner's world-download percent, throttled. Display-only. The overlay derives "loading world…" from report STALENESS (fresh percent = downloading; gone quiet but not world-ready = native load running) — no phase field to desync.
         RegisterServe        = 156, // Simulator → Host → All: a customer's serve STARTED / FINISHED at a till.  Lets the player working that till on a FOLLOWER machine perform the job — they are assigned to the station locally and see the queue, but with no real customers there the native serve loop never runs, so without this they stand motionless behind a busy counter.
         BuildingDirtEdit     = 155, // Helper → Host → Owner: floor cells a HELPER mopped in someone else's business.  Narrow on purpose (only the cells whose dirtiness changed): dirt is owner-authoritative interior state, and the only pre-existing guest→owner interior channel is the whole-snapshot forward on interior-designer close, which mopping never triggers — so without this a helper's cleaning stayed local and was overwritten by the owner's next push.
         RestVote             = 102, // Client → Host: this player started/ended a rest-class activity (consensus time-skip voting).
@@ -765,6 +766,13 @@ namespace BigAmbitionsMP
     public class PeerLogRequestPayload
     {
         public string RequestId { get; set; } = "";
+    }
+
+    /// <summary>Round-270: a joining player's world-download progress (display-only).</summary>
+    public class JoinProgressPayload
+    {
+        public string Pid     { get; set; } = "";
+        public int    Percent { get; set; }
     }
 
     /// <summary>Round-269: a Business-granted guest's grab in another player's business.

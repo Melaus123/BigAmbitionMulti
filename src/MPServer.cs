@@ -1092,6 +1092,19 @@ namespace BigAmbitionsMP
                     HandleGuestCargoGrab(senderPid, env.GetPayload<GuestCargoGrabPayload>());
                     break;
 
+                case MessageType.JoinProgress:
+                {
+                    // Round-270: display-only — stash for the host's own overlay, rebroadcast
+                    // so every player waiting on the startup screen sees the joiner's percent.
+                    var jp = env.GetPayload<JoinProgressPayload>();
+                    if (jp != null && !string.IsNullOrEmpty(jp.Pid))
+                    {
+                        MPCanvasUI.ReportJoinProgress(jp.Pid, jp.Percent);
+                        Broadcast(env);
+                    }
+                    break;
+                }
+
                 case MessageType.VehicleLockSet:
                     HandleVehicleLockSet(senderPid, env);
                     break;
