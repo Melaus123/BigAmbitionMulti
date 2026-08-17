@@ -39,6 +39,59 @@ namespace BigAmbitionsMP
         public static bool SeatedForUi => Seated && !ReferenceEquals(_curActRef, _suppressedActRef);
         private static object? _suppressedActRef;
         private static object? _curActRef;
+        private static bool _buttonsReadStackLogged;   // round-266: inner-exception stack printed once per activity
+        private static readonly Dictionary<NavigationBlocker, int> _stuckObs = new();   // round-90b: consecutive held-while-owner-closed observations
+
+        /// <summary>Round-90b: is this blocker's OWNING surface actually active right now?
+        /// true = open (legitimate hold), false = CLOSED (impossible in normal play — stuck),
+        /// null = no owner mapping (sequences, dialogs — the plain persistence warn covers them).
+        /// Singleton statics only — no scene scans, O(1) reads.</summary>
+        private static bool? BlockerOwnerOpen(NavigationBlocker key)
+        {
+            try
+            {
+                switch (key)
+                {
+                    case NavigationBlocker.Map:                return CityMap.IsOpen;
+                    // 'Vehicle' has TWO legitimate holders (user catch 2026-08-17): the native
+                    // driver flow (GetCurrentVehicle-based) AND our passenger ride, which sets
+                    // this key MANUALLY (PassengerRide.SetVehicleNavBlocker) while the native
+                    // check reads false — a rider is NOT natively "in" the car. Without the
+                    // second term every normal passenger ride reads as stuck.
+                    case NavigationBlocker.Vehicle:            return Helpers.VehicleHelper.IsInsideMotorVehicle() || PassengerRide.IsSeated;
+                    case NavigationBlocker.PurchaseUI:         return UI.Purchase.PurchaseUI.IsPanelOpen;
+                    case NavigationBlocker.InteriorDesignerUI: return UI.InteriorDesigner.InteriorDesignerUI.IsOpen;
+                    case NavigationBlocker.PurchaseVehicleUI:  return UI.PurchaseVehicle.PurchaseVehicleUI.IsPanelOpen;
+                    default: return null;
+                }
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Round-90b: the navigation-blocker state at THIS moment, for report.md — a
+        /// player filing "I'm stuck" with a key marked "owner CLOSED — STUCK" is the smoking
+        /// gun the round-90 class has been missing. MAIN THREAD (report creation is).</summary>
+        internal static string DescribeNavBlockersForReport()
+        {
+            try
+            {
+                var pc = InstanceBehavior<GameManager>.Instance?.playerController;
+                if (pc == null) return "(no player)";
+                _navBlockerSetField ??= HarmonyLib.AccessTools.Field(typeof(PlayerController), "_activeNavigationBlockers");
+                if (_navBlockerSetField?.GetValue(pc) is not System.Collections.IEnumerable held) return "(unreadable)";
+                var parts = new List<string>();
+                foreach (var b in held)
+                {
+                    if (b is not NavigationBlocker key) continue;
+                    bool? open = BlockerOwnerOpen(key);
+                    parts.Add(open == null ? key.ToString()
+                            : open == true ? $"{key}(owner open)"
+                            : $"{key}(owner CLOSED — STUCK)");
+                }
+                return parts.Count == 0 ? "none" : string.Join(", ", parts);
+            }
+            catch (Exception ex) { return $"(error: {ex.Message})"; }
+        }
 
         /// <summary>True once the avatar has physically ARRIVED in the activity (sitting / performing) —
         /// NOT while still choosing or walking over (MovingTowardsActivity).  This DELAYS the dock until
@@ -447,6 +500,7 @@ namespace BigAmbitionsMP
             {
                 _notSeatedSince = Time.unscaledTime;
                 if (_foreignHeldSince.Count > 0) _foreignHeldSince.Clear();   // round-90: activities hold keys legitimately
+                if (_stuckObs.Count > 0) _stuckObs.Clear();                   // round-90b: same reset
             }
             else if ((MPServer.IsRunning || MPClient.IsClientInWorld)
                      && Time.unscaledTime >= _navHealNext
@@ -486,6 +540,7 @@ namespace BigAmbitionsMP
                                 if (foreignNow == null)
                                 {
                                     if (_foreignHeldSince.Count > 0) _foreignHeldSince.Clear();
+                                    if (_stuckObs.Count > 0) _stuckObs.Clear();   // round-90b
                                 }
                                 else
                                 {
@@ -529,6 +584,26 @@ namespace BigAmbitionsMP
                                         try { pc.Character?.ToggleVisibility(show: true); } catch { }
                                         try { HarmonyLib.AccessTools.PropertySetter(typeof(SubwaySystem), "IsRiding")?.Invoke(null, new object[] { false }); } catch { }
                                         Plugin.Logger.LogWarning("[Rest] TRANSIT HEAL: released stranded 'Subway' blocker (held 120s+ — the ride's completion never ran; visibility restored, riding flag cleared; round-198). Movement restored.");
+                                    }
+
+                                    // Round-90b (user-directed 2026-08-17): the 30s persistence warn cannot
+                                    // tell "in use" from "stuck" — a player reading the map for a minute looks
+                                    // identical to a stranded lock. For keys with a KNOWN owning surface, read
+                                    // the owner LIVE: held while the owner is CLOSED cannot happen in normal
+                                    // play. Two consecutive observations (this tick runs each ~2s; a closing
+                                    // panel removes its key the same frame) = confirmed stuck — state-stability
+                                    // confirmation, not a wall-clock proxy. DETECT-ONLY here; the round-198
+                                    // heals above stay the only releases.
+                                    foreach (var k in new List<NavigationBlocker>(_stuckObs.Keys))
+                                        if (!foreignNow.Contains(k)) _stuckObs.Remove(k);
+                                    foreach (var k in foreignNow)
+                                    {
+                                        if (BlockerOwnerOpen(k) != false) { _stuckObs.Remove(k); continue; }
+                                        int n = _stuckObs.TryGetValue(k, out var prev) ? prev + 1 : 1;
+                                        _stuckObs[k] = n;
+                                        if (n == 2 || (n > 2 && n % 30 == 0))
+                                            Plugin.Logger.LogWarning(
+                                                $"[Rest] STUCK BLOCKER (round-90b, detect-only): '{k}' held while its owning surface is CLOSED ({n} consecutive checks) — walking and building exits are dead on this machine until it clears.");
                                     }
                                 }
                             }
@@ -719,6 +794,7 @@ namespace BigAmbitionsMP
                 Seated = seated;
                 _curAct = seated ? act : null;
                 _curActRef = _curAct;   // Mono: object identity replaces pointer identity
+                if (!seated) _buttonsReadStackLogged = false;   // round-266: re-arm the one-shot stack per activity
                 if (!seated) _suppressedActRef = null;   // gone — clear the wedge guard
                 ActivityName = seated ? nm : "";
                 ActivityState = -1;
@@ -786,7 +862,26 @@ namespace BigAmbitionsMP
                         }
                     }
                 }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] buttons read: {ex.Message}"); }
+                catch (Exception ex)
+                {
+                    // Round-266 (field 20260815-134731): 87 identical "Exception has been thrown by the
+                    // target of an invocation" lines — the WRAPPER message, with the real thrower
+                    // unknowable. Unwrap TargetInvocationException, name the activity, and print the
+                    // inner stack ONCE per session so the next bundle names the throwing native method
+                    // (the two candidates — null buildingRegistration vs schedule walk — are decided
+                    // by one stack frame). The empty dock is deliberately left as-is (user ruling
+                    // 2026-08-17: the lack of an exit motivates the report).
+                    var inner = ex; int hops = 0;
+                    while (inner is System.Reflection.TargetInvocationException tie && tie.InnerException != null && hops++ < 4)
+                        inner = tie.InnerException;
+                    string actName = "?"; try { actName = _curAct?.GetType()?.Name ?? "?"; } catch { }
+                    if (!_buttonsReadStackLogged)
+                    {
+                        _buttonsReadStackLogged = true;
+                        Plugin.Logger.LogWarning($"[Rest] buttons read ({actName}): {inner.GetType().Name}: {inner.Message}\n{inner.StackTrace}");
+                    }
+                    else Plugin.Logger.LogWarning($"[Rest] buttons read ({actName}): {inner.GetType().Name}: {inner.Message}");
+                }
 
                 // Classify: Start is AUTO-pressed (click bench → character sits,
                 // no redundant button); Stop/Cancel renders as the header X.
