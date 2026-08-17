@@ -1531,6 +1531,25 @@ namespace BigAmbitionsMP
             return "";
         }
 
+        /// <summary>Round-268: the exit-teardown remainder the native CarController.ExitVehicle
+        /// lines past the throw point would have run — blocker release (:511), avatar visibility
+        /// (:508), reparent (:510). Every call is a no-op when the state is already correct, so
+        /// it is safe on any path. PASSENGER GUARD: a rider's Vehicle blocker + hidden avatar
+        /// belong to the ride (PassengerRide sets both deliberately) — never touch them mid-ride.</summary>
+        private static void CompleteExitTeardown()
+        {
+            if (PassengerRide.IsSeated) return;
+            try { InstanceBehavior<GameManager>.Instance?.playerController?.UnsetNavigationBlocker(NavigationBlocker.Vehicle); } catch { }
+            try { InstanceBehavior<GameManager>.Instance?.playerController?.Character?.ToggleVisibility(show: true); } catch { }
+            try
+            {
+                var gm = InstanceBehavior<GameManager>.Instance;
+                if (gm != null && gm.playerController != null && gm.playerController.transform.parent != gm.transform)
+                    gm.playerController.transform.SetParent(gm.transform);
+            }
+            catch { }
+        }
+
         /// <summary>Round-34, THE STALE-VEHICLE-STATE CLASS (user: "do we have a larger bug?" — yes, this):
         /// destroying a ghost/proxy the LOCAL player is currently driving or pushing skips the game's exit
         /// bookkeeping (VehicleController.ExitVehicle :327 clears ActiveVehicleId + controlledByPlayer +
@@ -1556,6 +1575,9 @@ namespace BigAmbitionsMP
                 {
                     Plugin.Logger.LogWarning($"[Vehicle] despawning '{vid}' whose ghost id matches ActiveVehicleId '{active}' with no live controller — clearing the stale active state (round-68).");
                     try { SaveGameManager.Current.ActiveVehicleId = null; } catch { }
+                    // Round-268: a controller-less death can strand the blocker + hidden avatar
+                    // the same way the throw path below can — same completion, same no-op safety.
+                    CompleteExitTeardown();
                     return;
                 }
                 if (!driven && !activeHere) return;
@@ -1563,8 +1585,16 @@ namespace BigAmbitionsMP
                 try { vc!.ExitVehicle(); }
                 catch
                 {
+                    // Round-268 (approved 2026-08-18, found via the round-260 partial-rollback
+                    // class audit): this fallback cleared 2 of the 6 states EnterVehicle set. A
+                    // throw before CarController.ExitVehicle:511 left NavigationBlocker.Vehicle
+                    // HELD (WASD frozen, building exits dead — the round-90 stuck shape) and
+                    // could leave the avatar invisible + parented to the dying car. Complete
+                    // the remainder the unreached native lines would have run.
                     try { SaveGameManager.Current.ActiveVehicleId = null; } catch { }
                     try { if (vc != null) vc.controlledByPlayer = false; } catch { }
+                    CompleteExitTeardown();
+                    Plugin.Logger.LogWarning("[Vehicle] native exit THREW on the dying vehicle — fallback completed the full teardown (blocker released, avatar shown, reparented; round-268).");
                 }
                 try
                 {
