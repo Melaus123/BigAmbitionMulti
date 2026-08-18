@@ -86,23 +86,10 @@ namespace BigAmbitionsMP
         }
     }
 
-    /// <summary>TRIPWIRE: valuation over an EMPTY AI-owned comparable set throws
-    /// InvalidOperationException out of LINQ Average and aborts whatever BizMan panel was
-    /// building (6+ field bundles, host+client+offline).  An empty set means a rival-poor
-    /// world — round-256-class residue — which is the bug to root.  Guarded result: 0
-    /// (the panel renders with a zero valuation instead of half-built).</summary>
-    [HarmonyPatch(typeof(Helpers.CompetitionHelper), nameof(Helpers.CompetitionHelper.CalculateAiOwnedValuation))]
-    public static class Guard_AiOwnedValuation
-    {
-        static Exception? Finalizer(Exception __exception, ref float __result)
-        {
-            if (__exception == null || !NativeGuardReport.InMp) return __exception;
-            __result = 0f;
-            NativeGuardReport.Fire("CompetitionHelper.CalculateAiOwnedValuation", tripwire: true,
-                $"{__exception.GetType().Name} — empty AI-owned comparable set = rival-poor world (round-256 class).");
-            return null;
-        }
-    }
+    // (Batch 12's CalculateAiOwnedValuation guard REMOVED 2026-08-18 same-day: round-204b/255
+    //  already finalizes this method (MPPatches.Patch_AiValuation_ClientEmptyIncomeFallback)
+    //  and substitutes the HOST-SYNCED valuation — strictly better than this guard's 0, which
+    //  registering first would have displaced.  Same patch-inventory lesson as the storm guard.)
 
     /// <summary>TRIPWIRE: the shop-exit unpaid-items check NRE'd up to 98×/session (0.1.14
     /// era), killing the exit-zone path = "stuck in the building".  The MP-shared unpaid list

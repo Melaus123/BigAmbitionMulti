@@ -206,11 +206,14 @@ namespace BigAmbitionsMP
         }
     }
 
-    /// <summary>Candidate (b) — RESOLVED for clients (sweep item 4, 2026-08-18): the decision
-    /// rule fired on field evidence and the client half graduated to
-    /// Patch_UpdateMarketDemands_ClientAuthorityGuard (DemandAuthority.cs), which skips the
-    /// native recompute on clients entirely.  This probe is now a HOST-only detector (a host
-    /// recompute is native-normal; the line remains for the 4c "host loses prices" watch).</summary>
+    /// <summary>Candidate (b) — CORRECTED 2026-08-18: the client recompute was ALREADY
+    /// suppressed by round-102h (MPPatches.Patch_UpdateMarketDemands_HostAuthoritativeOnClient,
+    /// in 0.1.16), which deliberately allows only the pre-first-apply computation.  This
+    /// probe's client lines were ARTIFACTS: a Harmony prefix logs even when another prefix
+    /// skips the original, so "on a client this rewrites every demand value" fired on calls
+    /// that never executed — which misled the 2026-08-18 field sweep into a duplicate
+    /// (and briefly regressive) guard.  HOST-only now: the misleading client lines are gone
+    /// and the host line remains for the 4c "host loses prices" watch.</summary>
     [HarmonyLib.HarmonyPatch(typeof(Helpers.ProductMarketHelper), nameof(Helpers.ProductMarketHelper.UpdateMarketDemands))]
     public static class Probe_UpdateMarketDemands
     {
