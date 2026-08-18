@@ -470,6 +470,7 @@ namespace BigAmbitionsMP
                     SessionName   = adopt,
                     HsgGzipBase64 = data.Value.b64,
                     RawLength     = data.Value.raw,
+                    MetaJson      = MPSaveCoordinator.ReadMemberMetaJson(servedFrom, stable),   // round-275b: keep their copy datable
                     Money         = cash,
                     MoneyKnown    = moneyKnown,
                     // Handoff slice 4: world identity/day/epoch for the joiner's
@@ -2391,6 +2392,10 @@ namespace BigAmbitionsMP
         // (user backlog, 2026-06-11).  Clients report lifecycle transitions;
         // anyone parked in Menu >8s mid-fence is EXCUSED from the wait.
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string phase, long atMs)> _peerPhase = new();
+        // Round-274/M3: pids whose join-baseline save already fired this load — the
+        // 'Settled' + 'Running' dual trigger must not double-save; cleared per client
+        // by their next 'Loading' report (sent on every load path).
+        private static readonly HashSet<string> _joinBaselineDone = new();
         private static readonly HashSet<string> _fenceExcused = new();
         private static long _fenceArmedAtMs;   // grace: no excusals in the first 15s
 
@@ -2614,6 +2619,39 @@ namespace BigAmbitionsMP
             bool changed = !_peerPhase.TryGetValue(p.PlayerId, out var prevPh) || prevPh.phase != p.Phase;
             _peerPhase[p.PlayerId] = (p.Phase, TickMs64);
             if (changed) Plugin.Logger.LogInfo($"[Server] phase: '{p.PlayerId}' → {p.Phase}");
+            // Round-271 (Fix A): baseline capture the moment a joiner can actually CONTRIBUTE
+            // to it — their settled-gate, reported explicitly (world-ready is too early: their
+            // upload is skipped and the checkpoint is born without them; 2026-06-23 contract,
+            // field 20260816-213224 hole).  Deferred internally while the HOST is unsettled.
+            // Round-274/M3: the 'Settled' report is one-shot and the transport can drop it —
+            // the lifecycle's own 'Running' report (independent sender, ~same moment) is the
+            // retry.  One baseline per client per load: the set is cleared by their next
+            // 'Loading' report, which every load path sends.
+            if (changed && (p.Phase == "Settled" || p.Phase == "Running"))
+            {
+                bool first; lock (_joinBaselineDone) first = _joinBaselineDone.Add(p.PlayerId);
+                if (first)
+                {
+                    // Round-274/F1: the latch is kept (no double-save on the normal race),
+                    // but the coordinator VERIFIES the joiner landed in the baseline after
+                    // the upload window and refires once if not — so a 'Running' win over
+                    // a still-closed settled-gate can no longer produce a fileless slot.
+                    try
+                    {
+                        // Round-274d (verifier PLAUSIBLE-A): ARM before REQUEST — the main-thread
+                        // tick can consume the request and bump the join-save sequence between
+                        // these two statements, which would arm the verify against the NEXT join
+                        // save and silently skip this one.  The refire path already orders it so.
+                        MPSaveCoordinator.ArmJoinBaselineVerify(StableOfPid(p.PlayerId));
+                        MPSaveCoordinator.RequestJoinBaseline();
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Settled baseline save: {ex.Message}"); }
+                }
+            }
+            else if (changed && p.Phase == "Loading")
+            {
+                lock (_joinBaselineDone) _joinBaselineDone.Remove(p.PlayerId);
+            }
         }
 
         // ── Gate self-heal (field 2026-07-19) ─────────────────────────────────
@@ -2757,12 +2795,16 @@ namespace BigAmbitionsMP
             var payload = env.GetPayload<PlayerInGamePayload>();
             if (payload != null && !SenderIs(payload.PlayerId, senderPid, MessageType.WorldReady, allowEmpty: true)) return;
             MarkWorldReady(senderPid);
-            // Baseline capture: the moment a client is fully in-game, snapshot the session so EVERY member
-            // has a save from the start — even in a short session that never reaches a periodic autosave.
-            // Without this the disconnect carry-forward has nothing to copy and the member loads as a new
-            // player (2026-06-23). Coordinated save → the base session; the joiner uploads its own .hsg.
-            try { MPSaveCoordinator.HostSaveNow("join"); }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] World-ready baseline save: {ex.Message}"); }
+            // Round-274/F3: a member counts as "served since load" only once they have
+            // provably LOADED what was served (world-ready = world sync applied).  The
+            // earlier send-time mark let a client that died mid-load keep a stale
+            // pre-rollback disconnect offer alive behind an already-granted mark.
+            try { MPSaveCoordinator.MarkServedSinceLoad(StableOfPid(senderPid)); } catch { }
+            // Round-271 (Fix A): the join baseline save used to fire HERE, at world-ready —
+            // structurally before the joiner's own settled-gate, so the checkpoint it produced
+            // could never contain its trigger's member (field 20260816-213224: every first-join
+            // slot born fileless).  It now fires on the joiner's 'Settled' phase report — the
+            // same predicate that gates their upload — see HandlePhaseReport.
             // A player whose world just loaded missed any earlier loan-state
             // broadcast (session-load ledger, joins mid-loan) — re-broadcast.
             GameStatePatcher.EnqueueOnMainThread(MPHub.BroadcastLoansIfAny);
@@ -3724,6 +3766,7 @@ namespace BigAmbitionsMP
                 Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
                 {
                     SessionName = adopt, HsgGzipBase64 = data.Value.b64, RawLength = data.Value.raw, Money = cash,
+                    MetaJson = MPSaveCoordinator.ReadMemberMetaJson(servedFrom, stable),   // round-275b: keep their copy datable
                     MoneyKnown = cash != 0f || GetKnownCash(pid) >= 0f,   // round-224: 0-and-unstreamed = unknown
                     // Handoff slice 4: identity/day/epoch for the joiner's log-only diagnostics.
                     WorldDay = m?.WorldDay ?? 0, PlaythroughId = !string.IsNullOrEmpty(m?.PlaythroughId) ? m.PlaythroughId : MPSaveCoordinator.ActivePlaythroughId, HostEpoch = m?.HostEpoch ?? 0,

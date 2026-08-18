@@ -664,6 +664,7 @@ namespace BigAmbitionsMP
             VehicleStoragePanel.Tick();  // non-owner shared-storage panel (refresh on cargo change / auto-close)
             TimeSync.TickStartupHold();  // round-36: had NO caller (dead since inception) — the hold's timeScale re-clamp
             MPClient.TickJoinDownloadReport();   // round-270: throttled world-download percent → host → everyone's overlay
+            MPClient.TickSettledReport();        // round-271: one-shot 'Settled' phase → host fires the join baseline save
             GameStateReader.TickPendingNativePause();   // round-36c: converge the pause flag onto the last
                                                         // requested state (rate-limit drops lost it before)
             MPPerf.End("Pre.C", _sub);

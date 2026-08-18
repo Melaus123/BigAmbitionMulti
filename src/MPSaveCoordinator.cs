@@ -57,7 +57,13 @@ namespace BigAmbitionsMP
                     _activeManifest = null;
                     // Reset (new lobby) drops the world identity; a RENAME (non-empty) keeps it —
                     // saving under a new name is still the same world.
-                    if (string.IsNullOrEmpty(_activeSessionName)) { _activePlaythroughId = ""; _activeHostEpoch = 1; _midJoinSource = ""; PortraitFolder = null; MPSaveManager.ClearActivePlaythrough(); MPSaveManager.ResetSessionPins(); }
+                    if (string.IsNullOrEmpty(_activeSessionName))
+                    {
+                        _activePlaythroughId = ""; _activeHostEpoch = 1; _midJoinSource = ""; PortraitFolder = null; MPSaveManager.ClearActivePlaythrough(); MPSaveManager.ResetSessionPins();
+                        // Round-274/M1: the rollback fence dies with the world — bare-name keys
+                        // must never leak into a different playthrough's identically-named slots.
+                        lock (_abandonedAtLoad) { _abandonedAtLoad.Clear(); _abandonedCaptureUnix = 0; _loadedStampAtCapture = 0; _servedSinceLoad.Clear(); _remadeUnderFence.Clear(); }
+                    }
                 }
             }
         }
@@ -113,6 +119,7 @@ namespace BigAmbitionsMP
                               : "";
             bool isAutomatic = autoSuffix.Length > 0;
             session = cleanBase + autoSuffix;
+            if (reason == "join") lock (_lock) { _lastJoinSession = session; _joinSaveSeq++; }   // round-274/F1: the verify pins THIS fire
 
             Plugin.Logger.LogInfo($"[MPSave] HostSaveNow session='{session}' reason={reason} — broadcasting SaveNow.");
 
@@ -613,9 +620,137 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Round-271 (Fix A): join baseline save, fired on the joiner's SETTLED report ──
+        // The old trigger (client world-ready) was structurally before the joiner's own
+        // settled-gate — the save it triggered could never contain the joiner's upload, so
+        // every first-join slot was born without its trigger's member (field 20260816-213224).
+        // The host may ALSO still be loading when a fast client settles (same field case:
+        // the join save captured the host's mid-load world) — defer until the host's own
+        // gate opens; the per-frame tick below is the retry, exit condition confirmed.
+        // Round-274/M4: the request is a bare volatile flag set — NO Unity API on the
+        // transport poll thread (the old immediate branch evaluated IsSettled there,
+        // whose raw-false path resets the MAIN thread's settle window as a side effect).
+        // The main-thread tick is the only evaluator; N clients settling while the host
+        // is busy coalesce into ONE coordinated save, which captures every member anyway.
+        private static volatile bool _pendingJoinBaseline;
+        private static bool _pendingJoinLogged;
+
+        // ── Round-274/F1: verify the joiner actually LANDED in the join baseline ────
+        // The 'Running' fallback trigger can outrun the client's settled-gate (reviewer
+        // measured Running-first on 2 of 5 joins, one-frame margins): the save fires,
+        // the client's own gate DROPS its upload, and a one-shot latch would eat the
+        // 'Settled' retry — the pre-271 fileless-slot hole reborn.  Cure, backstop-style
+        // (round-184 precedent): after every baseline trigger, wait out the upload
+        // window, check the slot for the joiner's file, refire ONCE if absent; a second
+        // absence is left to the periodic autosave, loudly.
+        // Round-274c (verifier CONFIRMED-2 + PLAUSIBLE-1/3): the first cut's presence test
+        // was existence-only — a reused rotation slot's STALE file satisfied it, a vacuous
+        // pass over exactly the hole this verify exists to close (rig-observed).  Now each
+        // entry PINS the specific join save it watches (a sequence number pairs arm → fire,
+        // so interleaved joins can't cross wires), the 12s window starts at the FIRE (not
+        // the arm — a deferred save no longer burns the window), and presence means the
+        // member's file was WRITTEN AT-OR-AFTER that fire (freshness, not existence).
+        private sealed class BaselineVerify
+        {
+            public string Stable = ""; public string Session = "";
+            public int ArmSeq; public int ArmedMs; public int FiredMs; public long FiredWallUnix;
+            public bool Refired;
+        }
+        private static readonly List<BaselineVerify> _baselineVerifies = new();
+        private static string _lastJoinSession = "";
+        private static int _joinSaveSeq;               // bumped per join-reason save (under _lock)
+        private const int BaselineVerifyMs = 12000;    // upload window after the FIRE
+        private const int BaselineFireWaitMs = 90000;  // give a deferred join save this long to fire at all
+
+        internal static void ArmJoinBaselineVerify(string stable)
+        {
+            if (string.IsNullOrEmpty(stable) || stable == MPConfig.StableId) return;
+            int seq; lock (_lock) seq = _joinSaveSeq;
+            lock (_baselineVerifies)
+            {
+                foreach (var v in _baselineVerifies) if (v.Stable == stable) return;   // already watching
+                _baselineVerifies.Add(new BaselineVerify { Stable = stable, ArmSeq = seq, ArmedMs = Environment.TickCount });
+            }
+        }
+
+        private static void TickJoinBaselineVerify()
+        {
+            if (!MPServer.IsRunning) { lock (_baselineVerifies) _baselineVerifies.Clear(); return; }
+            int seqNow; string sessionNow;
+            lock (_lock) { seqNow = _joinSaveSeq; sessionNow = _lastJoinSession; }
+            List<BaselineVerify>? due = null;
+            lock (_baselineVerifies)
+            {
+                for (int i = _baselineVerifies.Count - 1; i >= 0; i--)
+                {
+                    var v = _baselineVerifies[i];
+                    if (v.FiredMs == 0)
+                    {
+                        if (seqNow > v.ArmSeq)   // the join save this entry waits on has fired — pin it
+                        { v.Session = sessionNow; v.FiredMs = Environment.TickCount; v.FiredWallUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds(); }
+                        else if (unchecked(Environment.TickCount - v.ArmedMs) >= BaselineFireWaitMs)
+                        {
+                            Plugin.Logger.LogWarning($"[MPSave] join baseline for stable={v.Stable} never fired within {BaselineFireWaitMs / 1000}s of the trigger — dropping the verify (the periodic autosave covers).");
+                            _baselineVerifies.RemoveAt(i);
+                        }
+                        continue;
+                    }
+                    if (unchecked(Environment.TickCount - v.FiredMs) >= BaselineVerifyMs)
+                    { (due ??= new List<BaselineVerify>()).Add(v); _baselineVerifies.RemoveAt(i); }
+                }
+            }
+            if (due == null) return;
+            foreach (var v in due)
+            {
+                // Presence = a file written at-or-after THIS fire (5s clock slack) — a reused
+                // rotation slot's stale copy no longer reads as success.
+                bool present = false;
+                try
+                {
+                    string? hsg = NewestHsg(MPSaveManager.MpCharacterFolder(v.Session, v.Stable));
+                    if (hsg != null)
+                        present = new DateTimeOffset(File.GetLastWriteTimeUtc(hsg)).ToUnixTimeSeconds() >= v.FiredWallUnix - 5;
+                }
+                catch { }
+                if (present) continue;
+                if (!v.Refired)
+                {
+                    Plugin.Logger.LogWarning($"[MPSave] join baseline '{v.Session}' is missing a FRESH file for stable={v.Stable} after the upload window — the trigger outran their settled-gate (or their upload was refused); firing another (round-274/F1).");
+                    int seqAtRefire; lock (_lock) seqAtRefire = _joinSaveSeq;
+                    RequestJoinBaseline();
+                    v.Refired = true; v.ArmSeq = seqAtRefire; v.ArmedMs = Environment.TickCount; v.FiredMs = 0; v.FiredWallUnix = 0; v.Session = "";
+                    lock (_baselineVerifies) _baselineVerifies.Add(v);
+                }
+                else
+                    Plugin.Logger.LogError($"[MPSave] join baseline STILL missing a fresh file for stable={v.Stable} after a retry — leaving it to the periodic autosave (round-274/F1).");
+            }
+        }
+
+        internal static void RequestJoinBaseline() => _pendingJoinBaseline = true;
+
+        private static void TickPendingJoinBaseline()
+        {
+            if (!_pendingJoinBaseline) return;
+            if (!MPServer.IsRunning) { _pendingJoinBaseline = false; _pendingJoinLogged = false; return; }
+            if (!MPWorldReady.IsSettled)
+            {
+                if (!_pendingJoinLogged)
+                {
+                    _pendingJoinLogged = true;
+                    Plugin.Logger.LogInfo("[MPSave] join baseline save deferred — host world not settled yet; fires when it is (round-271).");
+                }
+                return;
+            }
+            _pendingJoinBaseline = false;
+            _pendingJoinLogged = false;
+            HostSaveNow("join");
+        }
+
         public static void TickPendingUploads()
         {
             TickDeferredSave();   // task-28 fix 2: placement-deferred saves retry here (every frame, main thread)
+            TickPendingJoinBaseline();   // round-271: join baseline deferred until the HOST is settled
+            TickJoinBaselineVerify();    // round-274/F1: refire once if the joiner missed their baseline
             TickCarryBackstops(); // round-184 fix 1: post-upload-window completeness sweep (host-side entries only)
             TickTornNotice();     // round-251B: deliver the torn-read warning once the world is visible
             List<PendingUpload> snapshot;
@@ -649,8 +784,13 @@ namespace BigAmbitionsMP
                     byte[] raw = File.ReadAllBytes(file);
                     if (raw.Length == 0) continue;   // mid-write; retry next frame
                     up.Slot.SaveName = Path.GetFileNameWithoutExtension(file);
+                    // Round-275: ship the .hsg.meta sidecar too — without it the host's copy
+                    // cannot be dated by the save scanner (storedDay read -1, which made the
+                    // disconnect-save day window accept anything).
+                    string metaJson = "";
+                    try { string mp = file + ".meta"; if (File.Exists(mp)) metaJson = File.ReadAllText(mp); } catch { }
                     if (MPClient.IsConnected)
-                        MPClient.SendSaveData(up.Session, up.Slot, GzipBase64(raw), raw.Length);
+                        MPClient.SendSaveData(up.Session, up.Slot, GzipBase64(raw), raw.Length, metaJson);
                     Plugin.Logger.LogInfo($"[MPSave] Uploaded '{up.Slot.SaveName}.hsg' ({raw.Length}B) for session '{up.Session}'.");
                     Remove(up);
                 }
@@ -706,12 +846,22 @@ namespace BigAmbitionsMP
                     var prev = new FileInfo(dest);
                     if (prev.Exists && prev.Length > 200_000 && raw.Length < prev.Length / 2)
                     {
-                        Plugin.Logger.LogWarning($"[MPSave] REFUSED '{data.Slot.DisplayName}' upload ({raw.Length}B) — it would replace a {prev.Length}B save with less than half its size (blank-save signature). Old file kept.");
-                        return;
+                        // Round-274c: a member the fence remade legitimately shrinks — the big
+                        // file being replaced IS the abandoned copy the ruling refused.
+                        if (IsRemadeUnderFence(data.Slot.StableId))
+                            Plugin.Logger.LogWarning($"[MPSave] small upload ({raw.Length}B) from remade member '{data.Slot.DisplayName}' ACCEPTED over a retained {prev.Length}B abandoned copy (round-274c).");
+                        else
+                        {
+                            Plugin.Logger.LogWarning($"[MPSave] REFUSED '{data.Slot.DisplayName}' upload ({raw.Length}B) — it would replace a {prev.Length}B save with less than half its size (blank-save signature). Old file kept.");
+                            return;
+                        }
                     }
                 }
                 catch { }
                 File.WriteAllBytes(dest, raw);
+                // Round-275: land the sidecar with the save — a meta-less copy cannot be
+                // dated by ReadSaveDay (the scanner), which blinded the day validation.
+                try { if (!string.IsNullOrEmpty(data.MetaJson)) File.WriteAllText(dest + ".meta", data.MetaJson); } catch { }
                 LogHsgWrite(data.SessionName, data.Slot.StableId, raw.Length, $"host stored {data.Slot.DisplayName}'s upload");
                 Plugin.Logger.LogInfo($"[MPSave] Stored '{data.Slot.DisplayName}' .hsg ({raw.Length}B) → {dir}");
                 DiagWrite($"HostHandleSaveData wrote .hsg ({raw.Length}B), merging slot");
@@ -749,6 +899,10 @@ namespace BigAmbitionsMP
                 _midJoinSource       = "";
                 MPSaveManager.ResetSessionPins();   // round-218: nothing from a previous world survives
                 MPSaveManager.SetActivePlaythrough(_activePlaythroughId, "");   // base named at first save
+                // Round-274/F5: this path writes the backing field directly, bypassing the
+                // property setter's fence teardown — clear here too (a new world is never
+                // the rolled-back one; a stale registry could refuse its rescues).
+                lock (_abandonedAtLoad) { _abandonedAtLoad.Clear(); _abandonedCaptureUnix = 0; _loadedStampAtCapture = 0; _servedSinceLoad.Clear(); _remadeUnderFence.Clear(); }
                 Plugin.Logger.LogInfo($"[MPSave] New world — playthrough {_activePlaythroughId} minted at world start.");
             }
         }
@@ -778,7 +932,13 @@ namespace BigAmbitionsMP
             // Handoff slice 2: a (re)load is a host-start of this lineage — bump the epoch
             // (works identically on the original host and on a member hosting from their
             // MIRRORED copy of the store; every save stamps the new value + our identity).
-            lock (_lock) { _activeSessionName = lineage; _activeManifest = m; _activePlaythroughId = m.PlaythroughId ?? ""; _activeHostEpoch = Math.Max(1, m.HostEpoch + 1); _midJoinSource = session; }
+            // Round-274/H3: _activeManifest must NOT adopt the VARIANT's manifest object while
+            // _activeSessionName points at the BASE — EnsureManifest(base) reused it and wrote
+            // the variant's Slots into a base folder holding no member files (rig-observed:
+            // 2 phantom slots, zero folders), which under an active fence turns Fresh into
+            // Unavailable and ABORTS the join.  Null → the next EnsureManifest re-reads the
+            // base honestly from disk (or mints it empty — the truthful state).
+            lock (_lock) { _activeSessionName = lineage; _activeManifest = null; _activePlaythroughId = m.PlaythroughId ?? ""; _activeHostEpoch = Math.Max(1, m.HostEpoch + 1); _midJoinSource = session; }
             // Store v2: the loaded world's identity becomes the active playthrough folder
             // (name-only writes for this family land there). Empty pid = legacy world —
             // the first EnsureManifest mint below will stamp + activate it.
@@ -793,6 +953,13 @@ namespace BigAmbitionsMP
                             : (string.IsNullOrEmpty(prevSlot.CharacterName) ? prevSlot.DisplayName : prevSlot.CharacterName);
                 Plugin.Logger.LogWarning($"[MPSave] HOST HANDOFF: '{session}' was last hosted by '{prev}' — now hosting on this machine (host-start #{Math.Max(1, m.HostEpoch + 1)}).");
             }
+
+            // Round-271 (field 20260816-213224): loading a slot while NEWER lineage siblings exist
+            // is a deliberate rollback — those siblings are the ABANDONED timeline.  Captured here,
+            // BEFORE any member serve below, so rescues can never hand a player a future-timeline
+            // character (a rented building the loaded world has no record of: every owner-push then
+            // dies as 'not the recorded owner' and their furnishing work silently evaporates).
+            CaptureAbandonedTimeline(session, m);
 
             MPServer.RestoreOwnershipFromManifest(m);              // cross-machine ownership + cash seed
             MPServer.SendLoadDataToEachClient(session, m, lineage); // each client gets its own .hsg FROM the source, tagged with the lineage
@@ -928,6 +1095,9 @@ namespace BigAmbitionsMP
                 byte[] raw    = UnGzipBase64(p.HsgGzipBase64);
                 string folder = MPSaveManager.MpCharacterFolder(session, MPConfig.StableId);
                 File.WriteAllBytes(Path.Combine(folder, SaveFileName + ".hsg"), raw);
+                // Round-275b: land the served sidecar too — a meta-less local copy is
+                // undatable by the save scanner (client catalog read day 0; round-262 fired).
+                try { if (!string.IsNullOrEmpty(p.MetaJson)) File.WriteAllText(Path.Combine(folder, SaveFileName + ".hsg.meta"), p.MetaJson); } catch { }
                 LogHsgWrite(session, MPConfig.StableId, raw.Length, "client received own copy for load");
                 Plugin.Logger.LogInfo($"[MPSave] Received .hsg ({raw.Length}B) for session '{session}' — loading.");
                 ClearClientDisconnectMarker();   // host resolved our join (incl. any validated disconnect save) — offer consumed
@@ -1220,13 +1390,30 @@ namespace BigAmbitionsMP
         {
             servedFrom = sourceSession;
             cash = 0f;
-            data = ReadSaveBytesGzip(sourceSession, stableId);
+            // Round-274c (verifier CONFIRMED-1, rig-reproduced): the DIRECT read is a serve
+            // like any other.  After a rollback the mid-join source (the latest save target)
+            // can itself be a MARKED sibling still holding a member's gap-window file (the
+            // carry-forward keeps newer-mtime files) — unfenced, it served a day-52 character
+            // into a day-51 world with the founding 'not the recorded owner' symptom intact.
+            // Same test, same verdict: a refused direct read falls to the rescue ladder.
+            data = null;
+            string? srcHsg = null;
+            try { srcHsg = NewestHsg(MPSaveManager.MpCharacterFolder(sourceSession, stableId)); } catch { }
+            if (srcHsg != null && IsAbandonedCopy(sourceSession, srcHsg))
+                Plugin.Logger.LogWarning($"[MPSave] direct serve source '{sourceSession}' holds a gap-window copy for stable={stableId} — refused (round-274c); the rescue ladder decides.");
+            else
+                data = ReadSaveBytesGzip(sourceSession, stableId);
             var verdict = ServeVerdict.Served;
+            int refusedAbandoned = 0;
             if (data == null)
             {
                 // Round-233: fence the rescue by the LOADED session's day — a deliberately
                 // rewound world must not hand a joiner their future-timeline character.
-                var alt = FindNewestLineageSessionWithHsg(sourceSession, stableId, FenceDayFor(sourceSession));
+                // Round-271 sharpens the fence to the save MOMENT: abandoned-timeline slots
+                // (newer than the loaded save at load time) are excluded inside the selector,
+                // closing the same-day rollback hole (field 20260816-213224).
+                var altPick = LineageNewestEligible(sourceSession, stableId, FenceDayFor(sourceSession), allowUnknownDay: true, out refusedAbandoned);
+                string? alt = altPick?.srcSession;
                 if (!string.IsNullOrEmpty(alt) && alt != sourceSession)
                 {
                     data = ReadSaveBytesGzip(alt!, stableId);
@@ -1234,10 +1421,12 @@ namespace BigAmbitionsMP
                     {
                         verdict = ServeVerdict.Rescued;
                         servedFrom = alt!;
-                        Plugin.Logger.LogWarning($"[MPSave] serve rescue: no .hsg for stable={stableId} in '{sourceSession}' — adopted their newest lineage copy from '{alt}' ({data.Value.raw}B). The session was missing this member (interrupted save / save-as without them).");
+                        Plugin.Logger.LogWarning($"[MPSave] serve rescue: no .hsg for stable={stableId} in '{sourceSession}' — adopted their newest at-or-before lineage copy from '{alt}' ({data.Value.raw}B). The session was missing this member (interrupted save / save-as without them).");
                     }
                 }
             }
+            if (data == null && refusedAbandoned > 0)
+                Plugin.Logger.LogWarning($"[MPSave] serve for stable={stableId}: refused {refusedAbandoned} abandoned-timeline cop(ies) (rolled-back load, round-271) and no copy at-or-before the loaded save exists — verdict falls through (fresh = remake, per the timeline-coherence ruling 2026-08-17).");
             if (data == null)
             {
                 bool hasSlot = false;
@@ -1247,6 +1436,10 @@ namespace BigAmbitionsMP
                     hasSlot = mm?.Slots != null && mm.Slots.Exists(s => s.StableId == stableId);
                 }
                 catch { }
+                // Round-274c: a Fresh verdict under an active fence = the timeline-coherence
+                // remake — record it so the blank-save guard lets the new (small) character
+                // save replace the retained abandoned copies instead of resurrecting them.
+                if (!hasSlot && RollbackFenceActive) RecordRemadeUnderFence(stableId);
                 return hasSlot ? ServeVerdict.Unavailable : ServeVerdict.Fresh;
             }
             try
@@ -1257,6 +1450,20 @@ namespace BigAmbitionsMP
             }
             catch { }
             return verdict;
+        }
+
+        /// <summary>Round-275b: the .hsg.meta sidecar next to a member's newest save in a
+        /// session folder ("" if absent) — served with LoadData/mirrors so the receiving
+        /// machine's copy stays datable by the save scanner.</summary>
+        internal static string ReadMemberMetaJson(string session, string stableId)
+        {
+            try
+            {
+                var f = NewestHsg(MPSaveManager.MpCharacterFolder(session, stableId));
+                if (f != null && File.Exists(f + ".meta")) return File.ReadAllText(f + ".meta");
+            }
+            catch { }
+            return "";
         }
 
         /// <summary>Read a stored .hsg from the host's session folder, gzipped +
@@ -1378,11 +1585,13 @@ namespace BigAmbitionsMP
                         if (file == null) continue;
                         byte[] raw = File.ReadAllBytes(file);
                         if (raw.Length == 0) continue;
+                        string sweepMeta = ""; try { if (File.Exists(file + ".meta")) sweepMeta = File.ReadAllText(file + ".meta"); } catch { }
                         MPServer.SendStoreMirror(new StoreMirrorPayload
                         {
                             SessionName = session, StableId = stable,
                             SaveName = Path.GetFileNameWithoutExtension(file),
                             HsgGzipBase64 = GzipBase64(raw), RawLength = raw.Length,
+                            MetaJson = sweepMeta,   // round-275b
                             PlaythroughId = pid,
                             HostStoreToken = token,   // manifest already sent above
                         }, exceptStable: stable);
@@ -1411,11 +1620,13 @@ namespace BigAmbitionsMP
                 byte[] raw = File.ReadAllBytes(file);
                 if (raw.Length == 0) return;
                 var (manifestJson, pid) = ManifestSnapshot(session);
+                string mmMeta = ""; try { if (File.Exists(file + ".meta")) mmMeta = File.ReadAllText(file + ".meta"); } catch { }
                 MPServer.SendStoreMirror(new StoreMirrorPayload
                 {
                     SessionName = session, StableId = stable,
                     SaveName = Path.GetFileNameWithoutExtension(file),
                     HsgGzipBase64 = GzipBase64(raw), RawLength = raw.Length,
+                    MetaJson = mmMeta,   // round-275b
                     ManifestJson = manifestJson, PlaythroughId = pid,
                     HostStoreToken = StoreToken(),
                 }, exceptStable: stable);
@@ -1524,6 +1735,9 @@ namespace BigAmbitionsMP
                         string dir  = MPSaveManager.MpCharacterFolder(session, p.StableId);   // sanitizes the id component
                         string name = MPSaveManager.Sanitize(string.IsNullOrEmpty(p.SaveName) ? SaveFileName : p.SaveName);
                         File.WriteAllBytes(Path.Combine(dir, name + ".hsg"), raw);
+                        // Round-275b: the sidecar rides the mirror — a handoff host serving from
+                        // this mirrored store needs datable copies for its own day validation.
+                        try { if (!string.IsNullOrEmpty(p.MetaJson)) File.WriteAllText(Path.Combine(dir, name + ".hsg.meta"), p.MetaJson); } catch { }
                         LogHsgWrite(session, p.StableId, raw.Length, "store mirror");
                     }
                 }
@@ -1941,8 +2155,137 @@ namespace BigAmbitionsMP
         /// now-authoritative empty save then blanked their developed buildings on both machines).
         /// Round-233: fenced — pass maxDay to refuse copies from a FUTURE timeline (a deliberate
         /// rewind must not pull the old timeline's files into a rolled-back world).</summary>
-        public static string? FindNewestLineageSessionWithHsg(string aroundSession, string stableId, int maxDay = -1)
-            => LineageNewestEligible(aroundSession, stableId, maxDay, allowUnknownDay: true)?.srcSession;
+        // (Round-274/L1: the FindNewestLineageSessionWithHsg wrapper was removed — zero
+        //  callers remained after round-271 pointed ResolveMemberSave at the selector.)
+
+        // ── Round-271: abandoned-timeline registry (rollback loads) ──────────────────
+        // The user's save rule: a save is ONE conceptual file — a member substituted into
+        // a loaded slot may come from AT OR BEFORE that slot's moment, never its future.
+        // Wall-clock stamps cannot order timelines once the rolled-back world re-saves
+        // (its fresh stamps postdate the abandoned copies), so the set is captured ONCE,
+        // at load, against the loaded slot's stamp.  A sibling leaves the set when the
+        // rotation re-saves it — its stamp changes, its bytes are current-timeline again.
+        /// <summary>session → its manifest stamp at load time, for lineage sessions that
+        /// were NEWER than the loaded slot (plus, round-274/M2: unknown-stamp siblings,
+        /// fail-closed, once a rollback is detected).  Membership is for the life of the
+        /// loaded world; ELIGIBILITY is decided per member FILE (see IsAbandonedCopy) —
+        /// round-274/H2: a slot-level stamp cannot vouch for member files the rotation
+        /// never rewrote, so "re-saved slot = trustworthy again" was false at member
+        /// granularity (rig-proven: an offline member's stale .hsg laundered through).</summary>
+        private static readonly Dictionary<string, long> _abandonedAtLoad = new();
+        /// <summary>Wall-clock of the rollback load that built the registry (0 = no
+        /// rollback fence active), and the LOADED slot's own save stamp at that moment.
+        /// Together they bound the abandoned window: (loadedStamp .. captureUnix].</summary>
+        private static long _abandonedCaptureUnix;
+        private static long _loadedStampAtCapture;
+        /// <summary>Round-274/C1: members this host has SERVED (LoadData or fresh-start)
+        /// since the rollback load.  A disconnect save arriving from a member NOT in this
+        /// set was written before the rollback — old-timeline bytes the day window cannot
+        /// see (rig-reproduced: same-day rollback passed every guard and the commit
+        /// destroyed the slot's coherent copy before the fenced ladder ever ran).</summary>
+        private static readonly HashSet<string> _servedSinceLoad = new();
+
+        internal static void MarkServedSinceLoad(string stable)
+        {
+            if (string.IsNullOrEmpty(stable)) return;
+            lock (_abandonedAtLoad) _servedSinceLoad.Add(stable);
+        }
+
+        private static bool WasServedSinceLoad(string stable)
+        {
+            lock (_abandonedAtLoad) return _servedSinceLoad.Contains(stable);
+        }
+
+        // Round-274c (verifier CONFIRMED-3): a member the fence ruled Fresh legitimately
+        // uploads a SMALL save next — but the reused slot still holds their big abandoned
+        // copy, and the blank-save guard refused the remake, so the abandoned character
+        // outlived the ruling (rig: 104745B refused against a retained 222965B).  While
+        // the fence lives, remade members are exempt from that guard.  Cleared with the
+        // fence (same lifetime, same lock).
+        private static readonly HashSet<string> _remadeUnderFence = new();
+
+        private static void RecordRemadeUnderFence(string stable)
+        {
+            if (string.IsNullOrEmpty(stable)) return;
+            lock (_abandonedAtLoad)
+                if (_remadeUnderFence.Add(stable))
+                    Plugin.Logger.LogInfo($"[MPSave] stable={stable} remade under the rollback fence — their smaller uploads replace retained abandoned copies (round-274c).");
+        }
+
+        internal static bool IsRemadeUnderFence(string stable)
+        {
+            lock (_abandonedAtLoad) return _remadeUnderFence.Contains(stable);
+        }
+
+        private static bool RollbackFenceActive { get { lock (_abandonedAtLoad) return _abandonedCaptureUnix > 0; } }
+
+        private static void CaptureAbandonedTimeline(string loadedSession, MpManifest loadedManifest)
+        {
+            lock (_abandonedAtLoad)
+            {
+                _abandonedAtLoad.Clear();
+                _abandonedCaptureUnix = 0;
+                _loadedStampAtCapture = 0;
+                _servedSinceLoad.Clear();
+                _remadeUnderFence.Clear();
+                long loadedStamp = loadedManifest?.SavedAtUnix ?? 0;
+                if (loadedStamp <= 0) return;   // unstamped (legacy) manifest — no reference moment; the day fence still applies
+                try
+                {
+                    var unknown = new List<string>();
+                    foreach (var s in LineageSessions(loadedSession))
+                    {
+                        if (s == loadedSession) continue;
+                        // F4 (reviewer): rotation-name candidates with no folder are not siblings —
+                        // marking them inflated the evidence line ("12 marked" where 5 exist).
+                        bool exists = false; try { exists = Directory.Exists(MPSaveManager.MpSessionFolder(s)); } catch { }
+                        if (!exists) continue;
+                        long st = 0; try { st = MPSaveManager.ReadManifest(s)?.SavedAtUnix ?? 0; } catch { }
+                        if (st > loadedStamp) _abandonedAtLoad[s] = st;
+                        else if (st <= 0) unknown.Add(s);   // age unknowable (minted/legacy/manifest-less)
+                    }
+                    // Round-274/M2 (fail-closed): once ANY sibling proves this is a rollback,
+                    // unknown-age siblings cannot be trusted either — mark them; the per-file
+                    // mtime test still admits anything genuinely written after the load.
+                    if (_abandonedAtLoad.Count > 0)
+                        foreach (var s in unknown) _abandonedAtLoad[s] = 0;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] abandoned-timeline capture: {ex.Message}"); }
+                if (_abandonedAtLoad.Count > 0)
+                {
+                    _abandonedCaptureUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                    _loadedStampAtCapture = loadedStamp;
+                    var names = new System.Text.StringBuilder();
+                    foreach (var k in _abandonedAtLoad.Keys) { if (names.Length > 0) names.Append(", "); names.Append('\'').Append(k).Append('\''); }
+                    Plugin.Logger.LogWarning($"[MPSave] rollback load: {_abandonedAtLoad.Count} sibling(s) marked abandoned-timeline (round-271/274): {names} — a marked sibling's member file is refused unless the file itself was rewritten after this load.");
+                }
+            }
+        }
+
+        /// <summary>Round-274/H2 + F2 fix: file-granular fence.  The abandoned timeline is
+        /// exactly the WINDOW between the loaded slot's save moment and the rollback load —
+        /// a marked session's file written inside it carries future world-facts and is
+        /// refused.  A file OLDER than the loaded slot's moment is at-or-before by the
+        /// user's own rule and serves even from a marked folder (the reviewer measured a
+        /// carried-in at-or-before copy being over-refused into a join lockout); a file
+        /// written after the load is the rolled-back world's own and serves.  Round-274/H4:
+        /// a marked session's unreadable file fails CLOSED (refused), never open.</summary>
+        private static bool IsAbandonedCopy(string session, string hsgPath)
+        {
+            long captureUnix, loadedStamp;
+            lock (_abandonedAtLoad)
+            {
+                if (_abandonedCaptureUnix <= 0 || !_abandonedAtLoad.ContainsKey(session)) return false;
+                captureUnix = _abandonedCaptureUnix;          // F6: read under the lock, once
+                loadedStamp = _loadedStampAtCapture;
+            }
+            try
+            {
+                long fileUnix = new DateTimeOffset(File.GetLastWriteTimeUtc(hsgPath)).ToUnixTimeSeconds();
+                return fileUnix > loadedStamp && fileUnix <= captureUnix;
+            }
+            catch { return true; }   // H4: fail closed — refusal costs a rescue attempt, trust costs the timeline
+        }
 
         /// <summary>Round-233 (field 20260802-200058 + rewind analysis): THE shared day-fenced
         /// "newest eligible copy" selector for every place that pulls a member's newest .hsg out
@@ -1959,8 +2302,9 @@ namespace BigAmbitionsMP
         /// days only (pure JSON reads — thread-safe; the IL2CPP save scanner is main-thread-only
         /// and this runs on serve paths too).</summary>
         private static (string srcSession, string srcDir, DateTime when, int day)? LineageNewestEligible(
-            string aroundSession, string stableId, int maxDay, bool allowUnknownDay)
+            string aroundSession, string stableId, int maxDay, bool allowUnknownDay, out int abandonedRefused)
         {
+            abandonedRefused = 0;
             try
             {
                 (string srcSession, string srcDir, DateTime when, int day)? best = null;
@@ -1971,6 +2315,10 @@ namespace BigAmbitionsMP
                     if (!Directory.Exists(dir)) continue;
                     string? hsg = NewestHsg(dir);
                     if (hsg == null) continue;
+                    // Round-271/274: a rolled-back load's abandoned-timeline copies are never a
+                    // rescue source — they carry world-facts the loaded world predates.  Tested
+                    // per FILE (H2): only a file rewritten after the rollback load is eligible.
+                    if (IsAbandonedCopy(s, hsg)) { abandonedRefused++; continue; }
                     DateTime when; try { when = File.GetLastWriteTimeUtc(hsg); } catch { continue; }
                     int day = -1;
                     try { day = MPSaveManager.ReadManifest(s)?.Slots?.Find(x => x.StableId == stableId)?.Day ?? -1; } catch { }
@@ -2046,8 +2394,13 @@ namespace BigAmbitionsMP
                     // an empty slot may be FILLED by anything (manifest-less recovers included).
                     string targetMemberDir = Path.Combine(MPSaveManager.MpSessionFolder(targetSession), stable);
                     string? already = Directory.Exists(targetMemberDir) ? NewestHsg(targetMemberDir) : null;
-                    var best = LineageNewestEligible(targetSession, stable, fenceDay, allowUnknownDay: already == null);
-                    if (best == null) continue;
+                    var best = LineageNewestEligible(targetSession, stable, fenceDay, allowUnknownDay: already == null, out int carryRefused);
+                    if (best == null)
+                    {
+                        if (carryRefused > 0)
+                            Plugin.Logger.LogInfo($"[MPSave] carry-forward for stable={stable}: only abandoned-timeline cop(ies) exist ({carryRefused} refused, round-271) — slot left without this member rather than injecting the old timeline.");
+                        continue;
+                    }
                     var (srcSession, srcDir, srcWhen, srcDay) = best.Value;
                     if (srcSession == targetSession) continue;   // already its own newest eligible
                     if (already != null)
@@ -2177,10 +2530,16 @@ namespace BigAmbitionsMP
                     SaveName = Path.GetFileNameWithoutExtension(file), Day = marker.Day, IsHost = false,
                     Money = LocalWalletOr0(),   // round-224
                 };
+                // Round-275: include the sidecar — the host's day validator reads the day
+                // through the save scanner, which is blind without the .meta (the restore
+                // feature rejected everything past day 2 for exactly this reason).
+                string dcMeta = "";
+                try { string mp = file + ".meta"; if (File.Exists(mp)) dcMeta = File.ReadAllText(mp); } catch { }
                 MPClient.SendClientDisconnectUpload(new SaveDataPayload
                 {
                     SessionName = baseName, Success = true, Slot = slot,
                     HsgGzipBase64 = GzipBase64(raw), RawLength = raw.Length,
+                    MetaJson = dcMeta,
                     PlaythroughId = _wireWorldPid,   // round-222: sticky through disconnect by design
                 });
                 Plugin.Logger.LogInfo($"[MPSave] Uploaded disconnect save for '{baseName}' (claimed day={marker.Day}, {raw.Length}B).");
@@ -2242,6 +2601,19 @@ namespace BigAmbitionsMP
                 if (!string.Equals(p.SessionName, baseName, StringComparison.Ordinal))
                 { Plugin.Logger.LogWarning($"[MPSave] Disconnect upload session mismatch (got '{p.SessionName}', active base '{baseName}') — ignoring."); return false; }
 
+                // Round-274/C1 (rig-reproduced): this commit runs BEFORE the fenced serve
+                // ladder — during a rollback it wrote future-timeline bytes into the loaded
+                // slot, destroyed its coherent copy, and carry-forward spread them.  The day
+                // window cannot see a same-day rollback (and storedDay<0 accepted anything).
+                // Discriminator, host-side only: a member disconnecting AFTER the rollback
+                // load was necessarily SERVED by this world first — a member we have never
+                // served since the load carries a save written before it: old timeline.
+                if (RollbackFenceActive && !WasServedSinceLoad(stable))
+                {
+                    Plugin.Logger.LogWarning($"[MPSave] REFUSED client disconnect save (stable={stable}): written before this world's rollback load — old-timeline bytes (round-274); the fenced serve ladder decides their save instead.");
+                    return false;
+                }
+
                 byte[] raw = UnGzipBase64(p.HsgGzipBase64);
                 if (raw == null || raw.Length == 0) return false;
 
@@ -2251,6 +2623,10 @@ namespace BigAmbitionsMP
                 try { foreach (var f in Directory.GetFiles(stageDir)) File.Delete(f); } catch { }
                 string name = MPSaveManager.Sanitize(string.IsNullOrEmpty(p.Slot?.SaveName) ? SaveFileName : p.Slot.SaveName);
                 File.WriteAllBytes(Path.Combine(stageDir, name + ".hsg"), raw);
+                // Round-275: stage the sidecar too — ReadSaveDay goes through the game's
+                // save scanner, which cannot see a meta-less .hsg (actualDay always read 0,
+                // so the restore feature rejected every save past day 2).
+                try { if (!string.IsNullOrEmpty(p.MetaJson)) File.WriteAllText(Path.Combine(stageDir, name + ".hsg.meta"), p.MetaJson); } catch { }
                 LogHsgWrite(stageSession, stable, raw.Length, "staged for day validation");
 
                 int actualDay = ReadSaveDay(MPSaveManager.MpSessionFolder(stageSession), stable);
@@ -2264,7 +2640,19 @@ namespace BigAmbitionsMP
                 if (accept)
                 {
                     string dstDir = MPSaveManager.MpCharacterFolder(session, stable);
+                    // Round-274/C1: never destroy the slot's existing copy in place — sideline
+                    // it first (".bak" is invisible to NewestHsg's "*.hsg" pattern), so a wrong
+                    // acceptance can still be recovered by hand instead of being unrecoverable.
+                    // Round-275: the meta rides along in both directions so every copy stays datable.
+                    try
+                    {
+                        string cur = Path.Combine(dstDir, name + ".hsg");
+                        if (File.Exists(cur)) File.Copy(cur, cur + ".pre-dc.bak", overwrite: true);
+                        if (File.Exists(cur + ".meta")) File.Copy(cur + ".meta", cur + ".meta.pre-dc.bak", overwrite: true);
+                    }
+                    catch { }
                     File.WriteAllBytes(Path.Combine(dstDir, name + ".hsg"), raw);
+                    try { if (!string.IsNullOrEmpty(p.MetaJson)) File.WriteAllText(Path.Combine(dstDir, name + ".hsg.meta"), p.MetaJson); } catch { }
                     LogHsgWrite(session, stable, raw.Length, $"accepted disconnect save (day {actualDay} vs stored {storedDay})");
                     MergeSlot(session, new MpSlot
                     {
@@ -2562,7 +2950,10 @@ namespace BigAmbitionsMP
                     m.Merger = BuildMergerManifest();   // merger membership rides the same persist-on-change
                     m.MergerWalletBalance     = MPServer.SnapshotWalletBalances();      // slice 4: pooling/payout
                     m.MergerWalletContributed = MPServer.SnapshotWalletContributed();   // states persist immediately
-                    m.SavedAtUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                    // Round-274/H1: do NOT touch SavedAtUnix here — it means "when was this
+                    // WORLD saved", and a grants-only persist is not a world save.  Re-stamping
+                    // it fired within seconds of every load ("Persisted 0 grant(s)") and
+                    // silently un-marked abandoned-timeline slots (rig-proven, twice).
                     MPSaveManager.WriteManifest(_activeSessionName, m);
                     Plugin.Logger.LogInfo($"[MPSave] Persisted {m.Grants.Count} grant(s) + {m.Merger.Count} merger member(s) to '{_activeSessionName}' on change.");
                     session = _activeSessionName;
@@ -2609,6 +3000,12 @@ namespace BigAmbitionsMP
             return result;
         }
 
+        // Round-271 note: slots are added HERE ONLY — on the host's own successful save,
+        // a member upload landing, or a carry that physically copied a file.  This is the
+        // manifest-honesty invariant the serve ladder's Fresh-vs-Unavailable verdict rests
+        // on: a listed slot means bytes landed at least once (missing/unreadable = damage,
+        // refuse fresh-start); unlisted means the member did not exist in this slot, so a
+        // fresh start (remake) is the timeline-accurate outcome (design ruling 2026-08-17).
         private static void MergeSlot(string sessionName, MpSlot slot)
         {
             lock (_lock)

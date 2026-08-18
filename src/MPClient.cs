@@ -1509,6 +1509,7 @@ namespace BigAmbitionsMP
         {
             if (!IsConnected) return;
             _worldReadySent = false;   // re-arm the world-ready ack for this load
+            _settledReported = false;  // round-271: re-arm the settled report for this load
             WorldSyncApplied = false;  // re-arm: world sync not yet applied for this load
             _worldReadyContentDeadlineAt = 0f;   // round-205: content-bar deadline re-arms per load
             var payload = new PlayerInGamePayload { PlayerId = MPConfig.PlayerId };
@@ -1538,6 +1539,22 @@ namespace BigAmbitionsMP
             if (!IsConnected) return;
             Send(MessageEnvelope.Create(MessageType.PhaseReport, MPConfig.PlayerId,
                 new PhaseReportPayload { PlayerId = MPConfig.PlayerId, Phase = phase }));
+        }
+
+        /// <summary>Round-271 (Fix A): one-shot per load — report the moment OUR settled-gate
+        /// opens (the exact predicate that gates our save upload, not the lifecycle 'Running'
+        /// proxy).  The host fires the join baseline save on this instead of WorldReady, so
+        /// the checkpoint a join triggers actually contains the joiner.  Re-armed alongside
+        /// _worldReadySent in SendPlayerInGame (same per-load lifecycle).</summary>
+        private static bool _settledReported;
+
+        internal static void TickSettledReport()
+        {
+            if (_settledReported || !IsConnected || MPServer.IsRunning || !IsClientInWorld) return;
+            if (!MPWorldReady.IsSettled) return;
+            _settledReported = true;
+            SendPhaseReport("Settled");
+            Plugin.Logger.LogInfo("[Client] Reported Settled to host (round-271: join baseline save fires on this).");
         }
 
         public static void SendWorldReady()
@@ -1608,7 +1625,7 @@ namespace BigAmbitionsMP
 
         /// <summary>Ships this player's saved .hsg (gzipped) up to the host so the
         /// host holds the canonical copy (Phase 4 — centralized persistence).</summary>
-        public static void SendSaveData(string sessionName, MpSlot slot, string hsgGzipBase64, int rawLength)
+        public static void SendSaveData(string sessionName, MpSlot slot, string hsgGzipBase64, int rawLength, string metaJson = "")
         {
             if (!IsConnected) return;
             var p = new SaveDataPayload
@@ -1618,6 +1635,7 @@ namespace BigAmbitionsMP
                 Slot          = slot,
                 HsgGzipBase64 = hsgGzipBase64,
                 RawLength     = rawLength,
+                MetaJson      = metaJson,   // round-275: the sidecar that lets the host DATE this save
                 PlaythroughId = MPSaveManager.ActivePlaythrough,   // round-222: identity travels
             };
             Send(MessageEnvelope.Create(MessageType.SaveData, MPConfig.PlayerId, p));

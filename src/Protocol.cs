@@ -2183,6 +2183,10 @@ namespace BigAmbitionsMP
         public MpSlot Slot           { get; set; } = new();
         public string HsgGzipBase64  { get; set; } = "";   // gzip(.hsg bytes) → base64
         public int    RawLength       { get; set; }          // uncompressed length, for sanity check
+        /// <summary>Round-275: the .hsg.meta sidecar JSON.  The game's save scanner cannot
+        /// date a .hsg without it — host-stored copies lacked one, so day validation read
+        /// -1/0 and the disconnect-save restore never committed on a real world.</summary>
+        public string MetaJson       { get; set; } = "";
     }
 
     /// <summary>Client → Host: this player's current money.  Sent periodically so
@@ -2217,6 +2221,9 @@ namespace BigAmbitionsMP
         public string SessionName    { get; set; } = "";
         public string HsgGzipBase64  { get; set; } = "";
         public int    RawLength      { get; set; }
+        /// <summary>Round-275b: the served save's .hsg.meta sidecar — without it the
+        /// CLIENT-side copy is undatable (its local catalog read day 0; round-262 fired).</summary>
+        public string MetaJson       { get; set; } = "";
         public float  Money          { get; set; }
         // Host → client (Proposal 2, 2026-06-17): "you HAVE a saved character in this session, but I can't read
         // its .hsg right now (missing / locked / corrupt)." The client must NOT fresh-start on this — that would
@@ -2259,6 +2266,7 @@ namespace BigAmbitionsMP
         public string SaveName       { get; set; } = "";   // .hsg file name, no extension
         public string HsgGzipBase64  { get; set; } = "";
         public int    RawLength      { get; set; }
+        public string MetaJson       { get; set; } = "";   // round-275b: .hsg.meta sidecar rides the mirror
         public string ManifestJson   { get; set; } = "";   // full session manifest (small)
         public string HostStoreToken { get; set; } = "";
         /// <summary>World identity of the mirrored session (review fix 2026-07-23): the

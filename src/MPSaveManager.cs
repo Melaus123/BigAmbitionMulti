@@ -449,7 +449,21 @@ namespace BigAmbitionsMP
             {
                 Directory.CreateDirectory(MpSessionFolder(sessionName));
                 var json = Newtonsoft.Json.JsonConvert.SerializeObject(m, Newtonsoft.Json.Formatting.Indented);
-                File.WriteAllText(ManifestPath(sessionName), json);
+                // Round-274 (user-approved): ATOMIC write — the old in-place truncating write
+                // let a concurrent reader observe a half-written manifest, which ReadManifest
+                // swallows into null (reviewer-confirmed mechanism).  Write beside, then swap:
+                // a reader sees the old complete file or the new complete file, never a torn one.
+                string path = ManifestPath(sessionName);
+                // Round-274c: unique temp name — concurrent writers of one manifest must not
+                // interleave on a shared ".tmp" (verifier PLAUSIBLE-5 second-order).
+                string tmp  = path + ".tmp-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                try
+                {
+                    File.WriteAllText(tmp, json);
+                    if (File.Exists(path)) File.Replace(tmp, path, null);
+                    else File.Move(tmp, path);
+                }
+                finally { try { if (File.Exists(tmp)) File.Delete(tmp); } catch { } }
                 Plugin.Logger.LogInfo($"[MPSave] Wrote manifest '{sessionName}' ({m.Slots.Count} slot(s), {m.BuildingOwners.Count} owned).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] WriteManifest '{sessionName}': {ex.Message}"); }
