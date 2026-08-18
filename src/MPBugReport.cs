@@ -282,7 +282,10 @@ namespace BigAmbitionsMP
             Directory.CreateDirectory(dir);
             MarkReportBusy(dir);   // released in the terminal path below — the prune skips busy dirs
 
-            string ring = MPLog.Dump("manual bug report: " + reason);
+            // Batch 14: callers already prefix the reason ("manual bug report: " / "previous
+            // crash: ", MPCanvasUI:5852) — re-prefixing here doubled it on every ring-dump
+            // header in the field ("manual bug report: manual bug report: <text>", 10 bundles).
+            string ring = MPLog.Dump(reason);
             WriteDescription(Path.Combine(dir, "description.txt"), reason);
             WriteReport(Path.Combine(dir, "report.md"), reason);
             CopyPlayerLogs(dir);
@@ -433,7 +436,11 @@ namespace BigAmbitionsMP
             sb.AppendLine($"LobbyPlayers: {string.Join(", ", LobbyPlayers())}");
             sb.AppendLine($"ConnectedClients: {(MPServer.IsRunning ? MPServer.ConnectedCount.ToString(CultureInfo.InvariantCulture) : "n/a")}");
             sb.AppendLine($"ClientConnected: {MPClient.IsConnected}");
-            sb.AppendLine($"PreviousCrashDetected: {PendingCrashDetected}");
+            // Batch 14: PendingCrashDetected is LAUNCH-scoped state that Acknowledge can clear
+            // before/independently of this report — field triage sorting on it reached wrong
+            // conclusions (a real-dump bundle read False).  Keep it for continuity, but the
+            // hint line below is the trustworthy evidence; readers should prefer it.
+            sb.AppendLine($"PreviousCrashDetected: {PendingCrashDetected} (launch-scoped; may read False on reports filed after acknowledge — trust PreviousCrashHint)");
             if (!string.IsNullOrWhiteSpace(PendingCrashHint))
                 sb.AppendLine($"PreviousCrashHint: {PendingCrashHint}");
             // A failed/dead patch class is silent feature loss — every report names them (2026-07-09).
