@@ -44,10 +44,8 @@ namespace BigAmbitionsMP
         private static int   _episodesLogged;
         private static float _lastEpisodeStartAt = -999f;   // round-185: rate-limit anchor
 
-        // PlayerAction.Move reflection (dump gap).
-        private static bool _inputResolved;
-        private static object? _moveAction;
-        private static System.Reflection.MethodInfo? _vectorMi;
+        // (Batch 13: the "PlayerAction" reflection trio removed — the type never existed;
+        //  see ReadMoveMagnitude/ReadConsumedMagnitude for the two-layer measurement.)
 
         public static void Reset()
         {
@@ -198,40 +196,40 @@ namespace BigAmbitionsMP
 
         private static float ReadMoveMagnitude()
         {
-            try
-            {
-                if (!_inputResolved)
-                {
-                    _inputResolved = true;
-                    var t = VehicleManager.FindGameType("PlayerAction");
-                    if (t == null)
-                        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-                        {
-                            try { foreach (var x in asm.GetTypes()) if (x != null && x.Name == "PlayerAction") { t = x; break; } } catch { }
-                            if (t != null) break;
-                        }
-                    if (t != null)
-                    {
-                        var m = HarmonyLib.AccessTools.Property(t, "Move")?.GetValue(null)
-                             ?? HarmonyLib.AccessTools.Field(t, "Move")?.GetValue(null);
-                        if (m != null)
-                        {
-                            _vectorMi = m.GetType().GetMethod("Vector", Type.EmptyTypes);
-                            if (_vectorMi != null) _moveAction = m;
-                        }
-                    }
-                    Plugin.Logger.LogInfo($"[MoveFreeze] input source: {(_moveAction != null ? "PlayerAction.Move" : "raw keys (PlayerAction unresolved — dump gap)")}.");
-                }
-                if (_moveAction != null && _vectorMi != null)
-                {
-                    var v = _vectorMi.Invoke(_moveAction, null);
-                    if (v is Vector2 v2) return v2.magnitude;
-                }
-            }
-            catch { }
-            // Fallback: raw keys — misses rebinds/gamepad but never lies positive.
+            // Sweep batch 13 (2026-08-18): the old code hunted a type named "PlayerAction"
+            // that does not exist in ANY dump of this game — it never resolved once, and the
+            // "dump gap" line blamed the dump for a phantom.  Raw keys turn out to be the
+            // RIGHT trigger signal anyway: they measure the player's INTENT (keys held),
+            // which is exactly what "trying to move but not moving" means.  The layer the
+            // game CONSUMES is read separately (ReadConsumedMagnitude) so the snapshot can
+            // name which layer ate the input.  Misses rebinds/gamepad; never lies positive.
             return Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.A) || Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.D)
                 || Input.GetKey(KeyCode.UpArrow) || Input.GetKey(KeyCode.DownArrow) || Input.GetKey(KeyCode.LeftArrow) || Input.GetKey(KeyCode.RightArrow) ? 1f : 0f;
+        }
+
+        // Batch 13: PlayerController._inputVelocity is the value the game ACTUALLY moves on
+        // (PlayerController.cs:377 — movement iff sqrMagnitude >= 0.05).  intent=1/consumed=0
+        // = input eaten UPSTREAM (focused UI, blocker); intent=1/consumed>0/no displacement
+        // = the NAV/physics layer is stuck.  The delta is the per-episode layer diagnosis
+        // every field freeze report has been missing.
+        private static System.Reflection.FieldInfo? _inputVelFi;
+        private static bool _inputVelResolved;
+        private static float ReadConsumedMagnitude()
+        {
+            try
+            {
+                var pc = InstanceBehavior<GameManager>.Instance?.playerController;
+                if (pc == null) return -1f;
+                if (!_inputVelResolved)
+                {
+                    _inputVelResolved = true;
+                    _inputVelFi = HarmonyLib.AccessTools.Field(pc.GetType(), "_inputVelocity");
+                    Plugin.Logger.LogInfo($"[MoveFreeze] consumed-input source: {(_inputVelFi != null ? "PlayerController._inputVelocity" : "UNRESOLVED (field missing — game update?)")} (batch 13).");
+                }
+                if (_inputVelFi != null && _inputVelFi.GetValue(pc) is Vector3 v) return v.magnitude;
+            }
+            catch { }
+            return -1f;
         }
 
         private static void LogSnapshot(string trigger, Vector3 pos, float inputMag)
@@ -260,8 +258,10 @@ namespace BigAmbitionsMP
             catch { }
             bool dialog = false; try { dialog = DialogController.current != null; } catch { }
             bool inside = false; try { inside = BuildingManager.IsInsideBuilding; } catch { }
+            float consumed = ReadConsumedMagnitude();
             Plugin.Logger.LogWarning(
-                $"[MoveFreeze] STUCK ({trigger}) pos={pos.x:F1},{pos.y:F1},{pos.z:F1} inputMag={inputMag:F2} " +
+                $"[MoveFreeze] STUCK ({trigger}) pos={pos.x:F1},{pos.y:F1},{pos.z:F1} inputMag={inputMag:F2} consumed={consumed:F2} " +
+                $"(intent w/o consumption = eaten upstream; consumption w/o movement = nav layer) " +
                 $"clicks5s={_clicks.Count}(overUI={clicksOverUi}) pointerOverUI={overUi} selectedGO='{selectedGo}' " +
                 $"selection={sel} nav[{nav}] dialog={dialog} inside={inside} shop='{MPRegisterSync.CurrentShopAddress}' timeScale={Time.timeScale:F2}");
         }
