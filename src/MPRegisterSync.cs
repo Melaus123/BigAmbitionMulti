@@ -121,6 +121,28 @@ namespace BigAmbitionsMP
         private static string Key(Vector3 p)
             => $"{Mathf.RoundToInt(p.x)}:{Mathf.RoundToInt(p.y)}:{Mathf.RoundToInt(p.z)}";
 
+        /// <summary>Sweep item 7 (2026-08-18): STATION IDENTITY.  The rounded-position key
+        /// split identities whenever a till sat on a rounding boundary — field bundle
+        /// 20260713-223138 measured one checkout row keyed as BOTH 1106:1:z and 1107:1:z
+        /// (x≈1106.5), which minted duplicate synthetics, unresolvable BAMP_DUTY ids
+        /// (7,000+ native "Employee not found" lines) and ON/OFF churn between the two
+        /// keys.  The ItemInstance id already rides every duty payload and is preserved
+        /// identically across machines by interior replication (round-122) — it is the
+        /// identity; position remains the fallback for entries that genuinely have no
+        /// instance id (and the value everywhere for proximity/display).</summary>
+        private static string RegKey(string? stationId, Vector3 pos)
+            => string.IsNullOrEmpty(stationId) ? Key(pos) : "sid:" + stationId;
+
+        /// <summary>The registry key for a live station object (serve mirror + duty capture
+        /// use the same derivation so key strings compare equal across machines).  Takes the
+        /// BASE station type — ItemInstance lives on EmployeeStationController and the serve
+        /// mirror hands us whatever station kind the stand-in is working.</summary>
+        internal static string RegKeyForStation(EmployeeStationController? c)
+        {
+            string id = ""; try { id = c?.ItemInstance?.id ?? ""; } catch { }
+            return RegKey(id, c != null ? c.transform.position : Vector3.zero);
+        }
+
 #if BAMP_DEV
         /// <summary>Round-263 test hooks (TestDrive 'schedfilter'): inject/remove a duty
         /// synthetic at a fabricated station so the schedule-surface filter can be
@@ -130,18 +152,19 @@ namespace BigAmbitionsMP
         {
             var pos = new Vector3(-9999f, -9999f, -9999f);
             TryStaffSynthetic(addressKey, "TESTDUTY", "BAMP_TESTSTATION", pos);
-            return Key(pos);
+            return RegKey("BAMP_TESTSTATION", pos);   // item 7: the registry key the injection actually used
         }
         internal static void TestRemoveSynthetic(string stationKey) => RemoveSynthetic(stationKey);
 #endif
 
         // ── Round-120: personal-duty stand-ins whose BODY must stay hidden ──────────────────────────────
-        // stationKey → addressKey.  The game spawns a serving NPC from the roster record a frame or more
+        // RegKey → (addressKey, pos) — item 7.  The game spawns a serving NPC from the roster record a frame or more
         // after we inject it, so concealment cannot happen at injection time — it is retried on a slow tick
         // until the body exists.  Hiding uses the game's own ThirdPersonCharacter.ToggleVisibility, NOT a
         // root SetActive: round-87 proved that deactivating a character at the root strips its collider and
         // traffic then drives through where it stood.
-        private static readonly Dictionary<string, string> _hideBodyAt = new();
+        // Item 7: value carries the position (keys are no longer parseable to positions).
+        private static readonly Dictionary<string, (string addr, Vector3 pos)> _hideBodyAt = new();
         private static readonly HashSet<string> _hidden = new();
         private static readonly HashSet<string> _hideMissLogged = new();   // round-125: one "not present yet" line per station
         private static readonly Dictionary<string, ThirdPersonCharacter> _hiddenTpc = new();   // round-126: per-frame re-assert target
@@ -205,7 +228,7 @@ namespace BigAmbitionsMP
                 var stationObjs = GetStationsCached();
                 foreach (var kv in _hideBodyAt)
                 {
-                    var reg = NearestStationIn(stationObjs, ParseKey(kv.Key), 2.5f);
+                    var reg = NearestStationIn(stationObjs, kv.Value.pos, 2.5f);   // item 7: keys no longer parse to positions
                     var emp = reg?.employee;
                     var tpc = emp?.employeeTpc;
                     if (tpc == null)
@@ -353,9 +376,8 @@ namespace BigAmbitionsMP
             return "";
         }
 
-        /// <summary>Round-119: the position key for a station, so the simulator can name the till it just
-        /// served at in the same terms every machine already uses for duty.</summary>
-        internal static string StationKeyOf(Vector3 pos) => Key(pos);
+        // (Round-119's StationKeyOf(pos) removed — item 7: the serve mirror derives keys via
+        //  RegKeyForStation so its wire strings match the id-keyed duty registry.)
 
         /// <summary>Round-41 (customer puppets): the player on PERSONAL register duty at this address
         /// ("" = none). The simulator election gives the register worker authority — serving requires
@@ -373,7 +395,7 @@ namespace BigAmbitionsMP
         {
             if (p == null || string.IsNullOrEmpty(p.PlayerId)) return;
             var pos = new Vector3(p.X, p.Y, p.Z);
-            string k = Key(pos);
+            string k = RegKey(p.StationId, pos);   // item 7: instance id is the identity; position is the fallback
             if (p.On)
             {
                 _cashiers[k] = (p.PlayerId, pos, p.Employee, p.Address ?? "", p.StationId ?? "");
@@ -397,24 +419,41 @@ namespace BigAmbitionsMP
                 {
                     string addr = p.Address; string pid = p.PlayerId; string st = p.StationId;
                     var dutyPos = pos;
+                    string hk = k;   // item 7: the registry key, captured — never re-derive inside the lambda
                     bool personal = !p.Employee;
                     GameStatePatcher.EnqueueOnMainThread(() =>
                     {
                         TryStaffSynthetic(addr, pid, st, dutyPos);
-                        if (personal) _hideBodyAt[Key(dutyPos)] = addr;   // the player's own avatar is the visual
+                        if (personal) _hideBodyAt[hk] = (addr, dutyPos);   // the player's own avatar is the visual
                     });
                 }
             }
-            else if (_cashiers.TryGetValue(k, out var e) && e.playerId == p.PlayerId)
+            else
             {
-                _cashiers.TryRemove(k, out _);
+                // Item 7: an OFF whose key form differs from the ON it retracts (a sender that
+                // lost the StationId) falls back to a same-player position match — the split
+                // this restructure removes must not be reintroduced by a mixed-form packet.
+                if (!_cashiers.TryGetValue(k, out var e) || e.playerId != p.PlayerId)
+                {
+                    k = ""; e = default;
+                    string pk = Key(pos);
+                    foreach (var kv in _cashiers)
+                        if (kv.Value.playerId == p.PlayerId && Key(kv.Value.pos) == pk) { k = kv.Key; e = kv.Value; break; }
+                }
+                if (!string.IsNullOrEmpty(k) && e.playerId == p.PlayerId)
+                {
+                    _cashiers.TryRemove(k, out _);
 #if BAMP_DEV
-                Plugin.Logger.LogInfo($"[Register] '{p.PlayerId}' OFF duty at {k}.");   // round-187b: dev-only
+                    Plugin.Logger.LogInfo($"[Register] '{p.PlayerId}' OFF duty at {k}.");   // round-187b: dev-only
 #endif
-                // Round-120: mirror the ON gate — a personal-duty stand-in must be torn down too, or the till
-                // stays staffed by a phantom after the player walks away.
-                if (p.PlayerId != MPConfig.PlayerId)
-                    GameStatePatcher.EnqueueOnMainThread(() => { _hideBodyAt.Remove(k); RemoveSyntheticAtStation(k); });
+                    // Round-120: mirror the ON gate — a personal-duty stand-in must be torn down too, or the till
+                    // stays staffed by a phantom after the player walks away.
+                    if (p.PlayerId != MPConfig.PlayerId)
+                    {
+                        var offKey = k;
+                        GameStatePatcher.EnqueueOnMainThread(() => { _hideBodyAt.Remove(offKey); RemoveSyntheticAtStation(offKey); });
+                    }
+                }
             }
         }
 
@@ -459,6 +498,7 @@ namespace BigAmbitionsMP
         private static float _nextDutyAt;
         private static bool _onDuty;
         private static Vector3 _dutyPos;
+        private static string _dutyStationId = "";   // item 7: the till's instance id rides every toggle incl. OFF
 
         public static void TickDuty()
         {
@@ -497,15 +537,6 @@ namespace BigAmbitionsMP
                     if (reg == null) return;   // working some other station — not register duty
                     _onDuty = true;
                     _dutyPos = reg.transform.position;
-                    // If this station was broadcast as EMPLOYEE-staffed (the
-                    // schedule query also matches the working owner), retract
-                    // that first — personal duty owns the till now.
-                    string myKey = Key(_dutyPos);
-                    if (_empDuty.ContainsKey(myKey))
-                    {
-                        SendToggle(_empDuty[myKey], false);
-                        _empDuty.Remove(myKey);
-                    }
                     // ROUND-122: carry the till's ITEM-INSTANCE id.  Without it the receiver's stand-in is
                     // created with "0 shift(s), station ''" — and the work shift is the ONLY thing that tells
                     // the game which station a worker mans, so the till was never actually staffed on the
@@ -517,6 +548,16 @@ namespace BigAmbitionsMP
                     if (string.IsNullOrEmpty(myStationId))
                         Plugin.Logger.LogWarning("[Register] personal duty: could not resolve the till's item-instance id — "
                             + "the stand-in on other machines will have no shift and that till will not serve.");
+                    _dutyStationId = myStationId;   // item 7: OFF must retract the SAME identity
+                    // If this station was broadcast as EMPLOYEE-staffed (the
+                    // schedule query also matches the working owner), retract
+                    // that first — personal duty owns the till now.
+                    string myKey = RegKey(myStationId, _dutyPos);
+                    if (_empDuty.TryGetValue(myKey, out var ed))
+                    {
+                        SendToggle(ed.pos, false, employee: true, stationId: ed.stationId);
+                        _empDuty.Remove(myKey);
+                    }
                     SendToggle(_dutyPos, true, stationId: myStationId);
                     // Worker-side price-table snapshot — cross-machine evidence
                     // pairing for any future price dispute.
@@ -533,7 +574,8 @@ namespace BigAmbitionsMP
                 else if (!working && _onDuty)
                 {
                     _onDuty = false;
-                    SendToggle(_dutyPos, false);
+                    SendToggle(_dutyPos, false, stationId: _dutyStationId);   // item 7: OFF carries the identity
+                    _dutyStationId = "";
                 }
 
                 // (employee-staffed stations now scanned by TickEmployeeDutySliced above — round-161)
@@ -552,7 +594,19 @@ namespace BigAmbitionsMP
         /// player?  The duty map's ONE consumer-facing question — gates the
         /// self-checkout routing and the queue guard.</summary>
         public static bool IsStaffedByOtherPlayer(Vector3 registerPos)
-            => _cashiers.TryGetValue(Key(registerPos), out var e) && e.playerId != MPConfig.PlayerId;
+            => TryFindCashierByPos(registerPos, out var e) && e.playerId != MPConfig.PlayerId;
+
+        /// <summary>Item 7: position-probe lookup against the (now id-keyed) duty map —
+        /// callers that only hold a world position match on the stored position value.</summary>
+        private static bool TryFindCashierByPos(Vector3 pos,
+            out (string playerId, Vector3 pos, bool employee, string address, string stationId) e)
+        {
+            string pk = Key(pos);
+            if (_cashiers.TryGetValue(pk, out e)) return true;   // position-keyed entry (no instance id)
+            foreach (var v in _cashiers.Values)
+                if (Key(v.pos) == pk) { e = v; return true; }
+            e = default; return false;
+        }
 
         /// <summary>Snapshot of the current duty posts, as ON payloads — for
         /// re-syncing a (re)joining peer.  Duty is EVENT-tracked (broadcast only
@@ -604,7 +658,7 @@ namespace BigAmbitionsMP
         // then buy through the same self-checkout + RemoteSale path.  KNOWN
         // cosmetic gap: visitors see no cashier body at employee-run tills.
         private static float _nextEmpScanAt;
-        private static readonly Dictionary<string, Vector3> _empDuty = new();   // posKey → pos
+        private static readonly Dictionary<string, (Vector3 pos, string stationId)> _empDuty = new();   // RegKey → (pos, stationId) — item 7
 
         // Round-161 — the 5s scan walked EVERY registration + every owned shop's schedules in ONE
         // frame: 60-65ms worst-frame on a 28-business save, the recurring hitch both the field pair's
@@ -689,15 +743,15 @@ namespace BigAmbitionsMP
                         // The OWNER personally working reads as "employed" to the
                         // schedule query — that's PERSONAL duty, not staff (user
                         // saw a staff NPC spawn on top of their working avatar).
-                        if (_onDuty && Key(_dutyPos) == Key(pos)) continue;
-                        live[Key(pos)] = (pos, addr, stationId);
+                        if (_onDuty && RegKey(_dutyStationId, _dutyPos) == RegKey(stationId, pos)) continue;
+                        live[RegKey(stationId, pos)] = (pos, addr, stationId);   // item 7: instance id is the identity
                     }
                 }
                 // Newly staffed stations → ON; no-longer-staffed → OFF.
                 foreach (var kv in live)
                     if (!_empDuty.ContainsKey(kv.Key))
                     {
-                        _empDuty[kv.Key] = kv.Value.pos;
+                        _empDuty[kv.Key] = (kv.Value.pos, kv.Value.stationId);
                         SendToggle(kv.Value.pos, true, kv.Value.addr, employee: true, stationId: kv.Value.stationId);
 #if BAMP_DEV
                         Plugin.Logger.LogInfo($"[Register] employee-staffed station ON at {kv.Key} ({kv.Value.addr}).");   // round-187b: dev-only
@@ -709,7 +763,8 @@ namespace BigAmbitionsMP
                 foreach (var k in stale)
                 {
                     // Don't stomp PERSONAL duty at the same register.
-                    if (!(_onDuty && Key(_dutyPos) == k)) SendToggle(_empDuty[k], false);
+                    if (!(_onDuty && RegKey(_dutyStationId, _dutyPos) == k))
+                        SendToggle(_empDuty[k].pos, false, employee: true, stationId: _empDuty[k].stationId);   // item 7: OFF carries the identity
                     _empDuty.Remove(k);
 #if BAMP_DEV
                     Plugin.Logger.LogInfo($"[Register] employee-staffed station OFF at {k}.");   // round-187b: dev-only
@@ -1121,7 +1176,7 @@ namespace BigAmbitionsMP
         /// <summary>Is this station under EMPLOYEE duty (used by the staffing
         /// gate override — personal duty must never force the gate).</summary>
         public static bool IsEmployeeDutyStation(Vector3 pos)
-            => _cashiers.TryGetValue(Key(pos), out var e) && e.employee;
+            => TryFindCashierByPos(pos, out var e) && e.employee;
 
         /// <summary>Round-144 - true when this position is a till WE staffed with a stand-in.  Scope guard
         /// for the ShouldUpdateEmployee ownership bypass (BusinessPatches): only OUR stations get it.</summary>
@@ -1141,7 +1196,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                string stationKey = Key(dutyPos);
+                string stationKey = RegKey(stationId, dutyPos);   // item 7: stable identity → stable BAMP_DUTY id
                 if (string.IsNullOrEmpty(addressKey) || _synthetics.ContainsKey(stationKey)) return;
                 var gi = SaveGameManager.Current;
                 if (gi == null) return;

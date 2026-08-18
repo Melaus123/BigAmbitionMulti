@@ -52,7 +52,7 @@ namespace BigAmbitionsMP
                 {
                     AddressKey   = addr,
                     SimulatorPid = MPConfig.PlayerId,
-                    StationKey   = MPRegisterSync.StationKeyOf(station.transform.position),
+                    StationKey   = MPRegisterSync.RegKeyForStation(station),   // item 7: same derivation as the duty registry — key strings compare equal across machines
                     CustomerId   = custId,
                     Kind         = kind,
                     Finished     = kind == 2,
