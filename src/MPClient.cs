@@ -1169,11 +1169,12 @@ namespace BigAmbitionsMP
             MPNeedsTuning.SetFromHeartbeat(payload.TuneDrain, payload.TuneRest, payload.TuneMorale);
 
             // Weather (2026-07-14): align local rain with the host's state — main
-            // thread, coalesced (only the newest state matters).
+            // thread, coalesced (only the newest state matters).  2026-08-18: the
+            // host's intensity rides along and is used when rain STARTS here.
             if (payload.RainState >= 0)
             {
-                int rs = payload.RainState;
-                GameStatePatcher.EnqueueOnMainThread(() => MPWeatherSync.ApplyRainState(rs), "weather");
+                int rs = payload.RainState; float ri = payload.RainIntensity;
+                GameStatePatcher.EnqueueOnMainThread(() => MPWeatherSync.ApplyRainState(rs, ri), "weather");
             }
         }
 

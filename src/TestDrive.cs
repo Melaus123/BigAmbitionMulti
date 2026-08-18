@@ -110,6 +110,10 @@ namespace BigAmbitionsMP
                     try { sb.Append($"session='{MPSaveCoordinator.ActiveSessionName}' "); } catch { }
                     try { var t = GameStateReader.GetGameTime(); sb.Append($"day={t.day} hour={t.hourOfDay:0.0} "); } catch { }
                     try { sb.Append($"ledger={MPServer.BuildingOwners.Count} "); } catch { }
+                    // Weather round (2026-08-18): local isRaining / last host verdict /
+                    // drops visually falling — lets the rig verify the VISUAL layer,
+                    // which log lines alone cannot see (-1 = unknown).
+                    try { sb.Append($"rain={MPWeatherSync.CurrentRainState()}/{MPWeatherSync.HostRainState} drops={MPWeatherSync.DropsFalling()} "); } catch { }
                     // Round-240: clientConn above is THIS instance's own outbound link, not a peer
                     // count — agents misread it. pendingJoins>0 means 'acceptjoin' is needed.
                     try { if (MPServer.IsRunning) sb.Append($"pendingJoins={MPServer.PendingJoinList.Count}"); } catch { }

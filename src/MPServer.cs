@@ -4913,6 +4913,7 @@ namespace BigAmbitionsMP
             var payload = new GameTimeSyncPayload
             {
                 Day = day, TimeOfDay = hour, Speed = speed, RainState = MPWeatherSync.CurrentRainState(),
+                RainIntensity = MPWeatherSync.CurrentRainIntensity(),
                 TuneDrain = MPNeedsTuning.DrainPercent, TuneRest = MPNeedsTuning.RestPercent,
                 TuneMorale = MPNeedsTuning.MoralePercent,
             };

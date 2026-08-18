@@ -1321,6 +1321,11 @@ namespace BigAmbitionsMP
         /// <summary>Host rain state: -1 absent/unknown (older builds omit the field —
         /// JSON-tolerant), 0 dry, 1 raining.  Clients align their local RainHelper.</summary>
         public int   RainState { get; set; } = -1;
+        /// <summary>Host rain intensity 0..1 while raining, -1 absent/dry/unknown
+        /// (additive like RainState — older peers ignore it).  Consumed only at the
+        /// moment a client STARTS rain: the game's transition API is a TOGGLE, so a
+        /// mid-rain re-apply would turn rain off instead of adjusting it.</summary>
+        public float RainIntensity { get; set; } = -1f;
         /// <summary>Needs/morale tuning percents (drain, rest, morale-tempo) —
         /// -1 = absent (older hosts).  Rides the heartbeat so LOADED-session
         /// clients converge too (the RainState pattern).</summary>
