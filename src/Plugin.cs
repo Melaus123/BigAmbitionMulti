@@ -98,6 +98,54 @@ namespace BigAmbitionsMP
         /// <summary>Round-254b (user ruling: the banner names the mod, nothing else — the
         /// remedy is identical either way). Returns the short culprit line, and whether it
         /// actually points at ANOTHER mod (naming ourselves or nothing = generic message).</summary>
+        /// <summary>2026-08-18 (user: "thats not how names work"): players see NAMES in
+        /// their mod list, never Workshop ids — the Lord-Wolf report relayed "not showing
+        /// up" instead of the culprit because the banner led with a number.  Resolve the
+        /// culprit folder to its DISPLAY NAME via the game's own loader registry
+        /// (ModDiscoveryRegistry.Entries → DiscoveredModEntry.ModFolder/ModDisplayName;
+        /// names live inside mod DLLs, not on disk, so the registry is the only source).
+        /// Reflection, not a compile reference: this path runs once, on a failing boot.
+        /// The id + URL stay as fine print — support still wants them.</summary>
+        private static string ResolveModDisplayName(string culpritFolder)
+        {
+            try
+            {
+                // Separator normalization is load-bearing: Unity's persistentDataPath
+                // uses FORWARD slashes while the loaded DLL's Location uses backslashes
+                // — the first rig test fell to the fallback branch on exactly this.
+                static string Norm(string p) => p.Replace('/', '\\').TrimEnd('\\');
+                string want = Norm(culpritFolder);
+                string wantLeaf = System.IO.Path.GetFileName(want);
+                string leafHit = "";
+                var regT = HarmonyLib.AccessTools.TypeByName("BigAmbitions.ModsInternal.ModDiscoveryRegistry");
+                var entriesProp = regT == null ? null : HarmonyLib.AccessTools.Property(regT, "Entries");
+                if (entriesProp?.GetValue(null) is not System.Collections.IDictionary byScope) return "";
+                foreach (System.Collections.DictionaryEntry scope in byScope)
+                {
+                    if (scope.Value is not System.Collections.IEnumerable list) continue;
+                    foreach (var entry in list)
+                    {
+                        if (entry == null) continue;
+                        var t = entry.GetType();
+                        string folder = Norm(HarmonyLib.AccessTools.Property(t, "ModFolder")?.GetValue(entry) as string ?? "");
+                        if (folder.Length == 0) continue;
+                        string name = HarmonyLib.AccessTools.Property(t, "ModDisplayName")?.GetValue(entry) as string ?? "";
+                        if (string.Equals(folder, want, StringComparison.OrdinalIgnoreCase)
+                            || want.StartsWith(folder + "\\", StringComparison.OrdinalIgnoreCase))
+                            return name;
+                        // Last-resort: same leaf folder name (covers differently-rooted
+                        // registry paths); only used if no full-path match exists.
+                        if (leafHit.Length == 0 && wantLeaf.Length > 0
+                            && string.Equals(System.IO.Path.GetFileName(folder), wantLeaf, StringComparison.OrdinalIgnoreCase))
+                            leafHit = name;
+                    }
+                }
+                return leafHit;
+            }
+            catch { }
+            return "";
+        }
+
         internal static string CulpritShort(out bool isOtherMod)
         {
             isOtherMod = false;
@@ -116,7 +164,11 @@ namespace BigAmbitionsMP
                     isOtherMod = true;
                     string folder = "";
                     try { folder = loc.Substring(0, wm.Index + wm.Length).TrimEnd('\\', '/'); } catch { }
-                    return $"Workshop mod {wm.Groups[1].Value}\nsteamcommunity.com/sharedfiles/filedetails/?id={wm.Groups[1].Value}"
+                    string name = folder.Length > 0 ? ResolveModDisplayName(folder) : "";
+                    string headline = name.Length > 0
+                        ? $"\"{name}\""
+                        : $"Workshop mod {wm.Groups[1].Value}";   // name unresolvable → the id is still better than nothing
+                    return $"{headline}\n(Workshop item {wm.Groups[1].Value} — steamcommunity.com/sharedfiles/filedetails/?id={wm.Groups[1].Value})"
                          + (folder.Length > 0 ? $"\nFolder: {folder}" : "");
                 }
                 var lm = System.Text.RegularExpressions.Regex.Match(loc, @"^(.*[\\/]ModsLocal[\\/][^\\/]+)");
@@ -124,7 +176,9 @@ namespace BigAmbitionsMP
                 {
                     isOtherMod = true;
                     string folder = lm.Groups[1].Value;
-                    return $"Local mod '{System.IO.Path.GetFileName(folder)}'\nFolder: {folder}";
+                    string name = ResolveModDisplayName(folder);
+                    return (name.Length > 0 ? $"\"{name}\"\n" : $"Local mod '{System.IO.Path.GetFileName(folder)}'\n")
+                         + $"Folder: {folder}";
                 }
                 return "";
             }

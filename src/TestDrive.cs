@@ -290,11 +290,22 @@ namespace BigAmbitionsMP
                     // wraps with state transitions.
                     if (!MPServer.IsRunning) return "ERR start the server first ('host')";
                     if (arg.Length == 0) return "ERR session name required";
-                    if (!MPSaveManager.ListSessions().Exists(s => s.Name == arg))
-                        return $"ERR session '{arg}' not in the session list";
-                    MPServer.ChosenLoadSession = arg;
+                    // Support-rig forensics (user-approved 2026-08-18): 'hostload <session> as=<stableId>'
+                    // loads the NAMED member's character as the world carrier — the only way to open a
+                    // FIELD save (whose slots are steam-* ids) on a rig machine (guid-* ids).  The
+                    // trailing token is stripped BEFORE the session-name checks so session names with
+                    // spaces keep working.  A plain hostload always DISARMS the override.
+                    string sess = arg; string? loadAs = null;
+                    int ai = arg.LastIndexOf(" as=", StringComparison.OrdinalIgnoreCase);
+                    if (ai > 0) { loadAs = arg.Substring(ai + 4).Trim(); sess = arg.Substring(0, ai).Trim(); }
+                    MPSaveCoordinator.DevHostLoadAs = string.IsNullOrEmpty(loadAs) ? null : loadAs;
+                    if (!string.IsNullOrEmpty(loadAs))
+                        Plugin.Logger.LogWarning($"[MPSave] DEV hostload impersonation ARMED: world will load member '{loadAs}' (support-rig forensics).");
+                    if (!MPSaveManager.ListSessions().Exists(s => s.Name == sess))
+                        return $"ERR session '{sess}' not in the session list";
+                    MPServer.ChosenLoadSession = sess;
                     MPServer.StartLoadGame();
-                    return $"OK StartLoadGame('{arg}') invoked (lobby clients are served their saves; later joiners need 'acceptjoin')";
+                    return $"OK StartLoadGame('{sess}') invoked{(loadAs != null ? $" loading-as '{loadAs}'" : "")} (lobby clients are served their saves; later joiners need 'acceptjoin')";
                 }
 
                 case "acceptjoin":
@@ -455,8 +466,88 @@ namespace BigAmbitionsMP
                     return "ERR usage: fakemod add <name> | fakemod clear";
                 }
 
+                // ── No-takeover package (user-approved 2026-08-18): rig runs must never
+                // steal foreground.  Verbs replace the SendInput F-keys; the screenshot
+                // renders from INSIDE the game, so an unfocused (not minimized) window
+                // captures fine while the user keeps the machine. ──────────────────────
+                case "enterbuilding":
+                {
+                    if (arg.Length == 0) return "ERR address key required (e.g. '29 ba:street_thirdstreet')";
+                    string addr = arg;
+                    GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        try
+                        {
+                            var bm = InstanceBehavior<BuildingManager>.Instance;
+                            if (bm == null) { Plugin.Logger.LogWarning("[TestDrive] enterbuilding: no BuildingManager."); return; }
+                            if (bm.enteringBuilding || bm.exitingBuilding) { Plugin.Logger.LogWarning("[TestDrive] enterbuilding: a building transition is already running — re-issue the verb."); return; }
+                            if (BuildingManager.IsInsideBuilding) { Plugin.Logger.LogWarning("[TestDrive] enterbuilding: already inside a building — 'exitbuilding' first."); return; }
+                            var cm = InstanceBehavior<CityManager>.Instance;
+                            bool found = false;
+                            if (cm?.cityBuildingControllers != null)
+                                foreach (var c in cm.cityBuildingControllers)
+                                    if (c?.building != null && GameStateReader.AddressKey(c.building) == addr)
+                                    {
+                                        found = true;
+                                        // Same native entry the passenger-follow uses (PassengerRide): the
+                                        // full door flow — interior load, staffing, positioning — force=true.
+                                        bool ok = bm.EnterBuilding(c.building, false, false, 0, -1, true);
+                                        Plugin.Logger.LogInfo($"[TestDrive] enterbuilding '{addr}' → {(ok ? "OK" : "REFUSED by native")}.");
+                                        break;
+                                    }
+                            if (!found) Plugin.Logger.LogWarning($"[TestDrive] enterbuilding: no building resolves to '{addr}'.");
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[TestDrive] enterbuilding: {ex.Message}"); }
+                    });
+                    return $"OK enterbuilding('{arg}') queued — result in log ([TestDrive] enterbuilding line)";
+                }
+                case "exitbuilding":
+                {
+                    GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        try
+                        {
+                            var bm = InstanceBehavior<BuildingManager>.Instance;
+                            if (bm == null || !BuildingManager.IsInsideBuilding) { Plugin.Logger.LogInfo("[TestDrive] exitbuilding: not inside a building."); return; }
+                            if (bm.enteringBuilding || bm.exitingBuilding) { Plugin.Logger.LogWarning("[TestDrive] exitbuilding: a transition is already running — re-issue the verb."); return; }
+                            bm.ExitFromBuilding(0);
+                            Plugin.Logger.LogInfo("[TestDrive] exitbuilding invoked.");
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[TestDrive] exitbuilding: {ex.Message}"); }
+                    });
+                    return "OK exitbuilding queued — result in log";
+                }
+                case "rain":
+                {
+                    bool on  = arg.Trim().Equals("on",  StringComparison.OrdinalIgnoreCase);
+                    bool off = arg.Trim().Equals("off", StringComparison.OrdinalIgnoreCase);
+                    if (!on && !off) return "ERR usage: rain on|off";
+                    GameStatePatcher.EnqueueOnMainThread(() => MPWeatherSync.TryForceRain(on));
+                    return $"OK rain {(on ? "on" : "off")} queued (same apply path as the F7 key)";
+                }
+                case "screenshot":
+                {
+                    string name = arg.Length == 0 ? DateTime.Now.ToString("HHmmss") : arg;
+                    string path = Path.Combine(_dir ?? Path.Combine(MPConfig.DataRootPath, "testdrive"), "shot-" + name + ".png");
+                    GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        try
+                        {
+                            // Reflection, not a csproj module reference (the Ctrl+F9 console
+                            // precedent): ScreenCapture lives in UnityEngine.ScreenCaptureModule.
+                            var sc = HarmonyLib.AccessTools.TypeByName("UnityEngine.ScreenCapture");
+                            var m  = sc == null ? null : HarmonyLib.AccessTools.Method(sc, "CaptureScreenshot", new[] { typeof(string) });
+                            if (m == null) { Plugin.Logger.LogWarning("[TestDrive] screenshot: ScreenCapture.CaptureScreenshot not resolvable."); return; }
+                            m.Invoke(null, new object[] { path });
+                            Plugin.Logger.LogInfo($"[TestDrive] screenshot → {path} (file lands at end of frame; a minimized window does not render — keep it unfocused, not minimized).");
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[TestDrive] screenshot: {ex.Message}"); }
+                    });
+                    return $"OK screenshot queued → {path}";
+                }
+
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot)";
             }
         }
 

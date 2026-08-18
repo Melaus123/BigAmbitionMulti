@@ -52,6 +52,15 @@ namespace BigAmbitionsMP
 
                 int aiTotal = 0, notEligible = 0, eligible = 0;
                 int pricesEmpty = 0, prodsEmpty = 0, gateClosed = 0, gateOpenNoPrices = 0;
+                // 4b discriminator (user-approved 2026-08-18): products are a DERIVED cache
+                // over reg.itemInstances (BusinessHelper.UpdateCachedAvailableProducts) —
+                // count the SOURCE level so hollow-cache vs hollow-items separates:
+                //   itemsEmpty    = eligible AI regs with no itemInstances at all;
+                //   sellableEmpty = eligible AI regs where no instance passes the native
+                //                   filter (stocked PointOfSale/ShowcaseShelf w/ retail or
+                //                   service product) — the exact input the cache derives from.
+                int itemsEmpty = 0, sellableEmpty = 0, hollowSamples = 0;
+                var hollowSb = new System.Text.StringBuilder();
                 var emptyNow = new System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal);
                 var newlyEmpty = new System.Text.StringBuilder();
                 int newCount = 0, newAlsoLostProds = 0, newKeptProds = 0;
@@ -75,6 +84,31 @@ namespace BigAmbitionsMP
 
                         int nPrices = reg.retailPrices?.Count ?? 0;
                         int nProds  = reg.cachedAvailableProducts?.Count ?? 0;
+                        int nItems = 0, nSellable = 0;
+                        try
+                        {
+                            if (reg.itemInstances != null)
+                            {
+                                nItems = reg.itemInstances.Count;
+                                foreach (var ii in reg.itemInstances.Values)
+                                {
+                                    try
+                                    {
+                                        if (ii?.ItemCached == null) continue;
+                                        if ((ii.ItemCached.type & (BigAmbitions.Items.ItemType.PointOfSale | BigAmbitions.Items.ItemType.ShowcaseShelf)) == 0) continue;
+                                        var stock = ii.GetStockInstance();
+                                        if (stock == null || string.IsNullOrEmpty(stock.itemName) || stock.ItemCached == null) continue;
+                                        if ((stock.ItemCached.type & (BigAmbitions.Items.ItemType.RetailProduct | BigAmbitions.Items.ItemType.ServiceProduct)) != 0) nSellable++;
+                                    }
+                                    catch { }
+                                }
+                            }
+                        }
+                        catch { nItems = -1; }
+                        if (nItems <= 0) itemsEmpty++;
+                        if (nSellable == 0) sellableEmpty++;
+                        if (nProds == 0 && hollowSamples < 3)
+                        { hollowSb.Append($" [{GameStateReader.AddressKey(reg)} items={nItems} sellable={nSellable}]"); hollowSamples++; }
                         if (nPrices == 0) pricesEmpty++;
                         if (nProds  == 0) prodsEmpty++;
                         if (nPrices == 0 && nProds == 0) gateClosed++;
@@ -113,7 +147,8 @@ namespace BigAmbitionsMP
                 string ctx = $"day={day} h{gi.Hour}{(dayRolled ? " (DAY ROLLED)" : "")} inside='{inside}' placing={placing} recalcQueue={queued}";
                 Plugin.Logger.LogInfo(
                     $"[PROBE] PriceFill/{role} {ctx}: aiRegs={aiTotal} eligible={eligible} notEligible={notEligible} " +
-                    $"| pricesEmpty={pricesEmpty} prodsEmpty={prodsEmpty} | gateClosed={gateClosed} gateOpenNoPrices={gateOpenNoPrices}");
+                    $"| pricesEmpty={pricesEmpty} prodsEmpty={prodsEmpty} | gateClosed={gateClosed} gateOpenNoPrices={gateOpenNoPrices} " +
+                    $"| itemsEmpty={itemsEmpty} sellableEmpty={sellableEmpty}{(hollowSamples > 0 ? " hollow:" + hollowSb : "")}");
                 if (grew)
                     Plugin.Logger.LogWarning(
                         $"[PROBE] PriceFill/{role} LOST PRICES on {newCount} shop(s) since the last pass " +

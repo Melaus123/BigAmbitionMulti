@@ -922,6 +922,27 @@ namespace BigAmbitionsMP
             var m = MPSaveManager.ReadManifest(session);
             if (m == null) { Plugin.Logger.LogWarning($"[MPSave] HostLoadSession: no manifest for '{session}'."); return; }
 
+            // 2026-08-18 ORDERING FIX (user-approved; found when a field save refused on the
+            // rig): validate OUR OWN slot before anything below mutates shared state.
+            // Previously RestoreOwnershipFromManifest persisted the manifest with the bumped
+            // epoch + this machine as LastHost, and every client was served its save, all
+            // BEFORE LoadOwnHsg's identity check could refuse — a refused load left a phantom
+            // host-start in the group's records (FORK SUSPECT then chews on it).  Same
+            // predicate as the load itself (ResolveOwnSlot) — never two copies.
+            {
+                int rc = ResolveOwnSlot(session, MPConfig.StableId, out _, out string effId);
+                if (rc == -1)
+                {
+                    Plugin.Logger.LogError($"[MPSave] HostLoadSession '{session}' REFUSED before any state change: no save for this character (stable={effId}) among multiple member folders. Nothing was stamped, persisted, or served.");
+                    return;
+                }
+                if (rc == -2)
+                {
+                    Plugin.Logger.LogWarning($"[MPSave] HostLoadSession '{session}': no member saves under the session folder — refused before any state change.");
+                    return;
+                }
+            }
+
             // Round-37 FORK SEMANTICS: load FROM the selected variant/checkpoint folder, but CONTINUE the
             // playthrough on its lineage BASE — ongoing saves go to Main/-auto/checkpoints as usual and can
             // never mutate the loaded (frozen) source. Loading is a jump to a recorded moment; the recorded
@@ -1192,6 +1213,45 @@ namespace BigAmbitionsMP
         /// folder); cleared with the session.  Null → native path passthrough.</summary>
         public static volatile string? PortraitFolder;
 
+#if BAMP_DEV
+        /// <summary>Support-rig forensics (user-approved 2026-08-18): when set, host-load
+        /// resolution loads the NAMED member's character instead of this machine's —
+        /// the only way a support machine (whose identity has no slot in a field save)
+        /// can open one for reproduction.  Armed/cleared by every TestDrive 'hostload'
+        /// (the 'as=<stableId>' form arms it; a plain hostload clears it).  Compiled
+        /// out of Release/Debug entirely — retail identity semantics untouched.</summary>
+        public static string? DevHostLoadAs;
+#endif
+
+        /// <summary>ONE slot-resolution predicate for BOTH the HostLoadSession precheck
+        /// and LoadOwnHsg (2026-08-18: the refused-load-still-mutated-the-manifest defect
+        /// needs the answer BEFORE any write, and a second copy of this matching would
+        /// drift — the derived-counter lesson).  Honors the Dev impersonation override.
+        /// Returns 1 = own slot matched; 0 = legacy single-folder fallback (chosen set);
+        /// -1 = refused (no own slot among several member folders); -2 = no saves.</summary>
+        private static int ResolveOwnSlot(string session, string stableId,
+            out SaveGameManager.SaveGameStruct? chosen, out string effectiveId)
+        {
+            effectiveId = stableId;
+#if BAMP_DEV
+            if (!string.IsNullOrEmpty(DevHostLoadAs)) effectiveId = DevHostLoadAs!;
+#endif
+            chosen = null;
+            string sessionFolder = MPSaveManager.MpSessionFolder(session);
+            var saves = SaveGamePathHelper.GetAllSaveGamesFromVersion(sessionFolder);
+            if (saves == null || saves.Count == 0) return -2;
+            string want = Path.GetFileName(MPSaveManager.MpCharacterFolder(session, effectiveId).TrimEnd('\\', '/'));
+            for (int i = 0; i < saves.Count; i++)
+            {
+                string seg = Path.GetFileName((saves[i]?.CharacterPath ?? "").TrimEnd('\\', '/'));
+                if (string.Equals(seg, want, StringComparison.OrdinalIgnoreCase)) { chosen = saves[i]; return 1; }
+            }
+            // Review-2 semantics preserved: a single-folder store keeps the legacy
+            // fallback; several folders with no own slot is a refusal.
+            if (saves.Count == 1) { chosen = saves[0]; return 0; }
+            return -1;
+        }
+
         /// <summary>MAIN THREAD: load this player's .hsg out of the MP session folder.
         /// The game's Load() locates saves by re-scanning CurrentVersionFolderPath();
         /// we briefly redirect that to the MP session folder so Load finds + loads our
@@ -1202,29 +1262,23 @@ namespace BigAmbitionsMP
         private static bool LoadOwnHsg(string session, string stableId)
         {
             string sessionFolder = MPSaveManager.MpSessionFolder(session);
-            var saves = SaveGamePathHelper.GetAllSaveGamesFromVersion(sessionFolder);
-            if (saves == null || saves.Count == 0)
+            int rc = ResolveOwnSlot(session, stableId, out var chosen, out string effectiveId);
+            if (rc == -2)
             { Plugin.Logger.LogWarning($"[MPSave] LoadOwnHsg: no saves under {sessionFolder}."); return false; }
-
-            string want   = Path.GetFileName(MPSaveManager.MpCharacterFolder(session, stableId).TrimEnd('\\', '/'));
-            var    chosen = saves[0];
-            bool   matched = false;
-            for (int i = 0; i < saves.Count; i++)
-            {
-                var s   = saves[i];
-                string seg = Path.GetFileName((s?.CharacterPath ?? "").TrimEnd('\\', '/'));
-                if (string.Equals(seg, want, StringComparison.OrdinalIgnoreCase)) { chosen = s; matched = true; break; }
-            }
             // Review-2 fix: never load ANOTHER MEMBER's character because ours is missing —
             // with several character folders in the store (mirrors!) the saves[0] fallback
             // did exactly that (e.g. own self-save failed before hosting a checkpoint).
-            // A single-folder store keeps the fallback for legacy layouts.
-            if (!matched && saves.Count > 1)
+            if (rc == -1)
             {
-                Plugin.Logger.LogError($"[MPSave] LoadOwnHsg: no save for THIS character (stable={stableId}) under {sessionFolder} — REFUSING to load another member's character. Pick a different save of this world, or rejoin a session to restore yours.");
+                Plugin.Logger.LogError($"[MPSave] LoadOwnHsg: no save for THIS character (stable={effectiveId}) under {sessionFolder} — REFUSING to load another member's character. Pick a different save of this world, or rejoin a session to restore yours.");
                 return false;
             }
+#if BAMP_DEV
+            if (!string.Equals(effectiveId, stableId, StringComparison.Ordinal))
+                Plugin.Logger.LogWarning($"[MPSave] DEV IMPERSONATION: loading member '{effectiveId}' instead of '{stableId}' (support-rig forensics; saves during this run write under this machine's own identity).");
+#endif
 
+            if (chosen == null) return false;   // rc 0/1 guarantee this; the compiler can't see it
             Plugin.Logger.LogInfo($"[MPSave] Loading .hsg: char='{chosen.characterId}' day={chosen.day} via redirect → {sessionFolder}");
             DiagWrite($"LoadOwnHsg: redirect ON → {sessionFolder}, calling Load");
             // Redirect the game's path resolver to the MP session folder for the
@@ -1250,7 +1304,7 @@ namespace BigAmbitionsMP
             }
             catch { }
 
-            PortraitFolder = MPSaveManager.MpCharacterFolder(session, stableId);
+            PortraitFolder = MPSaveManager.MpCharacterFolder(session, effectiveId);   // = stableId outside Dev impersonation
             DiagWrite("LoadOwnHsg: redirect OFF, Load returned");
             return true;
         }

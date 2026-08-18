@@ -550,6 +550,23 @@ namespace BigAmbitionsMP
         {
             if (FatalBootBanner != null)
             {
+                // 2026-08-18 DEADLOCK FIX (rig-reproduced with a staged Harmony conflict:
+                // menu up, no banner, "Canvas built OK" absent from the log): the banner
+                // waited for _canvasGO while this early return skipped the lazy
+                // BuildCanvas below — EnsureFatalBanner's "retry until the canvas
+                // exists" retried against a canvas its own branch was blocking.  The
+                // banner therefore NEVER rendered in the field (Lord-Wolf 2026-08-18,
+                // and plausibly every case since round-254 shipped).  Banner mode now
+                // runs the same lazy build first; BuildCanvas is pure uGUI by design
+                // (round-241: the canvas must survive a dead Harmony), so it is safe
+                // with zero patches applied.
+                if (!_built)
+                {
+                    if (++_initDelay < 30) return;
+                    try   { BuildCanvas(); _built = true; Plugin.Logger.LogInfo("[UI] Canvas built OK (banner mode)."); }
+                    catch (Exception ex) { _built = true; Plugin.Logger.LogError($"[UI] Build failed (banner mode): {ex}"); }
+                    return;
+                }
                 if (!_fatalDismissed) EnsureFatalBanner();
                 return;
             }
