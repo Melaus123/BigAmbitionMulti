@@ -91,23 +91,12 @@ namespace BigAmbitionsMP
     //  and substitutes the HOST-SYNCED valuation — strictly better than this guard's 0, which
     //  registering first would have displaced.  Same patch-inventory lesson as the storm guard.)
 
-    /// <summary>TRIPWIRE: the shop-exit unpaid-items check NRE'd up to 98×/session (0.1.14
-    /// era), killing the exit-zone path = "stuck in the building".  The MP-shared unpaid list
-    /// holding a null is the state to root.  Guarded result: TRUE (allow the exit) — a
-    /// deliberate trade: a possible unpaid walk-out beats a player soft-locked indoors, and
-    /// the tripwire line records every occurrence for the root hunt.</summary>
-    [HarmonyPatch(typeof(Helpers.PlayerHelper), nameof(Helpers.PlayerHelper.HasPaidForAllItems))]
-    public static class Guard_HasPaidForAllItems
-    {
-        static Exception? Finalizer(Exception __exception, ref bool __result)
-        {
-            if (__exception == null || !NativeGuardReport.InMp) return __exception;
-            __result = true;
-            NativeGuardReport.Fire("PlayerHelper.HasPaidForAllItems", tripwire: true,
-                $"{__exception.GetType().Name} — unpaid-item list holds a null; exit allowed by policy (soft-lock beats the edge case).");
-            return null;
-        }
-    }
+    // (Batch 12's HasPaidForAllItems guard REMOVED 2026-08-18 (user-driven re-audit): the NRE's
+    //  root chain — IsUsingVehicle=true with GetCurrentVehicle()=null while pushing a borrowed
+    //  cart — is documented at GameStatePatcher:2373 and was FIXED by round-243's ghost-parity
+    //  postfix; every storm bundle is 0.1.14-era.  And OUR OWN patches call this method at two
+    //  "shopper flow keeps priority" gates (BusinessPatches:392/:680) whose semantics a forced
+    //  TRUE would flip on corrupted state.  Root-fixed + own-caller risk = no guard.)
 
     /// <summary>TRIPWIRE: the pedestrian camera's input handler died permanently after
     /// parking (field 20260816-004749: 12,809 per-frame NREs to end of log — the reported
