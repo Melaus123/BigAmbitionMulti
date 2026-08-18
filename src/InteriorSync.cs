@@ -43,6 +43,7 @@ namespace BigAmbitionsMP
         private static float _lastPollAt;
         private static float _lastOwnerPollAt;
         private static string _localOwnerAddress = "";
+        private static string _pendingExitPush   = "";   // sweep 3b: an exit push that was refused — retried by the tick until it lands
 
         /// <summary>Reset all subscription + cache state.  Called on host shutdown / new game.</summary>
         public static void Reset()
@@ -61,6 +62,7 @@ namespace BigAmbitionsMP
             _lastPollAt = 0f;
             _lastOwnerPollAt = 0f;
             _localOwnerAddress = "";
+            _pendingExitPush   = "";
             // Round-106: this one-shot gate was missed when Reset was written, so
             // PublishAllOwnedInteriors fired only ONCE PER PROCESS. Field-confirmed
             // (RED ROC 2026-07-27): first join logged "published ALL 9 owned interior(s)",
@@ -198,6 +200,17 @@ namespace BigAmbitionsMP
             PublishAllOwnedInteriors("world live (settled retry)");   // round-179: no-op once done; retries a deferral
 
             if (!MPClient.IsConnected || MPServer.IsRunning) return;
+            // Sweep item 3b: a parked exit push retries until one send actually lands —
+            // recurrence-covered per the deferral contract. Cheap while blocked (the
+            // placement check is the first thing the send evaluates).
+            if (!string.IsNullOrEmpty(_pendingExitPush))
+            {
+                if (SendLocalOwnerSnapshot(_pendingExitPush, force: true, reason: "exit-retry"))
+                {
+                    Plugin.Logger.LogInfo($"[InteriorSync] parked exit push for '{_pendingExitPush}' delivered (sweep 3b).");
+                    _pendingExitPush = "";
+                }
+            }
             if (string.IsNullOrEmpty(_localOwnerAddress)) return;
             float now = UnityEngine.Time.realtimeSinceStartup;
             if (now - _lastOwnerPollAt < PollIntervalSeconds) return;
@@ -282,7 +295,16 @@ namespace BigAmbitionsMP
             if (string.IsNullOrEmpty(addressKey)) return;
             if (_localOwnerAddress == addressKey)
             {
-                SendLocalOwnerSnapshot(addressKey, force: true, reason: "exit");
+                // Sweep item 3b (field 20260816-164914 shape): this was a one-shot — the address
+                // was cleared even when the send REFUSED (mid-placement, exception), the tick
+                // stopped polling, and the shop's final state never conveyed until re-entry.
+                // Clear only on success; otherwise park the address for the tick to retry.
+                bool delivered = SendLocalOwnerSnapshot(addressKey, force: true, reason: "exit");
+                if (!delivered)
+                {
+                    _pendingExitPush = addressKey;
+                    Plugin.Logger.LogInfo($"[InteriorSync] exit push for '{addressKey}' deferred — parked for tick retry (sweep 3b).");
+                }
                 _localOwnerAddress = "";
             }
         }
@@ -383,6 +405,10 @@ namespace BigAmbitionsMP
             return true;
         }
 
+        /// <summary>Return contract (sweep 3b): FALSE only when the push should be RETRIED
+        /// (deferred mid-placement, or threw).  "Nothing to deliver" outcomes — no snapshot
+        /// buildable, all-zero skip, hash-unchanged — return TRUE so a parked exit push
+        /// can't spin forever on a shop that has nothing to say.</summary>
         private static bool SendLocalOwnerSnapshot(string addressKey, bool force, string reason)
         {
             try
@@ -392,7 +418,7 @@ namespace BigAmbitionsMP
                 if (snap == null)
                 {
                     Plugin.Logger.LogWarning($"[InteriorSync] OwnerSnapshot not sent ({reason}): no snapshot for '{addressKey}'.");
-                    return false;
+                    return true;   // nothing retrievable — retrying cannot help (3b contract)
                 }
                 // Round-177 (field bamp-bug-20260727-184813, 'Jc': fridge/bed despawned from his
                 // market AND apartment "each time he spawns"): the join-time PublishAllOwnedInteriors
@@ -409,7 +435,7 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogWarning($"[InteriorSync] owner push for '{addressKey}' ({reason}) SKIPPED — " +
                         "registration reads all-zero (not yet materialized, or truly bare): nothing to assert; " +
                         "the entry-time push will carry the real state.");
-                    return false;
+                    return true;   // nothing to assert — done, not retry-worthy (3b contract)
                 }
                 snap.OwnerPlayerId = MPConfig.PlayerId;
                 snap.Authoritative = true;   // owner's own push — authoritative for the whole interior
@@ -448,11 +474,11 @@ namespace BigAmbitionsMP
                 _lastLocalOwnerStructByAddr[addressKey] = ohs;
                 _lastLocalOwnerVolatileAt[addressKey] = onow;
                 MPClient.SendInteriorOwnerSnapshot(snap);
-#if BAMP_DEV
-                // Change-gated already (hash-skip above), but still ~290 lines/session in one capture —
-                // DEV-only in Release. (Worth a later look at why one HQ's interior changes that often.)
+                // Sweep 3c (user-approved): promoted to ALL builds — this line is the completion
+                // evidence every field triage of "furniture never appeared" lacked (Release logs
+                // could show deferrals but structurally never a success). Change-gated by the
+                // hash-skip above; one chatty HQ measured ~290/session, accepted.
                 Plugin.Logger.LogInfo($"[InteriorSync] Sent owner snapshot ({reason}) addr='{addressKey}': {SnapshotSummary(snap)}.");
-#endif
                 return true;
             }
             catch (Exception ex)

@@ -3942,6 +3942,7 @@ namespace BigAmbitionsMP
         private TextMeshProUGUI? _lwConnInfo;
         private TextMeshProUGUI[] _lwRoster = new TextMeshProUGUI[6];
         private GameObject? _lwDiffEasy, _lwDiffNormal, _lwDiffHard, _lwCustomize, _lwStart;
+        private TMP_Text?   _lwStartLabel;   // sweep item 2: live start-state label ("Start Game"/"Starting...")
         private RectTransform? _rtDiffEasy, _rtDiffNormal, _rtDiffHard, _rtCustomize, _rtLwStart, _rtLwLeave;
         // Per-player roster columns.  Cash = host-dictated (host edits any row);
         // Age = self-edited (each player edits only their own row).  This is the
@@ -5023,6 +5024,18 @@ namespace BigAmbitionsMP
 
         private void OnLobbyStart()
         {
+            // Field sweep 2026-08-18 (bundles 0803-222126 ×12, 0801-193731 ×36): the start
+            // path had no re-entrancy guard — every extra click re-ran the whole load
+            // (manifest rewrites, the startup fence reset mid-load, fresh-character
+            // fallbacks pushed at clients that were already loading).  IsInLobby is the
+            // existing accepted-start latch: false the moment StartNewGame/StartLoadGame
+            // runs, true again only via lobby re-entry or session Stop — a live read of
+            // authoritative state, no new flags.
+            if (MPServer.IsRunning && !MPServer.IsInLobby)
+            {
+                Plugin.Logger.LogInfo("[MenuUI] Lobby Start ignored — a start is already in flight.");
+                return;
+            }
             Plugin.Logger.LogInfo($"[MenuUI] Lobby Start (load={_lobbyLoadMode})");
             try { if (_lobbyLoadMode) OnStartLoad(); else OnStartNew(); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] start: {ex.Message}"); }
@@ -5119,6 +5132,7 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] invite visual match: {ex.Message}"); }
 
             _lwStart   = CloneButtonInto(_lobbyWindow.transform, "BAMP_LwStart", "Start Game", OnLobbyStart, 110f, -456f, 160f, 42f); _rtLwStart = _lwStart?.GetComponent<RectTransform>();
+            _lwStartLabel = _lwStart != null ? _lwStart.GetComponentInChildren<TMP_Text>(true) : null;
             var leave  = CloneButtonInto(_lobbyWindow.transform, "BAMP_LwLeave", "Leave",      OnLobbyLeave, 290f, -456f, 160f, 42f); _rtLwLeave = leave?.GetComponent<RectTransform>();
             // (Round-54's lobby Report button REMOVED 2026-07-23 per user — redundant with the
             // "Report a Bug" entry in the multiplayer submenu, one Leave-click away.)
@@ -5376,6 +5390,17 @@ namespace BigAmbitionsMP
         private void TickLobbyWindow()
         {
             if (_lobbyWindow == null || !_lobbyWindow.activeSelf) { _btnDiagLogged = false; return; }
+            // Sweep item 2 UI honesty: while a start is in flight the button says so — the
+            // field's ×12/×36 click storms were players mashing a button that gave no feedback.
+            try
+            {
+                if (_lwStartLabel != null)
+                {
+                    string want = (MPServer.IsRunning && !MPServer.IsInLobby) ? "Starting..." : "Start Game";
+                    if (_lwStartLabel.text != want) _lwStartLabel.text = want;
+                }
+            }
+            catch { }
             // Round-226c (user): the cash/age boxes had NO visible caret. Typing in
             // them only ever appends/backspaces at the end, so an end-of-text blinking
             // bar is honest. Rendered per frame while focused; the normal refresh

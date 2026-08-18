@@ -206,8 +206,11 @@ namespace BigAmbitionsMP
         }
     }
 
-    /// <summary>Candidate (b): log EVERY demand recompute, per role, with the caller. On a client
-    /// each of these overwrites host-synced demand with a providers==0 result.</summary>
+    /// <summary>Candidate (b) — RESOLVED for clients (sweep item 4, 2026-08-18): the decision
+    /// rule fired on field evidence and the client half graduated to
+    /// Patch_UpdateMarketDemands_ClientAuthorityGuard (DemandAuthority.cs), which skips the
+    /// native recompute on clients entirely.  This probe is now a HOST-only detector (a host
+    /// recompute is native-normal; the line remains for the 4c "host loses prices" watch).</summary>
     [HarmonyLib.HarmonyPatch(typeof(Helpers.ProductMarketHelper), nameof(Helpers.ProductMarketHelper.UpdateMarketDemands))]
     public static class Probe_UpdateMarketDemands
     {
@@ -215,19 +218,18 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning) return;   // sweep item 4: client calls are guard-skipped; logging them would misreport
                 MPFrameRhythm.MarkBeat("demand-all");   // round-207: full market recompute is a rhythmic-stall suspect
-                string role = MPServer.IsRunning ? "HOST" : "CLIENT";
                 Plugin.Logger.LogWarning(
-                    $"[PROBE] Demand/{role} RECOMPUTE-ALL (UpdateMarketDemands) providersDict={MPDemandProbe.ProvidersCount()} " +
-                    $"— on a client this rewrites every demand value from the LOCAL provider count. Caller:\n{new System.Diagnostics.StackTrace(2, false)}");
+                    $"[PROBE] Demand/HOST RECOMPUTE-ALL (UpdateMarketDemands) providersDict={MPDemandProbe.ProvidersCount()}. Caller:\n{new System.Diagnostics.StackTrace(2, false)}");
             }
             catch { }
         }
     }
 
-    /// <summary>Candidate (b), single-item variant (BuildingRegistration.RemoveUnusedRetailPrices
-    /// and friends). Throttled — this one can fire per item in a loop.</summary>
+    /// <summary>Single-item variant — HOST-only detector since sweep item 4 (client half
+    /// graduated to Patch_UpdateMarketDemand_ClientAuthorityGuard). Throttled — this one can
+    /// fire per item in a loop.</summary>
     [HarmonyLib.HarmonyPatch(typeof(Helpers.ProductMarketHelper), nameof(Helpers.ProductMarketHelper.UpdateMarketDemand))]
     public static class Probe_UpdateMarketDemand
     {
@@ -237,12 +239,11 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!MPServer.IsRunning) return;   // sweep item 4: client calls are guard-skipped
                 if (UnityEngine.Time.unscaledTime < _nextLog) { _suppressed++; return; }
                 _nextLog = UnityEngine.Time.unscaledTime + 5f;
-                string role = MPServer.IsRunning ? "HOST" : "CLIENT";
                 Plugin.Logger.LogWarning(
-                    $"[PROBE] Demand/{role} RECOMPUTE-ONE '{itemName}' providersDict={MPDemandProbe.ProvidersCount()}" +
+                    $"[PROBE] Demand/HOST RECOMPUTE-ONE '{itemName}' providersDict={MPDemandProbe.ProvidersCount()}" +
                     (_suppressed > 0 ? $" (+{_suppressed} more in the last 5s)" : "") +
                     $"\n{new System.Diagnostics.StackTrace(2, false)}");
                 _suppressed = 0;

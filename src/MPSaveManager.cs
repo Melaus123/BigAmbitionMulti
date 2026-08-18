@@ -62,6 +62,12 @@ namespace BigAmbitionsMP
         public List<MpGrant> Grants { get; set; } = new();
         /// <summary>Merged-company membership (merger slice 1) — empty/absent = no merger.</summary>
         public List<MpMergerMember> Merger { get; set; } = new();
+        /// <summary>Player-to-player loan ledger (field sweep 2026-08-18) — loans ride the
+        /// manifest like grants, so each save slot carries the loans AS OF that moment and
+        /// loading an older slot rolls them back with the world (timeline ruling).  NULL
+        /// (absent) = manifest predates loan tracking → the legacy base-folder
+        /// loans.bamp.json may be adopted once; non-null (even empty) is authoritative.</summary>
+        public List<LoanEntry>? Loans { get; set; }
         /// <summary>Shared-wallet balance per merger group (slice 4) — absent on old manifests.</summary>
         public Dictionary<string, float> MergerWalletBalance { get; set; } = new();
         /// <summary>Per group: stable ids whose merge-time wallet pooling was already accepted, so a
@@ -744,6 +750,11 @@ namespace BigAmbitionsMP
             foreach (var c in Path.GetInvalidFileNameChars())
                 s = s.Replace(c, '_');
             s = s.Trim();
+            // Windows strips trailing dots/spaces when CREATING a directory but file opens
+            // inside the dotted name still fail — a session named for a character like
+            // "…Jr." got a folder "…Jr" it could never address again, and every manifest/
+            // ledger/save write failed all session (field 20260816-112127, sweep 2026-08-18).
+            s = s.TrimEnd('.', ' ');
             return (s.Length == 0 || s.Trim('.').Length == 0) ? "_" : s;
         }
     }

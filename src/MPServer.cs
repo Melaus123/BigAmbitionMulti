@@ -348,6 +348,7 @@ namespace BigAmbitionsMP
                         mn++;
                     }
                 RestoreWalletFromManifest(m);   // slice 4: ledger BEFORE the broadcast below (members snap to it)
+                MPHub.RestoreLoans(m.Loans);    // sweep 2026-08-18: the loaded slot's loans are the timeline truth
                 RefreshGrantsAndBroadcast();
                 Plugin.Logger.LogInfo($"[Server] Restored {gn} access grant(s) + {mn} merger member(s) from manifest ({(m.Grants?.Count ?? 0)} grants in file).");
             }

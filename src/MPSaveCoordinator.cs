@@ -1530,15 +1530,17 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>The lineage's loan ledger as JSON — part of the session store (review
-        /// fix 2026-07-23: it was never mirrored, so a handoff silently lost all loans).
-        /// The ledger lives at the lineage BASE folder (MPHub.LedgerPath). "" = none.</summary>
+        /// <summary>The live loan ledger as JSON for the mirror's legacy channel.  Since the
+        /// sweep 2026-08-18 loans authoritatively ride the MANIFEST (which mirrors alongside);
+        /// this channel keeps the receiver-side loans.bamp.json fallback current for stores
+        /// whose manifests predate loan tracking. "" = none.</summary>
         private static string LedgerJsonSnapshot(string session)
         {
             try
             {
-                string p = Path.Combine(MPSaveManager.MpSessionFolder(StripAutoSuffix(session)), MPHub.LedgerFileName);
-                return File.Exists(p) ? File.ReadAllText(p) : "";
+                var loans = MPHub.SnapshotLoans();
+                if (loans.Count == 0) return "";
+                return Newtonsoft.Json.JsonConvert.SerializeObject(new LoanStatePayload { Loans = loans });
             }
             catch { return ""; }
         }
@@ -1758,6 +1760,10 @@ namespace BigAmbitionsMP
         private static readonly string DiagFile = $@"C:\dumps\savediag.{System.Diagnostics.Process.GetCurrentProcess().Id}.txt";
         private static bool          _diagInstalled;
         private static volatile bool _diagActive;
+        /// <summary>Sweep item 5: cause of the most recent failed native-save attempt — set by
+        /// every failure path in the retry loop, cleared per save, appended to the SAVE FAILED
+        /// line so cause and consequence land together in field bundles.</summary>
+        private static string _lastSaveFailReason = "";
         private static int           _diagFramesLeft;
         private static StreamWriter? _diagWriter;
 
@@ -1942,6 +1948,7 @@ namespace BigAmbitionsMP
                 // client slot then missing from the manifest → session load never
                 // reached that client).  The launch bat now gives instance 2 its
                 // own %TEMP%; this retry covers any remaining collision.
+                _lastSaveFailReason = "";
                 for (int attempt = 0; attempt < 3 && !ok; attempt++)
                 {
                     if (attempt > 0)
@@ -1949,8 +1956,31 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogWarning($"[MPSave] save attempt {attempt} failed — retrying in 1.2s.");
                         try { System.Threading.Thread.Sleep(1200); } catch { }
                     }
-                    try { ok = SaveGameManager.Save(saveType, SaveFileName, folder); }
-                    catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] SaveGameManager.Save: {ex.Message}"); }
+                    try
+                    {
+                        ok = SaveGameManager.Save(saveType, SaveFileName, folder);
+                        if (!ok)
+                        {
+                            // Sweep item 5 (user-approved, log-only): Save's only KNOWN silent-false
+                            // path is CanSave() — re-evaluate the blockers NOW so the log separates
+                            // "a blocker appeared between our pre-check and the save" (decide-then-act
+                            // gap) from an unknown native false path (a new finding).
+                            string blocked = "";
+                            try { blocked = SaveBlockedBy() ?? ""; } catch { }
+                            _lastSaveFailReason = blocked.Length > 0
+                                ? $"returned false; SaveBlockedBy now reports '{blocked}' (blocker appeared mid-save)"
+                                : "returned false with NO known blocker active (unknown native false path — worth a report)";
+                            Plugin.Logger.LogWarning($"[MPSave] SaveGameManager.Save {_lastSaveFailReason}.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // Sweep item 5: message-only logging flattened distinct field failure classes
+                        // ("Sequence contains no elements", native NREs, temp-file 0x2038340) into
+                        // indistinguishable one-liners — the TYPE + STACK names the subsystem that died.
+                        _lastSaveFailReason = $"threw {ex.GetType().Name}: {ex.Message}";
+                        Plugin.Logger.LogWarning($"[MPSave] SaveGameManager.Save threw ({ex.GetType().Name}): {ex}");
+                    }
                 }
                 DiagWrite($"returned from Save ok={ok}");
                 // Save regenerates the portrait jpg into this folder (async, lands
@@ -1999,7 +2029,8 @@ namespace BigAmbitionsMP
                     + "timestamp, THIS is it, and they most likely force-quit a game that would have recovered.");
             // 4a diagnostic: a failed save is the upstream cause of most "lost progress" reports — make it
             // LOUD so it stands out in a submitted log (the routine line above is INFO).
-            if (!ok) Plugin.Logger.LogError($"[MPSave] SAVE FAILED for '{sessionName}' (char='{charName}', day={day}) — .hsg not written; a later load may fall back to an older copy.");
+            if (!ok) Plugin.Logger.LogError($"[MPSave] SAVE FAILED for '{sessionName}' (char='{charName}', day={day}) — .hsg not written; a later load may fall back to an older copy." +
+                (string.IsNullOrEmpty(_lastSaveFailReason) ? "" : $" Last attempt: {_lastSaveFailReason}."));
 
             saved = ok;
             return new MpSlot
@@ -2891,6 +2922,7 @@ namespace BigAmbitionsMP
                 m.Merger = BuildMergerManifest();
                 m.MergerWalletBalance     = MPServer.SnapshotWalletBalances();      // slice 4
                 m.MergerWalletContributed = MPServer.SnapshotWalletContributed();
+                m.Loans = MPHub.SnapshotLoans();   // sweep 2026-08-18: loans are part of the save moment
                 // Round-53: the running session's tuning dials persist with the save (mid-session
                 // changes included), so the next load's lobby mirrors what this world actually ran.
                 m.TuneNeedsDrain   = MPNeedsTuning.DrainPercent;
@@ -2950,12 +2982,13 @@ namespace BigAmbitionsMP
                     m.Merger = BuildMergerManifest();   // merger membership rides the same persist-on-change
                     m.MergerWalletBalance     = MPServer.SnapshotWalletBalances();      // slice 4: pooling/payout
                     m.MergerWalletContributed = MPServer.SnapshotWalletContributed();   // states persist immediately
+                    m.Loans = MPHub.SnapshotLoans();   // sweep 2026-08-18: loans ride the manifest like grants
                     // Round-274/H1: do NOT touch SavedAtUnix here — it means "when was this
                     // WORLD saved", and a grants-only persist is not a world save.  Re-stamping
                     // it fired within seconds of every load ("Persisted 0 grant(s)") and
                     // silently un-marked abandoned-timeline slots (rig-proven, twice).
                     MPSaveManager.WriteManifest(_activeSessionName, m);
-                    Plugin.Logger.LogInfo($"[MPSave] Persisted {m.Grants.Count} grant(s) + {m.Merger.Count} merger member(s) to '{_activeSessionName}' on change.");
+                    Plugin.Logger.LogInfo($"[MPSave] Persisted {m.Grants.Count} grant(s) + {m.Merger.Count} merger member(s) + {m.Loans.Count} loan(s) to '{_activeSessionName}' on change.");
                     session = _activeSessionName;
                     manifestJson = Newtonsoft.Json.JsonConvert.SerializeObject(m);
                     pid = m.PlaythroughId ?? "";

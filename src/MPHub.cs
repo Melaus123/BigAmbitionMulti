@@ -501,28 +501,52 @@ namespace BigAmbitionsMP
             catch { return null; }
         }
 
-        private static bool _warnedNoSession;
+        /// <summary>Persist the loan ledger.  Loans ride the session MANIFEST like grants
+        /// (field sweep 2026-08-18): the old base-folder loans.bamp.json write had no
+        /// directory creation, so any world that only ever auto-saved failed EVERY ledger
+        /// write ("Could not find a part of the path", ~15 field bundles) — and a file
+        /// pinned outside the save slots also sat outside the one-save-moment timeline
+        /// rule.  LedgerPath/TryLoadLedger remain as the legacy READ fallback only.</summary>
+        public static void SaveLedger() => MPSaveCoordinator.PersistGrantsNow();
 
-        public static void SaveLedger()
+        private static LoanEntry CopyLoan(LoanEntry ln) => new LoanEntry
+        {
+            Id = ln.Id, Lender = ln.Lender, Borrower = ln.Borrower,
+            Remaining = ln.Remaining, DailyInterest = ln.DailyInterest, DailyPayment = ln.DailyPayment,
+        };
+
+        /// <summary>Deep copy of the live ledger for manifest persistence (deep so the
+        /// serialized manifest can never alias entries the ledger later mutates).</summary>
+        internal static System.Collections.Generic.List<LoanEntry> SnapshotLoans()
+        {
+            var list = new System.Collections.Generic.List<LoanEntry>(_hostLoans.Count);
+            foreach (var ln in _hostLoans) list.Add(CopyLoan(ln));
+            return list;
+        }
+
+        /// <summary>Host-load restore: the loaded slot's manifest loans are the timeline
+        /// truth (non-null, even empty, is authoritative; null = manifest predates loan
+        /// tracking → adopt the legacy loans.bamp.json once).  Never overwrites a live
+        /// in-memory ledger — the session name can appear late (first save), and loading
+        /// then would wipe loans created meanwhile.</summary>
+        internal static void RestoreLoans(System.Collections.Generic.List<LoanEntry>? fromManifest)
         {
             try
             {
-                var path = LedgerPath();
-                if (path == null)
+                if (_hostLoans.Count > 0)
                 {
-                    if (!_warnedNoSession)
-                    {
-                        _warnedNoSession = true;
-                        Plugin.Logger.LogWarning("[Hub] ledger NOT saved — no active session name yet (will persist on next change after first save).");
-                    }
+                    _ledgerLoaded = true;
+                    Plugin.Logger.LogInfo("[Hub] manifest loans skipped — in-memory ledger already live.");
                     return;
                 }
-                var st = new LoanStatePayload();
-                st.Loans.AddRange(_hostLoans);
-                System.IO.File.WriteAllText(path, Newtonsoft.Json.JsonConvert.SerializeObject(st));
-                if (_hostLoans.Count > 0) Plugin.Logger.LogInfo($"[Hub] ledger saved ({_hostLoans.Count} loan(s)).");
+                if (fromManifest == null) { TryLoadLedger(); return; }   // legacy store — file fallback
+                _ledgerLoaded = true;
+                _hostLoans.Clear();
+                foreach (var ln in fromManifest) if (ln != null) _hostLoans.Add(CopyLoan(ln));
+                if (_hostLoans.Count > 0) HostBroadcastLoans();
+                Plugin.Logger.LogInfo($"[Hub] loans restored from manifest ({_hostLoans.Count}).");
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Hub] SaveLedger: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Hub] RestoreLoans: {ex.Message}"); }
         }
 
         private static void TryLoadLedger()
