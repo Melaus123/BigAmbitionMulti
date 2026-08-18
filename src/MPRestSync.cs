@@ -525,7 +525,32 @@ namespace BigAmbitionsMP
                                 if (b is not NavigationBlocker key) continue;
                                 if (System.Array.IndexOf(ActivityBlockers, key) >= 0)
                                     (stranded ??= new List<NavigationBlocker>()).Add(key);
-                                else { foreignHeld = true; (foreignNow ??= new List<NavigationBlocker>()).Add(key); }
+                                else
+                                {
+                                    // foreignHeld stays TRUE for legitimate holders — it is the
+                                    // heal's hands-off signal, and excluding e.g. Vehicle would
+                                    // let the physical-layer heal fire mid-drive.
+                                    foreignHeld = true;
+                                    // Round-90c precision (2026-08-18, field 20260818-114209):
+                                    // these keys are LEGITIMATELY held outside any activity —
+                                    // driving holds Vehicle for the whole ride (CarController
+                                    // :477 set / :511 unset), the open map holds Map, an open
+                                    // preview holds BuildingPreview.  The watch warned on 30s of
+                                    // NORMAL driving/map browsing, which cost a session's triage
+                                    // chasing a phantom leak.  Excluded from WARN tracking while
+                                    // legitimate; tracking restarts when the owner state ends, so
+                                    // a key STILL held 30s after car-exit/map-close warns exactly
+                                    // as round-90 intended.
+                                    bool legit = false;
+                                    try
+                                    {
+                                        legit = (key == NavigationBlocker.Vehicle && !string.IsNullOrEmpty(SaveGameManager.Current?.ActiveVehicleId))
+                                             || (key == NavigationBlocker.Map && CityMap.IsOpen)
+                                             || (key == NavigationBlocker.BuildingPreview && UI.BuildingPreview.isPreviewing);
+                                    }
+                                    catch { }
+                                    if (!legit) (foreignNow ??= new List<NavigationBlocker>()).Add(key);
+                                }
                             }
                             // Round-90 (user-approved) FOREIGN-BLOCKER WATCH — log-only, never heals.
                             // ANY held blocker silently no-ops the building exit trigger
