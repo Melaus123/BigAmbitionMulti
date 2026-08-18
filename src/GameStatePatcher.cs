@@ -3716,7 +3716,8 @@ namespace BigAmbitionsMP
                     // the directory and write every file so the next
                     // UpdateSign loads the same pixels the host sees.
                     bool wroteLogo = false;
-                    if (nonTrivial && !string.IsNullOrEmpty(info.LogoShape) && (info.LogoFiles == null || info.LogoFiles.Count == 0))
+                    if (nonTrivial && !string.IsNullOrEmpty(info.LogoShape) && (info.LogoFiles == null || info.LogoFiles.Count == 0)
+                        && _noLogoLogged.Add(info.AddressKey ?? ""))   // sweep item 10: once per address per launch
                     {
                         Plugin.Logger.LogInfo($"[Patcher] No logo files received for {info.AddressKey} ('{info.BusinessName}') — host had no directory.");
                     }
@@ -3939,6 +3940,10 @@ namespace BigAmbitionsMP
         private static volatile string? _pendingMarketJson;   // arrived before the world existed
         private static float _lastMarketApplyAt;              // real time of the last SUCCESSFUL apply
         private static bool  _haveAuthoritativeDemand;        // ≥1 host payload applied this session
+        // Sweep item 10 (2026-08-18): "no logo files" is a passive per-apply INFO that reached
+        // storm scale (3,147 lines/6 bundles — most businesses legitimately have no logo dir).
+        // Once per address per launch carries the same information.
+        private static readonly HashSet<string> _noLogoLogged = new(StringComparer.Ordinal);
         private static float _nextDemandWatchdogAt;
 
         /// <summary>True once a host market payload has been applied — the client's own demand

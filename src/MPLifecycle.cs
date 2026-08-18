@@ -91,16 +91,21 @@ namespace BigAmbitionsMP
                     var (_, hour) = GameStateReader.GetGameTime();
                     if (Math.Abs(hour - _lastHour) > 0.001f) { _lastHour = hour; _lastHourChangeAt = Time.unscaledTime; }
                     // Paused states legitimately stop the clock — don't hold
-                    // readiness hostage to them.
+                    // readiness hostage to them.  Sweep item 9a (2026-08-18): the THIRD
+                    // legitimate freeze was missing — TimeSync.AheadHeld (a client ahead of
+                    // the host deliberately freezes its tick until the host catches up).
+                    // Without it the detector demoted Running→Loading on every hold and the
+                    // phase machine flapped 128-200 cycles/session in the field, each cycle
+                    // firing full resyncs (~123-car ParkedSync) into an already-loaded wire.
                     clockAlive = (Time.unscaledTime - _lastHourChangeAt) < 6f
-                              || TimeSync.ManualPaused || TimeSync.IsStartupHeld;
+                              || TimeSync.ManualPaused || TimeSync.IsStartupHeld || TimeSync.AheadHeld;
                 }
                 catch { }
 
                 bool ready = clockAlive && !overlayUp;
                 if (!ready)
                 {
-                    Set(MPPhase.Loading, $"clock={clockAlive} overlay={overlayUp}");
+                    Set(MPPhase.Loading, $"clock={clockAlive} overlay={overlayUp} aheadHeld={TimeSync.AheadHeld}");
                     if (_loadingSince > 0f && !_stuckWarned && Time.unscaledTime - _loadingSince > 60f)
                     {
                         _stuckWarned = true;

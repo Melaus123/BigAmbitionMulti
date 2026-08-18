@@ -126,6 +126,19 @@ namespace BigAmbitionsMP
 
                 var reg = GameStatePatcher.FindRegistration(p.AddressKey);
                 if (reg == null || reg.retailPrices == null) return;   // building unknown here (yet)
+                // Sweep item 10 (2026-08-18): the sender's ~30s re-assert heartbeat is deliberate
+                // dropped-update insurance — but this receiver rewrote the table and logged a line
+                // for every IDENTICAL heartbeat (12,021 field lines/8 bundles buried the evidence
+                // reports exist to carry).  Live compare: apply + log only when the LOCAL table
+                // actually differs from the payload — the heartbeat still heals genuine drift.
+                bool same = reg.retailPrices.Count == p.Prices.Count;
+                if (same)
+                    for (int i = 0; i < p.Prices.Count; i++)
+                    {
+                        var rp = p.Prices[i]; var lp = reg.retailPrices[i];
+                        if (lp == null || lp.itemName != rp.ItemName || lp.price != rp.Price) { same = false; break; }
+                    }
+                if (same) return;
                 reg.retailPrices.Clear();
                 foreach (var rp in p.Prices)
                     reg.retailPrices.Add(new RetailPrice { itemName = rp.ItemName, price = rp.Price });
