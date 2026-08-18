@@ -1582,6 +1582,21 @@ namespace BigAmbitionsMP
                 {
                     var rc = env.GetPayload<RegisterCashierPayload>();
                     if (rc == null || !SenderIs(rc.PlayerId, senderPid, env.Type)) break;
+                    // Sweep batch 11: an empty Address is a LOST CONTEXT, not a permission
+                    // failure — resolve the building from the station's stable id and stamp
+                    // it before the check (and before Apply/Broadcast: receivers need the
+                    // address for synthetic staffing).  The check below then judges the
+                    // sender's actual rights instead of auto-failing on a blank.
+                    bool rcStamped = false;
+                    if (string.IsNullOrEmpty(rc.Address))
+                    {
+                        string resolved = MPRegisterSync.ResolveAddressForStation(rc.StationId);
+                        if (!string.IsNullOrEmpty(resolved))
+                        {
+                            rc.Address = resolved; rcStamped = true;
+                            Plugin.Logger.LogInfo($"[Server] RegisterCashier from '{senderPid}' carried no address — resolved '{resolved}' from station id (batch 11).");
+                        }
+                    }
                     // Round-42: owner OR granted helper — the owner-only anti-spoof gate predates helper
                     // grants and silently dropped a helper's register duty (field-proven: the guest worked
                     // the till, the host never learned, the simulator election never handed off, and the
@@ -1602,7 +1617,9 @@ namespace BigAmbitionsMP
                         break;
                     }
                     MPRegisterSync.Apply(rc);
-                    Broadcast(env);   // relay duty state to everyone (idempotent at sender)
+                    // Batch 11: a stamped address must ride the relay too — receivers need it
+                    // for synthetic staffing, and the original envelope still carries "".
+                    Broadcast(rcStamped ? MessageEnvelope.Create(MessageType.RegisterCashier, rc.PlayerId, rc) : env);   // relay duty state to everyone (idempotent at sender)
                     break;
                 }
 

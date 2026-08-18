@@ -143,6 +143,36 @@ namespace BigAmbitionsMP
             return RegKey(id, c != null ? c.transform.position : Vector3.zero);
         }
 
+        /// <summary>Sweep batch 11 (2026-08-18): the building that CONTAINS a station, resolved
+        /// from the station's stable instance id (reliable since item 7).  Duty toggles used to
+        /// trust the entry-hook shop context, and entry paths that skip the hook (hand-vehicle
+        /// entry etc.) shipped Address="" — which the host's owns-or-granted check can never
+        /// pass (grants explicitly require a non-empty address), so every registration from an
+        /// affected player was dropped (×407/×420/×30 field storms = "can't work at the till"
+        /// with permissions in perfect order).  "" = unresolvable.  Pure managed reads — safe
+        /// from the network poll thread; any race with a main-thread list mutation falls out
+        /// as "" (the old behavior).</summary>
+        internal static string ResolveAddressForStation(string? stationId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(stationId)) return "";
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return "";
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    try
+                    {
+                        if (reg?.itemInstances != null && reg.itemInstances.ContainsKey(stationId))
+                            return GameStateReader.AddressKey(reg);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return "";
+        }
+
 #if BAMP_DEV
         /// <summary>Round-263 test hooks (TestDrive 'schedfilter'): inject/remove a duty
         /// synthetic at a fabricated station so the schedule-surface filter can be
@@ -558,7 +588,18 @@ namespace BigAmbitionsMP
                         SendToggle(ed.pos, false, employee: true, stationId: ed.stationId);
                         _empDuty.Remove(myKey);
                     }
-                    SendToggle(_dutyPos, true, stationId: myStationId);
+                    // Batch 11: live-read the address at commitment — the entry-hook context can
+                    // be empty (hook-skipping entry paths); the station itself names its building.
+                    string dutyAddr = CurrentShopAddress;
+                    if (string.IsNullOrEmpty(dutyAddr))
+                    {
+                        dutyAddr = ResolveAddressForStation(myStationId);
+                        if (!string.IsNullOrEmpty(dutyAddr))
+                            Plugin.Logger.LogInfo($"[Register] shop context was empty at duty-on — resolved '{dutyAddr}' from the station (batch 11).");
+                        else
+                            Plugin.Logger.LogWarning("[Register] duty-on with NO shop context and an unresolvable station — the host will drop this registration (batch 11).");
+                    }
+                    SendToggle(_dutyPos, true, address: string.IsNullOrEmpty(dutyAddr) ? null : dutyAddr, stationId: myStationId);
                     // Worker-side price-table snapshot — cross-machine evidence
                     // pairing for any future price dispute.
                     try
