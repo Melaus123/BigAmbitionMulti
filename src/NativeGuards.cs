@@ -147,4 +147,11 @@ namespace BigAmbitionsMP
             return null;
         }
     }
+
+    // (Batch 15's StationaryAiBehavior attribution guard REMOVED same-day: the round-199
+    //  shield (MPPatches.Patch_StationaryAi_HealStuckCombinedFlag) already roots AND heals
+    //  this storm — a native one-way _isPlayingCombinedAnimation flag, MP-amplified by
+    //  weather-sync re-rolls — and a second finalizer on the same method registered first
+    //  would have displaced that heal (verifier catch, 2026-08-18).  Lesson: grep OUR OWN
+    //  patch classes for the target method before adding a patch to it.)
 }
