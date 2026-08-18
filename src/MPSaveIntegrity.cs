@@ -84,6 +84,14 @@ namespace BigAmbitionsMP
                         foreach (var reg in gi.BuildingRegistrations)
                         {
                             if (reg is not Entities.Warehouse w) continue;
+                            // Round-273 (user-approved 2026-08-17): native-parity filter. The game's
+                            // own EA06 fixes repair ONLY player-rented warehouses (RentedByPlayer),
+                            // and ResetVehicleSlots fills slots at rent time — unowned/AI warehouse-
+                            // type buildings sit at zero slots BY DESIGN. Without this filter the
+                            // sweep re-"repaired" the whole city every load (the vehicle-slots×131
+                            // header constant: three field worlds + a fresh gen, identical count).
+                            // Player-rented only — the RED ROC factory case stays covered.
+                            if (!w.RentedByPlayer) continue;
                             int expected = 0;
                             try { expected = Buildings.BuildingSizeHelper.GetData(Helpers.BuildingHelper.GetBuilding(w.Address))?.numberOfVehicleSlots ?? 0; }
                             catch { }
@@ -152,7 +160,8 @@ namespace BigAmbitionsMP
                 // ── Class 4b: rival-less world (DETECT-ONLY, round-256) ──────
                 // gi.rivalStates is the id list ALL rival identity derives from
                 // (native load: FillData(rivalStates ids)); native GenerateRivals
-                // always writes 34 entries and can never leave it empty. Empty +
+                // always writes exactly 19 entries (4 special fixed-id + 7
+                // wholesale + 8 import UUIDs) and can never leave it empty. Empty +
                 // a populated world = generation ran without rivals (lost id
                 // race at a client new-game start, field 20260809-132321) or an
                 // externally damaged save. Detect-only by user ruling 2026-08-15
