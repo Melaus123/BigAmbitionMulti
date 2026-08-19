@@ -206,6 +206,32 @@ namespace BigAmbitionsMP
                 // Handoff slice 1: best-effort mirror before the window closes —
                 // inline (not Task.Run) so the sends are queued before teardown.
                 MirrorStoreSweep(dc);
+                // ── Round-282/282b: make the farewell mirror actually leave ──────
+                // The farewell mirror is the ONE mirror a voluntary host switch depends
+                // on, and round-282 put mirrors on a metered lane that releases a chunk
+                // at a time — "queued before teardown" stopped meaning "gone before
+                // teardown".  Two steps, in this order, both INLINE on the quit stack:
+                //   1. drain — wait while bytes are still moving (progress-based, not a
+                //      fixed budget: a ~6.6MB store at the measured 250-330KB/s needs
+                //      ~22s and the old 8s cap failed healthy transfers).
+                //   2. flushing close — hand each link a graceful close so the transport
+                //      flushes what IT still holds, with a reason tag the client names.
+                //
+                // TEARDOWN ORDER (read from the code, 2026-08-19) — why these two must
+                // sit HERE and not in MPServer.Stop:
+                //   • Window close / quit-to-desktop → Unity fires MPCanvasUI's
+                //     OnApplicationQuit → this method, all on one stack.
+                //   • Pause-menu Save & Exit → Patch_MiniMenu_SaveAndExitToDesktop →
+                //     MenuSave(exiting:true) → MiniMenuUtil.QuitToDesktop → the game's
+                //     quit coroutine → Application.Quit → the SAME OnApplicationQuit.
+                //   • The socket close lives further out and later: Plugin.OnUnloadAsync
+                //     → MPServer.Stop → SteamHostTransport.Stop → _socket.Close() (bare,
+                //     no linger — it DISCARDS whatever Steam still holds).  Whether the
+                //     loader's unload hook even runs before process exit is not
+                //     guaranteed; running the drain + flushing close inline here is what
+                //     makes them provably precede both that close and the exit.
+                MPServer.DrainOutboundForQuit();
+                MPServer.CloseLinksForQuit();
             }
             catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] HostQuitCheckpoint: {ex}"); }
         }

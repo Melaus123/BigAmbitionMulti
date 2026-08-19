@@ -58,7 +58,40 @@ namespace BigAmbitionsMP
         private static readonly byte[] FragPrefix = { 0x02, (byte)'B', (byte)'F', (byte)'R' };
         public const int ChunkSize = 400_000;   // header + chunk stays well under the 512KB cap
 
+        // ── Round-282 (mirror pacing) ────────────────────────────────────────
+        // The paced lane uses a SMALLER fragment than the immediate lane, because
+        // the paced chunk is the unit of head-of-line blocking: whatever size we
+        // pick is what an urgent gameplay message can end up waiting behind.
+        // 192KB ≈ 0.6-0.8s on the 250-330KB/s links measured in field
+        // 20260818-215459, against 400KB ≈ 1.3-1.6s.
+        //
+        // Verified before choosing it (SteamReassembly, this file): reassembly is
+        // INDEX/COUNT based — it sizes the output from the SUM of the received
+        // chunk lengths and concatenates the parts in index order.  There is no
+        // offset = index × ChunkSize assumption anywhere, so a message fragmented
+        // at 192KB reassembles on an unmodified receiver.  Its guards still hold:
+        // count ≤ 4096 (4096 × 192KB = 786MB of headroom) and the 16-bit index.
+        public const int PacedChunkSize = 192 * 1024;
+
         public static int FragmentCount(int totalLen) => (totalLen + ChunkSize - 1) / ChunkSize;
+
+        /// <summary>Round-282: pre-split a paced payload into the frames the pump will
+        /// release one at a time.  A payload at or under PacedChunkSize rides as ONE
+        /// unwrapped message (still headroom-gated) — exactly what the immediate lane
+        /// does with a small message, so the receiver sees nothing new.</summary>
+        public static byte[][] BuildPacedFrames(int msgId, byte[] data)
+        {
+            if (data.Length <= PacedChunkSize) return new[] { data };
+            int count = (data.Length + PacedChunkSize - 1) / PacedChunkSize;
+            var frames = new byte[count][];
+            for (int i = 0, off = 0; i < count; i++)
+            {
+                int len = Math.Min(PacedChunkSize, data.Length - off);
+                frames[i] = WrapFragment(msgId, i, count, data, off, len);
+                off += len;
+            }
+            return frames;
+        }
 
         public static byte[] WrapFragment(int msgId, int index, int count, byte[] data, int offset, int len)
         {
@@ -197,7 +230,83 @@ namespace BigAmbitionsMP
         private static int _nextFragId;
         internal readonly SteamReassembly Reassembly = new("SteamHost");
 
-        public override long PendingSendBytes { get { lock (_pending) return _pendingBytes; } }   // round-276 congestion signal
+        // Round-276 congestion signal; round-282: transport backlog ONLY — MPLink adds
+        // the paced lane on top for PendingSendBytes, and this figure is the pacing gate.
+        protected override long TransportPendingBytes { get { lock (_pending) return _pendingBytes; } }
+
+        // ── Round-282: the paced lane (host → client store mirrors) ──────────
+        private readonly PacedSendQueue _paced = new("SteamLink");
+        public override long PacedSendBytes => _paced.Bytes;
+
+        /// <summary>Round-282b: the true outbound figure — our own queues PLUS what
+        /// Steam itself still holds for this connection.  Connection.QuickStatus()
+        /// (verified against the shipped Facepunch.Steamworks.Win64.dll) exposes
+        /// PendingReliable (queued in Steam, not yet sent) and SentUnackedReliable
+        /// (sent, not yet acknowledged by the peer).  Counting BOTH is what makes the
+        /// quit drain a real answer to "did the farewell mirror leave?": zero here
+        /// means the peer has acknowledged every reliable byte, not merely that our
+        /// process handed them over.  A closed/invalid connection reads as zero, which
+        /// is the correct answer — nothing more can be sent down it.
+        /// NOT wired into TransportPendingBytes on purpose: the pacing gate must not
+        /// stall on SentUnackedReliable, which on a high-RTT relay is simply the
+        /// bandwidth-delay product and blocks nothing that is queued behind it.</summary>
+        public override long UnflushedSendBytes
+        {
+            get
+            {
+                long ours = PendingSendBytes;
+                try { var s = _conn.QuickStatus(); return ours + s.PendingReliable + s.SentUnackedReliable; }
+                catch { return ours; }
+            }
+        }
+
+        /// <summary>Round-282b: the flushing close.  Disconnect(reason) already takes
+        /// the round-91 linger path — Close(linger: true, 1000, tag) — which asks Steam
+        /// to flush queued reliable data before the connection goes away; a bare Close()
+        /// discards it.  Marking the link dead afterwards stops the pump from re-offering
+        /// into a closing connection (and lets it release both queues).</summary>
+        public override bool CloseFlushing(byte[] reason)
+        {
+            try { Disconnect(reason); Alive = false; return true; }
+            catch (Exception ex)
+            { Plugin.Logger.LogWarning($"[SteamLink] flushing close for {Describe}: {ex.Message}"); return false; }
+        }
+
+        public override void SendPaced(byte[] data, string supersedeKey = "")
+        {
+            if (data == null || data.Length == 0) return;
+            try
+            {
+                // Fragment ids come from the SAME counter the immediate lane uses, so a
+                // paced assembly can never collide with an immediate one on the receiver.
+                int id = Interlocked.Increment(ref _nextFragId);
+                _paced.Enqueue(SteamFrames.BuildPacedFrames(id, data), supersedeKey, Describe);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[SteamLink] paced queue for {Describe}: {ex.Message} — sending immediately instead.");
+                Send(data, reliable: true);
+            }
+        }
+
+        /// <summary>Round-282: release at most ONE paced chunk per pump tick, and only
+        /// while this link's own backlog is under the headroom — so at most about one
+        /// paced chunk ever sits in front of an urgent gameplay message.  Pump thread,
+        /// ~15ms, immediately after FlushPending (the gate must read a post-flush
+        /// backlog or it under-releases for one tick after every drain).</summary>
+        internal void FlushPaced()
+        {
+            if (!Alive) { _paced.Clear(); return; }
+            var chunk = _paced.TryRelease(TransportPendingBytes, Describe);
+            if (chunk == null) return;
+            try { SendReliableRaw(chunk); }
+            catch (Exception ex)
+            {
+                // A lost chunk means the receiver's assembly never completes and expires
+                // after 120s.  Background replication: the next save re-mirrors the file.
+                Plugin.Logger.LogWarning($"[SteamLink] paced chunk to {Describe} lost: {ex.Message} — that mirror will not reassemble; the next save re-mirrors.");
+            }
+        }
 
         public override void Send(byte[] data, bool reliable)
         {
@@ -296,7 +405,14 @@ namespace BigAmbitionsMP
             {
                 if (reason != null && reason.Length > 0)
                 {
-                    _conn.SendMessage(SteamFrames.WrapClose(reason), SendType.Reliable);
+                    // Round-282c (verifier): the tag frame's Result was ignored — on a congested
+                    // link (exactly where the quit drain ends in STOPPED/TIMEOUT) Steam can refuse
+                    // it and the tag vanished silently.  The linger close still carries the tag in
+                    // its debug string, so the player message usually survives; the log now says
+                    // when the frame itself was lost.
+                    var tagResult = _conn.SendMessage(SteamFrames.WrapClose(reason), SendType.Reliable);
+                    if (tagResult != Result.OK)
+                        Plugin.Logger.LogWarning($"[SteamLink] close-tag frame to {Describe} refused ({tagResult}) — relying on the close debug-string fallback (round-282c).");
                     // Round-91 (field 20260725-165954: a relay version-refusal reached the player as a
                     // bare 'App_Min' and a wordless bounce to the menu): Close() WITHOUT linger discards
                     // queued reliable data, so the close-tag frame above lost the race on the relay and
@@ -364,7 +480,14 @@ namespace BigAmbitionsMP
             {
                 try { _socket?.Receive(); }
                 catch (Exception ex) { Plugin.Logger.LogError($"[SteamHost] Receive: {ex}"); }
-                try { foreach (var l in _links.Values) l.FlushPending(); } catch { }
+                // Round-282: FlushPending first (retries own the backlog figure the
+                // paced gate reads), then release at most one paced chunk per link.
+                // Per-link isolation: one sick peer must not stop the others draining.
+                foreach (var l in _links.Values)
+                {
+                    try { l.FlushPending(); l.FlushPaced(); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamHost] flush {l.Describe}: {ex.Message}"); }
+                }
                 Thread.Sleep(15);
             }
         }
@@ -477,6 +600,47 @@ namespace BigAmbitionsMP
         private static int _nextFragId;
         private readonly SteamReassembly _reassembly = new("SteamClient");
 
+        // ── Round-282: the paced lane, client side ───────────────────────────
+        // Same queue, same headroom gate, same pump as the host link.  No v1 caller:
+        // the client's save upload stays IMMEDIATE by the round-282 scope decision
+        // (the host is waiting on it to complete a coordinated save — that is not
+        // background replication).  The lane exists so the handoff work can meter
+        // client→host bulk without reopening the transport layer.
+        private readonly PacedSendQueue _paced = new("SteamClient");
+        public long PacedSendBytes => _paced.Bytes;
+        // (round-282c: an unused PendingSendBytes aggregate lived here — not on
+        // IClientTransport, no reader; removed rather than left as drift surface.)
+
+        public void SendPaced(byte[] data, string supersedeKey = "")
+        {
+            if (data == null || data.Length == 0) return;
+            try
+            {
+                int id = Interlocked.Increment(ref _nextFragId);
+                _paced.Enqueue(SteamFrames.BuildPacedFrames(id, data), supersedeKey, "host");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[SteamClient] paced queue: {ex.Message} — sending immediately instead.");
+                Send(data, reliable: true);
+            }
+        }
+
+        /// <summary>Round-282: release at most one paced chunk per pump tick, gated on
+        /// our own send backlog (NOT PendingSendBytes — that includes the paced queue
+        /// and would gate the queue against itself).  Pump thread, ~15ms.</summary>
+        private void FlushPaced()
+        {
+            var mgr = _mgr;
+            if (mgr == null) { _paced.Clear(); return; }
+            long backlog; lock (_pending) backlog = _pendingBytes;
+            var chunk = _paced.TryRelease(backlog, "host");
+            if (chunk == null) return;
+            try { SendReliableRaw(mgr, chunk); }
+            catch (Exception ex)
+            { Plugin.Logger.LogWarning($"[SteamClient] paced chunk lost: {ex.Message} — that payload will not reassemble on the host."); }
+        }
+
         public void Send(byte[] data, bool reliable)
         {
             try
@@ -575,6 +739,7 @@ namespace BigAmbitionsMP
                 try { _mgr?.Receive(); }
                 catch (Exception ex) { Plugin.Logger.LogError($"[SteamClient] Receive: {ex}"); }
                 try { FlushPending(); } catch { }
+                try { FlushPaced(); } catch { }   // round-282: paced lane, after the retry flush
                 Thread.Sleep(15);
             }
         }

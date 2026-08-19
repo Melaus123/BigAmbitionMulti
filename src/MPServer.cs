@@ -2762,7 +2762,13 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Round-276: helpers exposing the transport's per-peer send backlog —
-        /// the congestion signal for the join-baseline verifier and the phase probe.</summary>
+        /// the congestion signal for the join-baseline verifier and the phase probe.
+        /// Round-282: the figure now INCLUDES the paced lane's unreleased bytes (see
+        /// MPLink.PendingSendBytes).  A queue-depth reading must be the whole truth —
+        /// a metered mirror is still data owed to that peer, and hiding it would have
+        /// made the verifier read "link clear" while megabytes waited.  Expect outQ to
+        /// stay non-zero LONGER than before for the same payload: pacing trades queue
+        /// duration for head-of-line latency, on purpose.</summary>
         internal static long PendingSendBytesTo(string pid)
         {
             foreach (var peer in _clients.Keys)
@@ -5111,6 +5117,32 @@ namespace BigAmbitionsMP
             try
             {
                 var env = MessageEnvelope.Create(MessageType.StoreMirror, "host", payload);
+                // Round-282: serialize ONCE for the whole fan-out (Broadcast already
+                // does this) — on the megabyte class, per-peer serialization was
+                // re-encoding 1-2MB of base64 for every client.
+                var bytes = env.Serialize();
+                // Round-282 (mirror pacing): the store mirror is THE megabyte class —
+                // field 20260818-215459 measured ~6.6MB queued per join-save cycle
+                // against links draining at 250-330KB/s, and the clock/phase messages
+                // behind that convoy in the single ordered FIFO were 30s+ late.  These
+                // mirrors are background replication for host handoff: they tolerate
+                // lateness by design, so they take the METERED lane and let urgent
+                // gameplay traffic through between chunks.
+                //
+                // SCOPE DECISION (v1 = StoreMirror only): join-serve LoadData, member
+                // SaveData uploads, and world/business snapshots stay IMMEDIATE.  A
+                // joining player sits at a loading screen waiting on LoadData — metering
+                // that would trade a background delay nobody feels for a foreground one
+                // everybody does.  Widen only with a measurement that says otherwise.
+                //
+                // Supersede key = (session, character).  A newer mirror of the same
+                // character's .hsg fully replaces an older one, so an older copy that
+                // has not begun sending is dropped rather than shipped as pure convoy.
+                // Safe for the manifest a dropped piece may have carried: the sweep
+                // sends the manifest as its own piece (key "<session>|"), and a
+                // superseding piece for the same character is by definition the fresher
+                // snapshot of that file.  Partially-sent payloads are never dropped.
+                string key = payload.SessionName + "|" + payload.StableId;
                 foreach (var peer in _clients.Keys)
                 {
                     if (!_peerNames.TryGetValue(peer.Id, out var pid)) continue;
@@ -5118,11 +5150,132 @@ namespace BigAmbitionsMP
                         && StableIdByPlayer.TryGetValue(pid, out var st) && st == exceptStable) continue;
                     // Per-peer isolation (review fix 2026-07-23): one throwing peer must
                     // not skip the remaining peers' mirror piece.
-                    try { Send(peer, env); }
+                    try { peer.SendPaced(bytes, key); }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendStoreMirror → '{pid}': {ex.Message}"); }
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendStoreMirror: {ex.Message}"); }
+        }
+
+        // ── Round-282b: quit-drain thresholds ────────────────────────────────
+        // The round-282 fixed 8s budget was wrong in the direction that matters: a
+        // ~6.6MB store at the measured 250-330KB/s needs ~22s, so a perfectly healthy
+        // transfer timed out and reported the farewell mirror as possibly-lost.  Time
+        // is not the right question — PROGRESS is.  Wait as long as bytes are actually
+        // moving; stop the moment they are not.
+        /// <summary>Absolute ceiling on quit latency, whatever is happening.  Even a
+        /// link that IS progressing does not get to hold the window open forever.</summary>
+        private const int DrainHardCapMs = 20_000;
+        /// <summary>No strict decrease for this long = the link is dead (or the peer
+        /// stopped acking); waiting longer only delays the player's exit.</summary>
+        private const int DrainIdleCutoffMs = 3_000;
+        /// <summary>Progress-report window: how often the "finishing sync" line is
+        /// emitted, and the span each report compares against.  Long enough that a
+        /// slow-but-real link reads as moving, short enough to notice a stall.</summary>
+        private const int DrainProgressWindowMs = 2_000;
+        /// <summary>Poll cadence — cheap; each sample is a few reads per link.</summary>
+        private const int DrainPollMs = 100;
+
+        /// <summary>Round-282 (the host-handoff correction), round-282b (progress-based
+        /// budget): block until every peer has taken everything it is owed, or until
+        /// progress stops.  The quit checkpoint's farewell mirror is the one mirror that
+        /// cannot afford to be late — a voluntary host switch depends on it — and
+        /// round-282 put mirrors on a metered lane, so "queued before teardown" no
+        /// longer means "gone before teardown".
+        /// Measures MPLink.UnflushedSendBytes, the strictest figure each transport can
+        /// give: on Steam links that includes Steam's own PendingReliable AND
+        /// SentUnackedReliable, so reaching zero means the peer ACKNOWLEDGED the bytes.
+        /// On UDP links it is our queue estimate only (LiteNetLib exposes no unacked
+        /// figure) — that limit is documented at LnlLink.
+        /// Ends in exactly one of three states, and says which: drained, stopped-idle,
+        /// or hard-cap timeout.  A timeout is never worded as a success.
+        /// MAIN THREAD (quit path); the pumps that do the draining run on their own
+        /// threads, so blocking here does not stop the bytes from moving.</summary>
+        internal static void DrainOutboundForQuit()
+        {
+            if (!_running || _clients.Count == 0) return;   // solo host: nothing is owed to anyone
+            try
+            {
+                long startTicks   = DateTime.UtcNow.Ticks;
+                long hardDeadline = startTicks + TimeSpan.TicksPerMillisecond * DrainHardCapMs;
+                long lastProgress = startTicks;              // last time the total strictly decreased
+                long best         = long.MaxValue;           // lowest total seen so far
+                long windowStart  = startTicks;              // current progress-report window
+                long windowTotal  = -1;                      // total at that window's start
+                while (true)
+                {
+                    long total = 0; int peers = 0;
+                    foreach (var peer in _clients.Keys)
+                    {
+                        long b = 0; try { b = peer.UnflushedSendBytes; } catch { }
+                        if (b > 0) { total += b; peers++; }
+                    }
+                    long now = DateTime.UtcNow.Ticks;
+                    double secs = (now - startTicks) / (double)TimeSpan.TicksPerSecond;
+                    if (windowTotal < 0) windowTotal = total;
+
+                    if (total <= 0)
+                    {
+                        // Round-282c (verifier): "taken" overstated on UDP — LiteNetLib's backlog
+                        // figure cannot see the in-flight window, so drain-to-zero there means
+                        // "handed to the send window", not "acknowledged".  Say which one is true.
+                        int udpLinks = 0, allLinks = 0;
+                        try { foreach (var lk in _clients.Keys) { allLinks++; if (lk.Describe != null && lk.Describe.StartsWith("udp:")) udpLinks++; } } catch { }
+                        string meaning = udpLinks == 0 ? "every peer ACKNOWLEDGED the farewell mirror"
+                                       : udpLinks == allLinks ? "the farewell mirror was handed to the send window (UDP cannot confirm receipt)"
+                                       : "Steam peers ACKNOWLEDGED the farewell mirror; UDP peers only had it handed to the send window";
+                        Plugin.Logger.LogInfo($"[Server] quit drain: DRAINED after {secs:F1}s — {meaning}.");
+                        return;
+                    }
+                    // Strict decrease = the transfer is alive; re-arm the idle clock.
+                    if (total < best) { best = total; lastProgress = now; }
+
+                    if (now - lastProgress >= TimeSpan.TicksPerMillisecond * DrainIdleCutoffMs)
+                    {
+                        Plugin.Logger.LogWarning($"[Server] quit drain: STOPPED — no progress for {DrainIdleCutoffMs / 1000}s with {total / 1024}KB still owed to {peers} peer(s) after {secs:F1}s; "
+                                               + "treating the link as dead. Those peers keep their PREVIOUS mirror for a handoff.");
+                        return;
+                    }
+                    if (now >= hardDeadline)
+                    {
+                        Plugin.Logger.LogWarning($"[Server] quit drain: TIMEOUT at the {DrainHardCapMs / 1000}s cap — {total / 1024}KB still owed to {peers} peer(s) (still moving, just not fast enough); "
+                                               + "part of the farewell mirror did NOT leave. Those peers keep their PREVIOUS mirror for a handoff.");
+                        return;
+                    }
+                    if (now - windowStart >= TimeSpan.TicksPerMillisecond * DrainProgressWindowMs)
+                    {
+                        long moved = windowTotal - total;    // negative = the queue GREW this window
+                        Plugin.Logger.LogInfo($"[Server] finishing sync: {total / 1024}KB left to {peers} peer(s)"
+                            + (moved > 0 ? $" ({moved / 1024}KB moved in the last {DrainProgressWindowMs / 1000}s)..." : " (no movement this window)..."));
+                        windowStart = now; windowTotal = total;
+                    }
+                    Thread.Sleep(DrainPollMs);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] quit drain: {ex.Message}"); }
+        }
+
+        /// <summary>Round-282b: close every peer link the FLUSHING way, before anything
+        /// else tears the transport down.  Steam links take the round-91 linger path
+        /// (Close(linger:true, 1000, tag)), which asks Steam to flush queued reliable
+        /// data and delivers a reason tag the client can name; SteamHostTransport.Stop's
+        /// bare _socket.Close() would discard it.
+        /// UDP links are deliberately LEFT ALONE: LiteNetLib's disconnect discards
+        /// pending reliable data (decompiled evidence at LnlLink), so a "polite" close
+        /// there would destroy the very mirror the drain just waited for.
+        /// MAIN THREAD, quit path only — this makes the links unusable by design.</summary>
+        internal static void CloseLinksForQuit()
+        {
+            if (!_running || _clients.Count == 0) return;
+            byte[] tag; try { tag = System.Text.Encoding.UTF8.GetBytes("BAMP:hostquit"); } catch { return; }
+            int flushed = 0, left = 0;
+            foreach (var peer in _clients.Keys)
+            {
+                try { if (peer.CloseFlushing(tag)) flushed++; else left++; }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] quit close {peer.Describe}: {ex.Message}"); left++; }
+            }
+            Plugin.Logger.LogInfo($"[Server] quit close: {flushed} link(s) closed with flush+reason tag"
+                + (left > 0 ? $", {left} left to the transport's own teardown (no flushing close available)" : "") + ".");
         }
 
         /// <summary>Host: broadcast the consensus rest/skip state.</summary>

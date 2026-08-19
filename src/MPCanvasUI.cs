@@ -484,6 +484,12 @@ namespace BigAmbitionsMP
                     {
                         // Client: write the designated disconnect save (+ marker) — the trusted-newer file
                         // Phase 3 may restore on rejoin if the host's stored copy is older.
+                        // Round-282 (checked, not assumed): this branch sends NOTHING over the wire —
+                        // WriteClientDisconnectSave writes '<base>-disconnect' and clientDisconnect.json to
+                        // LOCAL disk only.  So there is no client-side equivalent of the host's quit
+                        // drain-wait to add.  The client's one inline upload at exit lives in a DIFFERENT
+                        // flow (MPSaveCoordinator.MenuSave with exiting:true → SendSaveData, the pause-menu
+                        // Save-and-Exit button) and is IMMEDIATE, not paced — unaffected by mirror pacing.
                         MPSaveCoordinator.WriteClientDisconnectSave();
                     }
                 }

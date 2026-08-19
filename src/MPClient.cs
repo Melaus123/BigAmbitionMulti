@@ -230,6 +230,14 @@ namespace BigAmbitionsMP
                     // threw and ate the kick/reject reason, 2026-06-11).
                     string tag = System.Text.Encoding.UTF8.GetString(extra);
                     if (tag == "BAMP:rejected") why = "Join REJECTED by host";
+                    // Round-282b: the host's quit path now closes links deliberately
+                    // (flush + tag) instead of letting the socket teardown drop them, so
+                    // name it — an orderly host exit used to reach the player as a bare
+                    // transport reason, indistinguishable from a crash or a network drop.
+                    // This changes the WORDING only: a host quit is still an involuntary
+                    // drop for us, so the session-ended notice and the disconnect save
+                    // below run exactly as before.
+                    else if (tag == "BAMP:hostquit") why = "The host saved and left the session";
                     else if (tag == "BAMP:kicked") why = "KICKED by host";
                     else if (tag == "BAMP:banned") why = "Banned until host re-hosts";
                     else if (tag == "BAMP:identity") why = "Join refused — player identity invalid or already connected";
