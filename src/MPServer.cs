@@ -4435,7 +4435,9 @@ namespace BigAmbitionsMP
                     sent++;
                 }
                 if (sent > 0)
-                    Plugin.Logger.LogInfo($"[Server] Interior diff broadcast to {sent} subscriber(s) for '{snap.AddressKey}': {InteriorSync.SnapshotSummary(snap)}.");
+                    // Round-280 (S5): this is a FULL snapshot — no diff message exists; the old
+                    // "diff broadcast" wording sent a field investigation down the wrong path.
+                    Plugin.Logger.LogInfo($"[Server] Interior snapshot broadcast (full state) to {sent} subscriber(s) for '{snap.AddressKey}': {InteriorSync.SnapshotSummary(snap)}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BroadcastInteriorSnapshotTo: {ex.Message}"); }
         }

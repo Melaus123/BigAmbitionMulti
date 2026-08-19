@@ -106,7 +106,12 @@ namespace BigAmbitionsMP
                 // Send initial snapshot to this peer only.
                 var snap = BuildSnapshotForHostSend(addressKey);
                 if (snap == null) return;
-                _lastHashByAddr[addressKey] = ComputeHash(snap);
+                // Round-280 (S1): stamp ALL THREE trackers — stamping only the full hash left
+                // the Tick's 12s clock un-reset, so it could double-send moments later.
+                var (hsSub, hvSub) = ComputeHashes(snap);
+                _lastHashByAddr[addressKey] = hvSub;
+                _lastStructHashByAddr[addressKey] = hsSub;
+                _volatileSentAtByAddr[addressKey] = UnityEngine.Time.realtimeSinceStartup;
                 MPServer.SendInteriorSnapshotTo(peer, snap);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] HandleRequest: {ex.Message}"); }
@@ -561,6 +566,10 @@ namespace BigAmbitionsMP
             }
         }
 
+        // Round-280: immediate pushes suppressed by the S1/S2 gates, counted per address and
+        // named on the next actual send — coalescing must never be silent.
+        private static readonly Dictionary<string, int> _suppressedPushes = new();
+
         /// <summary>The actual push. Works regardless of where the owner's avatar is — BuildSnapshot reads the
         /// SAVE data, not loaded objects. Host owner → broadcast to that building's subscribers; client owner →
         /// push to the host, which rebroadcasts.</summary>
@@ -574,7 +583,39 @@ namespace BigAmbitionsMP
                     var snap = BuildSnapshotForHostSend(addressKey);
                     if (snap != null && _subsByBuilding.TryGetValue(addressKey, out var set))
                     {
-                        _lastHashByAddr[addressKey] = ComputeHash(snap);
+                        // Round-280 (S1/S2, field 20260818-223659 resend storm): this path had NO
+                        // gate — 68% of a 522-broadcast evening came through here (helper-order
+                        // adoptions + storage ops), 96% of all sends carrying zero item changes.
+                        // S1: an identical snapshot does not send at all.  S2: a CARGO-ONLY delta
+                        // obeys the same 12s coalesce as the Tick — the Tick's 2s poll delivers it
+                        // when the window opens (recurrence-covered: the un-stamped hash keeps the
+                        // Tick's fullChanged true).  STRUCTURAL changes (a guest's furniture) still
+                        // send immediately, exactly as before.  Suppressions are counted and named
+                        // on the next actual send so the coalescing stays diagnosable.
+                        float nowIp = UnityEngine.Time.realtimeSinceStartup;
+                        var (hsIp, hvIp) = ComputeHashes(snap);
+                        bool fullChangedIp = !_lastHashByAddr.TryGetValue(addressKey, out var pfIp) || pfIp != hvIp;
+                        if (!fullChangedIp)
+                        {
+                            _suppressedPushes.TryGetValue(addressKey, out var n0); _suppressedPushes[addressKey] = n0 + 1;
+                            return;
+                        }
+                        bool structChangedIp = !_lastStructHashByAddr.TryGetValue(addressKey, out var psIp) || psIp != hsIp;
+                        if (!structChangedIp
+                            && _volatileSentAtByAddr.TryGetValue(addressKey, out var tSentIp)
+                            && nowIp - tSentIp < VolatileCoalesceSeconds)
+                        {
+                            _suppressedPushes.TryGetValue(addressKey, out var n1); _suppressedPushes[addressKey] = n1 + 1;
+                            return;
+                        }
+                        _lastHashByAddr[addressKey] = hvIp;
+                        _lastStructHashByAddr[addressKey] = hsIp;
+                        _volatileSentAtByAddr[addressKey] = nowIp;
+                        if (_suppressedPushes.TryGetValue(addressKey, out var sup) && sup > 0)
+                        {
+                            _suppressedPushes.Remove(addressKey);
+                            Plugin.Logger.LogInfo($"[InteriorSync] immediate push for '{addressKey}' absorbed {sup} identical/cargo-coalesced push(es) since the last send (round-280).");
+                        }
                         MPServer.BroadcastInteriorSnapshotTo(set, snap);
                     }
                 }
