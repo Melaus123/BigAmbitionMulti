@@ -679,6 +679,7 @@ namespace BigAmbitionsMP
             _peerNames.Clear();
             _clients.Clear();
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
+            lock (_joinBaselineDone) _joinBaselineDone.Clear();   // round-276: baseline latches die with the session
         }
 
         /// <summary>Host clicked "Start New Game" in the lobby.</summary>
@@ -702,6 +703,7 @@ namespace BigAmbitionsMP
 
             // Re-arm the startup pause hold for this new game.
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
+            lock (_joinBaselineDone) _joinBaselineDone.Clear();   // round-276: baseline latches die with the session
 
             // Per-player starting cash: each client gets the host-designated amount
             // (their override, else the difficulty base).  The host now designates
@@ -764,6 +766,7 @@ namespace BigAmbitionsMP
 
             // Re-arm the startup pause hold for this new game.
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
+            lock (_joinBaselineDone) _joinBaselineDone.Clear();   // round-276: baseline latches die with the session
 
             // Phase 4: if a multiplayer session exists, resume it — the host holds
             // every player's .hsg, so it ships each connected client its own and
@@ -872,6 +875,14 @@ namespace BigAmbitionsMP
             // in-game set and re-check — the remaining players may now all be loaded.
             if (leftPlayer != null)
             {
+                // Round-276: a leaver's baseline latch dies with them, so a rejoin
+                // earns a fresh baseline even if its PlayerInGame races the phase flow.
+                lock (_joinBaselineDone) _joinBaselineDone.Remove(leftPlayer);
+                // Round-276b (verifier finding 2): their armed baseline VERIFY dies too —
+                // a departed member's file can never land, and the surviving entry fell
+                // straight through to a full refire for a player who is gone (F4's
+                // congestion check reads 0 for a dead link, so it never shielded this).
+                try { MPSaveCoordinator.DropJoinBaselineVerify(StableOfPid(leftPlayer)); } catch { }
                 bool release = false;
                 bool wasHeld = false;
                 List<string> waiting = new();
@@ -2328,6 +2339,14 @@ namespace BigAmbitionsMP
         /// </summary>
         public static void MarkPlayerInGame(string playerId)
         {
+            // Round-276b (verifier finding 1): the latch clear is the FIRST act,
+            // unconditional — the authenticated scene-load IS the signal.  The first
+            // cut nested it behind sendTo.Count>0 (a peer lookup that can race empty)
+            // and behind the second _startupReleased check (which can flip between
+            // the two lock takes) — either race left the latch set, and with the
+            // 'Loading' fallback gone nothing else would ever re-arm that member's
+            // baseline.  Clearing is idempotent, so hoisting costs nothing.
+            lock (_joinBaselineDone) _joinBaselineDone.Remove(playerId);
             bool hostJustReady = false;
             bool released;
             List<MPLink> sendTo = new();
@@ -2351,6 +2370,8 @@ namespace BigAmbitionsMP
                 if (sendTo.Count > 0)
                 {
                     Plugin.Logger.LogInfo($"[Server] Reconnect: '{playerId}' scene loaded — sent live world state.");
+                    // (round-276b: the join-baseline latch was already cleared at the
+                    // top of this method — the scene-load signal, unconditional.)
                     MPChat.AddNotice($"{DisplayNameFor(playerId)} reconnected.");
                     BroadcastChat("", $"— {DisplayNameFor(playerId)} reconnected.");
                     ParkedVehicleSync.ForgetPeer(playerId);   // resync their parked cars after the reload
@@ -2414,6 +2435,9 @@ namespace BigAmbitionsMP
         // 'Settled' + 'Running' dual trigger must not double-save; cleared per client
         // by their next 'Loading' report (sent on every load path).
         private static readonly HashSet<string> _joinBaselineDone = new();
+        // Round-276b: last non-empty Detail per player — lets a detailed re-report of an
+        // unchanged phase still log (the probe's payload must survive losing the race).
+        private static readonly ConcurrentDictionary<string, string> _peerPhaseDetail = new();
         private static readonly HashSet<string> _fenceExcused = new();
         private static long _fenceArmedAtMs;   // grace: no excusals in the first 15s
 
@@ -2636,15 +2660,42 @@ namespace BigAmbitionsMP
             if (p == null || string.IsNullOrEmpty(p.PlayerId)) return;
             bool changed = !_peerPhase.TryGetValue(p.PlayerId, out var prevPh) || prevPh.phase != p.Phase;
             _peerPhase[p.PlayerId] = (p.Phase, TickMs64);
-            if (changed) Plugin.Logger.LogInfo($"[Server] phase: '{p.PlayerId}' → {p.Phase}");
+            // Round-276b (verifier finding 5): a bare report winning the race must not
+            // silence a later, detailed report of the SAME phase — the detail is the
+            // probe's whole payload.  Re-log when the detail changes, phase change or not.
+            if (!changed && !string.IsNullOrEmpty(p.Detail))
+            {
+                _peerPhaseDetail.TryGetValue(p.PlayerId, out var prevDetail);
+                if (p.Detail != prevDetail) changed = true;
+            }
+            if (!string.IsNullOrEmpty(p.Detail)) _peerPhaseDetail[p.PlayerId] = p.Detail;
+            if (changed)
+            {
+                // Round-276 probe: the sender-side reason + our outbound queue depth to
+                // that peer, on the one log line a field bundle reliably carries — the
+                // client-side discriminators were unrecoverable in 20260818-215459
+                // because peer-log collection shares the congested link.
+                long outQ = 0; try { outQ = PendingSendBytesTo(p.PlayerId); } catch { }
+                Plugin.Logger.LogInfo($"[Server] phase: '{p.PlayerId}' → {p.Phase}"
+                    + (string.IsNullOrEmpty(p.Detail) ? "" : $" ({p.Detail})")
+                    + (outQ > 0 ? $" outQ={outQ / 1024}KB" : ""));
+            }
             // Round-271 (Fix A): baseline capture the moment a joiner can actually CONTRIBUTE
             // to it — their settled-gate, reported explicitly (world-ready is too early: their
             // upload is skipped and the checkpoint is born without them; 2026-06-23 contract,
             // field 20260816-213224 hole).  Deferred internally while the HOST is unsettled.
             // Round-274/M3: the 'Settled' report is one-shot and the transport can drop it —
             // the lifecycle's own 'Running' report (independent sender, ~same moment) is the
-            // retry.  One baseline per client per load: the set is cleared by their next
-            // 'Loading' report, which every load path sends.
+            // retry.  One baseline per client per load.
+            // Round-276 (field 20260818-215459): the latch is NO LONGER cleared by the
+            // 'Loading' phase string — that string is a heuristic inference (clock+overlay
+            // sampling), and a live client's 6s clock wobble re-armed the latch, so every
+            // wobble fired a full join-baseline save (~6.6MB mirrored per fire; three in
+            // 15s collapsed the links).  The latch now clears only on the AUTHENTICATED
+            // per-load join signal — MarkPlayerInGame (sender-verified scene-load, both
+            // the startup and the mid-session reconnect branch) — and on disconnect.
+            // Phase reports still TIME the fire (Settled/Running = the joiner can
+            // contribute); they can no longer ARM it.
             if (changed && (p.Phase == "Settled" || p.Phase == "Running"))
             {
                 bool first; lock (_joinBaselineDone) first = _joinBaselineDone.Add(p.PlayerId);
@@ -2666,10 +2717,24 @@ namespace BigAmbitionsMP
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Settled baseline save: {ex.Message}"); }
                 }
             }
-            else if (changed && p.Phase == "Loading")
-            {
-                lock (_joinBaselineDone) _joinBaselineDone.Remove(p.PlayerId);
-            }
+            // (round-276: no 'Loading' clear here — see the comment above.)
+        }
+
+        /// <summary>Round-276: helpers exposing the transport's per-peer send backlog —
+        /// the congestion signal for the join-baseline verifier and the phase probe.</summary>
+        internal static long PendingSendBytesTo(string pid)
+        {
+            foreach (var peer in _clients.Keys)
+                if (_peerNames.TryGetValue(peer.Id, out var p) && p == pid) return peer.PendingSendBytes;
+            return 0;
+        }
+
+        internal static long PendingSendBytesToStable(string stable)
+        {
+            if (string.IsNullOrEmpty(stable)) return 0;
+            foreach (var kv in StableIdByPlayer)
+                if (kv.Value == stable) return PendingSendBytesTo(kv.Key);
+            return 0;
         }
 
         // ── Gate self-heal (field 2026-07-19) ─────────────────────────────────

@@ -1668,6 +1668,11 @@ namespace BigAmbitionsMP
     {
         public string PlayerId { get; set; } = "";
         public string Phase    { get; set; } = "";
+        /// <summary>Round-276 probe (additive; absent from older builds): the sender-side
+        /// reason for this transition — for a Loading demotion, the full discriminator set
+        /// (clock/overlay/excuse flags + staleness age) that field 20260818-215459 could
+        /// not recover because peer logs were uncollectable through the congestion.</summary>
+        public string Detail   { get; set; } = "";
     }
 
     /// <summary>A purchase by one player inside another player's shop

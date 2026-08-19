@@ -661,6 +661,24 @@ namespace BigAmbitionsMP
         private static int _joinSaveSeq;               // bumped per join-reason save (under _lock)
         private const int BaselineVerifyMs = 12000;    // upload window after the FIRE
         private const int BaselineFireWaitMs = 90000;  // give a deferred join save this long to fire at all
+        // Round-276 (field 20260818-215459): a join save costs ~1s of host main thread +
+        // ~6.6MB of mirrors per fire — three fired in 15s during the storm.  Minimum
+        // spacing between fires; a deferred request KEEPS its pending flag (recurrence-
+        // covered) and every joiner that accumulates during the hold rides the one save
+        // (SaveNow already broadcasts to everyone; verifies arm per-stable).  60s sits
+        // inside BaselineFireWaitMs (90s) so no armed verify is ever dropped by the hold.
+        private const int JoinBaselineMinIntervalMs = 60000;
+        private static int _lastJoinFireMs;
+        private static bool _joinRateLogged;
+        // Round-276: refiring a join save into a congested link amplifies the very
+        // congestion that made the first window unmeetable (measured RTT ramp 4→8→15→21s
+        // as fires stacked).  Above this outbound backlog, extend the window instead.
+        private const long VerifyCongestedBytes = 256 * 1024;
+        // Round-276b (verifier finding 3): extensions need a ceiling — a peer that stays
+        // congested (or wedges without disconnecting) must not extend forever.  Past this
+        // age (from the ARM) the verify degrades to the documented fallback: the periodic
+        // autosave covers the member.  5 min > any drain the 64MB link cap permits surviving.
+        private const int BaselineExtendCapMs = 300000;
 
         internal static void ArmJoinBaselineVerify(string stable)
         {
@@ -670,6 +688,32 @@ namespace BigAmbitionsMP
             {
                 foreach (var v in _baselineVerifies) if (v.Stable == stable) return;   // already watching
                 _baselineVerifies.Add(new BaselineVerify { Stable = stable, ArmSeq = seq, ArmedMs = Environment.TickCount });
+            }
+        }
+
+        /// <summary>Round-276b (verifier finding 2): a departed member's armed verify is
+        /// dropped — their file can never land, so the entry would otherwise fall through
+        /// to a full refire for a player who is gone.  Called from the disconnect path.</summary>
+        internal static void DropJoinBaselineVerify(string stable)
+        {
+            if (string.IsNullOrEmpty(stable)) return;
+            lock (_baselineVerifies)
+            {
+                int n = _baselineVerifies.RemoveAll(v => v.Stable == stable);
+                if (n > 0) Plugin.Logger.LogInfo($"[MPSave] join baseline verify for stable={stable} dropped — member disconnected before their upload could land (round-276b).");
+            }
+        }
+
+        /// <summary>Round-276b (verifier finding 4): a due entry is removed under the lock,
+        /// processed outside it, and re-queued — in that gap a concurrent arm for the same
+        /// member can't see it and adds a fresh entry.  On re-queue, the fresh arm wins
+        /// (it is pinned to the newer sequence); adding ours back would double the watch.</summary>
+        private static void ReAddVerifyUnlessSuperseded(BaselineVerify v)
+        {
+            lock (_baselineVerifies)
+            {
+                foreach (var e in _baselineVerifies) if (e.Stable == v.Stable) return;
+                _baselineVerifies.Add(v);
             }
         }
 
@@ -713,13 +757,40 @@ namespace BigAmbitionsMP
                 }
                 catch { }
                 if (present) continue;
+                // Round-276: if OUR outbound queue to this member is still congested, the
+                // upload window was structurally unmeetable — their upload is queued behind
+                // our own backlog (field 20260818-215459: RTT ramped 4→8→15→21s as fires
+                // stacked; both "missing" uploads landed 3-4s after the verifier gave up).
+                // Extend the window instead of refiring another ~6.6MB save into the very
+                // congestion.  FiredWallUnix keeps the ORIGINAL fire time, so a file that
+                // lands during the extension still satisfies the freshness check; the
+                // extension recurs while congested and resolves when the link drains.
+                long outQ = 0;
+                try { outQ = MPServer.PendingSendBytesToStable(v.Stable); } catch { }
+                if (outQ > VerifyCongestedBytes)
+                {
+                    // Round-276b: extension ceiling — past the cap, hand off to the
+                    // periodic autosave loudly instead of extending forever.
+                    if (unchecked(Environment.TickCount - v.ArmedMs) >= BaselineExtendCapMs)
+                    {
+                        Plugin.Logger.LogWarning($"[MPSave] join baseline verify for stable={v.Stable}: link still congested ({outQ / 1024}KB) after {BaselineExtendCapMs / 1000}s of extensions — giving up; the periodic autosave covers them (round-276b).");
+                        continue;   // entry already removed from the list — dropped
+                    }
+                    v.FiredMs = Environment.TickCount;   // restart the 12s window; freshness anchor unchanged
+                    ReAddVerifyUnlessSuperseded(v);      // round-276b: a concurrent fresh arm wins
+                    Plugin.Logger.LogInfo($"[MPSave] join baseline verify for stable={v.Stable}: link congested ({outQ / 1024}KB queued outbound) — window extended instead of refiring into it (round-276).");
+                    continue;
+                }
                 if (!v.Refired)
                 {
-                    Plugin.Logger.LogWarning($"[MPSave] join baseline '{v.Session}' is missing a FRESH file for stable={v.Stable} after the upload window — the trigger outran their settled-gate (or their upload was refused); firing another (round-274/F1).");
+                    // Round-276: wording no longer blames the settled-gate — in the field
+                    // case the gate was healthy and transport latency was the cause; the
+                    // old text sent the investigation to the wrong subsystem.
+                    Plugin.Logger.LogWarning($"[MPSave] join baseline '{v.Session}' is missing a FRESH file for stable={v.Stable} after the upload window — their upload has not landed (slow link, refused upload, or their settled-gate); firing another (round-274/F1).");
                     int seqAtRefire; lock (_lock) seqAtRefire = _joinSaveSeq;
                     RequestJoinBaseline();
                     v.Refired = true; v.ArmSeq = seqAtRefire; v.ArmedMs = Environment.TickCount; v.FiredMs = 0; v.FiredWallUnix = 0; v.Session = "";
-                    lock (_baselineVerifies) _baselineVerifies.Add(v);
+                    ReAddVerifyUnlessSuperseded(v);   // round-276b: a concurrent fresh arm wins
                 }
                 else
                     Plugin.Logger.LogError($"[MPSave] join baseline STILL missing a fresh file for stable={v.Stable} after a retry — leaving it to the periodic autosave (round-274/F1).");
@@ -741,8 +812,22 @@ namespace BigAmbitionsMP
                 }
                 return;
             }
+            // Round-276 rate limit: the request stays pending through the hold (the
+            // gate must not consume the trigger) and fires when the interval elapses.
+            int sinceFire = unchecked(Environment.TickCount - _lastJoinFireMs);
+            if (_lastJoinFireMs != 0 && sinceFire >= 0 && sinceFire < JoinBaselineMinIntervalMs)
+            {
+                if (!_joinRateLogged)
+                {
+                    _joinRateLogged = true;
+                    Plugin.Logger.LogInfo($"[MPSave] join baseline deferred (rate limit): last join save {sinceFire / 1000}s ago — fires in ~{(JoinBaselineMinIntervalMs - sinceFire) / 1000}s; joiners accumulated meanwhile ride the same save (round-276).");
+                }
+                return;
+            }
+            _joinRateLogged = false;
             _pendingJoinBaseline = false;
             _pendingJoinLogged = false;
+            _lastJoinFireMs = Environment.TickCount;
             HostSaveNow("join");
         }
 
@@ -1107,7 +1192,7 @@ namespace BigAmbitionsMP
         private static void ProceedWithLoadData(LoadDataPayload p)
         {
             MPClient.MarkLeftLobby();   // loading now — the lobby pane yields
-            MPClient.SendPhaseReport("Loading");   // INTENT: don't excuse me from the fence
+            MPClient.SendPhaseReport("Loading", "intent: load-data (served world)");   // round-276b: intents name themselves
             MPClient.BeginJoinQuiesce();   // live stream must not touch the load
             string session = p.SessionName;
             lock (_lock) { _activeSessionName = session; }

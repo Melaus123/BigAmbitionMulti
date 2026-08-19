@@ -197,6 +197,8 @@ namespace BigAmbitionsMP
         private static int _nextFragId;
         internal readonly SteamReassembly Reassembly = new("SteamHost");
 
+        public override long PendingSendBytes { get { lock (_pending) return _pendingBytes; } }   // round-276 congestion signal
+
         public override void Send(byte[] data, bool reliable)
         {
             try

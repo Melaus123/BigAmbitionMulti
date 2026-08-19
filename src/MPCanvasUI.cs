@@ -510,7 +510,10 @@ namespace BigAmbitionsMP
             // Fence visibility: the host excuses clients parked in Menu
             // (a connected client who cancels a load never disconnects —
             // the old fence waited the full 90s timeout on them).
-            if (MPClient.IsConnected) MPClient.SendPhaseReport(next.ToString());
+            // Round-276 probe: the transition's reason string rides along so the
+            // host's log carries the client-side discriminators (a congested link
+            // makes peer-log collection impossible exactly when it matters).
+            if (MPClient.IsConnected) MPClient.SendPhaseReport(next.ToString(), MPLifecycle.LastSetReason);
 
             if (next != MPLifecycle.MPPhase.WorldReady) return;
             MPClient.EndJoinQuiesce();

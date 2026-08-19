@@ -26,6 +26,13 @@ namespace BigAmbitionsMP
         public abstract bool IsAlive { get; }
         /// <summary>Log-safe endpoint description (no raw IPs).</summary>
         public abstract string Describe { get; }
+        /// <summary>Round-276: bytes queued behind a refused reliable send to this peer.
+        /// Congestion signal for the join-baseline verifier and the phase-report probe —
+        /// a verify window or a peer-log deadline is unmeetable while megabytes sit in
+        /// front of the reply.  Scope (round-276b): Steam links report exact queued bytes;
+        /// LiteNetLib links report a count×MTU upper-bound estimate; the base returns 0
+        /// only for transports with no visible backlog at all.</summary>
+        public virtual long PendingSendBytes => 0;
         public abstract void Send(byte[] data, bool reliable);
         public abstract void Disconnect(byte[] reason);
 
@@ -40,6 +47,14 @@ namespace BigAmbitionsMP
         public override int Id => Peer.Id;
         public override bool IsAlive => Peer.ConnectionState == ConnectionState.Connected;
         public override string Describe => $"udp:{Peer.Id}";
+        /// <summary>Round-276b (verifier finding 6): LiteNetLib exposes a reliable-queue
+        /// PACKET count, not bytes — estimate as count × MTU (an upper bound; the sends
+        /// above are ReliableOrdered on channel 0).  Over-estimating biases the verifier
+        /// toward window-extension, the safe direction.  Steam links report exact bytes.</summary>
+        public override long PendingSendBytes
+        {
+            get { try { return (long)Peer.GetPacketsCountInReliableQueue(0, true) * Peer.Mtu; } catch { return 0; } }
+        }
         public override void Send(byte[] data, bool reliable)
         {
             var writer = new NetDataWriter();

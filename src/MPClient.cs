@@ -910,7 +910,7 @@ namespace BigAmbitionsMP
         {
             IsInLobby = false;
             PendingFreshSpawn = true;
-            SendPhaseReport("Loading");   // INTENT: don't excuse me from the fence
+            SendPhaseReport("Loading", "intent: fresh-start (fence)");   // round-276b: intents name themselves
             BeginJoinQuiesce();
             var s = settings ?? MPServer.Preset("Normal");
             Plugin.Logger.LogInfo($"[Client] Mid-join fresh start; cash={s.StartingMoney}.");
@@ -937,7 +937,7 @@ namespace BigAmbitionsMP
         private static void HandleStartGame(MessageEnvelope env, bool isNew)
         {
             IsInLobby = false;
-            SendPhaseReport("Loading");   // INTENT: don't excuse me from the fence
+            SendPhaseReport("Loading", "intent: start-game (fence)");   // round-276b: intents name themselves
             var  sp              = env.GetPayload<StartGamePayload>();
             var  newGameSettings = sp?.Settings ?? MPServer.Preset("Normal");
             bool enforceCash     = sp?.EnforceStartingCash ?? true;
@@ -1534,12 +1534,14 @@ namespace BigAmbitionsMP
         /// <summary>Tell the host we've APPLIED the world sync, so it can release the
         /// frozen-until-synced startup hold once everyone is ready.  One-shot per load.</summary>
         /// <summary>Reports a lifecycle transition to the host (load-fence
-        /// visibility — lets the host excuse a menu-bailed client).</summary>
-        public static void SendPhaseReport(string phase)
+        /// visibility — lets the host excuse a menu-bailed client).  Round-276:
+        /// `detail` carries the sender-side reason (lifecycle discriminators) so the
+        /// host log names WHY a client demoted without needing its Player.log.</summary>
+        public static void SendPhaseReport(string phase, string detail = "")
         {
             if (!IsConnected) return;
             Send(MessageEnvelope.Create(MessageType.PhaseReport, MPConfig.PlayerId,
-                new PhaseReportPayload { PlayerId = MPConfig.PlayerId, Phase = phase }));
+                new PhaseReportPayload { PlayerId = MPConfig.PlayerId, Phase = phase, Detail = detail }));
         }
 
         /// <summary>Round-271 (Fix A): one-shot per load — report the moment OUR settled-gate
@@ -1554,7 +1556,7 @@ namespace BigAmbitionsMP
             if (_settledReported || !IsConnected || MPServer.IsRunning || !IsClientInWorld) return;
             if (!MPWorldReady.IsSettled) return;
             _settledReported = true;
-            SendPhaseReport("Settled");
+            SendPhaseReport("Settled", "settled-gate open (round-271)");
             Plugin.Logger.LogInfo("[Client] Reported Settled to host (round-271: join baseline save fires on this).");
         }
 

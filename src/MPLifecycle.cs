@@ -86,6 +86,7 @@ namespace BigAmbitionsMP
                 // discriminators that actually separated broken loads from
                 // healthy ones: game clock advancing + overlay down.)
                 bool clockAlive = false;
+                float hourAge = 0f;
                 try
                 {
                     var (_, hour) = GameStateReader.GetGameTime();
@@ -97,15 +98,25 @@ namespace BigAmbitionsMP
                     // Without it the detector demoted Running→Loading on every hold and the
                     // phase machine flapped 128-200 cycles/session in the field, each cycle
                     // firing full resyncs (~123-car ParkedSync) into an already-loaded wire.
-                    clockAlive = (Time.unscaledTime - _lastHourChangeAt) < 6f
-                              || TimeSync.ManualPaused || TimeSync.IsStartupHeld || TimeSync.AheadHeld;
+                    // Round-276 (field 20260818-215459): an excused freeze RE-BASES the
+                    // staleness budget instead of merely masking it.  The old OR left
+                    // _lastHourChangeAt aging underneath the excuse, so the instant the
+                    // flag dropped the full accumulated staleness (10-20s in the field)
+                    // was live, and one sample landing before the next clock tick demoted
+                    // a RUNNING client to Loading — which the host then treated as a join.
+                    // Re-basing also ends the one-flag-per-newly-discovered-freeze pattern
+                    // (9a's third flag was the previous instance of this bug class).
+                    bool excused = TimeSync.ManualPaused || TimeSync.IsStartupHeld || TimeSync.AheadHeld;
+                    if (excused) _lastHourChangeAt = Time.unscaledTime;
+                    hourAge = Time.unscaledTime - _lastHourChangeAt;
+                    clockAlive = excused || hourAge < 6f;
                 }
                 catch { }
 
                 bool ready = clockAlive && !overlayUp;
                 if (!ready)
                 {
-                    Set(MPPhase.Loading, $"clock={clockAlive} overlay={overlayUp} aheadHeld={TimeSync.AheadHeld}");
+                    Set(MPPhase.Loading, $"clock={clockAlive} overlay={overlayUp} manual={TimeSync.ManualPaused} startup={TimeSync.IsStartupHeld} ahead={TimeSync.AheadHeld} hourAge={hourAge:F1}s");
                     if (_loadingSince > 0f && !_stuckWarned && Time.unscaledTime - _loadingSince > 60f)
                     {
                         _stuckWarned = true;
@@ -148,11 +159,18 @@ namespace BigAmbitionsMP
             static void Postfix(IntroCharacterCustomizer __instance) => IntroInstance = __instance;
         }
 
+        /// <summary>Round-276 probe: the reason string of the most recent transition —
+        /// rides the phase report so the HOST's log carries the client-side discriminators
+        /// (field 20260818-215459: peer logs were uncollectable through the congestion,
+        /// leaving the demotion cause unprovable).</summary>
+        public static string LastSetReason { get; private set; } = "";
+
         private static void Set(MPPhase next, string why)
         {
             if (next == Phase) return;
             var prev = Phase;
             Phase = next;
+            LastSetReason = why;
             if (next == MPPhase.Loading) { _loadingSince = Time.unscaledTime; _stuckWarned = false; }
             else _loadingSince = 0f;
             Plugin.Logger.LogInfo($"[Lifecycle] {prev} → {next} ({why})");
