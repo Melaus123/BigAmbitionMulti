@@ -1168,6 +1168,7 @@ namespace BigAmbitionsMP
                     var removedIds = new HashSet<string>();
                     var movedIds   = new HashSet<string>();   // REAL transform deltas → move in place (round-22; round-86b: cargo-only no longer lands here)
                     var cargoOnlyIds = new HashSet<string>(); // round-86b: in-place restocks — fully handled at apply time, feed NOTHING downstream
+                    int stackedInPlace = 0;   // round-278/F3: attachment-list-only in-place updates (same feed-nothing contract)
                     try
                     {
                         if (reg.itemInstances != null)
@@ -1237,17 +1238,24 @@ namespace BigAmbitionsMP
                                 {
                                     string ns = IdentitySig(i), ls = IdentitySig(prevLive);
                                     bool transformOnly = ns == ls;
-                                    bool cargoOnly = false;
+                                    bool cargoOnly = false, stackedOnly = false;
                                     if (!transformOnly)
                                     {
                                         var np = ns.Split('#'); var lp = ls.Split('#');
                                         cargoOnly = np.Length == 3 && lp.Length == 3 && np[0] == lp[0] && np[2] == lp[2];
+                                        // Round-278/F3 (field 20260818-222130): an attachment-list-only delta is
+                                        // NOT a different item.  Destroying the parent took its attached children
+                                        // down as Unity collateral — the guest attaching to the host's counter ate
+                                        // the till the counter carried.  The stacked list swaps onto the live
+                                        // object; the child travels under its OWN id and the post-spawn re-link
+                                        // attaches it to this kept parent.
+                                        stackedOnly = !cargoOnly && np.Length == 3 && lp.Length == 3 && np[0] == lp[0] && np[1] == lp[1];
                                     }
                                     // Task-28 fix 1: a workstation arriving where a base copy lives (or vice
                                     // versa) cannot be updated in place — the TYPE is wrong; fall through to
                                     // destroy+respawn, which heals a previously type-erased copy.
                                     bool typeMismatch = (ii is FactoryWorkstationInstance) != (prevLive is FactoryWorkstationInstance);
-                                    if (!typeMismatch && (transformOnly || cargoOnly))
+                                    if (!typeMismatch && (transformOnly || cargoOnly || stackedOnly))
                                     {
                                         if (cargoOnly)
                                         {
@@ -1261,6 +1269,11 @@ namespace BigAmbitionsMP
                                                 try { prevLive.OnItemsInCargoUpdated()?.Invoke(); } catch { }
                                                 restocked++;
                                             }
+                                        }
+                                        else if (stackedOnly)
+                                        {
+                                            prevLive.stackedItems = ii.stackedItems;   // round-278/F3: in-place attachment-list update
+                                            stackedInPlace++;
                                         }
                                         // Round-86b (user-approved, MEASURED): the move pass's ONLY effects are a
                                         // controller rebind (same live object → no-op) and a transform set — so when
@@ -1501,7 +1514,7 @@ namespace BigAmbitionsMP
                     }
                     catch { }
 
-                    Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' {InteriorSync.SnapshotSummary(payload)} (changed={changedIds.Count} moved={movedIds.Count} cargoOnly={cargoOnlyIds.Count} removed={removedIds.Count}){_deltaNames}.");
+                    Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' {InteriorSync.SnapshotSummary(payload)} (changed={changedIds.Count} moved={movedIds.Count} cargoOnly={cargoOnlyIds.Count} stackedInPlace={stackedInPlace} removed={removedIds.Count}){_deltaNames}.");
                     InteriorSync.NoteSnapshotApply(payload.AddressKey);   // round-213: re-send-loop detector
 
                     // Trigger a visual refresh of the interior IF the local
@@ -2146,6 +2159,7 @@ namespace BigAmbitionsMP
 
                 // Live controllers of THIS building, by instance id.
                 var liveById = new Dictionary<string, ItemController>();
+                var killedControllers = new HashSet<ItemController>();   // round-278: Destroy is frame-deferred — the re-link rescan must skip the dying
                 int destroyed = 0;
                 try
                 {
@@ -2194,6 +2208,41 @@ namespace BigAmbitionsMP
                                         || isRemoved;
                             if (kill)
                             {
+                                // Round-278/F1 (field 20260818-222130): attached children are Unity
+                                // transform children — Destroy(parent) takes them down at frame end,
+                                // AFTER the spawn pass already recorded them as live survivors, so
+                                // they died with no respawn (the invisible-till bug; the stranded
+                                // EmployeeStationController NRE was its aftershock).  Detach them
+                                // SCENE-side only: the native RemoveFromParentPlaceableItem also
+                                // erases the parent's stackedItems DATA record (ItemController:
+                                // 1290-1293) which the apply just wrote authoritatively — so this
+                                // is a manual detach that leaves all data untouched.  The re-link
+                                // pass below re-attaches them to the respawned parent.
+                                try
+                                {
+                                    if (ic.childItemControllers != null && ic.childItemControllers.Count > 0)
+                                    {
+                                        var rescue = new List<ItemController>(ic.childItemControllers);
+                                        int rescued = 0;
+                                        foreach (var kid in rescue)
+                                        {
+                                            if (kid == null) continue;
+                                            try
+                                            {
+                                                kid.parentItemController = null;
+                                                kid.parentAttachmentPoint = null;
+                                                kid.transform.SetParent(bm.indoorItemContainer, true);
+                                                rescued++;
+                                            }
+                                            catch { }
+                                        }
+                                        ic.childItemControllers.Clear();
+                                        if (rescued > 0)
+                                            Plugin.Logger.LogInfo($"[Patcher] destroy of '{id}' would take {rescued} attached child(ren) with it — detached to the container first; the re-link pass re-attaches them (round-278).");
+                                    }
+                                }
+                                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] child rescue for '{id}': {ex.Message}"); }
+                                killedControllers.Add(ic);
                                 UnityEngine.Object.Destroy(ic.gameObject);
                                 destroyed++;
                             }
@@ -2224,6 +2273,66 @@ namespace BigAmbitionsMP
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] item spawn pass: {ex.Message}"); }
+
+                // Round-278/F4 + tripwire: re-attach stacked children to their (possibly just
+                // respawned) parents.  Natively this re-link runs ONLY in LoadItems() at building
+                // entry (BuildingManager:665-688), so a mod-spawned child sat flat — and did not
+                // follow a moving parent — until re-entry.  One targeted rescan of this building's
+                // controllers, on the same rare event-driven path as the passes above; the dying
+                // controllers from the destroy pass are excluded (Destroy is frame-deferred, so a
+                // killed parent and its respawn coexist this frame under the same id).
+                try
+                {
+                    bool anyStacked = false;
+                    if (reg.itemInstances != null)
+                        foreach (var kv in reg.itemInstances)
+                            if (kv.Value?.stackedItems != null && kv.Value.stackedItems.Count > 0) { anyStacked = true; break; }
+                    if (anyStacked && (spawned > 0 || destroyed > 0))
+                    {
+                        var nowById = new Dictionary<string, ItemController>();
+                        var all = UnityEngine.Object.FindObjectsOfType(typeof(ItemController));
+                        if (all != null)
+                            for (int i = 0; i < all.Length; i++)
+                            {
+                                var c = all[i] as ItemController;
+                                if (c == null || killedControllers.Contains(c)) continue;
+                                try { if (ItemHelper.GetBuildingRegistration(c.ItemInstance) != reg) continue; } catch { continue; }
+                                string cid = ""; try { cid = c.ItemInstance?.id ?? ""; } catch { }
+                                if (!string.IsNullOrEmpty(cid)) nowById[cid] = c;
+                            }
+                        int reattached = 0;
+                        foreach (var kv in reg.itemInstances)
+                        {
+                            var pi = kv.Value;
+                            if (pi?.stackedItems == null || pi.stackedItems.Count == 0) continue;
+                            if (!nowById.TryGetValue(kv.Key, out var pic) || pic == null) continue;
+                            foreach (var st in pi.stackedItems)
+                            {
+                                if (st == null || string.IsNullOrEmpty(st.childId)) continue;
+                                if (!nowById.TryGetValue(st.childId, out var kidIc) || kidIc == null) continue;
+                                try
+                                {
+                                    if (kidIc.parentItemController != null) continue;   // already attached — data converges on later applies
+                                    var pts = pic.AttachmentPoints;
+                                    if (pts == null || st.attachmentIndex < 0 || st.attachmentIndex >= pts.Length) continue;
+                                    kidIc.SetToParentPlaceableItem(pic, pts[st.attachmentIndex]);
+                                    reattached++;
+                                }
+                                catch { }
+                            }
+                        }
+                        // Tripwire: a data id with NO live controller after the spawn pass is an
+                        // ORPHAN — the exact signature of the collateral class this round fixes.
+                        int orphans = 0;
+                        foreach (var kv in reg.itemInstances)
+                            if (kv.Value != null && !nowById.ContainsKey(kv.Key)) orphans++;
+                        if (orphans > 0)
+                            Plugin.Logger.LogWarning($"[Patcher] item refresh left {orphans} ORPHAN id(s) (data present, no live object) in '{GameStateReader.AddressKey(reg)}' — the collateral class round-278 fixes; report this (reattached={reattached}).");
+                        else if (reattached > 0)
+                            Plugin.Logger.LogInfo($"[Patcher] re-link pass: {reattached} child(ren) re-attached (round-278).");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] re-link pass: {ex.Message}"); }
 
                 // MOVE pass (round-22): transform-only deltas keep their live GameObject — re-bind it to the
                 // fresh instance and move it to the owner-authoritative pose. No destroy/respawn → no zombie

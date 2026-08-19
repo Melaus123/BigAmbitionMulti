@@ -66,11 +66,18 @@ namespace BigAmbitionsMP
             catch { }
             try
             {
+                // Round-278/F5 (field 20260818-222130): audit ONLY the address currently being
+                // live-fed — the building we are inside.  Replicas of buildings we left are
+                // frozen BY DESIGN (we unsubscribed); that bundle's loudest "mismatches" were
+                // healthy stale replicas drowning out the real signal.
+                string liveAddr = "";
+                try { liveAddr = MPRegisterSync.CurrentShopAddress ?? ""; } catch { }
                 foreach (var addr in GameStatePatcher.ReplicatedInteriorAddresses())
                 {
+                    if (addr != liveAddr) continue;
                     if (p.Interiors.Count >= MaxInteriors) break;
                     int? ih = InteriorHash(addr);
-                    if (ih != null) p.Interiors.Add(new AddressHashInfo { AddressKey = addr, Hash = ih.Value });
+                    if (ih != null) p.Interiors.Add(new AddressHashInfo { AddressKey = addr, Hash = ih.Value, StructHash = InteriorStructHash(addr) ?? 0 });
                 }
             }
             catch { }
@@ -342,6 +349,49 @@ namespace BigAmbitionsMP
             catch { return null; }
         }
 
+        /// <summary>Round-278/F5: the STRUCTURAL half of InteriorHash — identical in every way
+        /// except the cargo loop is omitted, so till churn (sales changing amounts) does not move
+        /// it.  MUST mirror InteriorHash field-for-field; edit them together.</summary>
+        private static int? InteriorStructHash(string addressKey)
+        {
+            try
+            {
+                var snap = InteriorSync.BuildSnapshot(addressKey);
+                if (snap == null) return null;
+                unchecked
+                {
+                    int h = 17;
+                    h = Combine(h, StableHash(snap.Layout));
+                    foreach (var d in snap.InteriorDesigns)
+                    {
+                        h = Combine(h, StableHash(d.UUID));
+                        foreach (var m in d.Materials)
+                        {
+                            h = Combine(h, StableHash(m.MaterialID));
+                            h = Combine(h, m.MaterialIndex);
+                            h = Combine(h, m.ColorIndex);
+                        }
+                    }
+                    foreach (var rp in snap.RetailPrices)
+                    {
+                        h = Combine(h, StableHash(rp.ItemName));
+                        h = Combine(h, (int)System.Math.Round(rp.Price * 100f));
+                    }
+                    foreach (var it in snap.ItemInstances)
+                    {
+                        h = Combine(h, StableHash(it.Id));
+                        h = Combine(h, StableHash(it.ItemName));
+                        h = Combine(h, (int)System.Math.Round(it.Px * 100f));
+                        h = Combine(h, (int)System.Math.Round(it.Py * 100f));
+                        h = Combine(h, (int)System.Math.Round(it.Pz * 100f));
+                        h = Combine(h, it.StateIndex);
+                    }
+                    return h;
+                }
+            }
+            catch { return null; }
+        }
+
         // ── Client tick ───────────────────────────────────────────────────────
 
         /// <summary>Main thread, once per frame while in-game.  Clients send a
@@ -443,8 +493,18 @@ namespace BigAmbitionsMP
                     int? mh = InteriorHash(ci.AddressKey);
                     if (mh == null) continue;   // host can't build it — not comparable
                     intChecked++;
-                    if (Check(p.PlayerId, "interior:" + ci.AddressKey, ci.Hash == mh.Value,
-                              $"client 0x{ci.Hash:X8} vs host 0x{mh.Value:X8}")) intOk++;
+                    bool intMatch = ci.Hash == mh.Value;
+                    string detail = $"client 0x{ci.Hash:X8} vs host 0x{mh.Value:X8}";
+                    // Round-278/F5: when the client sent the structural half (new builds), a
+                    // mismatch line says WHICH kind — cargo churn (benign lag) or structure.
+                    if (!intMatch && ci.StructHash != 0)
+                    {
+                        int? sh = InteriorStructHash(ci.AddressKey);
+                        if (sh != null) detail += ci.StructHash == sh.Value
+                            ? " | struct MATCH (till churn — cargo only)"
+                            : " | struct DIFF (structural divergence)";
+                    }
+                    if (Check(p.PlayerId, "interior:" + ci.AddressKey, intMatch, detail)) intOk++;
                 }
 
                 // Round-104: the client's OWN shops vs ours. Compares item COUNTS only, and emits

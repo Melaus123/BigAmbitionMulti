@@ -1731,6 +1731,9 @@ namespace BigAmbitionsMP
     {
         public string AddressKey { get; set; } = "";
         public int    Hash       { get; set; }
+        /// <summary>Round-278/F5 (additive; 0 from older builds): the structural half of the
+        /// hash — no cargo amounts — so a mismatch line can say "till churn" vs "structural".</summary>
+        public int    StructHash { get; set; }
     }
 
     public class AddressCountInfo
