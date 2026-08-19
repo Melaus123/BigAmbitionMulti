@@ -62,11 +62,22 @@ namespace BigAmbitionsMP
                     case NavigationBlocker.PurchaseUI:         return UI.Purchase.PurchaseUI.IsPanelOpen;
                     case NavigationBlocker.InteriorDesignerUI: return UI.InteriorDesigner.InteriorDesignerUI.IsOpen;
                     case NavigationBlocker.PurchaseVehicleUI:  return UI.PurchaseVehicle.PurchaseVehicleUI.IsPanelOpen;
+                    // Round-279: this oracle CANNOT go stale — IsInPlacementMode is
+                    // CurrentPlaceableItemBeingPlaced != null, the same object lifetime
+                    // that gates the blocker's set.
+                    case NavigationBlocker.PlacementMode:      return BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode;
                     default: return null;
                 }
             }
             catch { return null; }
         }
+
+        /// <summary>Round-279 (fix C): the blocker state sampled the instant the report popup
+        /// opens — BEFORE the popup's own input-block sets NavigationBlocker.HelpSystem.  The
+        /// old live sample was self-poisoned: every manual report showed HelpSystem because
+        /// the report tool itself had just set it, and the wedge-time state was unknowable.
+        /// Set by MPCanvasUI.OpenManualBugReport; cleared when the popup closes.</summary>
+        internal static string? PreReportNavBlockers;
 
         /// <summary>Round-90b: the navigation-blocker state at THIS moment, for report.md — a
         /// player filing "I'm stuck" with a key marked "owner CLOSED — STUCK" is the smoking
@@ -91,6 +102,57 @@ namespace BigAmbitionsMP
                 return parts.Count == 0 ? "none" : string.Join(", ", parts);
             }
             catch (Exception ex) { return $"(error: {ex.Message})"; }
+        }
+
+        /// <summary>Round-279 (fix D): 3-frame origin tag for the PlacementMode set/unset
+        /// logs below — Harmony wrapper frames (DMD…) filtered out.</summary>
+        private static string BlockerOrigin()
+        {
+            try
+            {
+                var st = new System.Diagnostics.StackTrace(2, false);
+                var parts = new List<string>();
+                for (int i = 0; i < st.FrameCount && parts.Count < 3; i++)
+                {
+                    var m = st.GetFrame(i)?.GetMethod();
+                    if (m == null) continue;
+                    string n = $"{m.DeclaringType?.Name}.{m.Name}";
+                    if (n.Contains("DMD") || n.Contains("NavBlocker") || n.Contains("BlockerOrigin")) continue;
+                    parts.Add(n);
+                }
+                return parts.Count == 0 ? "(unknown)" : string.Join(" ← ", parts);
+            }
+            catch { return "(unknown)"; }
+        }
+
+        // Round-279 (fix D): every PlacementMode set/unset names its origin — this alone
+        // settles whether a future strand came from round-37i/279, the placement finalizer,
+        // a dead cancel-coroutine, or a native path.  Placement start/end are rare events,
+        // so the stack capture is negligible.  5-point checklist 2026-08-19: (1) no other
+        // patch class targets these methods (grep); (2) our own Unset callers (heals,
+        // HousingPatches finalizer, VehicleManager) logging through this is intended;
+        // (3) loader annotation checked on next load; (4) MP-gated below; (5) the game
+        // call is never absorbed — only our own log line is guarded.
+        [HarmonyLib.HarmonyPatch(typeof(PlayerController), "SetNavigationBlocker")]
+        public static class Patch_NavBlockerSet_PlacementOrigin
+        {
+            static void Postfix(NavigationBlocker navigationBlocker)
+            {
+                if (navigationBlocker != NavigationBlocker.PlacementMode) return;
+                if (!MPServer.IsRunning && !MPClient.InMpGame) return;
+                try { Plugin.Logger.LogInfo($"[Rest] PlacementMode blocker SET — origin: {BlockerOrigin()}"); } catch { }
+            }
+        }
+
+        [HarmonyLib.HarmonyPatch(typeof(PlayerController), "UnsetNavigationBlocker")]
+        public static class Patch_NavBlockerUnset_PlacementOrigin
+        {
+            static void Postfix(NavigationBlocker navigationBlocker)
+            {
+                if (navigationBlocker != NavigationBlocker.PlacementMode) return;
+                if (!MPServer.IsRunning && !MPClient.InMpGame) return;
+                try { Plugin.Logger.LogInfo($"[Rest] PlacementMode blocker UNSET — origin: {BlockerOrigin()}"); } catch { }
+            }
         }
 
         /// <summary>True once the avatar has physically ARRIVED in the activity (sitting / performing) —
@@ -547,7 +609,8 @@ namespace BigAmbitionsMP
                                     {
                                         legit = (key == NavigationBlocker.Vehicle && !string.IsNullOrEmpty(SaveGameManager.Current?.ActiveVehicleId))
                                              || (key == NavigationBlocker.Map && CityMap.IsOpen)
-                                             || (key == NavigationBlocker.BuildingPreview && UI.BuildingPreview.isPreviewing);
+                                             || (key == NavigationBlocker.BuildingPreview && UI.BuildingPreview.isPreviewing)
+                                             || (key == NavigationBlocker.PlacementMode && BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode);   // round-279: live placement holds it legitimately
                                     }
                                     catch { }
                                     if (!legit) (foreignNow ??= new List<NavigationBlocker>()).Add(key);
@@ -575,17 +638,26 @@ namespace BigAmbitionsMP
                                     foreach (var k in foreignNow)
                                         if (!_foreignHeldSince.ContainsKey(k)) _foreignHeldSince[k] = nowT;
                                     if (nowT >= _foreignWarnNext)
+                                    {
+                                        // Round-279: name EVERY key over threshold in one line — the old
+                                        // break-after-first left simultaneous strands invisible (field
+                                        // 20260818-223659 triage had to reconstruct them by hand).
+                                        List<string>? overdue = null;
                                         foreach (var kv in _foreignHeldSince)
                                             if (nowT - kv.Value >= 30f)
                                             {
                                                 // Round-205: the host soft-hold deliberately parks this
                                                 // blocker while the world populates — not a wedge.
                                                 if (kv.Key == NavigationBlocker.CasinoEntrySequence && MPCanvasUI.HostSoftHoldActive) continue;
-                                                _foreignWarnNext = nowT + 60f;
-                                                Plugin.Logger.LogWarning(
-                                                    $"[Rest] FOREIGN BLOCKER HELD (round-90, log-only): '{kv.Key}' for {nowT - kv.Value:F0}s outside any activity — building exits silently dead and WASD frozen while it persists. No action taken.");
-                                                break;
+                                                (overdue ??= new List<string>()).Add($"'{kv.Key}' {nowT - kv.Value:F0}s");
                                             }
+                                        if (overdue != null)
+                                        {
+                                            _foreignWarnNext = nowT + 60f;
+                                            Plugin.Logger.LogWarning(
+                                                $"[Rest] FOREIGN BLOCKER HELD (round-90, log-only): {string.Join(", ", overdue)} outside any activity — building exits silently dead and WASD frozen while it persists. No action taken.");
+                                        }
+                                    }
 
                                     // Round-198 (field 20260730-221621): the two TRANSIT keys upgrade from
                                     // log-only to HEAL under provably-safe conditions — a dead map-close
@@ -610,6 +682,25 @@ namespace BigAmbitionsMP
                                         try { pc.Character?.ToggleVisibility(show: true); } catch { }
                                         try { HarmonyLib.AccessTools.PropertySetter(typeof(SubwaySystem), "IsRiding")?.Invoke(null, new object[] { false }); } catch { }
                                         Plugin.Logger.LogWarning("[Rest] TRANSIT HEAL: released stranded 'Subway' blocker (held 120s+ — the ride's completion never ran; visibility restored, riding flag cleared; round-198). Movement restored.");
+                                    }
+
+                                    // Round-279 (field 20260818-223659): a stranded 'PlacementMode' is a
+                                    // TOTAL interaction wedge — every entity click, WASD, click-to-move and
+                                    // the building exit gate on NavigationDisabled — and its only native
+                                    // release is the last line of CancelPlacementMode's camera coroutine,
+                                    // so a bare StopPlacingItem or a dead coroutine strands it forever.
+                                    // No heal covered it, and foreignHeld SUPPRESSES the physical restore
+                                    // on top.  The oracle cannot be stale (see BlockerOwnerOpen): 10s held
+                                    // with no live placement = stranded.  Time control is restored too —
+                                    // the native start disabled it alongside setting the blocker.
+                                    if (_foreignHeldSince.TryGetValue(NavigationBlocker.PlacementMode, out var pmSince)
+                                        && nowT - pmSince >= 10f
+                                        && !BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode)
+                                    {
+                                        pc.UnsetNavigationBlocker(NavigationBlocker.PlacementMode);
+                                        _foreignHeldSince.Remove(NavigationBlocker.PlacementMode);
+                                        try { InstanceBehavior<UI.UIs>.Instance?.gameSpeed?.DisableTimeControl(false); } catch { }
+                                        Plugin.Logger.LogWarning("[Rest] PLACEMENT HEAL: released stranded 'PlacementMode' blocker (held 10s+ with no live placement — a bare StopPlacingItem or dead cancel-coroutine stranded it; round-279). Movement and interaction restored.");
                                     }
 
                                     // Round-90b (user-directed 2026-08-17): the 30s persistence warn cannot

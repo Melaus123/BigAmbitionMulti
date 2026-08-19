@@ -259,11 +259,25 @@ namespace BigAmbitionsMP
             bool dialog = false; try { dialog = DialogController.current != null; } catch { }
             bool inside = false; try { inside = BuildingManager.IsInsideBuilding; } catch { }
             float consumed = ReadConsumedMagnitude();
+            // Round-279 (field 20260818-223659): the blocker layer gates UPSTREAM of the
+            // nav agent — in all five field samples nav[] read healthy while a stranded
+            // blocker had every click and WASD dead.  The probe was instrumenting a layer
+            // structurally incapable of showing the fault class it was built for; the
+            // blocker set is the field that would have named it from the log alone.
+            bool navDisabled = false;
+            string blockers = "";
+            try
+            {
+                var pcB = InstanceBehavior<GameManager>.Instance?.playerController;
+                if (pcB != null) navDisabled = pcB.NavigationDisabled;
+                blockers = MPRestSync.DescribeNavBlockersForReport();
+            }
+            catch { blockers = "(unreadable)"; }
             Plugin.Logger.LogWarning(
                 $"[MoveFreeze] STUCK ({trigger}) pos={pos.x:F1},{pos.y:F1},{pos.z:F1} inputMag={inputMag:F2} consumed={consumed:F2} " +
                 $"(intent w/o consumption = eaten upstream; consumption w/o movement = nav layer) " +
                 $"clicks5s={_clicks.Count}(overUI={clicksOverUi}) pointerOverUI={overUi} selectedGO='{selectedGo}' " +
-                $"selection={sel} nav[{nav}] dialog={dialog} inside={inside} shop='{MPRegisterSync.CurrentShopAddress}' timeScale={Time.timeScale:F2}");
+                $"selection={sel} navDisabled={navDisabled} blockers=[{blockers}] nav[{nav}] dialog={dialog} inside={inside} shop='{MPRegisterSync.CurrentShopAddress}' timeScale={Time.timeScale:F2}");
         }
     }
 }

@@ -5772,6 +5772,10 @@ namespace BigAmbitionsMP
         /// <summary>Entry point for the recycled native top-bar bug-report button (2026-07-08).</summary>
         internal void OpenManualBugReport()
         {
+            // Round-279 (fix C): sample the blocker state BEFORE the popup's own
+            // input-block sets HelpSystem — the old live sample was self-poisoned
+            // and made the wedge-time state unknowable in every manual report.
+            try { MPRestSync.PreReportNavBlockers = MPRestSync.DescribeNavBlockersForReport(); } catch { }
             _crashReportIsCrash = false;
             _crashReportMessage = "";
             _crashReportAttachments.Clear();
@@ -5916,6 +5920,7 @@ namespace BigAmbitionsMP
             if (_crashReportIsCrash) MPBugReport.AcknowledgePendingCrash();
             _crashReportSending = false; _crashReportResult = ""; _crashReportAutoCloseAt = 0f; _crashReportSentOk = false;
             _crashReportPopupVisible = false;
+            MPRestSync.PreReportNavBlockers = null;   // round-279: the snapshot dies with the popup
             if (_crashReportGO != null) _crashReportGO.SetActive(false);
         }
 

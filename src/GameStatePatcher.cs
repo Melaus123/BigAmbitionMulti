@@ -2150,8 +2150,27 @@ namespace BigAmbitionsMP
                             || (!string.IsNullOrEmpty(parentId) && (changedIds!.Contains(parentId) || (removedIds?.Contains(parentId) ?? false)));
                         if (touched)
                         {
-                            Plugin.Logger.LogWarning($"[Patcher] interior refresh intersects a LIVE placement (placed={placedId} parent={parentId}) — running native StopPlacingItem so parent outlines/flags don't strand (round-37i).");
-                            BigAmbitions.PlacementSystem.PlacementSystem.StopPlacingItem();
+                            // Round-279 (field 20260818-223659): the bare StopPlacingItem this used to
+                            // call is only HALF the native cancel — the PlacementMode blocker's ONLY
+                            // release lives at the end of CancelPlacementMode's camera coroutine
+                            // (PlacementHelper:249-262), and a held blocker kills EVERY entity click,
+                            // WASD, click-to-move and the building exit (total interaction wedge; the
+                            // reporter's only escape was quit-to-menu).  Run the full native cancel;
+                            // on a throw, fall back to the half-teardown PLUS the state releases the
+                            // full cancel would have done.
+                            Plugin.Logger.LogWarning($"[Patcher] interior refresh intersects a LIVE placement (placed={placedId} parent={parentId}) — running the FULL native cancel so nothing strands (round-279, was bare StopPlacingItem in round-37i).");
+                            try
+                            {
+                                Buildings.Indoors.InteriorDesign.PlacementHelper.CancelPlacementMode(true);
+                            }
+                            catch (Exception cex)
+                            {
+                                Plugin.Logger.LogWarning($"[Patcher] CancelPlacementMode threw ({cex.Message}) — fallback: StopPlacingItem + explicit blocker/time-control/autosave release (round-279).");
+                                try { BigAmbitions.PlacementSystem.PlacementSystem.StopPlacingItem(); } catch { }
+                                try { InstanceBehavior<GameManager>.Instance.playerController.UnsetNavigationBlocker(NavigationBlocker.PlacementMode); } catch { }
+                                try { InstanceBehavior<UI.UIs>.Instance.gameSpeed.DisableTimeControl(false); } catch { }
+                                try { GameManager.preventAutoSave = false; } catch { }
+                            }
                         }
                     }
                 }

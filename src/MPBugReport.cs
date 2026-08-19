@@ -452,7 +452,9 @@ namespace BigAmbitionsMP
             // Round-90b (user-directed 2026-08-17): the navigation-blocker state AT REPORT TIME.
             // "I'm stuck" + a key marked "owner CLOSED — STUCK" here = the round-90 class caught
             // in the act; keys marked "owner open" are normal play (map being read, driving).
-            sb.AppendLine($"NavBlockers: {MPRestSync.DescribeNavBlockersForReport()}");
+            // Round-279 (fix C): prefer the snapshot taken at popup-open — the live read
+            // is self-poisoned (the popup's input-block sets HelpSystem before this runs).
+            sb.AppendLine($"NavBlockers: {(MPRestSync.PreReportNavBlockers != null ? MPRestSync.PreReportNavBlockers + " (sampled at popup open)" : MPRestSync.DescribeNavBlockersForReport())}");
             sb.AppendLine();
             sb.AppendLine("## Runtime");
             // (InstalledMods below — round-57, Rialgame report 2026-07-22: a broken third-party
