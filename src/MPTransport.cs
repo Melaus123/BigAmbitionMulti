@@ -81,6 +81,23 @@ namespace BigAmbitionsMP
         /// to meter from is honest about being unpaced rather than silently dropping.</summary>
         public virtual void SendPaced(byte[] data, string supersedeKey = "") => Send(data, reliable: true);
 
+        /// <summary>Round-283 (the express lane, field 20260818-215459: clock heartbeats arriving
+        /// 30s+ late because they sat in the ONE strictly-ordered FIFO behind megabytes of save
+        /// mirror — which flapped client lifecycle and fed the round-276 join-save storm): send a
+        /// payload that must not wait behind bulk, EVER.  Round-282 metered the bulk; this gives the
+        /// two most critical signals a lane bulk cannot occupy.
+        ///
+        /// Contract: within the express lane order is preserved; BETWEEN lanes ordering is
+        /// deliberately broken — that is the entire point, and it is why every express message
+        /// carries a monotonic Seq stamp its receiver uses to drop stale copies.  ONLY the round-283
+        /// whitelist may use it (host→client GameTimeSync, client→host PhaseReport), and only toward
+        /// a peer that advertised the capability; widening it needs the same order-safety audit those
+        /// two got.
+        ///
+        /// The base is an immediate reliable Send — a transport with no lane to jump is honest about
+        /// being ordinary rather than pretending to a priority it cannot deliver.</summary>
+        public virtual void SendExpress(byte[] data) => Send(data, reliable: true);
+
         public abstract void Disconnect(byte[] reason);
 
         public void Send(MessageEnvelope env) => Send(env.Serialize(), reliable: true);
@@ -254,6 +271,188 @@ namespace BigAmbitionsMP
         }
     }
 
+    // ── Round-283: the express lane ──────────────────────────────────────────
+    // One implementation shared by SteamLink and SteamClientTransport, for the same
+    // reason PacedSendQueue is shared: the retry queue already exists in three
+    // near-identical copies and every fix to it has had to be made three times.
+    //
+    // Shape: a FIFO the pump drains BEFORE the retry (_pending) queue and BEFORE the
+    // paced lane.  An express send goes out IMMEDIATELY when the express lane itself
+    // is empty — it does not queue behind _pending the way SendReliableRaw does, which
+    // is the whole mechanism: the urgent message overtakes the bulk backlog instead of
+    // inheriting its latency.  It queues only when Steam refuses it (send buffer full)
+    // or when an earlier express message is still waiting, so order WITHIN the lane is
+    // preserved even though order between lanes is not.
+    //
+    // Deliberately unbounded-by-count but tiny by construction: the whitelist is two
+    // small messages, one every ~3s and one per lifecycle transition, and each is
+    // rejected above SteamFrames.ChunkSize before it ever reaches here.
+
+    /// <summary>Round-283: per-link express send queue plus the lane's instrumentation.
+    /// Thread-safe; enqueued from sender threads, drained from the owning transport's pump.</summary>
+    internal sealed class ExpressSendQueue
+    {
+        /// <summary>Log "express jumped a backlog" only when the backlog it jumped is at least
+        /// this big — below it the lane is not buying anything worth a log line.</summary>
+        private const long JumpLogBacklogBytes = 64L * 1024;
+        /// <summary>...and at most once per this many seconds per link: the clock heartbeat is
+        /// ~3s, so an unthrottled line would itself become the flood during exactly the congestion
+        /// it reports (round-88 hygiene: retry lines once burned the bug-report ring to 19s).</summary>
+        private const long JumpLogEverySeconds = 60;
+
+        private readonly LinkedList<byte[]> _q = new();
+        private readonly string _tag;
+        private long _bytes;
+        // Round-283b (verifier finding b): an immediate send runs trySend OUTSIDE the lock.
+        // Without this flag, two concurrent senders could both see an empty queue and race
+        // their trySends — and a refused-then-queued older message behind a succeeded newer
+        // one is an IN-LANE REORDER, which the lane's contract forbids.  Inert with today's
+        // single caller (BroadcastGameTime, main thread); load-bearing the day the held
+        // phase-report switch ships, whose callers span the poll AND main threads — fixed
+        // now precisely because that is the round it would be forgotten in.
+        private bool _inFlight;
+
+        // Instrumentation.  Ticks-based, not UnityEngine.Time — the pump runs off the main thread.
+        private long _sends;             // express payloads handed to the wire (immediate + released)
+        private long _queued;            // express payloads that had to wait (refusal or lane busy)
+        private int  _depthHighWater;    // deepest the lane has ever been, in messages
+        private long _bytesHighWater;    // ...and in bytes
+        private long _jumpLogNextTicks;
+        private long _jumpsSinceLog;
+        private long _jumpBacklogMax;
+
+        public ExpressSendQueue(string tag) { _tag = tag; }
+
+        public long Bytes { get { lock (_q) return _bytes; } }
+        public long Sends { get { lock (_q) return _sends; } }
+        public int  DepthHighWater { get { lock (_q) return _depthHighWater; } }
+
+        /// <summary>The express send.  `trySend` returns true when the transport ACCEPTED the bytes
+        /// (a Steam Result.OK); false means refused-and-retryable, so the payload waits here and the
+        /// pump re-offers it.  `bulkBacklog` is the link's bulk debt (retry queue + paced lane) read
+        /// by the CALLER before entering this lock — reading it in here would mean holding two
+        /// transport locks at once for a log line.</summary>
+        public void Send(byte[] data, Func<byte[], bool> trySend, long bulkBacklog, string describe)
+        {
+            if (data == null || data.Length == 0) return;
+            bool sendNow;
+            lock (_q)
+            {
+                sendNow = _q.Count == 0 && !_inFlight;
+                if (sendNow) _inFlight = true;
+                else { EnqueueLocked(data); _queued++; }
+            }
+            // Queued behind an earlier express message: the pump owns it now, and it has NOT
+            // jumped anything yet — NoteJump is only for a send that actually reached the wire
+            // ahead of the backlog, so the log line stays literally true.
+            if (!sendNow) return;
+            bool ok;
+            try { ok = trySend(data); }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[{_tag}] express send to {describe} threw: {ex.Message} — queued for the pump to retry.");
+                // Front of the queue: anything enqueued while we were in flight is NEWER.
+                lock (_q) { EnqueueFrontLocked(data); _queued++; _inFlight = false; }
+                return;
+            }
+            lock (_q)
+            {
+                _inFlight = false;
+                if (ok) _sends++;
+                else { EnqueueFrontLocked(data); _queued++; }   // refused: older than anything queued meanwhile
+            }
+            if (ok) NoteJump(bulkBacklog, describe);
+        }
+
+        /// <summary>Pump tick: re-offer the head until the transport refuses.  Runs BEFORE the retry
+        /// queue and BEFORE the paced lane, so a queued express message is still ahead of every bulk
+        /// byte the link owes.</summary>
+        public void Flush(Func<byte[], bool> trySend, string describe)
+        {
+            while (true)
+            {
+                byte[] head;
+                // Round-283b: never flush around an in-flight immediate send — its payload is
+                // OLDER than anything queued here, and sending the queue head past it would be
+                // the same in-lane reorder the _inFlight flag exists to prevent.
+                lock (_q) { if (_inFlight || _q.Count == 0) return; head = _q.First!.Value; }
+                bool ok;
+                try { ok = trySend(head); }
+                catch { return; }                      // still stuck — next pump tick retries
+                if (!ok) return;
+                lock (_q) { if (_q.Count > 0) { _q.RemoveFirst(); _bytes -= head.Length; _sends++; } }
+            }
+        }
+
+        /// <summary>Link is gone — nothing queued here can ever be delivered.  Reports the lane's
+        /// lifetime counters, because a link that dies mid-congestion is exactly the case where the
+        /// high-water figures explain what the player saw.</summary>
+        public void Clear(string describe)
+        {
+            long sends, queued, bytesHw; int depthHw;
+            lock (_q)
+            {
+                // Idempotent BY COUNTER RESET, not just by emptiness: the pump calls this on every
+                // ~15ms tick once the link is dead, so a summary keyed on "have we ever sent" would
+                // print eighty lines a second forever.  Zeroing here makes the second call a no-op.
+                if (_q.Count == 0 && _sends == 0 && _queued == 0) return;
+                _q.Clear(); _bytes = 0;
+                sends = _sends; queued = _queued; depthHw = _depthHighWater; bytesHw = _bytesHighWater;
+                _sends = 0; _queued = 0; _depthHighWater = 0; _bytesHighWater = 0;
+            }
+            try
+            {
+                Plugin.Logger.LogInfo($"[{_tag}] express lane to {describe} closed: {sends} sent, {queued} had to wait, "
+                                    + $"depth high-water {depthHw} msg/{bytesHw}B.");
+            }
+            catch { }
+        }
+
+        private void EnqueueFrontLocked(byte[] data)
+        {
+            _q.AddFirst(data); _bytes += data.Length;
+            if (_q.Count > _depthHighWater) _depthHighWater = _q.Count;
+            if (_bytes > _bytesHighWater) _bytesHighWater = _bytes;
+        }
+
+        private void EnqueueLocked(byte[] data)
+        {
+            _q.AddLast(data); _bytes += data.Length;
+            if (_q.Count > _depthHighWater) _depthHighWater = _q.Count;
+            if (_bytes > _bytesHighWater)   _bytesHighWater = _bytes;
+        }
+
+        /// <summary>The line that proves the lane earned its keep: an express message went out while
+        /// this link still owed the peer a real backlog.  Throttled to one line per minute per link,
+        /// carrying the WORST backlog jumped in that minute and how many jumps there were.</summary>
+        private void NoteJump(long bulkBacklog, string describe)
+        {
+            if (bulkBacklog < JumpLogBacklogBytes) return;
+            long jumps; long worst; bool emit = false;
+            lock (_q)
+            {
+                _jumpsSinceLog++;
+                if (bulkBacklog > _jumpBacklogMax) _jumpBacklogMax = bulkBacklog;
+                long now = DateTime.UtcNow.Ticks;
+                jumps = _jumpsSinceLog; worst = _jumpBacklogMax;
+                if (now >= _jumpLogNextTicks)
+                {
+                    _jumpLogNextTicks = now + TimeSpan.TicksPerSecond * JumpLogEverySeconds;
+                    _jumpsSinceLog = 0; _jumpBacklogMax = 0;
+                    emit = true;
+                }
+            }
+            if (!emit) return;
+            try
+            {
+                Plugin.Logger.LogInfo($"[{_tag}] express jumped a backlog to {describe}: {jumps} urgent message(s) "
+                                    + $"went ahead of up to {worst / 1024}KB of bulk in the last minute "
+                                    + $"(that backlog is what they used to wait behind).");
+            }
+            catch { }
+        }
+    }
+
     /// <summary>LiteNetLib-backed link (direct UDP / LAN).</summary>
     public sealed class LnlLink : MPLink
     {
@@ -288,6 +487,69 @@ namespace BigAmbitionsMP
         {
             if (data == null || data.Length == 0) return;
             _paced.Enqueue(new[] { data }, supersedeKey, Describe);
+        }
+
+        // ── Round-283: why this link has NO express lane ─────────────────────
+        // Decompiled from the referenced LiteNetLib 1.3.1 (net471 lib in the NuGet
+        // package this project builds against) with ilspycmd — evidence, not assumption,
+        // per the round-282 precedent.
+        //
+        // The API surface IS there: NetPeer exposes Send(NetDataWriter, byte
+        // channelNumber, DeliveryMethod) and DeliveryMethod.ReliableSequenced = 3.  Using
+        // it would be wrong three times over:
+        //
+        //  1. IT THROWS.  NetManager._channelsCount defaults to 1, and NetPeer's ctor
+        //     allocates _channels = new BaseChannel[netManager.ChannelsCount * 4] — four
+        //     slots, all belonging to channel 0.  SendInternal guards
+        //     `channelNumber >= _channels.Length`, which for channel 1 is `1 >= 4` =
+        //     FALSE, so it passes the guard and then calls
+        //     CreateChannel(channelNumber * 4 + deliveryMethod) = CreateChannel(7), which
+        //     indexes _channels[7] → IndexOutOfRangeException.  The library's own guard
+        //     compares channelNumber against the ARRAY length instead of ChannelsCount,
+        //     so raising ChannelsCount is the only way to make channel 1 exist at all.
+        //  2. RAISING IT SILENTLY LOSES DATA ON OLD PEERS — the July class exactly.
+        //     NetPeer.ProcessPacket's Channeled/Ack case does
+        //     `if (packet.ChannelId >= _channels.Length) { PoolRecycle(packet); break; }`.
+        //     A peer that did not ALSO raise ChannelsCount discards every channel-1 packet
+        //     without a word.  Our capability flag could gate that, but see 3.
+        //  3. ReliableSequenced IS THE WRONG DELIVERY METHOD FOR A PHASE REPORT.  It
+        //     cannot fragment — SendInternal throws TooBigPacketException once
+        //     length + headerSize > mtu for anything but ReliableOrdered/ReliableUnordered,
+        //     and a phase report's Detail string is unbounded — and it drops intermediate
+        //     packets by design: SequencedChannel.ProcessPacket accepts a packet only when
+        //     RelativeSequenceNumber > 0, and only _lastPacket is ever retransmitted.
+        //     Newest-wins is right for the clock (absolute state) and wrong for phase
+        //     reports, where each transition is its own state report the host acts on.
+        //
+        // And there is nothing here for an express QUEUE to overtake either: NetPeer.Send
+        // never refuses, it enqueues inside the library's ReliableChannel, so this
+        // transport owns no app-level backlog an urgent message could be lifted out of.
+        // SendExpress therefore stays the base immediate ordered Send — honestly identical
+        // to today — and only counts, so a UDP field log still says whether urgency was
+        // being asked for while this link was backed up.
+        private long _expressSends;
+        private long _expressBehindLogNextTicks;
+        private long _expressBehindSince;
+
+        public override void SendExpress(byte[] data)
+        {
+            long behind = 0;
+            try { behind = PendingSendBytes; } catch { }
+            _expressSends++;
+            if (behind >= 64L * 1024)
+            {
+                _expressBehindSince++;
+                long now = DateTime.UtcNow.Ticks;
+                if (now >= _expressBehindLogNextTicks)
+                {
+                    _expressBehindLogNextTicks = now + TimeSpan.TicksPerSecond * 60;
+                    long n = _expressBehindSince; _expressBehindSince = 0;
+                    Plugin.Logger.LogInfo($"[LnlLink] express to {Describe}: {n} urgent message(s) in the last minute "
+                        + $"went out behind {behind / 1024}KB of backlog — this transport has no lane to jump "
+                        + $"(LiteNetLib queues inside NetPeer; see the round-283 note above).  Total express {_expressSends}.");
+                }
+            }
+            Send(data, reliable: true);
         }
 
         // ── Round-282b: why this link has NO flushing close ──────────────────
@@ -363,6 +625,11 @@ namespace BigAmbitionsMP
         /// host-handoff work has a metered lane in both directions without another
         /// transport-layer round.  LiteNetLib falls back to an immediate send.</summary>
         void SendPaced(byte[] data, string supersedeKey = "");
+        /// <summary>Round-283: the client-side half of the express lane (see MPLink.SendExpress).
+        /// Its ONE v1 caller is MPClient.SendPhaseReport, and only toward a host that advertised
+        /// the capability.  LiteNetLib falls back to an immediate ordered send — see LnlLink for
+        /// the decompiled reasons that transport gets no separate lane.</summary>
+        void SendExpress(byte[] data);
         event Action? Connected;
         event Action<string, byte[]>? Disconnected;       // reason text + host's reason bytes ("BAMP:...")
         event Action<byte[]>? Received;
@@ -515,6 +782,14 @@ namespace BigAmbitionsMP
         /// here is an immediate send, not a bolted-on metering thread for a LAN link
         /// that rarely congests.  Documented rather than silently unpaced.</summary>
         public void SendPaced(byte[] data, string supersedeKey = "") => Send(data, reliable: true);
+
+        /// <summary>Round-283: an immediate ordered send, for the same decompiled reasons LnlLink
+        /// has no express lane (channel 1 throws with the default ChannelsCount, raising it silently
+        /// loses data on peers that did not, and ReliableSequenced neither fragments nor keeps
+        /// intermediate packets).  There is also no app-level backlog on this transport to overtake:
+        /// NetPeer.Send never refuses, it queues inside LiteNetLib.  Documented rather than dressed
+        /// up as a priority it does not have.</summary>
+        public void SendExpress(byte[] data) => Send(data, reliable: true);
 
         private void PollLoop()
         {

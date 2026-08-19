@@ -46,6 +46,17 @@ namespace BigAmbitionsMP
         public static bool   HostLoadMode;
         public static string HostLoadSession = "";
 
+        /// <summary>Round-283 (from LobbyUpdate.HostExpress): true when the host's build drops stale
+        /// PhaseReports by Seq, i.e. when it is safe for us to put phase reports on the express lane.
+        /// Written on the poll thread, read wherever a phase report is sent.  Volatile: a plain bool
+        /// written on the poll thread and read on the main thread can be cached in a register on
+        /// either side, and the whole point of the flag is that its value is respected the instant
+        /// it changes.  Defaults FALSE and is re-set false on every connect — an unknown host is
+        /// treated as incapable, which is exactly today's ordered send.
+        /// NOT YET CONSUMED — see the order-safety audit in SendPhaseReport for why the client→host
+        /// half of round-283 is held back.</summary>
+        public static volatile bool HostExpressLane;
+
         public static bool IsConnected  => _connected && _transport is { IsRunning: true };
         public static bool IsConnecting => _transport is { IsRunning: true } && !_connected;
 
@@ -169,6 +180,12 @@ namespace BigAmbitionsMP
         {
             Plugin.Logger.LogInfo("[Client] Connected to host.");
             _connected = true;
+            // Round-283: freshness state is PER SESSION.  The host's Seq counter starts at 1 in a
+            // fresh host process, so a last-seen carried over from a previous connection would drop
+            // every heartbeat of this one.  Host capability is re-learned from the next LobbyUpdate;
+            // until it arrives we assume the conservative answer (no express).
+            ResetClockSyncFreshness();
+            HostExpressLane = false;
 
             // RECONNECT: the host's vote tally + any in-flight skip are gone on its side — clear our stale
             // copy so a leftover SkipActive or phantom vote rows don't wedge the rest dock / world-clock
@@ -195,7 +212,12 @@ namespace BigAmbitionsMP
                 // Round-281: "I have the InteriorCargoSync handler."  A literal true is the whole
                 // point — the flag's meaning is "this build contains the receiver", which is a
                 // compile-time fact about the assembly being sent, not a runtime setting.
-                CargoDelta = true
+                CargoDelta = true,
+                // Round-283: "I drop stale GameTimeSync by Seq."  Also a literal true — the flag
+                // states a compile-time fact about this assembly (the guard is in
+                // HandleGameTimeSync below), not a runtime setting.  The host expresses clock
+                // sends only to peers that raise it.
+                ExpressLane = true
             };
             // Phase 3: offer any pending disconnect save (un-uploaded progress from our last leave). The
             // host decides whether to request it; it never auto-overrides a host save.
@@ -902,6 +924,7 @@ namespace BigAmbitionsMP
             if (payload.Ages != null) foreach (var kv in payload.Ages) LobbyAges[kv.Key] = kv.Value;
             HostLoadMode    = payload.LoadMode;
             HostLoadSession = payload.LoadSessionName ?? "";
+            HostExpressLane = payload.HostExpress;   // round-283 capability (see SendPhaseReport)
             Plugin.Logger.LogInfo($"[Client] Lobby: {string.Join(", ", LobbyPlayers)} " +
                                   $"(starting cash {(EnforceStartingCash ? "enforced by host" : "per-player")})");
         }
@@ -1165,10 +1188,53 @@ namespace BigAmbitionsMP
         }
 
         private static int _lastLoggedGtsDay = int.MinValue;
+        /// <summary>Round-283: newest GameTimeSync.Seq applied, and the stale-drop tally.  Reset on
+        /// connect (OnConnected) — a different host, or the same host restarted, begins its counter
+        /// at 1 again, and a last-seen carried over from the previous session would swallow the whole
+        /// heartbeat stream.</summary>
+        private static long _lastGtsSeq;
+        private static long _gtsStaleDrops;
+        private static long _gtsStaleLogNextTicks;
+        internal static void ResetClockSyncFreshness() { _lastGtsSeq = 0; _gtsStaleDrops = 0; }
+
         private static void HandleGameTimeSync(MessageEnvelope env)
         {
             var payload = env.GetPayload<GameTimeSyncPayload>();
             if (payload == null) return;
+
+            // ── Round-283 FRESHNESS GUARD ────────────────────────────────────
+            // The host may now send this packet on the EXPRESS lane, which deliberately
+            // breaks ordering against every bulk message — so a newer heartbeat can overtake
+            // an older one still queued behind a store mirror, and without this guard that
+            // older one would then be applied LAST.
+            //
+            // Why that specifically matters here: ReceiveClockSync derives drift from the
+            // packet's time against our LIVE local clock.  Apply the newer packet and we are
+            // aligned; apply the older one afterwards and its time is now BEHIND our
+            // (correctly advanced) clock, so the drift reads negative, the ahead-branch
+            // latches AheadHeld, and the RunMainGameTick prefix freezes this client's
+            // game-time and economy until the next heartbeat releases it — a visible stall
+            // manufactured entirely out of a stale packet.  So: apply strictly-newer only.
+            // Seq == 0 = an older host that does not stamp → always apply, exactly today's
+            // behaviour.  The whole payload is dropped, not just the clock: RainState,
+            // needs-tuning and Speed on a stale packet are equally stale.
+            if (payload.Seq > 0)
+            {
+                if (payload.Seq <= _lastGtsSeq)
+                {
+                    long n = ++_gtsStaleDrops;
+                    long nowT = DateTime.UtcNow.Ticks;
+                    if (nowT >= _gtsStaleLogNextTicks)
+                    {
+                        _gtsStaleLogNextTicks = nowT + TimeSpan.TicksPerSecond * 60;
+                        Plugin.Logger.LogInfo($"[Client] GameTimeSync: dropped a STALE packet (seq {payload.Seq} "
+                            + $"<= last {_lastGtsSeq}) — {n} stale drop(s) this session.  Expected on the express "
+                            + $"lane when an urgent heartbeat overtakes one stuck behind bulk.");
+                    }
+                    return;
+                }
+                _lastGtsSeq = payload.Seq;
+            }
             // Log once per in-game DAY, not every ~3s packet (was ~2,100 lines/session). The day
             // progression is what we actually diagnose with (e.g. the save-storm day range).
             if (payload.Day != _lastLoggedGtsDay)
@@ -1569,11 +1635,58 @@ namespace BigAmbitionsMP
         /// visibility — lets the host excuse a menu-bailed client).  Round-276:
         /// `detail` carries the sender-side reason (lifecycle discriminators) so the
         /// host log names WHY a client demoted without needing its Player.log.</summary>
+        /// <summary>Round-283: monotonic freshness stamp for our phase reports (see
+        /// PhaseReportPayload.Seq).  Process-lifetime, never reset — the HOST clears its last-seen
+        /// for us when we disconnect, so a restart of this process starting over at 1 is fine.</summary>
+        private static long _phaseSeq;
+
         public static void SendPhaseReport(string phase, string detail = "")
         {
             if (!IsConnected) return;
-            Send(MessageEnvelope.Create(MessageType.PhaseReport, MPConfig.PlayerId,
-                new PhaseReportPayload { PlayerId = MPConfig.PlayerId, Phase = phase, Detail = detail }));
+            var env = MessageEnvelope.Create(MessageType.PhaseReport, MPConfig.PlayerId,
+                new PhaseReportPayload
+                {
+                    PlayerId = MPConfig.PlayerId, Phase = phase, Detail = detail,
+                    Seq = System.Threading.Interlocked.Increment(ref _phaseSeq),
+                });
+
+            // ── Round-283 ORDER-SAFETY AUDIT: phase reports stay on the ORDERED lane ──
+            // This send was the second half of the round-283 whitelist and is deliberately
+            // NOT switched to SendExpress.  The audit found a consumer that depends on this
+            // message's order relative to ANOTHER message type, so per the round's own rule
+            // the switch is held rather than shipped.
+            //
+            // The dependency: MPServer.RecordPhaseReport fires the join-baseline save when a
+            // 'Settled' or 'Running' report is the FIRST one to take the _joinBaselineDone
+            // latch for this player.  Round-276 made that latch clearable by exactly one
+            // thing — MPServer.MarkPlayerInGame, i.e. the arrival of MessageType.PlayerInGame
+            // (the authenticated per-load scene-load signal).  On this side the program order
+            // is fixed: SendPlayerInGame re-arms _settledReported and sends PlayerInGame, and
+            // only afterwards can TickSettledReport send 'Settled'.  Today's single FIFO turns
+            // that program order into a DELIVERY guarantee, and the latch logic is built on it.
+            //
+            // On the express lane it stops being a guarantee.  Round-283 verifier CORRECTION
+            // (the first draft of this comment justified the hold with a "latch still set
+            // from the previous load" scenario that is UNREACHABLE — every session-entry
+            // path clears _joinBaselineDone wholesale before StartGame*/LoadData, and
+            // disconnect clears it per-player; a reader who checks that would be tempted
+            // to unblock the switch): the REACHABLE inversion is the opposite one.  On a
+            // perfectly normal first join with PlayerInGame stuck behind a store mirror —
+            // the exact congestion this round exists for — an express 'Settled'/'Running'
+            // arrives FIRST, finds the latch CLEAR, and fires the join baseline for a
+            // player the host has not yet marked in-game or served world state to: the
+            // checkpoint machinery runs against an unregistered joiner, out of order with
+            // everything MarkPlayerInGame establishes.  A latency win is not worth
+            // creating that inversion in the round-271/276 machinery.
+            //
+            // Everything else this round needs for that switch is already in place and inert:
+            // the Seq stamp above, the host's guard in RecordPhaseReport, the host's advertised
+            // capability (LobbyUpdate.HostExpress → HostExpressLane), and IClientTransport.
+            // SendExpress.  What is missing is a join-baseline trigger that does not depend on
+            // cross-type arrival order — e.g. carrying the per-load identity in the report
+            // itself so the host can decide without the latch, which is a design change with
+            // its own audit, not a line to slip into a transport round.
+            Send(env);
         }
 
         /// <summary>Round-271 (Fix A): one-shot per load — report the moment OUR settled-gate

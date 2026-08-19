@@ -845,6 +845,14 @@ namespace BigAmbitionsMP
         /// message to a build that has no handler for it.  The host gates on this flag AND version
         /// equality — the flag proves the code is there, the version keeps the pairing conservative.</summary>
         public bool   CargoDelta { get; set; }
+        /// <summary>Round-283 CAPABILITY flag (client → host): "my build drops stale GameTimeSync by
+        /// Seq."  It is NOT about parsing — an older client parses an express clock packet perfectly
+        /// well; what it lacks is the freshness guard, so a packet that overtook an older one on the
+        /// express lane could be followed by that older one and leave the client wrongly AheadHeld.
+        /// The host therefore expresses clock sends ONLY to peers that raise this.  Additive: absent
+        /// from every older build, Newtonsoft leaves it FALSE, and that peer keeps the ordered lane —
+        /// byte-identical to today.  Gated the round-281 way (flag AND version equality).</summary>
+        public bool   ExpressLane { get; set; }
     }
 
     /// <summary>
@@ -919,6 +927,23 @@ namespace BigAmbitionsMP
         public bool   LoadMode        { get; set; }
         /// <summary>Name of the save being resumed (for the client's "Resuming…" line).</summary>
         public string LoadSessionName { get; set; } = "";
+        /// <summary>Round-283 CAPABILITY flag (host → client): "my build drops stale PhaseReport by
+        /// Seq" — the mirror of HelloPayload.ExpressLane, so the client knows whether it may put its
+        /// phase reports on the express lane.
+        ///
+        /// WHY THIS MESSAGE carried it (least blast radius of the candidates): the host had no
+        /// dedicated host→client capability channel, so the flag had to ride something the host
+        /// already sends.  LobbyUpdate is the only host→client message the client provably receives
+        /// in BOTH join legs before StartGameNew/StartGameLoad (lobby leg) and before the LoadData
+        /// that triggers the first 'Loading' report (mid-game leg).  Round-283 verifier precision:
+        /// a connected client's very FIRST phase report (the Lobby/early one, gated only on
+        /// IsConnected) can precede this flag's arrival — harmless, because HostExpressLane
+        /// defaults FALSE and those early reports simply ride the ordered lane.  Re-sent on every
+        /// roster CHANGE (join/leave/kick) — so a lost copy heals at the next roster event, not on
+        /// a timer; fail-safe either way, since absent = ordered lane.  Welcome/LoadData were
+        /// rejected: both arrive later on at least one leg.  Absent (older host) = FALSE = today's
+        /// behaviour exactly.</summary>
+        public bool   HostExpress     { get; set; }
     }
 
     /// <summary>Client → Host: this player's lobby preferences.  Currently just the
@@ -1341,6 +1366,14 @@ namespace BigAmbitionsMP
         public int TuneDrain  { get; set; } = -1;
         public int TuneRest   { get; set; } = -1;
         public int TuneMorale { get; set; } = -1;
+        /// <summary>Round-283 FRESHNESS STAMP (additive; monotonic per host, per session).  The
+        /// express lane deliberately breaks ordering BETWEEN lanes, so a clock packet can now
+        /// overtake an older one that is still stuck behind bulk — and applying the older one after
+        /// the newer would set AheadHeld (TimeSync.ReceiveClockSync's ahead branch) for a cycle on a
+        /// client that is in fact perfectly aligned.  The receiver drops any packet whose Seq is
+        /// &lt;= the last one it applied.  0 = an older host that does not stamp → always apply,
+        /// which is byte-for-byte today's behaviour.</summary>
+        public long Seq { get; set; }
     }
 
     // ── Business sync (Phase 1: exterior business state) ──────────────────────
@@ -1682,6 +1715,14 @@ namespace BigAmbitionsMP
         /// (clock/overlay/excuse flags + staleness age) that field 20260818-215459 could
         /// not recover because peer logs were uncollectable through the congestion.</summary>
         public string Detail   { get; set; } = "";
+        /// <summary>Round-283 FRESHNESS STAMP (additive; monotonic per sending client, per session).
+        /// A phase report is a LATEST-WINS state report, and the express lane can now let a newer one
+        /// overtake an older one still queued behind bulk.  Re-applying an older phase after a newer
+        /// one is precisely the round-276 flap class (a stale 'Loading' landing after 'Running' makes
+        /// the host believe a settled client demoted).  The host drops any report whose Seq is
+        /// &lt;= the last one it accepted from that player.  0 = an older client that does not stamp
+        /// → always apply, exactly today's behaviour.</summary>
+        public long Seq { get; set; }
     }
 
     /// <summary>A purchase by one player inside another player's shop

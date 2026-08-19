@@ -238,6 +238,62 @@ namespace BigAmbitionsMP
         private readonly PacedSendQueue _paced = new("SteamLink");
         public override long PacedSendBytes => _paced.Bytes;
 
+        // ── Round-283: the express lane (host → client game-clock sync) ──────
+        // Deliberately NOT counted in PendingSendBytes/TransportPendingBytes.  That figure
+        // is the CONGESTION signal the round-276 phase probe prints as outQ and the
+        // join-baseline verifier extends its window on — it means "bulk this peer is still
+        // waiting on".  Express bytes are by construction ahead of all of it, are two small
+        // messages at most, and folding them in would move a number other code makes
+        // decisions from for no diagnostic gain.
+        private readonly ExpressSendQueue _express = new("SteamLink");
+        private int _expressRefusalsLogged;   // its own budget — must not eat the bulk path's 8 lines
+
+        public override void SendExpress(byte[] data)
+        {
+            if (data == null || data.Length == 0) return;
+            // NEVER fragment express.  A fragmented express message would interleave with
+            // itself against the bulk lane on the wire and could only reassemble by luck;
+            // worse, it would put ~400KB of "urgent" in front of the very traffic the lane
+            // exists to protect.  A payload this size is not urgent by definition — it is
+            // bulk that reached the wrong call site, which is a bug worth an ERROR line.
+            if (data.Length > SteamFrames.ChunkSize)
+            {
+                Plugin.Logger.LogError($"[SteamLink] express payload for {Describe} is {data.Length}B — over the "
+                    + $"{SteamFrames.ChunkSize}B express cap; sent on the ORDERED lane instead.  Express is for small "
+                    + $"urgent signals only (round-283 whitelist); a payload this large does not belong on it.");
+                Send(data, reliable: true);
+                return;
+            }
+            long bulk = 0;
+            try { bulk = PendingSendBytes; } catch { }   // read OUTSIDE the express lock (it takes _pending)
+            _express.Send(data, TrySendExpressRaw, bulk, Describe);
+        }
+
+        /// <summary>The express wire call: straight to Steam, deliberately NOT through
+        /// SendReliableRaw — that method's whole job is to keep order behind _pending, which is
+        /// exactly the queue an express message must overtake.  Returns true only on Result.OK;
+        /// anything else leaves the payload in the express queue for the pump.</summary>
+        private bool TrySendExpressRaw(byte[] d)
+        {
+            Result r;
+            try { r = _conn.SendMessage(d, SendType.Reliable); }
+            catch { return false; }
+            if (r == Result.OK) return true;
+            if (_expressRefusalsLogged++ < 8)
+                Plugin.Logger.LogWarning($"[SteamLink] express send to {Describe} refused: {r} ({d.Length}B) — "
+                    + $"held in the express queue, which the pump drains before the retry and paced lanes.");
+            return false;
+        }
+
+        /// <summary>Round-283: drain the express lane.  Pump thread, ~15ms, BEFORE FlushPending and
+        /// BEFORE FlushPaced — a queued express message must still be ahead of every bulk byte this
+        /// link owes, or the lane would only help on the first (unrefused) send.</summary>
+        internal void FlushExpress()
+        {
+            if (!Alive) { _express.Clear(Describe); return; }
+            _express.Flush(TrySendExpressRaw, Describe);
+        }
+
         /// <summary>Round-282b: the true outbound figure — our own queues PLUS what
         /// Steam itself still holds for this connection.  Connection.QuickStatus()
         /// (verified against the shipped Facepunch.Steamworks.Win64.dll) exposes
@@ -480,12 +536,14 @@ namespace BigAmbitionsMP
             {
                 try { _socket?.Receive(); }
                 catch (Exception ex) { Plugin.Logger.LogError($"[SteamHost] Receive: {ex}"); }
-                // Round-282: FlushPending first (retries own the backlog figure the
+                // Round-283: express FIRST — the lane is worthless if a refused express
+                // message has to wait for the retry queue it was meant to overtake.
+                // Round-282: FlushPending next (retries own the backlog figure the
                 // paced gate reads), then release at most one paced chunk per link.
                 // Per-link isolation: one sick peer must not stop the others draining.
                 foreach (var l in _links.Values)
                 {
-                    try { l.FlushPending(); l.FlushPaced(); }
+                    try { l.FlushExpress(); l.FlushPending(); l.FlushPaced(); }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamHost] flush {l.Describe}: {ex.Message}"); }
                 }
                 Thread.Sleep(15);
@@ -608,6 +666,54 @@ namespace BigAmbitionsMP
         // client→host bulk without reopening the transport layer.
         private readonly PacedSendQueue _paced = new("SteamClient");
         public long PacedSendBytes => _paced.Bytes;
+
+        // ── Round-283: the express lane, client side (phase reports → host) ──
+        // Same queue, same discipline, same pump position as SteamLink.  Its one v1 caller
+        // is MPClient.SendPhaseReport, and only when the host advertised the capability
+        // (LobbyUpdatePayload.HostExpress) — a host without the Seq guard must keep
+        // receiving these strictly in order, which is today's behaviour.
+        private readonly ExpressSendQueue _express = new("SteamClient");
+        private int _expressRefusalsLogged;   // its own budget — must not eat the bulk path's 8 lines
+
+        public void SendExpress(byte[] data)
+        {
+            if (data == null || data.Length == 0) return;
+            // Never fragment express — see SteamLink.SendExpress for the reasoning.
+            if (data.Length > SteamFrames.ChunkSize)
+            {
+                Plugin.Logger.LogError($"[SteamClient] express payload is {data.Length}B — over the "
+                    + $"{SteamFrames.ChunkSize}B express cap; sent on the ORDERED lane instead.  Express is for small "
+                    + $"urgent signals only (round-283 whitelist); a payload this large does not belong on it.");
+                Send(data, reliable: true);
+                return;
+            }
+            long bulk; lock (_pending) bulk = _pendingBytes;
+            bulk += _paced.Bytes;                       // the whole bulk debt this send goes ahead of
+            _express.Send(data, TrySendExpressRaw, bulk, "host");
+        }
+
+        /// <summary>Straight to Steam, deliberately NOT through SendReliableRaw — that method keeps
+        /// order behind _pending, which is the queue express exists to overtake.</summary>
+        private bool TrySendExpressRaw(byte[] d)
+        {
+            var mgr = _mgr; if (mgr == null) return false;
+            Result r;
+            try { r = mgr.Connection.SendMessage(d, SendType.Reliable); }
+            catch { return false; }
+            if (r == Result.OK) return true;
+            if (_expressRefusalsLogged++ < 8)
+                Plugin.Logger.LogWarning($"[SteamClient] express send refused: {r} ({d.Length}B) — held in the "
+                    + $"express queue, which the pump drains before the retry and paced lanes.");
+            return false;
+        }
+
+        /// <summary>Round-283: drain the express lane.  Pump thread, ~15ms, before FlushPending and
+        /// FlushPaced (see SteamLink.FlushExpress).</summary>
+        private void FlushExpress()
+        {
+            if (_mgr == null) { _express.Clear("host"); return; }
+            _express.Flush(TrySendExpressRaw, "host");
+        }
         // (round-282c: an unused PendingSendBytes aggregate lived here — not on
         // IClientTransport, no reader; removed rather than left as drift surface.)
 
@@ -738,6 +844,7 @@ namespace BigAmbitionsMP
             {
                 try { _mgr?.Receive(); }
                 catch (Exception ex) { Plugin.Logger.LogError($"[SteamClient] Receive: {ex}"); }
+                try { FlushExpress(); } catch { }  // round-283: express lane FIRST — it must overtake the retry queue
                 try { FlushPending(); } catch { }
                 try { FlushPaced(); } catch { }   // round-282: paced lane, after the retry flush
                 Thread.Sleep(15);

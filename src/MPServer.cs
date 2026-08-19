@@ -118,7 +118,10 @@ namespace BigAmbitionsMP
         /// disconnect.  Before this round the joiner's mod version was logged and thrown away (the
         /// "VERSION SKEW" warning below), so the host had no way to ask "can this peer parse message X"
         /// at send time.  Keyed by peer.Id because the interior subscriber sets are peer.Id sets.</summary>
-        private static readonly ConcurrentDictionary<int, (string version, bool cargoDelta)> _peerBuild = new();
+        /// Round-283 adds `express` to the SAME record rather than opening a parallel dictionary:
+        /// one registry means one place that binds at Hello and one place that drops at disconnect,
+        /// so a future capability cannot be forgotten in half of them.
+        private static readonly ConcurrentDictionary<int, (string version, bool cargoDelta, bool express)> _peerBuild = new();
 
         /// <summary>Round-281: may this peer be sent MessageType.InteriorCargoSync?  Two conditions,
         /// both required: the peer ANNOUNCED the capability (Hello.CargoDelta — absent on every older
@@ -146,6 +149,21 @@ namespace BigAmbitionsMP
             why = "";
             return true;
         }
+
+        /// <summary>Round-283: may this peer be sent GameTimeSync on the EXPRESS lane?  Same two
+        /// conditions and the same reasoning as IsDeltaCapablePeer above, but the risk it guards is
+        /// different: an older peer PARSES an express clock packet perfectly well — what it lacks is
+        /// the Seq freshness guard, so if an express packet overtakes an older one still stuck behind
+        /// bulk, that older packet lands afterwards and can leave a perfectly aligned client wrongly
+        /// AheadHeld for a cycle.  The flag proves the guard is present; version equality keeps the
+        /// pairing conservative (round-281 precedent).  An unknown peer is NOT capable, and the
+        /// answer "no" is always correct — it is exactly today's ordered send.</summary>
+        internal static bool IsExpressCapablePeer(int peerId)
+        {
+            if (!_peerBuild.TryGetValue(peerId, out var b)) return false;
+            return b.express && b.version == MyPluginInfo.PLUGIN_VERSION;
+        }
+
         /// <summary>playerId → immutable StableId (for save/ownership persistence).
         /// Includes the host's own.  Populated from each client's Hello.
         /// CONCURRENT: written on the poll thread (Hello) + main thread (host
@@ -712,7 +730,7 @@ namespace BigAmbitionsMP
             _peerNames.Clear();
             _peerBuild.Clear();       // round-281
             _clients.Clear();
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _peerPhaseSeq.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
             lock (_joinBaselineDone) _joinBaselineDone.Clear();   // round-276: baseline latches die with the session
         }
 
@@ -736,7 +754,7 @@ namespace BigAmbitionsMP
             ResetWallet();            // fresh world — no shared wallet (slice 4)
 
             // Re-arm the startup pause hold for this new game.
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _peerPhaseSeq.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
             lock (_joinBaselineDone) _joinBaselineDone.Clear();   // round-276: baseline latches die with the session
 
             // Per-player starting cash: each client gets the host-designated amount
@@ -799,7 +817,7 @@ namespace BigAmbitionsMP
             IsInLobby = false;
 
             // Re-arm the startup pause hold for this new game.
-            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
+            lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _peerPhaseSeq.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
             lock (_joinBaselineDone) _joinBaselineDone.Clear();   // round-276: baseline latches die with the session
 
             // Phase 4: if a multiplayer session exists, resume it — the host holds
@@ -917,6 +935,10 @@ namespace BigAmbitionsMP
                 // Round-276: a leaver's baseline latch dies with them, so a rejoin
                 // earns a fresh baseline even if its PlayerInGame races the phase flow.
                 lock (_joinBaselineDone) _joinBaselineDone.Remove(leftPlayer);
+                // Round-283: their phase freshness stamp dies with them.  A client that restarts
+                // its process restarts its own counter at 1, so a last-seen figure that outlived
+                // the connection would silently drop every report of the next one.
+                _peerPhaseSeq.TryRemove(leftPlayer, out _);
                 // Round-276b (verifier finding 2): their armed baseline VERIFY dies too —
                 // a departed member's file can never land, and the surviving entry fell
                 // straight through to a full refire for a player who is gone (F4's
@@ -2122,7 +2144,7 @@ namespace BigAmbitionsMP
 
             _clients[peer] = 0;
             _peerNames[peer.Id] = hello.PlayerId;
-            _peerBuild[peer.Id] = (hello.Version ?? "", hello.CargoDelta);   // round-281: bound with the name, dropped with the peer
+            _peerBuild[peer.Id] = (hello.Version ?? "", hello.CargoDelta, hello.ExpressLane);   // round-281/283: bound with the name, dropped with the peer
             if (!string.IsNullOrEmpty(hello.StableId))
             {
                 StableIdByPlayer[hello.PlayerId] = hello.StableId;
@@ -2154,7 +2176,7 @@ namespace BigAmbitionsMP
             {
                 _clients[peer] = 0;
                 _peerNames[peer.Id] = hello.PlayerId;
-                _peerBuild[peer.Id] = (hello.Version ?? "", hello.CargoDelta);   // round-281 (mid-game join leg)
+                _peerBuild[peer.Id] = (hello.Version ?? "", hello.CargoDelta, hello.ExpressLane);   // round-281/283 (mid-game join leg)
                 if (!string.IsNullOrEmpty(hello.StableId))
                 {
                     StableIdByPlayer[hello.PlayerId] = hello.StableId;
@@ -2479,6 +2501,13 @@ namespace BigAmbitionsMP
         // Round-276b: last non-empty Detail per player — lets a detailed re-report of an
         // unchanged phase still log (the probe's payload must survive losing the race).
         private static readonly ConcurrentDictionary<string, string> _peerPhaseDetail = new();
+        /// <summary>Round-283: highest PhaseReport.Seq accepted from each player, and the running
+        /// count of reports dropped as stale.  Cleared when that player leaves (below) and with the
+        /// session — a client that restarts its process restarts its counter at 1, so a last-seen
+        /// that outlived the connection would silently swallow every report of the next one.</summary>
+        private static readonly ConcurrentDictionary<string, long> _peerPhaseSeq = new();
+        private static long _phaseStaleDrops;
+        private static long _phaseStaleLogNextTicks;
         private static readonly HashSet<string> _fenceExcused = new();
         private static long _fenceArmedAtMs;   // grace: no excusals in the first 15s
 
@@ -2699,6 +2728,42 @@ namespace BigAmbitionsMP
         public static void RecordPhaseReport(PhaseReportPayload? p)
         {
             if (p == null || string.IsNullOrEmpty(p.PlayerId)) return;
+
+            // ── Round-283 FRESHNESS GUARD ────────────────────────────────────
+            // A phase report is a LATEST-WINS state report about the sender, and everything
+            // below treats it that way: _peerPhase[pid] is overwritten outright, and the
+            // fence's excuse rule (TickStartupFence) acts on whatever phase is there NOW —
+            // "phase == Menu for 8s ⇒ excuse them from the load wait".  So an OLD report
+            // landing after a NEW one is not a harmless duplicate: a stale 'Menu' arriving
+            // after 'Running' re-stamps the player as menu-bailed with a FRESH timestamp and
+            // excuses a client that is actually in the world.  That is exactly the round-276
+            // flap class (a live client repeatedly demoted by state that no longer described
+            // it, which is what fed the join-save storm), so it is guarded at the door rather
+            // than hoped away.
+            //
+            // Today the single ordered FIFO makes reordering impossible and this guard never
+            // fires; it is a precondition for the express lane, not a fix for a live bug, and
+            // it is deliberately in place BEFORE any sender puts these on that lane.
+            // Seq == 0 means an older client that does not stamp: always apply, which is
+            // byte-for-byte the behaviour those peers get today.
+            if (p.Seq > 0)
+            {
+                long lastSeen = _peerPhaseSeq.TryGetValue(p.PlayerId, out var ls) ? ls : 0;
+                if (p.Seq <= lastSeen)
+                {
+                    long n = System.Threading.Interlocked.Increment(ref _phaseStaleDrops);
+                    long now = DateTime.UtcNow.Ticks;
+                    if (now >= _phaseStaleLogNextTicks)
+                    {
+                        _phaseStaleLogNextTicks = now + TimeSpan.TicksPerSecond * 60;
+                        Plugin.Logger.LogInfo($"[Server] phase: dropped a STALE report from '{p.PlayerId}' "
+                            + $"(seq {p.Seq} <= last {lastSeen}, phase '{p.Phase}') — {n} stale drop(s) this session.");
+                    }
+                    return;
+                }
+                _peerPhaseSeq[p.PlayerId] = p.Seq;
+            }
+
             bool changed = !_peerPhase.TryGetValue(p.PlayerId, out var prevPh) || prevPh.phase != p.Phase;
             _peerPhase[p.PlayerId] = (p.Phase, TickMs64);
             // Round-276b (verifier finding 5): a bare report winning the race must not
@@ -4978,6 +5043,10 @@ namespace BigAmbitionsMP
                 Ages = new Dictionary<string, int>(StartingAgeByPlayer),
                 LoadMode = !string.IsNullOrEmpty(ChosenLoadSession),   // resuming a save
                 LoadSessionName = ChosenLoadSession,
+                // Round-283: "this host drops stale phase reports by Seq" — a literal true, because
+                // the flag's meaning is a compile-time fact about THIS assembly (the guard is in
+                // RecordPhaseReport), not a runtime setting.  Same shape as HelloPayload.CargoDelta.
+                HostExpress = true,
             };
             Broadcast(MessageEnvelope.Create(MessageType.LobbyUpdate, "host", payload));
         }
@@ -5043,6 +5112,10 @@ namespace BigAmbitionsMP
         /// </summary>
         private static int   _lastLoggedGtsDay   = int.MinValue;   // round-189: log on day/speed transitions only
         private static float _lastLoggedGtsSpeed = float.MinValue;
+        /// <summary>Round-283: the clock heartbeat's freshness stamp — monotonic for the life of this
+        /// host process, never reset, so it can only ever move forward for a given receiver.</summary>
+        private static long _gtsSeq;
+        private static int  _gtsExpressPeers = -1;   // last logged express/total split (log on change only)
 
         public static void BroadcastGameTime(float? speedOverride = null)
         {
@@ -5056,8 +5129,62 @@ namespace BigAmbitionsMP
                 RainIntensity = MPWeatherSync.CurrentRainIntensity(),
                 TuneDrain = MPNeedsTuning.DrainPercent, TuneRest = MPNeedsTuning.RestPercent,
                 TuneMorale = MPNeedsTuning.MoralePercent,
+                Seq = System.Threading.Interlocked.Increment(ref _gtsSeq),   // round-283 freshness stamp
             };
-            Broadcast(MessageEnvelope.Create(MessageType.GameTimeSync, "host", payload));
+
+            // ── Round-283 ORDER-SAFETY AUDIT: the clock heartbeat on the express lane ──
+            // Why it is safe for this packet to overtake ANY bulk message in flight to this
+            // peer (store mirrors, world/business/interior snapshots, LoadData — everything):
+            //
+            // It carries ABSOLUTE STATE, and every one of its consumers recomputes from
+            // scratch on arrival rather than accumulating.  TimeSync.ReceiveClockSync reads
+            // the client's LIVE local clock (GameStateReader.GetGameTime) at apply time and
+            // derives the whole correction from the difference — it is not a delta chained
+            // onto a previous packet, so a packet that arrives early, late, or alone still
+            // produces the correct answer for the moment it is applied.  The same holds for
+            // its passengers: MPNeedsTuning.SetFromHeartbeat assigns absolute percents;
+            // MPWeatherSync.ApplyRainState re-reads the LIVE local rain state and acts only
+            // on a mismatch (a live read at commitment, so it converges from any order);
+            // TimeSync.ApplyNetwork writes an absolute timeScale (round-283 verifier
+            // precision: not the SOLE timeScale writer — StartupRelease and the per-frame
+            // ManualPause pin also write it, so Speed survives at most one frame against
+            // the pin; all are live-state writers, none order-dependent).  No consumer
+            // composes the clock packet with another message type by ARRIVAL ORDER — the
+            // cross-type touches (ReceiveClockSync's `if (MPRestSync.SkipActive) return`,
+            // the tick patch's re-read of SkipActive, MPRestSync clearing AheadHeld) are
+            // all LIVE reads/writes of current state, and each interleaving is already
+            // reachable today under the ordered lane.
+            //
+            // What arriving out of order WOULD break, and what stops it: two clock packets
+            // reordered against EACH OTHER.  The older one's drift is computed against a
+            // clock the newer one already corrected, so the ahead-branch would latch
+            // AheadHeld and freeze a perfectly aligned client's game-time tick until the next
+            // heartbeat.  That is what Seq is for — the client drops any packet at or below
+            // the newest it has applied.  Order WITHIN the express lane is preserved anyway;
+            // Seq covers the seam where a peer's first express packet passes an ordinary one
+            // still sitting in the bulk queue.
+            var env = MessageEnvelope.Create(MessageType.GameTimeSync, "host", payload);
+            var bytes = env.Serialize();
+            int express = 0, total = 0;
+            foreach (var peer in _clients.Keys)
+            {
+                total++;
+                // Per-peer isolation: one throwing link must not cost the others their heartbeat.
+                try
+                {
+                    // Capability-gated: a peer that did not announce the Seq guard keeps the
+                    // ordered lane, which is byte-identical to what it gets today.
+                    if (IsExpressCapablePeer(peer.Id)) { peer.SendExpress(bytes); express++; }
+                    else                                peer.Send(bytes, reliable: true);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] GameTimeSync → {peer.Describe}: {ex.Message}"); }
+            }
+            if (total > 0 && express != _gtsExpressPeers)
+            {
+                _gtsExpressPeers = express;
+                Plugin.Logger.LogInfo($"[Server] GameTimeSync lane: {express}/{total} peer(s) express-capable "
+                                    + $"(the rest keep the ordered lane — round-283).");
+            }
             // Round-189 (user-approved): the heartbeat logged every send (1,541 lines in one field
             // log).  It is the triage TIME ANCHOR — keep it, but only on day/speed transitions
             // (the client side has been day-gated the same way for a while).
