@@ -268,6 +268,7 @@ namespace BigAmbitionsMP
         private static float _cartWarnNext;         // round-83 tripwire: re-warn throttle
         private static readonly Dictionary<NavigationBlocker, float> _foreignHeldSince = new();   // round-90 foreign-blocker watch
         private static float _foreignWarnNext;
+        private static float _voteWaitLogNext;   // round-277: skip-vote limbo heartbeat throttle
 
         /// <summary>The nine ACTIVITY-class navigation blockers — the IPlayerActivity states whose
         /// UI our dock replaces (and whose lifecycle we therefore own in MP). The nav-heal watchdog
@@ -943,6 +944,12 @@ namespace BigAmbitionsMP
                 _hostVotes[p.PlayerId] = new RestVoteEntry { PlayerId = p.PlayerId, GoalMinutes = p.GoalMinutes, Activity = p.Activity };
             else
                 _hostVotes.Remove(p.PlayerId);
+            // Round-277 (field 20260818-215459 paper trail): every tally change logs.
+            // That session's two sleeps NEVER reached consensus (1/3 votes) and the log
+            // was silent about it — "skip request ON" then nothing, unreadable in triage.
+            int req = MPServer.LobbyPlayers?.Count ?? 1;
+            Plugin.Logger.LogInfo($"[Rest] skip vote {(p.Active ? $"ON (until {Fmt(p.GoalMinutes)}, {p.Activity})" : "OFF")} from '{p.PlayerId}' — tally {_hostVotes.Count}/{req}.");
+            _voteWaitLogNext = 0f;   // a change re-arms the prompt waiting line
             HostBroadcastState();
         }
 
@@ -965,6 +972,16 @@ namespace BigAmbitionsMP
                 SkipActive = false;
                 Plugin.Logger.LogInfo("[Rest] skip STOPPED (a vote dropped).");
                 HostBroadcastState();
+            }
+            // Round-277: the not-yet-consensus limbo names itself — who is holding the
+            // skip up, once a minute while any vote waits.  Time passes at NORMAL speed
+            // in this state; the field session's sleeps lived (and died) entirely here.
+            else if (!SkipActive && _hostVotes.Count > 0 && Time.unscaledTime >= _voteWaitLogNext)
+            {
+                _voteWaitLogNext = Time.unscaledTime + 60f;
+                var missing = new List<string>();
+                try { foreach (var lp in MPServer.LobbyPlayers) if (!_hostVotes.ContainsKey(lp)) missing.Add(lp); } catch { }
+                Plugin.Logger.LogInfo($"[Rest] skip vote WAITING: {_hostVotes.Count}/{required} — missing: {string.Join(", ", missing)}; time passes at normal speed until every player requests a skip.");
             }
 
             if (SkipActive)
