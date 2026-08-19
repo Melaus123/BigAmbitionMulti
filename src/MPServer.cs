@@ -114,6 +114,38 @@ namespace BigAmbitionsMP
         // ConcurrentDictionary used as a set; iterate it via .Keys.
         private static readonly ConcurrentDictionary<MPLink, byte> _clients   = new();
         private static readonly ConcurrentDictionary<int, string>   _peerNames = new(); // peer.Id → playerId
+        /// <summary>Round-281: peer.Id → what BUILD that peer runs, bound once at Hello and dropped at
+        /// disconnect.  Before this round the joiner's mod version was logged and thrown away (the
+        /// "VERSION SKEW" warning below), so the host had no way to ask "can this peer parse message X"
+        /// at send time.  Keyed by peer.Id because the interior subscriber sets are peer.Id sets.</summary>
+        private static readonly ConcurrentDictionary<int, (string version, bool cargoDelta)> _peerBuild = new();
+
+        /// <summary>Round-281: may this peer be sent MessageType.InteriorCargoSync?  Two conditions,
+        /// both required: the peer ANNOUNCED the capability (Hello.CargoDelta — absent on every older
+        /// build, so it answers "is the handler present" exactly), and it runs our exact mod version
+        /// (the conservative pairing: same code on both ends of a new channel).  An unknown peer — one
+        /// whose Hello we never bound — is NOT capable; the answer defaults to "send the full snapshot",
+        /// which is always correct, only larger.  `why` names the failing half for the send-site log.</summary>
+        internal static bool IsDeltaCapablePeer(int peerId, out string why)
+        {
+            if (!_peerBuild.TryGetValue(peerId, out var b))
+            {
+                why = $"peer {peerId} has no recorded build (Hello not bound)";
+                return false;
+            }
+            if (!b.cargoDelta)
+            {
+                why = $"peer {peerId} (v{(string.IsNullOrEmpty(b.version) ? "?" : b.version)}) did not announce cargo-delta support";
+                return false;
+            }
+            if (b.version != MyPluginInfo.PLUGIN_VERSION)
+            {
+                why = $"peer {peerId} runs v{(string.IsNullOrEmpty(b.version) ? "?" : b.version)}, we run v{MyPluginInfo.PLUGIN_VERSION}";
+                return false;
+            }
+            why = "";
+            return true;
+        }
         /// <summary>playerId → immutable StableId (for save/ownership persistence).
         /// Includes the host's own.  Populated from each client's Hello.
         /// CONCURRENT: written on the poll thread (Hello) + main thread (host
@@ -607,6 +639,7 @@ namespace BigAmbitionsMP
             MPSaveCoordinator.ActiveSessionName = "";   // stale session must not leak into a new lobby
                                                         // (HostLoadSession / first save re-set it)
             _peerNames.Clear();
+            _peerBuild.Clear();       // round-281: per-peer build records die with the session, like _peerNames
             StableIdByPlayer.Clear();
             StableIdByPlayer[MPConfig.PlayerId] = MPConfig.StableId; // host's own
             MPLog.BeginSession(System.Guid.NewGuid().ToString("N").Substring(0, 8), "host");
@@ -677,6 +710,7 @@ namespace BigAmbitionsMP
             ModMismatchByPlayer.Clear();
             try { MPCanvasUI.ClearLobbyNotice(); } catch { }
             _peerNames.Clear();
+            _peerBuild.Clear();       // round-281
             _clients.Clear();
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
             lock (_joinBaselineDone) _joinBaselineDone.Clear();   // round-276: baseline latches die with the session
@@ -840,6 +874,11 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Server] Peer disconnected: {peer.Id} — {reason}");
             _clients.TryRemove(peer, out _);
             lock (_pendingJoins) _pendingJoins.Remove(peer.Id);   // abandoned join request
+            // Round-281: drop the build record UNCONDITIONALLY (not inside the named-peer branch
+            // below) — a transport can hand the same peer.Id to a LATER connection, and a stale
+            // "cargo-delta capable" record inherited by a peer that never announced it is exactly
+            // the version-skew hole this gate exists to close.
+            _peerBuild.TryRemove(peer.Id, out _);
 
             // Clear any interior subscription the peer held so we stop polling
             // a building no client is in anymore.  Marshal — it mutates the same
@@ -2083,6 +2122,7 @@ namespace BigAmbitionsMP
 
             _clients[peer] = 0;
             _peerNames[peer.Id] = hello.PlayerId;
+            _peerBuild[peer.Id] = (hello.Version ?? "", hello.CargoDelta);   // round-281: bound with the name, dropped with the peer
             if (!string.IsNullOrEmpty(hello.StableId))
             {
                 StableIdByPlayer[hello.PlayerId] = hello.StableId;
@@ -2114,6 +2154,7 @@ namespace BigAmbitionsMP
             {
                 _clients[peer] = 0;
                 _peerNames[peer.Id] = hello.PlayerId;
+                _peerBuild[peer.Id] = (hello.Version ?? "", hello.CargoDelta);   // round-281 (mid-game join leg)
                 if (!string.IsNullOrEmpty(hello.StableId))
                 {
                     StableIdByPlayer[hello.PlayerId] = hello.StableId;
@@ -4440,6 +4481,32 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Server] Interior snapshot broadcast (full state) to {sent} subscriber(s) for '{snap.AddressKey}': {InteriorSync.SnapshotSummary(snap)}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BroadcastInteriorSnapshotTo: {ex.Message}"); }
+        }
+
+        /// <summary>Round-281: broadcast one building's CARGO state to its subscribers.  Same shape as
+        /// BroadcastInteriorSnapshotTo (one serialization, reliable send to the subscriber peer ids) —
+        /// only the payload is the small absolute cargo message instead of the whole interior.  The
+        /// caller has already established that EVERY peer in this set is delta-capable
+        /// (InteriorSync's send gate); this method does not re-check, so it must never be called with
+        /// an unfiltered set.  Returns the serialized size so the sender can report the saving.</summary>
+        public static int BroadcastInteriorCargoSyncTo(System.Collections.Generic.HashSet<int> peerIds, InteriorCargoSyncPayload cargo)
+        {
+            if (!_running || peerIds == null || peerIds.Count == 0 || cargo == null) return 0;
+            try
+            {
+                var env = MessageEnvelope.Create(MessageType.InteriorCargoSync, "host", cargo);
+                byte[] data = env.Serialize();
+                int sent = 0;
+                foreach (var peer in _clients.Keys)
+                {
+                    if (peer == null) continue;
+                    if (!peerIds.Contains(peer.Id)) continue;
+                    peer.Send(data, reliable: true);
+                    sent++;
+                }
+                return sent > 0 ? data.Length : 0;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BroadcastInteriorCargoSyncTo: {ex.Message}"); return 0; }
         }
 
         // ── Player profile (Wave 5) ──────────────────────────────────────────

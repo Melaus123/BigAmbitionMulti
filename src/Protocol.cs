@@ -173,6 +173,7 @@ namespace BigAmbitionsMP
         MergerEmployeeEdit  = 152,       // Member → Host → business owner (slice 5): a routed employee/schedule op on a merger-flipped shop ("fire" an injected partner employee; "schedule" = wholesale hours+shifts write-back). Owner applies natively; roster/business heartbeats republish the truth.
         StoreMirror         = 153,       // Host → all-but-owner (handoff slice 1): one piece of the session store — a member's saved .hsg and/or the manifest — so every member holds the complete session store and can host the world later.
         AuditDrillReply     = 154,       // Client → Host (round-89): per-registration hashes+summaries for the diverged audit buckets — the host diffs against its own and NAMES the diverging address(es) in one log (field reports only ever carry one machine's log, so offline two-log diffing never happened).
+        InteriorCargoSync   = 181,       // Host → a building's subscribers (round-281, field bundles 20260818-22*): the CURRENT cargo of that building's items and NOTHING else.  86% of interior traffic was cargo-only churn (shelf stock ticking down as customers buy) shipped as a FULL ~80-150KB snapshot whose 306 designs and 225 dirt spots were byte-identical every single time; round-280 slowed those sends down, this shrinks them.  ABSOLUTE STATE, never a diff-chain: it names EVERY item in the building, so re-applying it converges by itself.  Guarded by StructVersion — a receiver whose last applied FULL snapshot carried a different version knows its structure is stale, ignores the cargo and re-requests (InteriorRequest).  Sent ONLY when EVERY subscriber runs our exact build (Hello.CargoDelta + mod-version equality); one non-capable subscriber and all of them get the full snapshot, so an old client can never be handed this type.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -836,6 +837,14 @@ namespace BigAmbitionsMP
         /// commit a foreign world's character file into this session. Empty (pre-field
         /// marker / no mirrored manifest yet) = legacy name-only matching.</summary>
         public string DisconnectPlaythroughId { get; set; } = "";
+        /// <summary>Round-281 CAPABILITY flag: "my build understands MessageType.InteriorCargoSync."
+        /// Additive — an older client omits it, Newtonsoft leaves it FALSE, and the host then never
+        /// sends that peer (or anyone subscribed alongside it) the new message type.  This exists
+        /// because the mod VERSION string cannot answer the question: 0.1.17-without-round-281 and
+        /// 0.1.17-with-round-281 both report "0.1.17", so version equality alone would hand a new
+        /// message to a build that has no handler for it.  The host gates on this flag AND version
+        /// equality — the flag proves the code is there, the version keeps the pairing conservative.</summary>
+        public bool   CargoDelta { get; set; }
     }
 
     /// <summary>
@@ -1922,6 +1931,40 @@ namespace BigAmbitionsMP
         // computed owner-side from amenities) — customers complain about demands NOT in this set, so a
         // guest without it would complain about everything.
         public List<string>               FulfilledDemands { get; set; } = new();
+        // Round-281: which STRUCTURE this snapshot describes.  The host mints one number per address
+        // per distinct structure hash (InteriorSync.ComputeHashes' `structure` half — layout, designs,
+        // prices, the item set with poses/aliases/config) and stamps it on every full send.  The cheap
+        // cargo message (InteriorCargoSync) carries the same number, so a receiver can tell in O(1)
+        // whether the cargo it just got belongs to the structure it actually holds.  ADDITIVE: an older
+        // host leaves this 0, the receiver records 0, and — since that host also never sends cargo
+        // syncs — nothing downstream ever reads it.
+        public int                        StructVersion   { get; set; }
+    }
+
+    /// <summary>Round-281 — the cheap half of interior sync (MessageType.InteriorCargoSync).
+    /// One building's CURRENT cargo, absolute: `Items` names EVERY item in the building with the cargo
+    /// it holds right now (an emptied shelf appears with an empty list — that is what makes the message
+    /// idempotent rather than a diff-chain, and what lets an emptied shelf converge without waiting for
+    /// a structural change to force a full snapshot).  It deliberately carries NO structure: the
+    /// receiver matches StructVersion against the last FULL snapshot it applied and, on a mismatch,
+    /// throws the cargo away and re-requests the interior instead of guessing.
+    /// PlaythroughId is the world identity (same field as StoreMirror/LoadData) — a cargo write is a
+    /// save-state write, and a name-collided address from a different lineage must not receive one.</summary>
+    public class InteriorCargoSyncPayload
+    {
+        public string AddressKey    { get; set; } = "";
+        public string PlaythroughId { get; set; } = "";
+        public int    StructVersion { get; set; }
+        public List<InteriorCargoItemInfo> Items { get; set; } = new();
+    }
+
+    /// <summary>One item's cargo on the cargo-sync wire.  Reuses the snapshot's own CargoInstanceInfo
+    /// verbatim (same serializer, same receiver-side builder) so the two channels can never drift into
+    /// describing cargo differently.</summary>
+    public class InteriorCargoItemInfo
+    {
+        public string Id { get; set; } = "";
+        public List<CargoInstanceInfo> CargoInstances { get; set; } = new();
     }
 
     public class CustomerEntryInfo

@@ -975,6 +975,48 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+                    // ── Round-281 (S4-lite): IDENTICAL PAYLOAD, ALREADY APPLIED → SKIP ─────────────
+                    // The degree-1 echo — a guest's own edit coming back from the host — arrives as a
+                    // byte-for-byte repeat of what this machine just applied, and the apply below is
+                    // the most expensive thing the mod does on the main thread (field 20260818-22*:
+                    // #1 slow-apply on BOTH machines, mean 119ms, max 284ms).  Re-deriving state we
+                    // already hold is pure cost, so compare first and leave.  No protocol change: the
+                    // signature is computed over the PAYLOAD (both hash halves + the two flags that
+                    // change how the same content applies), so it is exact, not a heuristic.
+                    // NOTE the deliberate asymmetry: only a payload that actually RAN to completion
+                    // records a signature (the recording sits at the end, past every refusal), so a
+                    // refused apply can never be mistaken for an applied one.
+                    string applySig;
+                    {
+                        var (sHs, sHv, _) = InteriorSync.ComputeHashes(payload);
+                        applySig = $"{sHs}|{sHv}|{(payload.ItemInstancesAuthoritative ? 1 : 0)}|{(grantedEdit ? 1 : 0)}|{payload.Layout ?? ""}";
+                    }
+                    // Round-281b (verifier finding a): only an apply that RAN TO COMPLETION may
+                    // become the S4-lite baseline.  The round-103 empty-snapshot refusal and the
+                    // item-apply catch both fell through to the recordings — a refused-or-thrown
+                    // apply recorded a signature, and a byte-identical re-send (the host's only
+                    // corrective move) was then skipped forever.
+                    bool appliedFully = true;
+                    // Two halves, cheap one first.  The payload half says "the host is telling me the
+                    // same thing again"; the LOCAL half says "and my copy is still the one I applied it
+                    // to".  Both are required — a save load, a heal, or any other path that replaces
+                    // reg.itemInstances underneath us makes a repeat payload NEWS again, and a skip
+                    // there would strand the stale copy with no second chance (the host has no reason
+                    // to ever send a different snapshot).  The registration lookup is only paid when
+                    // the payload half already matched.
+                    if (_lastAppliedSig.TryGetValue(payload.AddressKey, out var prevSig) && prevSig == applySig
+                        && _lastAppliedLocalTag.TryGetValue(payload.AddressKey, out var prevLocal)
+                        && prevLocal == LocalInteriorTag(FindRegistration(payload.AddressKey)))
+                    {
+                        // Record the version even on a skip.  Otherwise a full snapshot whose CONTENT
+                        // is identical but whose StructVersion moved (a host restart re-mints from 1)
+                        // would be skipped, the receiver would keep the old number, every cargo sync
+                        // would mismatch, and the re-request would loop forever against a snapshot
+                        // that keeps getting skipped.  One line closes that loop.
+                        if (!grantedEdit) _lastAppliedStructVersion[payload.AddressKey] = payload.StructVersion;
+                        NoteApplySkipped(payload.AddressKey);
+                        return;
+                    }
                     // Round-178 (user design ruling, 2026-07-28): FOR A BUILDING THIS MACHINE OWNS, a
                     // generic snapshot may only FILL AN EMPTY COPY — never modify a developed one.  The
                     // owner is the authority; the generic channel exists to update REPLICAS, and the
@@ -1190,6 +1232,7 @@ namespace BigAmbitionsMP
                             // removals travel as per-item diffs while the owner is inside.
                             if (protectPlayerBusiness && payload.ItemInstances.Count == 0 && reg.itemInstances.Count > 0)
                             {
+                                appliedFully = false;   // round-281b: a refusal is not a baseline
                                 Plugin.Logger.LogWarning($"[Patcher] Interior item apply REFUSED for '{payload.AddressKey}': an empty snapshot (itemAuth={payload.ItemInstancesAuthoritative}) would have cleared {reg.itemInstances.Count} stored item(s) of a player-owned business. Kept the stored interior.");
                             }
                             else
@@ -1494,7 +1537,7 @@ namespace BigAmbitionsMP
                             }
                         }
                     }
-                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] itemInstances apply: {ex.Message}"); }
+                    catch (Exception ex) { appliedFully = false; Plugin.Logger.LogWarning($"[Patcher] itemInstances apply: {ex.Message}"); }   // round-281b: a thrown apply is not a baseline
 
                     // Round-39d — Phase 3 customer presence: seed the local shopper table from the owner's
                     // schedule (no-op on the owner; local completed flags preserved inside SeedFor).
@@ -1516,6 +1559,20 @@ namespace BigAmbitionsMP
 
                     Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' {InteriorSync.SnapshotSummary(payload)} (changed={changedIds.Count} moved={movedIds.Count} cargoOnly={cargoOnlyIds.Count} stackedInPlace={stackedInPlace} removed={removedIds.Count}){_deltaNames}.");
                     InteriorSync.NoteSnapshotApply(payload.AddressKey);   // round-213: re-send-loop detector
+                    // Round-281: this apply COMPLETED, so it is now the baseline for both guards —
+                    // the S4-lite duplicate test above, and the struct version every incoming cargo
+                    // sync is measured against.  grantedEdit payloads are excluded from the version:
+                    // they come from the guest-edit channel (BuildingInteriorEdit), which is not the
+                    // host's stamped subscriber stream and always carries 0 — recording it would tell
+                    // this machine it holds a structure the host never described.
+                    if (appliedFully)
+                    {
+                        _lastAppliedSig[payload.AddressKey]      = applySig;
+                        _lastAppliedLocalTag[payload.AddressKey] = LocalInteriorTag(reg);   // what our copy looks like NOW
+                        if (!grantedEdit) _lastAppliedStructVersion[payload.AddressKey] = payload.StructVersion;
+                    }
+                    else
+                        Plugin.Logger.LogInfo($"[Patcher] baseline NOT recorded for '{payload.AddressKey}' — the apply was refused or threw, so an identical re-send stays news (round-281b).");
 
                     // Trigger a visual refresh of the interior IF the local
                     // player is currently inside THIS building.  Writing to
@@ -1527,6 +1584,197 @@ namespace BigAmbitionsMP
                     TryRefreshActiveInteriorIfMatches(payload.AddressKey, changedIds, removedIds, changedDesignUuids, _layoutChanged, movedIds);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorSnapshot: {ex.Message}"); }
+            });
+        }
+
+        // ── Round-281: cargo sync (receiver) ──────────────────────────────────────────────────────
+        // Per-address baselines for the two round-281 guards.  `_lastAppliedSig` is the S4-lite
+        // duplicate test; `_lastAppliedStructVersion` is which STRUCTURE this machine actually holds,
+        // recorded from the last full snapshot that ran to completion.
+        private static readonly Dictionary<string, string> _lastAppliedSig           = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, string> _lastAppliedLocalTag      = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, int>    _lastAppliedStructVersion = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, int>    _applySkipCount           = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, float>  _applySkipLoggedAt        = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, float>  _cargoReRequestedAt       = new(StringComparer.Ordinal);
+        private const float ApplySkipLogSeconds  = 60f;
+        private const float CargoReRequestSeconds = 5f;
+
+        /// <summary>A coarse fingerprint of what THIS machine's copy of an interior currently looks
+        /// like.  Recorded right after an apply and re-checked before the S4-lite skip, so anything
+        /// that rewrote the registration out-of-band — a save load, a heal, a native teardown — turns
+        /// the next repeat payload back into news instead of a skip.  Deliberately coarse and O(1):
+        /// this runs on the hot receive path, and its job is to catch a REPLACED copy, not to audit
+        /// one.  A null registration returns a distinct tag, so "gone" never matches "present".</summary>
+        private static string LocalInteriorTag(BuildingRegistration? reg)
+        {
+            if (reg == null) return "none";
+            try { return $"{reg.itemInstances?.Count ?? -1}:{reg.interiorDesigns?.Count ?? -1}:{reg.dirtSpots?.Count ?? -1}"; }
+            catch { return "unreadable"; }
+        }
+
+        /// <summary>S4-lite counter.  Throttled to one line per address per minute WITH the count —
+        /// a per-skip line would cost more than the skip saves, and a silent optimization is one
+        /// nobody can confirm is working from a field log.</summary>
+        private static void NoteApplySkipped(string addr)
+        {
+            try
+            {
+                _applySkipCount.TryGetValue(addr, out var n);
+                _applySkipCount[addr] = n + 1;
+                float now = UnityEngine.Time.realtimeSinceStartup;
+                if (_applySkipLoggedAt.TryGetValue(addr, out var at) && now - at < ApplySkipLogSeconds) return;
+                _applySkipLoggedAt[addr] = now;
+                int total = _applySkipCount[addr];
+                _applySkipCount[addr] = 0;
+                Plugin.Logger.LogInfo($"[Patcher] '{addr}': skipped {total} interior apply(ies) — byte-identical to the state already applied (round-281 S4-lite; each one avoided a full ~120ms main-thread rebuild).");
+            }
+            catch { }
+        }
+
+        /// <summary>Round-281: a per-address, per-kind, once-a-minute notice.  Cargo syncs arrive many
+        /// times a minute by design, so ANY unconditional line inside the cargo apply becomes exactly
+        /// the kind of log flood this round was opened to reduce — the notices that describe a standing
+        /// condition (we own this building; ids we don't know) say it once and then stay quiet.</summary>
+        private static readonly Dictionary<string, float> _cargoNoteAt = new(StringComparer.Ordinal);
+        private static void CargoNoteThrottled(string addr, string kind, string message)
+        {
+            try
+            {
+                string key = kind + "|" + addr;
+                float now = UnityEngine.Time.realtimeSinceStartup;
+                if (_cargoNoteAt.TryGetValue(key, out var at) && now - at < ApplySkipLogSeconds) return;
+                _cargoNoteAt[key] = now;
+                Plugin.Logger.LogInfo(message);
+            }
+            catch { }
+        }
+
+        /// <summary>Ask the host for a fresh full interior.  Loud on purpose and throttled per address:
+        /// a re-request means this machine received cargo for a structure it does not hold, which
+        /// should be rare (a structural edit racing a cargo send) — if a log is full of these, the
+        /// version stamping is wrong and that is worth seeing immediately.  Recurrence-covered rather
+        /// than retried: cargo keeps flowing, so the NEXT stale cargo sync re-asks once the throttle
+        /// window passes, and the arriving full snapshot re-seeds the version.</summary>
+        private static void ReRequestInterior(string addr, string why)
+        {
+            try
+            {
+                if (!MPClient.IsConnected || MPServer.IsRunning) return;
+                float now = UnityEngine.Time.realtimeSinceStartup;
+                if (_cargoReRequestedAt.TryGetValue(addr, out var at) && now - at < CargoReRequestSeconds) return;
+                _cargoReRequestedAt[addr] = now;
+                Plugin.Logger.LogWarning($"[Patcher] cargo sync for '{addr}' IGNORED and a full interior RE-REQUESTED — {why} (round-281). Cargo keeps flowing; it will match once the full snapshot lands.");
+                MPClient.SendInteriorRequest(addr);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] cargo re-request for '{addr}': {ex.Message}"); }
+        }
+
+        /// <summary>Apply a cargo-only interior update (MessageType.InteriorCargoSync, round-281).
+        ///
+        /// What it does NOT do is as load-bearing as what it does:
+        ///  • no scene refresh — cargo owns no scene objects.  The full apply's refresh exists to
+        ///    rebuild walls/floors/items; the existing in-place cargo branch already skips it and
+        ///    fires the native cargo callback instead, which is what makes a shelf redraw its boxes.
+        ///  • no round-213 tripwire — these are the CHEAP path; feeding a counter calibrated on
+        ///    ~120ms applies would turn the resend-loop alarm into permanent noise (contract item 6).
+        ///  • no structural inference — an id this machine doesn't know is skipped, never created.
+        ///    An unknown id means a structural change is in flight, and the version check is what
+        ///    covers that; guessing an item into existence from a cargo message is how a cheap
+        ///    channel starts quietly authoring structure.</summary>
+        public static void ApplyInteriorCargoSync(InteriorCargoSyncPayload payload, int wireBytes)
+        {
+            if (payload == null || string.IsNullOrEmpty(payload.AddressKey)) return;
+            RunOnMainThread(() =>
+            {
+                try
+                {
+                    string addr = payload.AddressKey;
+                    // Lineage guard: a cargo write is a save-state write, and session/address names can
+                    // collide across worlds (the handoff-slice-3 hazard).  Both sides must know their
+                    // identity for this to mean anything — either side empty is legacy, not a mismatch.
+                    try
+                    {
+                        string mine = MPSaveCoordinator.ActivePlaythroughId ?? "";
+                        if (!string.IsNullOrEmpty(mine) && !string.IsNullOrEmpty(payload.PlaythroughId)
+                            && mine != payload.PlaythroughId)
+                        {
+                            Plugin.Logger.LogWarning($"[Patcher] cargo sync for '{addr}' DROPPED — it belongs to a different world (lineage '{payload.PlaythroughId}' vs ours '{mine}').");
+                            return;
+                        }
+                    }
+                    catch { }
+
+                    // No baseline at all: this machine has never applied a full snapshot for the
+                    // address, so it has no structure to hang cargo on.  Ask for one.
+                    if (!_lastAppliedStructVersion.TryGetValue(addr, out var mineVer))
+                    {
+                        ReRequestInterior(addr, "no full snapshot has ever been applied for this building");
+                        return;
+                    }
+                    // Stale structure: the host is describing cargo for a layout/item set we do not
+                    // hold.  Applying it would write the right amounts onto the wrong shelves.
+                    if (mineVer != payload.StructVersion)
+                    {
+                        ReRequestInterior(addr, $"our structure is version {mineVer}, the cargo claims version {payload.StructVersion}");
+                        return;
+                    }
+
+                    var reg = FindRegistration(addr);
+                    if (reg?.itemInstances == null)
+                    {
+                        ReRequestInterior(addr, "no local registration for this building");
+                        return;
+                    }
+
+                    // CARGO AUTHORITY SHIELD (round-38d) — the same rule as the full apply's in-place
+                    // cargo branch, for the same reason: when THIS machine owns the building, its live
+                    // cargo IS the truth and an inbound copy is a replica.  The host's relay of our own
+                    // pushed snapshot can come back to us, and letting it write would launder a stale
+                    // replica into owner state.  TrulyMine excludes merger-flipped shops — never shield
+                    // a replica against its real owner.
+                    bool receiverOwnsThis = false;
+                    try { receiverOwnsThis = MergerFlip.TrulyMine(reg); } catch { }
+                    if (receiverOwnsThis)
+                    {
+                        CargoNoteThrottled(addr, "shield", $"[Patcher] cargo sync for '{addr}' SHIELDED — this machine owns the building; kept our own cargo on all {payload.Items.Count} item(s) (round-38d).");
+                        InteriorSync.NoteCargoSyncApply(addr, 0, wireBytes);
+                        return;
+                    }
+
+                    int changed = 0, unknown = 0;
+                    _lastItemSer.TryGetValue(addr, out var lastSer);
+                    foreach (var entry in payload.Items)
+                    {
+                        if (entry == null || string.IsNullOrEmpty(entry.Id)) continue;
+                        if (!reg.itemInstances.TryGetValue(entry.Id, out var live) || live == null) { unknown++; continue; }
+                        if (!CargoDiffers(live, entry.CargoInstances)) continue;
+                        FillCargoInstances(live, entry.CargoInstances, addr);
+                        // The native announcement a local deposit/sale makes — ShelfController and
+                        // friends redraw their boxes off this, so it is what makes the change VISIBLE.
+                        try { live.OnItemsInCargoUpdated()?.Invoke(); } catch { }
+                        // Invalidate this item's per-item diff baseline.  _lastItemSer records what the
+                        // last SNAPSHOT said; we just changed the live object out from under it, so a
+                        // later snapshot whose cargo happens to match that old record would be judged
+                        // "unchanged", keep the live object, and freeze our out-of-band value in place.
+                        // Dropping the entry costs one deserialize on the next full apply and closes it.
+                        try { lastSer?.Remove(entry.Id); } catch { }
+                        changed++;
+                    }
+
+                    // A cargo write moves state the S4-lite fingerprint cannot see (counts are
+                    // unchanged — same items, same designs, same dirt cells; only amounts moved), so
+                    // drop the duplicate-apply baseline.  Without this, a later full snapshot that
+                    // happens to match the LAST one byte-for-byte would be skipped as a duplicate
+                    // while our cargo sits at whatever the cargo syncs left it — the host's cargo
+                    // going X → Y → X is enough to produce that.  The cost is one un-skipped apply.
+                    if (changed > 0) { try { _lastAppliedSig.Remove(addr); } catch { } }
+
+                    if (unknown > 0)
+                        CargoNoteThrottled(addr, "unknown", $"[Patcher] cargo sync for '{addr}': {unknown} unknown item id(s) ignored — a structural change is in flight; the version check covers it.");
+                    InteriorSync.NoteCargoSyncApply(addr, changed, wireBytes);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorCargoSync: {ex.Message}"); }
             });
         }
 
@@ -1998,6 +2246,21 @@ namespace BigAmbitionsMP
         public static void ForgetInteriorBaseline(string addressKey)
         {
             try { if (!string.IsNullOrEmpty(addressKey)) _lastItemSer.Remove(addressKey); } catch { }
+            // Round-281: the S4-lite duplicate test MUST be forgotten with it.  This method exists to
+            // force the next snapshot to replace every live item — and the re-requested snapshot is,
+            // by construction, byte-identical to the one already applied (the corruption is LOCAL, the
+            // host's copy never changed).  Leaving the signature behind would make S4-lite skip the
+            // very heal this call was made to trigger.  The struct version goes too: until the healing
+            // snapshot lands, cargo for this address should be re-requested, not applied onto a copy
+            // the caller has just declared untrustworthy.
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey)) return;
+                _lastAppliedSig.Remove(addressKey);
+                _lastAppliedLocalTag.Remove(addressKey);
+                _lastAppliedStructVersion.Remove(addressKey);
+            }
+            catch { }
         }
 
         /// <summary>Round-34: pre-fix sessions PERSISTED injected buyer-purchaser flags into saves (the owner
@@ -2676,18 +2939,55 @@ namespace BigAmbitionsMP
                 foreach (var cc in i.CustomColors)
                     if (cc != null) sb.Append('|').Append(cc.Channel).Append(':').Append(cc.ColorPacked);
             sb.Append('#');
-            if (i.CargoInstances != null)
-                foreach (var c in i.CargoInstances)
-                    if (c != null) sb.Append(c.ItemName ?? "").Append(':').Append(c.Amount).Append(':')
-                                     .Append(c.Paid).Append(':').Append(c.PricePerUnit.ToString(inv)).Append(':')
-                                     .Append(c.CustomColors?.Count ?? 0).Append(':')
-                                     .Append(c.NestedCargoInstances?.Count ?? 0).Append(';');
+            AppendCargoSig(sb, i.CargoInstances);
             sb.Append('#');
             if (i.StackedItems != null)
                 foreach (var s in i.StackedItems)
                     if (s != null) sb.Append(s.ChildId ?? "").Append(':').Append(s.ChildItemName ?? "").Append(':')
                                      .Append(s.AttachmentIndex).Append(';');
             return sb.ToString();
+        }
+
+        // Round-281: the cargo half of IdentitySig, lifted out verbatim.  It was already two mirrored
+        // copies (wire DTO / live instance) that MUST append identically or a cargo delta silently
+        // reclassifies as "different item" and respawns; the cargo-sync channel needed the same
+        // comparison to decide which items actually changed, and a THIRD copy of a rule that has to
+        // agree with two others is how these bugs are born.  Both overloads stay right here, adjacent,
+        // so a field added to one is visibly missing from the other.
+        private static void AppendCargoSig(System.Text.StringBuilder sb, List<CargoInstanceInfo>? cargo, bool includePrice = true)
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            if (cargo == null) return;
+            foreach (var c in cargo)
+                if (c != null) sb.Append(c.ItemName ?? "").Append(':').Append(c.Amount).Append(':')
+                                 .Append(c.Paid).Append(':').Append(includePrice ? c.PricePerUnit.ToString(inv) : "-").Append(':')
+                                 .Append(c.CustomColors?.Count ?? 0).Append(':')
+                                 .Append(c.NestedCargoInstances?.Count ?? 0).Append(';');
+        }
+
+        private static void AppendCargoSig(System.Text.StringBuilder sb, BigAmbitions.Items.ItemInstance ii, bool includePrice = true)
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            if (ii?.cargoInstances == null) return;
+            foreach (var c in ii.cargoInstances)
+                if (c != null) sb.Append(c.itemName ?? "").Append(':').Append(c.amount).Append(':')
+                                 .Append(c.paid).Append(':').Append(includePrice ? c.pricePerUnit.ToString(inv) : "-").Append(':')
+                                 .Append(c.customColors?.Count ?? 0).Append(':')
+                                 .Append(c.nestedCargoInstances?.Count ?? 0).Append(';');
+        }
+
+        /// <summary>Round-281: "does this item's cargo differ from what the wire says?"  Built from the
+        /// two overloads above, so it can never disagree with the full-snapshot path's own cargo test.
+        /// Round-281b (verifier finding, read-confirmed): PRICE IS EXCLUDED here — FillCargoInstances
+        /// deliberately re-stamps PricePerUnit from the local price table (by-design divergence, the
+        /// same reason the audit hash excludes it), so a live-vs-wire compare that includes price marks
+        /// every table-priced item "changed" on EVERY sync: 9 phantom entries per sync in the soak,
+        /// native cargo callbacks fired for all of them, and S4-lite's baseline invalidated each time.</summary>
+        private static bool CargoDiffers(BigAmbitions.Items.ItemInstance live, List<CargoInstanceInfo>? incoming)
+        {
+            var a = new System.Text.StringBuilder(); AppendCargoSig(a, live, includePrice: false);
+            var b = new System.Text.StringBuilder(); AppendCargoSig(b, incoming, includePrice: false);
+            return !string.Equals(a.ToString(), b.ToString(), StringComparison.Ordinal);
         }
 
         private static string IdentitySig(BigAmbitions.Items.ItemInstance ii)
@@ -2704,18 +3004,77 @@ namespace BigAmbitionsMP
                 foreach (var cc in ii.customColors)
                     if (cc != null) sb.Append('|').Append((int)cc.channel).Append(':').Append(cc.color.color);
             sb.Append('#');
-            if (ii.cargoInstances != null)
-                foreach (var c in ii.cargoInstances)
-                    if (c != null) sb.Append(c.itemName ?? "").Append(':').Append(c.amount).Append(':')
-                                     .Append(c.paid).Append(':').Append(c.pricePerUnit.ToString(inv)).Append(':')
-                                     .Append(c.customColors?.Count ?? 0).Append(':')
-                                     .Append(c.nestedCargoInstances?.Count ?? 0).Append(';');
+            AppendCargoSig(sb, ii);
             sb.Append('#');
             if (ii.stackedItems != null)
                 foreach (var s in ii.stackedItems)
                     if (s != null) sb.Append(s.childId?.ToString() ?? "").Append(':').Append(s.childItemName ?? "").Append(':')
                                      .Append(s.attachmentIndex).Append(';');
             return sb.ToString();
+        }
+
+        /// <summary>Rebuild one item's cargo list from the wire, IN PLACE on the target instance.
+        /// Round-281 extracted this out of DeserializeItemInstance so the two channels that write cargo
+        /// — the full snapshot and the cargo sync — share one definition.  Two copies of this would be
+        /// two places to remember the price-table stamp and the round-99 null-colour traps, and the
+        /// cheap channel is exactly where a forgotten one would hide.
+        /// `addressForPrices` is the shop whose retail table stamps the display price: the snapshot path
+        /// passes the item's own street address, the cargo path passes the payload's AddressKey — the
+        /// same string, from the same address format (GameStateReader.AddressKey).</summary>
+        private static void FillCargoInstances(BigAmbitions.Items.ItemInstance ii, List<CargoInstanceInfo>? cargo, string addressForPrices)
+        {
+            if (ii?.cargoInstances == null || cargo == null) return;
+            ii.cargoInstances.Clear();
+            foreach (var c in cargo)
+            {
+                if (c == null) continue;
+                // Display correctness (user, 2026-06-12): the CHARGE comes
+                // from the store table; the replica cargo must show the
+                // same number (basket said $18 while the charge was $22).
+                // Stamp from the table when it has an entry.
+                float price = c.PricePerUnit;
+                try
+                {
+                    float t = MPRegisterSync.GetShopPriceAt(addressForPrices, c.ItemName);
+                    if (t >= 0f) price = t;
+                }
+                catch { }
+                var ci = new BigAmbitions.Items.CargoInstance(
+                    c.ItemName,
+                    c.Amount,
+                    price,
+                    c.Paid);
+                // Round-99: the 4-arg CargoInstance ctor sets customColors = NULL —
+                // same dead-guard class as the item colors elsewhere; assign instead.
+                if (c.CustomColors != null && c.CustomColors.Count > 0)
+                {
+                    ci.customColors = new List<BigAmbitions.Items.CustomColor>();
+                    foreach (var cc in c.CustomColors)
+                        ci.customColors.Add(new BigAmbitions.Items.CustomColor { channel = (BigAmbitions.Items.CustomColorChannel)cc.Channel, color = new SerializableColor(cc.ColorPacked) });
+                }
+                if (ci.nestedCargoInstances != null && c.NestedCargoInstances != null)
+                {
+                    ci.nestedCargoInstances.Clear();
+                    foreach (var n in c.NestedCargoInstances)
+                    {
+                        var nci = new BigAmbitions.Items.NestedCargoInstance
+                        {
+                            itemName     = n.ItemName,
+                            amount       = n.Amount,
+                            pricePerUnit = n.PricePerUnit,
+                        };
+                        // Round-99: NestedCargoInstance.customColors defaults NULL — same dead guard; assign.
+                        if (n.CustomColors != null && n.CustomColors.Count > 0)
+                        {
+                            nci.customColors = new List<BigAmbitions.Items.CustomColor>();
+                            foreach (var cc in n.CustomColors)
+                                nci.customColors.Add(new BigAmbitions.Items.CustomColor { channel = (BigAmbitions.Items.CustomColorChannel)cc.Channel, color = new SerializableColor(cc.ColorPacked) });
+                        }
+                        ci.nestedCargoInstances.Add(nci);
+                    }
+                }
+                ii.cargoInstances.Add(ci);
+            }
         }
 
         private static BigAmbitions.Items.ItemInstance? DeserializeItemInstance(ItemInstanceInfo i)
@@ -2775,61 +3134,9 @@ namespace BigAmbitionsMP
                     }
                 }
 
-                // Cargo
-                if (ii.cargoInstances != null && i.CargoInstances != null)
-                {
-                    ii.cargoInstances.Clear();
-                    foreach (var c in i.CargoInstances)
-                    {
-                        // Display correctness (user, 2026-06-12): the CHARGE comes
-                        // from the store table; the replica cargo must show the
-                        // same number (basket said $18 while the charge was $22).
-                        // Stamp from the table when it has an entry.
-                        float price = c.PricePerUnit;
-                        try
-                        {
-                            float t = MPRegisterSync.GetShopPriceAt(
-                                $"{i.StreetNumber} {i.StreetName}", c.ItemName);
-                            if (t >= 0f) price = t;
-                        }
-                        catch { }
-                        var ci = new BigAmbitions.Items.CargoInstance(
-                            c.ItemName,
-                            c.Amount,
-                            price,
-                            c.Paid);
-                        // Round-99: the 4-arg CargoInstance ctor sets customColors = NULL —
-                        // same dead-guard class as the item colors below; assign instead.
-                        if (c.CustomColors != null && c.CustomColors.Count > 0)
-                        {
-                            ci.customColors = new List<BigAmbitions.Items.CustomColor>();
-                            foreach (var cc in c.CustomColors)
-                                ci.customColors.Add(new BigAmbitions.Items.CustomColor { channel = (BigAmbitions.Items.CustomColorChannel)cc.Channel, color = new SerializableColor(cc.ColorPacked) });
-                        }
-                        if (ci.nestedCargoInstances != null && c.NestedCargoInstances != null)
-                        {
-                            ci.nestedCargoInstances.Clear();
-                            foreach (var n in c.NestedCargoInstances)
-                            {
-                                var nci = new BigAmbitions.Items.NestedCargoInstance
-                                {
-                                    itemName     = n.ItemName,
-                                    amount       = n.Amount,
-                                    pricePerUnit = n.PricePerUnit,
-                                };
-                                // Round-99: NestedCargoInstance.customColors defaults NULL — same dead guard; assign.
-                                if (n.CustomColors != null && n.CustomColors.Count > 0)
-                                {
-                                    nci.customColors = new List<BigAmbitions.Items.CustomColor>();
-                                    foreach (var cc in n.CustomColors)
-                                        nci.customColors.Add(new BigAmbitions.Items.CustomColor { channel = (BigAmbitions.Items.CustomColorChannel)cc.Channel, color = new SerializableColor(cc.ColorPacked) });
-                                }
-                                ci.nestedCargoInstances.Add(nci);
-                            }
-                        }
-                        ii.cargoInstances.Add(ci);
-                    }
-                }
+                // Cargo — round-281: the body moved into FillCargoInstances so the cargo-sync
+                // channel builds cargo through the SAME code, not a second copy of it.
+                FillCargoInstances(ii, i.CargoInstances, $"{i.StreetNumber} {i.StreetName}");
 
                 // Dirt spots — round-99: same dead-guard class as the colors (native field
                 // has no initializer → the old `ii.dirtSpotsThatAffects != null` never fired).

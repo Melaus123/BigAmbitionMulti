@@ -191,7 +191,11 @@ namespace BigAmbitionsMP
                 // CACHED read only — OnConnected runs on the LiteNetLib network thread and
                 // computing this touches Unity asset loading (crash 2026-07-27).
                 Content  = MPContentFingerprint.Cached,
-                Mods     = MPContentFingerprint.CachedMods   // round-253: host diffs + informs on mismatch
+                Mods     = MPContentFingerprint.CachedMods,  // round-253: host diffs + informs on mismatch
+                // Round-281: "I have the InteriorCargoSync handler."  A literal true is the whole
+                // point — the flag's meaning is "this build contains the receiver", which is a
+                // compile-time fact about the assembly being sent, not a runtime setting.
+                CargoDelta = true
             };
             // Phase 3: offer any pending disconnect save (un-uploaded progress from our last leave). The
             // host decides whether to request it; it never auto-overrides a host save.
@@ -555,6 +559,10 @@ namespace BigAmbitionsMP
 
                 case MessageType.InteriorSnapshot:
                     HandleInteriorSnapshot(env);
+                    break;
+
+                case MessageType.InteriorCargoSync:
+                    HandleInteriorCargoSync(env);
                     break;
 
                 case MessageType.RivalsSnapshot:
@@ -1208,6 +1216,22 @@ namespace BigAmbitionsMP
             if (payload == null) return;
             Plugin.Logger.LogInfo($"[Client] Received interior snapshot for '{payload.AddressKey}': {InteriorSync.SnapshotSummary(payload)}.");
             GameStatePatcher.ApplyInteriorSnapshot(payload);
+        }
+
+        /// <summary>Round-281: the cheap cargo-only interior update.  Deliberately quiet at INFO —
+        /// this arrives many times per minute in a busy shop, which is the entire point; the periodic
+        /// stats line (InteriorSync.NoteCargoSyncApply) is where it becomes visible.  The byte count is
+        /// taken from the envelope's own payload string so the reported saving is measured, not
+        /// estimated from field counts.</summary>
+        private static void HandleInteriorCargoSync(MessageEnvelope env)
+        {
+            var payload = env.GetPayload<InteriorCargoSyncPayload>();
+            if (payload == null) return;
+            // Round-281b: Data is a STRING — Length is a char count, not wire bytes; the
+            // host logs real envelope bytes, so report UTF-8 bytes here to stay comparable.
+            int approxBytes = 0;
+            try { approxBytes = env.Data == null ? 0 : System.Text.Encoding.UTF8.GetByteCount(env.Data); } catch { }
+            GameStatePatcher.ApplyInteriorCargoSync(payload, approxBytes);
         }
 
         private static void HandleRivalsSnapshot(MessageEnvelope env)

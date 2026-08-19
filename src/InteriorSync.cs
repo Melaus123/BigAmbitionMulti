@@ -59,6 +59,15 @@ namespace BigAmbitionsMP
             _lastLocalOwnerVolatileAt.Clear();
             _applyTimes.Clear();
             _loopWarnedAt.Clear();
+            // Round-281: the struct-version mint and its send-side bookkeeping.  Clearing the version
+            // counter is safe by construction — a receiver still holding an old number sees a MISMATCH
+            // on the next cargo sync, throws it away and re-requests, which re-seeds both sides.
+            _structVersionByAddr.Clear();
+            _structVersionHashByAddr.Clear();
+            _structVolHashByAddr.Clear();
+            _cargoSendsByAddr.Clear();
+            _cargoSendLoggedAt.Clear();
+            _cargoFallbackReason.Clear();
             _lastPollAt = 0f;
             _lastOwnerPollAt = 0f;
             _localOwnerAddress = "";
@@ -108,10 +117,14 @@ namespace BigAmbitionsMP
                 if (snap == null) return;
                 // Round-280 (S1): stamp ALL THREE trackers — stamping only the full hash left
                 // the Tick's 12s clock un-reset, so it could double-send moments later.
-                var (hsSub, hvSub) = ComputeHashes(snap);
+                var (hsSub, hvSub, hnSub) = ComputeHashes(snap);
                 _lastHashByAddr[addressKey] = hvSub;
                 _lastStructHashByAddr[addressKey] = hsSub;
+                _structVolHashByAddr[addressKey] = hnSub;   // round-281: the cargo-only discriminator's baseline
                 _volatileSentAtByAddr[addressKey] = UnityEngine.Time.realtimeSinceStartup;
+                // Round-281: this snapshot is the receiver's BASELINE — it is what every later cargo
+                // sync for this address is measured against, so it must carry the structure's version.
+                StampStructVersion(snap, hsSub);
                 MPServer.SendInteriorSnapshotTo(peer, snap);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] HandleRequest: {ex.Message}"); }
@@ -180,7 +193,7 @@ namespace BigAmbitionsMP
                     // 2s beat as before; VOLATILE-only churn (cargo as customers buy,
                     // dirt underfoot, item state) coalesces - the rig 2026-08-01 loop
                     // shipped the full 754-item interior every beat for one visitor.
-                    var (hs, hv) = ComputeHashes(snap);
+                    var (hs, hv, hn) = ComputeHashes(snap);
                     bool fullChanged = !_lastHashByAddr.TryGetValue(addr, out var pf) || pf != hv;
                     if (!fullChanged) continue;
                     bool structChanged = !_lastStructHashByAddr.TryGetValue(addr, out var ps) || ps != hs;
@@ -188,11 +201,27 @@ namespace BigAmbitionsMP
                         && _volatileSentAtByAddr.TryGetValue(addr, out var tSent)
                         && now - tSent < VolatileCoalesceSeconds)
                         continue;
+                    // Round-281: cargo-only means CARGO-ONLY.  `!structChanged` alone would also be
+                    // true for a dirt or item-state delta, and routing those onto the cargo channel
+                    // would strand them until some unrelated structural edit forced a full snapshot.
+                    // A missing baseline reads as "not cargo-only" — the full snapshot is always a
+                    // correct answer, only a larger one.
+                    bool cargoOnly = !structChanged
+                                     && _structVolHashByAddr.TryGetValue(addr, out var pn) && pn == hn;
                     _lastHashByAddr[addr] = hv;
                     _lastStructHashByAddr[addr] = hs;
+                    _structVolHashByAddr[addr] = hn;
                     _volatileSentAtByAddr[addr] = now;
+                    int sv = StampStructVersion(snap, hs);
                     if (_subsByBuilding.TryGetValue(addr, out var set))
+                    {
+                        // The gates above have already decided a send is warranted; all that is left is
+                        // WHICH message carries it.  The round-280 trackers are stamped IDENTICALLY
+                        // either way — whichever goes out, this address has spoken and the coalescing
+                        // clock runs the same.
+                        if (cargoOnly && TrySendCargoOnly(addr, set, snap, sv, "tick")) continue;
                         MPServer.BroadcastInteriorSnapshotTo(set, snap);
+                    }
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] Tick: {ex.Message}"); }
@@ -381,7 +410,14 @@ namespace BigAmbitionsMP
 
                 GameStatePatcher.ApplyInteriorSnapshot(payload);
                 if (_subsByBuilding.TryGetValue(payload.AddressKey, out var set))
+                {
+                    // Round-281: a relayed owner push is still a FULL send to subscribers, so it is
+                    // still a receiver's baseline — stamp it.  (The owner's own machine sent this
+                    // payload with StructVersion 0; the number is the HOST's to mint, since the host
+                    // is the only machine that sends cargo syncs for this address.)
+                    StampStructVersion(payload);
                     MPServer.BroadcastInteriorSnapshotTo(set, payload);
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] HandleOwnerSnapshot: {ex.Message}"); }
         }
@@ -463,7 +499,15 @@ namespace BigAmbitionsMP
                 // Round-213: same split gate as the host subscriber tick - an owner
                 // standing in their own busy shop pushed the full interior every 2s
                 // beat on cargo/dirt churn; the host relayed each to every visitor.
-                var (ohs, ohv) = ComputeHashes(snap);
+                // ROUND-281 SCOPE GUARD (deliberate, not an oversight): this GUEST-OWNER → HOST push
+                // stays a FULL snapshot.  The cargo channel is host→subscriber only, and this leg is a
+                // different contract: the host does not merely relay this payload, it CACHES it
+                // (_ownerSnapshotsByAddr) and serves that cached object to everyone who later enters
+                // the building.  A cargo-only message cannot maintain a cache that must answer
+                // "what is the whole interior" — it would have to be merged into the stored snapshot,
+                // and a merge is where "absolute state" quietly becomes a diff-chain.  Shrinking this
+                // leg is its own round with its own design.
+                var (ohs, ohv, _) = ComputeHashes(snap);
                 float onow = UnityEngine.Time.realtimeSinceStartup;
                 if (!force)
                 {
@@ -593,7 +637,7 @@ namespace BigAmbitionsMP
                         // send immediately, exactly as before.  Suppressions are counted and named
                         // on the next actual send so the coalescing stays diagnosable.
                         float nowIp = UnityEngine.Time.realtimeSinceStartup;
-                        var (hsIp, hvIp) = ComputeHashes(snap);
+                        var (hsIp, hvIp, hnIp) = ComputeHashes(snap);
                         bool fullChangedIp = !_lastHashByAddr.TryGetValue(addressKey, out var pfIp) || pfIp != hvIp;
                         if (!fullChangedIp)
                         {
@@ -608,14 +652,24 @@ namespace BigAmbitionsMP
                             _suppressedPushes.TryGetValue(addressKey, out var n1); _suppressedPushes[addressKey] = n1 + 1;
                             return;
                         }
+                        // Round-281: same cargo-only test as the Tick (dirt/state deltas are NOT
+                        // cargo-only and must keep riding the full snapshot).
+                        bool cargoOnlyIp = !structChangedIp
+                                           && _structVolHashByAddr.TryGetValue(addressKey, out var pnIp) && pnIp == hnIp;
                         _lastHashByAddr[addressKey] = hvIp;
                         _lastStructHashByAddr[addressKey] = hsIp;
+                        _structVolHashByAddr[addressKey] = hnIp;
                         _volatileSentAtByAddr[addressKey] = nowIp;
+                        int svIp = StampStructVersion(snap, hsIp);
                         if (_suppressedPushes.TryGetValue(addressKey, out var sup) && sup > 0)
                         {
                             _suppressedPushes.Remove(addressKey);
                             Plugin.Logger.LogInfo($"[InteriorSync] immediate push for '{addressKey}' absorbed {sup} identical/cargo-coalesced push(es) since the last send (round-280).");
                         }
+                        // Round-281: trackers already stamped identically above — only the wire format
+                        // differs.  A guest's helper-order adoption or storage op that moved nothing but
+                        // cargo now costs a few KB instead of the whole interior.
+                        if (cargoOnlyIp && TrySendCargoOnly(addressKey, set, snap, svIp, "immediate-push")) return;
                         MPServer.BroadcastInteriorSnapshotTo(set, snap);
                     }
                 }
@@ -649,6 +703,12 @@ namespace BigAmbitionsMP
                     snap.Authoritative              = true;
                     snap.ItemInstancesAuthoritative = true;
                 }
+                // Round-281: every full send is stamped, this ungated one included — the receiver may
+                // never have subscribed (that is this path's whole purpose), so this snapshot can be
+                // the only baseline it ever gets for the address.  Deliberately stamps ONLY the
+                // version: writing the round-280 trackers from here would give an ungated path a say
+                // in the coalescing clock, which is exactly the bug round-280 fixed.
+                StampStructVersion(snap);
                 MPServer.SendToPlayer(pid, MessageEnvelope.Create(MessageType.InteriorSnapshot, "host", snap));
                 Plugin.Logger.LogInfo($"[InteriorSync] snapshot of '{addressKey}' sent directly to '{pid}' ({SnapshotSummary(snap)}{(forceItemAuthority ? ", sale-authoritative" : "")}).");
             }
@@ -1030,6 +1090,196 @@ namespace BigAmbitionsMP
             return info;
         }
 
+        // ── Round-281: cargo sync (the cheap half of interior sync) ───────────────────────────────
+        // Field bundles 20260818-22*: 86% of interior traffic carried NO structural change at all —
+        // shelf stock ticking down as customers buy — yet every send shipped the whole interior (306
+        // designs + 225 dirt spots, byte-identical every time).  Round-280 cut the RATE; this cuts the
+        // SIZE: a cargo-only send becomes InteriorCargoSync, a small ABSOLUTE statement of the
+        // building's cargo, and the structure stays where it belongs (the full snapshot).
+        //
+        // addressKey → the version number currently minted for that address, and the STRUCT HASH that
+        // number was minted for.  Keeping the hash is what makes the mint idempotent across send sites:
+        // any site can ask for "the version of this structure" and only a genuinely different structure
+        // bumps the counter.  Deliberately NOT derived from the round-280 trackers — writing those from
+        // an ungated site (SendSnapshotToPlayer) would silently change round-280's coalescing.
+        private static readonly Dictionary<string, int> _structVersionByAddr     = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, int> _structVersionHashByAddr = new(StringComparer.Ordinal);
+        // Throttled send instrumentation: sends since the last line, when we last spoke, and the reason
+        // we last fell back to a full snapshot (a live-read register — it re-speaks when the reason
+        // CHANGES rather than on a timer).
+        private static readonly Dictionary<string, (int n, int lastItems, long bytes)> _cargoSendsByAddr = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, float>  _cargoSendLoggedAt   = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, string> _cargoFallbackReason = new(StringComparer.Ordinal);
+        private const float CargoLogIntervalSeconds = 60f;
+
+        /// <summary>The version number for the structure this snapshot describes.  Increments exactly
+        /// when the structure hash changes for that address; identical structure always returns the
+        /// same number, so the full snapshot and the cargo messages that follow it agree by
+        /// construction.  Version 0 is never returned — it is reserved as "an older host said nothing",
+        /// which is how a receiver tells a pre-round-281 host apart from one that stamped a real 0.</summary>
+        private static int StructVersionFor(string addressKey, int structHash)
+        {
+            if (_structVersionHashByAddr.TryGetValue(addressKey, out var mintedFor) && mintedFor == structHash
+                && _structVersionByAddr.TryGetValue(addressKey, out var cur) && cur > 0)
+                return cur;
+            _structVersionByAddr.TryGetValue(addressKey, out var next);
+            next++;
+            _structVersionByAddr[addressKey]     = next;
+            _structVersionHashByAddr[addressKey] = structHash;
+            return next;
+        }
+
+        /// <summary>Stamp a full snapshot with the version of the structure it carries.  Called at
+        /// EVERY host→client full send — the number is the receiver's only way to know which structure
+        /// the cargo messages that follow are talking about, so a single unstamped send would leave a
+        /// receiver permanently re-requesting.</summary>
+        private static int StampStructVersion(InteriorSnapshotPayload snap, int structHash)
+        {
+            int v = StructVersionFor(snap.AddressKey, structHash);
+            snap.StructVersion = v;
+            return v;
+        }
+
+        private static int StampStructVersion(InteriorSnapshotPayload snap)
+            => StampStructVersion(snap, ComputeHashes(snap).structure);
+
+        /// <summary>Is EVERY current subscriber of this building able to parse a cargo sync?  One
+        /// non-capable subscriber and the answer is no for all of them — the alternative (cargo to
+        /// some, full snapshots to others) means two receivers holding the same building from two
+        /// different message streams, which is exactly the divergence class this codebase keeps
+        /// paying for.  `why` names the first failing peer for the fallback log.</summary>
+        private static bool AllSubscribersDeltaCapable(HashSet<int> subs, out string why)
+        {
+            why = "";
+            if (subs == null || subs.Count == 0) { why = "no subscribers"; return false; }
+            foreach (var peerId in subs)
+                if (!MPServer.IsDeltaCapablePeer(peerId, out why)) return false;
+            return true;
+        }
+
+        /// <summary>Build the cargo-only message from a snapshot we already built.  Every item is named,
+        /// including the ones holding NOTHING: an emptied shelf must be able to convey through this
+        /// channel, and a receiver cannot tell "absent because empty" from "absent because unchanged".
+        /// That is what keeps the message absolute — apply it twice, apply it late, apply it after a
+        /// dropped predecessor, and the building's cargo is correct either way.</summary>
+        private static InteriorCargoSyncPayload BuildCargoSync(InteriorSnapshotPayload snap, int structVersion)
+        {
+            var cargo = new InteriorCargoSyncPayload
+            {
+                AddressKey    = snap.AddressKey,
+                StructVersion = structVersion,
+            };
+            try { cargo.PlaythroughId = MPSaveCoordinator.ActivePlaythroughId ?? ""; } catch { }
+            foreach (var it in snap.ItemInstances)
+            {
+                if (it == null || string.IsNullOrEmpty(it.Id)) continue;
+                cargo.Items.Add(new InteriorCargoItemInfo
+                {
+                    Id             = it.Id,
+                    // The snapshot's own DTO list — no copy, no second serializer.  The payload is
+                    // serialized and discarded within this call chain, so sharing the reference cannot
+                    // outlive the send.
+                    CargoInstances = it.CargoInstances ?? new List<CargoInstanceInfo>(),
+                });
+            }
+            return cargo;
+        }
+
+        /// <summary>The cargo-only send.  Returns FALSE when the caller must fall back to the full
+        /// snapshot (a non-capable subscriber, or the send itself reached nobody) — the caller has
+        /// already stamped the round-280 trackers, so a fallback costs a bigger message, never a lost
+        /// update.</summary>
+        private static bool TrySendCargoOnly(string addressKey, HashSet<int> subs, InteriorSnapshotPayload snap, int structVersion, string site)
+        {
+            if (!AllSubscribersDeltaCapable(subs, out var why))
+            {
+                NoteCargoFallback(addressKey, site, why);
+                return false;
+            }
+            var cargo = BuildCargoSync(snap, structVersion);
+            int bytes = MPServer.BroadcastInteriorCargoSyncTo(subs, cargo);
+            if (bytes <= 0)
+            {
+                NoteCargoFallback(addressKey, site, "the cargo broadcast reached no peer");
+                return false;
+            }
+            NoteCargoFallbackCleared(addressKey);
+            NoteCargoSend(addressKey, cargo.Items.Count, bytes);
+            return true;
+        }
+
+        /// <summary>Host-side send counter — one INFO line per address per minute.  A per-send line
+        /// would out-shout the very traffic this round exists to reduce.</summary>
+        private static void NoteCargoSend(string addressKey, int items, int bytes)
+        {
+            try
+            {
+                _cargoSendsByAddr.TryGetValue(addressKey, out var acc);
+                acc = (acc.n + 1, items, acc.bytes + bytes);
+                _cargoSendsByAddr[addressKey] = acc;
+                float now = UnityEngine.Time.realtimeSinceStartup;
+                if (_cargoSendLoggedAt.TryGetValue(addressKey, out var at) && now - at < CargoLogIntervalSeconds) return;
+                _cargoSendLoggedAt[addressKey] = now;
+                _cargoSendsByAddr[addressKey] = (0, items, 0L);
+                Plugin.Logger.LogInfo($"[InteriorSync] '{addressKey}': {acc.n} cargo sync(s), last {items} item(s), {acc.bytes / 1024}KB total (round-281 — these replaced full interior snapshots).");
+            }
+            catch { }
+        }
+
+        /// <summary>Fallback-to-full decisions speak once per address, and again whenever the REASON
+        /// changes — a live read of the current situation rather than a timer, so "a v0.1.16 player
+        /// walked in" and "…walked out again" are both visible without spamming the log in between.</summary>
+        private static void NoteCargoFallback(string addressKey, string site, string why)
+        {
+            try
+            {
+                string reason = $"{site}: {why}";
+                if (_cargoFallbackReason.TryGetValue(addressKey, out var prev) && prev == reason) return;
+                _cargoFallbackReason[addressKey] = reason;
+                Plugin.Logger.LogInfo($"[InteriorSync] '{addressKey}': cargo-only send FELL BACK to the full snapshot — {reason} (round-281). Everyone gets the full interior while this holds.");
+            }
+            catch { }
+        }
+
+        private static void NoteCargoFallbackCleared(string addressKey)
+        {
+            try
+            {
+                if (!_cargoFallbackReason.TryGetValue(addressKey, out var prev)) return;
+                _cargoFallbackReason.Remove(addressKey);
+                Plugin.Logger.LogInfo($"[InteriorSync] '{addressKey}': cargo-only sends RESUMED (was falling back — {prev}).");
+            }
+            catch { }
+        }
+
+        // ── Round-281 receiver-side stats (tripwire hygiene, contract item 6) ─────────────────────
+        // Cargo applies must NOT feed NoteSnapshotApply: that counter's threshold (10/min) is
+        // calibrated against the EXPENSIVE full apply, and a healthy round-281 shop legitimately
+        // applies cargo far more often than that.  Feeding it would turn the round-213 resend-loop
+        // tripwire into a permanent false alarm — and a tripwire that always fires is not a tripwire.
+        // These get their own once-a-minute line instead, silent when nothing is arriving.
+        private static int   _cargoAppliesMin, _cargoApplyItems;
+        private static long  _cargoApplyBytes;
+        private static readonly HashSet<string> _cargoApplyAddrs = new(StringComparer.Ordinal);
+        private static float _cargoApplyLoggedAt = -999f;
+
+        internal static void NoteCargoSyncApply(string addr, int items, int bytes)
+        {
+            try
+            {
+                _cargoAppliesMin++;
+                _cargoApplyItems += items;
+                _cargoApplyBytes += bytes;
+                if (!string.IsNullOrEmpty(addr)) _cargoApplyAddrs.Add(addr);
+                float now = UnityEngine.Time.realtimeSinceStartup;
+                if (now - _cargoApplyLoggedAt < CargoLogIntervalSeconds) return;
+                _cargoApplyLoggedAt = now;
+                Plugin.Logger.LogInfo($"[InteriorSync] cargo sync applies: {_cargoAppliesMin}/min across {_cargoApplyAddrs.Count} address(es), {_cargoApplyItems} item entries, ~{_cargoApplyBytes / 1024}KB (round-281 — the cheap path; NOT counted by the round-213 resend tripwire).");
+                _cargoAppliesMin = 0; _cargoApplyItems = 0; _cargoApplyBytes = 0; _cargoApplyAddrs.Clear();
+            }
+            catch { }
+        }
+
         /// <summary>
         /// Order-sensitive hash over the snapshot's contents.  Collisions just
         /// mean one missed broadcast, recoverable on the next change.
@@ -1040,6 +1290,10 @@ namespace BigAmbitionsMP
         // re-send-loop detector.
         private const float VolatileCoalesceSeconds = 12f;
         private static readonly Dictionary<string, int>   _lastStructHashByAddr       = new(StringComparer.Ordinal);
+        // Round-281: last-sent "everything except cargo" hash — the send-side discriminator that turns
+        // round-280's "structure unchanged" into the stronger, and actually correct, "cargo and nothing
+        // else changed".  Stamped wherever the other three are, on the subscriber paths only.
+        private static readonly Dictionary<string, int>   _structVolHashByAddr        = new(StringComparer.Ordinal);
         private static readonly Dictionary<string, float> _volatileSentAtByAddr       = new(StringComparer.Ordinal);
         private static readonly Dictionary<string, int>   _lastLocalOwnerStructByAddr = new(StringComparer.Ordinal);
         private static readonly Dictionary<string, float> _lastLocalOwnerVolatileAt   = new(StringComparer.Ordinal);
@@ -1077,14 +1331,22 @@ namespace BigAmbitionsMP
         /// (task-28), paint (round-99d). `full` additionally folds the VOLATILE fields
         /// that churn continuously in a customer-filled shop: dirt values (the X/Z
         /// lattice itself is fixed), item StateIndex, and cargo. All rounding rules are
-        /// unchanged from the single-hash version this replaces.</summary>
-        internal static (int structure, int full) ComputeHashes(InteriorSnapshotPayload snap)
+        /// unchanged from the single-hash version this replaces.
+        /// ROUND-281 adds a third: `structAndNonCargo` = everything EXCEPT cargo.  The
+        /// round-280 gate's "structure didn't change" is NOT the same statement as "this
+        /// is a cargo-only send" — dirt dirtiness and item StateIndex are volatile too,
+        /// and routing a dirt change onto the cargo-only channel would strand it until
+        /// some unrelated structural edit forced a full snapshot.  This hash is what
+        /// lets the sender say cargo-only and MEAN it: `full` differs while this one
+        /// matches ⇔ the delta is cargo and nothing else.</summary>
+        internal static (int structure, int full, int structAndNonCargo) ComputeHashes(InteriorSnapshotPayload snap)
         {
             unchecked
             {
-                int hs = 17, hv = 17;
-                void S(int v) { hs = hs * 31 + v; hv = hv * 31 + v; }   // structure -> both
-                void V(int v) { hv = hv * 31 + v; }                     // volatile -> full only
+                int hs = 17, hv = 17, hn = 17;
+                void S(int v) { hs = hs * 31 + v; hv = hv * 31 + v; hn = hn * 31 + v; }   // structure -> all three
+                void V(int v) { hv = hv * 31 + v; hn = hn * 31 + v; }   // non-cargo volatile (dirt, state) -> full + structAndNonCargo
+                void C(int v) { hv = hv * 31 + v; }                     // cargo -> full only
 
                 S(MPAudit.StableHash(snap.Layout));
                 S(snap.RadioStation); S(((int)System.Math.Round(snap.RadioVolume * 100f)));   // round-227
@@ -1126,20 +1388,22 @@ namespace BigAmbitionsMP
                     foreach (var cc in it.CustomColors) { S(cc.Channel); S(cc.ColorPacked); }
                     foreach (var c in it.CargoInstances)
                     {
-                        V(MPAudit.StableHash(c.ItemName));
-                        V(c.Amount);
+                        // Round-281: cargo folds into `full` ONLY (C, not V) — that is precisely what
+                        // makes "full changed, structAndNonCargo didn't" mean "cargo and nothing else".
+                        C(MPAudit.StableHash(c.ItemName));
+                        C(c.Amount);
                         // Round-242 (field 20260803-224740, FOURTH member of the round-99
                         // attribute-omitted class): paying at a register flips ONLY this flag —
                         // with it absent here the publisher saw "no change", never re-sent, and
                         // every other machine kept the buyer's boxes unpaid until some other
                         // cargo change forced a publish. Serializer/deserializer/IdentitySig all
                         // carried it already; this hash was the one blind layer.
-                        V(c.Paid ? 1 : 0);
-                        V(((int)System.Math.Round(c.PricePerUnit * 100f)).GetHashCode());
-                        foreach (var cc in c.CustomColors) { V(cc.Channel); V(cc.ColorPacked); }
+                        C(c.Paid ? 1 : 0);
+                        C(((int)System.Math.Round(c.PricePerUnit * 100f)).GetHashCode());
+                        foreach (var cc in c.CustomColors) { C(cc.Channel); C(cc.ColorPacked); }
                     }
                 }
-                return (hs, hv);
+                return (hs, hv, hn);
             }
         }
     }
