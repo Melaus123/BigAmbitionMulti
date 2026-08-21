@@ -263,6 +263,21 @@ namespace BigAmbitionsMP
                     _customizerFirstSeen = -1f;
                     return "OK armed — confirms the character screen when it appears (2s settle)";
 
+                case "pause":
+                {
+                    // T284-C (user-approved 2026-08-21): a scriptable press of the REAL pause
+                    // button path — TogglePause WITHOUT the AllowNativePauseCall key, so the
+                    // Patch_GSC_TogglePause postfix runs the full MP pipeline exactly as for a
+                    // player press.  Absolute semantics: no toggle when already in the state.
+                    if (arg != "on" && arg != "off") return "ERR usage: pause on|off";
+                    bool want = arg == "on";
+                    if (GameStateReader.GetGSCPaused() == want) return $"OK already {(want ? "paused" : "unpaused")}";
+                    if (!GameStateReader.InvokeNativeTogglePauseAsPress()) return "ERR TogglePause unavailable (no GSC instance yet, or rate-limited — retry in 1s)";
+                    bool now = GameStateReader.GetGSCPaused();
+                    return now == want ? $"OK pause pressed → {(want ? "paused" : "unpaused")} (MP pipeline fired via the patch)"
+                                       : $"ERR pressed but state reads {(now ? "paused" : "unpaused")} — a suppression patch may have eaten it; check the log";
+                }
+
                 case "rivalrace":
                     // Round-256 forced lost-race: run on the CLIENT (c-*.cmd).
                     if (arg == "hold")

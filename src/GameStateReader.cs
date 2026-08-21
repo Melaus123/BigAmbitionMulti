@@ -231,6 +231,33 @@ namespace BigAmbitionsMP
         /// the only key through the MP blanket pause-suppression patches.</summary>
         public static bool AllowNativePauseCall;
 
+        /// <summary>TestDrive 'pause on|off' (T284-C, user-approved 2026-08-21): press the REAL
+        /// pause path.  Invokes GameSpeedController.TogglePause WITHOUT the AllowNativePauseCall
+        /// key, so Patch_GSC_TogglePause treats it exactly like a player's button press and the
+        /// whole MP pause pipeline (local set + pending note + send/broadcast) fires.  Shares the
+        /// toggle rate limit so it can never interleave a state fight with the converger.</summary>
+        public static bool InvokeNativeTogglePauseAsPress()
+        {
+            try
+            {
+                EnsureGSCProbed();
+                if (_gscType == null || _gscInstance == null) return false;
+                _gscMTogglePause ??= _gscType.GetMethod("TogglePause",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (_gscMTogglePause == null) return false;
+                if (UnityEngine.Time.realtimeSinceStartup - _lastPauseToggleAt < 0.25f) return false;
+                _lastPauseToggleAt = UnityEngine.Time.realtimeSinceStartup;
+                _gscMTogglePause.Invoke(_gscInstance, null);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                var inner = (ex as System.Reflection.TargetInvocationException)?.InnerException;
+                Plugin.Logger.LogWarning($"[GSC] TogglePause-as-press: {(inner ?? ex).Message}");
+                return false;
+            }
+        }
+
         /// <summary>Round-199 diagnostic: who last set the time-control lock (recorded
         /// by the DisableTimeControl suppression prefix on every set that passes
         /// through), so the watchdog's clear line names the grabber instead of just
