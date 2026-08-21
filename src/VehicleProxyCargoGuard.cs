@@ -467,36 +467,11 @@ namespace BigAmbitionsMP
         }
     }
 
-    /// <summary>Round-243 (field 20260804-162422 "picked up a friend's cart, can't let it go"):
-    /// the round-109 seed above fixed the DATA resolver (GetCurrentVehicle → VehiclesCache) but
-    /// native has a SECOND, controller-level resolver — GetCurrentVehicleBase walks
-    /// AllPlayerVehicles, which ghosts deliberately skip (listing them would leak a friend's
-    /// cart into this player's fleet broadcast and native sweeps).  While a borrowed cart is
-    /// possessed it returned null, and every consumer broke: HandTruck.Release's resolution
-    /// (the wedge), IsColliderFromCurrentVehicle (:505 no null check — the bundle's NRE storm
-    /// from road triggers), ItemController:652's .vehicleType hover deref.  Same pattern as
-    /// round-109, applied at the layer it missed: resolve the possessed ghost's live controller
-    /// from our registry.  Inert outside MP and for real vehicles (__result already set).</summary>
-    [HarmonyPatch(typeof(VehicleHelper), nameof(VehicleHelper.GetCurrentVehicleBase))]
-    public static class Patch_GetCurrentVehicleBase_GhostParity
-    {
-        private static int _logged;
-        static void Postfix(ref VehicleController? __result)
-        {
-            try
-            {
-                if (__result != null) return;
-                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
-                string av = SaveGameManager.Current?.ActiveVehicleId ?? "";
-                if (!av.StartsWith("BAMP_", StringComparison.Ordinal)
-                    || av.StartsWith("BAMP_TESTRIG", StringComparison.Ordinal)) return;
-                var vc = VehicleManager.GhostControllerFor(av);
-                if (vc == null) return;
-                __result = vc;
-                if (_logged++ < 3)
-                    Plugin.Logger.LogInfo($"[Vehicle] GetCurrentVehicleBase resolved possessed ghost '{av}' (round-243 controller-level parity).");
-            }
-            catch { }
-        }
-    }
+    // Round-243's GetCurrentVehicleBase ghost-parity postfix was REMOVED here (round-289,
+    // user 2026-08-21): it was dead on arrival — it looked up the "BAMP_"-prefixed
+    // ActiveVehicleId in a registry keyed by RAW vehicle ids, so it never resolved once.
+    // The symptom it targeted (field 20260804-162422 "can't let go of a borrowed cart",
+    // plus the road-trigger NRE storm and the hover deref sharing the same empty
+    // GetCurrentVehicleBase answer) is therefore KNOWINGLY UNFIXED, pending a fresh field
+    // report — see .modding/07-bug-classes.md; the old attempt lives in the round-243 commit.
 }
