@@ -3852,12 +3852,34 @@ namespace BigAmbitionsMP
                 // Player shops never carry Prices here — MPPriceSync owns them.
                 try
                 {
-                    if (info.Prices != null && info.Prices.Count > 0 && reg.retailPrices != null
-                        && !IsAnyPlayerBusiness(reg))
+                    if (reg.retailPrices != null && !IsAnyPlayerBusiness(reg))
                     {
-                        reg.retailPrices.Clear();
-                        foreach (var rp in info.Prices)
-                            reg.retailPrices.Add(new RetailPrice { itemName = rp.ItemName, price = rp.Price });
+                        if (info.Prices != null && info.Prices.Count > 0)
+                        {
+                            reg.retailPrices.Clear();
+                            foreach (var rp in info.Prices)
+                                reg.retailPrices.Add(new RetailPrice { itemName = rp.ItemName, price = rp.Price });
+                        }
+                        // Round-291: a building the host reports EMPTY must lose its price table
+                        // here too. Native ShutdownBusiness (BusinessHelper.cs:863) empties the
+                        // table when a business closes; the publish carries no Prices for an empty
+                        // list (BusinessSync ReadInfo) and this apply used to read "nothing sent"
+                        // as "keep mine" — so every other machine kept the dead shop's prices,
+                        // saved them into its own .hsg, and the biz audit diverged forever
+                        // (TESTBATCH-0813: 11 regs, measured in both .hsg files 2026-08-21).
+                        // Narrowed to the EMPTY type so a transient empty list on a live AI shop
+                        // (prices not yet materialized) can never blank a shop players buy from,
+                        // and never the receiver's own/rented building (optimistic-rent window).
+                        // Same class as round-255's valuation clear — 07-bug-classes "ABSENT
+                        // PAYLOAD FIELD READ AS UNCHANGED".
+                        else if (reg.retailPrices.Count > 0 && !reg.RentedByPlayer && !receiverOwnsThis
+                                 && (string.IsNullOrEmpty(info.BusinessTypeName) || info.BusinessTypeName == "ba:businesstype_empty"))
+                        {
+                            int n = reg.retailPrices.Count;
+                            reg.retailPrices.Clear();
+                            try { reg.storedRetailPrices?.Clear(); } catch { }
+                            Plugin.Logger.LogInfo($"[Patcher] '{info.AddressKey}' is empty on the host — cleared {n} stale retail price(s) left by a closed business (round-291).");
+                        }
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] AI prices apply '{info.AddressKey}': {ex.Message}"); }

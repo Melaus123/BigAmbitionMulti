@@ -248,6 +248,40 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] starter-item dedupe: {ex.Message}"); }
 
+                // ── Class 10: stale retail prices on EMPTY buildings (REPAIR, round-291) ──
+                // Native ShutdownBusiness empties a closed business's price table, but
+                // the publish→apply path read "no prices sent" as "keep yours", so every
+                // other machine kept the dead shop's prices and SAVED them (TESTBATCH-0813:
+                // 11 regs, measured in the client's .hsg 2026-08-21). The live apply now
+                // clears them (GameStatePatcher, round-291); this heals saves that already
+                // carry the residue. Invariant restored = native's own post-shutdown state:
+                // empty type ⇒ no prices. Touches only nameless, typeless, unrented shells.
+                try
+                {
+                    int staleRegs = 0, stalePrices = 0;
+                    if (gi.BuildingRegistrations != null)
+                        foreach (var reg in gi.BuildingRegistrations)
+                        {
+                            if (reg == null || reg.RentedByPlayer) continue;
+                            string t = ""; try { t = reg.businessTypeName ?? ""; } catch { }
+                            if (t.Length > 0 && t != "ba:businesstype_empty") continue;
+                            bool named = false; try { named = !string.IsNullOrEmpty(reg.BusinessName); } catch { }
+                            if (named) continue;
+                            int n = 0;
+                            try { n = (reg.retailPrices?.Count ?? 0) + (reg.storedRetailPrices?.Count ?? 0); } catch { }
+                            if (n == 0) continue;
+                            try { reg.retailPrices?.Clear(); } catch { }
+                            try { reg.storedRetailPrices?.Clear(); } catch { }
+                            staleRegs++; stalePrices += n;
+                        }
+                    if (staleRegs > 0)
+                    {
+                        parts.Add($"stale-prices×{staleRegs} cleared");
+                        Plugin.Logger.LogWarning($"[Integrity] {reason}: {staleRegs} empty building(s) still carried {stalePrices} retail price(s) from a business that closed elsewhere — cleared (round-291; the publish path now clears them live).");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] stale-prices: {ex.Message}"); }
+
                 // ── Class 6: cross-owner staff (REPAIR) ──────────────────────
                 // An OWN employee whose assignedAddress points at ANOTHER
                 // player's business (2026-07-16 report: the native assign-to-

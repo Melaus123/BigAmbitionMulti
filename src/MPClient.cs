@@ -677,15 +677,16 @@ namespace BigAmbitionsMP
 
                 case MessageType.AuditDrill:
                 {
-                    // Host localized a biz divergence to bucket(s) — log our
-                    // per-registration hashes so the two logs diff offline, and
-                    // (round-89) send them BACK so the host can name the diverging
-                    // address(es) in its own log: field reports only ever carry one
-                    // machine's side, so the offline diff never actually happened.
+                    // Host localized a biz divergence to bucket(s) — send our
+                    // per-registration hashes BACK (round-89) so the host can name the
+                    // diverging address(es) in its own log. Round-291 (user-approved
+                    // 2026-08-21): the ~340-line per-registration dump that used to go
+                    // into THIS log is gone — field reports only ever carry one
+                    // machine's log, so a one-sided dump was never diffable; the host's
+                    // reply diff is the whole answer.
                     var ad = env.GetPayload<AuditDrillPayload>();
                     if (ad != null) GameStatePatcher.EnqueueOnMainThread(() =>
                     {
-                        MPAudit.LogBizDrill(ad.Buckets);
                         try
                         {
                             var rows = MPAudit.BuildDrillRows(ad.Buckets);
@@ -732,6 +733,10 @@ namespace BigAmbitionsMP
 
                 case MessageType.RadioState:            // round-227: a building's speaker state
                     MPRadioSync.Apply(env.GetPayload<RadioStatePayload>(), "from host");
+                    break;
+
+                case MessageType.BillboardAds:          // round-290: a partner's billboard campaigns
+                    BillboardAdSync.Apply(env.GetPayload<BillboardAdsPayload>());
                     break;
 
                 case MessageType.ModMismatch:           // round-253: host says our mod list differs from theirs — informational, never a gate

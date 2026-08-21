@@ -195,36 +195,13 @@ namespace BigAmbitionsMP
             return (acc, count, new List<int>(buckets));
         }
 
-        /// <summary>Log every registration hash in the given buckets — run on
-        /// BOTH machines, the two logs diff to the exact diverging address.</summary>
-        public static void LogBizDrill(List<int>? bucketIds)
-        {
-            try
-            {
-                if (bucketIds == null || bucketIds.Count == 0) return;
-                var want = new HashSet<int>(bucketIds);
-                var gi = SaveGameManager.Current;
-                if (gi?.BuildingRegistrations == null) return;
-                int logged = 0;
-                foreach (var reg in gi.BuildingRegistrations)
-                {
-                    if (reg == null) continue;
-                    try
-                    {
-                        int b = BucketOf(reg);
-                        if (!want.Contains(b)) continue;
-                        Plugin.Logger.LogInfo($"[Audit] drill b{b}: '{GameStateReader.AddressKey(reg)}' = 0x{RegHash(reg):X8} (biz='{reg.BusinessName}' type={reg.businessTypeName} prices={reg.retailPrices?.Count ?? 0} bizOwner='{reg.businessOwnerRivalId}')");
-                        logged++;
-                    }
-                    catch { }
-                }
-                Plugin.Logger.LogInfo($"[Audit] drill complete: {logged} reg(s) in bucket(s) {string.Join(",", bucketIds)}.");
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Audit] drill: {ex.Message}"); }
-        }
+        // LogBizDrill (the per-registration "[Audit] drill bN: ..." dump, ~340 lines per
+        // machine per episode) REMOVED round-291 (user-approved 2026-08-21): it predates the
+        // round-89 reply diff and was only useful if BOTH machines' logs were in hand, which
+        // a bug bundle never provides. BuildDrillRows + HostHandleDrillReply carry the answer.
 
         /// <summary>Round-89: the drill rows a CLIENT sends back — per-reg hash + the same
-        /// summary LogBizDrill prints, for the diverged bucket(s).</summary>
+        /// summary the host diff prints, for the diverged bucket(s).</summary>
         public static List<DrillRegRow> BuildDrillRows(List<int>? bucketIds)
         {
             var rows = new List<DrillRegRow>();
@@ -457,14 +434,17 @@ namespace BigAmbitionsMP
                     && _streaks.TryGetValue(p.PlayerId + "/biz", out var bizStreak) && bizStreak == StreakToReport;
                 if (bizAlarmed && p.BizBuckets != null && p.BizBuckets.Count == 16 && mine.BizBuckets.Count == 16)
                 {
-                    // Localize: which 16th(s) of the table diverged → drill logs
-                    // on BOTH machines (diff the two logs to the exact address).
+                    // Localize: which 16th(s) of the table diverged → ask the client
+                    // for its per-registration hashes in those buckets; the reply diff
+                    // (HostHandleDrillReply) names the exact address(es) in THIS log.
+                    // Round-291 (user-approved 2026-08-21): the per-registration dumps
+                    // both machines used to write (~340 lines each) are gone — a bundle
+                    // carries one log, so a one-sided dump was never diffable.
                     var diverged = new List<int>();
                     for (int b = 0; b < 16; b++)
                         if (p.BizBuckets[b] != mine.BizBuckets[b]) diverged.Add(b);
-                    Plugin.Logger.LogWarning($"[Audit] biz divergence localized to bucket(s): {string.Join(",", diverged)} — drilling both sides.");
-                    LogBizDrill(diverged);                       // host side
-                    MPServer.SendAuditDrill(p.PlayerId, diverged); // client side
+                    Plugin.Logger.LogWarning($"[Audit] biz divergence localized to bucket(s): {string.Join(",", diverged)} — requesting the client's rows (the drill diff below names the address(es)).");
+                    MPServer.SendAuditDrill(p.PlayerId, diverged);
                     // SELF-HEAL (2026-07-20, severity review of the silent-loss class):
                     // detection alone left the client divergent until luck of the delta
                     // traffic — a CONFIRMED divergence now pushes a fresh business
