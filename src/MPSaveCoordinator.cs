@@ -1377,7 +1377,7 @@ namespace BigAmbitionsMP
             reason = "";
             if (MPSaveManager.ReadManifest(session) == null)
             { reason = "no save catalog found."; return false; }
-            int rc = ResolveOwnSlot(session, MPConfig.StableId, out _, out string effId);
+            int rc = ResolveOwnSlot(session, MPConfig.StableId, out var chosen, out string effId);
             if (rc == -1)
             {
                 reason = effId == MPConfig.StableId
@@ -1392,6 +1392,36 @@ namespace BigAmbitionsMP
                 // shows the one approved refusal text; the log keeps the real cause.
                 Plugin.Logger.LogWarning($"[MPSave] validate '{session}': zero save files on disk — refusing with the generic notice.");
                 reason = "no character found."; return false;
+            }
+            // P8 (user-approved 2026-08-21): test-open the exact file this load would read,
+            // BEFORE the lobby latch burns. Vanilla catches corrupt saves by opening every
+            // file at list time; we open the one that matters at the click (rc 1 = own slot,
+            // rc 0 = legacy single folder). Unreadable → refused with the approved generic
+            // notice; the log names the real failure.
+            if (chosen != null)
+            {
+                try
+                {
+                    string folder = Path.Combine(MPSaveManager.MpSessionFolder(session), chosen.characterId ?? "");
+                    string file = Path.Combine(folder, (chosen.name ?? "save")
+                        + (chosen.saveGameType == SaveGameManager.SaveGameStruct.SaveGameType.json ? ".json" : ".hsg"));
+                    if (File.Exists(file))
+                    {
+                        var gi = chosen.saveGameType == SaveGameManager.SaveGameStruct.SaveGameType.json
+                            ? SaveGameSerializationHelper.DeserializeJsonData(file)
+                            : SaveGameSerializationHelper.DeserializeBinaryData(file);
+                        if (gi == null || gi.charactersData == null || gi.charactersData.Count == 0)
+                        {
+                            Plugin.Logger.LogError($"[MPSave] validate '{session}': own save '{file}' opened but holds no character data — refused before the lobby burns.");
+                            reason = "no character found."; return false;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogError($"[MPSave] validate '{session}': own save failed to open ({ex.Message}) — refused before the lobby burns (corrupt save).");
+                    reason = "no character found."; return false;
+                }
             }
             return true;
         }
@@ -1416,7 +1446,10 @@ namespace BigAmbitionsMP
             string want = Path.GetFileName(MPSaveManager.MpCharacterFolder(session, effectiveId).TrimEnd('\\', '/'));
             for (int i = 0; i < saves.Count; i++)
             {
-                string seg = Path.GetFileName((saves[i]?.CharacterPath ?? "").TrimEnd('\\', '/'));
+                // P5 (user-approved 2026-08-21): read the raw folder segment, NEVER the
+                // CharacterPath getter — that getter rebuilds a path under the SINGLE-PLAYER
+                // store and Directory.CreateDirectory's it (audit F4: junk SP-store folders).
+                string seg = saves[i]?.characterId ?? "";
                 if (string.Equals(seg, want, StringComparison.OrdinalIgnoreCase)) { chosen = saves[i]; return 1; }
             }
             // Review-2 semantics preserved: a single-folder store keeps the legacy
@@ -2350,7 +2383,10 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Pick the rotation slot the next automatic save writes to. Pure file/JSON IO —
-        /// thread-safe.</summary>
+        /// thread-safe. User-approved 2026-08-21: occupied slots are aged by their newest actual
+        /// save FILE (the picker's clock), never the catalog's SavedAtUnix claim — a stale or
+        /// minted claim could aim the overwrite at the NEWEST autosave instead of the oldest.
+        /// A slot folder holding zero save files counts as empty (same doctrine as the picker).</summary>
         internal static string NextAutoSlotSuffix(string baseName)
         {
             int slots = AutosaveSlotCount();
@@ -2362,13 +2398,30 @@ namespace BigAmbitionsMP
                 {
                     string dir = MPSaveManager.MpSessionFolder(baseName + suf);
                     if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return suf;   // first empty slot
-                    long when = MPSaveManager.ReadManifest(baseName + suf)?.SavedAtUnix ?? 0;
-                    if (when <= 0) when = new DateTimeOffset(Directory.GetLastWriteTimeUtc(dir)).ToUnixTimeSeconds();
+                    long when = -1;   // -1 = probe failed (fall back to folder mtime); 0 = probed clean, no files
+                    try
+                    {
+                        var saves = SaveGamePathHelper.GetAllSaveGamesFromVersion(dir);
+                        when = 0;
+                        if (saves != null)
+                            foreach (var s in saves)
+                            {
+                                try
+                                {
+                                    long u = new DateTimeOffset(s.lastPlayedDate.ToUniversalTime()).ToUnixTimeSeconds();
+                                    if (u > when) when = u;
+                                }
+                                catch { }
+                            }
+                    }
+                    catch { }
+                    if (when == 0) return suf;   // folder exists but holds no save files — effectively empty
+                    if (when < 0) when = new DateTimeOffset(Directory.GetLastWriteTimeUtc(dir)).ToUnixTimeSeconds();
                     if (when < bestWhen) { bestWhen = when; bestSuf = suf; }
                 }
                 catch { }
             }
-            return bestSuf;   // all slots taken → overwrite the oldest
+            return bestSuf;   // all slots taken → overwrite the oldest by real file age
         }
 
         /// <summary>HOST: make an automatic checkpoint (autosave / disconnect) a COMPLETE roster snapshot.

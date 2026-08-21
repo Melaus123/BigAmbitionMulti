@@ -582,6 +582,30 @@ namespace BigAmbitionsMP
             public string LastHostName     = "";
         }
 
+        /// <summary>TRUE if any session folder in the current store holds at least one actual
+        /// save file — the "may Host Saved Game be clicked" probe (user-approved 2026-08-21:
+        /// with nothing loadable the button greys out, vanilla-style, so the empty window is
+        /// unreachable). First hit short-circuits; same file-based predicate as the picker.</summary>
+        public static bool AnyLoadableSaves()
+        {
+            try
+            {
+                string root = MpVersionFolder();
+                if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return false;
+                foreach (var (_, dir, _) in WalkSessionDirs(root))
+                {
+                    try
+                    {
+                        var probe = SaveGamePathHelper.GetAllSaveGamesFromVersion(dir);
+                        if (probe != null && probe.Count > 0) return true;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return false;
+        }
+
         /// <summary>Group MP saves into PLAYTHROUGHS for the load screen: one entry per base session, each
         /// holding its variants newest-playthrough-first; variants ordered Main→Autosave→Disconnect→Recover.
         /// Includes manifest-LESS recover saves (dated by folder mtime, players borrowed from siblings).

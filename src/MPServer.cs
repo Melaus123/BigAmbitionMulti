@@ -854,20 +854,34 @@ namespace BigAmbitionsMP
             // refused load must leave the lobby exactly as it found it.
             string? mpSession = null;
             var sessions = MPSaveManager.ListSessions();
-            if (sessions.Count > 0)
+            // P2 (user-approved 2026-08-21): a PICKED save never substitutes. The old shape
+            // fell through to "newest session of any world" when the picked name wasn't in
+            // the loadable list — and with no loadable sessions at all, clean through to the
+            // host's newest SINGLE-PLAYER save. Both silent wrong-world loads (audit F2/F3).
+            if (!string.IsNullOrEmpty(ChosenLoadSession))
             {
-                // Use the session the host picked in the save list; else newest.
-                if (!string.IsNullOrEmpty(ChosenLoadSession) && sessions.Exists(s => s.Name == ChosenLoadSession))
+                if (sessions.Exists(s => s.Name == ChosenLoadSession))
                 {
                     mpSession = ChosenLoadSession;   // the picker's round-219 pin targets the exact world
                 }
                 else
                 {
-                    // Round-222: the legacy "resume newest" branch chooses by LIST position —
-                    // carry that entry's identity so a duplicated name can't resolve elsewhere.
-                    mpSession = sessions[0].Name;
-                    try { MPSaveManager.NoteSessionPid(mpSession, sessions[0].Manifest?.PlaythroughId ?? ""); } catch { }
+                    Plugin.Logger.LogWarning($"[Server] StartLoadGame: picked session '{ChosenLoadSession}' is not in the loadable list ({sessions.Count} candidate(s)) — refused, never substituted. Lobby unchanged.");
+                    try { MPCanvasUI.PostLobbyNotice("Load refused: no character found."); } catch { }
+                    MPSaveCoordinator.ConsumeDevHostLoadAs("load refused");
+                    return;   // IsInLobby untouched — the lobby stays live, Start stays clickable
                 }
+            }
+            else if (sessions.Count > 0)
+            {
+                // Round-222: the legacy "resume newest" branch (NO explicit pick) chooses by
+                // LIST position — carry that entry's identity so a duplicated name can't
+                // resolve elsewhere. Only an unpicked start may resume-newest.
+                mpSession = sessions[0].Name;
+                try { MPSaveManager.NoteSessionPid(mpSession, sessions[0].Manifest?.PlaythroughId ?? ""); } catch { }
+            }
+            if (mpSession != null)
+            {
                 if (!MPSaveCoordinator.ValidateOwnSlotForLoad(mpSession, out string refuseWhy))
                 {
                     Plugin.Logger.LogWarning($"[Server] StartLoadGame '{mpSession}' refused pre-start: {refuseWhy} Lobby unchanged.");

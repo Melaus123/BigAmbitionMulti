@@ -48,6 +48,7 @@ namespace BigAmbitionsMP
         private static bool      _inventoryLogged;
         private static readonly List<LoadGameCharacterEntryView> _cards = new();
         private static readonly Dictionary<SaveGameManager.SaveGameStruct, MPSaveManager.MpVariant> _rowMap = new();
+        private static readonly List<UnityEngine.Object> _ownedGfx = new();   // P5: textures/sprites WE created — destroyed on refresh (the clone leaked them, audit #20)
 
         public static bool IsOpen => _win != null && _win.activeSelf;
 
@@ -92,6 +93,8 @@ namespace BigAmbitionsMP
             try { if (_win != null) UnityEngine.Object.Destroy(_win); } catch { }
             _win = null; _sceneLg = null; _template = null; _recoverToggle = null;
             _cards.Clear(); _rowMap.Clear();
+            foreach (var o in _ownedGfx) { try { UnityEngine.Object.Destroy(o); } catch { } }
+            _ownedGfx.Clear();
         }
 
         // ── build: clone + strip + rewire ────────────────────────────────────
@@ -166,6 +169,8 @@ namespace BigAmbitionsMP
         private static void Refresh()
         {
             _cards.Clear(); _rowMap.Clear();
+            foreach (var o in _ownedGfx) { try { UnityEngine.Object.Destroy(o); } catch { } }
+            _ownedGfx.Clear();
             try { _template.ResetTemplate(); } catch { ResetTemplateManual(_template); }
 
             var runs = MPSaveManager.ListPlaythroughs();
@@ -187,24 +192,34 @@ namespace BigAmbitionsMP
                 Rewire(card.LoadLastGameButton, () => { if (newestMain != null) LoadVariant(newestMain); });
                 Rewire(card.RemoveCharacterButton, () => ConfirmDeleteWorld(runRef));
 
+                // P3 (user-approved 2026-08-21): rows in DATE order (vanilla) so the top
+                // visible row IS what Continue loads; a card with NO manual save shows its
+                // automatic saves regardless of the toggle (vanilla's only-recovery rule —
+                // the clone previously rendered such cards empty). P7: rows carry the classic
+                // picker's readable labels. P5: CharacterPath is NEVER assigned — the native
+                // struct's path property is booby-trapped (setter keeps a segment, getter
+                // rebuilds under the SP store and creates folders; audit F4).
+                bool hasMain = run.Variants.Exists(x => x.Kind == "Main");
+                var baseNames2 = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var v in run.Variants) baseNames2.Add(MPSaveManager.StripToBase(v.SessionName));
+                bool multiName = baseNames2.Count > 1;
                 var structs = new List<SaveGameManager.SaveGameStruct>();
-                foreach (var v in run.Variants)
+                foreach (var v in run.Variants.OrderByDescending(x => x.SavedAtUnix))
                 {
                     var s = new SaveGameManager.SaveGameStruct
                     {
-                        name           = v.SessionName,
+                        name           = MPCanvasUI.SpRowLabel(v, multiName),
                         day            = v.Day < 0 ? 0 : v.Day,
                         lastPlayedDate = v.SavedAtUnix > 0
                             ? DateTimeOffset.FromUnixTimeSeconds(v.SavedAtUnix).LocalDateTime
                             : SafeDirTime(v.SessionDir),
-                        isRecoverSave  = v.Kind != "Main",          // vanilla's toggle hides these
-                        CharacterPath  = v.SessionDir ?? "",        // GetIcon probes <dir>/<name>.jpg → default sprite
+                        isRecoverSave  = hasMain && v.Kind != "Main",   // no-Main card → every row visible
                         hasEverUsedMods = false,                    // mod tooltip deactivates itself
                     };
                     structs.Add(s);
                     _rowMap[s] = v;
                 }
-                card.Setup(structs, _showRecover, GetIconSafe, OnRowLoad, OnRowDelete);
+                card.Setup(structs, _showRecover, GetRowIcon, OnRowLoad, OnRowDelete);
                 entry.gameObject.SetActive(true);
             }
             Plugin.Logger.LogInfo($"[LoadWin] listed {runs.Count} playthrough(s).");
@@ -213,7 +228,9 @@ namespace BigAmbitionsMP
         private static string CardTitle(MPSaveManager.MpPlaythrough run)
         {
             string players = (run.Players ?? "").Trim();
-            return string.IsNullOrEmpty(players) || players == "—" ? run.Base : $"{run.Base}  ({players})";
+            // P7 (user-approved 2026-08-21): the same friendly name the classic picker shows.
+            string title = MPCanvasUI.FriendlyName(run.Base);
+            return string.IsNullOrEmpty(players) || players == "—" ? title : $"{title}  ({players})";
         }
 
         private static void TrySetPortrait(LoadGameCharacterEntryView card, MPSaveManager.MpPlaythrough run)
@@ -223,21 +240,68 @@ namespace BigAmbitionsMP
                 foreach (var v in run.Variants.OrderByDescending(x => x.SavedAtUnix))
                 {
                     if (string.IsNullOrEmpty(v.SessionDir) || !Directory.Exists(v.SessionDir)) continue;
-                    var jpg = Directory.GetFiles(v.SessionDir, "*portrait*.jpg", SearchOption.AllDirectories).FirstOrDefault();
+                    // P6 (user-approved 2026-08-21): the card's face is the world-carrier's —
+                    // the last host first, this machine's own character second, and only then
+                    // whoever the filesystem returns first (the old rule, which could show a
+                    // different member's face on every refresh).
+                    string jpg = null;
+                    foreach (var owner in new[] { run.LastHostStableId, MPConfig.StableId })
+                    {
+                        if (string.IsNullOrEmpty(owner)) continue;
+                        try
+                        {
+                            string dirO = Path.Combine(v.SessionDir, owner);
+                            if (Directory.Exists(dirO)) jpg = Directory.GetFiles(dirO, "*portrait*.jpg").FirstOrDefault();
+                        }
+                        catch { }
+                        if (jpg != null) break;
+                    }
+                    jpg ??= Directory.GetFiles(v.SessionDir, "*portrait*.jpg", SearchOption.AllDirectories).FirstOrDefault();
                     if (jpg == null) continue;
-                    var tex = new Texture2D(2, 2) { hideFlags = HideFlags.HideAndDontSave };
-                    if (!tex.LoadImage(File.ReadAllBytes(jpg))) { UnityEngine.Object.Destroy(tex); continue; }
-                    card.PortraitImage.sprite = Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f));
+                    var sp = LoadSprite(jpg);
+                    if (sp == null) continue;
+                    card.PortraitImage.sprite = sp;
                     return;
                 }
             }
             catch { }
         }
 
-        private static Sprite GetIconSafe(SaveGameManager.SaveGameStruct s)
+        /// <summary>P5: row screenshots read by US from the variant's own folder — the native
+        /// GetIcon path went through the booby-trapped CharacterPath property (junk SP-store
+        /// folders, always-default sprites). Own slot first, last host's second, anyone's third;
+        /// portraits excluded (those are faces, not scene shots).</summary>
+        private static Sprite GetRowIcon(SaveGameManager.SaveGameStruct s)
         {
-            try { if (_sceneLg != null) return _sceneLg.GetIcon(s); } catch { }
-            return null;
+            try
+            {
+                if (!_rowMap.TryGetValue(s, out var v) || string.IsNullOrEmpty(v.SessionDir) || !Directory.Exists(v.SessionDir)) return null;
+                foreach (var owner in new[] { MPConfig.StableId, v.LastHostStableId })
+                {
+                    if (string.IsNullOrEmpty(owner)) continue;
+                    string dirO = Path.Combine(v.SessionDir, owner);
+                    if (!Directory.Exists(dirO)) continue;
+                    var jpg = Directory.GetFiles(dirO, "*.jpg").FirstOrDefault(f => !Path.GetFileName(f).ToLowerInvariant().Contains("portrait"));
+                    if (jpg != null) return LoadSprite(jpg);
+                }
+                var any = Directory.GetFiles(v.SessionDir, "*.jpg", SearchOption.AllDirectories).FirstOrDefault(f => !Path.GetFileName(f).ToLowerInvariant().Contains("portrait"));
+                return any != null ? LoadSprite(any) : null;
+            }
+            catch { return null; }
+        }
+
+        private static Sprite LoadSprite(string path)
+        {
+            try
+            {
+                var tex = new Texture2D(2, 2) { hideFlags = HideFlags.HideAndDontSave };
+                if (!tex.LoadImage(File.ReadAllBytes(path))) { UnityEngine.Object.Destroy(tex); return null; }
+                var sp = Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f));
+                sp.hideFlags = HideFlags.HideAndDontSave;
+                _ownedGfx.Add(tex); _ownedGfx.Add(sp);
+                return sp;
+            }
+            catch { return null; }
         }
 
         // ── load + delete actions ────────────────────────────────────────────

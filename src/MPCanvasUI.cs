@@ -588,6 +588,7 @@ namespace BigAmbitionsMP
             // arrive before it is in-game.  Caching here, every frame from the start,
             // guarantees the path is ready so NO poll-thread handler ever calls IL2CPP.
             MPSaveManager.EnsureVersionCached();
+            MPStoreCarryForward.RunIfNeeded();   // game-version upgrade (user-approved 2026-08-21): copy the previous version's MP store forward, once, in the background
             MPStoreMigration.RunIfNeeded();   // store v2 M2: one-time flat→pid migration, first frame the version resolves
             MPRadioSync.Tick();   // round-227: debounced volume-drag flush
 #if BAMP_DEV
@@ -4310,6 +4311,19 @@ namespace BigAmbitionsMP
             foreach (var o in _origMenuButtons) { try { o.SetActive(main); } catch { } }
             if (_mpButton != null) { try { _mpButton.SetActive(main); } catch { } }
             foreach (var m in _mpSubmenu) { try { m.SetActive(sub); } catch { } }
+            // User-approved 2026-08-21 (replaces P9): with nothing loadable, Host Saved
+            // Game greys out exactly like vanilla's Load Game button — the empty window
+            // becomes unreachable. Re-probed every time the submenu shows (live read).
+            if (sub)
+            {
+                try
+                {
+                    var hs = _mpSubmenu.Find(b => b != null && b.name == "BAMP_HostSaved");
+                    var hsBtn = hs != null ? hs.GetComponent<Button>() : null;
+                    if (hsBtn != null) hsBtn.interactable = MPSaveManager.AnyLoadableSaves();
+                }
+                catch { }
+            }
             if (lob && _lobbyWindow == null) BuildLobbyWindow();
             if (_lobbyWindow != null) { try { _lobbyWindow.SetActive(lob); } catch { } }
             if (lob) RefreshLobbyWindow();
@@ -4354,6 +4368,10 @@ namespace BigAmbitionsMP
         {
             // Round-225: the native-style load window (vanilla layout + delete). The
             // classic picker stays as the loud fallback if the clone can't build.
+            // Live read at commitment (user-approved 2026-08-21): the grey-out decides at
+            // submenu-show time; this guard re-decides at the click itself.
+            if (!MPSaveManager.AnyLoadableSaves())
+            { Plugin.Logger.LogInfo("[MenuUI] Host Saved Game ignored — no loadable MP saves (the button greys for this)."); return; }
             if (MPLoadWindow.Open()) { Plugin.Logger.LogInfo("[MenuUI] Host Saved Game → native-style load window"); return; }
             Plugin.Logger.LogInfo("[MenuUI] Host Saved Game → classic save picker (fallback)");
             ShowSavePicker(true);   // choose WHICH save first (local disk; no server needed yet)
@@ -4429,7 +4447,7 @@ namespace BigAmbitionsMP
 
         /// <summary>Friendly playthrough title: the auto MP name "MP 2026-06-23 1614" → "MP Jun 23, 4:14 PM"
         /// (the time disambiguates same-day runs); custom names (hqtest, …) pass through unchanged.</summary>
-        private static string FriendlyName(string b)
+        internal static string FriendlyName(string b)
         {
             try {
                 if (!string.IsNullOrEmpty(b) && b.StartsWith("MP ") && b.Length >= 18)
@@ -4773,7 +4791,7 @@ namespace BigAmbitionsMP
         /// <summary>Row label. On a single-name card, kinds label the rows as before. When
         /// playthrough-id grouping merges several save NAMES into one card, every row carries its
         /// save's name (native shows the typed name per save row), automatic rows kind-prefixed.</summary>
-        private static string SpRowLabel(MPSaveManager.MpVariant v, bool multiName)
+        internal static string SpRowLabel(MPSaveManager.MpVariant v, bool multiName)
         {
             if (!multiName) return VariantLabel(v.Kind);
             string name = FriendlyName(MPSaveManager.StripToBase(v.SessionName));
@@ -4896,9 +4914,9 @@ namespace BigAmbitionsMP
             // Round-219: the clicked ROW's identity wins outright (click-exact, vanilla
             // semantics); the name map is only a fallback for legacy paths, and a name
             // ambiguous there ("") falls back to newest-wins with a loud log.
+            string pickedPid = _spSelPid;
             try
             {
-                string pickedPid = _spSelPid;
                 if (string.IsNullOrEmpty(pickedPid)) _spPidBySession.TryGetValue(name, out pickedPid);
                 if (!string.IsNullOrEmpty(pickedPid))
                 {
@@ -4937,6 +4955,18 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] save tuning mirror: {ex.Message}"); }
             try { OnHost(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] host: {ex.Message}"); }
             MPServer.ChosenLoadSession = name;   // set AFTER OnHost so Start() can't clear it
+            // P1 (user-approved 2026-08-21): Start() just wiped every session pin — re-note
+            // the clicked (name, world) pair AFTER it, the same survival trick as the line
+            // above, so a duplicated name can never resolve to the other world (audit F1).
+            try
+            {
+                if (!string.IsNullOrEmpty(pickedPid))
+                {
+                    MPSaveManager.NoteSessionPid(name, pickedPid);
+                    MPSaveManager.NoteSessionPid(MPSaveManager.StripToBase(name), pickedPid);
+                }
+            }
+            catch { }
             ShowView(MpView.Lobby);
         }
 
