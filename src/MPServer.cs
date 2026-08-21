@@ -505,6 +505,7 @@ namespace BigAmbitionsMP
                         // the client with no active playthrough, and its first save landed
                         // in '_unresolved').
                         PlaythroughId    = MPSaveCoordinator.ActivePlaythroughId,
+                        LoadGen          = MintLoadGen(pid),   // round-284: a fresh start is a served load too
                     }));
                     Plugin.Logger.LogWarning($"[Server] No save slot for new player '{pid}' (stable={stable}) — sent fresh-character fallback.");
                     continue;
@@ -531,6 +532,7 @@ namespace BigAmbitionsMP
                     // may not be stamped yet, but the live world always knows itself.
                     PlaythroughId = !string.IsNullOrEmpty(m.PlaythroughId) ? m.PlaythroughId : MPSaveCoordinator.ActivePlaythroughId,
                     HostEpoch     = m.HostEpoch,
+                    LoadGen       = MintLoadGen(pid),   // round-284 load ticket
                 };
                 Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", payload));
                 Plugin.Logger.LogInfo($"[Server] Sent LoadData to '{pid}' ({data.Value.raw}B, ${cash:F0}).");
@@ -602,7 +604,7 @@ namespace BigAmbitionsMP
         // ManualPause), NEVER by the disconnect pause.  ResumeFromDisconnectPause restores
         // the shared pause to THIS, so lifting a disconnect pause can't cancel a pause a
         // player set on purpose (M6, 2026-06-24).
-        private static bool _deliberatePause;
+        private static volatile bool _deliberatePause;   // 284b (verifier F-5): read lock-free on the poll thread (join replay :2365, heartbeat stamp) — volatile like its sibling _pausedByDisconnect
         /// <summary>Who dropped (for the host's pause overlay).</summary>
         public static volatile string DisconnectPauseWho = "";
         public static bool PausedByDisconnect => _pausedByDisconnect;
@@ -732,6 +734,7 @@ namespace BigAmbitionsMP
             _clients.Clear();
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _peerPhaseSeq.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
             lock (_joinBaselineDone) _joinBaselineDone.Clear();   // round-276: baseline latches die with the session
+            _expectedLoadGen.Clear(); _parkedBaselineGen.Clear(); _firedLoadGen.Clear(); _markedInGame.Clear();   // round-284: load-ticket state too (the counter itself never resets — a reissued gen could match a stale echo)
         }
 
         /// <summary>Host clicked "Start New Game" in the lobby.</summary>
@@ -756,6 +759,7 @@ namespace BigAmbitionsMP
             // Re-arm the startup pause hold for this new game.
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _peerPhaseSeq.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
             lock (_joinBaselineDone) _joinBaselineDone.Clear();   // round-276: baseline latches die with the session
+            _expectedLoadGen.Clear(); _parkedBaselineGen.Clear(); _firedLoadGen.Clear(); _markedInGame.Clear();   // round-284: load-ticket state too (the counter itself never resets — a reissued gen could match a stale echo)
 
             // Per-player starting cash: each client gets the host-designated amount
             // (their override, else the difficulty base).  The host now designates
@@ -773,6 +777,7 @@ namespace BigAmbitionsMP
                     SaveName            = "",
                     Settings            = CloneWithCash(settings, cash, age),
                     EnforceStartingCash = true,
+                    LoadGen             = string.IsNullOrEmpty(pid) ? 0 : MintLoadGen(pid),   // round-284 load ticket
                 };
                 Send(peer, MessageEnvelope.Create(MessageType.StartGameNew, "host", perPayload));
                 Plugin.Logger.LogInfo($"[Server] StartNewGame → '{pid}' cash ${cash} age {age}.");
@@ -819,6 +824,7 @@ namespace BigAmbitionsMP
             // Re-arm the startup pause hold for this new game.
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _peerPhaseSeq.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
             lock (_joinBaselineDone) _joinBaselineDone.Clear();   // round-276: baseline latches die with the session
+            _expectedLoadGen.Clear(); _parkedBaselineGen.Clear(); _firedLoadGen.Clear(); _markedInGame.Clear();   // round-284: load-ticket state too (the counter itself never resets — a reissued gen could match a stale echo)
 
             // Phase 4: if a multiplayer session exists, resume it — the host holds
             // every player's .hsg, so it ships each connected client its own and
@@ -846,7 +852,9 @@ namespace BigAmbitionsMP
 
             // No MP session yet — fall back to the legacy "everyone loads their most
             // recent single-player save" behaviour.
-            var payload = new StartGamePayload { SaveName = "" };
+            // Round-284: one shared ticket for the broadcast serve — every named peer
+            // expects the same gen.
+            var payload = new StartGamePayload { SaveName = "", LoadGen = MintSharedLoadGen() };
             Broadcast(MessageEnvelope.Create(MessageType.StartGameLoad, "host", payload));
             Plugin.Logger.LogInfo("[Server] StartLoadGame (legacy SP path) sent to all clients.");
 
@@ -935,6 +943,13 @@ namespace BigAmbitionsMP
                 // Round-276: a leaver's baseline latch dies with them, so a rejoin
                 // earns a fresh baseline even if its PlayerInGame races the phase flow.
                 lock (_joinBaselineDone) _joinBaselineDone.Remove(leftPlayer);
+                // Round-284: their load-ticket state dies with them too — a rejoin is a
+                // fresh serve (new ticket), and a parked fire for a gone player must not
+                // linger to fire on a stale echo after they return.
+                _expectedLoadGen.TryRemove(leftPlayer, out _);
+                _parkedBaselineGen.TryRemove(leftPlayer, out _);
+                _firedLoadGen.TryRemove(leftPlayer, out _);
+                _markedInGame.TryRemove(leftPlayer, out _);
                 // Round-283: their phase freshness stamp dies with them.  A client that restarts
                 // its process restarts its own counter at 1, so a last-seen figure that outlived
                 // the connection would silently drop every report of the next one.
@@ -2264,6 +2279,7 @@ namespace BigAmbitionsMP
                             HsgGzipBase64 = "",
                             Money = Math.Max(0f, GetKnownCash(hello.PlayerId)),
                             FallbackSettings = LastStartSettings,
+                            LoadGen = MintLoadGen(hello.PlayerId),   // round-284 load ticket
                         }));
                         sentLoad = true;
                         Plugin.Logger.LogInfo($"[Server] Mid-game join by '{hello.PlayerId}' (no session yet) — sent fresh-character instruction.");
@@ -2336,8 +2352,26 @@ namespace BigAmbitionsMP
             SendAppearanceSyncTo(peer);      // every player's appearance (else a joiner sees default avatars — broadcast-on-change only)
             foreach (var d in MPStockSync.AllDigests())   // un-entered shops' stocked-shelf sets, so the joiner's market floor is right from the start
                 Send(peer, MessageEnvelope.Create(MessageType.ShopStockDigest, "host", d));
-            if (TimeSync.ManualPaused)       // shared pause is STATE, not an event — a joiner during a pause must be told, else it runs at 1x while everyone else is frozen (covers fresh join + clean-drop reconnect)
-                Send(peer, MessageEnvelope.Create(MessageType.ManualPause, "host", new ManualPausePayload { Paused = true }));
+            // Shared pause is STATE, not an event — a joiner during a pause must be told, else it
+            // runs at 1x while everyone else is frozen (covers fresh join + clean-drop reconnect).
+            // Round-284: read the host's INTENT (_deliberatePause / _pausedByDisconnect, both
+            // flipped synchronously at every site) — NOT TimeSync.ManualPaused.  This runs from a
+            // main-thread queue job, and the unpause path (ResumeFromDisconnectPause) broadcasts
+            // immediately but only ENQUEUES SetManualPause — so the applied flag can still read a
+            // stale true here and re-pause the very rejoiner the unpause was for (log-proven,
+            // 2026-08-19 soak).  Send-only-when-paused is kept: this is the join flow's ONLY
+            // per-join pause inform, and any earlier broadcast a connected joiner received is
+            // always paired with its own follow-up broadcast when that state ends.
+            // 284c: express toward a capable peer, like every other host→client pause send —
+            // ONE lane per peer keeps in-lane FIFO as the pause's total order (an ordered inform
+            // stuck behind this replay's snapshot could be overtaken by a later express unpause,
+            // and the older "paused" would land last).
+            if (_deliberatePause || _pausedByDisconnect)
+            {
+                var pauseBytes = MessageEnvelope.Create(MessageType.ManualPause, "host", new ManualPausePayload { Paused = true }).Serialize();
+                if (IsExpressCapablePeer(peer.Id)) peer.SendExpress(pauseBytes);
+                else                               peer.Send(pauseBytes, reliable: true);
+            }
         }
 
         /// <summary>Send a peer the full world state (owners+market, host profile,
@@ -2410,6 +2444,22 @@ namespace BigAmbitionsMP
             // 'Loading' fallback gone nothing else would ever re-arm that member's
             // baseline.  Clearing is idempotent, so hoisting costs nothing.
             lock (_joinBaselineDone) _joinBaselineDone.Remove(playerId);
+            // Round-284: the same authenticated signal is the gen path's MARK — set it
+            // unconditionally (both the startup and the reconnect branch below run past
+            // here), then fire any PARKED baseline (an express Settled/Running that beat
+            // this message) whose ticket is still the expected one.  A parked gen
+            // superseded by a newer serve is dropped — its load no longer exists.
+            _markedInGame[playerId] = 1;
+            if (_parkedBaselineGen.TryGetValue(playerId, out var parkedGen))
+            {
+                if (_expectedLoadGen.TryGetValue(playerId, out var expectedGen) && parkedGen == expectedGen)
+                    FireJoinBaselineForGen(playerId, parkedGen, "PlayerInGame (parked express report)");
+                else
+                {
+                    _parkedBaselineGen.TryRemove(playerId, out _);
+                    Plugin.Logger.LogInfo($"[Server] parked join baseline for '{playerId}' (gen {parkedGen}) superseded by a newer serve — dropped.");
+                }
+            }
             bool hostJustReady = false;
             bool released;
             List<MPLink> sendTo = new();
@@ -2498,6 +2548,80 @@ namespace BigAmbitionsMP
         // 'Settled' + 'Running' dual trigger must not double-save; cleared per client
         // by their next 'Loading' report (sent on every load path).
         private static readonly HashSet<string> _joinBaselineDone = new();
+        // ── Round-284 "load tickets" — the gen-keyed join-baseline trigger that freed
+        // phase reports for the express lane.  The host mints a ticket every time it
+        // SERVES a player a load (every StartGameNew/StartGameLoad/LoadData that leads
+        // to a load), carries it in the served payload, and the client echoes it in
+        // every phase report.  A Settled/Running report fires the baseline IFF its gen
+        // matches the expected ticket, that gen hasn't fired, and PlayerInGame has
+        // landed (_markedInGame); a matching report that BEATS the ordered PlayerInGame
+        // is PARKED and fired by MarkPlayerInGame — so an express report can neither
+        // fire early nor be lost.  Gen 0 (older client) keeps the round-276 latch path
+        // unchanged.  The counter is ONE process-lifetime int, never reset: a reissued
+        // value could match a stale echo from an earlier session on the same link.
+        private static int _loadGenCounter;
+        private static readonly ConcurrentDictionary<string, int>  _expectedLoadGen   = new();   // pid → ticket of the load we last served them
+        private static readonly ConcurrentDictionary<string, int>  _firedLoadGen      = new();   // pid → ticket whose baseline already fired
+        private static readonly ConcurrentDictionary<string, int>  _parkedBaselineGen = new();   // pid → matching ticket awaiting its PlayerInGame
+        private static readonly ConcurrentDictionary<string, byte> _markedInGame      = new();   // pid → MarkPlayerInGame landed for the served load
+
+        /// <summary>Round-284: mint a load ticket for ONE player at the moment a load is
+        /// served to them.  Clears their mark/parked state — the serve supersedes the
+        /// previous load's scene signal and any parked fire.</summary>
+        private static int MintLoadGen(string pid)
+        {
+            int gen = System.Threading.Interlocked.Increment(ref _loadGenCounter);
+            RecordExpectedLoadGen(pid, gen);
+            return gen;
+        }
+
+        private static void RecordExpectedLoadGen(string pid, int gen)
+        {
+            if (string.IsNullOrEmpty(pid)) return;
+            _expectedLoadGen[pid] = gen;
+            _markedInGame.TryRemove(pid, out _);
+            _parkedBaselineGen.TryRemove(pid, out _);
+            // 284b (verifier F-3, known residual): a PlayerInGame for the PREVIOUS load already
+            // on the wire can land after this clear and re-set the mark — a one-RTT window in
+            // which the next load's Settled fires against the old scene's mark.  Reachable only
+            // by serving a new load to a client that is IN-WORLD, and today that path ejects
+            // the client outright (round-240 known defect) before any such Settled — so the
+            // window is closed in practice.  If an in-game host switch-save feature ever ships,
+            // carry the gen ON PlayerInGame and match it here instead of trusting arrival time.
+        }
+
+        /// <summary>Round-284: one ticket for a load served by BROADCAST (the legacy
+        /// StartGameLoad path) — every currently named peer expects the same gen.</summary>
+        private static int MintSharedLoadGen()
+        {
+            int gen = System.Threading.Interlocked.Increment(ref _loadGenCounter);
+            foreach (var pr in _clients.Keys)
+                if (_peerNames.TryGetValue(pr.Id, out var nm)) RecordExpectedLoadGen(nm, gen);
+            return gen;
+        }
+
+        /// <summary>Round-284: the gen-keyed join-baseline fire.  Idempotent per
+        /// (player, gen); on failure the trigger is NOT consumed (fired stays unset, a
+        /// parked entry stays), so the sibling Settled/Running report or the next
+        /// PlayerInGame retries — a deferred action must not eat its trigger.</summary>
+        private static void FireJoinBaselineForGen(string pid, int gen, string via)
+        {
+            if (_firedLoadGen.TryGetValue(pid, out var fired) && fired == gen) return;
+            try
+            {
+                // ARM before REQUEST (round-274d) — identical to the legacy latch fire, so
+                // TickJoinBaselineVerify arms the same way on the direct and the parked path.
+                MPSaveCoordinator.ArmJoinBaselineVerify(StableOfPid(pid));
+                MPSaveCoordinator.RequestJoinBaseline();
+                _firedLoadGen[pid] = gen;
+                _parkedBaselineGen.TryRemove(pid, out _);
+                Plugin.Logger.LogInfo($"[Server] join baseline fired for '{pid}' (load gen {gen}, via {via}).");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[Server] join baseline fire for '{pid}' (load gen {gen}, via {via}) failed: {ex.Message} — trigger kept for a retry.");
+            }
+        }
         // Round-276b: last non-empty Detail per player — lets a detailed re-report of an
         // unchanged phase still log (the probe's payload must survive losing the race).
         private static readonly ConcurrentDictionary<string, string> _peerPhaseDetail = new();
@@ -2802,6 +2926,39 @@ namespace BigAmbitionsMP
             // the startup and the mid-session reconnect branch) — and on disconnect.
             // Phase reports still TIME the fire (Settled/Running = the joiner can
             // contribute); they can no longer ARM it.
+            // Round-284: a report that echoes a load ticket (LoadGen != 0) takes the
+            // gen-keyed path instead — the latch machinery below remains solely for
+            // gen-0 (pre-284) clients.
+            // 284b (verifier F-2): the gen path deliberately does NOT require `changed`.
+            // _peerPhase is the one per-player map a disconnect leaves standing, so a
+            // rejoiner whose stale entry already reads "Running" would report Running
+            // with changed == false — and a changed-gated fire would neither fire nor
+            // park, with nothing left to retry it.  The gen path is idempotent per
+            // (player, gen), so an unchanged re-report is a free retry, not a hazard.
+            if (p.LoadGen != 0 && (p.Phase == "Settled" || p.Phase == "Running"))
+            {
+                // ── Round-284 gen path ────────────────────────────────────────
+                // The report names the exact load it describes, so the fire needs
+                // no cross-type arrival order: match the ticket, then either fire
+                // (PlayerInGame already landed) or PARK for MarkPlayerInGame (the
+                // express report beat the ordered scene-load signal).  A mismatched
+                // gen is a stale report from a previous load — ignored for baseline
+                // purposes only; the phase bookkeeping above already applied.
+                _expectedLoadGen.TryGetValue(p.PlayerId, out var expectedGen);
+                if (p.LoadGen != expectedGen)
+                {
+                    if (changed)   // log the first sighting, not every re-report
+                        Plugin.Logger.LogInfo($"[Server] phase: '{p.PlayerId}' {p.Phase} carries load gen {p.LoadGen}, expected {expectedGen} — stale report from a previous load; not a baseline trigger.");
+                }
+                else if (_markedInGame.ContainsKey(p.PlayerId))
+                    FireJoinBaselineForGen(p.PlayerId, p.LoadGen, $"'{p.Phase}' report");
+                else if (!(_firedLoadGen.TryGetValue(p.PlayerId, out var fg) && fg == p.LoadGen))
+                {
+                    _parkedBaselineGen[p.PlayerId] = p.LoadGen;
+                    Plugin.Logger.LogInfo($"[Server] join baseline for '{p.PlayerId}' PARKED (gen {p.LoadGen}: '{p.Phase}' arrived before PlayerInGame) — fires when the mark lands.");
+                }
+                return;
+            }
             if (changed && (p.Phase == "Settled" || p.Phase == "Running"))
             {
                 bool first; lock (_joinBaselineDone) first = _joinBaselineDone.Add(p.PlayerId);
@@ -3125,12 +3282,27 @@ namespace BigAmbitionsMP
             BroadcastManualPause(paused);
         }
 
-        /// <summary>Broadcasts the shared manual-pause state to all clients.</summary>
+        /// <summary>Broadcasts the shared manual-pause state to all clients.
+        /// 284c (user-approved): rides the EXPRESS lane toward capable peers — a pause must not
+        /// sit behind a store mirror (the F-1 flicker: a press outliving F2's 8s echo bound).
+        /// ManualPause carries no Seq on purpose: EVERY host→client pause send (this broadcast,
+        /// the relay, the join-replay inform) uses the same lane toward a given peer, so in-lane
+        /// FIFO is its total order; the F2 heartbeat is the floor beneath a mixed pairing.</summary>
         public static void BroadcastManualPause(bool paused)
         {
             if (!_running) return;
-            Broadcast(MessageEnvelope.Create(
-                MessageType.ManualPause, "host", new ManualPausePayload { Paused = paused }));
+            var bytes = MessageEnvelope.Create(
+                MessageType.ManualPause, "host", new ManualPausePayload { Paused = paused }).Serialize();
+            foreach (var peer in _clients.Keys)
+            {
+                // Per-peer isolation, same shape as the GameTimeSync loop.
+                try
+                {
+                    if (IsExpressCapablePeer(peer.Id)) peer.SendExpress(bytes);
+                    else                               peer.Send(bytes, reliable: true);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] ManualPause → {peer.Describe}: {ex.Message}"); }
+            }
             Plugin.Logger.LogInfo($"[Server] ManualPause broadcast: {paused}");
         }
 
@@ -3143,10 +3315,19 @@ namespace BigAmbitionsMP
             // intent (NOT the disconnect pause) so a later reconnect restores it (M6).
             _deliberatePause = payload.Paused;
             TimeSync.SetManualPause(payload.Paused);
+            // 284c: relay on the express lane toward capable peers — same reasoning and
+            // same per-peer shape as BroadcastManualPause above.
+            var relayBytes = MessageEnvelope.Create(MessageType.ManualPause, "host", payload).Serialize();
             foreach (var peer in _clients.Keys)
                 if (peer.Id != sender.Id)
-                    Send(peer, MessageEnvelope.Create(
-                        MessageType.ManualPause, "host", payload));
+                {
+                    try
+                    {
+                        if (IsExpressCapablePeer(peer.Id)) peer.SendExpress(relayBytes);
+                        else                               peer.Send(relayBytes, reliable: true);
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] ManualPause relay → {peer.Describe}: {ex.Message}"); }
+                }
             Plugin.Logger.LogInfo($"[Server] ManualPause from {senderPid}: {payload.Paused} — relayed.");
         }
 
@@ -3965,6 +4146,7 @@ namespace BigAmbitionsMP
                     MoneyKnown = cash != 0f || GetKnownCash(pid) >= 0f,   // round-224: 0-and-unstreamed = unknown
                     // Handoff slice 4: identity/day/epoch for the joiner's log-only diagnostics.
                     WorldDay = m?.WorldDay ?? 0, PlaythroughId = !string.IsNullOrEmpty(m?.PlaythroughId) ? m.PlaythroughId : MPSaveCoordinator.ActivePlaythroughId, HostEpoch = m?.HostEpoch ?? 0,
+                    LoadGen = MintLoadGen(pid),   // round-284 load ticket
                 }));
                 Plugin.Logger.LogInfo($"[Server] Mid-session join: sent LoadData to '{pid}' (source='{servedFrom}', adopt='{adopt}', {data.Value.raw}B, ${cash:F0}); world state follows once their scene loads.");
                 return true;
@@ -3979,7 +4161,8 @@ namespace BigAmbitionsMP
             float kc = GetKnownCash(pid);
             Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
             { SessionName = adopt, HsgGzipBase64 = "", Money = Math.Max(0f, kc), FallbackSettings = LastStartSettings,
-              PlaythroughId = MPSaveCoordinator.ActivePlaythroughId }));   // round-217: identity always travels
+              PlaythroughId = MPSaveCoordinator.ActivePlaythroughId,   // round-217: identity always travels
+              LoadGen = MintLoadGen(pid) }));   // round-284 load ticket (fresh start = served load)
             // 4a diagnostic: fresh-starting someone who OWNS property is the "lost character" smoking gun —
             // they had a session presence but no save survived. Loud ERROR so a bug report pinpoints it;
             // genuinely-new joiners stay at INFO.
@@ -5046,6 +5229,12 @@ namespace BigAmbitionsMP
                 // Round-283: "this host drops stale phase reports by Seq" — a literal true, because
                 // the flag's meaning is a compile-time fact about THIS assembly (the guard is in
                 // RecordPhaseReport), not a runtime setting.  Same shape as HelloPayload.CargoDelta.
+                // 284b (verifier F-6): the two directions gate differently ON PURPOSE.  Host→client
+                // express requires flag + version equality; client→host requires this flag + a
+                // non-zero ServedLoadGen — the client can't check version equality (this payload
+                // carries no host version), and for the one hazard that matters (the baseline fire
+                // rule) a minted ticket is STRONGER proof than a version string: only a host running
+                // the gen-keyed rule ever stamps one.
                 HostExpress = true,
             };
             Broadcast(MessageEnvelope.Create(MessageType.LobbyUpdate, "host", payload));
@@ -5130,6 +5319,11 @@ namespace BigAmbitionsMP
                 TuneDrain = MPNeedsTuning.DrainPercent, TuneRest = MPNeedsTuning.RestPercent,
                 TuneMorale = MPNeedsTuning.MoralePercent,
                 Seq = System.Threading.Interlocked.Increment(ref _gtsSeq),   // round-283 freshness stamp
+                // Round-284/F2: pause INTENT rides the heartbeat — a LIVE read at send time of
+                // the same synchronously-flipped fields the F1 join inform reads (never the
+                // main-thread-lagged TimeSync.ManualPaused).  Clients converge to it, so a
+                // lost/misordered ManualPause edge heals within one heartbeat.
+                PauseState = (_deliberatePause || _pausedByDisconnect) ? 1 : 2,
             };
 
             // ── Round-283 ORDER-SAFETY AUDIT: the clock heartbeat on the express lane ──

@@ -1135,6 +1135,10 @@ namespace BigAmbitionsMP
                 MPSaveManager.NoteSessionPid(p.SessionName, _wireWorldPid);
                 MPSaveManager.NoteSessionPid(StripAutoSuffix(p.SessionName), _wireWorldPid);
             }
+            // Round-284 load ticket: adopt it up front — every branch below that leads to a
+            // load (the fresh-start fallback included) must phase-report under THIS serve's
+            // gen.  The no-load branches are never stamped by the host, so 0 changes nothing.
+            if (p.LoadGen != 0) MPClient.ServedLoadGen = p.LoadGen;
             // Proposal 2 (2026-06-17): host says our saved character exists but its .hsg can't be read right
             // now — do NOT fresh-start (that abandons the real save). Leave cleanly so the player can reconnect
             // to retry, or the host can recover the file. Checked BEFORE the empty-hsg fresh path below.

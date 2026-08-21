@@ -965,6 +965,12 @@ namespace BigAmbitionsMP
 
         /// <summary>True if the host enforces one starting cash; false = clients use their own.</summary>
         public bool EnforceStartingCash { get; set; } = true;
+
+        /// <summary>Round-284 "load ticket": the host's id for THIS serve of a world to this
+        /// player.  The client adopts it and echoes it in every PhaseReportPayload, so the
+        /// host can key the join-baseline fire to the exact load a report describes without
+        /// depending on cross-type arrival order.  0 = older host (never stamps).</summary>
+        public int LoadGen { get; set; }
     }
 
     /// <summary>
@@ -1374,6 +1380,12 @@ namespace BigAmbitionsMP
         /// &lt;= the last one it applied.  0 = an older host that does not stamp → always apply,
         /// which is byte-for-byte today's behaviour.</summary>
         public long Seq { get; set; }
+        /// <summary>Round-284/F2: the host's pause INTENT riding the heartbeat — clients CONVERGE
+        /// to it (TimeSync.ConvergePauseFromHeartbeat; the ManualPause edge messages remain the
+        /// fast path, this is the recurrence-covered floor under a lost/misordered edge).
+        /// 1 = paused, 2 = unpaused, 0 = absent (older host) — the receiver must NOT converge
+        /// on 0 (the Seq==0 legacy-passthrough idiom above).</summary>
+        public int PauseState { get; set; }
     }
 
     // ── Business sync (Phase 1: exterior business state) ──────────────────────
@@ -1723,6 +1735,13 @@ namespace BigAmbitionsMP
         /// &lt;= the last one it accepted from that player.  0 = an older client that does not stamp
         /// → always apply, exactly today's behaviour.</summary>
         public long Seq { get; set; }
+        /// <summary>Round-284 (additive): echo of the load ticket the sender was last SERVED
+        /// (StartGamePayload/LoadDataPayload.LoadGen).  0 = older client, or not yet served —
+        /// the host's round-276 latch path applies unchanged.  Non-zero lets the host fire the
+        /// join baseline GEN-KEYED — no dependency on this report's arrival order vs
+        /// PlayerInGame — which is what let phase reports onto the express lane (see
+        /// MPClient.SendPhaseReport).</summary>
+        public int LoadGen { get; set; }
     }
 
     /// <summary>A purchase by one player inside another player's shop
@@ -2345,6 +2364,10 @@ namespace BigAmbitionsMP
         public int    WorldDay      { get; set; }
         public string PlaythroughId { get; set; } = "";
         public int    HostEpoch     { get; set; }
+        /// <summary>Round-284 "load ticket" — see StartGamePayload.LoadGen.  Stamped only on
+        /// serves that lead to a LOAD (real .hsg or fresh-character fallback); the no-load
+        /// branches (SaveUnavailable / AwaitClientDisconnectUpload) stay 0.</summary>
+        public int    LoadGen       { get; set; }
     }
 
     /// <summary>Host → clients (handoff slice 1, 2026-07-23): one piece of the session STORE —

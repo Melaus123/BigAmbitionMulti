@@ -88,11 +88,14 @@ namespace BigAmbitionsMP
         /// two most critical signals a lane bulk cannot occupy.
         ///
         /// Contract: within the express lane order is preserved; BETWEEN lanes ordering is
-        /// deliberately broken — that is the entire point, and it is why every express message
-        /// carries a monotonic Seq stamp its receiver uses to drop stale copies.  ONLY the round-283
-        /// whitelist may use it (host→client GameTimeSync, client→host PhaseReport), and only toward
-        /// a peer that advertised the capability; widening it needs the same order-safety audit those
-        /// two got.
+        /// deliberately broken — that is the entire point.  Every express message therefore needs a
+        /// staleness defense: a monotonic Seq stamp its receiver drops stale copies by (GameTimeSync,
+        /// PhaseReport), OR — for absolute state — the rule that EVERY sender of that type uses this
+        /// lane toward that peer, so in-lane FIFO is the type's total order (ManualPause, 284c; the
+        /// F2 heartbeat is the floor beneath a mixed-version pairing).  ONLY the whitelist may use
+        /// it (host→client GameTimeSync + ManualPause, client→host PhaseReport + ManualPause), and
+        /// only toward a peer that advertised the capability; widening it needs the same
+        /// order-safety audit these got.
         ///
         /// The base is an immediate reliable Send — a transport with no lane to jump is honest about
         /// being ordinary rather than pretending to a priority it cannot deliver.</summary>
@@ -284,9 +287,10 @@ namespace BigAmbitionsMP
     // or when an earlier express message is still waiting, so order WITHIN the lane is
     // preserved even though order between lanes is not.
     //
-    // Deliberately unbounded-by-count but tiny by construction: the whitelist is two
-    // small messages, one every ~3s and one per lifecycle transition, and each is
-    // rejected above SteamFrames.ChunkSize before it ever reaches here.
+    // Deliberately unbounded-by-count but tiny by construction: the whitelist is three
+    // small messages — one every ~3s, one per lifecycle transition, one per pause
+    // press (284c) — and each is rejected above SteamFrames.ChunkSize before it ever
+    // reaches here.
 
     /// <summary>Round-283: per-link express send queue plus the lane's instrumentation.
     /// Thread-safe; enqueued from sender threads, drained from the owning transport's pump.</summary>

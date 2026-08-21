@@ -198,6 +198,71 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[TimeSync] Manual pause = {paused}");
         }
 
+        // ── Round-284/F2: heartbeat pause convergence (client) ───────────────
+        // The host's pause INTENT rides every GameTimeSync (PauseState 1/2; 0 = older
+        // host, no convergence).  The ManualPause edge messages remain the fast path —
+        // this is the recurrence-covered floor under them: a lost or no-op'd edge heals
+        // within one heartbeat instead of leaving this client desynced until the next
+        // press.  Echo suppression: when THIS client presses pause, the edge is in
+        // flight and the next heartbeat can still carry the host's PRE-press intent —
+        // converging on that would visibly revert the press just before the relay
+        // lands.  The desired state is recorded at send; a matching heartbeat consumes
+        // it, a mismatching one is ignored until the bound expires (~2 heartbeat
+        // intervals) — then the host's word wins, and the WARN below is the visible
+        // trace of a lost/rejected local pause request.
+        // 284b (verifier F-4): written on the main thread, read on the poll thread.  An int,
+        // not bool? — Nullable<bool> is a two-field struct with no atomicity guarantee across
+        // that pairing.  0 = none, 1 = press wants PAUSED, 2 = press wants UNPAUSED.  The
+        // timestamp is a paired long read/written via Volatile so a torn 64-bit read on a
+        // 32-bit runtime can't fabricate a bound expiry; state is written LAST so a reader
+        // that sees a pending press also sees its fresh timestamp.
+        private static volatile int _pendingLocalPause;
+        private static long _pendingLocalPauseAtUtcTicks;
+        private const double PendingLocalPauseBoundSec = 8.0;   // ~2 heartbeat intervals (3s cadence)
+
+        /// <summary>Round-284/F2: a local pause press is on the wire (MPClient.SendManualPause) —
+        /// suppress heartbeat convergence back to the old state until it round-trips or the
+        /// bound expires.</summary>
+        public static void NotePendingLocalPause(bool desired)
+        {
+            System.Threading.Volatile.Write(ref _pendingLocalPauseAtUtcTicks, System.DateTime.UtcNow.Ticks);
+            _pendingLocalPause = desired ? 1 : 2;
+        }
+
+        /// <summary>Round-284/F2: converge the shared pause onto the host's heartbeat intent
+        /// (1 = paused, 2 = unpaused; callers must not pass 0 — legacy hosts don't stamp).
+        /// Client-only by construction: the heartbeat is a host→client message, and the host's
+        /// own intent IS the authority.  Recurrence-covered by construction — every subsequent
+        /// heartbeat re-evaluates, so nothing here consumes a trigger it failed to act on.</summary>
+        public static void ConvergePauseFromHeartbeat(int pauseState)
+        {
+            if (pauseState != 1 && pauseState != 2) return;
+            // The startup hold OWNS pause during a load: Begin/EndStartupHold drive the
+            // native pause directly and GameStateReader.TickPendingNativePause re-asserts
+            // their intent every frame — converging to "unpaused" here would start a
+            // SetNativePause tug-of-war against the hold (the 2026-06-10 freeze class).
+            // Skipping is safe: the F1 join inform covers the join case, and the first
+            // post-release heartbeat converges anything missed within ~3s.
+            if (IsStartupHeld) return;
+            bool hostPaused = pauseState == 1;
+            int pending = _pendingLocalPause;
+            if (pending != 0)
+            {
+                bool desired = pending == 1;
+                var pressedAt = new System.DateTime(System.Threading.Volatile.Read(ref _pendingLocalPauseAtUtcTicks), System.DateTimeKind.Utc);
+                if (hostPaused == desired)
+                    _pendingLocalPause = 0;   // press round-tripped (or host already agreed) — converge normally (no-op)
+                else if ((System.DateTime.UtcNow - pressedAt).TotalSeconds < PendingLocalPauseBoundSec)
+                    return;   // press still in flight — ignore this heartbeat's pause bit; the next one re-evaluates
+                else
+                {
+                    _pendingLocalPause = 0;
+                    Plugin.Logger.LogWarning($"[TimeSync] local pause press ({desired}) never round-tripped within {PendingLocalPauseBoundSec:0}s — host intent is {(hostPaused ? "paused" : "unpaused")}; converging to the host (lost/rejected pause request).");
+                }
+            }
+            SetManualPause(hostPaused);   // no-op when already matching (SetManualPause early-returns)
+        }
+
         // ── Drift state ───────────────────────────────────────────────────────
 
         // Remaining game-hours of forward catch-up to RUN (we're behind the host). Drained by
@@ -311,6 +376,7 @@ namespace BigAmbitionsMP
             AheadHeld        = false;
             _firstSyncSeen   = false;   // re-arm the one-time join snap for the next load
             _releaseDeferred = false; _forceNextRelease = false;   // world-sync release gate dies with the load
+            _pendingLocalPause = 0;   // round-284/F2: an in-flight press dies with the load too
             // Round-81 (user-approved): a stale MANUAL pause dies with the load too. It was never
             // reset at session boundaries, so a pause from the PREVIOUS session survived the menu on
             // both roles and re-imposed itself on the fresh world (host informs joiners at

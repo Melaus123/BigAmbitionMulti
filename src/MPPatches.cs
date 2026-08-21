@@ -386,6 +386,11 @@ namespace BigAmbitionsMP
                 // benches pause through a different path.  Read the resulting absolute
                 // pause state and share it so the world pauses/resumes for everyone.
                 bool paused = GameStateReader.GetGSCPaused();
+                // 284b (verifier F-4): note the pending press BEFORE applying it locally — a
+                // heartbeat draining between SetManualPause and SendManualPause's own note
+                // could converge the just-set state away.  SendManualPause re-notes the same
+                // value (refreshing the stamp), which is harmless.
+                if (!MPServer.IsRunning && MPClient.IsConnected) TimeSync.NotePendingLocalPause(paused);
                 TimeSync.SetManualPause(paused);
                 if (MPServer.IsRunning)        MPServer.SetDeliberatePause(paused);
                 else if (MPClient.IsConnected) MPClient.SendManualPause(paused);

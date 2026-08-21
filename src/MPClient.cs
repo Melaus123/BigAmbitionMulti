@@ -53,9 +53,16 @@ namespace BigAmbitionsMP
         /// either side, and the whole point of the flag is that its value is respected the instant
         /// it changes.  Defaults FALSE and is re-set false on every connect — an unknown host is
         /// treated as incapable, which is exactly today's ordered send.
-        /// NOT YET CONSUMED — see the order-safety audit in SendPhaseReport for why the client→host
-        /// half of round-283 is held back.</summary>
+        /// Consumed by SendPhaseReport (round-284) together with ServedLoadGen — see the lane
+        /// decision there for why BOTH are required.</summary>
         public static volatile bool HostExpressLane;
+
+        /// <summary>Round-284 "load ticket": the LoadGen of the load this client was last SERVED
+        /// (StartGameNew/StartGameLoad/LoadData), echoed in every phase report so the host can key
+        /// the join-baseline fire to the exact load a Settled/Running report describes.  0 until
+        /// served — and stays 0 toward pre-284 hosts, which never stamp.  Reset with the
+        /// connection: a ticket is only meaningful to the host that minted it.</summary>
+        internal static volatile int ServedLoadGen;
 
         public static bool IsConnected  => _connected && _transport is { IsRunning: true };
         public static bool IsConnecting => _transport is { IsRunning: true } && !_connected;
@@ -186,6 +193,7 @@ namespace BigAmbitionsMP
             // until it arrives we assume the conservative answer (no express).
             ResetClockSyncFreshness();
             HostExpressLane = false;
+            ServedLoadGen   = 0;   // round-284: a load ticket is only meaningful to the host that minted it
 
             // RECONNECT: the host's vote tally + any in-flight skip are gone on its side — clear our stale
             // copy so a leftover SkipActive or phantom vote rows don't wedge the rest dock / world-clock
@@ -978,6 +986,7 @@ namespace BigAmbitionsMP
             IsInLobby = false;
             SendPhaseReport("Loading", "intent: start-game (fence)");   // round-276b: intents name themselves
             var  sp              = env.GetPayload<StartGamePayload>();
+            if (sp != null && sp.LoadGen != 0) ServedLoadGen = sp.LoadGen;   // round-284 load ticket (0 = older host)
             var  newGameSettings = sp?.Settings ?? MPServer.Preset("Normal");
             bool enforceCash     = sp?.EnforceStartingCash ?? true;
             // If the host hasn't enforced a fixed amount, this client uses its
@@ -1032,6 +1041,11 @@ namespace BigAmbitionsMP
         {
             var payload = env.GetPayload<ManualPausePayload>();
             if (payload == null) return;
+            // Round-284 probe: one line per receipt (rare message — a few per session).  A
+            // 2026-08-19 soak showed a host "ManualPause broadcast: False" that produced no
+            // client state change with no trace; this is the paper trail for lost/no-op
+            // pause informs (registered in .modding/04-probes.md).
+            Plugin.Logger.LogInfo($"[Client] ManualPause recv: {payload.Paused} (state was {TimeSync.ManualPaused})");
             TimeSync.SetManualPause(payload.Paused);
         }
 
@@ -1258,6 +1272,17 @@ namespace BigAmbitionsMP
                 int rs = payload.RainState; float ri = payload.RainIntensity;
                 GameStatePatcher.EnqueueOnMainThread(() => MPWeatherSync.ApplyRainState(rs, ri), "weather");
             }
+
+            // Round-284/F2: the host's pause INTENT rides the heartbeat — converge to it
+            // (0 = older host: no convergence, the Seq==0 idiom).  Runs only on accepted-
+            // fresh packets (the Seq guard above already returned on stale ones); echo
+            // suppression for our own in-flight press + the startup-hold skip live in
+            // TimeSync.ConvergePauseFromHeartbeat.  The ManualPause edge messages remain
+            // the fast path; this is the recurrence-covered floor under them.  Early-load
+            // convergence is a non-issue: GameTimeSync is dropped wholesale by the join
+            // quiesce (OnReceive) for the whole load window.
+            if (payload.PauseState != 0)
+                TimeSync.ConvergePauseFromHeartbeat(payload.PauseState);
         }
 
         private static void HandleMarketSnapshot(MessageEnvelope env)
@@ -1648,45 +1673,27 @@ namespace BigAmbitionsMP
                 {
                     PlayerId = MPConfig.PlayerId, Phase = phase, Detail = detail,
                     Seq = System.Threading.Interlocked.Increment(ref _phaseSeq),
+                    LoadGen = ServedLoadGen,   // round-284 load ticket (0 until served / toward non-stamping hosts)
                 });
 
-            // ── Round-283 ORDER-SAFETY AUDIT: phase reports stay on the ORDERED lane ──
-            // This send was the second half of the round-283 whitelist and is deliberately
-            // NOT switched to SendExpress.  The audit found a consumer that depends on this
-            // message's order relative to ANOTHER message type, so per the round's own rule
-            // the switch is held rather than shipped.
-            //
-            // The dependency: MPServer.RecordPhaseReport fires the join-baseline save when a
-            // 'Settled' or 'Running' report is the FIRST one to take the _joinBaselineDone
-            // latch for this player.  Round-276 made that latch clearable by exactly one
-            // thing — MPServer.MarkPlayerInGame, i.e. the arrival of MessageType.PlayerInGame
-            // (the authenticated per-load scene-load signal).  On this side the program order
-            // is fixed: SendPlayerInGame re-arms _settledReported and sends PlayerInGame, and
-            // only afterwards can TickSettledReport send 'Settled'.  Today's single FIFO turns
-            // that program order into a DELIVERY guarantee, and the latch logic is built on it.
-            //
-            // On the express lane it stops being a guarantee.  Round-283 verifier CORRECTION
-            // (the first draft of this comment justified the hold with a "latch still set
-            // from the previous load" scenario that is UNREACHABLE — every session-entry
-            // path clears _joinBaselineDone wholesale before StartGame*/LoadData, and
-            // disconnect clears it per-player; a reader who checks that would be tempted
-            // to unblock the switch): the REACHABLE inversion is the opposite one.  On a
-            // perfectly normal first join with PlayerInGame stuck behind a store mirror —
-            // the exact congestion this round exists for — an express 'Settled'/'Running'
-            // arrives FIRST, finds the latch CLEAR, and fires the join baseline for a
-            // player the host has not yet marked in-game or served world state to: the
-            // checkpoint machinery runs against an unregistered joiner, out of order with
-            // everything MarkPlayerInGame establishes.  A latency win is not worth
-            // creating that inversion in the round-271/276 machinery.
-            //
-            // Everything else this round needs for that switch is already in place and inert:
-            // the Seq stamp above, the host's guard in RecordPhaseReport, the host's advertised
-            // capability (LobbyUpdate.HostExpress → HostExpressLane), and IClientTransport.
-            // SendExpress.  What is missing is a join-baseline trigger that does not depend on
-            // cross-type arrival order — e.g. carrying the per-load identity in the report
-            // itself so the host can decide without the latch, which is a design change with
-            // its own audit, not a line to slip into a transport round.
-            Send(env);
+            // ── Round-284: phase reports ride the EXPRESS lane when the host allows ──
+            // Round-283 audited this send and HELD it ordered: the join-baseline trigger
+            // was the _joinBaselineDone latch, and it depended on cross-type arrival order
+            // (an express 'Settled'/'Running' beating the ordered PlayerInGame would fire
+            // the baseline for a player the host had not yet marked in-game or served).
+            // Round-284 built the trigger that audit asked for — the report carries its
+            // per-load identity (LoadGen above) and the host's fire rule is GEN-KEYED: a
+            // matching report that arrives before PlayerInGame is PARKED and fired by
+            // MarkPlayerInGame when the mark lands, so the inversion can no longer produce
+            // a wrong fire (MPServer.RecordPhaseReport).  The gate is two-sided on purpose:
+            // HostExpressLane (host drops stale reports by Seq — LobbyUpdate.HostExpress)
+            // AND a non-zero ServedLoadGen — only a host that stamps load tickets has the
+            // gen-keyed fire rule, and a round-283 host advertises the lane while still
+            // running the order-dependent latch, so toward it (and until we are served)
+            // delivery order stays the guarantee: the ordered send, byte-identical to
+            // before.
+            if (HostExpressLane && ServedLoadGen != 0) _transport?.SendExpress(env.Serialize());
+            else Send(env);
         }
 
         /// <summary>Round-271 (Fix A): one-shot per load — report the moment OUR settled-gate
@@ -1877,8 +1884,22 @@ namespace BigAmbitionsMP
         public static void SendManualPause(bool paused)
         {
             if (!IsConnected) return;
-            Send(MessageEnvelope.Create(
-                MessageType.ManualPause, MPConfig.PlayerId, new ManualPausePayload { Paused = paused }));
+            // Round-284/F2 echo suppression: our press is now on the wire — the next heartbeat
+            // can still carry the host's PRE-press intent, and converging on it would revert
+            // the press just before the relay lands.  Recorded HERE (with the actual send, its
+            // only pairing) rather than at the patch site.
+            TimeSync.NotePendingLocalPause(paused);
+            // 284c (user-approved): the press rides the EXPRESS lane — queued behind a store
+            // mirror it can outlive F2's 8s echo bound, and the bound then converges this client
+            // back to the pre-press state until the press finally lands (the verifier's F-1
+            // flicker).  Gate: HostExpressLane alone — NOT ServedLoadGen, which proves the
+            // gen-keyed BASELINE rule (a phase-report hazard; pause has no such consumer).
+            // Presses stay in-lane FIFO, so two presses can't swap; toward an older host the
+            // ordered send is byte-identical to before.
+            var env = MessageEnvelope.Create(
+                MessageType.ManualPause, MPConfig.PlayerId, new ManualPausePayload { Paused = paused });
+            if (HostExpressLane) _transport?.SendExpress(env.Serialize());
+            else Send(env);
             Plugin.Logger.LogInfo($"[Client] Sent ManualPause: {paused}");
         }
 
