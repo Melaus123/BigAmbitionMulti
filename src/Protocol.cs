@@ -117,7 +117,7 @@ namespace BigAmbitionsMP
         RegisterCashier      = 111, // Any → Host → All: player went on/off duty at the cash register near (X,Y,Z); others can F4-buy there (Wave-2 player-staffed registers).
         RemoteSale           = 112, // Buyer → Host: I bought items in another player's shop (buyer already paid locally); host validates and credits the owner.
         AuditReport          = 113, // Client → Host: periodic state-hash audit (clock, business table, roster, interior replicas) — host compares against its own state and logs [Audit] MISMATCH on divergence.
-        AuditDrill           = 114, // Host → Client: a biz bucket diverged persistently — log your per-registration hashes for these buckets so the two logs can be diffed offline.
+        AuditDrill           = 114, // Host → Client: a biz bucket diverged persistently — send back your per-registration hashes for these buckets so the host can name the diverging address(es) in its own log (round-291: no local dump — a bundle carries one log).
         MarketEvents         = 115, // Host → All: the authoritative gi.marketEvents list (shortages/hype/backorders drive shelf fills + prices; clients suppress the generating sim and would otherwise never see one).
 
         // Passengers (ride shotgun in another player's car — host-authoritative).
@@ -174,6 +174,7 @@ namespace BigAmbitionsMP
         StoreMirror         = 153,       // Host → all-but-owner (handoff slice 1): one piece of the session store — a member's saved .hsg and/or the manifest — so every member holds the complete session store and can host the world later.
         AuditDrillReply     = 154,       // Client → Host (round-89): per-registration hashes+summaries for the diverged audit buckets — the host diffs against its own and NAMES the diverging address(es) in one log (field reports only ever carry one machine's log, so offline two-log diffing never happened).
         InteriorCargoSync   = 181,       // Host → a building's subscribers (round-281, field bundles 20260818-22*): the CURRENT cargo of that building's items and NOTHING else.  86% of interior traffic was cargo-only churn (shelf stock ticking down as customers buy) shipped as a FULL ~80-150KB snapshot whose 306 designs and 225 dirt spots were byte-identical every single time; round-280 slowed those sends down, this shrinks them.  ABSOLUTE STATE, never a diff-chain: it names EVERY item in the building, so re-applying it converges by itself.  Guarded by StructVersion — a receiver whose last applied FULL snapshot carried a different version knows its structure is stale, ignores the cargo and re-requests (InteriorRequest).  Sent ONLY when EVERY subscriber runs our exact build (Hello.CargoDelta + mod-version equality); one non-capable subscriber and all of them get the full snapshot, so an old client can never be handed this type.
+        BillboardAds        = 182,       // Any → Host → All (round-290, field 20260820-092547): the sender's ACTIVE billboard campaigns as an ABSOLUTE set (billboard type + business name per entry). Campaign facts live only in the owner's save, so partners' paid ads never entered anyone else's AdManager pools; receivers inject these as PLAYER-weight ads. Images need nothing new — the per-size billboard logos already sync.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -2313,6 +2314,17 @@ namespace BigAmbitionsMP
     {
         public string PlayerId { get; set; } = "";
         public float  Money    { get; set; }
+    }
+
+    /// <summary>Round-290 (field 20260820-092547 "players can't see each other's ads"): the
+    /// sender's currently-ACTIVE billboard campaigns as an absolute set — re-applying always
+    /// converges, never a diff-chain. Entry format "type|businessName" where type =
+    /// (int)Entities.MarketingTypeName (3/4/5 = Small/Medium/LargeBillboard). Plain strings
+    /// only (§10: never Newtonsoft a game type).</summary>
+    public class BillboardAdsPayload
+    {
+        public string PlayerId { get; set; } = "";
+        public List<string> Entries { get; set; } = new();
     }
 
     /// <summary>Host → Client: the client's own stored .hsg for an MP session, so

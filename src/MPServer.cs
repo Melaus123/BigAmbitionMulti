@@ -958,6 +958,7 @@ namespace BigAmbitionsMP
         {
             Plugin.Logger.LogInfo($"[Server] Peer connected: {peer.Id}");
             // Welcome message will be sent after we receive their Hello
+            BillboardAdSync.NoteJoin();   // round-290: re-ship known campaign sets so the joiner converges
         }
 
         private static void OnPeerDisconnected(MPLink peer, string reason)
@@ -1166,6 +1167,10 @@ namespace BigAmbitionsMP
 
                 case MessageType.RadioState:            // round-227: relay a member's speaker change
                     MPRadioSync.HostHandle(env.GetPayload<RadioStatePayload>(), senderPid);
+                    break;
+
+                case MessageType.BillboardAds:          // round-290: relay a member's billboard campaigns
+                    BillboardAdSync.HostHandle(env.GetPayload<BillboardAdsPayload>(), senderPid, env);
                     break;
 
                 case MessageType.TakeoverRequest:       // round-204b: client's AI-business offer — arbitrate on live data

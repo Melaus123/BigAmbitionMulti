@@ -592,6 +592,7 @@ namespace BigAmbitionsMP
             if (!MPStoreCarryForward.Busy)       // lean-A ordering: the migrator waits out a pending carry (it would race the copy's renames otherwise)
                 MPStoreMigration.RunIfNeeded();  // store v2 M2: one-time flat→pid migration, first frame the version resolves
             MPRadioSync.Tick();   // round-227: debounced volume-drag flush
+            BillboardAdSync.Tick();   // round-290: own billboard campaigns → peers (diff-triggered + heartbeat)
 #if BAMP_DEV
             TestDrive.Tick();   // round-239 (registered in 04-probes.md): file-drop test command channel — inert until <DataRoot>\testdrive\ exists
             // DIAG:DEVTOOL (round-228 test, registered in 04-probes.md): the game's native
