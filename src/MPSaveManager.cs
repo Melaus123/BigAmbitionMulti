@@ -48,6 +48,11 @@ namespace BigAmbitionsMP
         public string GameVersion    { get; set; } = "";   // "EA 0.10" — guards against cross-version loads
         public long   SavedAtUnix    { get; set; }
         public int    WorldDay       { get; set; }          // fingerprint: in-game day at save
+        /// <summary>TRUE when the last host save attempt failed to write its .hsg while this
+        /// manifest still updated for the members' uploads (B, 2026-08-21). Day/SavedAtUnix were
+        /// NOT advanced — the rollback fence treats such a sibling as age-unknown (fail-closed)
+        /// and the freshness watchdog knows the staleness is explained. Absent on old manifests.</summary>
+        public bool   LastHostSaveFailed { get; set; }
         public List<MpSlot> Slots    { get; set; } = new();
         /// <summary>addressKey → owner STABLE id (or "host"'s stable id).  The
         /// cross-machine ownership map, re-keyed from MPServer.BuildingOwners
@@ -392,6 +397,7 @@ namespace BigAmbitionsMP
         private static readonly HashSet<string> _unresolvedWarned = new(StringComparer.OrdinalIgnoreCase);
         private static readonly HashSet<string> _pidMismatchWarned = new(StringComparer.OrdinalIgnoreCase);
         private static readonly HashSet<string> _noSavesSkipLogged = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> _noManifestSkipLogged = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>v2: find the playthrough folder already holding any member of a
         /// session FAMILY (base name + variant suffixes) — the disk-truth fallback for
@@ -596,6 +602,7 @@ namespace BigAmbitionsMP
                 {
                     try
                     {
+                        if (ReadManifestAt(dir) == null) continue;   // E 2026-08-21: catalog-less = unloadable = doesn't count
                         var probe = SaveGamePathHelper.GetAllSaveGamesFromVersion(dir);
                         if (probe != null && probe.Count > 0) return true;
                     }
@@ -633,13 +640,15 @@ namespace BigAmbitionsMP
                             Plugin.Logger.LogWarning($"[MPSave] '{name}' holds no save files — catalog-only folder, not listed.");
                         continue;
                     }
-                    // User-approved 2026-08-21: the variant's DATE comes from the save FILES
-                    // (File.GetLastWriteTime via the native enumeration above), never from the
-                    // catalog's SavedAtUnix claim — the file's own clock can't disagree with
-                    // the file. Claim failures this sidesteps: crash between save-write and
-                    // catalog-write; minted-at-load manifests (SavedAtUnix 0); folder-mtime
-                    // blindness to subfolder changes. The catalog still supplies day, roster
-                    // and world identity below.
+                    // User-approved 2026-08-21 (mechanism CORRECTED after verification): the
+                    // variant's DATE comes from the native save enumeration — per file, that
+                    // is the game's own .meta sidecar claim when one exists (vanilla's dating
+                    // too, SaveGamePathHelper.cs:33-50), else the file's disk time. NOT the
+                    // session catalog's SavedAtUnix: sidesteps the crash-between-two-writes
+                    // gap, minted-at-load manifests (SavedAtUnix 0), and folder-mtime
+                    // blindness. Caveat (verifier): a member-authored .meta carries the
+                    // AUTHOR's clock — display-grade here; host-clock decisions (autosave
+                    // rotation) read disk times directly instead.
                     long newestFileUnix = 0;
                     foreach (var s in probe)
                     {
@@ -650,8 +659,18 @@ namespace BigAmbitionsMP
                         }
                         catch { }
                     }
-                    var v = new MpVariant { SessionName = name, Kind = ClassifyVariant(name), SessionDir = dir };
+                    // E (user-approved 2026-08-21): an entry without a catalog can NEVER load
+                    // (loading requires the manifest), so listing it only offers a dead click —
+                    // skip it. Its files stay fully visible to rescue/carry-forward, which scan
+                    // files directly. (Retires the deliberate manifest-less listing.)
                     var m = ReadManifestAt(dir);
+                    if (m == null)
+                    {
+                        if (_noManifestSkipLogged.Add(dir))
+                            Plugin.Logger.LogWarning($"[MPSave] '{name}' has save files but no catalog — not listed (unloadable until its catalog arrives).");
+                        continue;
+                    }
+                    var v = new MpVariant { SessionName = name, Kind = ClassifyVariant(name), SessionDir = dir };
                     if (m != null)
                     {
                         v.Day = m.WorldDay; v.SavedAtUnix = newestFileUnix > 0 ? newestFileUnix : m.SavedAtUnix; v.PlaythroughId = m.PlaythroughId ?? "";
@@ -675,15 +694,7 @@ namespace BigAmbitionsMP
                             if (hs != null) v.LastHostName = string.IsNullOrEmpty(hs.CharacterName) ? hs.DisplayName : hs.CharacterName;
                         }
                     }
-                    else
-                    {
-                        v.SavedAtUnix = newestFileUnix;
-                        if (v.SavedAtUnix <= 0)
-                            try { v.SavedAtUnix = new DateTimeOffset(Directory.GetLastWriteTimeUtc(dir)).ToUnixTimeSeconds(); } catch { }
-                        // v2: a manifest-less variant (recover folders) still groups with its
-                        // family — the folder it sits in names the world.
-                        if (pidFolder.Length > 0) v.PlaythroughId = pidFolder;
-                    }
+                    // (manifest-less branch removed 2026-08-21 — E skips those entries above)
 
                     string baseName = StripToBase(name);
                     // Round-220: in v2 the name-family bundle must stay WITHIN its world —

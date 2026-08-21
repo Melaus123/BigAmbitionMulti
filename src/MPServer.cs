@@ -824,6 +824,9 @@ namespace BigAmbitionsMP
         internal static void NotifyLoadRefused(string why)
         {
             if (!_running) return;
+            // F15 (2026-08-21): a deep refusal consumes the dev impersonation too — same rule
+            // as StartLoadGame's refusals (the override must never outlive its load).
+            MPSaveCoordinator.ConsumeDevHostLoadAs("load refused (deep)");
             // 285 audit: restore the lobby ONLY when the lobby is what the failed start
             // consumed.  A refusal reached from IN-WORLD (the dev hostload verb; no retail
             // path leads here mid-session) must not flip lifecycle/UI to "lobby" under a
@@ -867,7 +870,9 @@ namespace BigAmbitionsMP
                 else
                 {
                     Plugin.Logger.LogWarning($"[Server] StartLoadGame: picked session '{ChosenLoadSession}' is not in the loadable list ({sessions.Count} candidate(s)) — refused, never substituted. Lobby unchanged.");
-                    try { MPCanvasUI.PostLobbyNotice("Load refused: no character found."); } catch { }
+                    // E (2026-08-21): the accurate reason — a picked name absent from the
+                    // loadable list means its CATALOG is missing/unreadable, not its character.
+                    try { MPCanvasUI.PostLobbyNotice("Load refused: no save catalog found."); } catch { }
                     MPSaveCoordinator.ConsumeDevHostLoadAs("load refused");
                     return;   // IsInLobby untouched — the lobby stays live, Start stays clickable
                 }

@@ -49,6 +49,7 @@ namespace BigAmbitionsMP
         private static readonly List<LoadGameCharacterEntryView> _cards = new();
         private static readonly Dictionary<SaveGameManager.SaveGameStruct, MPSaveManager.MpVariant> _rowMap = new();
         private static readonly List<UnityEngine.Object> _ownedGfx = new();   // P5: textures/sprites WE created — destroyed on refresh (the clone leaked them, audit #20)
+        private static Sprite _defaultShot;   // F11: vanilla's defaultSaveGameScreenshot — rows without a screenshot show it, never a blank
 
         public static bool IsOpen => _win != null && _win.activeSelf;
 
@@ -91,7 +92,7 @@ namespace BigAmbitionsMP
         public static void ResetForScene()
         {
             try { if (_win != null) UnityEngine.Object.Destroy(_win); } catch { }
-            _win = null; _sceneLg = null; _template = null; _recoverToggle = null;
+            _win = null; _sceneLg = null; _template = null; _recoverToggle = null; _defaultShot = null;
             _cards.Clear(); _rowMap.Clear();
             foreach (var o in _ownedGfx) { try { UnityEngine.Object.Destroy(o); } catch { } }
             _ownedGfx.Clear();
@@ -120,6 +121,7 @@ namespace BigAmbitionsMP
             // Capture the clone's OWN references before the controller dies.
             _template      = FieldOf<Transform>(lg, "characterTemplate");
             _recoverToggle = FieldOf<Toggle>(lg, "toggleRecoverSaves");
+            _defaultShot   = FieldOf<Sprite>(lg, "defaultSaveGameScreenshot");   // F11: the shared fallback image (LoadGame.cs:514)
             DestroyIfOurs(FieldOf<GameObject>(lg, "upgradeSaveGamesButton"));
             DestroyIfOurs(FieldOf<GameObject>(lg, "brokenSaveGamesPopup"));
             var backupUi = FieldOf<Component>(lg, "modBackupWarningUi");
@@ -275,19 +277,21 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (!_rowMap.TryGetValue(s, out var v) || string.IsNullOrEmpty(v.SessionDir) || !Directory.Exists(v.SessionDir)) return null;
+                if (!_rowMap.TryGetValue(s, out var v) || string.IsNullOrEmpty(v.SessionDir) || !Directory.Exists(v.SessionDir)) return _defaultShot;
                 foreach (var owner in new[] { MPConfig.StableId, v.LastHostStableId })
                 {
                     if (string.IsNullOrEmpty(owner)) continue;
                     string dirO = Path.Combine(v.SessionDir, owner);
                     if (!Directory.Exists(dirO)) continue;
                     var jpg = Directory.GetFiles(dirO, "*.jpg").FirstOrDefault(f => !Path.GetFileName(f).ToLowerInvariant().Contains("portrait"));
-                    if (jpg != null) return LoadSprite(jpg);
+                    var sp = jpg != null ? LoadSprite(jpg) : null;
+                    if (sp != null) return sp;
                 }
                 var any = Directory.GetFiles(v.SessionDir, "*.jpg", SearchOption.AllDirectories).FirstOrDefault(f => !Path.GetFileName(f).ToLowerInvariant().Contains("portrait"));
-                return any != null ? LoadSprite(any) : null;
+                var sp2 = any != null ? LoadSprite(any) : null;
+                return sp2 != null ? sp2 : _defaultShot;   // F11: vanilla's fallback image, never a blank
             }
-            catch { return null; }
+            catch { return _defaultShot; }
         }
 
         private static Sprite LoadSprite(string path)

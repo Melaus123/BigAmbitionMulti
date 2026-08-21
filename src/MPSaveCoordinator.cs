@@ -1393,33 +1393,34 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning($"[MPSave] validate '{session}': zero save files on disk — refusing with the generic notice.");
                 reason = "no character found."; return false;
             }
-            // P8 (user-approved 2026-08-21): test-open the exact file this load would read,
-            // BEFORE the lobby latch burns. Vanilla catches corrupt saves by opening every
-            // file at list time; we open the one that matters at the click (rc 1 = own slot,
-            // rc 0 = legacy single folder). Unreadable → refused with the approved generic
-            // notice; the log names the real failure.
-            if (chosen != null)
+            // C (user-approved 2026-08-21, replaces the full test-open): stream-verify the
+            // chosen file's COMPRESSED CONTAINER — .hsg is gzip (SaveGameSerializationHelper
+            // .cs:136-139), so decompressing into a discard buffer validates length + CRC end
+            // to end at a fraction of a full world deserialize (the old test unpacked the
+            // whole world twice per load, on the main thread — verifier defect 6). Catches
+            // truncation/byte corruption, the dominant real class; a semantically-broken-but-
+            // valid-gzip file slips to the real load's round-251 containment (disclosed
+            // trade-off). Json-type saves (dev-only) skip; a nameless entry skips (F16 —
+            // never guess a filename the load wouldn't use).
+            if (chosen != null && !string.IsNullOrEmpty(chosen.name)
+                && chosen.saveGameType != SaveGameManager.SaveGameStruct.SaveGameType.json)
             {
+                string file = "";
                 try
                 {
                     string folder = Path.Combine(MPSaveManager.MpSessionFolder(session), chosen.characterId ?? "");
-                    string file = Path.Combine(folder, (chosen.name ?? "save")
-                        + (chosen.saveGameType == SaveGameManager.SaveGameStruct.SaveGameType.json ? ".json" : ".hsg"));
+                    file = Path.Combine(folder, chosen.name + ".hsg");
                     if (File.Exists(file))
                     {
-                        var gi = chosen.saveGameType == SaveGameManager.SaveGameStruct.SaveGameType.json
-                            ? SaveGameSerializationHelper.DeserializeJsonData(file)
-                            : SaveGameSerializationHelper.DeserializeBinaryData(file);
-                        if (gi == null || gi.charactersData == null || gi.charactersData.Count == 0)
-                        {
-                            Plugin.Logger.LogError($"[MPSave] validate '{session}': own save '{file}' opened but holds no character data — refused before the lobby burns.");
-                            reason = "no character found."; return false;
-                        }
+                        using var fs = File.OpenRead(file);
+                        using var gz = new System.IO.Compression.GZipStream(fs, System.IO.Compression.CompressionMode.Decompress);
+                        var buf = new byte[81920];
+                        while (gz.Read(buf, 0, buf.Length) > 0) { }
                     }
                 }
                 catch (Exception ex)
                 {
-                    Plugin.Logger.LogError($"[MPSave] validate '{session}': own save failed to open ({ex.Message}) — refused before the lobby burns (corrupt save).");
+                    Plugin.Logger.LogError($"[MPSave] validate '{session}': own save '{file}' failed container verification ({ex.Message}) — refused before the lobby burns (corrupt/truncated save).");
                     reason = "no character found."; return false;
                 }
             }
@@ -2383,10 +2384,12 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Pick the rotation slot the next automatic save writes to. Pure file/JSON IO —
-        /// thread-safe. User-approved 2026-08-21: occupied slots are aged by their newest actual
-        /// save FILE (the picker's clock), never the catalog's SavedAtUnix claim — a stale or
-        /// minted claim could aim the overwrite at the NEWEST autosave instead of the oldest.
-        /// A slot folder holding zero save files counts as empty (same doctrine as the picker).</summary>
+        /// thread-safe. User-approved 2026-08-21 (revised after verification): occupied slots
+        /// are aged by their newest save file's DISK time — host-clock by construction (member
+        /// uploads are written by the host at receive time) — never the catalog's SavedAtUnix
+        /// claim, and never the .meta sidecar's author-clock claim (a fast peer clock made
+        /// their slot dodge rotation forever; verifier defect 8). A slot folder holding zero
+        /// save files counts as empty (same doctrine as the picker).</summary>
         internal static string NextAutoSlotSuffix(string baseName)
         {
             int slots = AutosaveSlotCount();
@@ -2401,20 +2404,17 @@ namespace BigAmbitionsMP
                     long when = -1;   // -1 = probe failed (fall back to folder mtime); 0 = probed clean, no files
                     try
                     {
-                        var saves = SaveGamePathHelper.GetAllSaveGamesFromVersion(dir);
                         when = 0;
-                        if (saves != null)
-                            foreach (var s in saves)
+                        foreach (var f in Directory.GetFiles(dir, "*.hsg", SearchOption.AllDirectories))
+                        { long u = new DateTimeOffset(File.GetLastWriteTimeUtc(f)).ToUnixTimeSeconds(); if (u > when) when = u; }
+                        if (when == 0)
+                            foreach (var f in Directory.GetFiles(dir, "*.json", SearchOption.AllDirectories))
                             {
-                                try
-                                {
-                                    long u = new DateTimeOffset(s.lastPlayedDate.ToUniversalTime()).ToUnixTimeSeconds();
-                                    if (u > when) when = u;
-                                }
-                                catch { }
+                                if (f.EndsWith(".bamp.json", StringComparison.OrdinalIgnoreCase)) continue;   // catalogs are not saves
+                                long u = new DateTimeOffset(File.GetLastWriteTimeUtc(f)).ToUnixTimeSeconds(); if (u > when) when = u;
                             }
                     }
-                    catch { }
+                    catch { when = -1; }
                     if (when == 0) return suf;   // folder exists but holds no save files — effectively empty
                     if (when < 0) when = new DateTimeOffset(Directory.GetLastWriteTimeUtc(dir)).ToUnixTimeSeconds();
                     if (when < bestWhen) { bestWhen = when; bestSuf = suf; }
@@ -2551,9 +2551,13 @@ namespace BigAmbitionsMP
                         // marking them inflated the evidence line ("12 marked" where 5 exist).
                         bool exists = false; try { exists = Directory.Exists(MPSaveManager.MpSessionFolder(s)); } catch { }
                         if (!exists) continue;
-                        long st = 0; try { st = MPSaveManager.ReadManifest(s)?.SavedAtUnix ?? 0; } catch { }
+                        long st = 0; bool failedStamp = false;
+                        try { var sm = MPSaveManager.ReadManifest(s); st = sm?.SavedAtUnix ?? 0; failedStamp = sm?.LastHostSaveFailed ?? false; } catch { }
                         if (st > loadedStamp) _abandonedAtLoad[s] = st;
-                        else if (st <= 0) unknown.Add(s);   // age unknowable (minted/legacy/manifest-less)
+                        // age unknowable (minted/legacy/manifest-less) — or the stamp predates a
+                        // FAILED host save whose member uploads still landed (B, 2026-08-21):
+                        // both fall into the fail-closed net below.
+                        else if (st <= 0 || failedStamp) unknown.Add(s);
                     }
                     // Round-274/M2 (fail-closed): once ANY sibling proves this is a rollback,
                     // unknown-age siblings cannot be trusted either — mark them; the per-file
@@ -2874,7 +2878,9 @@ namespace BigAmbitionsMP
                     for (int i = 0; i < saves.Count; i++)
                     {
                         var s = saves[i];
-                        string seg = Path.GetFileName((s?.CharacterPath ?? "").TrimEnd('\\', '/'));
+                        // F10 (2026-08-21): raw folder segment, never the CharacterPath getter —
+                        // it rebuilds a path under the SP store and CreateDirectory's it (audit F4).
+                        string seg = s?.characterId ?? "";
                         if (string.Equals(seg, MPSaveManager.Sanitize(stable), StringComparison.OrdinalIgnoreCase)) return s.day;
                     }
             }
@@ -3200,9 +3206,16 @@ namespace BigAmbitionsMP
                 {
                     m.WorldDay    = worldDay;
                     m.SavedAtUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                    m.LastHostSaveFailed = false;
                 }
                 else
-                    Plugin.Logger.LogWarning($"[MPSave] '{sessionName}': save failed — catalog day/time NOT advanced (claim stays day {m.WorldDay}); members' uploads still merge and their files date themselves.");
+                {
+                    // B (user-approved 2026-08-21): the held-back claim is FLAGGED, so the
+                    // rollback fence treats this sibling as age-unknown (fail-closed) instead
+                    // of trusting a stamp that predates files members may still have landed.
+                    m.LastHostSaveFailed = true;
+                    Plugin.Logger.LogWarning($"[MPSave] '{sessionName}': save failed — catalog day/time NOT advanced (claim stays day {m.WorldDay}, flagged); members' uploads still merge and their files date themselves.");
+                }
                 m.BuildingOwners = BuildOwnersStableKeyed();
                 m.BuildingRealEstateOwners = RealEstateOwnersStableKeyed();
                 m.Grants = new List<MpGrant>();
@@ -3242,7 +3255,9 @@ namespace BigAmbitionsMP
                 int worldDay = 0; try { worldDay = SaveGameManager.Current?.Day ?? 0; } catch { }
                 if (worldDay <= 0) return;
                 int drift = worldDay - m.WorldDay;
-                if (drift >= 3)
+                if (drift >= 3 && m.LastHostSaveFailed)
+                    Plugin.Logger.LogInfo($"[Integrity] manifest day {m.WorldDay} vs world day {worldDay}: staleness explained by a flagged failed host save — the ledger WAS written (B, 2026-08-21).");
+                else if (drift >= 3)
                     Plugin.Logger.LogWarning(
                         $"[Integrity] MANIFEST STALE: session '{name}' ownership state (deeds/rentals/grants) is from day {m.WorldDay}, " +
                         $"but the loaded world is day {worldDay} ({drift} day(s) newer) — purchases/rentals made in between are NOT in " +

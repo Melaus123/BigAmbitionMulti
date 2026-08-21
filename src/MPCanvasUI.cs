@@ -589,7 +589,8 @@ namespace BigAmbitionsMP
             // guarantees the path is ready so NO poll-thread handler ever calls IL2CPP.
             MPSaveManager.EnsureVersionCached();
             MPStoreCarryForward.RunIfNeeded();   // game-version upgrade (user-approved 2026-08-21): copy the previous version's MP store forward, once, in the background
-            MPStoreMigration.RunIfNeeded();   // store v2 M2: one-time flat→pid migration, first frame the version resolves
+            if (!MPStoreCarryForward.Busy)       // lean-A ordering: the migrator waits out a pending carry (it would race the copy's renames otherwise)
+                MPStoreMigration.RunIfNeeded();  // store v2 M2: one-time flat→pid migration, first frame the version resolves
             MPRadioSync.Tick();   // round-227: debounced volume-drag flush
 #if BAMP_DEV
             TestDrive.Tick();   // round-239 (registered in 04-probes.md): file-drop test command channel — inert until <DataRoot>\testdrive\ exists
@@ -7521,7 +7522,10 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] load tuning apply: {ex.Message}"); }
-            MPServer.StartLoadGame(); SetStatus("Loading save...", false);
+            MPServer.StartLoadGame();
+            // F13 (2026-08-21): a refusal leaves IsInLobby TRUE — only a proceeding load may
+            // claim "Loading save..." (live read; the refusal notice owns the line otherwise).
+            if (!MPServer.IsInLobby) SetStatus("Loading save...", false);
         }
 
         private void OnCycleDifficulty()
