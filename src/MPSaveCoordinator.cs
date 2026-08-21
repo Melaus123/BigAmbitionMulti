@@ -145,10 +145,13 @@ namespace BigAmbitionsMP
                 {
                     var slot = PerformLocalSave(session, out bool saved);
                     DiagPhase("host lambda: PerformLocalSave done → SetSessionMetadata");
-                    // Session metadata (owners ledger + live day + timestamp) reflects the LIVE
-                    // world and stays valid for the members' incoming uploads even when the
-                    // host's own .hsg write failed — only the host's SLOT claim is the lie.
-                    SetSessionMetadata(session, slot.Day);   // owners + day + timestamp
+                    // Session metadata (owners ledger + roster) reflects the LIVE world and
+                    // stays valid for the members' incoming uploads even when the host's own
+                    // .hsg write failed — but the save-moment claim (day + timestamp) only
+                    // advances when the host's file actually landed (user-approved 2026-08-21;
+                    // the picker dates by real file times, so members' files that still land
+                    // keep their own honest dates).
+                    SetSessionMetadata(session, slot.Day, saved);   // owners + roster (+ day/time if saved)
                     DiagPhase("host lambda: SetSessionMetadata done → MergeSlot");
                     if (saved) MergeSlot(session, slot);      // host's own slot
                     else Plugin.Logger.LogError($"[MPSave] host save '{session}' FAILED — own slot NOT advertised (round-237); the load-time lineage rescue fills it honestly. Members' uploads still land.");
@@ -193,7 +196,7 @@ namespace BigAmbitionsMP
             try
             {
                 var slot = PerformLocalSave(dc, out bool saved);
-                SetSessionMetadata(dc, slot.Day);
+                SetSessionMetadata(dc, slot.Day, saved);
                 if (saved) MergeSlot(dc, slot);
                 else Plugin.Logger.LogError($"[MPSave] quit checkpoint '{dc}' save FAILED — own slot NOT advertised (round-237); members still carried forward below.");
                 // Same carry-forward as every other save path (review 2026-07-20) — but
@@ -285,7 +288,7 @@ namespace BigAmbitionsMP
             try
             {
                 var slot = PerformLocalSave(session, out bool saved);
-                SetSessionMetadata(session, slot.Day);
+                SetSessionMetadata(session, slot.Day, saved);
                 if (saved) MergeSlot(session, slot);
                 else Plugin.Logger.LogError($"[MPSave] menu save '{session}' FAILED — own slot NOT advertised (round-237); members' uploads and carry-forward still run.");
                 // Field 2026-07-19 (the unintended character reset): this MANUAL path —
@@ -1031,7 +1034,7 @@ namespace BigAmbitionsMP
             MPSaveManager.ResetSessionPinsExceptFamily(MPSaveManager.StripToBase(session));
             MPSaveManager.ClearActivePlaythrough();
             var m = MPSaveManager.ReadManifest(session);
-            if (m == null) { Plugin.Logger.LogWarning($"[MPSave] HostLoadSession: no manifest for '{session}'."); return; }
+            if (m == null) { Plugin.Logger.LogWarning($"[MPSave] HostLoadSession: no manifest for '{session}'."); MPServer.NotifyLoadRefused("no save catalog found."); return; }
 
             // 2026-08-18 ORDERING FIX (user-approved; found when a field save refused on the
             // rig): validate OUR OWN slot before anything below mutates shared state.
@@ -1045,11 +1048,18 @@ namespace BigAmbitionsMP
                 if (rc == -1)
                 {
                     Plugin.Logger.LogError($"[MPSave] HostLoadSession '{session}' REFUSED before any state change: no save for this character (stable={effId}) among multiple member folders. Nothing was stamped, persisted, or served.");
+                    // Round-285: hand the lobby back — the caller burned IsInLobby before we
+                    // could refuse, and nothing else restores it (the wedge, live 2026-08-21).
+                    MPServer.NotifyLoadRefused("no character found.");
                     return;
                 }
                 if (rc == -2)
                 {
+                    // "no save files found." RETIRED (user 2026-08-21): save-less folders are
+                    // never listed, so reaching this means files vanished after listing — the
+                    // player sees the one approved refusal text; this log keeps the real cause.
                     Plugin.Logger.LogWarning($"[MPSave] HostLoadSession '{session}': no member saves under the session folder — refused before any state change.");
+                    MPServer.NotifyLoadRefused("no character found.");
                     return;
                 }
             }
@@ -1337,6 +1347,54 @@ namespace BigAmbitionsMP
         /// out of Release/Debug entirely — retail identity semantics untouched.</summary>
         public static string? DevHostLoadAs;
 #endif
+
+        /// <summary>Round-285: consume the dev impersonation override.  It proved STICKY in the
+        /// field (2026-08-21): armed for one forensic load, it silently re-keyed every LATER
+        /// load's identity check — the user's own saves refused with a stranger's stable id
+        /// until a process restart.  Consumed on: a refused pre-start (the trap case), session
+        /// Stop, and StartNewGame.  A successful impersonated load deliberately keeps it armed
+        /// (the load's own deferred reads still need it); the NEXT load attempt then either
+        /// uses it or — if it no longer fits — refuses cleanly and consumes it here.
+        /// No-op on non-dev builds (the field only exists under BAMP_DEV).</summary>
+        public static void ConsumeDevHostLoadAs(string why)
+        {
+#if BAMP_DEV
+            if (string.IsNullOrEmpty(DevHostLoadAs)) return;
+            Plugin.Logger.LogWarning($"[MPSave] dev impersonation override '{DevHostLoadAs}' consumed ({why}) — later loads use this machine's own identity.");
+            DevHostLoadAs = null;
+#endif
+        }
+
+        /// <summary>Round-285: caller-facing pre-start validation — the SAME predicate the load
+        /// itself re-runs (ResolveOwnSlot; never a second copy — the derived-counter lesson),
+        /// asked BEFORE StartLoadGame burns the lobby latch, so a refusal leaves the lobby
+        /// intact instead of wedging Start ("already in flight" forever, live 2026-08-21).
+        /// The reason text is player-facing (it lands in the lobby notice), not log jargon.</summary>
+        public static bool ValidateOwnSlotForLoad(string session, out string reason)
+        {
+            // Reason strings are PLAYER-FACING (lobby notice) — short and simple by user
+            // ruling 2026-08-21; the detailed forensics stay on the log-only lines.
+            reason = "";
+            if (MPSaveManager.ReadManifest(session) == null)
+            { reason = "no save catalog found."; return false; }
+            int rc = ResolveOwnSlot(session, MPConfig.StableId, out _, out string effId);
+            if (rc == -1)
+            {
+                reason = effId == MPConfig.StableId
+                    ? "no character found."
+                    : $"no character found for '{effId}' (load-as active).";
+                return false;
+            }
+            if (rc == -2)
+            {
+                // "no save files found." RETIRED (user 2026-08-21): save-less folders are
+                // never listed, so this residual (files vanished between listing and click)
+                // shows the one approved refusal text; the log keeps the real cause.
+                Plugin.Logger.LogWarning($"[MPSave] validate '{session}': zero save files on disk — refusing with the generic notice.");
+                reason = "no character found."; return false;
+            }
+            return true;
+        }
 
         /// <summary>ONE slot-resolution predicate for BOTH the HostLoadSession precheck
         /// and LoadOwnHsg (2026-08-18: the refused-load-still-mutated-the-manifest defect
@@ -3074,15 +3132,24 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Host-only: set the session-wide metadata (ownership map, world
-        /// day, timestamp) and write.</summary>
-        private static void SetSessionMetadata(string sessionName, int worldDay)
+        /// day, timestamp) and write. Day + timestamp advance ONLY when
+        /// <paramref name="saveSucceeded"/> — a failed save must not move the catalog's
+        /// save-moment claim (user-approved 2026-08-21). Everything else (owners,
+        /// grants, loans, tuning, provenance) always reflects the live world, so
+        /// members' incoming uploads still merge against valid metadata.</summary>
+        private static void SetSessionMetadata(string sessionName, int worldDay, bool saveSucceeded)
         {
             lock (_lock)
             {
                 var m = EnsureManifest(sessionName);
                 m.GameVersion    = SafeGameVersion();
-                m.WorldDay       = worldDay;
-                m.SavedAtUnix    = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                if (saveSucceeded)
+                {
+                    m.WorldDay    = worldDay;
+                    m.SavedAtUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                }
+                else
+                    Plugin.Logger.LogWarning($"[MPSave] '{sessionName}': save failed — catalog day/time NOT advanced (claim stays day {m.WorldDay}); members' uploads still merge and their files date themselves.");
                 m.BuildingOwners = BuildOwnersStableKeyed();
                 m.BuildingRealEstateOwners = RealEstateOwnersStableKeyed();
                 m.Grants = new List<MpGrant>();

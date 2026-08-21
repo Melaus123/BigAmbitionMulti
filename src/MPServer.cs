@@ -732,6 +732,7 @@ namespace BigAmbitionsMP
             _peerNames.Clear();
             _peerBuild.Clear();       // round-281
             _clients.Clear();
+            MPSaveCoordinator.ConsumeDevHostLoadAs("session stop");   // round-285: the impersonation override dies with the session
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _peerPhaseSeq.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
             lock (_joinBaselineDone) _joinBaselineDone.Clear();   // round-276: baseline latches die with the session
             _expectedLoadGen.Clear(); _parkedBaselineGen.Clear(); _firedLoadGen.Clear(); _markedInGame.Clear();   // round-284: load-ticket state too (the counter itself never resets — a reissued gen could match a stale echo)
@@ -755,6 +756,7 @@ namespace BigAmbitionsMP
                                       // session (the scene reset no longer wipes the store, 2026-06-30)
             MergerSync.ResetStore();  // fresh world — no merger (same session-boundary lifecycle)
             ResetWallet();            // fresh world — no shared wallet (slice 4)
+            MPSaveCoordinator.ConsumeDevHostLoadAs("new game");   // round-285: a fresh world has no member slots to impersonate
 
             // Re-arm the startup pause hold for this new game.
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _peerPhaseSeq.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
@@ -814,11 +816,69 @@ namespace BigAmbitionsMP
             });
         }
 
+        /// <summary>Round-285 backstop: a load that refuses AFTER StartLoadGame burned the
+        /// lobby latch must hand the lobby back — without this, every such refusal wedged
+        /// Start forever ("already in flight"; the pre-start validation normally prevents
+        /// reaching this, so firing here means the in-load check caught a race the
+        /// pre-check could not see).</summary>
+        internal static void NotifyLoadRefused(string why)
+        {
+            if (!_running) return;
+            // 285 audit: restore the lobby ONLY when the lobby is what the failed start
+            // consumed.  A refusal reached from IN-WORLD (the dev hostload verb; no retail
+            // path leads here mid-session) must not flip lifecycle/UI to "lobby" under a
+            // live world — MPState and MPLifecycle both key on IsInLobby.
+            bool worldUp = false;
+            try { worldUp = SaveGameManager.Current != null && Helpers.PlayerHelper.PlayerController != null; } catch { }
+            if (worldUp)
+            {
+                Plugin.Logger.LogWarning($"[Server] load refused in-world — lobby latch untouched ({why}).");
+                return;
+            }
+            IsInLobby = true;
+            Plugin.Logger.LogWarning($"[Server] load refused after start — lobby restored ({why}).");
+            try { MPCanvasUI.PostLobbyNotice($"Load refused: {why}"); } catch { }
+        }
+
         /// <summary>Host clicked "Load Multiplayer Save" in the lobby.</summary>
         public static void StartLoadGame()
         {
             if (!_running) return;
             MPLoadProfiler.Mark($"HOST StartLoadGame (session='{ChosenLoadSession}') — {_clients.Count} client(s)");
+
+            // Round-285: resolve AND validate the target session BEFORE any state flips.
+            // The 2026-08-18 in-load precheck protects the MANIFEST, but by the time it
+            // refused, this method had already burned IsInLobby — and nothing restores it
+            // on refusal, so every Start click after that logged "already in flight"
+            // forever (menu wedged until process restart; live 2026-08-21, twice).  A
+            // refused load must leave the lobby exactly as it found it.
+            string? mpSession = null;
+            var sessions = MPSaveManager.ListSessions();
+            if (sessions.Count > 0)
+            {
+                // Use the session the host picked in the save list; else newest.
+                if (!string.IsNullOrEmpty(ChosenLoadSession) && sessions.Exists(s => s.Name == ChosenLoadSession))
+                {
+                    mpSession = ChosenLoadSession;   // the picker's round-219 pin targets the exact world
+                }
+                else
+                {
+                    // Round-222: the legacy "resume newest" branch chooses by LIST position —
+                    // carry that entry's identity so a duplicated name can't resolve elsewhere.
+                    mpSession = sessions[0].Name;
+                    try { MPSaveManager.NoteSessionPid(mpSession, sessions[0].Manifest?.PlaythroughId ?? ""); } catch { }
+                }
+                if (!MPSaveCoordinator.ValidateOwnSlotForLoad(mpSession, out string refuseWhy))
+                {
+                    Plugin.Logger.LogWarning($"[Server] StartLoadGame '{mpSession}' refused pre-start: {refuseWhy} Lobby unchanged.");
+                    try { MPCanvasUI.PostLobbyNotice($"Load refused: {refuseWhy}"); } catch { }
+                    // A refusal also CONSUMES any armed dev impersonation — tonight's trap was
+                    // the override outliving its load and silently poisoning every later one.
+                    MPSaveCoordinator.ConsumeDevHostLoadAs("load refused");
+                    return;   // IsInLobby untouched — the lobby stays live, Start stays clickable
+                }
+            }
+
             IsInLobby = false;
 
             // Re-arm the startup pause hold for this new game.
@@ -829,24 +889,10 @@ namespace BigAmbitionsMP
             // Phase 4: if a multiplayer session exists, resume it — the host holds
             // every player's .hsg, so it ships each connected client its own and
             // loads its own, rather than everyone loading a single-player save.
-            var sessions = MPSaveManager.ListSessions();
-            if (sessions.Count > 0)
+            if (mpSession != null)
             {
-                // Use the session the host picked in the save list; else newest.
-                string session;
-                if (!string.IsNullOrEmpty(ChosenLoadSession) && sessions.Exists(s => s.Name == ChosenLoadSession))
-                {
-                    session = ChosenLoadSession;   // the picker's round-219 pin targets the exact world
-                }
-                else
-                {
-                    // Round-222: the legacy "resume newest" branch chooses by LIST position —
-                    // carry that entry's identity so a duplicated name can't resolve elsewhere.
-                    session = sessions[0].Name;
-                    try { MPSaveManager.NoteSessionPid(session, sessions[0].Manifest?.PlaythroughId ?? ""); } catch { }
-                }
-                Plugin.Logger.LogInfo($"[Server] StartLoadGame → resuming MP session '{session}'.");
-                MPSaveCoordinator.HostLoadSession(session);
+                Plugin.Logger.LogInfo($"[Server] StartLoadGame → resuming MP session '{mpSession}'.");
+                MPSaveCoordinator.HostLoadSession(mpSession);
                 return;
             }
 

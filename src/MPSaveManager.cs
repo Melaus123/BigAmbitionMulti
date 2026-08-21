@@ -391,6 +391,7 @@ namespace BigAmbitionsMP
         }
         private static readonly HashSet<string> _unresolvedWarned = new(StringComparer.OrdinalIgnoreCase);
         private static readonly HashSet<string> _pidMismatchWarned = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> _noSavesSkipLogged = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>v2: find the playthrough folder already holding any member of a
         /// session FAMILY (base name + variant suffixes) — the disk-truth fallback for
@@ -594,11 +595,42 @@ namespace BigAmbitionsMP
                 if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return new List<MpPlaythrough>();
                 foreach (var (name, dir, pidFolder) in WalkSessionDirs(root))
                 {
+                    // User ruling 2026-08-21: a folder holding zero actual save files is not
+                    // a save — never listed. (Vanilla derives its list from the files, so an
+                    // empty folder is invisible there by construction; ours came from catalogs
+                    // and could list a catalog-only shell as a loadable "Main" row.) Same
+                    // source predicate as ResolveOwnSlot's "no saves" refusal, so the picker
+                    // and the load validator can never disagree about "has saves".
+                    List<SaveGameManager.SaveGameStruct>? probe = null;
+                    try { probe = SaveGamePathHelper.GetAllSaveGamesFromVersion(dir); } catch { }
+                    if (probe == null || probe.Count == 0)
+                    {
+                        if (_noSavesSkipLogged.Add(dir))
+                            Plugin.Logger.LogWarning($"[MPSave] '{name}' holds no save files — catalog-only folder, not listed.");
+                        continue;
+                    }
+                    // User-approved 2026-08-21: the variant's DATE comes from the save FILES
+                    // (File.GetLastWriteTime via the native enumeration above), never from the
+                    // catalog's SavedAtUnix claim — the file's own clock can't disagree with
+                    // the file. Claim failures this sidesteps: crash between save-write and
+                    // catalog-write; minted-at-load manifests (SavedAtUnix 0); folder-mtime
+                    // blindness to subfolder changes. The catalog still supplies day, roster
+                    // and world identity below.
+                    long newestFileUnix = 0;
+                    foreach (var s in probe)
+                    {
+                        try
+                        {
+                            long u = new DateTimeOffset(s.lastPlayedDate.ToUniversalTime()).ToUnixTimeSeconds();
+                            if (u > newestFileUnix) newestFileUnix = u;
+                        }
+                        catch { }
+                    }
                     var v = new MpVariant { SessionName = name, Kind = ClassifyVariant(name), SessionDir = dir };
                     var m = ReadManifestAt(dir);
                     if (m != null)
                     {
-                        v.Day = m.WorldDay; v.SavedAtUnix = m.SavedAtUnix; v.PlaythroughId = m.PlaythroughId ?? "";
+                        v.Day = m.WorldDay; v.SavedAtUnix = newestFileUnix > 0 ? newestFileUnix : m.SavedAtUnix; v.PlaythroughId = m.PlaythroughId ?? "";
                         // Round-218 watchdog: contents claiming a different world than the
                         // folder they sit in = cross-world write or legacy contamination.
                         if (pidFolder.Length > 0 && !string.IsNullOrEmpty(m.PlaythroughId) && m.PlaythroughId != pidFolder
@@ -621,7 +653,9 @@ namespace BigAmbitionsMP
                     }
                     else
                     {
-                        try { v.SavedAtUnix = new DateTimeOffset(Directory.GetLastWriteTimeUtc(dir)).ToUnixTimeSeconds(); } catch { }
+                        v.SavedAtUnix = newestFileUnix;
+                        if (v.SavedAtUnix <= 0)
+                            try { v.SavedAtUnix = new DateTimeOffset(Directory.GetLastWriteTimeUtc(dir)).ToUnixTimeSeconds(); } catch { }
                         // v2: a manifest-less variant (recover folders) still groups with its
                         // family — the folder it sits in names the world.
                         if (pidFolder.Length > 0) v.PlaythroughId = pidFolder;
