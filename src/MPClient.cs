@@ -301,6 +301,10 @@ namespace BigAmbitionsMP
             {
                 RemotePlayerManager.RemoveAll();
                 TimeSync.EndStartupHold();
+                // Shared-shop management (permission feature): the link is gone, so no shop is shared with this
+                // player any more — an open page on one rebuilds itself (ruling 5). A reconnect re-pushes the set.
+                try { GrantSync.SetSharedManage(null); } catch { }
+                try { MPRegisterSync.DropBenchRecords("link lost"); } catch { }   // the owners' benches leave with the link
                 // Involuntary drop while IN-GAME → the MP session is over for this
                 // client.  Freeze + notice; the player can dismiss it and keep
                 // playing offline as an SP fork.  (IL2CPP in-game check must run
@@ -488,6 +492,36 @@ namespace BigAmbitionsMP
                     // Slice 5, host-relayed: this machine OWNS the shop — apply the fire/schedule natively.
                     var ee = env.GetPayload<EmployeeEditPayload>();
                     if (ee != null) GameStatePatcher.EnqueueOnMainThread(() => MergerEmployeeSync.ApplyOnOwner(ee));
+                    break;
+                }
+
+                // ── Shared-shop management (Business PERMISSION feature) — separate from the merger case above ──
+                case MessageType.SharedScheduleEdit:
+                {
+                    // Host-relayed: this machine OWNS the shop — validate + apply the permitted player's days.
+                    var se = env.GetPayload<SharedScheduleEditPayload>();
+                    if (se != null) GameStatePatcher.EnqueueOnMainThread(() => SharedShopSchedule.ApplyOnOwner(se));
+                    break;
+                }
+                case MessageType.ScheduleSession:
+                {
+                    // Host-relayed: open/close from an editor if I own the shop; a snapshot from the owner if I am editing.
+                    var ss = env.GetPayload<ScheduleSessionPayload>();
+                    if (ss != null) GameStatePatcher.EnqueueOnMainThread(() => SharedShopSchedule.HandleSession(ss));
+                    break;
+                }
+                case MessageType.SharedStaffPool:
+                {
+                    // Host-relayed: an owner's bench (only reaches players that owner directly grants).
+                    var sp = env.GetPayload<SharedStaffPoolPayload>();
+                    if (sp != null) GameStatePatcher.EnqueueOnMainThread(() => SharedShopStaff.ApplyPool(sp));
+                    break;
+                }
+                case MessageType.SharedStaffEdit:
+                {
+                    // Host-relayed: this machine OWNS the employee — perform the native reassignment.
+                    var sf = env.GetPayload<SharedStaffEditPayload>();
+                    if (sf != null) GameStatePatcher.EnqueueOnMainThread(() => SharedShopStaff.ApplyOnOwner(sf));
                     break;
                 }
 
@@ -1617,6 +1651,7 @@ namespace BigAmbitionsMP
             {
                 GrantSync.SetEnterableBuildings(p.AddressKeys);
                 GrantSync.SetHelperBusinesses(p.HelperAddressKeys);
+                GrantSync.SetSharedManage(p.SharedManageKeys);   // shared-shop management (permission feature): direct grants only
                 GrantSync.SetOtherOwned(p.OtherOwnedKeys);   // merger slice 3 repair source
                 HousingMapCues.RefreshSharedPois();
             });

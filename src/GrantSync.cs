@@ -60,6 +60,7 @@ namespace BigAmbitionsMP
             _myGrantees = new List<OwnGrantEntry>();
             _enterable = new HashSet<string>();
             _helperBiz = new HashSet<string>();
+            _sharedManage = new HashSet<string>();   // shared-shop management set dies with the scene like the others
         }
 
         /// <summary>HOST, session boundary only (fresh new-game world, or clear-before-apply at manifest
@@ -84,6 +85,16 @@ namespace BigAmbitionsMP
 
         /// <summary>Vehicle convenience (the original 2-arg check) — keeps vehicle enforcement call sites unchanged.</summary>
         public static bool IsGranted(string ownerId, string granteeId) => IsGranted(GrantKind.Vehicle, ownerId, granteeId);
+
+        /// <summary>The grant table ONLY — merger membership does not count. Shared-shop management (the Business
+        /// permission feature) gates on this so the two features never share an access decision.</summary>
+        public static bool IsGrantedDirect(GrantKind kind, string ownerId, string granteeId)
+            => !string.IsNullOrEmpty(ownerId) && !string.IsNullOrEmpty(granteeId)
+               && Runtime(kind).TryGetValue(ownerId, out var set) && set.Contains(granteeId);
+
+        /// <summary>Does <paramref name="ownerId"/> currently grant this kind of key to anyone online? (Direct table only.)</summary>
+        public static bool GrantsAnyone(GrantKind kind, string ownerId)
+            => !string.IsNullOrEmpty(ownerId) && Runtime(kind).TryGetValue(ownerId, out var set) && set.Count > 0;
 
         /// <summary>The owners who currently grant <paramref name="granteeId"/> a key of <paramref name="kind"/>
         /// (sorted + joined) — a stable signature for detecting when the local player's access changed.</summary>
@@ -116,7 +127,7 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>HOST: clear the runtime table for all kinds (before a rebuild from the store).</summary>
-        public static void ClearRuntime() { foreach (var k in AllKinds) _grants[k].Clear(); }
+        public static void ClearRuntime() { foreach (var k in AllKinds) _grants[k].Clear(); }   // (the host rebuilds from here on every roster change — the shared-manage set is re-pushed right after, so it is NOT cleared here)
 
         // ── Runtime: join replay (full set — see ANTIPATTERNS Class 4) ────────
         /// <summary>HOST: build the full runtime grant table (all kinds) for a connecting peer.</summary>
@@ -246,5 +257,25 @@ namespace BigAmbitionsMP
         }
         public static bool IsHelperBusiness(string addressKey)
             => !string.IsNullOrEmpty(addressKey) && _helperBiz.Contains(addressKey);
+        /// <summary>Shared-shop slice 1: the scan gate — nothing to track when this player helps nowhere.</summary>
+        public static int HelperBusinessCount => _helperBiz.Count;
+
+        // ── Shared-shop MANAGEMENT (the Business PERMISSION feature, 2026-08-21) ──
+        // Businesses the LOCAL player may MANAGE: DIRECT Business grants only (host-pushed SharedManageKeys).
+        // Separate from _helperBiz on purpose — that set unions merger membership; the permission feature never
+        // keys on the merger, and the host's routes check the same direct table (IsGrantedDirect).
+        private static HashSet<string> _sharedManage = new();
+        public static void SetSharedManage(IEnumerable<string> addressKeys)
+        {
+            var next = addressKeys != null ? new HashSet<string>(addressKeys) : new HashSet<string>();
+            if (next.SetEquals(_sharedManage)) return;
+            var changed = new HashSet<string>(next); changed.SymmetricExceptWith(_sharedManage);
+            Plugin.Logger.LogInfo($"[SharedShop] shops I may manage: {next.Count} (was {_sharedManage.Count}).");
+            _sharedManage = next;
+            try { SharedShopVisibility.OnSharedManageChanged(changed); } catch { }   // an open page on an affected shop rebuilds
+        }
+        public static bool IsSharedManage(string addressKey)
+            => !string.IsNullOrEmpty(addressKey) && _sharedManage.Contains(addressKey);
+        public static int SharedManageCount => _sharedManage.Count;
     }
 }

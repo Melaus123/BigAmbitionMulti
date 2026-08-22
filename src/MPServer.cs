@@ -665,6 +665,7 @@ namespace BigAmbitionsMP
             MPLog.BeginSession(System.Guid.NewGuid().ToString("N").Substring(0, 8), "host");
             _clients.Clear();         // stale peers from a torn-down session
             BuildingOwners.Clear();   // per-session state — a new game must not inherit
+            _sharedPoolByOwner.Clear();   // shared-shop slice 3: cached benches are per session too
             BuildingRealEstateOwners.Clear(); // bought-real-estate ledger — same per-session lifecycle (the load path re-seeds it from the manifest); was leaking across a new game and locking fresh-world buildings un-buyable
             CashByStableId.Clear();   // owners/cash; the load path re-seeds from the manifest
             _characterNamesByPlayerId.Clear();   // per-session: a returning player must not collide with a stale name
@@ -987,6 +988,7 @@ namespace BigAmbitionsMP
                 // (the strip line derives from the dict, so it disappears the same frame).
                 ModMismatchByPlayer.TryRemove(leftPlayer, out _);
                 LobbyRemove(leftPlayer);
+                try { _sharedPoolByOwner.Remove(leftPlayer); } catch { }   // shared-shop slice 3: an absent owner's bench is not replayed to anyone
                 _peerNames.TryRemove(peer.Id, out _);
                 BroadcastLobbyUpdate();   // keep everyone's roster (incl. the in-game F9 list) current
                 if (!IsInLobby)
@@ -1306,6 +1308,36 @@ namespace BigAmbitionsMP
                     var ee = env.GetPayload<EmployeeEditPayload>();
                     if (ee != null && SenderIs(ee.PlayerId, senderPid, MessageType.MergerEmployeeEdit))
                         GameStatePatcher.EnqueueOnMainThread(() => HostRouteEmployeeEdit(ee, senderPid));
+                    break;
+                }
+
+                // ── Shared-shop management (Business PERMISSION feature) — separate from the merger cases above ──
+                case MessageType.SharedScheduleEdit:
+                {
+                    var se = env.GetPayload<SharedScheduleEditPayload>();
+                    if (se != null && SenderIs(se.PlayerId, senderPid, MessageType.SharedScheduleEdit))
+                        GameStatePatcher.EnqueueOnMainThread(() => HostRouteSharedScheduleEdit(se, senderPid));
+                    break;
+                }
+                case MessageType.ScheduleSession:
+                {
+                    var ss = env.GetPayload<ScheduleSessionPayload>();
+                    if (ss != null && SenderIs(ss.PlayerId, senderPid, MessageType.ScheduleSession))
+                        GameStatePatcher.EnqueueOnMainThread(() => HostRouteScheduleSession(ss, senderPid));
+                    break;
+                }
+                case MessageType.SharedStaffPool:
+                {
+                    var sp = env.GetPayload<SharedStaffPoolPayload>();
+                    if (sp != null && SenderIs(sp.PlayerId, senderPid, MessageType.SharedStaffPool))
+                        GameStatePatcher.EnqueueOnMainThread(() => HostRouteSharedStaffPool(sp, senderPid));
+                    break;
+                }
+                case MessageType.SharedStaffEdit:
+                {
+                    var sf = env.GetPayload<SharedStaffEditPayload>();
+                    if (sf != null && SenderIs(sf.PlayerId, senderPid, MessageType.SharedStaffEdit))
+                        GameStatePatcher.EnqueueOnMainThread(() => HostRouteSharedStaffEdit(sf, senderPid));
                     break;
                 }
 
@@ -4381,7 +4413,7 @@ namespace BigAmbitionsMP
             bool IsBiz(string a) => bizType.TryGetValue(a, out var bt)
                 && !string.IsNullOrEmpty(bt) && bt != "ba:businesstype_empty";
 
-            var keys = new HashSet<string>(); var helper = new HashSet<string>();
+            var keys = new HashSet<string>(); var helper = new HashSet<string>(); var manage = new HashSet<string>();
             void Consider(string addr, string owner, bool operatorLedger)
             {
                 if (string.IsNullOrEmpty(addr) || string.IsNullOrEmpty(owner)) return;
@@ -4391,6 +4423,11 @@ namespace BigAmbitionsMP
                 {   // helper access keys on who RUNS the business — the rental ledger only, never real-estate
                     // (a bought building can host an AI tenant's shop; helpers get no access there)
                     if (operatorLedger && GrantSync.IsGranted(GrantKind.Business, ownerPid, clientPid)) helper.Add(addr);
+                    // Shared-shop MANAGEMENT (permission feature): direct grants only — merger membership never counts.
+                    // Headquarters are never managed through permissions (user ruling 2026-08-21: the helper still
+                    // sees it and may work inside it — helper access above — but its menus are not shared).
+                    bool hq = bizType.TryGetValue(addr, out var bt2) && bt2 == "ba:businesstype_headquarters";
+                    if (operatorLedger && !hq && GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, clientPid)) manage.Add(addr);
                 }
                 else if (GrantSync.IsGranted(GrantKind.Housing, ownerPid, clientPid)) keys.Add(addr);
             }
@@ -4398,6 +4435,7 @@ namespace BigAmbitionsMP
             foreach (var kv in BuildingRealEstateOwners) Consider(kv.Key, kv.Value, operatorLedger: false);
             pay.AddressKeys.AddRange(keys);
             pay.HelperAddressKeys.AddRange(helper);
+            pay.SharedManageKeys.AddRange(manage);
             // Merger slice 3 repair: everything the operator ledger says belongs to someone else.
             foreach (var kv in BuildingOwners)
             {
@@ -4411,7 +4449,14 @@ namespace BigAmbitionsMP
         private static void SendBuildingAccessTo(MPLink peer, string clientPid)
         {
             if (peer == null) return;
-            try { Send(peer, MessageEnvelope.Create(MessageType.PermissionBuildingAccess, "host", BuildBuildingAccessFor(clientPid))); }
+            try
+            {
+                var pay = BuildBuildingAccessFor(clientPid);
+                Send(peer, MessageEnvelope.Create(MessageType.PermissionBuildingAccess, "host", pay));
+                // Shared-shop slice 3: the benches of the owners whose shops this player may manage — deliberately AFTER
+                // the access push and inside its try: if the push fails, no bench is shipped that the client could not scope.
+                try { ReplaySharedPoolsTo(clientPid, pay.SharedManageKeys); } catch { }
+            }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendBuildingAccessTo: {ex.Message}"); }
         }
 
@@ -4430,6 +4475,12 @@ namespace BigAmbitionsMP
                 var own = BuildBuildingAccessFor(MPConfig.PlayerId);
                 GrantSync.SetEnterableBuildings(own.AddressKeys);
                 GrantSync.SetHelperBusinesses(own.HelperAddressKeys);
+                GrantSync.SetSharedManage(own.SharedManageKeys);   // shared-shop management (permission feature)
+                // The host as a permitted player: cached benches. MAIN THREAD ONLY — this applies the bench inline
+                // (injects employee records, may refresh My Employees), and RefreshBuildingAccess is also reached from
+                // the poll thread (HandleVacateRequest / HandleBuyRequest), so it is always marshalled.
+                var ownManage = new List<string>(own.SharedManageKeys);
+                try { GameStatePatcher.EnqueueOnMainThread(() => ReplaySharedPoolsTo(MPConfig.PlayerId, ownManage)); } catch { }
                 GameStatePatcher.EnqueueOnMainThread(HousingMapCues.RefreshSharedPois);   // recolour the host's own shared-residence POIs (reciprocal sharing)
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RefreshBuildingAccess: {ex.Message}"); }
@@ -4646,6 +4697,203 @@ namespace BigAmbitionsMP
                 else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.MergerEmployeeEdit, "host", p));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MergerStaff] HostRouteEmployeeEdit: {ex.Message}"); }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════════════════════════════
+        // SHARED-SHOP MANAGEMENT (the Business PERMISSION feature; src/SharedShopSchedule.cs) — NOT THE MERGER.
+        // The merger's routes (HostRouteEmployeeEdit above, BusinessEditRequest) are untouched by this block.
+        // Access here = a DIRECT Business grant from the shop's owner (GrantSync.IsGrantedDirect — merger
+        // membership does not count); a per-sender rate cap (plan §2.9 P4) and a payload shape check guard the
+        // relay; snapshots go to exactly one machine (P1).
+        // ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+        private static readonly Dictionary<string, (float windowStart, int count)> _sharedRate = new();
+        private const int SharedEditRatePerSecond     = 10;   // inbound editor traffic (edits, session open/close)
+        private const int SharedSnapshotRatePerSecond = 30;   // owner → editor snapshots: a SEPARATE bucket, so an editor's opens can never starve the owner's replies
+        private static bool SharedRateOk(string senderPid, string what, bool snapshotBucket = false)
+        {
+            float now = UnityEngine.Time.unscaledTime;
+            string key = snapshotBucket ? senderPid + "|snap" : senderPid;
+            int cap = snapshotBucket ? SharedSnapshotRatePerSecond : SharedEditRatePerSecond;
+            if (_sharedRate.Count > 256)   // disconnected pids leave entries behind — sweep the idle ones occasionally
+            {
+                var stale = new List<string>();
+                foreach (var kv in _sharedRate) if (now - kv.Value.windowStart > 60f) stale.Add(kv.Key);
+                foreach (var k in stale) _sharedRate.Remove(k);
+            }
+            _sharedRate.TryGetValue(key, out var r);
+            if (now - r.windowStart >= 1f) r = (now, 0);
+            r.count++;
+            _sharedRate[key] = r;
+            if (r.count <= cap) return true;
+            if (r.count == cap + 1)   // one line per burst, not one per dropped message
+                Plugin.Logger.LogWarning($"[SharedShop] '{senderPid}' sent more than {cap} {what}s in a second — dropping the rest of this second (rate cap).");
+            return false;
+        }
+
+        /// <summary>Resolve a shop's owner pid from the rental ledger; "" when unowned.</summary>
+        private static string SharedShopOwnerPid(string addressKey)
+        {
+            if (!BuildingOwners.TryGetValue(addressKey, out var owner) || string.IsNullOrEmpty(owner)) return "";
+            return owner == "host" ? MPConfig.PlayerId : owner;
+        }
+
+        /// <summary>HOST (main thread): a permitted player's schedule edit → the owner (applied here if the host owns it).</summary>
+        public static void HostRouteSharedScheduleEdit(SharedScheduleEditPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(senderPid)) return;
+                if (!SharedRateOk(senderPid, "schedule edit")) return;
+                if (!SharedShopSchedule.ScheduleShapeOk(p.Days, out var shape))
+                { Plugin.Logger.LogWarning($"[SharedShop] schedule edit by '{senderPid}' on '{p.AddressKey}' dropped at the host — {shape}."); return; }
+                string ownerPid = SharedShopOwnerPid(p.AddressKey);
+                if (ownerPid.Length == 0) { Plugin.Logger.LogWarning($"[SharedShop] schedule edit for unowned '{p.AddressKey}' from '{senderPid}' — dropped."); return; }
+                if (ownerPid == senderPid) return;   // an owner's own edits never route
+                if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid))
+                { Plugin.Logger.LogWarning($"[SharedShop] schedule edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission, dropped."); return; }
+                if (ownerPid == MPConfig.PlayerId) SharedShopSchedule.ApplyOnOwner(p);
+                else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedScheduleEdit, "host", p));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedScheduleEdit: {ex.Message}"); }
+        }
+
+        /// <summary>HOST (main thread): editing-session traffic. open/close: the sender must hold a direct Business
+        /// grant from the owner → to the owner. snapshot: the sender must BE the owner → to exactly ONE machine (ToPid).</summary>
+        public static void HostRouteScheduleSession(ScheduleSessionPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(senderPid)) return;
+                if (!SharedRateOk(senderPid, p.Action == "snapshot" ? "snapshot" : "session message", snapshotBucket: p.Action == "snapshot")) return;
+                if (!SharedShopSchedule.ScheduleShapeOk(p.Schedule, out var shapeAny))
+                { Plugin.Logger.LogWarning($"[SharedShop] session '{p.Action}' for '{p.AddressKey}' from '{senderPid}' dropped at the host — {shapeAny}."); return; }
+                string ownerPid = SharedShopOwnerPid(p.AddressKey);
+                if (ownerPid.Length == 0) { Plugin.Logger.LogWarning($"[SharedShop] session '{p.Action}' for unowned '{p.AddressKey}' from '{senderPid}' — dropped."); return; }
+                string target;
+                switch (p.Action)
+                {
+                    case "open":
+                    case "close":
+                        if (ownerPid == senderPid) return;   // the owner has no session with themself
+                        if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid))
+                        { Plugin.Logger.LogWarning($"[SharedShop] session '{p.Action}' by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission, dropped."); return; }
+                        target = ownerPid;
+                        break;
+                    case "snapshot":
+                        if (ownerPid != senderPid)
+                        { Plugin.Logger.LogWarning($"[SharedShop] snapshot for '{p.AddressKey}' from '{senderPid}', who is not its owner ('{ownerPid}') — dropped."); return; }
+                        if (string.IsNullOrEmpty(p.ToPid) || p.ToPid == senderPid) return;
+                        target = p.ToPid;
+                        break;
+                    default:
+                        return;
+                }
+                if (target == MPConfig.PlayerId) SharedShopSchedule.HandleSession(p);
+                else SendToPid(target, MessageEnvelope.Create(MessageType.ScheduleSession, "host", p));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteScheduleSession: {ex.Message}"); }
+        }
+
+        // ── Shared-shop slice 3: the owner's bench + routed assignment edits ──
+        private static readonly Dictionary<string, SharedStaffPoolPayload> _sharedPoolByOwner = new();   // owner pid → last bench (replayed to newly granted players)
+
+        /// <summary>HOST (main thread): an owner's bench — cache it, hand it to every connected player holding a DIRECT
+        /// Business grant from that owner (and to the host itself when granted). Never broadcast.</summary>
+        public static void HostRouteSharedStaffPool(SharedStaffPoolPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(senderPid)) return;
+                if (!SharedRateOk(senderPid, "bench publish")) return;
+                if ((p.Staff?.Count ?? 0) > 200) { Plugin.Logger.LogWarning($"[SharedShop] bench from '{senderPid}': implausible count — dropped."); return; }
+                _sharedPoolByOwner[senderPid] = p;
+                int sent = 0;
+                if (OwnerRunsManageableShop(senderPid))   // ONE city walk per publish; per player only the grant lookup below
+                {
+                    foreach (var pid in new List<string>(_peerNames.Values))
+                    {
+                        if (pid == senderPid || !GrantSync.IsGrantedDirect(GrantKind.Business, senderPid, pid)) continue;
+                        SendToPid(pid, MessageEnvelope.Create(MessageType.SharedStaffPool, senderPid, p)); sent++;
+                    }
+                    if (senderPid != MPConfig.PlayerId && GrantSync.IsGrantedDirect(GrantKind.Business, senderPid, MPConfig.PlayerId)) { SharedShopStaff.ApplyPool(p); sent++; }
+                }
+                if (sent > 0) Plugin.Logger.LogInfo($"[SharedShop] bench of '{senderPid}' ({p.Staff?.Count ?? 0}) handed to {sent} permitted player(s).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedStaffPool: {ex.Message}"); }
+        }
+
+        /// <summary>Does <paramref name="ownerPid"/> run at least one MANAGEABLE shop (a business that is neither empty
+        /// nor a headquarters)? The bench only travels where it can be used — a Business grant on its own (helper access
+        /// to a headquarters) does not ship the owner's staff list. ONE walk over the city per call; the per-player part
+        /// of the question (the direct grant) is a dictionary lookup the callers make themselves.</summary>
+        private static bool OwnerRunsManageableShop(string ownerPid)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ownerPid)) return false;
+                var mine = new HashSet<string>();
+                foreach (var kv in BuildingOwners)
+                {
+                    string o = kv.Value == "host" ? MPConfig.PlayerId : kv.Value;
+                    if (o == ownerPid && !string.IsNullOrEmpty(kv.Key)) mine.Add(kv.Key);
+                }
+                if (mine.Count == 0) return false;
+                var regs = SaveGameManager.Current?.BuildingRegistrations;
+                if (regs == null) return false;
+                foreach (var reg in regs)
+                {
+                    if (reg == null) continue;
+                    string a; try { a = GameStateReader.AddressKey(reg); } catch { continue; }
+                    if (!mine.Contains(a)) continue;
+                    string bt = ""; try { bt = reg.businessTypeName ?? ""; } catch { }
+                    if (bt.Length > 0 && bt != "ba:businesstype_empty" && bt != "ba:businesstype_headquarters") return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>A newly granted player (or a rejoining one) gets the cached bench of every owner whose shop they may
+        /// manage. <paramref name="manageKeys"/> is the SharedManageKeys set BuildBuildingAccessFor just computed for
+        /// that player (direct grant + manageable type, per address) — it already answers "which owners", so this is
+        /// dictionary lookups only, no walk over the city.</summary>
+        private static void ReplaySharedPoolsTo(string clientPid, IEnumerable<string> manageKeys)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(clientPid) || manageKeys == null || _sharedPoolByOwner.Count == 0) return;
+                var owners = new HashSet<string>();
+                foreach (var a in manageKeys)
+                    if (!string.IsNullOrEmpty(a) && BuildingOwners.TryGetValue(a, out var o) && !string.IsNullOrEmpty(o))
+                        owners.Add(o == "host" ? MPConfig.PlayerId : o);
+                owners.Remove(clientPid);
+                foreach (var kv in _sharedPoolByOwner)
+                {
+                    if (!owners.Contains(kv.Key)) continue;
+                    if (clientPid == MPConfig.PlayerId) SharedShopStaff.ApplyPool(kv.Value);
+                    else SendToPid(clientPid, MessageEnvelope.Create(MessageType.SharedStaffPool, kv.Key, kv.Value));
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] ReplaySharedPoolsTo: {ex.Message}"); }
+        }
+
+        /// <summary>HOST (main thread): a permitted player's assign/unassign of an owner's employee → the owner.</summary>
+        public static void HostRouteSharedStaffEdit(SharedStaffEditPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(p.EmployeeId) || string.IsNullOrEmpty(senderPid)) return;
+                if (!SharedRateOk(senderPid, "staff edit")) return;
+                string ownerPid = SharedShopOwnerPid(p.AddressKey);
+                if (ownerPid.Length == 0) { Plugin.Logger.LogWarning($"[SharedShop] staff edit for unowned '{p.AddressKey}' from '{senderPid}' — dropped."); return; }
+                if (ownerPid == senderPid) return;
+                if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid))
+                { Plugin.Logger.LogWarning($"[SharedShop] staff edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission, dropped."); return; }
+                if (ownerPid == MPConfig.PlayerId) SharedShopStaff.ApplyOnOwner(p);
+                else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedStaffEdit, "host", p));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedStaffEdit: {ex.Message}"); }
         }
 
         /// <summary>The merged-companies state broadcast: per group, online member pids (enforcement)

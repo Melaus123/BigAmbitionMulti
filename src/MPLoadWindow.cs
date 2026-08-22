@@ -331,11 +331,52 @@ namespace BigAmbitionsMP
             });
         }
 
+        /// <summary>Delete a whole playthrough. Field check 2026-08-21 (117 worlds deleted, 309 folders): deleting only
+        /// the LISTED variants left every session folder the picker cannot show — recover/autosave copies without a
+        /// catalogue ("unloadable, not listed") and catalogues without a save — behind, 38 orphans / 14.5 MB on one
+        /// machine. A v2 store keeps one folder per playthrough, so the world IS that folder: delete it whole, listed
+        /// or not. A legacy flat (v1) store has no such folder — there, every session folder whose base name is this
+        /// world's goes, whichever suffix it carries.</summary>
         private static void ConfirmDeleteWorld(MPSaveManager.MpPlaythrough run)
         {
             HudConfirm.Show(default, "main_menu_delete_character_confirm".Localize(new { characterName = run.Base }), () =>
             {
-                DeleteDirs(run.Variants.Select(v => v.SessionDir), $"world '{run.Base}' ({run.Variants.Count} save(s))");
+                var dirs = new List<string>();
+                string root = MPSaveManager.MpVersionFolder().TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                var pidFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var v in run.Variants)
+                {
+                    string parent = "";
+                    try { parent = Path.GetDirectoryName(v.SessionDir ?? "") ?? ""; } catch { }
+                    if (parent.Length > 0 && !string.Equals(parent.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), root, StringComparison.OrdinalIgnoreCase))
+                        pidFolders.Add(parent);   // v2: <version>/<pid> — the playthrough folder
+                }
+                int unlisted = 0;
+                if (pidFolders.Count > 0)
+                {
+                    foreach (var pf in pidFolders)
+                    {
+                        try { unlisted += Directory.GetDirectories(pf).Length; } catch { }
+                        dirs.Add(pf);
+                    }
+                    unlisted -= run.Variants.Count; if (unlisted < 0) unlisted = 0;
+                }
+                else
+                {
+                    // v1 flat store: the listed variants plus any sibling session folder of the same base name.
+                    var listed = new HashSet<string>(run.Variants.Select(v => v.SessionDir ?? ""), StringComparer.OrdinalIgnoreCase);
+                    dirs.AddRange(listed);
+                    try
+                    {
+                        foreach (var d in Directory.GetDirectories(root))
+                            if (!listed.Contains(d)
+                                && string.Equals(MPSaveManager.StripToBase(Path.GetFileName(d)), run.Base, StringComparison.OrdinalIgnoreCase))
+                            { dirs.Add(d); unlisted++; }
+                    }
+                    catch { }
+                }
+                DeleteDirs(dirs.Distinct(StringComparer.OrdinalIgnoreCase),
+                           $"world '{run.Base}' ({run.Variants.Count} listed save(s) + {unlisted} unlisted folder(s) — the whole playthrough)");
                 Refresh();
             });
         }

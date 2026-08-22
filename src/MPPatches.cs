@@ -2418,7 +2418,9 @@ namespace BigAmbitionsMP
                     int n = __0.RemoveAll(e =>
                     {
                         string id = e?.id ?? "";
-                        return id.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix) || MPRegisterSync.IsInjectedStaff(id);
+                        if (id.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix)) return true;
+                        // Shared-shop slice 3: on a shop shared with me, the OWNER's copied staff are the right staff.
+                        return MPRegisterSync.IsInjectedStaff(id) && !SharedShopStaff.AllowedInAutoFill(id, __1);
                     });
                     if (n > 0)
                         Plugin.Logger.LogInfo($"[ScheduleGuard] excluded {n} synthetic/injected record(s) from auto-fill for '{__1?.BusinessName}'.");
@@ -3829,7 +3831,8 @@ namespace BigAmbitionsMP
                     if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                     int removed = allModels.RemoveAll(m =>
                         m != null && MPRegisterSync.IsInjectedStaff(m.employeeId)
-                                  && !MPRegisterSync.IsInjectedFromMergedPartner(m.employeeId));
+                                  && !MPRegisterSync.IsInjectedFromMergedPartner(m.employeeId)
+                                  && !SharedShopStaff.IsFromGrantOwner(m.employeeId));   // shared-shop slice 3: the owner's people stay (tinted)
                     if (removed > 0)
                         Plugin.Logger.LogInfo($"[StaffRoster] MyEmployees: hid {removed} injected partner-staff record(s) (display only).");
                 }
@@ -3943,7 +3946,8 @@ namespace BigAmbitionsMP
                     int removed = __result.RemoveAll(e =>
                         e != null && (MPRegisterSync.IsSyntheticDuty(e.id)   // round-100: stand-ins never answer queries
                                       || (MPRegisterSync.IsInjectedStaff(e.id)
-                                          && !MPRegisterSync.IsInjectedFromMergedPartner(e.id))));
+                                          && !MPRegisterSync.IsInjectedFromMergedPartner(e.id)
+                                          && !SharedShopStaff.ShowInMyEmployees(e.id))));   // shared-shop slice 3: ONLY the My Employees list may show the owner's people; goals/counts/specialists still hide them
                     if (removed > 0 && UnityEngine.Time.unscaledTime >= _nextLog)
                     {
                         _nextLog = UnityEngine.Time.unscaledTime + 5f;
@@ -4003,6 +4007,7 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (!__result) return;
+                    if (SharedShopStaff.DropdownForGrantRecord) return;   // shared-shop slice 3: the dropdown for an OWNER's employee lists that owner's shared shops
                     if (!GameStatePatcher.IsForeignPlayerBusiness(buildingRegistration)) return;
                     // Native exception preserved: stay visible while the employee is
                     // STILL assigned there (pre-repair save) so the dropdown can show

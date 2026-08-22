@@ -3914,7 +3914,13 @@ namespace BigAmbitionsMP
                     // (possibly stale/blank) replica.  AI + other players' shops take the host's relayed hours.
                     // Slice 5: while OUR schedule edit to a flipped partner shop is in flight, hold the
                     // owner heartbeat for that shop — a pre-edit snapshot must not clobber the member's edit.
-                    if (reg.scheduleDays != null && info.Schedule != null && info.Schedule.Count > 0
+                    // Shared-shop management (Business PERMISSION feature, 2026-08-21): a shop this player may
+                    // manage through a grant is reconciled PER DAY by SharedShopSchedule (true = handled); every
+                    // other shop — own, AI, merger — takes the unchanged path below.
+                    if (reg.scheduleDays != null && info.Schedule != null && info.Schedule.Count > 0 && !receiverOwnsThis
+                        && SharedShopSchedule.TryApplyOwnerTruth(reg, info.Schedule, info.AddressKey, "heartbeat"))
+                    { }
+                    else if (reg.scheduleDays != null && info.Schedule != null && info.Schedule.Count > 0
                         && !receiverOwnsThis
                         && !MergerEmployeeSync.HoldScheduleApply(info.AddressKey))
                     {

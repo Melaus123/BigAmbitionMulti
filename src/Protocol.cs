@@ -175,6 +175,11 @@ namespace BigAmbitionsMP
         AuditDrillReply     = 154,       // Client → Host (round-89): per-registration hashes+summaries for the diverged audit buckets — the host diffs against its own and NAMES the diverging address(es) in one log (field reports only ever carry one machine's log, so offline two-log diffing never happened).
         InteriorCargoSync   = 181,       // Host → a building's subscribers (round-281, field bundles 20260818-22*): the CURRENT cargo of that building's items and NOTHING else.  86% of interior traffic was cargo-only churn (shelf stock ticking down as customers buy) shipped as a FULL ~80-150KB snapshot whose 306 designs and 225 dirt spots were byte-identical every single time; round-280 slowed those sends down, this shrinks them.  ABSOLUTE STATE, never a diff-chain: it names EVERY item in the building, so re-applying it converges by itself.  Guarded by StructVersion — a receiver whose last applied FULL snapshot carried a different version knows its structure is stale, ignores the cargo and re-requests (InteriorRequest).  Sent ONLY when EVERY subscriber runs our exact build (Hello.CargoDelta + mod-version equality); one non-capable subscriber and all of them get the full snapshot, so an old client can never be handed this type.
         BillboardAds        = 182,       // Any → Host → All (round-290, field 20260820-092547): the sender's ACTIVE billboard campaigns as an ABSOLUTE set (billboard type + business name per entry). Campaign facts live only in the owner's save, so partners' paid ads never entered anyone else's AdManager pools; receivers inject these as PLAYER-weight ads. Images need nothing new — the per-size billboard logos already sync.
+        // ── Shared-shop management (the Business PERMISSION feature) — NOT the merger; the merger keeps MergerEmployeeEdit ──
+        SharedScheduleEdit  = 183,       // Permitted player → Host → shop OWNER (shared-shop slice 1, 2026-08-21, plan §2.5/§2.6): the CHANGED days of a shared shop's schedule, each with the owner-truth signature it was edited against. Host: direct Business grant required (merger membership does not count), per-sender rate cap, shape check. Owner applies per day (base matches → apply, else owner wins), validates references, echoes ONE targeted snapshot.
+        ScheduleSession     = 184,       // Shared-shop slice 1 (plan §2.8): the editing session. open/close (+60 s keepalive): editor → Host → owner, grant-gated. snapshot: owner → Host → ONE editor (ToPid) — never a broadcast; everyone else converges on the business heartbeat. Carries all days (empty = "unchanged") + any rejected days after a routed edit.
+        SharedStaffPool     = 185,       // Owner → Host → the players holding a DIRECT Business grant from that owner (shared-shop slice 3, 2026-08-22, plan §2.3): the owner's hired-but-UNASSIGNED employees (their bench), sent when membership/wages change; the host caches it and replays it to a newly granted player. Receivers inject real-id records with no business so the helper can place them in the owner's shared shop.
+        SharedStaffEdit     = 186,       // Permitted player → Host → shop OWNER: "assign" an owner's employee to one of the owner's shared shops, or "unassign" them from it. Host: direct grant on the address, rate cap. Owner performs the native reassignment and republishes roster + bench.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -207,6 +212,63 @@ namespace BigAmbitionsMP
         public float  Satisfaction { get; set; } = 100f;
         public List<string> Skills  { get; set; } = new();   // "name=value" (characterData.skills)
         public List<string> Demands { get; set; } = new();
+    }
+
+    // ── Shared-shop management (Business PERMISSION feature; src/SharedShopSchedule.cs) — separate from the merger ──
+
+    /// <summary>Shared-shop slice 1: a permitted player's schedule edit for a shop they do not own — only the CHANGED
+    /// days. BaseSigs[i] is the owner-truth per-day signature Days[i] was edited against (owner: equal → apply,
+    /// different → the owner wins and the day comes back rejected). Seq orders one sender's edits per address;
+    /// SeqEpoch is random per editor PROCESS so a restarted editor's counter is never mistaken for duplicates.
+    /// Senders strip their own duty stand-ins before sending.</summary>
+    public class SharedScheduleEditPayload
+    {
+        public string PlayerId   { get; set; } = "";   // sender (validated SenderIs at the host)
+        public string AddressKey { get; set; } = "";
+        public int    Seq        { get; set; }
+        public int    SeqEpoch   { get; set; }
+        public List<ScheduleDayInfo> Days     { get; set; } = new();
+        public List<string>          BaseSigs { get; set; } = new();
+    }
+
+    /// <summary>Shared-shop slice 1 (plan §2.8): the editing session between a permitted player (the editor) and
+    /// the shop owner. "open"/"close" (and a 60 s "open" keepalive) go editor → host → owner; "snapshot" goes
+    /// owner → host → exactly ONE editor (ToPid) — never broadcast. A snapshot with an empty Schedule means
+    /// "your copy is current" (the editor's held Sig matched). RejectedDays lists the days the owner did not take
+    /// from a routed edit (same-day collision, owner mid-drag, or a reference that no longer exists); Reason is for
+    /// the log only — this feature puts nothing on screen.</summary>
+    public class ScheduleSessionPayload
+    {
+        public string PlayerId   { get; set; } = "";   // sender (validated SenderIs at the host)
+        public string Action     { get; set; } = "";   // "open" | "close" | "snapshot"
+        public string AddressKey { get; set; } = "";
+        public string ToPid      { get; set; } = "";   // snapshot target — the editor
+        public string Sig        { get; set; } = "";   // open: the editor's held whole-schedule sig; snapshot: the owner's
+        public List<ScheduleDayInfo> Schedule { get; set; } = new();   // snapshot: every day (empty = unchanged)
+        public List<int> RejectedDays { get; set; } = new();
+        public string Reason     { get; set; } = "";
+    }
+
+    /// <summary>Shared-shop slice 3: an owner's hired-but-unassigned employees (their bench), as the roster's StaffInfo
+    /// rows. ABSOLUTE set — receivers drop bench records no longer listed (unless the roster meanwhile assigned them).</summary>
+    public class SharedStaffPoolPayload
+    {
+        public string PlayerId { get; set; } = "";   // the owner (validated SenderIs at the host)
+        public List<StaffInfo> Staff { get; set; } = new();
+    }
+
+    /// <summary>Shared-shop slice 3: a permitted player's assignment change for one of the owner's employees.
+    /// "assign" → AddressKey = the owner's shared shop to place them in; "unassign" → AddressKey = the shop they
+    /// currently work at. Seq/SeqEpoch as for schedule edits (a delayed duplicate can never undo a newer edit).</summary>
+    public class SharedStaffEditPayload
+    {
+        public string PlayerId   { get; set; } = "";   // sender (validated SenderIs at the host)
+        public string Action     { get; set; } = "";   // "assign" | "unassign"
+        public string EmployeeId { get; set; } = "";
+        public string AddressKey { get; set; } = "";
+        public string FromAddressKey { get; set; } = "";   // where the helper believed the employee was ("" = bench); the owner rejects if that is no longer true (owner wins, as for schedule days)
+        public int    Seq        { get; set; }
+        public int    SeqEpoch   { get; set; }
     }
 
     /// <summary>Merger slice 4 — one native money delta from a merged member's machine. NEVER an
@@ -497,6 +559,10 @@ namespace BigAmbitionsMP
         // OTHER than this receiver (grants irrelevant). A local reg claiming RentedByPlayer on one
         // of these, outside an active flip, is contaminated (leaked tenancy) and gets self-healed.
         public System.Collections.Generic.List<string> OtherOwnedKeys { get; set; } = new System.Collections.Generic.List<string>();
+        // Shared-shop MANAGEMENT (the Business PERMISSION feature, 2026-08-21): businesses this player may MANAGE —
+        // DIRECT Business grants from the operator only. Deliberately separate from HelperAddressKeys, which unions
+        // merger membership (merger members help in partner shops); the permission feature never keys on the merger.
+        public System.Collections.Generic.List<string> SharedManageKeys { get; set; } = new System.Collections.Generic.List<string>();
     }
 
     /// <summary>Guest → host → building owner: take/put on a home INTERIOR item's cargo (the fridge — the same

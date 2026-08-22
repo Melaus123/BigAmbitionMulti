@@ -49,6 +49,7 @@ namespace BigAmbitionsMP
 
         public static void Reset()
         {
+            _injectedOwner.Clear(); _poolByOwner.Clear(); _benchGrace.Clear();   // shared-shop slice 3: bench bookkeeping dies with the scene (the records go with _injectedStaff below)
             // Remove the synthetic duty NPCs we injected from the live game first,
             // so a scene-exit/disconnect autosave can't write them into a save (they
             // are runtime-only and would otherwise orphan — they live in gi.Employee-
@@ -1644,6 +1645,12 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<string, (string pid, List<StaffInfo> staff, string sig)> _rosterByAddr = new();
         private static readonly Dictionary<string, string> _rosterApplied = new();            // addr → sig actually injected
         private static readonly Dictionary<string, (string addr, EmployeeInstance inst)> _injectedStaff = new();   // real-id records we injected
+        // Shared-shop slice 3: an owner's BENCH (hired, unassigned) arrives as real-id records with no business —
+        // addr "" in _injectedStaff. Their owner is remembered here (roster records resolve theirs via _rosterByAddr).
+        private static readonly Dictionary<string, string> _injectedOwner = new();            // employeeId → owner pid (bench records)
+        private static readonly Dictionary<string, HashSet<string>> _poolByOwner = new();     // owner pid → bench ids last applied
+        private static readonly Dictionary<string, float> _benchGrace = new();                // employeeId → when the bench stopped listing it (the roster may be about to claim it)
+        private const float BenchGraceSeconds = 12f;
         private static readonly Dictionary<string, string> _rosterSigSent = new();            // owner side: addr → last published sig
         private static readonly Dictionary<string, string> _rosterLogSig  = new();            // round-189: addr → last LOGGED membership (log speaks on hire/fire/rename only)
         private static float _nextRosterPublishAt, _nextRosterApplyAt;
@@ -1699,6 +1706,23 @@ namespace BigAmbitionsMP
         public static void ForceRosterRepublish(string addressKey)
         {
             try { _rosterSigSent.Remove(addressKey); _nextRosterPublishAt = 0f; } catch { }
+        }
+
+        /// <summary>Shared-shop management (PERMISSION feature): republish this shop's roster NOW, including when it has
+        /// just become EMPTY. ForceRosterRepublish above drops the sent-signature key, and the publish tick's
+        /// "never had staff — nothing to say" guard then suppresses an empty roster — right for a shop that never had
+        /// staff, wrong for one whose last employee was just moved to the bench (the helpers would keep a stale copy).
+        /// A sentinel signature keeps the key (the guard passes) while never matching (the publish is forced).
+        /// The merger's callers keep ForceRosterRepublish unchanged — its own case is noted in the merger map §22.</summary>
+        public static void ForceRosterRepublishEvenIfEmpty(string addressKey)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey)) return;
+                _rosterSigSent[addressKey] = "!force-republish!";   // can never equal a real RosterSig (ids|names|…;)
+                _nextRosterPublishAt = 0f;
+            }
+            catch { }
         }
 
         private static string RosterSig(List<StaffInfo> staff)
@@ -1845,7 +1869,13 @@ namespace BigAmbitionsMP
                     var gone = new List<string>();
                     foreach (var kv in _injectedStaff)
                         if (kv.Value.addr == addr && !want.ContainsKey(kv.Key)) gone.Add(kv.Key);
-                    foreach (var id in gone) RemoveInjectedStaff(id);
+                    foreach (var id in gone)
+                    {
+                        // Shared-shop slice 3: an owner's employee UNASSIGNED from this shop goes back to their bench
+                        // instead of vanishing (the bench republish, arriving right after, drops them if they really left).
+                        if (DemoteToBench(id, v.pid)) continue;
+                        RemoveInjectedStaff(id);
+                    }
 
                     int added = 0, updated = 0;
                     foreach (var s in want.Values)
@@ -1857,6 +1887,14 @@ namespace BigAmbitionsMP
                                 if (!string.IsNullOrEmpty(s.Name)) have.inst.characterData.name = s.Name;
                                 have.inst.isAbsent = !s.Available; have.inst.isReplaced = false;
                                 ApplyStaffFidelity(have.inst, s);   // slice 5: wage/skills/satisfaction stay current
+                                if (have.addr != addr)
+                                {
+                                    // Shared-shop slice 3: a bench record (or one from another shop) now works HERE —
+                                    // move the copy instead of leaving a stale "unassigned" record behind.
+                                    have.inst.assignedAddress = new Address(reg.StreetName, reg.StreetNumber);
+                                    _injectedStaff[s.Id] = (addr, have.inst);
+                                    _injectedOwner[s.Id] = v.pid;
+                                }
                             }
                             catch { }
                             updated++;
@@ -1919,6 +1957,194 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] apply: {ex.Message}"); }
         }
 
+        // ── Shared-shop slice 3 (the Business PERMISSION feature): an owner's BENCH on a helper's machine ──
+
+        /// <summary>Who published this injected record: the bench's owner, or the roster publisher of its shop. "" if unknown.</summary>
+        public static string OwnerOfInjected(string employeeId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(employeeId)) return "";
+                if (_injectedOwner.TryGetValue(employeeId, out var o) && !string.IsNullOrEmpty(o)) return o;
+                if (_injectedStaff.TryGetValue(employeeId, out var v) && v.addr.Length > 0)
+                    lock (_rosterByAddr) if (_rosterByAddr.TryGetValue(v.addr, out var r)) return r.pid ?? "";
+            }
+            catch { }
+            return "";
+        }
+
+        /// <summary>An injected record sitting on its owner's bench (no business).</summary>
+        public static bool IsInjectedUnassigned(string employeeId)
+            => !string.IsNullOrEmpty(employeeId) && _injectedStaff.TryGetValue(employeeId, out var v) && v.addr.Length == 0;
+
+        /// <summary>The roster's wire row for one of MY employees (same fields the roster publish sends).</summary>
+        public static StaffInfo StaffInfoOf(EmployeeInstance e)
+        {
+            var si = new StaffInfo { Id = e.id };
+            try { si.Name = e.characterData?.name ?? ""; } catch { }
+            try { si.Gender = (int)e.characterData.gender; } catch { }
+            try { si.Available = e.IsEmployeeAvailable(); } catch { }
+            try { si.Wage = e.hourlyWage; } catch { }
+            try { si.Satisfaction = e.satisfaction; } catch { }
+            try { si.AgeDays = e.characterData?.ageInDays ?? 0; } catch { }
+            try
+            {
+                var skills = e.characterData?.skills;
+                if (skills != null)
+                    foreach (var sk in skills)
+                        if (sk != null && !string.IsNullOrEmpty(sk.name))
+                            si.Skills.Add(sk.name + "=" + sk.value.ToString("F1", System.Globalization.CultureInfo.InvariantCulture));
+            }
+            catch { }
+            return si;
+        }
+
+        /// <summary>MAIN THREAD. Apply an owner's bench: inject/update real-id records with NO business. A bench record
+        /// the owner no longer lists is NOT dropped at once — the roster naming its new shop may be a moment behind
+        /// (the owner's own dropdown: bench republish first, roster sweep next) — it enters a short grace period and
+        /// SweepBenchGrace drops it if nothing claimed it. Records the roster already placed are left to the roster.
+        /// Returns true when anything changed.</summary>
+        public static bool ApplySharedPool(string ownerPid, List<StaffInfo> staff)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.EmployeeInstances == null || string.IsNullOrEmpty(ownerPid)) return false;
+                var want = new HashSet<string>();
+                foreach (var s in staff) if (s != null && !string.IsNullOrEmpty(s.Id)) want.Add(s.Id);
+                _poolByOwner.TryGetValue(ownerPid, out var prev); prev ??= new HashSet<string>();
+                int graced = 0, added = 0, updated = 0;
+                foreach (var id in prev)
+                {
+                    if (want.Contains(id)) { _benchGrace.Remove(id); continue; }
+                    if (!_injectedStaff.TryGetValue(id, out var v) || v.addr.Length > 0) continue;   // roster has it now
+                    if (!_benchGrace.ContainsKey(id)) { _benchGrace[id] = Time.unscaledTime; graced++; }
+                }
+                foreach (var s in staff)
+                {
+                    if (s == null || string.IsNullOrEmpty(s.Id)) continue;
+                    _benchGrace.Remove(s.Id);
+                    if (_injectedStaff.TryGetValue(s.Id, out var have))
+                    {
+                        if (have.addr.Length > 0) continue;   // the roster says they work somewhere — it wins
+                        try
+                        {
+                            if (!string.IsNullOrEmpty(s.Name)) have.inst.characterData.name = s.Name;
+                            have.inst.isAbsent = !s.Available; have.inst.isReplaced = false;
+                            ApplyStaffFidelity(have.inst, s);
+                        }
+                        catch { }
+                        _injectedOwner[s.Id] = ownerPid;
+                        updated++;
+                        continue;
+                    }
+                    bool existsLocally = false;
+                    try { existsLocally = Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(s.Id); } catch { }
+                    if (existsLocally) continue;   // never shadow a real local record
+                    var inst = Helpers.EmployeeHelper.CreateAIEmployeeInstance("ba:skill_customerservice");
+                    if (inst == null) continue;
+                    inst.id = s.Id;
+                    inst.hourlyWage = 0f;
+                    inst.satisfaction = 100f;
+                    inst.assignedAddress = null;   // the bench
+                    inst.characterData.name = string.IsNullOrEmpty(s.Name) ? "Staff" : s.Name;
+                    inst.characterData.ageInDays = Helpers.RecruitmentHelper.GetRandomEmployeeAgeInDays();
+                    try { if (s.Gender >= 0) inst.characterData.gender = (BigAmbitions.Characters.Gender)s.Gender; } catch { }
+                    inst.isAbsent = !s.Available; inst.isReplaced = false;
+                    ApplyStaffFidelity(inst, s);
+                    for (int i = gi.EmployeeInstances.Count - 1; i >= 0; i--)   // same de-dup as the roster path: never two list entries for one id
+                        if (gi.EmployeeInstances[i]?.id == inst.id) gi.EmployeeInstances.RemoveAt(i);
+                    gi.EmployeeInstances.Add(inst);
+                    try { Helpers.EmployeeHelper.EmployeeInstancesDictionary[inst.id] = inst; } catch { }
+                    _injectedStaff[inst.id] = ("", inst);
+                    _injectedOwner[inst.id] = ownerPid;
+                    added++;
+                }
+                _poolByOwner[ownerPid] = want;
+                if (added + updated + graced > 0)
+                    Plugin.Logger.LogInfo($"[SharedShop] bench of '{ownerPid}' applied: +{added} ~{updated} (no longer listed: {graced}) — they can be placed in that owner's shared shops.");
+                return added + updated > 0;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] ApplySharedPool: {ex.Message}"); return false; }
+        }
+
+        /// <summary>MAIN THREAD (SharedShopStaff's scan): drop bench records the owner stopped listing a while ago that no
+        /// roster claimed meanwhile and that were not assigned here. Returns the number dropped.</summary>
+        public static int SweepBenchGrace()
+        {
+            int dropped = 0;
+            try
+            {
+                if (_benchGrace.Count == 0) return 0;
+                var due = new List<string>();
+                foreach (var kv in _benchGrace) if (Time.unscaledTime - kv.Value >= BenchGraceSeconds) due.Add(kv.Key);
+                foreach (var id in due)
+                {
+                    if (!_injectedStaff.TryGetValue(id, out var v) || v.addr.Length > 0) { _benchGrace.Remove(id); continue; }   // gone, or the roster claimed it
+                    // Assigned here with the routed edit still in flight: keep the grace entry and look again next sweep —
+                    // the owner's answer moves the copy (roster) or lists it (bench); if no answer ever comes, the scan's
+                    // give-up reverts the address and the record is dropped here.
+                    if (v.inst?.assignedAddress != null) continue;
+                    _benchGrace.Remove(id);
+                    string owner = OwnerOfInjected(id);
+                    if (_poolByOwner.TryGetValue(owner, out var pool) && pool.Contains(id)) continue;   // listed again meanwhile
+                    RemoveInjectedStaff(id); dropped++;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] bench sweep: {ex.Message}"); }
+            return dropped;
+        }
+
+        /// <summary>Disconnect: every bench record leaves with the link (roster records keep their own lifecycle).</summary>
+        public static void DropBenchRecords(string why)
+        {
+            try
+            {
+                var ids = new List<string>();
+                foreach (var kv in _injectedStaff) if (kv.Value.addr.Length == 0) ids.Add(kv.Key);
+                foreach (var id in ids) RemoveInjectedStaff(id);
+                _poolByOwner.Clear(); _benchGrace.Clear();
+                if (ids.Count > 0) Plugin.Logger.LogInfo($"[SharedShop] dropped {ids.Count} bench record(s) ({why}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] DropBenchRecords: {ex.Message}"); }
+        }
+
+        private static BuildingRegistration? RegOfKey(string addressKey)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey)) return null;
+                var regs = SaveGameManager.Current?.BuildingRegistrations;
+                if (regs == null) return null;
+                foreach (var r in regs) if (r != null && GameStateReader.AddressKey(r) == addressKey) return r;
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>Roster apply: an owner's employee left a shop. If that owner directly shares shops with me, the copy
+        /// goes back to the bench (no business) instead of being destroyed — the bench republish that follows keeps or
+        /// drops it (via the grace sweep), and an open detail panel keeps a live object. True = handled.</summary>
+        private static bool DemoteToBench(string id, string ownerPid)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ownerPid) || !GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, MPConfig.PlayerId)) return false;
+                if (!_injectedStaff.TryGetValue(id, out var have) || have.inst == null) return false;
+                try { var fillReg = RegOfKey(have.addr); if (fillReg != null) UI.Smartphone.Apps.BizMan.Schedule.BizManSchedule.AbortAutoFillForBusiness(fillReg); } catch { }
+                have.inst.assignedAddress = null;
+                _injectedStaff[id] = ("", have.inst);
+                _injectedOwner[id] = ownerPid;
+                if (!(_poolByOwner.TryGetValue(ownerPid, out var pool) && pool.Contains(id))) _benchGrace[id] = Time.unscaledTime;   // not (yet) on the published bench — grace, then sweep
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Shared-shop slice 3: the owner's bench changed — publish the roster sweep in the same frame too, so a
+        /// copy never sits "unlisted" on a helper's machine for the sweep's 30 s.</summary>
+        public static void NudgeRosterPublish() { _nextRosterPublishAt = 0f; }
+
         /// <summary>Slice 5: apply the wire's display-fidelity fields to an injected record. Wage is
         /// safe to be real — the payroll skip keys on the injected-id registry, not on wage 0. Skills
         /// replace the placeholder so MyEmployees/BizMan show the partner staff's true role/levels.</summary>
@@ -1954,11 +2180,14 @@ namespace BigAmbitionsMP
             {
                 if (!_injectedStaff.TryGetValue(id, out var have)) return;
                 _injectedStaff.Remove(id);
+                _injectedOwner.Remove(id);   // shared-shop slice 3: the owner memory goes with the record (a stale entry would keep guards lit)
+                _benchGrace.Remove(id);
                 // Same auto-fill hazard as RemoveSynthetic: an in-flight background fill holding
                 // this record would write shifts for an id that is about to lose its record.
                 try
                 {
-                    var fillReg = Helpers.BuildingHelper.GetBuildingRegistration(have.inst?.assignedAddress);
+                    // The registry's address, not the copy's field — the helper's dropdown may already have changed that locally.
+                    var fillReg = RegOfKey(have.addr) ?? Helpers.BuildingHelper.GetBuildingRegistration(have.inst?.assignedAddress);
                     if (fillReg != null) UI.Smartphone.Apps.BizMan.Schedule.BizManSchedule.AbortAutoFillForBusiness(fillReg);
                 }
                 catch { }
