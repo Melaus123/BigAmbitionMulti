@@ -4067,7 +4067,17 @@ namespace BigAmbitionsMP
         {
             static void Postfix(BuildingRegistration buildingRegistration, ref bool __result)
             {
-                try { if (__result && GameStatePatcher.IsForeignPlayerBusiness(buildingRegistration)) __result = false; } catch { }
+                try
+                {
+                    if (!__result) return;
+                    // Shared-shop ruling 23: while the BULK panel is scoped to a granting owner, THAT owner's shared
+                    // shops are the whole point of the list — the same stand-down the single-employee dropdown above
+                    // has carried since slice 3. Without it this veto silently emptied the panel (field 2026-08-22):
+                    // the game's own filter answered yes and this line overrode it to no.
+                    if (SharedShopStaff.AllowsInMassAssign(buildingRegistration)) return;
+                    if (GameStatePatcher.IsForeignPlayerBusiness(buildingRegistration)) __result = false;
+                }
+                catch { }
             }
         }
 

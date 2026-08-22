@@ -5,6 +5,7 @@ using Entities;                                // EmployeeInstance, TodoTaskType
 using HarmonyLib;
 using Helpers;                                 // BuildingHelper, EmployeeHelper
 using UI.Smartphone.Apps.MyEmployees;          // MyEmployees, EmployeeScrollerController, EmployeeModel
+using UI.Smartphone.Apps.MyEmployees.Types;    // AssignBusinessMassAction (bulk assign, ruling 23)
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -31,8 +32,14 @@ namespace BigAmbitionsMP
     ///    reassignment and republishes roster + bench — the copies converge. The helper's OWN employees never see a
     ///    shared shop in that dropdown; if any path still points one at a shared shop, the scan reverts it.
     ///  • GREYED / BLOCKED on the owner's people (rulings 14, 19 + the money ruling): pay bonus, training (the train
-    ///    buttons are not offered), fire (button greyed and the action blocked), mass-action selection (toggle greyed);
-    ///    no to-do entries about the owner's staff are written into the helper's save.
+    ///    buttons are not offered), fire (button greyed and the action blocked); no to-do entries about the owner's
+    ///    staff are written into the helper's save.
+    ///  • BULK ACTIONS (ruling 23, 2026-08-22): the owner's people CAN be bulk-selected — bulk assign is much of the
+    ///    point of managing their shop — but a selection holds ONE group: yours, or one owner's. The other group's
+    ///    checkboxes grey out, and select-all follows the group already started. For an owner's group the action menu
+    ///    offers ASSIGN only, and its shop list is that owner's shared shops; the game's own errors (skills, training)
+    ///    behave natively. The assignment itself needs no new transport — it lands on the local copy exactly as the
+    ///    single-employee dropdown does, and the 2 s scan below routes each change to the owner.
     ///  • AUTO-FILL on a shared shop works with the owner's staff (the auto-fill guard exempts them).
     ///  • Nothing on screen beyond colour and greying (ruling 17).
     /// </summary>
@@ -78,6 +85,73 @@ namespace BigAmbitionsMP
         }
 
         public static bool ShowInMyEmployees(string employeeId) => ListScope && IsFromGrantOwner(employeeId);
+
+        // ── bulk (mass) actions: ONE GROUP per selection (ruling 23) ──
+
+        /// <summary>Which group a row belongs to: "" = mine, an owner id = a record copied from that granting owner,
+        /// null = not a real record. Merged-partner copies answer "" on purpose — their bulk actions are the merger's
+        /// business and stay exactly as they were. A selection may hold only ONE group, because the two follow
+        /// different rules (mine are assigned here and now; theirs are routed to the owner and only ever to THAT
+        /// owner's shared shops), and one bulk action cannot honour both.</summary>
+        private static string GroupOf(EmployeeInstance e)
+        {
+            try
+            {
+                if (e == null || string.IsNullOrEmpty(e.id)) return null;
+                if (!IsFromGrantOwner(e.id)) return "";
+                return MPRegisterSync.OwnerOfInjected(e.id);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>The group the current selection belongs to; null when nothing is selected — the group is then
+        /// undecided and the next tick decides it.</summary>
+        private static string SelectionGroup()
+        {
+            try
+            {
+                var sel = MyEmployeesMassActionsUI.massActionSelectedEmployees;
+                if (sel == null) return null;
+                for (int i = 0; i < sel.Count; i++) { string g = GroupOf(sel[i]); if (g != null) return g; }
+                return null;
+            }
+            catch { return null; }
+        }
+
+        private static bool _menuGroupKnown;      // has the action menu been built for _menuGroup yet?
+        private static string _menuGroup;         // the group it was built for
+
+        private static void RefreshRows()
+        {
+            try
+            {
+                var ui = InstanceBehavior<UI.UIs>.Instance;
+                var page = ui != null && ui.fullMenu != null ? ui.fullMenu.myEmployees : null;
+                if (page == null || !page.gameObject.activeInHierarchy) return;
+                page.GetCurrentScroller()?.RefreshActiveCellViews();
+            }
+            catch { }
+        }
+
+        /// <summary>Row greying and the action menu both depend on which group is selected, and the game refreshes
+        /// neither when a single row is ticked — so we do, but only on the transitions that change anything (an empty
+        /// selection gaining a group, the last tick being removed, a swap). Refreshing on every click would rebuild
+        /// the menu under the player's cursor for nothing.</summary>
+        private static void SyncMassActionUiIfGroupChanged()
+        {
+            try
+            {
+                string g = SelectionGroup();
+                if (_menuGroupKnown && g == _menuGroup) return;
+                _menuGroupKnown = true; _menuGroup = g;
+                var ui = InstanceBehavior<UI.UIs>.Instance;
+                var page = ui != null && ui.fullMenu != null ? ui.fullMenu.myEmployees : null;
+                if (page == null || !page.gameObject.activeInHierarchy) return;
+                try { if (page.massActionsUI != null) page.massActionsUI.UpdateMassActionDropdown(page.CurrentTab); } catch { }
+                RefreshRows();
+            }
+            catch { }
+        }
 
         /// <summary>Auto-fill on a shared shop may use the OWNER's copied staff (theirs, at their shop) — nobody else's.</summary>
         public static bool AllowedInAutoFill(string employeeId, BuildingRegistration reg)
@@ -444,9 +518,6 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (__instance == null || data == null) return;
-                    // PROBE-START: P-SHAREDSTAFF-LIST (delete these two lines with the probe file)
-                    ProbeSharedStaffList.NoteRow(IsFromGrantOwner(data.employeeInstance?.id), __instance.employeeName != null);
-                    // PROBE-END: P-SHAREDSTAFF-LIST
                     if (__instance.employeeName == null) return;
                     bool grant = IsFromGrantOwner(data.employeeInstance?.id);
                     // The colour lives INSIDE the text (a TMP rich-text tag), never on the label component:
@@ -456,7 +527,13 @@ namespace BigAmbitionsMP
                     // (probe P-SHAREDSTAFF-LIST, 2026-08-22). Native SetData rebuilds the text from the model on
                     // every (re)bind, so recycled cells never stack tags and own rows need no restore.
                     if (grant) __instance.employeeName.text = TintTagOpen + __instance.employeeName.text + "</color>";
-                    if (__instance.massActionToggle != null) __instance.massActionToggle.interactable = !grant;
+                    // Ruling 23: tickable while this row's group is the one being worked on (or nothing is selected
+                    // yet). Native never disables this toggle, so writing true is what the game would have left.
+                    if (__instance.massActionToggle != null)
+                    {
+                        string sg = SelectionGroup(), rg = GroupOf(data.employeeInstance);
+                        __instance.massActionToggle.interactable = (sg == null || rg == null || sg == rg);
+                    }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} row tint: {ex.Message}"); }
             }
@@ -487,20 +564,145 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>The seam for single-click AND shift-click range selection (ToggleRangeOfEmployees funnels every member
-        /// through here): the owner's people are never part of a mass action — mass pay-bonus would spend the helper's
-        /// money on them and mass-assign would strip their shifts off the owner's schedule. SELECT-ALL does NOT pass
-        /// through here (MyEmployeesMassActionsUI.MassActionToggleAll assigns the list wholesale from
-        /// EmployeeHelper.GetEmployeeInstances) — it is safe by a different mechanism: outside the list build (ListScope)
-        /// the MPPatches global-query filter strips the owner's records. Do not relax that filter believing this prefix
-        /// covers select-all.</summary>
+        /// <summary>The seam for single-click AND shift-click range selection (ToggleRangeOfEmployees funnels every
+        /// member through here). Ruling 23: the owner's people MAY be ticked — what may not happen is a selection
+        /// holding two groups at once. The other group's checkboxes are greyed in the row patch above, so this is the
+        /// back stop for any path that reaches the list directly; a refusal is silent (ruling 17) and forces a row
+        /// refresh, which puts a checkbox the game had already flipped back where it belongs.
+        /// SELECT-ALL does NOT pass through here — see Patch_MassActions_ToggleAll_Group.</summary>
         [HarmonyPatch(typeof(MyEmployeesMassActionsUI), nameof(MyEmployeesMassActionsUI.ToggleSelectedEmployee))]
         public static class Patch_MassActions_ToggleSelected_Guard
         {
-            static bool Prefix(EmployeeInstance employeeInstance)
+            static bool Prefix(EmployeeInstance employeeInstance, out bool __state)
             {
-                try { return !IsFromGrantOwner(employeeInstance?.id); } catch { return true; }
+                __state = false;
+                try
+                {
+                    string sg = SelectionGroup(), rg = GroupOf(employeeInstance);
+                    if (sg == null || rg == null || sg == rg) return true;
+                    __state = true;   // refused → the row's checkbox must be put back
+                    if (_logged.Add("mixed-selection"))
+                        Plugin.Logger.LogInfo($"{Tag} a bulk selection holds one group at a time (yours, or one owner's) — this tick was not added.");
+                    return false;
+                }
+                catch { return true; }
             }
+            static void Postfix(bool __state)
+            {
+                if (__state) RefreshRows();
+                SyncMassActionUiIfGroupChanged();
+            }
+        }
+
+        /// <summary>SELECT ALL. Vanilla replaces the selection with everyone currently listed, taken from the GLOBAL
+        /// employee query — which the MPPatches filter narrows to my own people, so vanilla select-all can never reach
+        /// the owner's rows. Ruling 23: select-all follows the group already started — with one of an owner's people
+        /// ticked it takes all of THAT owner's rows in the list instead. Same replace-not-extend behaviour as vanilla,
+        /// and the same respect for the search box and filters, because the scroller's data IS the filtered list.
+        /// With nothing selected the group is undecided and vanilla stands (my own people).
+        /// The group must be read in a PREFIX: the native body replaces the selection before a postfix could see it.</summary>
+        [HarmonyPatch(typeof(MyEmployeesMassActionsUI), "MassActionToggleAll")]
+        public static class Patch_MassActions_ToggleAll_Group
+        {
+            static void Prefix(out string __state) { __state = SelectionGroup(); }
+
+            static void Postfix(bool toggled, string __state)
+            {
+                try
+                {
+                    if (!toggled || string.IsNullOrEmpty(__state)) { SyncMassActionUiIfGroupChanged(); return; }
+                    var ui = InstanceBehavior<UI.UIs>.Instance;
+                    var page = ui != null && ui.fullMenu != null ? ui.fullMenu.myEmployees : null;
+                    var rows = page != null && page.employeeScrollerController != null ? page.employeeScrollerController.data : null;
+                    var sel = MyEmployeesMassActionsUI.massActionSelectedEmployees;
+                    if (rows == null || sel == null) return;
+                    sel.Clear();
+                    foreach (var m in rows)
+                        if (m != null && GroupOf(m.employeeInstance) == __state) sel.Add(m.employeeInstance);
+                    Plugin.Logger.LogInfo($"{Tag} select-all took {sel.Count} of the {__state}'s listed people (the group already being worked on).");
+                    SyncMassActionUiIfGroupChanged();
+                    RefreshRows();
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} select-all: {ex.Message}"); }
+            }
+        }
+
+        private static readonly System.Reflection.FieldInfo _fMassActionTypes    = AccessTools.Field(typeof(MyEmployeesMassActionsUI), "_massActionsTypes");
+        private static readonly System.Reflection.FieldInfo _fMassActionDropdown = AccessTools.Field(typeof(MyEmployeesMassActionsUI), "massActionDropdown");
+
+        /// <summary>With one of an owner's groups selected the action menu offers ASSIGN only — fire, training and pay
+        /// bonus stay forbidden (rulings 14, 19 and the money ruling), and listing an action that would be refused is a
+        /// menu that lies. The action is recognised by TYPE, not by its name string, because those names live in game
+        /// data we cannot read. The private type array is rewritten alongside the visible options: DoMassAction indexes
+        /// INTO that array, so filtering only what is drawn would fire the wrong action.</summary>
+        [HarmonyPatch(typeof(MyEmployeesMassActionsUI), nameof(MyEmployeesMassActionsUI.UpdateMassActionDropdown))]
+        public static class Patch_MassActionMenu_Scope
+        {
+            static void Postfix(MyEmployeesMassActionsUI __instance)
+            {
+                try
+                {
+                    if (string.IsNullOrEmpty(SelectionGroup())) return;   // nothing selected, or my own people → the game's own menu
+                    if (_fMassActionTypes == null || _fMassActionDropdown == null)
+                    {
+                        // Never silent: without these the menu would keep offering fire/train/bonus on another
+                        // player's staff (they would still be refused, but the menu would be lying).
+                        if (_logged.Add("bulk-menu-fields"))
+                            Plugin.Logger.LogWarning($"{Tag} cannot narrow the bulk action menu (types field {( _fMassActionTypes == null ? "MISSING" : "ok")}, dropdown field {( _fMassActionDropdown == null ? "MISSING" : "ok")}) — the forbidden actions stay blocked, but they are still listed.");
+                        return;
+                    }
+                    if (!(_fMassActionTypes.GetValue(__instance) is string[] types) || types.Length == 0) return;
+                    var keep = new List<string>();
+                    foreach (var t in types)
+                        if (EmployeeMassActionHelper.GetMassAction(t) is AssignBusinessMassAction) keep.Add(t);
+                    if (keep.Count == types.Length) return;
+                    _fMassActionTypes.SetValue(__instance, keep.ToArray());
+                    if (_fMassActionDropdown?.GetValue(__instance) is UI.Elements.Dropdown dd) dd.SetOptions(new List<string>(keep));
+                    if (_logged.Add("bulk-menu"))
+                        Plugin.Logger.LogInfo($"{Tag} bulk actions on another player's staff: {keep.Count} of {types.Length} offered (assign only).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} bulk action menu: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>Set while the BULK assign panel is being built or resolved for one of an owner's groups, so the
+        /// shop list below becomes that owner's shared shops ("" = not in that scope). Both halves are covered because
+        /// the game builds the labels and then re-queries the SAME call to turn the chosen index back into a shop —
+        /// scoping one and not the other would map the player's choice onto a different building.</summary>
+        private static string _massAssignOwner = "";
+
+        /// <summary>True while the BULK assign panel is scoped to a granting owner AND this registration is one of
+        /// THAT owner's staffable shared shops. The 2026-07-16 partner-business veto in MPPatches stands down on
+        /// exactly this, and nothing wider: outside the panel, and for anyone else's buildings, the veto is unchanged.
+        /// (Field 2026-08-22: without this the panel offered nothing but "Unassign" — the game's own filter said yes
+        /// and our older guard overrode it to no.)</summary>
+        internal static bool AllowsInMassAssign(BuildingRegistration reg)
+        {
+            try
+            {
+                if (reg == null || _massAssignOwner.Length == 0) return false;
+                string addr; try { addr = GameStateReader.AddressKey(reg); } catch { return false; }
+                if (!SharedShopSchedule.IsSharedShop(reg, addr) || IsWarehouse(reg)) return false;
+                string stamp = ""; try { stamp = reg.businessOwnerRivalId?.ToString() ?? ""; } catch { }
+                return stamp == _massAssignOwner;
+            }
+            catch { return false; }
+        }
+
+        [HarmonyPatch(typeof(AssignBusinessMassAction), nameof(AssignBusinessMassAction.Perform))]
+        public static class Patch_MassAssign_Perform_Scope
+        {
+            static void Prefix() { _massAssignOwner = SelectionGroup() ?? ""; }
+            static void Finalizer() { _massAssignOwner = ""; }
+        }
+
+        /// <summary>The index→shop resolve. The confirmation that follows looks the shop up by ADDRESS, not by index,
+        /// so it needs no scope of its own.</summary>
+        [HarmonyPatch(typeof(AssignBusinessMassAction), "AssignBusiness")]
+        public static class Patch_MassAssign_Resolve_Scope
+        {
+            static void Prefix() { _massAssignOwner = SelectionGroup() ?? ""; }
+            static void Finalizer() { _massAssignOwner = ""; }
         }
 
         /// <summary>Training is money — the owner's people are never trainable here (the game then hides the train buttons).</summary>
@@ -570,45 +772,81 @@ namespace BigAmbitionsMP
             static void Finalizer() { _dropdownPage = null; DropdownForGrantRecord = false; }
         }
 
+        /// <summary>Serves BOTH "assign to business" surfaces for an owner's people: the single-employee dropdown and
+        /// the bulk assign panel. One body, so the two can never drift into offering different shops.</summary>
         [HarmonyPatch(typeof(BuildingHelper), nameof(BuildingHelper.GetPlayerBuildingRegistrations))]
         [HarmonyPriority(Priority.Low)]
-        public static class Patch_GetPlayerBuildingRegistrations_GrantDropdown
+        public static class Patch_GetPlayerBuildingRegistrations_OwnerShopScope
         {
             static void Postfix(List<BuildingRegistration> __result, object[] __args)
             {
                 try
                 {
-                    if (!DropdownForGrantRecord || __result == null) return;
+                    if (__result == null) return;
                     if (SharedShopVisibility.InBizManRefresh) return;   // scopes never overlap today; never wipe the BizMan append if they ever did
-                    __result.Clear();   // fail CLOSED: an owner's employee is never offered the helper's own shops
-                    var sel = _dropdownPage != null ? _dropdownPage.SelectedEmployeeInstance : null;
-                    string owner = sel != null ? MPRegisterSync.OwnerOfInjected(sel.id) : "";
-                    if (owner.Length == 0) return;
-                    var filter = __args != null && __args.Length > 0 ? __args[0] as Delegate : null;   // the page's own PlayerBuildingFilter (skills)
-                    var gi = SaveGameManager.Current;
-                    if (gi?.BuildingRegistrations == null) return;
-                    foreach (var reg in gi.BuildingRegistrations)
+                    string owner;
+                    if (DropdownForGrantRecord)
                     {
-                        if (reg == null) continue;
-                        string addr = ""; try { addr = GameStateReader.AddressKey(reg); } catch { continue; }
-                        if (!SharedShopSchedule.IsSharedShop(reg, addr) || IsWarehouse(reg)) continue;   // warehouses: driver slots are a later slice
-                        string stamp = ""; try { stamp = reg.businessOwnerRivalId?.ToString() ?? ""; } catch { }
-                        if (stamp != owner) continue;
-                        bool ok = true;
-                        try { if (filter != null) ok = (bool)filter.DynamicInvoke(reg); }
-                        catch (Exception ex) { ok = false; if (_logged.Add("dropdown-filter")) Plugin.Logger.LogWarning($"{Tag} the game's business filter threw for '{addr}': {ex.InnerException?.Message ?? ex.Message} — shop not offered."); }
-                        if (ok) __result.Add(reg);
+                        var sel = _dropdownPage != null ? _dropdownPage.SelectedEmployeeInstance : null;
+                        owner = sel != null ? MPRegisterSync.OwnerOfInjected(sel.id) : "";
                     }
-                    __result.Sort((a, b) => string.CompareOrdinal(a.BusinessName?.ToString() ?? "", b.BusinessName?.ToString() ?? ""));
+                    else if (_massAssignOwner.Length > 0) owner = _massAssignOwner;
+                    else return;                                        // not one of our scopes — the game's own list stands
+                    ScopeToOwnerShops(__result, owner, __args != null && __args.Length > 0 ? __args[0] as Delegate : null);
                 }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} dropdown: {ex.Message}"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} shop list: {ex.Message}"); }
             }
+        }
+
+        /// <summary>Replace the list with ONLY that owner's staffable shared shops, still passing the game's own
+        /// filter. Fails CLOSED: an owner's employee is never offered the helper's own shops, so an owner we cannot
+        /// identify yields an empty list rather than the wrong one.
+        ///
+        /// The game's filters for "which business can this employee go to" are gated on RentedByPlayer — "I rent this"
+        /// — which is FALSE for another player's shop on this machine, so every one of the owner's shops was rejected
+        /// and the bulk panel offered nothing but "Unassign" (field 2026-08-22). Tenancy is therefore raised for the
+        /// single synchronous filter call and lowered in a finally: the flag means "mine" to every other system in the
+        /// game, so it may never outlive the call that needs it.</summary>
+        private static void ScopeToOwnerShops(List<BuildingRegistration> result, string owner, Delegate filter)
+        {
+            result.Clear();
+            if (string.IsNullOrEmpty(owner)) return;
+            var gi = SaveGameManager.Current;
+            if (gi?.BuildingRegistrations == null) return;
+            int candidates = 0;
+            foreach (var reg in gi.BuildingRegistrations)
+            {
+                if (reg == null) continue;
+                string addr = ""; try { addr = GameStateReader.AddressKey(reg); } catch { continue; }
+                if (!SharedShopSchedule.IsSharedShop(reg, addr) || IsWarehouse(reg)) continue;   // warehouses: driver slots are a later slice
+                string stamp = ""; try { stamp = reg.businessOwnerRivalId?.ToString() ?? ""; } catch { }
+                if (stamp != owner) continue;
+                candidates++;
+                bool ok = true;
+                if (filter != null)
+                {
+                    // Tenancy raised for the call: the game's own filter opens with RentedByPlayer ("I rent this"),
+                    // false for another player's shop here. Necessary but NOT sufficient — the mod's own 2026-07-16
+                    // partner-business veto sits on the same filter and had to stand down too (AllowsInMassAssign).
+                    bool raised = SharedShopVisibility.RaiseTenancy(reg, addr);
+                    try { ok = (bool)filter.DynamicInvoke(reg); }
+                    catch (Exception ex) { ok = false; if (_logged.Add("dropdown-filter")) Plugin.Logger.LogWarning($"{Tag} the game's business filter threw for '{addr}': {ex.InnerException?.Message ?? ex.Message} — shop not offered."); }
+                    finally { SharedShopVisibility.LowerTenancy(reg, raised); }
+                }
+                if (ok) result.Add(reg);
+            }
+            result.Sort((a, b) => string.CompareOrdinal(a.BusinessName?.ToString() ?? "", b.BusinessName?.ToString() ?? ""));
+            // A shop list that comes out short is the symptom the player sees as "my choices are missing": say which
+            // half lost them — none of that owner's shops found, or found and then filtered away.
+            if (_logged.Add($"shoplist|{owner}|{candidates}|{result.Count}"))
+                Plugin.Logger.LogInfo($"{Tag} shops offered for '{owner}': {result.Count} of {candidates} shared shop(s) of theirs on this machine.");
         }
 
         public static void Reset()
         {
             _inflight.Clear(); _appliedSeq.Clear(); _poolSigSent = ""; _logged.Clear(); _fireGreyed = false;
             ListScope = false; DropdownForGrantRecord = false; _dropdownPage = null;
+            _massAssignOwner = ""; _menuGroupKnown = false; _menuGroup = null;
         }
     }
 }

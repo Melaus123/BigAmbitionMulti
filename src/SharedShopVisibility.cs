@@ -68,7 +68,10 @@ namespace BigAmbitionsMP
         // (SetUpTabs) and its Presentation view (OnEnable → SetActiveView / SetAiOwned) on exactly that flag. For the
         // duration of those two synchronous calls ONLY, the flag is raised on THAT registration and lowered again in
         // the finalizer — it can never span a tick, a save, or a publish (the binding rule on ownership flips).
-        private static bool RaiseTenancy(BuildingRegistration reg, string addr)
+        // Second caller since 2026-08-22: SharedShopStaff.ScopeToOwnerShops, around the game's own "can an employee be
+        // assigned to this business" filter, which is gated on the same flag. Internal, not private, so there is ONE
+        // raise/lower pair in the mod rather than a copy per surface.
+        internal static bool RaiseTenancy(BuildingRegistration reg, string addr)
         {
             try
             {
@@ -79,7 +82,7 @@ namespace BigAmbitionsMP
             }
             catch { return false; }
         }
-        private static void LowerTenancy(BuildingRegistration reg, bool raised)
+        internal static void LowerTenancy(BuildingRegistration reg, bool raised)
         {
             if (!raised || reg == null) return;
             try { reg.RentedByPlayer = false; } catch { }
