@@ -1146,6 +1146,7 @@ namespace BigAmbitionsMP
                     if (reg.temporarilyClosed == p.TemporarilyClosed) return;   // idempotent
                     reg.TemporarilyClose(p.TemporarilyClosed);
                     Plugin.Logger.LogInfo($"[Merger] owner applied routed TemporarilyClose({p.TemporarilyClosed}) on '{key}'.");
+                    try { SharedShopVisibility.RefreshOpenStateIfPageOpen(key); } catch { }   // the owner's open BizMan page follows the switch at once (same for a merger member's toggle)
                     return;
                 }
             }

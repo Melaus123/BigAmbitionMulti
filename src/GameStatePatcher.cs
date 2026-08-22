@@ -3808,6 +3808,7 @@ namespace BigAmbitionsMP
                         try { AI.Customers.CustomerEntries.CustomerEntriesHelper.UpdateCustomerEntriesForPlayerBusiness(reg, TimeHelper.GetDayOfWeek()); } catch { }
                         Plugin.Logger.LogInfo($"[Patcher] '{info.AddressKey}' is now {(info.TemporarilyClosed ? "CLOSED" : "OPEN")} — "
                             + "notified the game (open-state event + registration change + shopper schedule rebuild).");
+                        try { SharedShopVisibility.RefreshOpenStateIfPageOpen(info.AddressKey); } catch { }   // an open BizMan page follows the switch at once
                     }
                     // Producer guard (RED ROC 2026-07-13): writing the type directly bypasses
                     // native setup, whose ResetBuildingSpecific sizes Warehouse.vehicleSlots —

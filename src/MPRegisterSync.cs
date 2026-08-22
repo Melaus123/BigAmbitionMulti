@@ -1701,20 +1701,13 @@ namespace BigAmbitionsMP
         /// roster republish is the durable confirmation (or restores it if the op was lost).</summary>
         public static void DropInjectedStaff(string employeeId) => RemoveInjectedStaff(employeeId);
 
-        /// <summary>Slice 5: owner-side nudge after a routed employee op — republish this shop's roster
-        /// NOW instead of waiting out the 30s heartbeat.</summary>
+        /// <summary>Owner-side nudge after a routed employee op (merger fire, permission assign/unassign) — republish
+        /// this shop's roster NOW instead of waiting out the 30s heartbeat, INCLUDING when it has just become EMPTY.
+        /// Until 2026-08-22 this removed the sent-signature key, and the publish tick's "never had staff — nothing to
+        /// say" guard then suppressed an empty roster — right for a shop that never had staff, wrong for one whose
+        /// last employee was just fired or moved to the bench (every other machine kept a stale copy). A sentinel
+        /// signature keeps the key (the guard passes) while never matching a real signature (the publish is forced).</summary>
         public static void ForceRosterRepublish(string addressKey)
-        {
-            try { _rosterSigSent.Remove(addressKey); _nextRosterPublishAt = 0f; } catch { }
-        }
-
-        /// <summary>Shared-shop management (PERMISSION feature): republish this shop's roster NOW, including when it has
-        /// just become EMPTY. ForceRosterRepublish above drops the sent-signature key, and the publish tick's
-        /// "never had staff — nothing to say" guard then suppresses an empty roster — right for a shop that never had
-        /// staff, wrong for one whose last employee was just moved to the bench (the helpers would keep a stale copy).
-        /// A sentinel signature keeps the key (the guard passes) while never matching (the publish is forced).
-        /// The merger's callers keep ForceRosterRepublish unchanged — its own case is noted in the merger map §22.</summary>
-        public static void ForceRosterRepublishEvenIfEmpty(string addressKey)
         {
             try
             {
@@ -1833,7 +1826,11 @@ namespace BigAmbitionsMP
                         list.Add(new PlayerStaffRosterPayload { PlayerId = kv.Value.pid, AddressKey = kv.Key, Staff = kv.Value.staff });
                 // The host's OWN rosters aren't in _rosterByAddr — force a fresh publish sweep instead
                 // (cheap; the joiner gets them within the next 30s heartbeat, or instantly via this nudge).
-                _rosterSigSent.Clear();
+                // Re-seed rather than clear (2026-08-22): clearing dropped the keys the publish tick's
+                // "never had staff" guard tests, so every shop that was EMPTY at a join stopped publishing
+                // until it regained staff — and it could wipe a pending forced republish (the permission
+                // feature's ForceRosterRepublish sentinel) in the one frame before the tick consumed it.
+                foreach (var k in new List<string>(_rosterSigSent.Keys)) _rosterSigSent[k] = "!force-republish!";
                 _nextRosterPublishAt = 0f;
             }
             catch { }

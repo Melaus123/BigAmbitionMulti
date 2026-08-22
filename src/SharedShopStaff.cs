@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Runtime.CompilerServices;
 using Buildings;                               // BuildingRegistration
 using Entities;                                // EmployeeInstance, TodoTaskType, CustomerDemandHelper
 using HarmonyLib;
@@ -62,7 +61,6 @@ namespace BigAmbitionsMP
         public static bool DropdownForGrantRecord { get; private set; }
         private static MyEmployees _dropdownPage;
 
-        private static Color Tint => HousingMapCues.SharedColor;
 
         // ── identity ──
 
@@ -416,11 +414,11 @@ namespace BigAmbitionsMP
 
         private static void RepublishAfterStaffEdit(string oldKey, string newKey)
         {
-            // EvenIfEmpty: the old shop may have just lost its LAST employee — the plain ForceRosterRepublish drops the
-            // sent-signature key and the publish tick then treats the empty roster as "never had staff" (not sent), so
-            // the helper's copy would stay at that shop and its give-up would later put the employee BACK there.
-            try { if (oldKey.Length > 0) MPRegisterSync.ForceRosterRepublishEvenIfEmpty(oldKey); } catch { }
-            try { if (newKey.Length > 0 && newKey != oldKey) MPRegisterSync.ForceRosterRepublishEvenIfEmpty(newKey); } catch { }
+            // The old shop may have just lost its LAST employee — ForceRosterRepublish publishes an empty roster too
+            // (sentinel key), otherwise the helper's copy would stay at that shop and its give-up would later put the
+            // employee BACK there.
+            try { if (oldKey.Length > 0) MPRegisterSync.ForceRosterRepublish(oldKey); } catch { }
+            try { if (newKey.Length > 0 && newKey != oldKey) MPRegisterSync.ForceRosterRepublish(newKey); } catch { }
             PublishPoolNow();
         }
 
@@ -433,11 +431,11 @@ namespace BigAmbitionsMP
             static void Finalizer() { ListScope = false; }
         }
 
-        private sealed class RowDefaults { public Color Name; public bool Captured; }
-        private static readonly ConditionalWeakTable<EmployeeCellView, RowDefaults> _rowDefaults = new();
+        /// <summary>TMP rich-text opener for the shared teal (single colour source: HousingMapCues.SharedColor).</summary>
+        private static readonly string TintTagOpen = "<color=#" + ColorUtility.ToHtmlStringRGB(HousingMapCues.SharedColor) + ">";
 
-        /// <summary>Row: teal name for the owner's people; their mass-action checkbox greyed (no mass fire / train /
-        /// bonus / assign on them). Own rows restored (cells are recycled).</summary>
+        /// <summary>Row: teal name for the owner's people (a rich-text tag in the label text — see the body comment);
+        /// their mass-action checkbox greyed (no mass fire / train / bonus / assign on them).</summary>
         [HarmonyPatch(typeof(EmployeeCellView), nameof(EmployeeCellView.SetData))]
         public static class Patch_EmployeeCellView_SetData_Tint
         {
@@ -445,11 +443,19 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (__instance == null || data == null || __instance.employeeName == null) return;
-                    var def = _rowDefaults.GetOrCreateValue(__instance);
-                    if (!def.Captured) { def.Name = __instance.employeeName.color; def.Captured = true; }
+                    if (__instance == null || data == null) return;
+                    // PROBE-START: P-SHAREDSTAFF-LIST (delete these two lines with the probe file)
+                    ProbeSharedStaffList.NoteRow(IsFromGrantOwner(data.employeeInstance?.id), __instance.employeeName != null);
+                    // PROBE-END: P-SHAREDSTAFF-LIST
+                    if (__instance.employeeName == null) return;
                     bool grant = IsFromGrantOwner(data.employeeInstance?.id);
-                    __instance.employeeName.color = grant ? Tint : def.Name;
+                    // The colour lives INSIDE the text (a TMP rich-text tag), never on the label component:
+                    // BaTable.GetCellView calls VisualizeSelected(false) right after SetData, and its SetTextColors
+                    // paints every child label WHITE unless its colour is one the game itself uses (red/yellow/
+                    // orange) — a colour set on the component here was overwritten before the player ever saw it
+                    // (probe P-SHAREDSTAFF-LIST, 2026-08-22). Native SetData rebuilds the text from the model on
+                    // every (re)bind, so recycled cells never stack tags and own rows need no restore.
+                    if (grant) __instance.employeeName.text = TintTagOpen + __instance.employeeName.text + "</color>";
                     if (__instance.massActionToggle != null) __instance.massActionToggle.interactable = !grant;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} row tint: {ex.Message}"); }

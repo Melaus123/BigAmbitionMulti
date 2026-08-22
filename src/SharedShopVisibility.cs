@@ -232,6 +232,34 @@ namespace BigAmbitionsMP
             });
         }
 
+        private static readonly System.Reflection.FieldInfo _fClosedToggle = AccessTools.Field(typeof(BizManBusiness), "temporarilyClosedToggle");
+
+        /// <summary>The shop's open/closed flag changed on THIS machine because of the OTHER side — a helper's routed
+        /// toggle applied here as the owner, or the owner's push applied here as a helper. The game's BizMan page reads
+        /// that flag only when it (re)opens (it has no change listener), so an open page kept showing the old switch and
+        /// security line (field test 2026-08-21: the helper's click closed the owner's gym, but no open page showed it).
+        /// Any thread — the work is queued onto the main thread.</summary>
+        public static void RefreshOpenStateIfPageOpen(string addressKey)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return;
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                try
+                {
+                    var ui = InstanceBehavior<UI.UIs>.Instance;
+                    var page = ui != null && ui.fullMenu != null && ui.fullMenu.bizMan != null ? ui.fullMenu.bizMan.business : null;
+                    if (page == null || !page.gameObject.activeInHierarchy) return;
+                    var reg = page.buildingRegistration;
+                    if (reg == null || AddrOf(reg) != addressKey) return;
+                    bool closed = false; try { closed = reg.temporarilyClosed; } catch { }
+                    if (_fClosedToggle?.GetValue(page) is Toggle t && t.isOn != closed) t.SetIsOnWithoutNotify(closed);
+                    try { page.UpdateSecurityInfo(); } catch { }
+                    Plugin.Logger.LogInfo($"{Tag} '{addressKey}' is now {(closed ? "closed" : "open")} — the open BizMan page's switch was updated.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} open-state refresh: {ex.Message}"); }
+            });
+        }
+
         /// <summary>The game's "my businesses" helper — APPEND the shared shops, but ONLY for the BizMan page's own
         /// dropdown. Runs after the 2026-07-16 hide postfix (Priority.Low), which keeps removing them everywhere else.</summary>
         [HarmonyPatch(typeof(BuildingHelper), nameof(BuildingHelper.GetPlayerBuildingRegistrations))]
