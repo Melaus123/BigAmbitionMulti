@@ -2,7 +2,7 @@
 
 **Status:** Design / pre-implementation. **No code written yet.**
 **Created / last updated:** 2026-06-28
-**Related:** `docs/PASSENGER-SYSTEM.md` (vehicle ghost + lock foundations), `context-log-2026-06-14-passenger-system.md`
+**Related:** `PASSENGER-SYSTEM.md` (same folder) (vehicle ghost + lock foundations), `context-log-2026-06-14-passenger-system.md`
 
 Confirmed-vs-inferred is tracked inline: **[code]** = read from source this session (re-verify the load-bearing vehicle internals before Phase 2), **[decided]** = user decision, **[open]** = unresolved, needs investigation or a call.
 
@@ -402,3 +402,38 @@ kinematic puppets from the simulator's 4 Hz stream. Field-hardened across rounds
   machine (native randomness).
 "Authority persists after leaving" remains REJECTED — the engine unloads interiors around the local
 player.
+
+### Phase 4 — shared-shop management — SHIPPED, field-confirmed 2026-08-24 (commit c6326f0)
+
+**What a Business grant now does.** Beyond the helper-apron work of Phases 1-3 (registers, logistics,
+stocking), a DIRECT Business grant lets the helper MANAGE the owner's shops from the Business Manager:
+
+- **See** the owner's businesses in the BizMan list and page dropdown, in teal (HousingMapCues.SharedColor).
+  Warehouses and factories are listed too (ruling 26) — listing only, management pending.
+- **Schedule** — full per-day editing. Routed writes (SharedScheduleEdit=183, ScheduleSession=184),
+  owner-authoritative merge (owner wins on collision), live push while both sit on the page.
+- **Staffing** — MyEmployees shows the owner's ENTIRE workforce in teal (ruling 24; a grant is blanket
+  across all that owner's businesses). Assign/unassign to that owner's shared shops, single or bulk
+  (ruling 23: a selection holds ONE group — yours or one owner's; the action menu narrows to Assign).
+  Never: fire (ruling 19), train, bonus, poach (§4.1).
+- **Pricing** — the Inventory & Pricing tab works end to end: products, the owner's real stock counts,
+  and 14 days of sales history (ruling 25, on demand) are carried from the owner; price edits route to
+  the owner (SharedPriceEdit=187) and the owner's own open page repaints on its own.
+
+**What it deliberately does NOT do:** anything that spends or earns money (§4.1 — all reserved for the
+merger), firing, headquarters (ruling 27 — permanently out), renaming/sign/uniforms/workstation renames
+(blocked v1), the Insight tab (hidden v1 — may reopen now that sales history syncs; unverified whether
+that covers what Insight reads). Everything applies ONLY through a DIRECT grant (ruling 12): own shops,
+AI shops, merger flips, and single-player stay native.
+
+**Design rules that emerged (full detail in shared-shop-management-plan.md and 05-findings.md):**
+- Tabs are an ALLOW-LIST per building type; a tab not implemented is HIDDEN, never shown half-working.
+  Ruling 28: any page the helper does get matches the owner's in fit, form, and function.
+- A replica is not the owner's copy: every value a shared screen READS must exist on a machine that does
+  not own the shop (three pricing values had to be carried: available products, sales history, stock).
+- The mod's own 2026-07-16 ownership vetoes run AFTER native filters; each shared surface needs an
+  explicit stand-down (ownership-exposure-map.md "PERMITTED" table; bug class in 07-bug-classes.md).
+- Tenancy (`RentedByPlayer`) is raised call-scoped only — one raise/lower pair, lowered in finally.
+
+**Remaining:** slice 6 — warehouse (Drivers, Inventory) and factory (recipe / produce-up-to / priority)
+management, reopening plan §4.2 f+g. Money surfaces stay excluded.
