@@ -351,6 +351,7 @@ namespace BigAmbitionsMP
 
         private static void OnReceive(byte[] bytes)
         {
+            MPNetStats.NoteIn(MPNetStats.PeekType(bytes), bytes.Length);   // T0 (review M8: torn frames count in bucket 0)
             var env = MessageEnvelope.Deserialize(bytes);
             if (env == null) return;
 

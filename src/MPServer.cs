@@ -978,6 +978,12 @@ namespace BigAmbitionsMP
             // subscriber dictionaries InteriorSync.Tick touches on the main thread.
             int gonePeerId = peer.Id;
             GameStatePatcher.EnqueueOnMainThread(() => InteriorSync.HandlePeerDisconnected(gonePeerId));
+            // Review B1/MIN-7: peer ids are RECYCLED (the round-281 rule right above) — per-peer traffic
+            // identity and the business-snapshot sig die with the connection. Marshalled: both maps are
+            // main-thread-owned.
+            GameStatePatcher.EnqueueOnMainThread(() => _lastBizSnapSig.Remove(gonePeerId));
+            if (_peerNames.TryGetValue(peer.Id, out var goneTrafficPid) && !string.IsNullOrEmpty(goneTrafficPid))
+                GameStatePatcher.EnqueueOnMainThread(() => TrafficSync.ForgetPeer(goneTrafficPid));
 
             string? leftPlayer = null;
 
@@ -1118,6 +1124,7 @@ namespace BigAmbitionsMP
 
         private static void OnReceive(MPLink peer, byte[] bytes)
         {
+            MPNetStats.NoteIn(MPNetStats.PeekType(bytes), bytes.Length);   // T0 (review M8: torn frames count in bucket 0)
             var env   = MessageEnvelope.Deserialize(bytes);
             if (env == null) return;
 
@@ -1416,6 +1423,7 @@ namespace BigAmbitionsMP
                         var pc = peer;
                         GameStatePatcher.EnqueueOnMainThread(() => InteriorSync.HandleExit(pc, p.PlayerId, p.AddressKey));
                         ParkedVehicleSync.ForgetPeer(p.PlayerId);   // door teleport — resync their parked cars now
+                        TrafficSync.ForgetPeer(p.PlayerId);         // review B1: same rule for the traffic identity map
                     }
                     break;
                 }
@@ -2444,6 +2452,7 @@ namespace BigAmbitionsMP
                             SendJoinReplayTo(joinPeer);   // rivals, businesses, register duty, passengers, market, shop prices
                             // Parked cars near the joiner — resync as soon as their position is known.
                             ParkedVehicleSync.ForgetPeer(joinName);
+                            TrafficSync.ForgetPeer(joinName);   // review B1: same rule for the traffic identity map
                         }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Late-join snapshot: {ex.Message}"); }
                     });
@@ -2620,6 +2629,7 @@ namespace BigAmbitionsMP
                     MPChat.AddNotice($"{DisplayNameFor(playerId)} reconnected.");
                     BroadcastChat("", $"— {DisplayNameFor(playerId)} reconnected.");
                     ParkedVehicleSync.ForgetPeer(playerId);   // resync their parked cars after the reload
+                    TrafficSync.ForgetPeer(playerId);         // review B1: same rule for the traffic identity map
                     // Lift the pause we applied when they dropped (only the
                     // disconnect pause — a deliberate manual pause stays).
                     ResumeFromDisconnectPause();
@@ -3313,7 +3323,11 @@ namespace BigAmbitionsMP
                 if (peer == null) return;
                 SendRivalsSnapshotTo(peer);
                 var bsnap = BusinessSync.BuildFullSnapshot();
-                SendToPlayer(pid, MessageEnvelope.Create(MessageType.BusinessSnapshot, "host", bsnap));
+                var benv  = MessageEnvelope.Create(MessageType.BusinessSnapshot, "host", bsnap);
+                var bdata = benv.Serialize();
+                long bsig = BizSnapSig(bdata);
+                bool bizResent = !_lastBizSnapSig.TryGetValue(peer.Id, out var had) || had != bsig;
+                if (bizResent) { _lastBizSnapSig[peer.Id] = bsig; peer.Send(bdata, reliable: true); }
                 int rosters = 0;
                 foreach (var r in MPRegisterSync.SnapshotRosters())   // stored client rosters; also nudges the host's own publishes
                 {
@@ -3322,7 +3336,7 @@ namespace BigAmbitionsMP
                 }
                 int duty = MPRegisterSync.SendDutyStateTo(pid);
                 MPTakeover.HostHealUnfurnishedShopsFor(pid);   // round-204d: claimed-but-unfurnished takeover shops
-                Plugin.Logger.LogInfo($"[Server] World-ready re-send to '{pid}': rivals + {bsnap.Businesses.Count} businesses + {rosters} stored roster(s) (own publishes nudged) + {duty} duty entr(ies).");
+                Plugin.Logger.LogInfo($"[Server] World-ready re-send to '{pid}': rivals + {(bizResent ? bsnap.Businesses.Count + " businesses" : "business table UNCHANGED — skipped (wave-2)")} + {rosters} stored roster(s) (own publishes nudged) + {duty} duty entr(ies).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] ResendJoinerState: {ex.Message}"); }
         }
@@ -4768,6 +4782,20 @@ namespace BigAmbitionsMP
             return owner == "host" ? MPConfig.PlayerId : owner;
         }
 
+        /// <summary>Review #6: a Business grant is blanket across the owner's ESTABLISHED businesses — never
+        /// empty premises, never a headquarters (rulings 24/27). The routes enforce the same per-address
+        /// line the access push draws, so a crafted request cannot reach what the design excludes.</summary>
+        private static bool SharedWorkAddressAllowed(string addressKey)
+        {
+            try
+            {
+                var reg = GameStatePatcher.FindRegistration(addressKey);
+                string type = reg?.businessTypeName ?? "";
+                return type.Length != 0 && type != "ba:businesstype_empty" && type != "ba:businesstype_headquarters";
+            }
+            catch { return false; }
+        }
+
         /// <summary>HOST (main thread): a permitted player's schedule edit → the owner (applied here if the host owns it).</summary>
         public static void HostRouteSharedScheduleEdit(SharedScheduleEditPayload p, string senderPid)
         {
@@ -4983,8 +5011,9 @@ namespace BigAmbitionsMP
             try
             {
                 if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(senderPid)) return;
-                // Snapshots ride the roomier owner-reply bucket: a list of shared warehouses can answer as a burst.
-                if (!SharedRateOk(senderPid, "work info", snapshotBucket: p.Action == "snapshot")) return;
+                // Review #4: BOTH directions ride the roomier snapshot bucket — a card round must never
+                // starve the 10/s edit bucket that schedule/staff/price edits depend on.
+                if (!SharedRateOk(senderPid, "work info", snapshotBucket: true)) return;
                 string ownerPid = SharedShopOwnerPid(p.AddressKey);
                 if (ownerPid.Length == 0) return;
                 if (p.Action == "request")
@@ -4992,6 +5021,8 @@ namespace BigAmbitionsMP
                     if (ownerPid == senderPid) return;
                     if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid))
                     { Plugin.Logger.LogWarning($"[SharedShop] work-info request by '{senderPid}' on '{p.AddressKey}' — no Business permission, dropped."); return; }
+                    if (!SharedWorkAddressAllowed(p.AddressKey))
+                    { Plugin.Logger.LogWarning($"[SharedShop] work-info request by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
                     if (ownerPid == MPConfig.PlayerId) SharedShopWorkTabs.HandleWorkInfo(p);
                     else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedWorkInfo, "host", p));
                 }
@@ -5019,6 +5050,8 @@ namespace BigAmbitionsMP
                 if (ownerPid.Length == 0 || ownerPid == senderPid) return;
                 if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid))
                 { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' on '{p.AddressKey}' — no Business permission, dropped."); return; }
+                if (!SharedWorkAddressAllowed(p.AddressKey))
+                { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
                 if (ownerPid == MPConfig.PlayerId) SharedShopWorkTabs.OwnerApplyEdit(p);
                 else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedWorkEdit, "host", p));
             }
@@ -5077,10 +5110,13 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Broadcasts the host's AI-traffic snapshot to all clients.</summary>
-        public static void BroadcastTrafficSnapshot(TrafficSnapshotPayload payload)
+        /// <summary>T2: the traffic stream is PER-PEER now (culled + identity-gated in TrafficSync);
+        /// peers come from ConnectedClientPeers (review MIN-9 — named peers only).</summary>
+        public static void SendTrafficSnapshotTo(MPLink peer, TrafficSnapshotPayload payload)
         {
-            if (!_running) return;
-            Broadcast(MessageEnvelope.Create(MessageType.TrafficSnapshot, "host", payload));
+            if (!_running || peer == null || payload == null) return;
+            try { peer.Send(MessageEnvelope.Create(MessageType.TrafficSnapshot, "host", payload)); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] traffic snapshot → {peer.Describe}: {ex.Message}"); }
         }
 
         /// <summary>Broadcasts the host's traffic-light states to all clients.</summary>
@@ -5101,6 +5137,22 @@ namespace BigAmbitionsMP
             Broadcast(MessageEnvelope.Create(MessageType.BusinessChange, "host", payload));
         }
 
+        // Wave-2 (audit join item — MEASURED: the ~850 KB table travelled TWICE per join): the
+        // WorldReady re-send only fires when the table actually changed during the load window.
+        private static readonly Dictionary<int, long> _lastBizSnapSig = new();
+        private static long BizSnapSig(byte[] d)
+        {
+            // Review M4 (MEASURED): stride-sampling missed 98-99.7% of SAME-LENGTH changes — and the
+            // table is full of them (OwnerOpenState 1↔2, SignType, same-length renames). Full-byte
+            // FNV-1a runs in well under a millisecond against a snapshot that costs tens of ms to build.
+            unchecked
+            {
+                ulong h = 14695981039346656037UL;
+                for (int i = 0; i < d.Length; i++) h = (h ^ d[i]) * 1099511628211UL;
+                return (long)h;
+            }
+        }
+
         /// <summary>Send the full business table to a single peer (on connect).</summary>
         public static void SendBusinessSnapshotTo(MPLink peer)
         {
@@ -5111,10 +5163,12 @@ namespace BigAmbitionsMP
                 var snap = BusinessSync.BuildFullSnapshot();
                 MPLoadProfiler.Span($"HOST BuildFullSnapshot ({snap.Businesses.Count} buildings, {snap.BuildingsForSale.Count} for-sale)", t0);
                 var env = MessageEnvelope.Create(MessageType.BusinessSnapshot, "host", snap);
-                int bytes = env.Serialize().Length;
-                Send(peer, env);
+                var data = env.Serialize();
+                int bytes = data.Length;
+                _lastBizSnapSig[peer.Id] = BizSnapSig(data);
+                peer.Send(data, reliable: true);
                 MPLoadProfiler.Mark($"HOST sent BusinessSnapshot to '{peer.Id}': {bytes} bytes ({snap.Businesses.Count} buildings)");
-                Plugin.Logger.LogInfo($"[Server] Sent business snapshot to '{peer.Id}': {snap.Businesses.Count} buildings, {snap.BuildingsForSale.Count} for-sale, {bytes}B.");
+                Plugin.Logger.LogInfo($"[Server] Sent business snapshot to '{peer.Id}': {snap.Businesses.Count} buildings, {snap.BuildingsForSale.Count} for-sale, {bytes}B on the wire (deflated — SizeWatch reports the raw size).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendBusinessSnapshotTo: {ex.Message}"); }
         }

@@ -22,6 +22,51 @@ namespace BigAmbitionsMP
     // immediately before closing; the client transport stashes it and hands it
     // to Disconnected(reason, extra) exactly like the UDP path.
 
+    /// <summary>T3 (2026-08 throughput audit #2): SteamNetworkingSockets supports multiple
+    /// independently-ordered outbound streams per connection ("lanes") with priorities — exactly what
+    /// the hand-built paced/express queues approximate, done in the transport where it works. Three
+    /// lanes: EXPRESS (clock/pause — must overtake everything), GAMEPLAY (default), BULK (the
+    /// snapshot/save megabyte class — may be overtaken by everything). Messages within a lane stay
+    /// ordered; a 700 KB market table on BULK no longer stalls positions and register events behind
+    /// it. Lane routing keys on the envelope's six-byte type peek (works for T1 frames too). If
+    /// ConfigureConnectionLanes is unavailable, everything stays on lane 0 — exactly today's wire.</summary>
+    internal static class SteamLanes
+    {
+        public const ushort Express = 0, Gameplay = 1, Bulk = 2;
+        public static readonly int[]    Priorities = { 0, 1, 2 };   // lower = more urgent
+        public static readonly ushort[] Weights    = { 1, 1, 1 };
+
+        public static ushort For(byte[] envelope)
+        {
+            switch (MPNetStats.PeekType(envelope))
+            {
+                case (int)MessageType.Welcome:                 // full world snapshot incl. the market table
+                case (int)MessageType.MarketSnapshot:
+                case (int)MessageType.BusinessSnapshot:
+                case (int)MessageType.InteriorSnapshot:
+                case (int)MessageType.InteriorOwnerSnapshot:
+                case (int)MessageType.SaveData:
+                case (int)MessageType.LoadData:
+                case (int)MessageType.StoreMirror:
+                // Review M5 — the ORDERING invariant: any type that writes state a Bulk snapshot also
+                // writes must SHARE the snapshot's lane, or an older snapshot can overtake-revert a
+                // newer delta (BusinessChange had no version guard and no re-assert path).
+                case (int)MessageType.BusinessChange:
+                case (int)MessageType.InteriorCargoSync:
+                case (int)MessageType.RadioState:
+                // Review M6 — the megabyte class that was missed: a rejoiner's disconnect-save upload
+                // and gzipped log replies must not head-of-line-block their own gameplay lane.
+                case (int)MessageType.ClientDisconnectUpload:
+                case (int)MessageType.PeerLogReply:
+                case (int)MessageType.BuildingInteriorEdit:
+                case (int)MessageType.AuditDrillReply:
+                    return Bulk;
+                default:
+                    return Gameplay;
+            }
+        }
+    }
+
     internal static class SteamFrames
     {
         public static readonly byte[] ClosePrefix = { 0x02, (byte)'B', (byte)'C', (byte)'L' };
@@ -193,7 +238,15 @@ namespace BigAmbitionsMP
         private readonly string _who;
         internal volatile bool Alive = true;
 
-        public SteamLink(Connection conn, int id, string who) { _conn = conn; _id = id; _who = who; }
+        private bool _lanesOk;   // T3: false → every send stays on lane 0 (today's wire, unchanged)
+
+        public SteamLink(Connection conn, int id, string who)
+        {
+            _conn = conn; _id = id; _who = who;
+            try { _lanesOk = _conn.ConfigureConnectionLanes(SteamLanes.Priorities, SteamLanes.Weights) == Result.OK; }
+            catch { _lanesOk = false; }
+            if (!_lanesOk) Plugin.Logger.LogWarning($"[SteamLink] connection lanes unavailable for {who} — single-lane sends (pre-T3 behaviour).");
+        }
         public override int Id => _id;
         public override bool IsAlive => Alive;
         public override string Describe => $"steam:{_who}";
@@ -205,7 +258,7 @@ namespace BigAmbitionsMP
         // could never become world-ready.  Reliable sends now queue on refusal
         // and re-offer from the pump loop; while anything is pending, later
         // reliable sends queue behind it so delivery order is preserved.
-        private readonly System.Collections.Generic.Queue<byte[]> _pending = new();
+        private readonly System.Collections.Generic.Queue<(byte[] d, ushort lane)> _pending = new();   // T3: retries keep their lane
         private long _pendingBytes;
         // 64MB (2026-07-20 scaling review): the old 8MB cap was a rebirth of the
         // silent-loss cliff — a fragmented message bigger than the cap (or a join
@@ -232,7 +285,20 @@ namespace BigAmbitionsMP
 
         // Round-276 congestion signal; round-282: transport backlog ONLY — MPLink adds
         // the paced lane on top for PendingSendBytes, and this figure is the pacing gate.
-        protected override long TransportPendingBytes { get { lock (_pending) return _pendingBytes; } }
+        // T0 (2026-08 audit #7): _pendingBytes alone is bytes STEAM REFUSED, which stays ~0 until
+        // Steam's own 512 KB send buffer is full — so the gate engaged half a megabyte too late and
+        // the join verifier under-read congestion the same way. PendingReliable (queued inside Steam,
+        // not yet sent) is the missing half. SentUnackedReliable stays excluded on purpose — on a
+        // high-RTT relay it is just the bandwidth-delay product and blocks nothing (round-282b note).
+        protected override long TransportPendingBytes
+        {
+            get
+            {
+                long ours; lock (_pending) ours = _pendingBytes;
+                try { return ours + _conn.QuickStatus().PendingReliable; }
+                catch { return ours; }
+            }
+        }
 
         // ── Round-282: the paced lane (host → client store mirrors) ──────────
         private readonly PacedSendQueue _paced = new("SteamLink");
@@ -264,6 +330,7 @@ namespace BigAmbitionsMP
                 Send(data, reliable: true);
                 return;
             }
+            MPNetStats.NoteOut(data);   // review M7: express counted at hand-off (retries not recounted)
             long bulk = 0;
             try { bulk = PendingSendBytes; } catch { }   // read OUTSIDE the express lock (it takes _pending)
             _express.Send(data, TrySendExpressRaw, bulk, Describe);
@@ -276,7 +343,7 @@ namespace BigAmbitionsMP
         private bool TrySendExpressRaw(byte[] d)
         {
             Result r;
-            try { r = _conn.SendMessage(d, SendType.Reliable); }
+            try { r = _conn.SendMessage(d, SendType.Reliable, _lanesOk ? SteamLanes.Express : (ushort)0); }
             catch { return false; }
             if (r == Result.OK) return true;
             if (_expressRefusalsLogged++ < 8)
@@ -310,9 +377,11 @@ namespace BigAmbitionsMP
         {
             get
             {
-                long ours = PendingSendBytes;
-                try { var s = _conn.QuickStatus(); return ours + s.PendingReliable + s.SentUnackedReliable; }
-                catch { return ours; }
+                // Review MIN-1: TransportPendingBytes now folds PendingReliable in (T0) — build from the
+                // raw refused-bytes figure so the drain number is not double-counted.
+                long ours; lock (_pending) ours = _pendingBytes;
+                try { var s = _conn.QuickStatus(); return ours + PacedSendBytes + s.PendingReliable + s.SentUnackedReliable; }
+                catch { return ours + PacedSendBytes; }
             }
         }
 
@@ -355,7 +424,8 @@ namespace BigAmbitionsMP
             if (!Alive) { _paced.Clear(); return; }
             var chunk = _paced.TryRelease(TransportPendingBytes, Describe);
             if (chunk == null) return;
-            try { SendReliableRaw(chunk); }
+            MPNetStats.NoteOutAs((int)MessageType.StoreMirror, chunk.Length);   // review M7: fragment heads are unpeekable; the lane carries only StoreMirror
+            try { SendReliableRaw(chunk, SteamLanes.Bulk); }   // T3: paced mirrors are bulk by definition
             catch (Exception ex)
             {
                 // A lost chunk means the receiver's assembly never completes and expires
@@ -366,10 +436,13 @@ namespace BigAmbitionsMP
 
         public override void Send(byte[] data, bool reliable)
         {
+            MPNetStats.NoteOut(data);   // T0: every wire send counts once, per recipient
+
             try
             {
                 if (reliable)
                 {
+                    ushort lane = _lanesOk ? SteamLanes.For(data) : (ushort)0;   // T3: from the ORIGINAL envelope
                     if (data.Length > SteamFrames.ChunkSize)
                     {
                         int id = Interlocked.Increment(ref _nextFragId);
@@ -378,16 +451,16 @@ namespace BigAmbitionsMP
                         for (int i = 0, off = 0; i < count; i++)
                         {
                             int len = Math.Min(SteamFrames.ChunkSize, data.Length - off);
-                            SendReliableRaw(SteamFrames.WrapFragment(id, i, count, data, off, len));
+                            SendReliableRaw(SteamFrames.WrapFragment(id, i, count, data, off, len), lane);
                             off += len;
                         }
                         return;
                     }
-                    SendReliableRaw(data);
+                    SendReliableRaw(data, lane);
                 }
                 else
                 {
-                    var r = _conn.SendMessage(data, SendType.Unreliable);
+                    var r = _conn.SendMessage(data, SendType.Unreliable, _lanesOk ? SteamLanes.Gameplay : (ushort)0);   // review MIN-2: never the express lane by default
                     if (r != Result.OK && _refusalsLogged++ < 8)
                         Plugin.Logger.LogWarning($"[SteamLink] unreliable send to {Describe} refused: {r} ({data.Length}B) — dropped (unreliable by contract).");
                 }
@@ -395,20 +468,20 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamHost] send to {Describe}: {ex.Message}"); }
         }
 
-        private void SendReliableRaw(byte[] data)
+        private void SendReliableRaw(byte[] data, ushort lane = SteamLanes.Gameplay)
         {
             lock (_pending)
-                if (_pending.Count > 0) { EnqueueLocked(data); return; }   // keep order behind pending
-            var r = _conn.SendMessage(data, SendType.Reliable);
+                if (_pending.Count > 0) { EnqueueLocked(data, lane); return; }   // keep order behind pending
+            var r = _conn.SendMessage(data, SendType.Reliable, _lanesOk ? lane : (ushort)0);
             if (r != Result.OK)
             {
                 if (_refusalsLogged++ < 8)
                     Plugin.Logger.LogWarning($"[SteamLink] reliable send to {Describe} refused: {r} ({data.Length}B) — queued for retry.");
-                lock (_pending) EnqueueLocked(data);
+                lock (_pending) EnqueueLocked(data, lane);
             }
         }
 
-        private void EnqueueLocked(byte[] data)
+        private void EnqueueLocked(byte[] data, ushort lane)
         {
             if (_pendingBytes + data.Length > MaxPendingBytes)
             {
@@ -416,7 +489,7 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogError($"[SteamLink] pending-send cap for {Describe} ({_pendingBytes}B queued) — dropping {data.Length}B; connection is stalled beyond recovery.");
                 return;
             }
-            _pending.Enqueue(data); _pendingBytes += data.Length;
+            _pending.Enqueue((data, lane)); _pendingBytes += data.Length;
             if (!_highWaterLatched && _pendingBytes > HighWaterBytes)
             {
                 _highWaterLatched = true;
@@ -433,9 +506,9 @@ namespace BigAmbitionsMP
                 if (!Alive) { _pending.Clear(); _pendingBytes = 0; return; }
                 while (_pending.Count > 0)
                 {
-                    var d = _pending.Peek();
+                    var (d, lane) = _pending.Peek();
                     Result r;
-                    try { r = _conn.SendMessage(d, SendType.Reliable); }
+                    try { r = _conn.SendMessage(d, SendType.Reliable, _lanesOk ? lane : (ushort)0); }
                     catch { return; }
                     if (r != Result.OK) return;   // still refused — next pump retries
                     _pending.Dequeue(); _pendingBytes -= d.Length;
@@ -466,7 +539,7 @@ namespace BigAmbitionsMP
                     // it and the tag vanished silently.  The linger close still carries the tag in
                     // its debug string, so the player message usually survives; the log now says
                     // when the frame itself was lost.
-                    var tagResult = _conn.SendMessage(SteamFrames.WrapClose(reason), SendType.Reliable);
+                    var tagResult = _conn.SendMessage(SteamFrames.WrapClose(reason), SendType.Reliable, _lanesOk ? SteamLanes.Gameplay : (ushort)0);   // review MIN-2
                     if (tagResult != Result.OK)
                         Plugin.Logger.LogWarning($"[SteamLink] close-tag frame to {Describe} refused ({tagResult}) — relying on the close debug-string fallback (round-282c).");
                     // Round-91 (field 20260725-165954: a relay version-refusal reached the player as a
@@ -633,7 +706,7 @@ namespace BigAmbitionsMP
 
         // Same silent-loss fix as SteamLink (field 2026-07-19): check the send
         // Result; queue refused reliable sends and re-offer from the pump loop.
-        private readonly System.Collections.Generic.Queue<byte[]> _pending = new();
+        private readonly System.Collections.Generic.Queue<(byte[] d, ushort lane)> _pending = new();   // T3: retries keep their lane
         private long _pendingBytes;
         // 64MB (2026-07-20 scaling review): the old 8MB cap was a rebirth of the
         // silent-loss cliff — a fragmented message bigger than the cap (or a join
@@ -740,20 +813,25 @@ namespace BigAmbitionsMP
             var mgr = _mgr;
             if (mgr == null) { _paced.Clear(); return; }
             long backlog; lock (_pending) backlog = _pendingBytes;
+            try { backlog += mgr.Connection.QuickStatus().PendingReliable; } catch { }   // review MIN-10: T0 sensor parity with the host gate
             var chunk = _paced.TryRelease(backlog, "host");
             if (chunk == null) return;
-            try { SendReliableRaw(mgr, chunk); }
+            MPNetStats.NoteOutAs((int)MessageType.StoreMirror, chunk.Length);   // review M7
+            try { SendReliableRaw(mgr, chunk, SteamLanes.Bulk); }   // T3: paced mirrors are bulk by definition
             catch (Exception ex)
             { Plugin.Logger.LogWarning($"[SteamClient] paced chunk lost: {ex.Message} — that payload will not reassemble on the host."); }
         }
 
         public void Send(byte[] data, bool reliable)
         {
+            MPNetStats.NoteOut(data);   // T0: every wire send counts once, per recipient
+
             try
             {
                 var mgr = _mgr; if (mgr == null) return;
                 if (reliable)
                 {
+                    ushort lane = _lanesOk ? SteamLanes.For(data) : (ushort)0;   // T3: from the ORIGINAL envelope
                     if (data.Length > SteamFrames.ChunkSize)
                     {
                         int id = Interlocked.Increment(ref _nextFragId);
@@ -762,16 +840,16 @@ namespace BigAmbitionsMP
                         for (int i = 0, off = 0; i < count; i++)
                         {
                             int len = Math.Min(SteamFrames.ChunkSize, data.Length - off);
-                            SendReliableRaw(mgr, SteamFrames.WrapFragment(id, i, count, data, off, len));
+                            SendReliableRaw(mgr, SteamFrames.WrapFragment(id, i, count, data, off, len), lane);
                             off += len;
                         }
                         return;
                     }
-                    SendReliableRaw(mgr, data);
+                    SendReliableRaw(mgr, data, lane);
                 }
                 else
                 {
-                    var r = mgr.Connection.SendMessage(data, SendType.Unreliable);
+                    var r = mgr.Connection.SendMessage(data, SendType.Unreliable, _lanesOk ? SteamLanes.Gameplay : (ushort)0);   // review MIN-2: never the express lane by default
                     if (r != Result.OK && _refusalsLogged++ < 8)
                         Plugin.Logger.LogWarning($"[SteamClient] unreliable send refused: {r} ({data.Length}B) — dropped (unreliable by contract).");
                 }
@@ -779,20 +857,22 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamClient] send: {ex.Message}"); }
         }
 
-        private void SendReliableRaw(ConnectionManager mgr, byte[] data)
+        private bool _lanesOk;   // T3: false → every send stays on lane 0 (today's wire, unchanged)
+
+        private void SendReliableRaw(ConnectionManager mgr, byte[] data, ushort lane = SteamLanes.Gameplay)
         {
             lock (_pending)
-                if (_pending.Count > 0) { EnqueueLocked(data); return; }   // keep order behind pending
-            var r = mgr.Connection.SendMessage(data, SendType.Reliable);
+                if (_pending.Count > 0) { EnqueueLocked(data, lane); return; }   // keep order behind pending
+            var r = mgr.Connection.SendMessage(data, SendType.Reliable, _lanesOk ? lane : (ushort)0);
             if (r != Result.OK)
             {
                 if (_refusalsLogged++ < 8)
                     Plugin.Logger.LogWarning($"[SteamClient] reliable send refused: {r} ({data.Length}B) — queued for retry.");
-                lock (_pending) EnqueueLocked(data);
+                lock (_pending) EnqueueLocked(data, lane);
             }
         }
 
-        private void EnqueueLocked(byte[] data)
+        private void EnqueueLocked(byte[] data, ushort lane)
         {
             if (_pendingBytes + data.Length > MaxPendingBytes)
             {
@@ -800,7 +880,7 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogError($"[SteamClient] pending-send cap ({_pendingBytes}B queued) — dropping {data.Length}B; connection is stalled beyond recovery.");
                 return;
             }
-            _pending.Enqueue(data); _pendingBytes += data.Length;
+            _pending.Enqueue((data, lane)); _pendingBytes += data.Length;
             if (!_highWaterLatched && _pendingBytes > HighWaterBytes)
             {
                 _highWaterLatched = true;
@@ -816,9 +896,9 @@ namespace BigAmbitionsMP
             {
                 while (_pending.Count > 0)
                 {
-                    var d = _pending.Peek();
+                    var (d, lane) = _pending.Peek();
                     Result r;
-                    try { r = mgr.Connection.SendMessage(d, SendType.Reliable); }
+                    try { r = mgr.Connection.SendMessage(d, SendType.Reliable, _lanesOk ? lane : (ushort)0); }
                     catch { return; }
                     if (r != Result.OK) return;   // still refused — next pump retries
                     _pending.Dequeue(); _pendingBytes -= d.Length;
@@ -857,6 +937,9 @@ namespace BigAmbitionsMP
         public void OnConnected(ConnectionInfo info)
         {
             Plugin.Logger.LogInfo("[SteamClient] relay connected.");
+            try { var m = _mgr; _lanesOk = m != null && m.Connection.ConfigureConnectionLanes(SteamLanes.Priorities, SteamLanes.Weights) == Result.OK; }
+            catch { _lanesOk = false; }
+            if (!_lanesOk) Plugin.Logger.LogWarning("[SteamClient] connection lanes unavailable — single-lane sends (pre-T3 behaviour).");
             Connected?.Invoke();
         }
 

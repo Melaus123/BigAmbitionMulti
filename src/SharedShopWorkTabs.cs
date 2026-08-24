@@ -53,13 +53,15 @@ namespace BigAmbitionsMP
         private const float ScanSeconds    = 2f;     // edit-scan cadence (same as staff/prices)
         private const float PollSeconds    = 5f;     // ruling 32 live parity: re-ask while a surface sits open (sig-gated - unchanged = silence)
         private const float EditQuiet      = 3f;     // no poll right after sending an edit (the echo is already coming)
-        private const int   MaxCardReqPerRound = 8;  // list-card requests per poll round (edit bucket is 10/s)
+        private const int   MaxCardReqPerRound = 4;  // list-card requests per poll round (review #4: small bursts; the rest go next round)
 
         // ── helper-side session ──
         private static string _openAddr = "";        // the shared building whose tab is open here
         private static string _openTab  = "";        // "inventory" | "drivers" | "factory"
         private static float  _nextScan;
         private static float  _nextPoll;
+        private static float  _nextCardPoll;         // review #4: cards poll on their own half-phase, never sharing a second with the tab poll
+        private static bool   _orderBaselineStale;   // review #5: an external priority write invalidates the order baseline
         private static float  _lastEditSentAt = -999f;
         private static string _tabSig = "";          // owner-computed sig of the open tab's held snapshot
         private static readonly HashSet<string> _logged = new();
@@ -93,7 +95,7 @@ namespace BigAmbitionsMP
 
         public static void Reset()
         {
-            CloseSession(); _logged.Clear(); _nextScan = 0f;
+            CloseSession(); _logged.Clear(); _nextScan = 0f; _nextPoll = 0f; _nextCardPoll = 0f; _orderBaselineStale = false;
             _cardSlots.Clear(); _cardInv.Clear(); _cardSig.Clear(); _cardNext.Clear(); _whList = null; _renderCards = false;
         }
 
@@ -134,6 +136,7 @@ namespace BigAmbitionsMP
             _openAddr = addr; _openTab = tab;
             if (reopened)
             {
+                _tabSig = "";   // review #9: a sig from another building/tab must never suppress this one's first snapshot
                 if (tab == "inventory") { _rows.Clear(); _boxesMax = 0; _boxesCurrent = 0; }
                 if (tab == "drivers")   { _slotInfo.Clear(); _vehReq.Clear(); _slotBaseline.Clear(); }
                 if (tab == "factory")   { _wsInfo.Clear(); _wsBaseline.Clear(); _orderBaseline.Clear(); _resourceStock.Clear(); _factoryAddrString = SafeAddrString(reg); }
@@ -291,32 +294,54 @@ namespace BigAmbitionsMP
             }
         }
 
-        private static void ApplySlotsToReplica(BuildingRegistration reg, List<DriverSlotInfo> slots)
+        /// <summary>Returns true when any carried driver id could NOT be resolved locally (its injected
+        /// record has not arrived) — the caller then leaves the sig unstored so the next round retries.</summary>
+        private static bool ApplySlotsToReplica(BuildingRegistration reg, List<DriverSlotInfo> slots)
         {
-            if (reg is not Entities.Warehouse wh || slots == null) return;
+            if (reg is not Entities.Warehouse wh || slots == null) return false;
             if (wh.vehicleSlots == null) wh.vehicleSlots = new List<Entities.VehicleSlot>();
+            bool unresolved = false;
             foreach (var s in slots)
             {
-                if (s == null || s.Index < 0 || s.Index >= MaxSlots) continue;
-                while (wh.vehicleSlots.Count <= s.Index) wh.vehicleSlots.Add(new Entities.VehicleSlot());
+                // Review #13: never GROW past the native slot count (the load-time sizing guard owns it) —
+                // an over-long list would persist in the helper's save.
+                if (s == null || s.Index < 0 || s.Index >= wh.vehicleSlots.Count) continue;
                 var slot = wh.vehicleSlots[s.Index];
+                if (slot == null) continue;
                 slot.vehicleInstanceId = s.VehicleId ?? "";
-                slot.employeeDriverId  = s.DriverId ?? "";
+                // Review #3: the native card derefs GetEmployeeById(id) with NO null guard — an id whose
+                // injected record has not landed yet would NPE the whole warehouse list. Only resolvable
+                // ids are written; the rest read as unassigned until the roster arrives.
+                string drv = s.DriverId ?? "";
+                if (drv.Length != 0)
+                {
+                    bool known = false;
+                    try { known = Helpers.EmployeeHelper.GetEmployeeById(drv, showError: false) != null; } catch { }
+                    if (!known) { drv = ""; unresolved = true; }
+                }
+                slot.employeeDriverId = drv;
             }
+            return unresolved;
         }
 
         /// <summary>Put the owner's slot contents onto the replica so the native tab (and its checks) read truth.</summary>
         private static void ApplyDriversSnapshot(SharedWorkInfoPayload p, BuildingRegistration reg)
         {
             _slotInfo.Clear(); _vehReq.Clear(); _slotBaseline.Clear();
-            ApplySlotsToReplica(reg, p.Slots);
+            bool unresolved = ApplySlotsToReplica(reg, p.Slots);
+            var whb = reg as Entities.Warehouse;
             foreach (var s in p.Slots)
             {
                 if (s == null || s.Index < 0 || s.Index >= MaxSlots) continue;
                 _slotInfo[s.Index] = s;
-                _slotBaseline[s.Index] = s.DriverId ?? "";
+                // The baseline is what the REPLICA now holds (review #3: unresolvable ids were not
+                // written) — baselining the owner's value would make the scan route a spurious unassign.
+                string written = "";
+                try { if (whb?.vehicleSlots != null && s.Index < whb.vehicleSlots.Count) written = whb.vehicleSlots[s.Index]?.employeeDriverId ?? ""; } catch { }
+                _slotBaseline[s.Index] = written;
                 if (!string.IsNullOrEmpty(s.VehicleId)) _vehReq[s.VehicleId] = s.RequiredSkill;
             }
+            if (unresolved) _tabSig = "";   // next poll re-fetches and retries the resolve
             _renderDrivers = true;
         }
 
@@ -397,12 +422,10 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (_openTab != "factory" || _openAddr.Length == 0) return true;
-                    __result = false;
-                    if (_wsInfo.TryGetValue(__instance?.id ?? "", out var info) && info?.Stacked != null)
-                        __result = info.Stacked.Contains(machineName);
-                    else if (__instance?.stackedItems != null)
-                        foreach (var st in __instance.stackedItems)
-                            if (st != null && st.childItemName == machineName) { __result = true; break; }
+                    // Review #8: only CARRIED stations are substituted — anything else (e.g. the helper's
+                    // OWN factory reached while this tab is open) falls through to the native check.
+                    if (!_wsInfo.TryGetValue(__instance?.id ?? "", out var info) || info?.Stacked == null) return true;
+                    __result = info.Stacked.Contains(machineName);
                     return false;
                 }
                 catch { return true; }
@@ -460,9 +483,26 @@ namespace BigAmbitionsMP
                     if (!string.IsNullOrEmpty(w.WorkstationType)) fw.workstationType = w.WorkstationType;
                     if (w.Stacked != null && fw.stackedItems != null)
                     {
-                        fw.stackedItems.Clear();
-                        foreach (var name in w.Stacked)
-                            if (!string.IsNullOrEmpty(name)) fw.stackedItems.Add(new AttachableChild { childItemName = name });
+                        // Review #7: the wire carries NAMES only — a blind rebuild would strip childId /
+                        // attachmentIndex off attachments the interior sync already linked. Rebuild only
+                        // when the name sequence differs, carrying matching entries over intact.
+                        bool same = fw.stackedItems.Count == w.Stacked.Count;
+                        if (same)
+                            for (int si = 0; si < w.Stacked.Count && same; si++)
+                                same = fw.stackedItems[si] != null && fw.stackedItems[si].childItemName == w.Stacked[si];
+                        if (!same)
+                        {
+                            var old = new List<AttachableChild>(fw.stackedItems);
+                            fw.stackedItems.Clear();
+                            foreach (var name in w.Stacked)
+                            {
+                                if (string.IsNullOrEmpty(name)) continue;
+                                AttachableChild keep = null;
+                                for (int oi = 0; oi < old.Count; oi++)
+                                    if (old[oi] != null && old[oi].childItemName == name) { keep = old[oi]; old.RemoveAt(oi); break; }
+                                fw.stackedItems.Add(keep ?? new AttachableChild { childItemName = name });
+                            }
+                        }
                     }
                 }
                 catch (Exception ex) { if (_logged.Add("wsapply")) Plugin.Logger.LogWarning($"{Tag} workstation apply: {ex.Message}"); continue; }
@@ -486,6 +526,8 @@ namespace BigAmbitionsMP
         {
             var reg = GameStatePatcher.FindRegistration(_openAddr);
             if (reg == null || _wsBaseline.Count == 0) return;
+            if (_orderBaselineStale) { _orderBaselineStale = false; RebuildOrderBaseline(reg); }   // review #5: external priority write
+            var pendingProduce = new List<(string id, bool upTo, int amount)>();
             var orderNow = new Dictionary<string, List<(int prio, string id)>>();
             foreach (var kv in _wsBaseline)
             {
@@ -504,8 +546,7 @@ namespace BigAmbitionsMP
                 if (upTo != b.upTo || amount != b.amount)
                 {
                     _wsBaseline[kv.Key] = (b.recipe, upTo, amount, b.alias); b = _wsBaseline[kv.Key];
-                    SendEdit(new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = _openAddr, Op = "produce", StationId = kv.Key, BoolValue = upTo, IntValue = amount });
-                    Plugin.Logger.LogInfo($"{Tag} routing produce-up-to of workstation '{kv.Key}' at '{_openAddr}' to the owner: {(upTo ? amount.ToString() : "continuous")}.");
+                    pendingProduce.Add((kv.Key, upTo, amount));   // review #12: batched below — one op per group
                 }
                 if (alias != b.alias)
                 {
@@ -516,6 +557,26 @@ namespace BigAmbitionsMP
                 string type = fw.workstationType ?? "";
                 if (!orderNow.TryGetValue(type, out var lst)) orderNow[type] = lst = new List<(int, string)>();
                 lst.Add((fw.priority, kv.Key));
+            }
+            if (pendingProduce.Count > 0)
+            {
+                // Review #12: the native panel copies produce-up-to across the whole product group, so ONE
+                // user action arrives as N station changes — batched per (setting, amount) so the rate cap
+                // can never half-apply a group.
+                var groups = new Dictionary<string, List<string>>();
+                foreach (var pp in pendingProduce)
+                {
+                    string gk = (pp.upTo ? "1" : "0") + "|" + pp.amount;
+                    if (!groups.TryGetValue(gk, out var lst)) groups[gk] = lst = new List<string>();
+                    lst.Add(pp.id);
+                }
+                foreach (var g in groups)
+                {
+                    bool upTo = g.Key[0] == '1';
+                    int amount = int.Parse(g.Key.Substring(g.Key.IndexOf('|') + 1));
+                    SendEdit(new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = _openAddr, Op = "produce", StationId = string.Join(",", g.Value), BoolValue = upTo, IntValue = amount });
+                    Plugin.Logger.LogInfo($"{Tag} routing produce-up-to of {g.Value.Count} workstation(s) at '{_openAddr}' to the owner: {(upTo ? amount.ToString() : "continuous")}.");
+                }
             }
             foreach (var kv in orderNow)
             {
@@ -551,6 +612,11 @@ namespace BigAmbitionsMP
                 _nextPoll = Time.unscaledTime + PollSeconds;
                 if (_openAddr.Length > 0 && Time.unscaledTime - _lastEditSentAt > EditQuiet)
                     RequestInfo(_openAddr, _openTab, _tabSig);
+            }
+            if (_nextCardPoll <= 0f) _nextCardPoll = Time.unscaledTime + PollSeconds / 2f;   // half-phase offset (review #4)
+            if (Time.unscaledTime >= _nextCardPoll)
+            {
+                _nextCardPoll = Time.unscaledTime + PollSeconds;
                 try { PollCards(); } catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} card poll: {ex.Message}"); }
             }
             if (_renderCards && _whList != null && _whList.gameObject.activeInHierarchy)
@@ -589,7 +655,7 @@ namespace BigAmbitionsMP
                     try
                     {
                         var reg = GameStatePatcher.FindRegistration(_openAddr);
-                        if (reg != null && fac.machineList != null) fac.machineList.SetUp(reg);
+                        if (reg != null && fac.machineList != null) { fac.machineList.SetUp(reg); RebuildOrderBaseline(reg); }
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} factory render: {ex.Message}"); }
                 }
@@ -615,6 +681,7 @@ namespace BigAmbitionsMP
         /// <summary>Ask the owner for each shared warehouse/factory card, debounced per address.</summary>
         private static void RequestCards()
         {
+            if (GrantSync.SharedManageCount == 0) return;   // review #11: no sweep when nothing is shared (single-player incl.)
             var gi = SaveGameManager.Current;
             if (gi?.BuildingRegistrations == null) return;
             int sent = 0;
@@ -704,10 +771,20 @@ namespace BigAmbitionsMP
                         if (info == null || string.IsNullOrEmpty(info.VehicleId)) continue;
                         var nameTf = child.Find("VehicleName");
                         if (nameTf == null) continue;
-                        var tmp = nameTf.GetComponentInChildren<TMP_Text>(true);
-                        if (tmp == null) continue;
                         string name = info.VehicleType;
                         try { var loc = VehicleStoragePanel.Localize(info.VehicleType); if (!string.IsNullOrEmpty(loc)) name = loc; } catch { }
+                        // Review #14: also write through the Localizor component (Prefix + empty Key — the
+                        // BuildingResume precedent), so a language change re-renders the same name instead
+                        // of reverting the label to "Unassigned".
+                        try
+                        {
+                            foreach (var comp in nameTf.GetComponents<Component>())
+                                if (comp != null && comp.GetType().Name == "TextLocalizationComponent")
+                                { HousingMapCues.SetMember(comp, "Prefix", name); HousingMapCues.SetMember(comp, "Key", ""); break; }
+                        }
+                        catch { }
+                        var tmp = nameTf.GetComponentInChildren<TMP_Text>(true);
+                        if (tmp == null) continue;
                         tmp.text = name;
                         try { tmp.color = InstanceBehavior<GlobalReferences>.Instance.colors.midnight; } catch { }
                     }
@@ -745,6 +822,94 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} owner repaint: {ex.Message}"); }
         }
 
+        /// <summary>Review #5 aggravator: switching to Schedule/Presentation on the same building has no
+        /// work-tab hook, so the session (and its 2 s scan) stayed alive with no work tab on screen.</summary>
+        [HarmonyPatch(typeof(BizManBusiness), "SetTab")]
+        public static class Patch_BizManBusiness_SetTab_CloseWork
+        {
+            static void Postfix(string tabName)
+            {
+                try
+                {
+                    if (_openAddr.Length == 0) return;
+                    if (tabName == "Inventory" || tabName == "Drivers" || tabName == "Factory") return;
+                    CloseSession();
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>Review #2: the native list REWRITES priority = index on every draw, and a never-opened
+        /// factory arrives with every priority 0 — a baseline taken from the snapshot then differs from what
+        /// the draw leaves behind, and the scan would route a reorder nobody made. The order baseline is
+        /// therefore always rebuilt from the REPLICA after our own deferred draw.</summary>
+        private static void RebuildOrderBaseline(BuildingRegistration reg)
+        {
+            try
+            {
+                _orderBaseline.Clear();
+                var order = new Dictionary<string, List<(int prio, string id)>>();
+                foreach (var kv in _wsBaseline)
+                {
+                    FactoryWorkstationInstance fw = null;
+                    try { if (reg.itemInstances.TryGetValue(kv.Key, out var ii)) fw = ii as FactoryWorkstationInstance; } catch { }
+                    if (fw == null) continue;
+                    string type = fw.workstationType ?? "";
+                    if (!order.TryGetValue(type, out var lst)) order[type] = lst = new List<(int, string)>();
+                    lst.Add((fw.priority, kv.Key));
+                }
+                foreach (var kv in order)
+                {
+                    kv.Value.Sort((a, b) => a.prio != b.prio ? a.prio.CompareTo(b.prio) : string.CompareOrdinal(a.id, b.id));
+                    _orderBaseline[kv.Key] = string.Join(",", kv.Value.ConvertAll(x => x.id));
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>GameStatePatcher calls this when an interior snapshot writes workstation config onto a
+        /// replica (review #5): the scan must never mistake that external write for a user edit — a stale
+        /// in-flight snapshot would otherwise be routed back and silently revert the owner's config.</summary>
+        public static void OnExternalWorkstationWrite(FactoryWorkstationInstance fw)
+        {
+            try
+            {
+                if (fw == null || _openTab != "factory" || _openAddr.Length == 0) return;
+                string id = fw.id ?? "";
+                if (!_wsBaseline.ContainsKey(id)) return;
+                _wsBaseline[id] = (fw.selectedRecipeId ?? "", fw.produceUpTo, fw.produceUpToValue, fw.alias ?? "");
+                _orderBaselineStale = true;   // the write may have moved a priority too
+            }
+            catch { }
+        }
+
+        /// <summary>GrantSync calls this when the shared-manage set changes (review #10): card overrides and
+        /// the replica slot contents we wrote must not outlive a revoked grant.</summary>
+        public static void OnSharedManageChanged(HashSet<string> changed)
+        {
+            if (changed == null || changed.Count == 0) return;
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                try
+                {
+                    foreach (var addr in changed)
+                    {
+                        if (string.IsNullOrEmpty(addr) || GrantSync.IsSharedManage(addr)) continue;   // still shared — keep
+                        _cardSlots.Remove(addr); _cardInv.Remove(addr); _cardSig.Remove(addr); _cardNext.Remove(addr);
+                        try
+                        {
+                            if (GameStatePatcher.FindRegistration(addr) is Entities.Warehouse wh && wh.vehicleSlots != null)
+                                foreach (var sl in wh.vehicleSlots) if (sl != null) sl.employeeDriverId = "";
+                        }
+                        catch { }
+                        if (_openAddr == addr) CloseSession();
+                        _renderCards = true;   // redraw the list without the dropped figures
+                    }
+                }
+                catch { }
+            });
+        }
+
         // ═══════════════ transport ═══════════════
 
         public static void HandleWorkInfo(SharedWorkInfoPayload p)
@@ -773,7 +938,7 @@ namespace BigAmbitionsMP
 
         /// <summary>OWNER: build one tab's snapshot and send it to one helper (also the echo after an edit).
         /// When the requester's sig matches the fresh content, nothing is sent - the poll costs no reply.</summary>
-        private static void BuildAndSendSnapshot(string addressKey, string tab, string toPid, string requesterSig = "")
+        private static void BuildAndSendSnapshot(string addressKey, string tab, string toPid, string requesterSig = "", bool echo = false)
         {
             var reg = GameStatePatcher.FindRegistration(addressKey);
             if (reg == null || !MergerFlip.TrulyMine(reg)) return;
@@ -797,6 +962,7 @@ namespace BigAmbitionsMP
                 else return;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} work-info build ({tab}): {ex.Message}"); }
+            reply.Echo = echo;
             reply.Sig = SigOf(reply);
             if (requesterSig.Length > 0 && requesterSig == reply.Sig) return;   // unchanged - the poll stays silent
             if (requesterSig.Length == 0)
@@ -814,7 +980,7 @@ namespace BigAmbitionsMP
         private static string SigOf(SharedWorkInfoPayload r)
         {
             var sb = new System.Text.StringBuilder(256);
-            sb.Append(r.Tab).Append('#').Append(r.BoxesMax).Append('/').Append(r.BoxesCurrent);
+            sb.Append(r.Tab).Append('@').Append(r.AddressKey).Append('#').Append(r.BoxesMax).Append('/').Append(r.BoxesCurrent);
             if (r.Products != null) foreach (var x in r.Products) if (x != null) sb.Append('|').Append(x.ItemName).Append(':').Append(x.Stock).Append(':').Append(x.Deliveries).Append(':').Append(x.Consumption).Append(':').Append(x.DaysLeft);
             if (r.Slots != null) foreach (var x in r.Slots) if (x != null) sb.Append('|').Append(x.Index).Append(':').Append(x.VehicleId).Append(':').Append(x.VehicleType).Append(':').Append(x.RequiredSkill).Append(':').Append(x.DriverId);
             if (r.Stations != null) foreach (var x in r.Stations) if (x != null) { sb.Append('|').Append(x.Id).Append(':').Append(x.RecipeId).Append(':').Append(x.Priority).Append(':').Append(x.ProduceUpTo).Append(':').Append(x.UpToValue).Append(':').Append(x.Alias).Append(':').Append(x.Active); if (x.Reasons != null) foreach (var rr in x.Reasons) sb.Append('~').Append(rr); }
@@ -937,15 +1103,19 @@ namespace BigAmbitionsMP
             if (p.Tab == "card")
             {
                 if (_cardSig.TryGetValue(p.AddressKey, out var oldSig) && oldSig == p.Sig) return;
-                _cardSig[p.AddressKey] = p.Sig ?? "";
                 _cardSlots[p.AddressKey] = p.Slots != null ? new List<DriverSlotInfo>(p.Slots) : new List<DriverSlotInfo>();
                 _cardInv[p.AddressKey]   = p.Products != null ? new List<WorkProductInfo>(p.Products) : new List<WorkProductInfo>();
-                ApplySlotsToReplica(reg, p.Slots);   // the card's driver names resolve natively once the slots are real
+                bool unresolved = ApplySlotsToReplica(reg, p.Slots);   // driver names resolve natively once the slots are real
+                if (!unresolved) _cardSig[p.AddressKey] = p.Sig ?? "";
+                else _cardSig.Remove(p.AddressKey);   // review #3: retry next round until the roster lands
                 _renderCards = true;
                 return;
             }
             if (_openAddr.Length == 0 || p.AddressKey != _openAddr) return;   // stale reply for a tab no longer open
-            if (p.Tab == _openTab && _tabSig.Length > 0 && p.Sig == _tabSig) return;   // unchanged - never disturb the open screen
+            // Unchanged content never disturbs the open screen — EXCEPT an edit echo: a REJECTED edit
+            // leaves the owner's content (and so its sig) unchanged, and the gate would swallow the
+            // revert with it (review BLOCKER). Echoes always apply.
+            if (!p.Echo && p.Tab == _openTab && _tabSig.Length > 0 && p.Sig == _tabSig) return;
             if (p.Tab == _openTab) _tabSig = p.Sig ?? "";
             if (p.Tab == "inventory")
             {
@@ -991,7 +1161,7 @@ namespace BigAmbitionsMP
                     _ => false,
                 };
                 if (!applied) Plugin.Logger.LogInfo($"{Tag} work edit '{p.Op}' on '{p.AddressKey}' from '{p.PlayerId}' NOT applied — echoing truth back.");
-                BuildAndSendSnapshot(p.AddressKey, echoTab, p.PlayerId);   // echo either way: apply confirms, reject reverts
+                BuildAndSendSnapshot(p.AddressKey, echoTab, p.PlayerId, "", echo: true);   // echo either way: apply confirms, reject REVERTS (Echo bypasses the helper's sig gate — review blocker)
                 if (applied) RefreshOwnerOpenSurfaces(p.AddressKey, echoTab);   // ruling 32: data alone never repaints a native tab
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} OwnerApplyEdit: {ex.Message}"); }
@@ -1059,15 +1229,19 @@ namespace BigAmbitionsMP
 
         private static bool ApplyProduceOp(Entities.Warehouse wh, SharedWorkEditPayload p)
         {
-            var fw = StationOf(wh, p.StationId);
-            if (fw == null) return false;
             int amount = Mathf.Clamp(p.IntValue, 0, 1000000);
-            // The native panel copies the setting to every same-product workstation in the group — the helper's
-            // machine ran that same native code, so each station arrives as its own op; applied per station here.
-            fw.produceUpTo = p.BoolValue;
-            fw.produceUpToValue = amount;
-            Plugin.Logger.LogInfo($"{Tag} '{p.PlayerId}' set produce-up-to of workstation '{p.StationId}' at '{p.AddressKey}': {(p.BoolValue ? amount.ToString() : "continuous")}.");
-            return true;
+            int applied = 0;
+            // Review #12: one op may carry a whole product GROUP (csv of station ids) — see the scan side.
+            foreach (var id in (p.StationId ?? "").Split(','))
+            {
+                var fw = StationOf(wh, id);
+                if (fw == null) continue;
+                fw.produceUpTo = p.BoolValue;
+                fw.produceUpToValue = amount;
+                applied++;
+            }
+            if (applied > 0) Plugin.Logger.LogInfo($"{Tag} '{p.PlayerId}' set produce-up-to on {applied} workstation(s) at '{p.AddressKey}': {(p.BoolValue ? amount.ToString() : "continuous")}.");
+            return applied > 0;
         }
 
         private static bool ApplyOrderOp(Entities.Warehouse wh, SharedWorkEditPayload p)

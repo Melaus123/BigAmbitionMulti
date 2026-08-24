@@ -273,6 +273,7 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[SharedShop] shops I may manage: {next.Count} (was {_sharedManage.Count}).");
             _sharedManage = next;
             try { SharedShopVisibility.OnSharedManageChanged(changed); } catch { }   // an open page on an affected shop rebuilds
+            try { SharedShopWorkTabs.OnSharedManageChanged(changed); } catch { }      // review #10: card overrides die with the grant
         }
         public static bool IsSharedManage(string addressKey)
             => !string.IsNullOrEmpty(addressKey) && _sharedManage.Contains(addressKey);

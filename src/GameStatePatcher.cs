@@ -1404,6 +1404,10 @@ namespace BigAmbitionsMP
                                                     pfw.produceUpTo      = nfw.produceUpTo;
                                                     pfw.produceUpToValue = nfw.produceUpToValue;
                                                     pfw.workstationType  = nfw.workstationType;
+                                                    // Slice-6 review #5: tell the work-tab scan this write is NOT a
+                                                    // user edit — a stale in-flight snapshot could otherwise be routed
+                                                    // back and silently revert the owner's config.
+                                                    try { SharedShopWorkTabs.OnExternalWorkstationWrite(pfw); } catch { }
                                                     // native tools announce recipe edits with exactly this event; the
                                                     // assembly controller re-reads its config on it
                                                     if (recipeChanged) try { GameEvent.Invoke("ba:gameevent_onfactorymachinerecipechanged"); } catch { }
@@ -4183,7 +4187,7 @@ namespace BigAmbitionsMP
                     if (nonTrivial && !string.IsNullOrEmpty(info.LogoShape) && (info.LogoFiles == null || info.LogoFiles.Count == 0)
                         && _noLogoLogged.Add(info.AddressKey ?? ""))   // sweep item 10: once per address per launch
                     {
-                        Plugin.Logger.LogInfo($"[Patcher] No logo files received for {info.AddressKey} ('{info.BusinessName}') — host had no directory.");
+                        Plugin.Logger.LogInfo($"[Patcher] No logo bytes on this message for {info.AddressKey} ('{info.BusinessName}') — either no logo exists, or it is unchanged (wave-2 attach-once; joiners get bytes via the snapshot).");
                     }
                     if (info.LogoFiles != null && info.LogoFiles.Count > 0 && !string.IsNullOrEmpty(info.BusinessName)
                         && !receiverOwnsThis)   // don't overwrite the owner's own logo image files with the host's replica

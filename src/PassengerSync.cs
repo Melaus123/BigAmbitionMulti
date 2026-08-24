@@ -109,6 +109,16 @@ namespace BigAmbitionsMP
         public static bool IsRiding(string playerId)
             => !string.IsNullOrEmpty(playerId) && _rideOf.ContainsKey(playerId);
 
+        /// <summary>Review M3: the ridden vehicle id, for host-side per-peer culls that must anchor on
+        /// the CAR (the rider's avatar is parked at the boarding door).</summary>
+        public static bool TryGetRide(string playerId, out string vehicleId)
+        {
+            vehicleId = "";
+            if (string.IsNullOrEmpty(playerId) || !_rideOf.TryGetValue(playerId, out var r)) return false;
+            vehicleId = r.vid;
+            return true;
+        }
+
         /// <summary>Seat → rider map for a vehicle (null if nobody aboard).</summary>
         public static IReadOnlyDictionary<int, string>? RidersOf(string vehicleId)
             => (vehicleId != null && _seatsOf.TryGetValue(vehicleId, out var d)) ? d : null;

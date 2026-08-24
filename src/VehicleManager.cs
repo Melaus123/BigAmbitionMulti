@@ -576,6 +576,72 @@ namespace BigAmbitionsMP
         /// read; null when on foot or in an enclosed vehicle).</summary>
         public static Transform? CurrentOpenDriven;
 
+        /// <summary>Review M3: live position of a remote-owned vehicle's ghost on THIS machine —
+        /// the per-peer traffic cull anchors a passenger on the car they ride.</summary>
+        public static bool TryGetGhostPosition(string vehicleId, out Vector3 pos)
+        {
+            pos = default;
+            try
+            {
+                if (!string.IsNullOrEmpty(vehicleId) && _remoteVehicles.TryGetValue(vehicleId, out var rv) && rv?.Go != null)
+                { pos = rv.Go.transform.position; return true; }
+            }
+            catch { }
+            return false;
+        }
+
+        // ── Wave-2 (audit T4): the driven set streams at 10 Hz; the RESTING set travels only when
+        // its signature changes, plus a 5 s full-truth heartbeat (absence = sold needs full packets).
+        private static string _fleetFullSig = "";
+        private static float  _fleetFullAt  = -999f;
+        private const  float  FullFleetHeartbeatSeconds = 5f;
+
+        public static void SplitAndSend(VehicleFleetPayload full)
+        {
+            if (full == null) return;
+            float now = Time.unscaledTime;
+            string sig = RestingFleetSig(full);
+            if (sig != _fleetFullSig || now - _fleetFullAt >= FullFleetHeartbeatSeconds)
+            {
+                _fleetFullSig = sig; _fleetFullAt = now;
+                DispatchFleet(full);
+                return;
+            }
+            List<VehicleEntry>? driven = null;
+            foreach (var e in full.Vehicles)
+                if (e != null && e.Driving) (driven ??= new List<VehicleEntry>()).Add(e);
+            if (driven == null) return;   // everything parked and unchanged — silence until the heartbeat
+            DispatchFleet(new VehicleFleetPayload { OwnerId = full.OwnerId, T = full.T, Partial = true, Vehicles = driven });
+        }
+
+        private static void DispatchFleet(VehicleFleetPayload vp)
+        {
+            if (MPServer.IsRunning) MPServer.BroadcastVehicleSync(vp);
+            else if (MPClient.IsConnected) MPClient.SendVehicleSync(vp);
+        }
+
+        /// <summary>Change signature over the NON-volatile fleet state. A driven vehicle contributes
+        /// only its id (its pose is volatile by definition); a resting one contributes everything a
+        /// receiver would need refreshed — so parking, refueling, cargo changes, sale/purchase and
+        /// interior moves all trigger a full packet, while pure driving does not.</summary>
+        private static string RestingFleetSig(VehicleFleetPayload p)
+        {
+            var sb = new System.Text.StringBuilder(256);
+            foreach (var e in p.Vehicles)
+            {
+                if (e == null) continue;
+                if (e.Driving) { sb.Append(e.VehicleId).Append("|D;"); continue; }
+                sb.Append(e.VehicleId).Append('|').Append(e.TypeName).Append('|').Append(e.ColorName).Append('|').Append(e.Bldg)
+                  .Append('|').Append(e.Dormant).Append('|').Append(e.Cargo).Append('|').Append(e.CarriedItems)
+                  // Review MIN-5: round-to-nearest METRE, not a truncated half-metre — a parked car
+                  // whose settle jitter straddled a truncation boundary flipped the whole-fleet sig
+                  // every tick, silently reverting the split. ColorName added (repaint reaches ≤1 beat).
+                  .Append('|').Append(Mathf.RoundToInt(e.X)).Append(',').Append(Mathf.RoundToInt(e.Y)).Append(',').Append(Mathf.RoundToInt(e.Z))
+                  .Append('|').Append((int)(e.Fuel * 20f)).Append(';');
+            }
+            return sb.ToString();
+        }
+
         /// <summary>Applies a remote player's full vehicle fleet (main thread).</summary>
         // CLAUDE-DIAGNOSTIC — kill-switch gate for owned-vehicle fleet sync.
         // When false, ApplyVehicleFleet returns early (no ghost vehicles
@@ -733,7 +799,9 @@ namespace BigAmbitionsMP
                 // coords — and this cleanup DESTROYED the cart out of the pusher's hands, stack:
                 // ApplyVehicleFleet → DespawnByVehicleId → ExitIfLocallyDriven). A possessed ghost
                 // rides out list flicker; a real sale despawns the moment it's released.
-                var stale = _remoteVehicles
+                // Wave-2 (audit T4): a PARTIAL packet lists only the driven set — absence means
+                // nothing there, so sold-detection runs on full-truth packets only (≤5 s apart).
+                var stale = p.Partial ? new List<string>() : _remoteVehicles
                     .Where(kv => kv.Value.OwnerId == p.OwnerId && !seen.Contains(kv.Key))
                     .Select(kv => kv.Key).ToList();
                 // Round-109: an id that came BACK into the owner's fleet closes its orphan episode.

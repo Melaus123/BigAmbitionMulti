@@ -705,6 +705,7 @@ namespace BigAmbitionsMP
             SharedShopStaff.Tick();      // shared-shop management slice 3: owner bench publish (5s) + assignment scan (2s)
             SharedShopPrices.Tick();     // shared-shop management slice 4: send a price edit after 1 s of quiet
             SharedShopWorkTabs.Tick();   // shared-shop management slice 6: deferred render of a shared warehouse/factory tab
+            MPNetStats.Tick();           // T0 (throughput audit): per-type bytes/s report every 30 s
             BusinessSync.TickOwnerBusinessPublish();   // round-190: one owner-business publish at settle (carries logo files; host adopts + re-broadcasts)
             MPPerf.End("Pre.D", _sub);
             _sub = MPPerf.Begin();
@@ -3044,6 +3045,7 @@ namespace BigAmbitionsMP
                 SharedShopStaff.Reset();      // shared-shop staffing state (permission feature)
                 SharedShopPrices.Reset();     // shared-shop pricing state (permission feature)
                 SharedShopWorkTabs.Reset();   // shared-shop warehouse/factory tab state (permission feature)
+                MPNetStats.Reset();           // T0 byte counters die with the scene
                 GrantSync.ResetSceneState();  // runtime grants + local caches die with the scene; the DURABLE store
                                               // survives — its lifecycle is session boundaries (StartNewGame /
                                               // manifest restore), NOT scene loads. The old full Reset() here fired
@@ -3758,13 +3760,10 @@ namespace BigAmbitionsMP
                 else if (MPClient.IsConnected)
                     MPClient.SendPlayerPosition(payload);
 
-                // Vehicle fleet — every owned vehicle (parked + driven).
+                // Vehicle fleet — wave-2 (audit T4): the driven set streams at 10 Hz; parked
+                // vehicles travel only on change + a 5 s full-truth heartbeat.
                 var vp = VehicleManager.ReadLocalFleet();
-                if (vp != null)
-                {
-                    if (MPServer.IsRunning)        MPServer.BroadcastVehicleSync(vp);
-                    else if (MPClient.IsConnected) MPClient.SendVehicleSync(vp);
-                }
+                if (vp != null) VehicleManager.SplitAndSend(vp);
                 VehicleManager.TickDriveSync();   // handoff: broadcast the pose of a borrowed car I'm driving
             }
             catch (Exception ex)

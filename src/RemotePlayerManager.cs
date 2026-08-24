@@ -344,6 +344,20 @@ namespace BigAmbitionsMP
             return list;
         }
 
+        /// <summary>T2 (throughput): the host's per-PEER traffic culling needs THIS player's position, not
+        /// the anonymous transform list. False when the player has no body here yet (pre-spawn, loading).</summary>
+        public static bool TryGetRemotePosition(string playerId, out Vector3 pos)
+        {
+            pos = default;
+            try
+            {
+                if (!string.IsNullOrEmpty(playerId) && _players.TryGetValue(playerId, out var go) && go != null)
+                { pos = go.transform.position; return true; }
+            }
+            catch { }
+            return false;
+        }
+
         /// <summary>
         /// Moves an existing remote-player capsule, or spawns one on first call.
         /// No-ops when not in-game.

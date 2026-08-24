@@ -591,6 +591,8 @@ namespace BigAmbitionsMP
 
         public override void Send(byte[] data, bool reliable)
         {
+            MPNetStats.NoteOut(data);   // T0: every wire send counts once, per recipient
+
             var writer = new NetDataWriter();
             writer.Put(data);
             Peer.Send(writer, reliable ? DeliveryMethod.ReliableOrdered : DeliveryMethod.Unreliable);
@@ -775,6 +777,8 @@ namespace BigAmbitionsMP
 
         public void Send(byte[] data, bool reliable)
         {
+            MPNetStats.NoteOut(data);   // T0: every wire send counts once, per recipient
+
             var writer = new NetDataWriter();
             writer.Put(data);
             _client?.FirstPeer?.Send(writer, reliable ? DeliveryMethod.ReliableOrdered : DeliveryMethod.Unreliable);

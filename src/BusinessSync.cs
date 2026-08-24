@@ -468,6 +468,7 @@ namespace BigAmbitionsMP
                     if (reg != null)
                     {
                         var info = ReadInfo(reg);
+                        if (info != null) StripUnchangedLogos(info);   // wave-2: same attach-once rule on the host sweep
                         if (info != null
                             && !(_lastSent.TryGetValue(info.AddressKey, out var prev) && EqualInfo(prev, info)))
                         {
@@ -537,6 +538,7 @@ namespace BigAmbitionsMP
                     if (info == null) continue;
                     info.OwnerPlayerId         = MPConfig.PlayerId;   // it's ours — the host attributes it to us
                     info.BusinessOwnerPlayerId = MPConfig.PlayerId;
+                    StripUnchangedLogos(info);   // wave-2: the 30 s heartbeat stops re-uploading unchanged JPGs
 
                     bool unchanged = _lastSentClient.TryGetValue(info.AddressKey, out var prev) && EqualInfo(prev, info);
                     bool reassertDue = !_lastSentClientAt.TryGetValue(info.AddressKey, out var sentAt) || (now - sentAt) >= ClientReassertSeconds;
@@ -995,6 +997,27 @@ namespace BigAmbitionsMP
         // and the expensive content read happens ONLY when that signature changes (i.e. the
         // player actually edited the logo).  LogoFilesEqual stays content-based, and an
         // unchanged scan returns the SAME cached list, so it never triggers a rebroadcast.
+        // ── Wave-2 (audit T5 — MEASURED: 341.8 KB per 30 s of byte-identical logo re-uploads) ──
+        // Steady-state sends carry the logo BYTES only when the on-disk set changed since this
+        // process last attached them. An EMPTY list is safe everywhere: the receive side logs
+        // "no logo files received" once and never wipes (GameStatePatcher:4187), and the host's
+        // adopt diff skips empties. The JOIN snapshot bypasses this (BuildFullSnapshot → ReadInfo
+        // directly), so a joiner always gets the bytes.
+        private static readonly System.Collections.Generic.Dictionary<string, long> _logoAttachedSig = new();
+
+        private static void StripUnchangedLogos(BusinessInfo info)
+        {
+            try
+            {
+                if (info == null || info.LogoFiles == null || info.LogoFiles.Count == 0 || string.IsNullOrEmpty(info.BusinessName)) return;
+                long sig = _logoCache.TryGetValue(info.BusinessName, out var e) ? e.MetaSig : 0;
+                if (_logoAttachedSig.TryGetValue(info.BusinessName, out var sent) && sent == sig)
+                { info.LogoFiles = new System.Collections.Generic.List<LogoFile>(); return; }
+                _logoAttachedSig[info.BusinessName] = sig;   // this send carries the bytes once
+            }
+            catch { }
+        }
+
         private static System.Collections.Generic.List<LogoFile> ReadLogoFilesCached(string businessName, string logoShape)
         {
             if (!_logoCache.TryGetValue(businessName, out var e))

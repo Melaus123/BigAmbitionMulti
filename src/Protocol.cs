@@ -335,6 +335,7 @@ namespace BigAmbitionsMP
         public string AddressKey { get; set; } = "";
         public string ToPid      { get; set; } = "";   // snapshot target — the helper that asked
         public string Sig        { get; set; } = "";   // request: the sig of the helper's held snapshot (owner stays silent on match); snapshot: the content sig
+        public bool   Echo       { get; set; }         // snapshot after a routed edit: ALWAYS applied by the helper — a REJECTED edit leaves the content (and so the sig) unchanged, and the sig gate would otherwise swallow the revert (review blocker, 2026-08-24)
         public int    BoxesMax     { get; set; }       // pallet-shelf capacity, as the owner's tab computes it
         public int    BoxesCurrent { get; set; }       // boxes on those shelves right now
         public List<WorkProductInfo>  Products { get; set; } = new();
@@ -852,6 +853,15 @@ namespace BigAmbitionsMP
         [Newtonsoft.Json.JsonProperty("d")]
         public string Data { get; set; } = "";
 
+        // ── T1 (2026-08 throughput audit): wire compression ─────────────────────────────
+        // Everything above this threshold deflates before it ships. Measured on the real
+        // payloads: -65% traffic snapshot, -91% business snapshot, -95% market table.
+        // Frame: 0x02 'B' 'Z' 'P' + type(2, little-endian, for NetStats/lane routing
+        // without inflating) + deflate bytes. A JSON envelope always starts '{' (0x7B),
+        // and the 0x02-prefix convention is SteamFrames' own ('BFR'/'BCL') — unambiguous.
+        // Mixed-version risk is zero: ValidateHelloVersion refuses a different Version.
+        private const int CompressOver = 4096;
+
         public byte[] Serialize()
         {
             var bytes = System.Text.Encoding.UTF8.GetBytes(Newtonsoft.Json.JsonConvert.SerializeObject(this));
@@ -859,8 +869,22 @@ namespace BigAmbitionsMP
             // was a message quietly outgrowing a transport limit — watch growth
             // centrally (fragmentation makes size SAFE; this makes it VISIBLE).
             // Throttled per type so a chatty big sender logs once per 5 minutes.
+            // Kept on the RAW size — the semantic payload is what grows, not the wire form.
             if (bytes.Length > 300_000) SizeTelemetry.Note(Type, bytes.Length);
-            return bytes;
+            if (bytes.Length <= CompressOver) return bytes;
+            try
+            {
+                using var ms = new System.IO.MemoryStream(bytes.Length / 4);
+                using (var dz = new System.IO.Compression.DeflateStream(ms, System.IO.Compression.CompressionLevel.Fastest, leaveOpen: true))
+                    dz.Write(bytes, 0, bytes.Length);
+                if (ms.Length + 6 >= bytes.Length) return bytes;   // incompressible — ship raw
+                var framed = new byte[6 + ms.Length];
+                framed[0] = 0x02; framed[1] = (byte)'B'; framed[2] = (byte)'Z'; framed[3] = (byte)'P';
+                framed[4] = (byte)((int)Type & 0xFF); framed[5] = (byte)(((int)Type >> 8) & 0xFF);
+                ms.Position = 0; ms.Read(framed, 6, (int)ms.Length);
+                return framed;
+            }
+            catch { return bytes; }   // compression must never lose a message
         }
 
         internal static class SizeTelemetry
@@ -884,8 +908,40 @@ namespace BigAmbitionsMP
 
         public static MessageEnvelope? Deserialize(byte[] bytes)
         {
-            return Newtonsoft.Json.JsonConvert.DeserializeObject<MessageEnvelope>(System.Text.Encoding.UTF8.GetString(bytes));
+            try
+            {
+                if (bytes != null && bytes.Length > 6 && bytes[0] == 0x02 && bytes[1] == (byte)'B' && bytes[2] == (byte)'Z' && bytes[3] == (byte)'P')
+                {
+                    // T1 compressed frame — inflate, then parse the JSON exactly as before.
+                    using var src = new System.IO.MemoryStream(bytes, 6, bytes.Length - 6);
+                    using var dz  = new System.IO.Compression.DeflateStream(src, System.IO.Compression.CompressionMode.Decompress);
+                    using var outMs = new System.IO.MemoryStream(bytes.Length * 4);
+                    dz.CopyTo(outMs);
+                    return Newtonsoft.Json.JsonConvert.DeserializeObject<MessageEnvelope>(System.Text.Encoding.UTF8.GetString(outMs.GetBuffer(), 0, (int)outMs.Length));
+                }
+                return Newtonsoft.Json.JsonConvert.DeserializeObject<MessageEnvelope>(System.Text.Encoding.UTF8.GetString(bytes));
+            }
+            catch (Exception ex)
+            {
+                // Review M8: the old path THREW into the pump's LogError; the null return is more robust
+                // but was completely silent — and "large messages silently dropped while small ones
+                // parse" is this file's own definition of the worst failure mode. Throttled, evidential.
+                try
+                {
+                    long now = DateTime.UtcNow.Ticks;
+                    if (now >= _nextDeserWarnTicks)
+                    {
+                        _nextDeserWarnTicks = now + TimeSpan.TicksPerSecond * 30;
+                        string head = bytes != null && bytes.Length >= 4 ? $"{bytes[0]:X2} {bytes[1]:X2} {bytes[2]:X2} {bytes[3]:X2}" : "short";
+                        Plugin.Logger.LogWarning($"[Protocol] envelope decode FAILED ({(bytes?.Length ?? 0)}B, head {head}): {ex.Message} — dropped (throttled 30s).");
+                    }
+                }
+                catch { }
+                return null;   // callers null-check; a torn frame must not throw off-thread
+            }
         }
+
+        private static long _nextDeserWarnTicks;
 
         public static MessageEnvelope Create<T>(MessageType type, string senderId, T payload)
         {
@@ -944,7 +1000,11 @@ namespace BigAmbitionsMP
         // (+AddressKey/BusinessName) and the BizTransfer* messages execute the transfer. A v6
         // peer would render a business offer as a malformed LOAN row, accept it into the loan
         // ledger, and silently drop the transfer messages — mixed sessions must be impossible.
-        public const int Version = 7;
+        // v8 (2026-08, throughput T1): the WIRE FORM changed — envelopes over 4 KB ship as a
+        // deflate frame (0x02 'B' 'Z' 'P' + type + compressed JSON). A v7 peer would read the
+        // frame as garbage and drop every large message while small ones still parse — a
+        // half-working session, the worst kind. Refuse mixed sessions outright.
+        public const int Version = 8;
     }
 
     /// <summary>Sent by client on connect.</summary>
@@ -1377,6 +1437,11 @@ namespace BigAmbitionsMP
     public class VehicleFleetPayload
     {
         public string OwnerId { get; set; } = "";
+        /// <summary>Wave-2 (audit T4): true = ONLY the vehicles listed (the driven set, 10 Hz) —
+        /// absence means NOTHING. Full-truth packets (false) keep absence = sold, and ride on a
+        /// resting-set change or a 5 s heartbeat. Measured pre-fix: ~24 KB/s per client of
+        /// byte-identical parked fleets.</summary>
+        public bool Partial { get; set; }
         public List<VehicleEntry> Vehicles { get; set; } = new();
         /// <summary>Sender's unscaled clock at sample time.  Receivers use the
         /// DIFFERENCE between two stamps from the same sender to measure true
@@ -1385,26 +1450,33 @@ namespace BigAmbitionsMP
         public float  T { get; set; }
     }
 
-    /// <summary>One AI-traffic car in a host traffic snapshot.</summary>
+    /// <summary>One AI-traffic car in a host traffic snapshot. T2 (2026-08 throughput): the pose is
+    /// QUANTIZED (position in whole centimetres, quaternion ×10000 — both far below visible error at
+    /// traffic distances), and the never-changing identity (model + paint) rides ONLY when this peer
+    /// has not seen this pool slot's current occupant — on first sight, on recycle, and on re-entering
+    /// the peer's send radius. 40% of every row was identity re-sent ten times a second (audit #1).</summary>
     public class TrafficCarDto
     {
         /// <summary>Stable Gley pool index — identifies this car across snapshots.</summary>
         public int    Index { get; set; }
-        /// <summary>Vehicle model name (e.g. "VordV150").</summary>
-        public string Model { get; set; } = "";
-        public float  X { get; set; }
-        public float  Y { get; set; }
-        public float  Z { get; set; }
-        public float  Qx { get; set; }
-        public float  Qy { get; set; }
-        public float  Qz { get; set; }
-        public float  Qw { get; set; }
+        /// <summary>Vehicle model name — null when this peer already knows this slot's identity.</summary>
+        [Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
+        public string Model { get; set; }
+        /// <summary>Position in CENTIMETRES (world metres × 100, rounded).</summary>
+        public int    X { get; set; }
+        public int    Y { get; set; }
+        public int    Z { get; set; }
+        /// <summary>Rotation quaternion components × 10000.</summary>
+        public int    Qx { get; set; }
+        public int    Qy { get; set; }
+        public int    Qz { get; set; }
+        public int    Qw { get; set; }
         /// <summary>
-        /// Body colours — flattened 6 floats (tint RGB + fresnel RGB) per
-        /// SH_Vehicle renderer.  A single group means every renderer is that
-        /// colour; multiple groups = per-renderer (e.g. a box truck's cab).
+        /// Body colours — flattened 6 floats (tint RGB + fresnel RGB) per SH_Vehicle renderer; a single
+        /// group = every renderer that colour. Null when the peer already knows them (same rule as Model).
         /// </summary>
-        public List<float> Colors { get; set; } = new();
+        [Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
+        public List<float> Colors { get; set; }
     }
 
     /// <summary>

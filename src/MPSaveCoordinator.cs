@@ -860,6 +860,11 @@ namespace BigAmbitionsMP
             HostSaveNow("join");
         }
 
+        // Wave-2 (the MEASURED post-save hitch): the .hsg read + gzip + base64 of a 1.7 MB save ran
+        // on the MAIN thread right after the native save's own ~500 ms. One in-flight task per upload;
+        // both transports send safely off-main (the Steam pump already does).
+        private static readonly HashSet<PendingUpload> _uploading = new();
+
         public static void TickPendingUploads()
         {
             TickDeferredSave();   // task-28 fix 2: placement-deferred saves retry here (every frame, main thread)
@@ -893,23 +898,30 @@ namespace BigAmbitionsMP
                 string? file = NewestHsg(up.Folder);
                 if (file == null) continue;   // not on disk yet
 
-                try
+                bool busy; lock (_uploading) busy = !_uploading.Add(up);
+                if (busy) continue;   // wave-2: this upload's read+gzip is already running off-thread
+                var upT = up; var fileT = file;
+                System.Threading.Tasks.Task.Run(() =>
                 {
-                    byte[] raw = File.ReadAllBytes(file);
-                    if (raw.Length == 0) continue;   // mid-write; retry next frame
-                    up.Slot.SaveName = Path.GetFileNameWithoutExtension(file);
-                    // Round-275: ship the .hsg.meta sidecar too — without it the host's copy
-                    // cannot be dated by the save scanner (storedDay read -1, which made the
-                    // disconnect-save day window accept anything).
-                    string metaJson = "";
-                    try { string mp = file + ".meta"; if (File.Exists(mp)) metaJson = File.ReadAllText(mp); } catch { }
-                    if (MPClient.IsConnected)
-                        MPClient.SendSaveData(up.Session, up.Slot, GzipBase64(raw), raw.Length, metaJson);
-                    Plugin.Logger.LogInfo($"[MPSave] Uploaded '{up.Slot.SaveName}.hsg' ({raw.Length}B) for session '{up.Session}'.");
-                    Remove(up);
-                }
-                catch (IOException) { /* file still locked — retry next frame */ }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] Upload read: {ex.Message}"); Remove(up); }
+                    try
+                    {
+                        byte[] raw = File.ReadAllBytes(fileT);
+                        if (raw.Length == 0) return;   // mid-write; retried next frame (finally releases)
+                        upT.Slot.SaveName = Path.GetFileNameWithoutExtension(fileT);
+                        // Round-275: ship the .hsg.meta sidecar too — without it the host's copy
+                        // cannot be dated by the save scanner (storedDay read -1, which made the
+                        // disconnect-save day window accept anything).
+                        string metaJson = "";
+                        try { string mp = fileT + ".meta"; if (File.Exists(mp)) metaJson = File.ReadAllText(mp); } catch { }
+                        if (MPClient.IsConnected)
+                            MPClient.SendSaveData(upT.Session, upT.Slot, GzipBase64(raw), raw.Length, metaJson);
+                        Plugin.Logger.LogInfo($"[MPSave] Uploaded '{upT.Slot.SaveName}.hsg' ({raw.Length}B) for session '{upT.Session}' (off-thread, wave-2).");
+                        Remove(upT);
+                    }
+                    catch (IOException) { /* file still locked — retry next frame */ }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] Upload read: {ex.Message}"); Remove(upT); }
+                    finally { lock (_uploading) _uploading.Remove(upT); }
+                });
             }
         }
 

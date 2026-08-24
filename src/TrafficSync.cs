@@ -16,7 +16,18 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class TrafficSync
     {
-        private const float BroadcastInterval = 0.1f;   // host snapshot rate (~10 Hz)
+        private const float BroadcastInterval = 0.2f;   // host snapshot rate — T2: 5 Hz (the client dead-reckons
+                                                        // up to 0.3 s, so 0.2 s packets sit inside its own tolerance)
+        private const float HostSendRadius    = 195f;   // T2 + review M2: the parked system's 95/125/160 triple keeps a
+                                                        // 35 m margin between the CLIENT cull ring and the host send ring
+                                                        // (movement margin between beats; the two tests also use different
+                                                        // anchors). 160==160 had zero margin → boundary cars churned
+                                                        // identity re-sends and Destroy/Instantiate at the ring edge.
+
+        // Wave-2 (measured 7.5 KB/s of ~95%-unchanged data): light DIFFS between full re-asserts.
+        private const float LightsFullReassertSeconds = 10f;
+        private static readonly Dictionary<int, (int road, bool yellow)> _lightLastSent = new();
+        private static float _lightsFullSentAt = -999f;
         private const float GhostLerp         = 14f;    // client ghost chase rate
         private const float TaxiStopDuration  = 18f;    // how long a hailed taxi stays stopped
         private const int   CarsPerPlayer     = 24;     // traffic budget scaled by player count
@@ -67,6 +78,10 @@ namespace BigAmbitionsMP
         // Keyed by the host's Gley pool index.
         private static readonly Dictionary<int, TrafficGhost> _ghosts = new();
 
+        // T2: last identity seen per pool slot — bridges the identity-less packets between the host's
+        // identity re-sends (first sight / recycle / radius re-entry all carry Model+Colors).
+        private static readonly Dictionary<int, (string model, List<float> colors)> _slotIdentity = new();
+
         /// <summary>Client-side count of spawned traffic ghosts — perf correlation.</summary>
         public static int ClientTrafficGhostCount => _ghosts.Count;
 
@@ -103,6 +118,14 @@ namespace BigAmbitionsMP
             _carRenderers.Clear();
             _ghosts.Clear();          // ghost GameObjects die with the old scene
 
+            // Review B1/MIN-3: the wave-1/2 per-peer and per-slot state dies with the scene too — a
+            // re-host in the same process otherwise inherits the previous world's identity maps
+            // (previous world's MODELS painted onto new pool slots) and diffs against its lights.
+            _peerSentIdentity.Clear();
+            _slotIdentity.Clear();
+            _lightLastSent.Clear();
+            _lightsFullSentAt = -999f;
+
             // Ghost anchor (#7) — clear last-outside memory so a new game/save
             // doesn't keep spawning traffic at the previous session's location.
             _hasOutsidePos = false;
@@ -127,8 +150,8 @@ namespace BigAmbitionsMP
                     if (_hostBroadcastTimer <= 0f)
                     {
                         _hostBroadcastTimer = BroadcastInterval;
-                        tb = MPPerf.Begin(); var s = BuildSnapshot(); MPPerf.End("Tr.Build", tb);
-                        tb = MPPerf.Begin(); MPServer.BroadcastTrafficSnapshot(s); MPPerf.End("Tr.Send", tb);
+                        tb = MPPerf.Begin(); var master = BuildMaster(); MPPerf.End("Tr.Build", tb);
+                        tb = MPPerf.Begin(); BroadcastPerPeer(master); MPPerf.End("Tr.Send", tb);
                     }
 
                     _lightBroadcastTimer -= Time.unscaledDeltaTime;
@@ -137,7 +160,25 @@ namespace BigAmbitionsMP
                         _lightBroadcastTimer = 0.5f;     // lights change slowly
                         tb = MPPerf.Begin();
                         var lights = BuildLightSnapshot();
-                        if (lights != null) MPServer.BroadcastTrafficLights(lights);
+                        if (lights != null)
+                        {
+                            // Wave-2: only intersections whose state MOVED ride the 0.5 s beat; a full
+                            // re-assert every 10 s covers drops and late joiners (apply is per-index,
+                            // so a partial list is naturally safe on the receiver).
+                            bool full = Time.unscaledTime - _lightsFullSentAt >= LightsFullReassertSeconds;
+                            var send = lights;
+                            if (!full)
+                            {
+                                var diff = new TrafficLightsPayload();
+                                foreach (var s in lights.Lights)
+                                    if (!_lightLastSent.TryGetValue(s.Index, out var prev) || prev.road != s.Road || prev.yellow != s.Yellow)
+                                        diff.Lights.Add(s);
+                                send = diff;
+                            }
+                            else _lightsFullSentAt = Time.unscaledTime;
+                            foreach (var s in lights.Lights) _lightLastSent[s.Index] = (s.Road, s.Yellow);
+                            if (send.Lights.Count > 0) MPServer.BroadcastTrafficLights(send);
+                        }
                         MPPerf.End("Tr.Light", tb);
                     }
                 }
@@ -234,13 +275,24 @@ namespace BigAmbitionsMP
         private sealed class CarColorEntry { public string Model = ""; public Vector3 Pos; public List<float> Colors = new(); }
         private static readonly Dictionary<int, CarColorEntry> _carColors = new();
 
-        private static TrafficSnapshotPayload BuildSnapshot()
+        /// <summary>One live car, gathered once per beat; every per-peer snapshot filters THIS list.
+        /// Identity is the cached Colors LIST REFERENCE: a recycle allocates a new entry (see
+        /// _carColors), so reference inequality == "this peer has not seen this occupant".</summary>
+        private sealed class MasterCar
         {
-            var snap = new TrafficSnapshotPayload { T = Time.unscaledTime };
+            public int Index; public string Model = ""; public List<float> Colors = new();
+            public Vector3 Pos; public Quaternion Rot;
+        }
+
+        private static readonly List<MasterCar> _masterScratch = new();
+
+        private static List<MasterCar> BuildMaster()
+        {
+            _masterScratch.Clear();
             try
             {
                 var arr = GetVehiclePool();
-                if (arr == null) return snap;
+                if (arr == null) return _masterScratch;
                 for (int i = 0; i < arr.Length; i++)
                 {
                     var vc = arr[i] as VehicleComponent;
@@ -274,21 +326,81 @@ namespace BigAmbitionsMP
                         _carColors[index] = new CarColorEntry { Model = model, Pos = pos, Colors = colors };
                     }
 
-                    snap.Cars.Add(new TrafficCarDto
-                    {
-                        Index = index,
-                        Model = model,
-                        X = pos.x, Y = pos.y, Z = pos.z,
-                        Qx = rot.x, Qy = rot.y, Qz = rot.z, Qw = rot.w,
-                        Colors = colors,
-                    });
+                    _masterScratch.Add(new MasterCar { Index = index, Model = model, Colors = colors, Pos = pos, Rot = rot });
                 }
             }
             catch (Exception ex)
             {
-                Plugin.Logger.LogWarning($"[TrafficSync] BuildSnapshot: {ex.Message}");
+                Plugin.Logger.LogWarning($"[TrafficSync] BuildMaster: {ex.Message}");
             }
-            return snap;
+            return _masterScratch;
+        }
+
+        // T2 per-peer state: PLAYER id → (pool slot → identity token = the Colors list ref last sent).
+        // A slot leaving the peer's radius is FORGOTTEN, so re-entry re-sends identity — the client
+        // culls its ghost at the same boundary and needs the model again to respawn it.
+        // Review B1: keyed by PLAYER id, never link id — LiteNetLib RECYCLES peer ids, and a rejoining
+        // client inheriting the old map would receive identity-less DTOs and spawn NO traffic at all
+        // (the round-281 rule at MPServer.cs: per-peer state dies with the connection).
+        private static readonly Dictionary<string, Dictionary<int, object>> _peerSentIdentity = new();
+
+        /// <summary>Review B1/MIN-3: drop a departed (or teleported/reloaded) peer's traffic state, and
+        /// force the next lights beat to a FULL re-assert so the newcomer starts from truth.</summary>
+        public static void ForgetPeer(string playerId)
+        {
+            if (string.IsNullOrEmpty(playerId)) return;
+            _peerSentIdentity.Remove(playerId);
+            _lightsFullSentAt = -999f;
+        }
+
+        private static void BroadcastPerPeer(List<MasterCar> master)
+        {
+            var peers = MPServer.ConnectedClientPeers();   // review MIN-9: named peers only (post-Hello)
+            if (peers.Count == 0) return;
+            float now = Time.unscaledTime;
+            float r2 = HostSendRadius * HostSendRadius;
+            var livePids = new HashSet<string>();
+            foreach (var (link, pid) in peers)
+            {
+                if (link == null || string.IsNullOrEmpty(pid)) continue;
+                livePids.Add(pid);
+                bool havePos = RemotePlayerManager.TryGetRemotePosition(pid, out var anchor);
+                // Review M3: a PASSENGER's avatar is parked at the boarding door — anchor on the ridden
+                // car's ghost instead, else the rider crosses the city through empty streets. If the
+                // ghost is not resolvable here, send UNCULLED rather than wrong.
+                if (PassengerSync.TryGetRide(pid, out var rideVid))
+                {
+                    if (VehicleManager.TryGetGhostPosition(rideVid, out var ridePos)) { anchor = ridePos; havePos = true; }
+                    else havePos = false;
+                }
+                if (!_peerSentIdentity.TryGetValue(pid, out var sent))
+                    _peerSentIdentity[pid] = sent = new Dictionary<int, object>();
+                var snap = new TrafficSnapshotPayload { T = now };
+                foreach (var mc in master)
+                {
+                    // No known position (player still spawning) → uncullled full feed, identity-gated.
+                    if (havePos && (mc.Pos - anchor).sqrMagnitude > r2) { sent.Remove(mc.Index); continue; }
+                    bool needIdentity = !sent.TryGetValue(mc.Index, out var tok) || !ReferenceEquals(tok, mc.Colors);
+                    var dto = new TrafficCarDto
+                    {
+                        Index = mc.Index,
+                        X = Mathf.RoundToInt(mc.Pos.x * 100f), Y = Mathf.RoundToInt(mc.Pos.y * 100f), Z = Mathf.RoundToInt(mc.Pos.z * 100f),
+                        Qx = Mathf.RoundToInt(mc.Rot.x * 10000f), Qy = Mathf.RoundToInt(mc.Rot.y * 10000f),
+                        Qz = Mathf.RoundToInt(mc.Rot.z * 10000f), Qw = Mathf.RoundToInt(mc.Rot.w * 10000f),
+                    };
+                    if (needIdentity) { dto.Model = mc.Model; dto.Colors = mc.Colors; sent[mc.Index] = mc.Colors; }
+                    snap.Cars.Add(dto);
+                }
+                MPServer.SendTrafficSnapshotTo(link, snap);
+            }
+            // Review B1: ALWAYS prune (the old "only when shrunk" gate skipped equal-count swaps, and
+            // the empty-peers early-return above means the last disconnect is handled by ForgetPeer).
+            if (_peerSentIdentity.Count != livePids.Count)
+            {
+                var stale = new List<string>();
+                foreach (var k in _peerSentIdentity.Keys) if (!livePids.Contains(k)) stale.Add(k);
+                foreach (var k in stale) _peerSentIdentity.Remove(k);
+            }
         }
 
 
@@ -566,10 +678,22 @@ namespace BigAmbitionsMP
                 foreach (var car in snap.Cars)
                 {
                     seen.Add(car.Index);
-                    var pos = new Vector3(car.X, car.Y, car.Z);
-                    var rot = new Quaternion(car.Qx, car.Qy, car.Qz, car.Qw);
+                    var pos = new Vector3(car.X * 0.01f, car.Y * 0.01f, car.Z * 0.01f);
+                    var rot = new Quaternion(car.Qx * 0.0001f, car.Qy * 0.0001f, car.Qz * 0.0001f, car.Qw * 0.0001f);
+                    if (rot.x == 0f && rot.y == 0f && rot.z == 0f && rot.w == 0f) rot = Quaternion.identity;
+
+                    // T2: identity rides only when the HOST believes this peer needs it (first sight,
+                    // recycle, radius re-entry). The slot cache bridges the packets in between.
+                    if (car.Model != null) _slotIdentity[car.Index] = (car.Model, car.Colors);
+                    else if (_slotIdentity.TryGetValue(car.Index, out var known)) { car.Model = known.model; car.Colors = known.colors; }
 
                     _ghosts.TryGetValue(car.Index, out var g);
+                    if (car.Model == null)
+                    {
+                        // Identity not yet known here (should be rare: host resends on radius entry).
+                        if (g == null || g.Go == null) continue;   // cannot spawn without a model
+                        car.Model = g.Model;                       // same live car — keep going with what we have
+                    }
 
                     if (haveMe)
                     {
@@ -1079,10 +1203,15 @@ namespace BigAmbitionsMP
                 if (!_anchorDiagLogged)
                 {
                     _anchorDiagLogged = true;
+                    // The NATIVE spawn/despawn radii are scene-serialized (not in code) — printed once so
+                    // the mod's send/view rings (160/130, hand-picked 2026-06-10) can be set from DATA:
+                    // native despawn distance = how far the game itself keeps a car alive around a player.
+                    string nativeR = "?";
+                    try { var tc = TrafficComponent.Instance; if (tc != null) nativeR = $"spawn={tc.minDistanceToAdd:F0}m despawn={tc.distanceToRemove:F0}m"; } catch { }
                     Plugin.Logger.LogInfo(
                         $"[TrafficSync] Traffic anchors active: {arr.Length} fed of {anchors.Count} player(s); " +
                         $"densityManager={(dm != null ? "ok" : "NULL")}; " +
-                        $"maxCars={CarsPerPlayer * arr.Length}.");
+                        $"maxCars={CarsPerPlayer * arr.Length}; nativeRadii: {nativeR}.");
                 }
             }
             catch (Exception ex)
