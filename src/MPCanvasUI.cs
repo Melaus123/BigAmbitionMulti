@@ -704,6 +704,7 @@ namespace BigAmbitionsMP
             SharedShopSchedule.Tick();   // shared-shop management (Business PERMISSION feature, NOT the merger): edit scan + editing sessions (2s)
             SharedShopStaff.Tick();      // shared-shop management slice 3: owner bench publish (5s) + assignment scan (2s)
             SharedShopPrices.Tick();     // shared-shop management slice 4: send a price edit after 1 s of quiet
+            SharedShopWorkTabs.Tick();   // shared-shop management slice 6: deferred render of a shared warehouse/factory tab
             BusinessSync.TickOwnerBusinessPublish();   // round-190: one owner-business publish at settle (carries logo files; host adopts + re-broadcasts)
             MPPerf.End("Pre.D", _sub);
             _sub = MPPerf.Begin();
@@ -3042,6 +3043,7 @@ namespace BigAmbitionsMP
                 SharedShopSchedule.Reset();   // shared-shop editing baselines + sessions die with the regs (permission feature)
                 SharedShopStaff.Reset();      // shared-shop staffing state (permission feature)
                 SharedShopPrices.Reset();     // shared-shop pricing state (permission feature)
+                SharedShopWorkTabs.Reset();   // shared-shop warehouse/factory tab state (permission feature)
                 GrantSync.ResetSceneState();  // runtime grants + local caches die with the scene; the DURABLE store
                                               // survives — its lifecycle is session boundaries (StartNewGame /
                                               // manifest restore), NOT scene loads. The old full Reset() here fired

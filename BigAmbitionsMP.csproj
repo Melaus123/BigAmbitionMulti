@@ -72,6 +72,7 @@
   <ItemGroup>
     <Reference Include="BigAmbitions"><HintPath>$(ManagedDir)BigAmbitions.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="BigAmbitions.Items"><HintPath>$(ManagedDir)BigAmbitions.Items.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="BigAmbitions.Factories"><HintPath>$(ManagedDir)BigAmbitions.Factories.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="BigAmbitions.Characters"><HintPath>$(ManagedDir)BigAmbitions.Characters.dll</HintPath><Private>false</Private></Reference>
     <!-- Round-119 serve mirror: the follower performs the job, so it needs the game's own animation/audio calls. -->
     <Reference Include="BigAmbitions.SoundSystem"><HintPath>$(ManagedDir)BigAmbitions.SoundSystem.dll</HintPath><Private>false</Private></Reference>

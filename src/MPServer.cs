@@ -1355,6 +1355,22 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.SharedWorkInfo:
+                {
+                    var wi = env.GetPayload<SharedWorkInfoPayload>();
+                    if (wi != null && SenderIs(wi.PlayerId, senderPid, MessageType.SharedWorkInfo))
+                        GameStatePatcher.EnqueueOnMainThread(() => HostRouteSharedWorkInfo(wi, senderPid));
+                    break;
+                }
+
+                case MessageType.SharedWorkEdit:
+                {
+                    var we = env.GetPayload<SharedWorkEditPayload>();
+                    if (we != null && SenderIs(we.PlayerId, senderPid, MessageType.SharedWorkEdit))
+                        GameStatePatcher.EnqueueOnMainThread(() => HostRouteSharedWorkEdit(we, senderPid));
+                    break;
+                }
+
                 case MessageType.TaxiHail:
                     HandleTaxiHail(env);
                     break;
@@ -4957,6 +4973,56 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedSalesHistory: {ex.Message}"); }
+        }
+
+        /// <summary>Shared-shop slice 6: "request" → the building's owner; "snapshot" → the ONE helper that
+        /// asked (ToPid), never a broadcast. Both directions are grant-gated on the address's owner — the exact
+        /// shape of the slice-4 sales-history route.</summary>
+        public static void HostRouteSharedWorkInfo(SharedWorkInfoPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(senderPid)) return;
+                // Snapshots ride the roomier owner-reply bucket: a list of shared warehouses can answer as a burst.
+                if (!SharedRateOk(senderPid, "work info", snapshotBucket: p.Action == "snapshot")) return;
+                string ownerPid = SharedShopOwnerPid(p.AddressKey);
+                if (ownerPid.Length == 0) return;
+                if (p.Action == "request")
+                {
+                    if (ownerPid == senderPid) return;
+                    if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid))
+                    { Plugin.Logger.LogWarning($"[SharedShop] work-info request by '{senderPid}' on '{p.AddressKey}' — no Business permission, dropped."); return; }
+                    if (ownerPid == MPConfig.PlayerId) SharedShopWorkTabs.HandleWorkInfo(p);
+                    else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedWorkInfo, "host", p));
+                }
+                else if (p.Action == "snapshot")
+                {
+                    if (senderPid != ownerPid) { Plugin.Logger.LogWarning($"[SharedShop] work snapshot for '{p.AddressKey}' from non-owner '{senderPid}' — dropped."); return; }
+                    if (string.IsNullOrEmpty(p.ToPid)) return;
+                    if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, p.ToPid)) return;
+                    if (p.ToPid == MPConfig.PlayerId) SharedShopWorkTabs.HandleWorkInfo(p);
+                    else SendToPid(p.ToPid, MessageEnvelope.Create(MessageType.SharedWorkInfo, "host", p));
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedWorkInfo: {ex.Message}"); }
+        }
+
+        /// <summary>Shared-shop slice 6b/6c: a helper's warehouse/factory edit → the building's owner
+        /// (applied here if the host owns it). Grant-gated + rate-capped like every routed op.</summary>
+        public static void HostRouteSharedWorkEdit(SharedWorkEditPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(senderPid)) return;
+                if (!SharedRateOk(senderPid, "work edit")) return;
+                string ownerPid = SharedShopOwnerPid(p.AddressKey);
+                if (ownerPid.Length == 0 || ownerPid == senderPid) return;
+                if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid))
+                { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' on '{p.AddressKey}' — no Business permission, dropped."); return; }
+                if (ownerPid == MPConfig.PlayerId) SharedShopWorkTabs.OwnerApplyEdit(p);
+                else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedWorkEdit, "host", p));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedWorkEdit: {ex.Message}"); }
         }
 
         /// <summary>The merged-companies state broadcast: per group, online member pids (enforcement)

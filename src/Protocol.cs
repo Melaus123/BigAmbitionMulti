@@ -182,6 +182,8 @@ namespace BigAmbitionsMP
         SharedStaffEdit     = 186,       // Permitted player → Host → shop OWNER: "assign" an owner's employee to one of the owner's shared shops, or "unassign" them from it. Host: direct grant on the address, rate cap. Owner performs the native reassignment and republishes roster + bench.
         SharedPriceEdit     = 187,       // Permitted player → Host → shop OWNER (shared-shop slice 4, 2026-08-22, plan §2.4): ONE item's retail price at a shared shop, coalesced to 1 s of quiet on the editor (the native editor fires per keystroke AND per +/- click). Host: direct Business grant on the address, rate cap. The owner writes BOTH native lists (retailPrices + storedRetailPrices) and MPPriceSync's existing broadcast carries it to everyone — no echo of its own.
         SharedSalesHistory  = 188,       // Shared-shop slice 4 (ruling 25): the shop's recent per-item sales, WITHOUT which a helper prices blind (orderHistory is local-only — the replica's is empty). "request": editor → Host → owner when the Inventory & Pricing tab opens. "snapshot": owner → Host → exactly ONE editor (ToPid), never broadcast. Only the last 14 days and only the three fields the tab sums (item, units, revenue) — no hour reports, no wholesale, no per-price breakdown.
+        SharedWorkInfo      = 189,       // Shared-shop slice 6 (rulings 26/28/29/31): a shared WAREHOUSE or FACTORY tab's figures, computed on the OWNER's machine — item data for a building only reaches other machines while someone is INSIDE it (InteriorSync), so a replica's is stale or empty. "request": helper → Host → owner when the tab opens (Tab says which). "snapshot": owner → Host → exactly ONE helper (ToPid), never broadcast. 6a carries the Inventory tab (boxes + product rows); 6b/6c add Drivers (per-slot vehicle + driver) and Factory (per-workstation config, active state, resource stock). Also the owner's ECHO after an applied SharedWorkEdit; Tab "card" carries the BizMan list card's summaries (slots + top-4 inventory rows) for one shared warehouse/factory. A helper with the tab open also re-requests every few seconds (ruling 32 live parity) — the owner replies only when the content changed (Sig match = silence).
+        SharedWorkEdit      = 190,       // Shared-shop slice 6b/6c: helper → Host → building OWNER, one edit on a shared warehouse/factory — "driver" (slot assignment), "recipe", "produce" (up-to toggle + amount), "order" (workstation priority), "alias" (rename, ruled allowed 2026-08-24). Host: direct Business grant on the address, rate cap. The owner validates against ITS data (the native checks), applies natively, and echoes that tab's SharedWorkInfo snapshot to the editor — a rejected edit reverts on the helper by that same echo.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -321,6 +323,79 @@ namespace BigAmbitionsMP
         public string ItemName   { get; set; } = "";
         public int    AmountSold { get; set; }
         public float  TotalPrice { get; set; }
+    }
+
+    /// <summary>Shared-shop slice 6: a shared warehouse/factory tab's figures, owner-computed (see
+    /// MessageType.SharedWorkInfo). One request per tab open; one targeted reply; never a broadcast.</summary>
+    public class SharedWorkInfoPayload
+    {
+        public string PlayerId   { get; set; } = "";   // sender (validated SenderIs at the host)
+        public string Action     { get; set; } = "";   // "request" | "snapshot"
+        public string Tab        { get; set; } = "";   // "inventory" (6a); "drivers" / "factory" later
+        public string AddressKey { get; set; } = "";
+        public string ToPid      { get; set; } = "";   // snapshot target — the helper that asked
+        public string Sig        { get; set; } = "";   // request: the sig of the helper's held snapshot (owner stays silent on match); snapshot: the content sig
+        public int    BoxesMax     { get; set; }       // pallet-shelf capacity, as the owner's tab computes it
+        public int    BoxesCurrent { get; set; }       // boxes on those shelves right now
+        public List<WorkProductInfo>  Products { get; set; } = new();
+        public List<DriverSlotInfo>   Slots    { get; set; } = new();   // 6b: Drivers tab
+        public List<WorkstationInfo>  Stations { get; set; } = new();   // 6c: Factory tab
+        public List<StockInfo>        ResourceStock { get; set; } = new();   // 6c: ingredient units in pallets, owner-counted
+    }
+
+    /// <summary>6b — one warehouse/factory vehicle slot. The helper's machine does NOT hold the owner's
+    /// VehicleInstances (ghosts are deregistered from the save list), so name and skill travel here.</summary>
+    public class DriverSlotInfo
+    {
+        public int    Index         { get; set; }        // position in Warehouse.vehicleSlots
+        public string VehicleId     { get; set; } = "";  // "" = no vehicle assigned to the slot
+        public string VehicleType   { get; set; } = "";  // raw type name (localized on the helper)
+        public float  RequiredSkill { get; set; }        // VehicleType.requiredDeliveryDriverSkillValue
+        public string DriverId      { get; set; } = "";  // employee id, "" = unassigned
+    }
+
+    /// <summary>6c — one factory workstation's config + computed state. Config fields already ride the
+    /// interior snapshot, but that only flows while someone is INSIDE the building — this keeps the tab
+    /// truthful from across town. Active/Reasons are owner-computed (they read pallet space, ingredients
+    /// and the hour, all only fresh on the owner's machine).</summary>
+    public class WorkstationInfo
+    {
+        public string Id           { get; set; } = "";
+        public string ItemName     { get; set; } = "";   // the assembly-machine item (ctor argument)
+        public string WorkstationType { get; set; } = "";
+        public string Alias        { get; set; } = "";
+        public string RecipeId     { get; set; } = "";
+        public int    Priority     { get; set; }
+        public bool   ProduceUpTo  { get; set; }
+        public int    UpToValue    { get; set; }
+        public bool   Active       { get; set; }
+        public List<string> Reasons { get; set; } = new();   // localization keys, rendered by the native tooltip
+        public List<string> Stacked { get; set; } = new();   // production-machine child item names (validity check)
+    }
+
+    /// <summary>6b/6c — one routed edit on a shared warehouse/factory (see MessageType.SharedWorkEdit).</summary>
+    public class SharedWorkEditPayload
+    {
+        public string PlayerId   { get; set; } = "";   // sender (validated SenderIs at the host)
+        public string AddressKey { get; set; } = "";
+        public string Op         { get; set; } = "";   // "driver" | "recipe" | "produce" | "order" | "alias"
+        public int    SlotIndex  { get; set; } = -1;   // driver: which vehicle slot
+        public string StationId  { get; set; } = "";   // recipe/produce/alias: which workstation
+        public string StrValue   { get; set; } = "";   // driver: employee id ("" = unassign); recipe: recipe id; alias: name; order: "type|id,id,id"
+        public int    IntValue   { get; set; }         // produce: up-to amount
+        public bool   BoolValue  { get; set; }         // produce: up-to on/off
+    }
+
+    /// <summary>One row of the warehouse/factory Inventory table, owner-computed: the deliveries ledger
+    /// (Warehouse.deliveryTransactions) never syncs, and stock counts read item data that is only fresh
+    /// on the owner's machine. Balance and days-until-empty are DERIVED by the native row from these.</summary>
+    public class WorkProductInfo
+    {
+        public string ItemName    { get; set; } = "";
+        public int    Stock       { get; set; }        // units in pallets (CountResourcesInPallets)
+        public int    Deliveries  { get; set; }        // delivered, last 7 days
+        public int    Consumption { get; set; }        // consumed, last 7 days
+        public int    DaysLeft    { get; set; } = -1;  // Tab "card" only: the list card's days-until-empty (-1 = no drain)
     }
 
     /// <summary>Merger slice 4 — one native money delta from a merged member's machine. NEVER an

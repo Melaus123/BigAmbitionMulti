@@ -116,13 +116,19 @@ namespace BigAmbitionsMP
             string type = ""; try { type = reg.businessTypeName ?? ""; } catch { }
             switch (type)
             {
-                case "ba:businesstype_warehouse":     // Drivers / Inventory — later (rulings e/f/g)
-                case "ba:businesstype_headquarters":  // plan tabs are the merger's; HQ scheduling not in this slice
+                case "ba:businesstype_headquarters":  // ruling 27: HQ stays out of the permission feature
                 case "ba:businesstype_empty":
                 case "":
                     break;
+                case "ba:businesstype_warehouse":
+                    list.Add("Drivers");              // slice 6b: carried slot info + routed assignment
+                    list.Add("Inventory");            // slice 6a: owner-computed figures; Sell All greyed (ruling 29)
+                    break;
                 case "ba:businesstype_factory":
-                    list.Add("Schedule");             // factories: pricing is for shops that sell to customers
+                    list.Add("Factory");              // slice 6c: carried config/state + routed edits (rename allowed, 2026-08-24)
+                    list.Add("Schedule");
+                    list.Add("Drivers");              // slice 6b
+                    list.Add("Inventory");            // slice 6a — no pricing tab natively (ruling 30)
                     break;
                 default:
                     list.Add("Schedule");             // every ordinary business
@@ -193,8 +199,17 @@ namespace BigAmbitionsMP
                     if (!IsOtherPlayersShop(reg, addr)) return;
                     var allowed = AllowedTabs(reg, SharedShopSchedule.IsSharedShop(reg, addr));
                     string sel = _fSelectedTab?.GetValue(__instance) as string ?? "";
+                    // Native defaults gate on RentedByPlayer (false on a replica) and land on Presentation —
+                    // re-derive them for a shared building so the page opens where the owner's would
+                    // (field 2026-08-24): factory → Factory, warehouse → Drivers, else the native Insight is
+                    // hidden here so Schedule stands in. An explicitly requested tab was already vetted above.
+                    string type = ""; try { type = reg.businessTypeName ?? ""; } catch { }
+                    string want = type == "ba:businesstype_factory" ? "Factory"
+                                : type == "ba:businesstype_warehouse" ? "Drivers"
+                                : "Schedule";
+                    if (sel == "Presentation" && allowed.Contains(want)) { _fSelectedTab?.SetValue(__instance, want); return; }
                     if (!allowed.Contains(sel))
-                        _fSelectedTab?.SetValue(__instance, allowed.Contains("Schedule") ? "Schedule" : "Presentation");
+                        _fSelectedTab?.SetValue(__instance, allowed.Contains(want) ? want : allowed.Contains("Schedule") ? "Schedule" : "Presentation");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} initial tab: {ex.Message}"); }
             }

@@ -539,6 +539,22 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.SharedWorkInfo:
+                {
+                    // "request" reaches the owner; "snapshot" reaches the one helper that asked (slice 6).
+                    var wi = env.GetPayload<SharedWorkInfoPayload>();
+                    if (wi != null) GameStatePatcher.EnqueueOnMainThread(() => SharedShopWorkTabs.HandleWorkInfo(wi));
+                    break;
+                }
+
+                case MessageType.SharedWorkEdit:
+                {
+                    // A helper's routed warehouse/factory edit, arriving at the OWNER (slice 6b/6c).
+                    var we = env.GetPayload<SharedWorkEditPayload>();
+                    if (we != null) GameStatePatcher.EnqueueOnMainThread(() => SharedShopWorkTabs.OwnerApplyEdit(we));
+                    break;
+                }
+
                 case MessageType.MergerRequest:
                 {
                     // "proposal": someone wants to merge with ME — surface Accept/Decline in the
