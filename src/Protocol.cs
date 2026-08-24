@@ -184,6 +184,8 @@ namespace BigAmbitionsMP
         SharedSalesHistory  = 188,       // Shared-shop slice 4 (ruling 25): the shop's recent per-item sales, WITHOUT which a helper prices blind (orderHistory is local-only — the replica's is empty). "request": editor → Host → owner when the Inventory & Pricing tab opens. "snapshot": owner → Host → exactly ONE editor (ToPid), never broadcast. Only the last 14 days and only the three fields the tab sums (item, units, revenue) — no hour reports, no wholesale, no per-price breakdown.
         SharedWorkInfo      = 189,       // Shared-shop slice 6 (rulings 26/28/29/31): a shared WAREHOUSE or FACTORY tab's figures, computed on the OWNER's machine — item data for a building only reaches other machines while someone is INSIDE it (InteriorSync), so a replica's is stale or empty. "request": helper → Host → owner when the tab opens (Tab says which). "snapshot": owner → Host → exactly ONE helper (ToPid), never broadcast. 6a carries the Inventory tab (boxes + product rows); 6b/6c add Drivers (per-slot vehicle + driver) and Factory (per-workstation config, active state, resource stock). Also the owner's ECHO after an applied SharedWorkEdit; Tab "card" carries the BizMan list card's summaries (slots + top-4 inventory rows) for one shared warehouse/factory. A helper with the tab open also re-requests every few seconds (ruling 32 live parity) — the owner replies only when the content changed (Sig match = silence).
         SharedWorkEdit      = 190,       // Shared-shop slice 6b/6c: helper → Host → building OWNER, one edit on a shared warehouse/factory — "driver" (slot assignment), "recipe", "produce" (up-to toggle + amount), "order" (workstation priority), "alias" (rename, ruled allowed 2026-08-24). Host: direct Business grant on the address, rate cap. The owner validates against ITS data (the native checks), applies natively, and echoes that tab's SharedWorkInfo snapshot to the editor — a rejected edit reverts on the helper by that same echo.
+        BuildingsForSale    = 191,       // Host → All (v9, 2026-08 throughput T6): JUST the buy-marketplace list (~15 entries, a few KB). The daily RealEstateHelper refresh used to trigger a FULL ~826-building BusinessSnapshot broadcast (~1 MB/client) to move this one list; now only the list travels. Join snapshots still carry it inside BusinessSnapshot — this type is the steady-state refresh only. Rides Bulk (review M5: shares state with BusinessSnapshot).
+        MirrorAck           = 192,       // Client → Host (v9 review B2): "I hold this exact mirrored .hsg" — sent after the file is WRITTEN to the client's store (or already present via the shared-store token). The host's absent-member mirror skip records delivery ONLY on this ack — never at send time, because the paced lane's documented loss recovery is "the next save re-mirrors", which a send-time record would silently delete (character loss on host handoff).
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -853,6 +855,14 @@ namespace BigAmbitionsMP
         [Newtonsoft.Json.JsonProperty("d")]
         public string Data { get; set; } = "";
 
+        /// <summary>v9 (2026-08 throughput): raw binary rider for the save-file class
+        /// (gzip .hsg bytes). Never serialized into the JSON — it ships in the 'BZA'
+        /// attachment frame after the envelope, killing the +33% base64 tax. Senders
+        /// set it INSTEAD of the payload's HsgGzipBase64; receivers read it off the
+        /// envelope at the dispatch seam (payload.HsgRaw = env.Attachment).</summary>
+        [Newtonsoft.Json.JsonIgnore]
+        public byte[]? Attachment { get; set; }
+
         // ── T1 (2026-08 throughput audit): wire compression ─────────────────────────────
         // Everything above this threshold deflates before it ships. Measured on the real
         // payloads: -65% traffic snapshot, -91% business snapshot, -95% market table.
@@ -864,6 +874,23 @@ namespace BigAmbitionsMP
 
         public byte[] Serialize()
         {
+            // v9 attachment frame: 0x02 'B' 'Z' 'A' + type(2 LE, same offset as 'BZP' so the
+            // one six-byte peek serves NetStats and lane routing) + jsonLen(4 LE) + envelope
+            // JSON + raw attachment bytes. The attachment is already gzip — deflating it
+            // again buys nothing, and the ~1 KB JSON head isn't worth a second format.
+            if (Attachment != null && Attachment.Length > 0)
+            {
+                var json = System.Text.Encoding.UTF8.GetBytes(Newtonsoft.Json.JsonConvert.SerializeObject(this));
+                var frame = new byte[10 + json.Length + Attachment.Length];
+                frame[0] = 0x02; frame[1] = (byte)'B'; frame[2] = (byte)'Z'; frame[3] = (byte)'A';
+                frame[4] = (byte)((int)Type & 0xFF); frame[5] = (byte)(((int)Type >> 8) & 0xFF);
+                frame[6] = (byte)(json.Length & 0xFF); frame[7] = (byte)((json.Length >> 8) & 0xFF);
+                frame[8] = (byte)((json.Length >> 16) & 0xFF); frame[9] = (byte)((json.Length >> 24) & 0xFF);
+                System.Buffer.BlockCopy(json, 0, frame, 10, json.Length);
+                System.Buffer.BlockCopy(Attachment, 0, frame, 10 + json.Length, Attachment.Length);
+                if (frame.Length > 300_000) SizeTelemetry.Note(Type, frame.Length);
+                return frame;
+            }
             var bytes = System.Text.Encoding.UTF8.GetBytes(Newtonsoft.Json.JsonConvert.SerializeObject(this));
             // Size telemetry (2026-07-20 severity review): the silent-loss class
             // was a message quietly outgrowing a transport limit — watch growth
@@ -910,6 +937,24 @@ namespace BigAmbitionsMP
         {
             try
             {
+                if (bytes != null && bytes.Length > 10 && bytes[0] == 0x02 && bytes[1] == (byte)'B' && bytes[2] == (byte)'Z' && bytes[3] == (byte)'A')
+                {
+                    // v9 attachment frame — parse the JSON head, hang the raw rider on the envelope.
+                    int jsonLen = bytes[6] | (bytes[7] << 8) | (bytes[8] << 16) | (bytes[9] << 24);
+                    // Review MIN-1: compare against bytes.Length - 10, never 10 + jsonLen — the
+                    // addition wraps on a hostile length and would defeat this exact guard.
+                    if (jsonLen <= 0 || jsonLen > bytes.Length - 10)
+                        throw new System.IO.InvalidDataException($"attachment frame jsonLen {jsonLen} vs {bytes.Length}B");
+                    var env = Newtonsoft.Json.JsonConvert.DeserializeObject<MessageEnvelope>(
+                        System.Text.Encoding.UTF8.GetString(bytes, 10, jsonLen));
+                    if (env != null && bytes.Length > 10 + jsonLen)
+                    {
+                        var att = new byte[bytes.Length - 10 - jsonLen];
+                        System.Buffer.BlockCopy(bytes, 10 + jsonLen, att, 0, att.Length);
+                        env.Attachment = att;
+                    }
+                    return env;
+                }
                 if (bytes != null && bytes.Length > 6 && bytes[0] == 0x02 && bytes[1] == (byte)'B' && bytes[2] == (byte)'Z' && bytes[3] == (byte)'P')
                 {
                     // T1 compressed frame — inflate, then parse the JSON exactly as before.
@@ -1004,7 +1049,12 @@ namespace BigAmbitionsMP
         // deflate frame (0x02 'B' 'Z' 'P' + type + compressed JSON). A v7 peer would read the
         // frame as garbage and drop every large message while small ones still parse — a
         // half-working session, the worst kind. Refuse mixed sessions outright.
-        public const int Version = 8;
+        //
+        // v9 (2026-08, throughput T6/T9): save-file class rides a new 'BZA' attachment frame
+        // (raw gzip .hsg after the JSON head — no base64), and the daily for-sale refresh is
+        // its own small BuildingsForSale (191) message instead of a full business snapshot.
+        // A v8 peer can parse neither; refuse mixed sessions outright.
+        public const int Version = 9;
     }
 
     /// <summary>Sent by client on connect.</summary>
@@ -2563,12 +2613,19 @@ namespace BigAmbitionsMP
         public string SessionName    { get; set; } = "";
         public bool   Success        { get; set; }
         public MpSlot Slot           { get; set; } = new();
-        public string HsgGzipBase64  { get; set; } = "";   // gzip(.hsg bytes) → base64
+        public string HsgGzipBase64  { get; set; } = "";   // gzip(.hsg bytes) → base64 (legacy channel; v9 senders use the attachment rider)
         public int    RawLength       { get; set; }          // uncompressed length, for sanity check
         /// <summary>Round-275: the .hsg.meta sidecar JSON.  The game's save scanner cannot
         /// date a .hsg without it — host-stored copies lacked one, so day validation read
         /// -1/0 and the disconnect-save restore never committed on a real world.</summary>
         public string MetaJson       { get; set; } = "";
+        /// <summary>v9: gzip(.hsg) as raw bytes, carried by the envelope's attachment frame
+        /// (no base64). Set at the dispatch seam from env.Attachment; never in the JSON.</summary>
+        [Newtonsoft.Json.JsonIgnore]
+        public byte[]? HsgRaw        { get; set; }
+        public bool    HasHsgFile()  => (HsgRaw?.Length ?? 0) > 0 || !string.IsNullOrEmpty(HsgGzipBase64);
+        public byte[]? GetHsgGzip()  => (HsgRaw?.Length ?? 0) > 0 ? HsgRaw
+                                        : string.IsNullOrEmpty(HsgGzipBase64) ? null : System.Convert.FromBase64String(HsgGzipBase64);
     }
 
     /// <summary>Client → Host: this player's current money.  Sent periodically so
@@ -2605,6 +2662,24 @@ namespace BigAmbitionsMP
         public float  Volume     { get; set; }
     }
 
+    /// <summary>Host → All (v9, T6): the buy marketplace list alone — the daily for-sale
+    /// refresh used to ride a full ~826-building BusinessSnapshot broadcast. Receivers
+    /// apply it with the same replace-the-list routine the snapshot path uses.</summary>
+    public class BuildingsForSalePayload
+    {
+        public List<BuildingForSaleInfo> BuildingsForSale { get; set; } = new();
+    }
+
+    /// <summary>Client → Host (v9): delivery confirmation for one mirrored .hsg —
+    /// SessionName/StableId name the FILE (the mirror payload's own fields, echoed
+    /// verbatim), Sig is FNV-1a over the gzip bytes as received. See MessageType.MirrorAck.</summary>
+    public class MirrorAckPayload
+    {
+        public string SessionName { get; set; } = "";
+        public string StableId    { get; set; } = "";
+        public long   Sig         { get; set; }
+    }
+
     public class LoadDataPayload
     {
         /// <summary>Round-224: false = the host has NO trustworthy cash figure for this
@@ -2624,7 +2699,8 @@ namespace BigAmbitionsMP
         // slot exists but ReadSaveBytesGzip returned null. A brand-new player (no slot) still gets a normal
         // empty-hsg fresh-start.
         public bool   SaveUnavailable { get; set; } = false;
-        /// <summary>Mid-join fallback chain: when HsgGzipBase64 is EMPTY the
+        /// <summary>Mid-join fallback chain: when NO save file is attached (HasHsgFile()
+        /// false — neither the v9 attachment rider nor the legacy base64 field) the
         /// client loads its own LOCAL session save if present, else starts a
         /// fresh character with these host settings (null → Normal preset).</summary>
         public GameVariablesDto? FallbackSettings { get; set; }
@@ -2645,6 +2721,13 @@ namespace BigAmbitionsMP
         /// serves that lead to a LOAD (real .hsg or fresh-character fallback); the no-load
         /// branches (SaveUnavailable / AwaitClientDisconnectUpload) stay 0.</summary>
         public int    LoadGen       { get; set; }
+        /// <summary>v9: gzip(.hsg) as raw bytes via the envelope attachment frame (no base64).
+        /// The "no save → fallback chain" checks MUST treat a non-empty rider as a real save.</summary>
+        [Newtonsoft.Json.JsonIgnore]
+        public byte[]? HsgRaw       { get; set; }
+        public bool    HasHsgFile() => (HsgRaw?.Length ?? 0) > 0 || !string.IsNullOrEmpty(HsgGzipBase64);
+        public byte[]? GetHsgGzip() => (HsgRaw?.Length ?? 0) > 0 ? HsgRaw
+                                       : string.IsNullOrEmpty(HsgGzipBase64) ? null : System.Convert.FromBase64String(HsgGzipBase64);
     }
 
     /// <summary>Host → clients (handoff slice 1, 2026-07-23): one piece of the session STORE —
@@ -2674,6 +2757,12 @@ namespace BigAmbitionsMP
         /// 2026-07-23): part of the session store, rides the sweep's manifest piece so
         /// loans survive a host handoff. "" = none.</summary>
         public string LedgerJson     { get; set; } = "";
+        /// <summary>v9: gzip(.hsg) as raw bytes via the envelope attachment frame (no base64).</summary>
+        [Newtonsoft.Json.JsonIgnore]
+        public byte[]? HsgRaw        { get; set; }
+        public bool    HasHsgFile()  => (HsgRaw?.Length ?? 0) > 0 || !string.IsNullOrEmpty(HsgGzipBase64);
+        public byte[]? GetHsgGzip()  => (HsgRaw?.Length ?? 0) > 0 ? HsgRaw
+                                        : string.IsNullOrEmpty(HsgGzipBase64) ? null : System.Convert.FromBase64String(HsgGzipBase64);
     }
 
     /// <summary>

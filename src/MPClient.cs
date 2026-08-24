@@ -391,6 +391,7 @@ namespace BigAmbitionsMP
                             case MessageType.RentDeny:
                             case MessageType.BuyDeny:
                             case MessageType.VacateNotify:
+                            case MessageType.BuildingsForSale:   // v9: re-covered at WorldReady (ResendJoinerState)
                                 return;
                         }
                         if (env.Type.ToString().Contains("Parked") || env.Type.ToString().Contains("Traffic")
@@ -660,6 +661,11 @@ namespace BigAmbitionsMP
                     HandleBusinessChange(env);
                     break;
 
+                case MessageType.BuildingsForSale:
+                    // v9 (T6): the daily buy-marketplace refresh — just the list.
+                    GameStatePatcher.ApplyBuildingsForSaleMsg(env.GetPayload<BuildingsForSalePayload>()?.BuildingsForSale);
+                    break;
+
                 case MessageType.InteriorSnapshot:
                     HandleInteriorSnapshot(env);
                     break;
@@ -689,15 +695,23 @@ namespace BigAmbitionsMP
                 case MessageType.LoadData:
                     // Host shipped us our stored .hsg — write + load it (coordinator
                     // marshals the load onto the main thread).
-                    MPLoadProfiler.Mark($"CLIENT recv LoadData (own .hsg, {env.Data?.Length ?? 0} bytes json)");
-                    MPSaveCoordinator.ClientHandleLoadData(env.GetPayload<LoadDataPayload>());
+                    MPLoadProfiler.Mark($"CLIENT recv LoadData (own .hsg, {env.Data?.Length ?? 0} bytes json + {env.Attachment?.Length ?? 0} rider)");
+                    {
+                        var ld = env.GetPayload<LoadDataPayload>();
+                        if (ld != null) ld.HsgRaw = env.Attachment;   // v9 rider → payload
+                        MPSaveCoordinator.ClientHandleLoadData(ld);
+                    }
                     break;
 
                 case MessageType.StoreMirror:
                     // Handoff slice 1: a piece of the session store (another member's
                     // .hsg and/or the manifest) — write into our local store so this
                     // machine holds the complete session and can host it later.
-                    MPSaveCoordinator.ClientHandleStoreMirror(env.GetPayload<StoreMirrorPayload>());
+                    {
+                        var sm = env.GetPayload<StoreMirrorPayload>();
+                        if (sm != null) sm.HsgRaw = env.Attachment;   // v9 rider → payload
+                        MPSaveCoordinator.ClientHandleStoreMirror(sm);
+                    }
                     break;
 
                 case MessageType.Chat:
@@ -1601,10 +1615,21 @@ namespace BigAmbitionsMP
 
         /// <summary>Client → host: upload our pending disconnect save (Phase 3); the host validates its
         /// actual in-game day, then sends back the real load.</summary>
+        /// <summary>v9 (review B2): confirm to the host that one mirrored .hsg is in our store —
+        /// the host's absent-member skip records delivery only on this.</summary>
+        public static void SendMirrorAck(string sessionName, string stableId, long sig)
+        {
+            if (!IsConnected || sig == 0) return;
+            Send(MessageEnvelope.Create(MessageType.MirrorAck, MPConfig.PlayerId,
+                 new MirrorAckPayload { SessionName = sessionName, StableId = stableId, Sig = sig }));
+        }
+
         public static void SendClientDisconnectUpload(SaveDataPayload p)
         {
             if (!IsConnected || p == null) return;
-            Send(MessageEnvelope.Create(MessageType.ClientDisconnectUpload, MPConfig.PlayerId, p));
+            var env = MessageEnvelope.Create(MessageType.ClientDisconnectUpload, MPConfig.PlayerId, p);
+            env.Attachment = p.HsgRaw;   // v9: raw gzip rides the attachment frame (HsgRaw is JsonIgnore)
+            Send(env);
         }
 
         // [PassFollow] SLICE 1a — confirm the rider receives the follow-signal and can resolve the
@@ -1851,7 +1876,7 @@ namespace BigAmbitionsMP
 
         /// <summary>Ships this player's saved .hsg (gzipped) up to the host so the
         /// host holds the canonical copy (Phase 4 — centralized persistence).</summary>
-        public static void SendSaveData(string sessionName, MpSlot slot, string hsgGzipBase64, int rawLength, string metaJson = "")
+        public static void SendSaveData(string sessionName, MpSlot slot, byte[] hsgGzip, int rawLength, string metaJson = "")
         {
             if (!IsConnected) return;
             var p = new SaveDataPayload
@@ -1859,12 +1884,13 @@ namespace BigAmbitionsMP
                 SessionName   = sessionName,
                 Success       = true,
                 Slot          = slot,
-                HsgGzipBase64 = hsgGzipBase64,
                 RawLength     = rawLength,
                 MetaJson      = metaJson,   // round-275: the sidecar that lets the host DATE this save
                 PlaythroughId = MPSaveManager.ActivePlaythrough,   // round-222: identity travels
             };
-            Send(MessageEnvelope.Create(MessageType.SaveData, MPConfig.PlayerId, p));
+            var env = MessageEnvelope.Create(MessageType.SaveData, MPConfig.PlayerId, p);
+            env.Attachment = hsgGzip;   // v9: raw gzip rides the attachment frame, no base64
+            Send(env);
             Plugin.Logger.LogInfo($"[Client] Sent SaveData: session='{sessionName}' raw={rawLength}B day={slot?.Day}.");
         }
 
@@ -2125,7 +2151,7 @@ namespace BigAmbitionsMP
 
         private static void Send(MessageEnvelope env)
         {
-            _transport?.Send(env.Serialize(), reliable: true);
+            _transport?.Send(env.Serialize(), reliable: true);   // Serialize() emits the 'BZA' frame itself when env.Attachment is set
         }
 
         // ── Round-270: world-download progress reporter (called each frame from the canvas) ──

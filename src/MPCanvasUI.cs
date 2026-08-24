@@ -706,6 +706,7 @@ namespace BigAmbitionsMP
             SharedShopPrices.Tick();     // shared-shop management slice 4: send a price edit after 1 s of quiet
             SharedShopWorkTabs.Tick();   // shared-shop management slice 6: deferred render of a shared warehouse/factory tab
             MPNetStats.Tick();           // T0 (throughput audit): per-type bytes/s report every 30 s
+            GameStatePatcher.TickMapFilterDebounce();   // v9 MIN-2: one map refresh after a delta burst goes quiet
             BusinessSync.TickOwnerBusinessPublish();   // round-190: one owner-business publish at settle (carries logo files; host adopts + re-broadcasts)
             MPPerf.End("Pre.D", _sub);
             _sub = MPPerf.Begin();

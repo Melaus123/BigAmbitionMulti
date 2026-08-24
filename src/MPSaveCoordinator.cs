@@ -369,7 +369,7 @@ namespace BigAmbitionsMP
                     if (raw.Length > 0)
                     {
                         slot.SaveName = Path.GetFileNameWithoutExtension(file);
-                        MPClient.SendSaveData(session, slot, GzipBase64(raw), raw.Length);
+                        MPClient.SendSaveData(session, slot, GzipBytes(raw), raw.Length);
                     }
                 }
             }
@@ -914,7 +914,7 @@ namespace BigAmbitionsMP
                         string metaJson = "";
                         try { string mp = fileT + ".meta"; if (File.Exists(mp)) metaJson = File.ReadAllText(mp); } catch { }
                         if (MPClient.IsConnected)
-                            MPClient.SendSaveData(upT.Session, upT.Slot, GzipBase64(raw), raw.Length, metaJson);
+                            MPClient.SendSaveData(upT.Session, upT.Slot, GzipBytes(raw), raw.Length, metaJson);
                         Plugin.Logger.LogInfo($"[MPSave] Uploaded '{upT.Slot.SaveName}.hsg' ({raw.Length}B) for session '{upT.Session}' (off-thread, wave-2).");
                         Remove(upT);
                     }
@@ -945,7 +945,7 @@ namespace BigAmbitionsMP
                 MPSaveManager.NoteSessionPid(StripAutoSuffix(data.SessionName), data.PlaythroughId);
             }
             if (data == null || data.Slot == null) return;
-            if (!data.Success || string.IsNullOrEmpty(data.HsgGzipBase64))
+            if (!data.Success || !data.HasHsgFile())
             {
                 Plugin.Logger.LogWarning($"[MPSave] SaveData from '{data?.Slot?.DisplayName}' had no payload.");
                 return;
@@ -954,7 +954,7 @@ namespace BigAmbitionsMP
             DiagWrite($"HostHandleSaveData entry from '{data.Slot.DisplayName}' (stable={data.Slot.StableId})");
             try
             {
-                byte[] raw = UnGzipBase64(data.HsgGzipBase64);
+                byte[] raw = UnGzipBytes(data.GetHsgGzip());
                 if (data.RawLength > 0 && raw.Length != data.RawLength)
                     Plugin.Logger.LogWarning($"[MPSave] SaveData length mismatch: got {raw.Length}, expected {data.RawLength}.");
 
@@ -1187,7 +1187,7 @@ namespace BigAmbitionsMP
             // "load your own local copy" variant was REMOVED 2026-06-10: a
             // client-supplied save is an obvious edit/exploit vector; only
             // host-stored saves are trusted.)
-            if (string.IsNullOrEmpty(p.HsgGzipBase64))
+            if (!p.HasHsgFile())
             {
                 if (!string.IsNullOrEmpty(p.SessionName))
                     lock (_lock) { _activeSessionName = p.SessionName; }
@@ -1250,7 +1250,7 @@ namespace BigAmbitionsMP
             lock (_lock) { _activeSessionName = session; }
             try
             {
-                byte[] raw    = UnGzipBase64(p.HsgGzipBase64);
+                byte[] raw    = UnGzipBytes(p.GetHsgGzip());
                 string folder = MPSaveManager.MpCharacterFolder(session, MPConfig.StableId);
                 File.WriteAllBytes(Path.Combine(folder, SaveFileName + ".hsg"), raw);
                 // Round-275b: land the served sidecar too — a meta-less local copy is
@@ -1659,7 +1659,7 @@ namespace BigAmbitionsMP
         /// manifest figure (live CashByStableId fallback).  Callers keep their own
         /// world-identity fields and their own Unavailable/Fresh messaging.</summary>
         internal static ServeVerdict ResolveMemberSave(string sourceSession, string stableId,
-            out (string b64, int raw)? data, out string servedFrom, out float cash)
+            out (byte[] gz, int raw)? data, out string servedFrom, out float cash)
         {
             servedFrom = sourceSession;
             cash = 0f;
@@ -1739,9 +1739,10 @@ namespace BigAmbitionsMP
             return "";
         }
 
-        /// <summary>Read a stored .hsg from the host's session folder, gzipped +
-        /// base64'd, for shipping to its owner.  Null if absent.</summary>
-        internal static (string b64, int raw)? ReadSaveBytesGzip(string session, string stableId)
+        /// <summary>Read a stored .hsg from the host's session folder, gzipped, for
+        /// shipping to its owner (v9: raw bytes — the attachment frame, no base64).
+        /// Null if absent.</summary>
+        internal static (byte[] gz, int raw)? ReadSaveBytesGzip(string session, string stableId)
         {
             try
             {
@@ -1750,7 +1751,7 @@ namespace BigAmbitionsMP
                 if (file == null) return null;
                 byte[] raw = File.ReadAllBytes(file);
                 if (raw.Length == 0) return null;
-                return (GzipBase64(raw), raw.Length);
+                return (GzipBytes(raw), raw.Length);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ReadSaveBytesGzip: {ex.Message}"); return null; }
         }
@@ -1861,15 +1862,20 @@ namespace BigAmbitionsMP
                         byte[] raw = File.ReadAllBytes(file);
                         if (raw.Length == 0) continue;
                         string sweepMeta = ""; try { if (File.Exists(file + ".meta")) sweepMeta = File.ReadAllText(file + ".meta"); } catch { }
+                        var gzSweep = GzipBytes(raw);
                         MPServer.SendStoreMirror(new StoreMirrorPayload
                         {
                             SessionName = session, StableId = stable,
                             SaveName = Path.GetFileNameWithoutExtension(file),
-                            HsgGzipBase64 = GzipBase64(raw), RawLength = raw.Length,
+                            HsgRaw = gzSweep, RawLength = raw.Length,   // v9: attachment rider, no base64
                             MetaJson = sweepMeta,   // round-275b
                             PlaythroughId = pid,
                             HostStoreToken = token,   // manifest already sent above
-                        }, exceptStable: stable);
+                        }, exceptStable: stable,
+                        // v9 absent-member skip: this file belongs to a member who is NOT in the
+                        // session (connected members were skipped above) — it is byte-identical
+                        // sweep after sweep. Per-client sent-signature memory drops the repeats.
+                        fileKey: session + "|" + stable, fileSig: FileSig(gzSweep));
                         sent++;
                     }
                     // One locked/mid-write file (e.g. a disconnect commit landing right
@@ -1896,15 +1902,16 @@ namespace BigAmbitionsMP
                 if (raw.Length == 0) return;
                 var (manifestJson, pid) = ManifestSnapshot(session);
                 string mmMeta = ""; try { if (File.Exists(file + ".meta")) mmMeta = File.ReadAllText(file + ".meta"); } catch { }
+                var gzMember = GzipBytes(raw);
                 MPServer.SendStoreMirror(new StoreMirrorPayload
                 {
                     SessionName = session, StableId = stable,
                     SaveName = Path.GetFileNameWithoutExtension(file),
-                    HsgGzipBase64 = GzipBase64(raw), RawLength = raw.Length,
+                    HsgRaw = gzMember, RawLength = raw.Length,   // v9: attachment rider, no base64
                     MetaJson = mmMeta,   // round-275b
                     ManifestJson = manifestJson, PlaythroughId = pid,
                     HostStoreToken = StoreToken(),
-                }, exceptStable: stable);
+                }, exceptStable: stable, fileKey: session + "|" + stable, fileSig: FileSig(gzMember));
                 Plugin.Logger.LogInfo($"[MPSave] Mirrored member file (stable={stable}, {raw.Length}B) for '{session}' → other clients.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] MirrorMemberFile '{stable}': {ex.Message}"); }
@@ -1932,7 +1939,14 @@ namespace BigAmbitionsMP
                 // (dual-instance testing) — the files are already there, and writing
                 // them here would race the host's own writes.
                 string ownToken = StoreToken();
-                if (!string.IsNullOrEmpty(p.HostStoreToken) && p.HostStoreToken == ownToken) return;
+                if (!string.IsNullOrEmpty(p.HostStoreToken) && p.HostStoreToken == ownToken)
+                {
+                    // v9 (review B2): the file IS in "our" store (it's the host's own folder) —
+                    // ack it so the host's skip memory engages on the rig too.
+                    if (p.HasHsgFile())
+                        try { MPClient.SendMirrorAck(p.SessionName, p.StableId, FileSig(p.GetHsgGzip()!)); } catch { }
+                    return;
+                }
 
                 string session = SanitizeSession(p.SessionName);
                 if (string.IsNullOrEmpty(session)) return;
@@ -2000,9 +2014,9 @@ namespace BigAmbitionsMP
                 }
 
                 if (!string.IsNullOrEmpty(p.StableId) && p.StableId != MPConfig.StableId
-                    && !string.IsNullOrEmpty(p.HsgGzipBase64))
+                    && p.HasHsgFile())
                 {
-                    byte[] raw = UnGzipBase64(p.HsgGzipBase64);
+                    byte[] raw = UnGzipBytes(p.GetHsgGzip());
                     if (p.RawLength > 0 && raw.Length != p.RawLength)
                         Plugin.Logger.LogWarning($"[MPSave] Store mirror length mismatch (stable={p.StableId}): got {raw.Length}, expected {p.RawLength}.");
                     if (raw.Length > 0)
@@ -2014,6 +2028,10 @@ namespace BigAmbitionsMP
                         // this mirrored store needs datable copies for its own day validation.
                         try { if (!string.IsNullOrEmpty(p.MetaJson)) File.WriteAllText(Path.Combine(dir, name + ".hsg.meta"), p.MetaJson); } catch { }
                         LogHsgWrite(session, p.StableId, raw.Length, "store mirror");
+                        // v9 (review B2): the file is WRITTEN — confirm delivery. The host's
+                        // skip memory records only on this ack, so a piece lost on the paced
+                        // lane keeps its "next save re-mirrors" recovery.
+                        try { MPClient.SendMirrorAck(p.SessionName, p.StableId, FileSig(p.GetHsgGzip()!)); } catch { }
                     }
                 }
             }
@@ -2865,7 +2883,7 @@ namespace BigAmbitionsMP
                 MPClient.SendClientDisconnectUpload(new SaveDataPayload
                 {
                     SessionName = baseName, Success = true, Slot = slot,
-                    HsgGzipBase64 = GzipBase64(raw), RawLength = raw.Length,
+                    HsgRaw = GzipBytes(raw), RawLength = raw.Length,   // v9: attachment rider, no base64
                     MetaJson = dcMeta,
                     PlaythroughId = _wireWorldPid,   // round-222: sticky through disconnect by design
                 });
@@ -2907,7 +2925,7 @@ namespace BigAmbitionsMP
                 MPSaveManager.NoteSessionPid(p.SessionName, p.PlaythroughId);            // round-222
                 MPSaveManager.NoteSessionPid(StripAutoSuffix(p.SessionName), p.PlaythroughId);
             }
-            if (p == null || string.IsNullOrEmpty(stable) || string.IsNullOrEmpty(p.HsgGzipBase64)) return false;
+            if (p == null || string.IsNullOrEmpty(stable) || !p.HasHsgFile()) return false;
             // Review-2 fix: validate against and commit into the folder that holds the
             // CURRENT state (loaded variant / latest save target) — the lineage base can
             // be stale or absent, which skewed the day window in both directions and
@@ -2943,7 +2961,7 @@ namespace BigAmbitionsMP
                     return false;
                 }
 
-                byte[] raw = UnGzipBase64(p.HsgGzipBase64);
+                byte[] raw = UnGzipBytes(p.GetHsgGzip());
                 if (raw == null || raw.Length == 0) return false;
 
                 // Stage into a throwaway session so we can read the save's ACTUAL day via the game scanner
@@ -3053,8 +3071,10 @@ namespace BigAmbitionsMP
             // PAIRED, loadable checkpoint on a separate host PC — not a per-machine orphan. A lower-
             // frequency rollback point than '-auto' (once per in-game day), mirroring vanilla's daily
             // Recover save, so a bug captured by the latest autosave can still be reverted past.
-            Plugin.Logger.LogInfo($"[MPSave] Midnight recover checkpoint (day {day}) → coordinated save '{recoverSession}'.");
-            HostSaveNow("midnight");
+            // Finding F-2026-08-24-B: the native trigger is Hour == 23 — the game's function name
+            // ("RunMidNightAutoSave") is wrong about its own timing, and this label used to copy it.
+            Plugin.Logger.LogInfo($"[MPSave] 23:00 daily recover save (day {day}) → coordinated save '{recoverSession}'.");
+            HostSaveNow("midnight");   // the reason token stays "midnight" — it keys the '-recover' suffix
         }
 
         // ── Native autosave suppression ─────────────────────────────────────────
@@ -3430,23 +3450,39 @@ namespace BigAmbitionsMP
             catch { return null; }
         }
 
-        private static string GzipBase64(byte[] raw)
+        private static byte[] GzipBytes(byte[] raw)
         {
             using var ms = new MemoryStream();
             using (var gz = new GZipStream(ms, CompressionLevel.Optimal, true))
                 gz.Write(raw, 0, raw.Length);
-            return Convert.ToBase64String(ms.ToArray());
+            return ms.ToArray();
         }
 
-        private static byte[] UnGzipBase64(string b64)
+        /// <summary>FNV-1a over the gzip bytes — the per-file identity the absent-member
+        /// mirror skip compares (full-byte, per the M4 lesson: sampling misses same-length
+        /// changes).</summary>
+        internal static long FileSig(byte[] d)
         {
-            byte[] comp = Convert.FromBase64String(b64);
+            unchecked
+            {
+                ulong h = 14695981039346656037UL;
+                for (int i = 0; i < d.Length; i++) { h ^= d[i]; h *= 1099511628211UL; }
+                return (long)h;
+            }
+        }
+
+        /// <summary>v9: inflate a gzip block that arrived either as the attachment rider or
+        /// decoded from the legacy base64 field (payload.GetHsgGzip()). Null/empty → empty.</summary>
+        private static byte[] UnGzipBytes(byte[]? comp)
+        {
+            if (comp == null || comp.Length == 0) return Array.Empty<byte>();
             using var ins  = new MemoryStream(comp);
             using var gz   = new GZipStream(ins, CompressionMode.Decompress);
             using var outs = new MemoryStream();
             gz.CopyTo(outs);
             return outs.ToArray();
         }
+
 
         private static string SafeGameVersion()
         {

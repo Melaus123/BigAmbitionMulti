@@ -76,8 +76,9 @@ namespace BigAmbitionsMP
         /// Anything else (a future compression marker, a fragment frame) lands in bucket 0, visibly.</summary>
         private static int ParseType(byte[] d)
         {
-            // T1 compressed frame: the type rides bytes 4-5 exactly so this stays a six-byte peek.
-            if (d.Length > 6 && d[0] == 0x02 && d[1] == (byte)'B' && d[2] == (byte)'Z' && d[3] == (byte)'P')
+            // T1 compressed frame ('P') and v9 attachment frame ('A'): the type rides
+            // bytes 4-5 in both, so this stays a six-byte peek.
+            if (d.Length > 6 && d[0] == 0x02 && d[1] == (byte)'B' && d[2] == (byte)'Z' && (d[3] == (byte)'P' || d[3] == (byte)'A'))
             { int ft = d[4] | (d[5] << 8); return ft > 0 && ft < Slots ? ft : 0; }
             if (d.Length < 7 || d[0] != (byte)'{' || d[1] != (byte)'"' || d[2] != (byte)'t' || d[3] != (byte)'"' || d[4] != (byte)':') return 0;
             int t = 0, i = 5;

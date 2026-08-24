@@ -3302,6 +3302,14 @@ namespace BigAmbitionsMP
         /// instantiate a new BuildingForSale per entry with the host's
         /// price/sqm/acceptOfferRate fields.
         /// </summary>
+        /// <summary>v9 (T6): the standalone BuildingsForSale message lands here too —
+        /// marshalled, same replace-the-list routine the snapshot path uses.</summary>
+        public static void ApplyBuildingsForSaleMsg(System.Collections.Generic.List<BuildingForSaleInfo> infos)
+        {
+            if (infos == null) return;
+            RunOnMainThread(() => ApplyBuildingsForSale(infos));
+        }
+
         private static void ApplyBuildingsForSale(System.Collections.Generic.List<BuildingForSaleInfo> infos)
         {
             try
@@ -3671,12 +3679,31 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] {label} count failed: {ex.Message}"); }
         }
 
+        /// <summary>v9 review MIN-2: the map's colored filters only refreshed on FULL snapshot
+        /// applies — now that the WorldReady resend and the daily heal ship batches of
+        /// BusinessChange instead, refresh after those too. Trailing-edge debounce (each apply
+        /// pushes the window) so an 80-delta burst costs ONE scene-sweep refresh, after the
+        /// LAST delta — a leading throttle would refresh on the first and leave 79 stale.
+        /// Ticked from MPCanvasUI.Update.</summary>
+        private static float _mapFilterDirtyAt = -1f;
+
+        internal static void TickMapFilterDebounce()
+        {
+            if (_mapFilterDirtyAt < 0f) return;
+            if (UnityEngine.Time.unscaledTime - _mapFilterDirtyAt < 1f) return;   // still bursting — wait for quiet
+            _mapFilterDirtyAt = -1f;
+            RefreshMapFilters();
+        }
+
         public static void ApplyBusinessChange(BusinessInfo info)
         {
             RunOnMainThread(() =>
             {
                 if (ApplyBusinessInfoLocal(info))
+                {
                     Plugin.Logger.LogInfo($"[Patcher] Business change applied: {info.AddressKey} = '{info.BusinessName}'");
+                    _mapFilterDirtyAt = UnityEngine.Time.unscaledTime;
+                }
             });
         }
 

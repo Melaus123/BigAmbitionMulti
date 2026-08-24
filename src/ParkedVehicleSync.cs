@@ -79,6 +79,18 @@ namespace BigAmbitionsMP
         // written on the host tick (main) and entries dropped from network handlers.
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Vector3> _lastSentPosByPlayer = new();
         private const float ResyncMoveDistSq = 60f * 60f;
+        // v9 (field 2026-08-24): ordinary DRIVING crosses 60m every ~3s, so the "teleport"
+        // resync fired continuously and re-sent ~150 already-delivered cars each time. The
+        // 60m TRIGGER is the delivery pacing for a moving player and stays; what changes is
+        // the payload — a DIFF of only the cars this peer hasn't been given yet. This mirror
+        // of each client's data-set is exact: the client's _clientKnown only changes on full
+        // snapshots (rebased below), broadcast diffs (mirrored below) and these per-peer
+        // sends — distance never prunes it client-side. Peers whose world isn't ready yet
+        // (round-188 drop window) get the full nearby set every trigger, exactly the old
+        // behavior, because their applies are dropped and must re-arrive; their mirror
+        // starts only at WorldReady. Entry dropped by ForgetPeer (join/building-exit/reload)
+        // → next trigger redelivers everything nearby, same as today.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, HashSet<long>> _peerKnownCars = new();
 
         // ── Client state ─────────────────────────────────────────────────────
         // ALL metadata the host has told us about (regardless of distance).
@@ -157,6 +169,7 @@ namespace BigAmbitionsMP
         public static void Reset()
         {
             _hostTracked.Clear();
+            _peerKnownCars.Clear();   // v9: per-peer delivery mirrors die with the session
             _pendingAdds.Clear();
             _pendingRemoves.Clear();
             _diffTimer = 0f;
@@ -218,14 +231,35 @@ namespace BigAmbitionsMP
                 (_pendingAdds.Count > 0 || _pendingRemoves.Count > 0))
             {
                 _diffTimer = 0f;
-                MPServer.BroadcastParkedSnapshot(BuildDiffSnapshot());
+                var diff = BuildDiffSnapshot();
+                MPServer.BroadcastParkedSnapshot(diff);
+                // v9: a broadcast diff reaches every applying client — mirror it into each
+                // peer's known-set (only world-ready peers have one; loaders drop the diff).
+                foreach (var ks in _peerKnownCars.Values)
+                {
+                    foreach (var c in diff.Cars) if (c != null) ks.Add(c.Key);
+                    foreach (var k in diff.RemovedKeys) ks.Remove(k);
+                }
             }
 
             // Periodic full snapshot for resync (handles new joiners + drift).
             if (_fullTimer >= FullSnapshotInterval)
             {
                 _fullTimer = 0f;
-                MPServer.BroadcastParkedSnapshot(BuildFullSnapshot());
+                var full = BuildFullSnapshot();
+                MPServer.BroadcastParkedSnapshot(full);
+                // v9: the client's full-apply REPLACES its data set with exactly this payload —
+                // rebase each world-ready peer's mirror to match; a loading peer dropped it.
+                foreach (var (_, pid) in MPServer.ConnectedClientPeers())
+                {
+                    if (MPServer.IsPlayerApplying(pid))
+                    {
+                        var ks = new HashSet<long>();
+                        foreach (var c in full.Cars) if (c != null) ks.Add(c.Key);
+                        _peerKnownCars[pid] = ks;
+                    }
+                    else _peerKnownCars.TryRemove(pid, out _);
+                }
             }
 
             // 30s heartbeat — diagnostics only.
@@ -316,12 +350,15 @@ namespace BigAmbitionsMP
 
         // ── Per-peer instant resync (teleport / building-exit / fast-travel) ──
 
-        /// <summary>Full parked snapshot of cars near a single point — no side
+        /// <summary>Cars near a single point that `known` doesn't list yet, as a DIFF
+        /// payload (adds only — the client's diff apply is add/update, so re-delivery is
+        /// idempotent and nothing already held gets despawned). known == null → everything
+        /// in range (a peer with no mirror: pre-WorldReady, or just forgotten). No side
         /// effects on the broadcast timers/queues (unlike BuildFullSnapshot, which
         /// flushes diffs and resets the full-snapshot cadence).</summary>
-        private static ParkedSnapshotPayload BuildSnapshotAround(Vector3 center)
+        private static ParkedSnapshotPayload BuildDeltaAround(Vector3 center, HashSet<long>? known)
         {
-            var snap = new ParkedSnapshotPayload { IsFullSnapshot = true };
+            var snap = new ParkedSnapshotPayload { IsFullSnapshot = false };
             try
             {
                 var dead = new List<long>();
@@ -329,6 +366,7 @@ namespace BigAmbitionsMP
                 {
                     if (kv.Value == null) { dead.Add(kv.Key); continue; }
                     if (!kv.Value.activeInHierarchy) continue;
+                    if (known != null && known.Contains(kv.Key)) continue;   // v9: they already hold this car
                     var pos = kv.Value.transform.position;
                     float dx = pos.x - center.x, dy = pos.y - center.y, dz = pos.z - center.z;
                     if (dx * dx + dy * dy + dz * dz > HostSendRadiusSq) continue;
@@ -337,7 +375,7 @@ namespace BigAmbitionsMP
                 }
                 foreach (var k in dead) _hostTracked.Remove(k);
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[ParkedSync] BuildSnapshotAround: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[ParkedSync] BuildDeltaAround: {ex.Message}"); }
             return snap;
         }
 
@@ -347,7 +385,9 @@ namespace BigAmbitionsMP
         /// at the next 30s full snapshot.  Thread-safe.</summary>
         public static void ForgetPeer(string playerId)
         {
-            if (!string.IsNullOrEmpty(playerId)) _lastSentPosByPlayer.TryRemove(playerId, out _);
+            if (string.IsNullOrEmpty(playerId)) return;
+            _lastSentPosByPlayer.TryRemove(playerId, out _);
+            _peerKnownCars.TryRemove(playerId, out _);   // v9: full redelivery on the next displacement pass
         }
 
         /// <summary>Host: for each connected client, if they've moved far since we
@@ -368,9 +408,28 @@ namespace BigAmbitionsMP
                         if (dx * dx + dy * dy + dz * dz < ResyncMoveDistSq) continue;   // not far enough — wait
                     }
                     _lastSentPosByPlayer[pid] = pos;
-                    var snap = BuildSnapshotAround(pos);
+                    // v9 (review B1): mirror only a peer whose Settled/Running report arrived
+                    // THIS load — a loading client DROPS applies (round-188), so marking cars
+                    // "delivered" during that window would silently strand them until the next
+                    // 30s full broadcast. The WorldReady message/flag is NOT that edge: the
+                    // flag is sticky across reconnects after the startup release, and the
+                    // message can precede the client's 3 s settle window.
+                    HashSet<long>? known = null;
+                    if (MPServer.IsPlayerApplying(pid) &&
+                        !_peerKnownCars.TryGetValue(pid, out known))
+                        _peerKnownCars[pid] = known = new HashSet<long>();
+                    var snap = BuildDeltaAround(pos, known);
+                    if (known != null)
+                    {
+                        // Already-delivered area — nothing new to say, zero bytes (the old
+                        // code re-sent all ~150 nearby cars here, every ~3s while driving).
+                        if (snap.Cars.Count == 0) continue;
+                        foreach (var c in snap.Cars) known.Add(c.Key);
+                    }
+                    // A not-yet-ready peer still gets the send even when empty: the client's
+                    // world-ready gate waits on this receipt (round-205).
                     MPServer.SendParkedSnapshotTo(peer, snap);
-                    Plugin.Logger.LogInfo($"[ParkedSync] instant resync to '{pid}' (moved/joined) — {snap.Cars.Count} car(s).");
+                    Plugin.Logger.LogInfo($"[ParkedSync] instant resync to '{pid}' (moved/joined) — {snap.Cars.Count} new car(s){(known != null ? $", {known.Count} mirrored" : " (pre-ready: full set)")}.");
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[ParkedSync] TickPeerDisplacement: {ex.Message}"); }

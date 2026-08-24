@@ -52,6 +52,7 @@ namespace BigAmbitionsMP
                 // writes must SHARE the snapshot's lane, or an older snapshot can overtake-revert a
                 // newer delta (BusinessChange had no version guard and no re-assert path).
                 case (int)MessageType.BusinessChange:
+                case (int)MessageType.BuildingsForSale:   // v9 review M5: writes gi.buildingsForSale, which BusinessSnapshot also writes
                 case (int)MessageType.InteriorCargoSync:
                 case (int)MessageType.RadioState:
                 // Review M6 — the megabyte class that was missed: a rejoiner's disconnect-save upload

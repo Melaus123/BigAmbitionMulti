@@ -520,7 +520,6 @@ namespace BigAmbitionsMP
                 var payload = new LoadDataPayload
                 {
                     SessionName   = adopt,
-                    HsgGzipBase64 = data.Value.b64,
                     RawLength     = data.Value.raw,
                     MetaJson      = MPSaveCoordinator.ReadMemberMetaJson(servedFrom, stable),   // round-275b: keep their copy datable
                     Money         = cash,
@@ -534,7 +533,9 @@ namespace BigAmbitionsMP
                     HostEpoch     = m.HostEpoch,
                     LoadGen       = MintLoadGen(pid),   // round-284 load ticket
                 };
-                Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", payload));
+                var ldEnv = MessageEnvelope.Create(MessageType.LoadData, "host", payload);
+                ldEnv.Attachment = data.Value.gz;   // v9: raw gzip rides the attachment frame
+                Send(peer, ldEnv);
                 Plugin.Logger.LogInfo($"[Server] Sent LoadData to '{pid}' ({data.Value.raw}B, ${cash:F0}).");
             }
         }
@@ -735,6 +736,7 @@ namespace BigAmbitionsMP
             _clients.Clear();
             MPSaveCoordinator.ConsumeDevHostLoadAs("session stop");   // round-285: the impersonation override dies with the session
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _peerPhaseSeq.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
+            ClearV9SessionMaps();   // v9 review MIN-5: mirror memory, join baselines, applying latches die with every (re)arm
             lock (_joinBaselineDone) _joinBaselineDone.Clear();   // round-276: baseline latches die with the session
             _expectedLoadGen.Clear(); _parkedBaselineGen.Clear(); _firedLoadGen.Clear(); _markedInGame.Clear();   // round-284: load-ticket state too (the counter itself never resets — a reissued gen could match a stale echo)
         }
@@ -761,6 +763,7 @@ namespace BigAmbitionsMP
 
             // Re-arm the startup pause hold for this new game.
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _peerPhaseSeq.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
+            ClearV9SessionMaps();   // v9 review MIN-5: mirror memory, join baselines, applying latches die with every (re)arm
             lock (_joinBaselineDone) _joinBaselineDone.Clear();   // round-276: baseline latches die with the session
             _expectedLoadGen.Clear(); _parkedBaselineGen.Clear(); _firedLoadGen.Clear(); _markedInGame.Clear();   // round-284: load-ticket state too (the counter itself never resets — a reissued gen could match a stale echo)
 
@@ -903,6 +906,7 @@ namespace BigAmbitionsMP
 
             // Re-arm the startup pause hold for this new game.
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _peerPhaseSeq.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
+            ClearV9SessionMaps();   // v9 review MIN-5: mirror memory, join baselines, applying latches die with every (re)arm
             lock (_joinBaselineDone) _joinBaselineDone.Clear();   // round-276: baseline latches die with the session
             _expectedLoadGen.Clear(); _parkedBaselineGen.Clear(); _firedLoadGen.Clear(); _markedInGame.Clear();   // round-284: load-ticket state too (the counter itself never resets — a reissued gen could match a stale echo)
 
@@ -982,8 +986,21 @@ namespace BigAmbitionsMP
             // identity and the business-snapshot sig die with the connection. Marshalled: both maps are
             // main-thread-owned.
             GameStatePatcher.EnqueueOnMainThread(() => _lastBizSnapSig.Remove(gonePeerId));
+            GameStatePatcher.EnqueueOnMainThread(() => _joinBizSigs.Remove(gonePeerId));   // v9: same recycled-id rule
             if (_peerNames.TryGetValue(peer.Id, out var goneTrafficPid) && !string.IsNullOrEmpty(goneTrafficPid))
+            {
+                ClearPlayerApplying(goneTrafficPid);   // v9: the applying latch is per-connection
                 GameStatePatcher.EnqueueOnMainThread(() => TrafficSync.ForgetPeer(goneTrafficPid));
+                // v9 review MAJOR-3: the parked delivery mirror and last-sent position are
+                // per-connection state too — without this, a rejoiner's stale mirror suppresses
+                // every displacement send until MarkPlayerInGame happens to fire.
+                GameStatePatcher.EnqueueOnMainThread(() => ParkedVehicleSync.ForgetPeer(goneTrafficPid));
+            }
+            // v9 mirror memory is keyed by the client's STABLE id (not the recycled peer id) — the
+            // record of what THIS connection was sent dies with it; a rejoiner re-receives once.
+            if (_peerNames.TryGetValue(peer.Id, out var goneMirrorPid) && !string.IsNullOrEmpty(goneMirrorPid)
+                && StableIdByPlayer.TryGetValue(goneMirrorPid, out var goneStable))
+                ForgetMirrorMemory(goneStable);
 
             string? leftPlayer = null;
 
@@ -1549,6 +1566,11 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.MirrorAck:
+                    // v9: mirror delivery confirmation — dict write, safe on the poll thread.
+                    RecordMirrorAck(senderPid, env.GetPayload<MirrorAckPayload>());
+                    break;
+
                 case MessageType.SaveData:
                 {
                     // Pure C# decompress + file write + manifest merge (no IL2CPP)
@@ -1557,6 +1579,7 @@ namespace BigAmbitionsMP
                     // id, or one client could overwrite another player's save.
                     var sd = env.GetPayload<SaveDataPayload>();
                     if (sd?.Slot == null) break;
+                    sd.HsgRaw = env.Attachment;   // v9 rider → payload
                     if (!StableIdByPlayer.TryGetValue(senderPid, out var expectStable)
                         || string.IsNullOrEmpty(expectStable) || sd.Slot.StableId != expectStable)
                     {
@@ -2453,6 +2476,7 @@ namespace BigAmbitionsMP
                             // Parked cars near the joiner — resync as soon as their position is known.
                             ParkedVehicleSync.ForgetPeer(joinName);
                             TrafficSync.ForgetPeer(joinName);   // review B1: same rule for the traffic identity map
+                            ClearPlayerApplying(joinName);      // v9: fresh load — they drop applies until Settled/Running
                         }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Late-join snapshot: {ex.Message}"); }
                     });
@@ -2630,6 +2654,7 @@ namespace BigAmbitionsMP
                     BroadcastChat("", $"— {DisplayNameFor(playerId)} reconnected.");
                     ParkedVehicleSync.ForgetPeer(playerId);   // resync their parked cars after the reload
                     TrafficSync.ForgetPeer(playerId);         // review B1: same rule for the traffic identity map
+                    ClearPlayerApplying(playerId);            // v9: mid-session reload — applies drop again until Settled/Running
                     // Lift the pause we applied when they dropped (only the
                     // disconnect pause — a deliberate manual pause stays).
                     ResumeFromDisconnectPause();
@@ -3032,6 +3057,17 @@ namespace BigAmbitionsMP
 
             bool changed = !_peerPhase.TryGetValue(p.PlayerId, out var prevPh) || prevPh.phase != p.Phase;
             _peerPhase[p.PlayerId] = (p.Phase, TickMs64);
+            // v9 (review B1/M4): the applying-edge. First Settled/Running report of this load
+            // latches "this client applies streams now" AND fires the round-197 one-shot
+            // resend — HERE, not at the WorldReady message: the 20 s deadline path sends
+            // WorldReady while the client still quiesce-drops, which ate the entire burst
+            // (rivals + business deltas + for-sale list + rosters) with no second re-cover.
+            // Settled/Running provably follow the quiesce end AND the 3 s settle window.
+            if ((p.Phase == "Settled" || p.Phase == "Running") && _peerApplying.TryAdd(p.PlayerId, 1))
+            {
+                string applyPid = p.PlayerId;
+                GameStatePatcher.EnqueueOnMainThread(() => ResendJoinerState(applyPid));
+            }
             // Round-276b (verifier finding 5): a bare report winning the race must not
             // silence a later, detailed report of the SAME phase — the detail is the
             // probe's whole payload.  Re-log when the detail changes, phase change or not.
@@ -3246,6 +3282,28 @@ namespace BigAmbitionsMP
             if (release) ReleaseStartupHold("remaining players ready (menu-bailers excused)");
         }
 
+        /// <summary>v9 (review B1): per-CONNECTION-per-load latch — this player can APPLY
+        /// streams, not just receive them. Set by the 'Settled'/'Running' phase reports
+        /// (round-271's own "the joiner can contribute" edge; 'Settled' is one-shot and the
+        /// lifecycle's 'Running' report is its per-load retry — round-274/M3). Cleared on
+        /// disconnect and on the authenticated per-load join/reload signals (the same sites
+        /// that call ParkedVehicleSync.ForgetPeer). Deliberately NOT derived from
+        /// _worldReadyPlayers: that set is sticky once the startup hold releases (a rejoiner
+        /// stays "ready" while loading), and the WorldReady MESSAGE itself can precede the
+        /// client's 3 s settle window — both edges mark cars delivered to a client that
+        /// provably drops them.</summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _peerApplying = new();
+
+        internal static bool IsPlayerApplying(string playerId)
+            => !string.IsNullOrEmpty(playerId) && _peerApplying.ContainsKey(playerId);
+
+        /// <summary>v9: the per-load reset for the applying latch — called wherever the code
+        /// already treats the player as freshly (re)loading (ForgetPeer sites, disconnect).</summary>
+        internal static void ClearPlayerApplying(string playerId)
+        {
+            if (!string.IsNullOrEmpty(playerId)) _peerApplying.TryRemove(playerId, out _);
+        }
+
         public static void MarkWorldReady(string playerId, bool hostSelf = false)
         {
             bool release = false;
@@ -3302,15 +3360,12 @@ namespace BigAmbitionsMP
             // A player whose world just loaded missed any earlier loan-state
             // broadcast (session-load ledger, joins mid-loan) — re-broadcast.
             GameStatePatcher.EnqueueOnMainThread(MPHub.BroadcastLoansIfAny);
-            // Round-197 (drop-list audit): re-send every event-driven one-shot this
-            // joiner's quiesce window may have eaten. The round-188 drop list claimed
-            // "everything dropped is recurrence-covered" — false for these four, each
-            // a field bug or a bug-in-waiting (rivals roster: field 2026-07-31; staff
-            // rosters: unstaffed partner shops; business deltas + duty state: silent
-            // divergence until the next edit/toggle). WorldReady is the first moment
-            // provably AFTER the drop window — the loans line above pioneered this
-            // anchor; now everything one-shot uses it.
-            GameStatePatcher.EnqueueOnMainThread(() => ResendJoinerState(senderPid));
+            // Round-197's one-shot resend used to fire HERE ("WorldReady is the first moment
+            // provably AFTER the drop window") — v9 review M4 showed that is false on the
+            // 20 s deadline path, where WorldReady goes out while the client still
+            // quiesce-drops and the whole burst is eaten. The resend now fires on the
+            // Settled/Running applying-edge in RecordPhaseReport, which provably follows
+            // both the quiesce end and the settle window.
         }
 
         /// <summary>Round-197: everything a joiner's load-window drop list may have
@@ -3323,11 +3378,18 @@ namespace BigAmbitionsMP
                 if (peer == null) return;
                 SendRivalsSnapshotTo(peer);
                 var bsnap = BusinessSync.BuildFullSnapshot();
-                var benv  = MessageEnvelope.Create(MessageType.BusinessSnapshot, "host", bsnap);
-                var bdata = benv.Serialize();
-                long bsig = BizSnapSig(bdata);
-                bool bizResent = !_lastBizSnapSig.TryGetValue(peer.Id, out var had) || had != bsig;
-                if (bizResent) { _lastBizSnapSig[peer.Id] = bsig; peer.Send(bdata, reliable: true); }
+                // v9 (T6): the join already delivered the full table seconds ago, and joining
+                // itself always touches a few entries — so the old whole-table sig almost never
+                // matched and this resend shipped ~0.8 MB per join. Ship only what changed since
+                // the baseline captured at the join send (SendBusinessDeltaTo handles the
+                // vanished-business / no-baseline / over-cap fallbacks to the full table).
+                string bizLine = SendBusinessDeltaTo(peer, bsnap, PerBusinessSigs(bsnap));
+                // v9: a daily for-sale flip that landed in this joiner's load-window drop
+                // list has no other re-cover until the NEXT in-game day — ship the live list.
+                var fsList = BusinessSync.CurrentForSaleList();
+                if (fsList != null)
+                    peer.Send(MessageEnvelope.Create(MessageType.BuildingsForSale, "host",
+                              new BuildingsForSalePayload { BuildingsForSale = fsList }));
                 int rosters = 0;
                 foreach (var r in MPRegisterSync.SnapshotRosters())   // stored client rosters; also nudges the host's own publishes
                 {
@@ -3336,7 +3398,7 @@ namespace BigAmbitionsMP
                 }
                 int duty = MPRegisterSync.SendDutyStateTo(pid);
                 MPTakeover.HostHealUnfurnishedShopsFor(pid);   // round-204d: claimed-but-unfurnished takeover shops
-                Plugin.Logger.LogInfo($"[Server] World-ready re-send to '{pid}': rivals + {(bizResent ? bsnap.Businesses.Count + " businesses" : "business table UNCHANGED — skipped (wave-2)")} + {rosters} stored roster(s) (own publishes nudged) + {duty} duty entr(ies).");
+                Plugin.Logger.LogInfo($"[Server] World-ready re-send to '{pid}': rivals + {bizLine} + {rosters} stored roster(s) (own publishes nudged) + {duty} duty entr(ies).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] ResendJoinerState: {ex.Message}"); }
         }
@@ -4222,6 +4284,7 @@ namespace BigAmbitionsMP
         {
             var p = env.GetPayload<SaveDataPayload>();
             if (p == null) return;
+            p.HsgRaw = env.Attachment;   // v9 rider → payload
             if (!StableIdByPlayer.TryGetValue(senderPid, out var stable) || string.IsNullOrEmpty(stable)) return;
             string session = MPSaveCoordinator.ActiveSessionName;
             GameStatePatcher.EnqueueOnMainThread(() =>
@@ -4285,15 +4348,17 @@ namespace BigAmbitionsMP
                     if (kv.Value == stable) { BuildingRealEstateOwners[kv.Key] = pid; rekeyed++; }
                 if (rekeyed > 0) Plugin.Logger.LogInfo($"[Server] Re-keyed {rekeyed} reserved building(s) to '{pid}'.");
                 var m = MPSaveManager.ReadManifest(servedFrom);
-                Send(peer, MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
+                var midEnv = MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
                 {
-                    SessionName = adopt, HsgGzipBase64 = data.Value.b64, RawLength = data.Value.raw, Money = cash,
+                    SessionName = adopt, RawLength = data.Value.raw, Money = cash,
                     MetaJson = MPSaveCoordinator.ReadMemberMetaJson(servedFrom, stable),   // round-275b: keep their copy datable
                     MoneyKnown = cash != 0f || GetKnownCash(pid) >= 0f,   // round-224: 0-and-unstreamed = unknown
                     // Handoff slice 4: identity/day/epoch for the joiner's log-only diagnostics.
                     WorldDay = m?.WorldDay ?? 0, PlaythroughId = !string.IsNullOrEmpty(m?.PlaythroughId) ? m.PlaythroughId : MPSaveCoordinator.ActivePlaythroughId, HostEpoch = m?.HostEpoch ?? 0,
                     LoadGen = MintLoadGen(pid),   // round-284 load ticket
-                }));
+                });
+                midEnv.Attachment = data.Value.gz;   // v9: raw gzip rides the attachment frame
+                Send(peer, midEnv);
                 Plugin.Logger.LogInfo($"[Server] Mid-session join: sent LoadData to '{pid}' (source='{servedFrom}', adopt='{adopt}', {data.Value.raw}B, ${cash:F0}); world state follows once their scene loads.");
                 return true;
             }
@@ -5153,6 +5218,109 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>v9 (T6): per-peer map of AddressKey → per-business FNV sig, captured at every
+        /// FULL snapshot send to that peer. The WorldReady resend compares against this and ships
+        /// only the businesses that actually changed since — the whole-table sig almost never
+        /// matched (joining itself always touches a few entries), so the "dedup" re-sent ~0.8 MB
+        /// per join. Keyed by recycled peer id → pruned at disconnect like _lastBizSnapSig.</summary>
+        private static readonly Dictionary<int, Dictionary<string, long>> _joinBizSigs = new();
+
+        private static Dictionary<string, long> PerBusinessSigs(BusinessSnapshotPayload snap)
+        {
+            var map = new Dictionary<string, long>(snap.Businesses.Count);
+            foreach (var b in snap.Businesses)
+            {
+                if (b == null || string.IsNullOrEmpty(b.AddressKey)) continue;
+                map[b.AddressKey] = BizSnapSig(System.Text.Encoding.UTF8.GetBytes(Newtonsoft.Json.JsonConvert.SerializeObject(b)));
+            }
+            return map;
+        }
+
+        /// <summary>Review MIN-4: each BusinessChange (~1.3 KB) ships uncompressed (below the
+        /// 4 KB deflate floor) while the full table deflates to ~825 KB — the delta stays the
+        /// cheaper form until several hundred entries. Field 2026-08-24 (P-JOINDELTA): a fresh
+        /// host load's join window really does churn ~109 businesses, so the original cap of 80
+        /// forced the full-book fallback on exactly the case the delta was built for; 200 keeps
+        /// a wide margin over measured churn while still bounding a pathological burst.</summary>
+        private const int BizDeltaCap = 200;
+
+        /// <summary>v9: send this peer only the businesses whose per-business sig differs from
+        /// its stored baseline; fall back to the full table when a business VANISHED (a delta
+        /// can't express removal), no baseline exists, or the delta exceeds BizDeltaCap.
+        /// Updates the peer's baseline either way (freshSigs is shared read-only across peers —
+        /// replaced wholesale, never mutated). Returns a log fragment. MAIN THREAD.</summary>
+        private static string SendBusinessDeltaTo(MPLink peer, BusinessSnapshotPayload bsnap, Dictionary<string, long> freshSigs)
+        {
+            bool haveBase = _joinBizSigs.TryGetValue(peer.Id, out var baseline);
+            bool removedSince = false;
+            var changed = new List<BusinessInfo>();
+            if (haveBase)
+            {
+                removedSince = baseline.Keys.Any(k => !freshSigs.ContainsKey(k));
+                if (!removedSince)
+                    foreach (var b in bsnap.Businesses)
+                    {
+                        if (b == null || string.IsNullOrEmpty(b.AddressKey)) continue;
+                        if (baseline.TryGetValue(b.AddressKey, out var oldSig)
+                            && freshSigs.TryGetValue(b.AddressKey, out var newSig) && oldSig == newSig) continue;
+                        changed.Add(b);
+                    }
+            }
+            if (haveBase && !removedSince && changed.Count <= BizDeltaCap)
+            {
+                foreach (var b in changed)
+                    peer.Send(MessageEnvelope.Create(MessageType.BusinessChange, "host",
+                              new BusinessChangePayload { Info = b }));
+                _joinBizSigs[peer.Id] = freshSigs;
+                return changed.Count == 0 ? "business table UNCHANGED — skipped"
+                                          : changed.Count + " changed business delta(s) (v9 — was a full table)";
+            }
+            var benv  = MessageEnvelope.Create(MessageType.BusinessSnapshot, "host", bsnap);
+            var bdata = benv.Serialize();
+            _lastBizSnapSig[peer.Id] = BizSnapSig(bdata);
+            _joinBizSigs[peer.Id]    = freshSigs;
+            peer.Send(bdata, reliable: true);
+            // PROBE-START: P-JOINDELTA — field run 2026-08-24 hit "delta over the cap" with an
+            // unknown changed-count (>80 of 826 businesses "changed" within ~2 min of a join is
+            // suspicious: real churn, or a sig-unstable field drifting the whole table?). Name
+            // the count and three examples so the next run answers it.
+            string probeDetail = "";
+            try
+            {
+                if (removedSince && baseline != null)
+                    probeDetail = "; vanished e.g. " + string.Join(", ", baseline.Keys.Where(k => !freshSigs.ContainsKey(k)).Take(3));
+                else if (changed.Count > 0)
+                    probeDetail = $"; changed={changed.Count} e.g. " + string.Join(", ", changed.Take(3).Select(b => b.AddressKey));
+            }
+            catch { }
+            // PROBE-END: P-JOINDELTA
+            return bsnap.Businesses.Count + " businesses (full — "
+                   + (removedSince ? "a business vanished" : !haveBase ? "no baseline" : "delta over the cap") + probeDetail + ")";
+        }
+
+        /// <summary>v9 review MAJOR-1: the daily full-table broadcast this release removed was
+        /// also the only recurring drift heal — a client that silently missed one BusinessChange
+        /// stayed wrong until the audit tripped. This is its change-bounded replacement: once
+        /// per in-game day (the for-sale flip), diff each applying client's baseline and re-send
+        /// only the drifted businesses. MAIN THREAD.</summary>
+        public static void HealBusinessDeltas()
+        {
+            if (!_running) return;
+            try
+            {
+                var snap = BusinessSync.BuildFullSnapshot();
+                var sigs = PerBusinessSigs(snap);
+                foreach (var (peer, pid) in ConnectedClientPeers())
+                {
+                    if (!IsPlayerApplying(pid)) continue;   // a loading client is covered by the join/resend path
+                    string line = SendBusinessDeltaTo(peer, snap, sigs);
+                    if (!line.StartsWith("business table UNCHANGED"))
+                        Plugin.Logger.LogInfo($"[Server] daily business heal → '{pid}': {line}");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] HealBusinessDeltas: {ex.Message}"); }
+        }
+
         /// <summary>Send the full business table to a single peer (on connect).</summary>
         public static void SendBusinessSnapshotTo(MPLink peer)
         {
@@ -5166,6 +5334,7 @@ namespace BigAmbitionsMP
                 var data = env.Serialize();
                 int bytes = data.Length;
                 _lastBizSnapSig[peer.Id] = BizSnapSig(data);
+                _joinBizSigs[peer.Id]    = PerBusinessSigs(snap);   // v9: baseline for the WorldReady delta resend
                 peer.Send(data, reliable: true);
                 MPLoadProfiler.Mark($"HOST sent BusinessSnapshot to '{peer.Id}': {bytes} bytes ({snap.Businesses.Count} buildings)");
                 Plugin.Logger.LogInfo($"[Server] Sent business snapshot to '{peer.Id}': {snap.Businesses.Count} buildings, {snap.BuildingsForSale.Count} for-sale, {bytes}B on the wire (deflated — SizeWatch reports the raw size).");
@@ -5635,6 +5804,19 @@ namespace BigAmbitionsMP
         private static int _lastFullSnapshotTick = -100000;
 
         /// <summary>Broadcast the full business table to all peers (on for-sale list change).</summary>
+        /// <summary>v9 (T6): the buy-marketplace list alone — the daily for-sale refresh's
+        /// replacement for a full business-snapshot broadcast.</summary>
+        public static void BroadcastBuildingsForSale(List<BuildingForSaleInfo> list)
+        {
+            if (!_running || list == null) return;
+            try
+            {
+                Broadcast(MessageEnvelope.Create(MessageType.BuildingsForSale, "host",
+                          new BuildingsForSalePayload { BuildingsForSale = list }));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BroadcastBuildingsForSale: {ex.Message}"); }
+        }
+
         public static void BroadcastBusinessSnapshot()
         {
             if (!_running) return;
@@ -5653,6 +5835,10 @@ namespace BigAmbitionsMP
                 var env = MessageEnvelope.Create(MessageType.BusinessSnapshot, "host", snap);
                 int bytes = env.Serialize().Length;
                 Broadcast(env);
+                // v9: every connected peer just received this full table — rebase their
+                // per-business baselines so the WorldReady delta compares against reality.
+                var sigs = PerBusinessSigs(snap);
+                foreach (var pr in _clients.Keys) _joinBizSigs[pr.Id] = sigs;
                 MPLoadProfiler.Mark($"HOST broadcast BusinessSnapshot: {bytes} bytes ({snap.Businesses.Count} buildings)");
                 Plugin.Logger.LogInfo($"[Server] Broadcast business snapshot: {snap.Businesses.Count} buildings, {snap.BuildingsForSale.Count} for-sale.");
             }
@@ -5933,12 +6119,51 @@ namespace BigAmbitionsMP
         /// client EXCEPT the member whose .hsg it is (their own local save writes that
         /// file — sending it back could only race it). exceptStable "" = everyone
         /// (manifest-only pieces).</summary>
-        public static void SendStoreMirror(StoreMirrorPayload payload, string exceptStable)
+        /// <summary>v9: per-client memory of which mirrored file signature each stableId was
+        /// already sent this session — absent members' carried-forward .hsg is byte-identical
+        /// sweep after sweep, and re-shipping ~2 MB per save per client bought nothing.
+        /// Key = receiving client's stableId → (fileKey → FNV sig). Cleared per-client at
+        /// disconnect (their next session re-receives once) and wholesale at server stop.</summary>
+        private static readonly Dictionary<string, Dictionary<string, long>> _mirrorSentByStable = new();
+
+        internal static void ForgetMirrorMemory(string stableId)
+        {
+            if (string.IsNullOrEmpty(stableId)) return;
+            lock (_mirrorSentByStable) _mirrorSentByStable.Remove(stableId);
+        }
+
+        /// <summary>v9 review MIN-5: the session-scoped v9 maps, cleared together at Stop and
+        /// at every StartNewGame/StartLoadGame re-arm (main thread on all callers).</summary>
+        private static void ClearV9SessionMaps()
+        {
+            lock (_mirrorSentByStable) _mirrorSentByStable.Clear();
+            _joinBizSigs.Clear();
+            _peerApplying.Clear();
+        }
+
+        /// <summary>v9 review BLOCKER-2: a client confirmed it holds a mirrored .hsg (written to
+        /// its store, or already present via the shared-store token). This is the ONLY writer of
+        /// the skip memory — poll thread, lock-guarded.</summary>
+        internal static void RecordMirrorAck(string senderPid, MirrorAckPayload p)
+        {
+            if (p == null || string.IsNullOrEmpty(senderPid) || p.Sig == 0) return;
+            if (!StableIdByPlayer.TryGetValue(senderPid, out var receiverStable) || string.IsNullOrEmpty(receiverStable)) return;
+            string fileKey = p.SessionName + "|" + p.StableId;
+            lock (_mirrorSentByStable)
+            {
+                if (!_mirrorSentByStable.TryGetValue(receiverStable, out var sentMap))
+                    _mirrorSentByStable[receiverStable] = sentMap = new Dictionary<string, long>();
+                sentMap[fileKey] = p.Sig;
+            }
+        }
+
+        public static void SendStoreMirror(StoreMirrorPayload payload, string exceptStable, string fileKey = "", long fileSig = 0)
         {
             if (!_running || payload == null) return;
             try
             {
                 var env = MessageEnvelope.Create(MessageType.StoreMirror, "host", payload);
+                env.Attachment = payload.HsgRaw;   // v9: raw gzip rides the attachment frame (JsonIgnore keeps it out of Data)
                 // Round-282: serialize ONCE for the whole fan-out (Broadcast already
                 // does this) — on the megabyte class, per-peer serialization was
                 // re-encoding 1-2MB of base64 for every client.
@@ -5965,16 +6190,33 @@ namespace BigAmbitionsMP
                 // superseding piece for the same character is by definition the fresher
                 // snapshot of that file.  Partially-sent payloads are never dropped.
                 string key = payload.SessionName + "|" + payload.StableId;
+                int skipped = 0;
                 foreach (var peer in _clients.Keys)
                 {
                     if (!_peerNames.TryGetValue(peer.Id, out var pid)) continue;
-                    if (!string.IsNullOrEmpty(exceptStable)
-                        && StableIdByPlayer.TryGetValue(pid, out var st) && st == exceptStable) continue;
+                    string peerStable = StableIdByPlayer.TryGetValue(pid, out var st) ? st : "";
+                    if (!string.IsNullOrEmpty(exceptStable) && peerStable == exceptStable) continue;
+                    // v9 absent-member skip: this exact file already went to this client.
+                    if (fileKey.Length > 0 && fileSig != 0 && peerStable.Length > 0)
+                    {
+                        lock (_mirrorSentByStable)
+                        {
+                            if (_mirrorSentByStable.TryGetValue(peerStable, out var sentMap)
+                                && sentMap.TryGetValue(fileKey, out var had) && had == fileSig)
+                            { skipped++; continue; }
+                        }
+                    }
                     // Per-peer isolation (review fix 2026-07-23): one throwing peer must
                     // not skip the remaining peers' mirror piece.
+                    // v9 review BLOCKER-2: delivery is recorded ONLY when the client's
+                    // MirrorAck arrives (RecordMirrorAck) — never here. SendPaced merely
+                    // QUEUES onto a lane whose documented loss recovery is "the next save
+                    // re-mirrors"; a send-time record silently deleted that recovery, with
+                    // character loss on host handoff as the end state.
                     try { peer.SendPaced(bytes, key); }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendStoreMirror → '{pid}': {ex.Message}"); }
                 }
+                if (skipped > 0) Plugin.Logger.LogInfo($"[Server] Store mirror '{key}': skipped {skipped} client(s) that already hold this exact file (v9).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendStoreMirror: {ex.Message}"); }
         }

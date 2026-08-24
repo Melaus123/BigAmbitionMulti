@@ -95,6 +95,24 @@ namespace BigAmbitionsMP
         private static int _lastSentForSaleHash = 0;
 
         /// <summary>Read every entry from gi.buildingsForSale into the snapshot.</summary>
+        /// <summary>v9: the live for-sale list for the WorldReady re-send (a daily flip that
+        /// lands in a joiner's load-window drop list must still reach them). Null when no world.</summary>
+        internal static System.Collections.Generic.List<BuildingForSaleInfo>? CurrentForSaleList()
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null) return null;
+                var probe = new BusinessSnapshotPayload();
+                ReadBuildingsForSale(gi, probe);
+                // Review MIN-3: the reader swallows per-entry exceptions — a partial read shipped
+                // as truth would WIPE the receiver's marketplace. Count mismatch = don't send.
+                if (probe.BuildingsForSale.Count != (gi.buildingsForSale?.Count ?? 0)) return null;
+                return probe.BuildingsForSale;
+            }
+            catch { return null; }
+        }
+
         private static void ReadBuildingsForSale(GameInstance gi, BusinessSnapshotPayload snap)
         {
             try
@@ -165,9 +183,14 @@ namespace BigAmbitionsMP
                 ReadBuildingsForSale(gi, probe);
                 int hash = ComputeForSaleHash(probe.BuildingsForSale);
                 if (hash == _lastSentForSaleHash) return;
-                Plugin.Logger.LogInfo($"[BusinessSync] BuildingsForSale changed (hash 0x{_lastSentForSaleHash:X8} → 0x{hash:X8}, count={probe.BuildingsForSale.Count}). Broadcasting full snapshot.");
+                // v9 (T6): only the ~15-entry list travels — this used to broadcast the FULL
+                // ~826-building snapshot (~1 MB/client) once per in-game day to move it.
+                Plugin.Logger.LogInfo($"[BusinessSync] BuildingsForSale changed (hash 0x{_lastSentForSaleHash:X8} → 0x{hash:X8}, count={probe.BuildingsForSale.Count}). Broadcasting for-sale list (v9).");
                 _lastSentForSaleHash = hash;
-                MPServer.BroadcastBusinessSnapshot();
+                MPServer.BroadcastBuildingsForSale(probe.BuildingsForSale);
+                // v9 review MAJOR-1: the old full-table broadcast doubled as the daily drift
+                // heal — run its change-bounded replacement on the same once-a-day trigger.
+                MPServer.HealBusinessDeltas();
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] CheckBuildingsForSaleChange: {ex.Message}"); }
         }
