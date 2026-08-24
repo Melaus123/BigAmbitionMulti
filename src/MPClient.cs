@@ -524,6 +524,20 @@ namespace BigAmbitionsMP
                     if (sf != null) GameStatePatcher.EnqueueOnMainThread(() => SharedShopStaff.ApplyOnOwner(sf));
                     break;
                 }
+                case MessageType.SharedPriceEdit:
+                {
+                    // Host-relayed: this machine OWNS the shop — write the price into both native lists.
+                    var pe = env.GetPayload<SharedPriceEditPayload>();
+                    if (pe != null) GameStatePatcher.EnqueueOnMainThread(() => SharedShopPrices.ApplyOnOwner(pe));
+                    break;
+                }
+                case MessageType.SharedSalesHistory:
+                {
+                    // "request" reaches the owner; "snapshot" reaches the one editor that asked.
+                    var sh = env.GetPayload<SharedSalesHistoryPayload>();
+                    if (sh != null) GameStatePatcher.EnqueueOnMainThread(() => SharedShopPrices.HandleSalesHistory(sh));
+                    break;
+                }
 
                 case MessageType.MergerRequest:
                 {

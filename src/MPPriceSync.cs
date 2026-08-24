@@ -57,6 +57,19 @@ namespace BigAmbitionsMP
             _nextScanAt = 0f;
         }
 
+        /// <summary>Publish this shop's prices on the next scan (the owner, right after applying a routed edit) —
+        /// the hash gate would otherwise wait out the re-assert interval before anyone saw the new number.</summary>
+        internal static void PublishNow(string addressKey)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey)) return;
+                _lastHash.Remove(addressKey);
+                _nextScanAt = 0f;
+            }
+            catch { }
+        }
+
         /// <summary>Main thread, while MP active + in game: broadcast changed
         /// price lists of locally-run businesses.</summary>
         public static void Tick()
@@ -139,9 +152,20 @@ namespace BigAmbitionsMP
                         if (lp == null || lp.itemName != rp.ItemName || lp.price != rp.Price) { same = false; break; }
                     }
                 if (same) return;
+                // Shared-shop slice 4: an item this machine has just re-priced (routed, not yet confirmed) keeps its
+                // local value — otherwise the owner's re-assert pulls the number back under the helper's cursor. Per
+                // ITEM, so everything else in the same message still applies.
+                var localHeld = new Dictionary<string, float>();
+                var incoming = new Dictionary<string, float>();
+                foreach (var rp in p.Prices) if (rp?.ItemName != null) incoming[rp.ItemName] = rp.Price;
+                foreach (var lp in reg.retailPrices)
+                    if (lp?.itemName != null
+                        && SharedShopPrices.HoldsItem(p.AddressKey, lp.itemName, incoming.TryGetValue(lp.itemName, out var inc) ? inc : float.NaN))
+                        localHeld[lp.itemName] = lp.price;
                 reg.retailPrices.Clear();
                 foreach (var rp in p.Prices)
-                    reg.retailPrices.Add(new RetailPrice { itemName = rp.ItemName, price = rp.Price });
+                    reg.retailPrices.Add(new RetailPrice { itemName = rp.ItemName, price = localHeld.TryGetValue(rp.ItemName, out var keep) ? keep : rp.Price });
+                if (localHeld.Count > 0) Plugin.Logger.LogInfo($"[PriceSync] '{p.AddressKey}': kept {localHeld.Count} price(s) being edited here.");
                 Plugin.Logger.LogInfo($"[PriceSync] applied {p.Prices.Count} price(s) for '{p.AddressKey}' (from {p.OwnerId}).");
 
                 // Live display correctness: if we're standing IN that shop, the

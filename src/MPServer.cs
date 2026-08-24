@@ -1340,6 +1340,20 @@ namespace BigAmbitionsMP
                         GameStatePatcher.EnqueueOnMainThread(() => HostRouteSharedStaffEdit(sf, senderPid));
                     break;
                 }
+                case MessageType.SharedPriceEdit:
+                {
+                    var pe = env.GetPayload<SharedPriceEditPayload>();
+                    if (pe != null && SenderIs(pe.PlayerId, senderPid, MessageType.SharedPriceEdit))
+                        GameStatePatcher.EnqueueOnMainThread(() => HostRouteSharedPriceEdit(pe, senderPid));
+                    break;
+                }
+                case MessageType.SharedSalesHistory:
+                {
+                    var sh = env.GetPayload<SharedSalesHistoryPayload>();
+                    if (sh != null && SenderIs(sh.PlayerId, senderPid, MessageType.SharedSalesHistory))
+                        GameStatePatcher.EnqueueOnMainThread(() => HostRouteSharedSalesHistory(sh, senderPid));
+                    break;
+                }
 
                 case MessageType.TaxiHail:
                     HandleTaxiHail(env);
@@ -4894,6 +4908,55 @@ namespace BigAmbitionsMP
                 else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedStaffEdit, "host", p));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedStaffEdit: {ex.Message}"); }
+        }
+
+        /// <summary>Shared-shop slice 4: one item's price at a shared shop → the shop's OWNER. Same gate as every
+        /// routed op: a DIRECT Business grant from that address's owner, plus the per-sender rate cap.</summary>
+        public static void HostRouteSharedPriceEdit(SharedPriceEditPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(p.ItemName) || string.IsNullOrEmpty(senderPid)) return;
+                if (!SharedRateOk(senderPid, "price edit")) return;
+                string ownerPid = SharedShopOwnerPid(p.AddressKey);
+                if (ownerPid.Length == 0) { Plugin.Logger.LogWarning($"[SharedShop] price edit for unowned '{p.AddressKey}' from '{senderPid}' — dropped."); return; }
+                if (ownerPid == senderPid) return;
+                if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid))
+                { Plugin.Logger.LogWarning($"[SharedShop] price edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission, dropped."); return; }
+                if (ownerPid == MPConfig.PlayerId) SharedShopPrices.ApplyOnOwner(p);
+                else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedPriceEdit, "host", p));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedPriceEdit: {ex.Message}"); }
+        }
+
+        /// <summary>Shared-shop slice 4 (ruling 25): "request" → the shop's owner; "snapshot" → the ONE editor that
+        /// asked (ToPid), never a broadcast. Both directions are grant-gated on the address's owner.</summary>
+        public static void HostRouteSharedSalesHistory(SharedSalesHistoryPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(senderPid)) return;
+                if (!SharedRateOk(senderPid, "sales history")) return;
+                string ownerPid = SharedShopOwnerPid(p.AddressKey);
+                if (ownerPid.Length == 0) return;
+                if (p.Action == "request")
+                {
+                    if (ownerPid == senderPid) return;
+                    if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid))
+                    { Plugin.Logger.LogWarning($"[SharedShop] sales-history request by '{senderPid}' on '{p.AddressKey}' — no Business permission, dropped."); return; }
+                    if (ownerPid == MPConfig.PlayerId) SharedShopPrices.HandleSalesHistory(p);
+                    else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedSalesHistory, "host", p));
+                }
+                else if (p.Action == "snapshot")
+                {
+                    if (senderPid != ownerPid) { Plugin.Logger.LogWarning($"[SharedShop] sales snapshot for '{p.AddressKey}' from non-owner '{senderPid}' — dropped."); return; }
+                    if (string.IsNullOrEmpty(p.ToPid)) return;
+                    if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, p.ToPid)) return;
+                    if (p.ToPid == MPConfig.PlayerId) SharedShopPrices.HandleSalesHistory(p);
+                    else SendToPid(p.ToPid, MessageEnvelope.Create(MessageType.SharedSalesHistory, "host", p));
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedSalesHistory: {ex.Message}"); }
         }
 
         /// <summary>The merged-companies state broadcast: per group, online member pids (enforcement)

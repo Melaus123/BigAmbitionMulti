@@ -121,8 +121,12 @@ namespace BigAmbitionsMP
                 case "ba:businesstype_empty":
                 case "":
                     break;
+                case "ba:businesstype_factory":
+                    list.Add("Schedule");             // factories: pricing is for shops that sell to customers
+                    break;
                 default:
-                    list.Add("Schedule");             // factory and every ordinary business
+                    list.Add("Schedule");             // every ordinary business
+                    list.Add("InventoryPricing");     // slice 4: the helper sets this shop's retail prices
                     break;
             }
             return list;
@@ -367,6 +371,87 @@ namespace BigAmbitionsMP
                     if (typeText != null) typeText.color = shared ? Tint : def.Type;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} card tint: {ex.Message}"); }
+            }
+        }
+
+        // ── Warehouses and factories (the BizMan page's SECOND list) ──────────
+        // WarehouseList.Load enumerates `RentedByPlayer && GetBuildingType() == "ba:buildingtype_warehouse"`. It keys
+        // on the BUILDING type, not the business type, which is why FACTORIES appear in it alongside storage
+        // warehouses — one list, one fix. Two reasons the owner's never showed (field 2026-08-22): the tenancy filter
+        // excludes them, and the teal above only ever covered BusinessCellView cards, which these entries are not.
+        // Tenancy is raised for the duration of Load so the game's own code builds the entries (icons, inventory
+        // read-outs and all), then lowered in the finalizer — it may never outlive the call.
+
+        private static readonly System.Reflection.FieldInfo _fWarehouseEntry = AccessTools.Field(typeof(WarehouseList), "warehouseEntry");
+        private static bool _warehouseLabelWarned;
+
+        /// <summary>Is this entry one of an owner's shared buildings? (Also the stand-down MPPatches' warehouse-list
+        /// veto consults, so "listed" and "not vetoed" can never disagree.)</summary>
+        internal static bool IsSharedWarehouseEntry(BuildingRegistration reg)
+        {
+            try { return reg != null && SharedShopSchedule.IsSharedShop(reg, AddrOf(reg)); } catch { return false; }
+        }
+
+        [HarmonyPatch(typeof(WarehouseList), "Load")]
+        public static class Patch_WarehouseList_Load_IncludeShared
+        {
+            static void Prefix(out List<BuildingRegistration> __state) { __state = RaiseSharedWarehouses(); }
+            static void Finalizer(List<BuildingRegistration> __state)
+            {
+                if (__state == null) return;
+                foreach (var r in __state) LowerTenancy(r, raised: true);
+            }
+        }
+
+        private static List<BuildingRegistration> RaiseSharedWarehouses()
+        {
+            var raised = new List<BuildingRegistration>();
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return raised;
+                if (GrantSync.SharedManageCount == 0) return raised;
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return raised;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null) continue;
+                    string addr = AddrOf(reg);
+                    if (!SharedShopSchedule.IsSharedShop(reg, addr)) continue;
+                    bool warehouseBuilding = false;
+                    try { warehouseBuilding = reg.GetBuildingType() == "ba:buildingtype_warehouse"; } catch { }
+                    if (!warehouseBuilding) continue;
+                    if (RaiseTenancy(reg, addr)) raised.Add(reg);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} warehouse list: {ex.Message}"); }
+            return raised;
+        }
+
+        /// <summary>Teal the entry the game has just appended. These are plain instantiated rows, not recycled table
+        /// cells, so the colour is written directly and needs no restore path.</summary>
+        [HarmonyPatch(typeof(WarehouseList), "SetUpEntry")]
+        public static class Patch_WarehouseList_SetUpEntry_Tint
+        {
+            static void Postfix(WarehouseList __instance, Entities.Warehouse warehouse)
+            {
+                try
+                {
+                    if (__instance == null || !IsSharedWarehouseEntry(warehouse)) return;
+                    var template = _fWarehouseEntry?.GetValue(__instance) as Transform;
+                    var parent = template != null ? template.parent : null;
+                    if (parent == null || parent.childCount == 0) return;
+                    // Object.Instantiate(template, template.parent) appends: the row just built is the last sibling.
+                    var row = parent.GetChild(parent.childCount - 1);
+                    int tinted = 0;
+                    foreach (var t in row.GetComponentsInChildren<TMPro.TMP_Text>(true))
+                        if (t != null && t.transform.name == "WarehouseName") { t.color = Tint; tinted++; }
+                    if (tinted == 0 && !_warehouseLabelWarned)
+                    {
+                        _warehouseLabelWarned = true;
+                        Plugin.Logger.LogWarning($"{Tag} could not find the name label on a shared warehouse row — it is listed, but not teal.");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} warehouse tint: {ex.Message}"); }
             }
         }
 

@@ -180,6 +180,8 @@ namespace BigAmbitionsMP
         ScheduleSession     = 184,       // Shared-shop slice 1 (plan §2.8): the editing session. open/close (+60 s keepalive): editor → Host → owner, grant-gated. snapshot: owner → Host → ONE editor (ToPid) — never a broadcast; everyone else converges on the business heartbeat. Carries all days (empty = "unchanged") + any rejected days after a routed edit.
         SharedStaffPool     = 185,       // Owner → Host → the players holding a DIRECT Business grant from that owner (shared-shop slice 3, 2026-08-22, plan §2.3): the owner's hired-but-UNASSIGNED employees (their bench), sent when membership/wages change; the host caches it and replays it to a newly granted player. Receivers inject real-id records with no business so the helper can place them in the owner's shared shop.
         SharedStaffEdit     = 186,       // Permitted player → Host → shop OWNER: "assign" an owner's employee to one of the owner's shared shops, or "unassign" them from it. Host: direct grant on the address, rate cap. Owner performs the native reassignment and republishes roster + bench.
+        SharedPriceEdit     = 187,       // Permitted player → Host → shop OWNER (shared-shop slice 4, 2026-08-22, plan §2.4): ONE item's retail price at a shared shop, coalesced to 1 s of quiet on the editor (the native editor fires per keystroke AND per +/- click). Host: direct Business grant on the address, rate cap. The owner writes BOTH native lists (retailPrices + storedRetailPrices) and MPPriceSync's existing broadcast carries it to everyone — no echo of its own.
+        SharedSalesHistory  = 188,       // Shared-shop slice 4 (ruling 25): the shop's recent per-item sales, WITHOUT which a helper prices blind (orderHistory is local-only — the replica's is empty). "request": editor → Host → owner when the Inventory & Pricing tab opens. "snapshot": owner → Host → exactly ONE editor (ToPid), never broadcast. Only the last 14 days and only the three fields the tab sums (item, units, revenue) — no hour reports, no wholesale, no per-price breakdown.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -269,6 +271,56 @@ namespace BigAmbitionsMP
         public string FromAddressKey { get; set; } = "";   // where the helper believed the employee was ("" = bench); the owner rejects if that is no longer true (owner wins, as for schedule days)
         public int    Seq        { get; set; }
         public int    SeqEpoch   { get; set; }
+    }
+
+    /// <summary>Shared-shop slice 4: ONE item's retail price at a shared shop, set by a permitted player. The native
+    /// editor writes per keystroke and per +/- click and raises no event, so the SEND is coalesced to 1 s of quiet
+    /// (ruled 2026-08-21) — the local write stays immediate, only the message waits. Seq/SeqEpoch as elsewhere: a
+    /// delayed duplicate can never undo a newer edit. Absolute value, never a delta.</summary>
+    public class SharedPriceEditPayload
+    {
+        public string PlayerId   { get; set; } = "";   // sender (validated SenderIs at the host)
+        public string AddressKey { get; set; } = "";
+        public string ItemName   { get; set; } = "";
+        public float  Price      { get; set; }
+        public int    Seq        { get; set; }
+        public int    SeqEpoch   { get; set; }
+    }
+
+    /// <summary>Shared-shop slice 4 (ruling 25): the recent per-item sales of a shared shop, so a helper can price
+    /// against real numbers instead of the empty orderHistory a replica carries. "request" → the owner answers with
+    /// "snapshot" to that ONE editor. Fourteen days is exactly what the tab consumes (two 7-day windows), and three
+    /// fields are exactly what it sums — everything else in an OrderHistoryEntry stays home.</summary>
+    public class SharedSalesHistoryPayload
+    {
+        public string PlayerId   { get; set; } = "";   // sender (validated SenderIs at the host)
+        public string Action     { get; set; } = "";   // "request" | "snapshot"
+        public string AddressKey { get; set; } = "";
+        public string ToPid      { get; set; } = "";   // snapshot target — the editor that asked
+        public int    OwnerDay   { get; set; }         // the owner's day number when taken: the receiver rebases so its own day arithmetic lands on the same window
+        public List<SalesDayInfo> Days { get; set; } = new();
+        public List<string> Products { get; set; } = new();   // what the shop sells (cachedAvailableProducts): derived from a shop's own shelves, so a replica has none and the tab would list nothing to price
+        public List<StockInfo> Stock { get; set; } = new();    // units on hand per item: counted from the shop's INTERIOR, which a helper may never have loaded
+
+    }
+
+    public class SalesDayInfo
+    {
+        public int DayNumber { get; set; }
+        public List<SalesItemInfo> Items { get; set; } = new();
+    }
+
+    public class StockInfo
+    {
+        public string ItemName { get; set; } = "";
+        public int    Count    { get; set; }
+    }
+
+    public class SalesItemInfo
+    {
+        public string ItemName   { get; set; } = "";
+        public int    AmountSold { get; set; }
+        public float  TotalPrice { get; set; }
     }
 
     /// <summary>Merger slice 4 — one native money delta from a merged member's machine. NEVER an

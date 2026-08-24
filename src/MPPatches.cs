@@ -4166,7 +4166,15 @@ namespace BigAmbitionsMP
         {
             static bool Prefix(Entities.Warehouse warehouse)
             {
-                try { return !GameStatePatcher.HideFromOwnAssetLists(warehouse); } catch { return true; }
+                try
+                {
+                    // Shared-shop ruling 26 (2026-08-22): a helper SEES the owner's warehouses and factories in this
+                    // list (teal, Presentation-only page). One predicate for "listed" and "not vetoed" so the two can
+                    // never disagree — the bug class of 2026-08-22.
+                    if (SharedShopVisibility.IsSharedWarehouseEntry(warehouse)) return true;
+                    return !GameStatePatcher.HideFromOwnAssetLists(warehouse);
+                }
+                catch { return true; }
             }
         }
 
