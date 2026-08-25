@@ -238,11 +238,15 @@ namespace BigAmbitionsMP
     [HarmonyPatch(typeof(UI.Purchase.PurchaseUI), nameof(UI.Purchase.PurchaseUI.SetCargoInstancesToPaid))]
     public static class Patch_PurchaseUI_SetPaid_BorrowedShop
     {
-        // Option A checkout mirror: when the borrower pays while PUSHING a borrowed cart, the native method
-        // flips paid=true on the replica's stacks (the UI list holds the same object references) and
-        // consolidates with DIRECT list ops that bypass every chokepoint. Snapshot the flip set in the
-        // prefix and replay it on the owner's real cart as MARK-PAID mirrors — the flip is the one native
-        // cargo mutation with no chokepoint to hook.
+        // Option A checkout mirror: when the borrower pays while PUSHING a borrowed cart — or, since
+        // ruling 35 (2026-08-25), while DRIVING a borrowed car through a drive-through register —
+        // the native method flips paid=true on the replica's stacks (the UI list holds the same
+        // object references) and consolidates with DIRECT list ops that bypass every chokepoint.
+        // Snapshot the flip set in the prefix and replay it on the owner's real vehicle as MARK-PAID
+        // mirrors — the flip is the one native cargo mutation with no chokepoint to hook. Before the
+        // gate widened, a drive-through payment flipped ONLY the local replica: the borrower's money
+        // left, the owner's record stayed unpaid, and the next fleet re-sync reverted the local flag
+        // (the 2026-08-25 fries case, F-2026-08-25-C correction).
         static void Prefix(UI.Purchase.PurchaseUI __instance, out System.Collections.Generic.List<CargoMirrorState> __state)
         {
             BorrowedShopScope.Depth++;
@@ -250,7 +254,7 @@ namespace BigAmbitionsMP
             try
             {
                 var cur = VehicleHelper.GetCurrentVehicle();
-                if (!ProxyCargo.IsPossessedPushed(cur)) return;
+                if (!ProxyCargo.IsProxy(cur)) return;   // ruling 35: ANY borrowed proxy — pushed cart or driven car
                 var list = AccessTools.Field(typeof(UI.Purchase.PurchaseUI), "_cargoInstances")?.GetValue(__instance)
                            as System.Collections.Generic.IEnumerable<BigAmbitions.Items.CargoInstance>;
                 if (list == null) return;

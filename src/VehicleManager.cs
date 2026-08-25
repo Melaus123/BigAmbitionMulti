@@ -202,27 +202,51 @@ namespace BigAmbitionsMP
             catch { }
         }
 
-        /// <summary>The ghost's synced loose cargo as (itemName, amount) rows, parsed from the manifest the
-        /// ghost was built with (AppliedCargo = "item=amt;...|carried"). EA0.11 stores ALL loose vehicle
-        /// cargo — car trunks AND flatbed/hand-trucks — in cargoInstances, which this manifest captures;
-        /// the legacy cargoIds path is migrated away (UpdateItemInstancesToNewSystem). Manifest caps at 24
-        /// stacks (ReadLocalFleet), so deeper storages list their first 24.</summary>
-        public static System.Collections.Generic.List<(string item, int amount)> GhostCargoFor(string vid)
+        /// <summary>THE one parser for the fleet cargo-manifest wire form: ';'-separated stacks,
+        /// "item=amount" (legacy) or "item=amount=paid=price" (since Option A, 2026-07-07); '='
+        /// separator because EA 0.11 item ids contain ':'. F-2026-08-25-D: this format once had TWO
+        /// hand-rolled parsers and the UI one missed the Option-A upgrade (it read the PRICE as the
+        /// amount) — every borrowed trunk looked empty to the mod's own menus for seven weeks while
+        /// native systems read the correctly-filled instances. Never parse the string anywhere else:
+        /// both readers (GhostCargoFor and ApplyCargoManifest) go through here BY CONSTRUCTION.</summary>
+        internal static System.Collections.Generic.List<(string item, int amount, bool paid, float price)> ParseCargoManifest(string? manifest)
         {
-            var rows = new System.Collections.Generic.List<(string, int)>();
-            if (!_remoteVehicles.TryGetValue(vid, out var rv) || rv == null) return rows;
-            string sig = rv.AppliedCargo ?? "";
-            int bar = sig.IndexOf('|');
-            string cargo = bar >= 0 ? sig.Substring(0, bar) : sig;
-            foreach (var entry in cargo.Split(';'))
+            var rows = new System.Collections.Generic.List<(string, int, bool, float)>();
+            if (string.IsNullOrEmpty(manifest)) return rows;
+            foreach (var part in manifest!.Split(';'))
             {
-                if (string.IsNullOrEmpty(entry)) continue;
-                int eq = entry.LastIndexOf('=');   // '=' separator: EA 0.11 item ids contain ':'
-                if (eq <= 0) continue;
-                if (int.TryParse(entry.Substring(eq + 1), out int amt) && amt > 0)
-                    rows.Add((entry.Substring(0, eq), amt));
+                if (string.IsNullOrEmpty(part)) continue;
+                var bits = part.Split('=');
+                if (bits.Length != 2 && bits.Length != 4) continue;   // 2 = legacy wire, 4 = +paid+price (Option A)
+                if (string.IsNullOrEmpty(bits[0])) continue;
+                if (!int.TryParse(bits[1], out var amount) || amount <= 0) continue;
+                bool paid = true; float price = 0f;
+                if (bits.Length == 4)
+                {
+                    paid = bits[2] != "0";
+                    float.TryParse(bits[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out price);
+                }
+                rows.Add((bits[0], amount, paid, price));
             }
             return rows;
+        }
+
+        private static string Snip(string? s)
+            => string.IsNullOrEmpty(s) ? "(empty)" : (s!.Length <= 60 ? s : s.Substring(0, 57) + "...");
+
+        /// <summary>The ghost's synced loose cargo rows, parsed from the manifest the ghost was built
+        /// with (AppliedCargo = "manifest|carried"). EA0.11 stores ALL loose vehicle cargo — car
+        /// trunks AND flatbed/hand-trucks — in cargoInstances, which this manifest captures; the
+        /// legacy cargoIds path is migrated away (UpdateItemInstancesToNewSystem). Manifest caps at
+        /// 24 stacks (ReadLocalFleet), so deeper storages list their first 24. Rows carry the REAL
+        /// paid/price (ruling 36: unpaid-cargo parity — takes must send them, never assume paid).</summary>
+        public static System.Collections.Generic.List<(string item, int amount, bool paid, float price)> GhostCargoFor(string vid)
+        {
+            if (!_remoteVehicles.TryGetValue(vid, out var rv) || rv == null)
+                return new System.Collections.Generic.List<(string, int, bool, float)>();
+            string sig = rv.AppliedCargo ?? "";
+            int bar = sig.IndexOf('|');
+            return ParseCargoManifest(bar >= 0 ? sig.Substring(0, bar) : sig);
         }
 
         /// <summary>Vehicle cargo capacity (VehicleType.maxCargoCapacity) for the "Boxes: used/max" header;
@@ -521,6 +545,15 @@ namespace BigAmbitionsMP
                                     dCargo = csb.ToString();
                                 }
                                 int dCarried = 0; try { dCarried = inst.cargoIds?.Count ?? 0; } catch { }
+                                // Car-package instrumentation (2026-08-25): the live pass logged
+                                // manifests, the dormant pass did not — which is exactly where the
+                                // fries triage needed evidence. Same per-id change throttle.
+                                string dManifestSig = $"{dCargo}|{dCarried}";
+                                if (!_lastManifestLogged.TryGetValue(inst.id, out var dPrev) || dPrev != dManifestSig)
+                                {
+                                    _lastManifestLogged[inst.id] = dManifestSig;
+                                    Plugin.Logger.LogInfo($"[Vehicle] manifest (dormant) {inst.vehicleTypeName} '{inst.id}': {(dCargo.Length > 0 ? dCargo : "(empty)")} carried={dCarried}");
+                                }
                                 string dBldg = string.IsNullOrEmpty(inst.streetName) ? "" : $"{inst.streetNumber} {inst.streetName}";
                                 fleet.Vehicles.Add(new VehicleEntry
                                 {
@@ -595,14 +628,23 @@ namespace BigAmbitionsMP
         private static string _fleetFullSig = "";
         private static float  _fleetFullAt  = -999f;
         private const  float  FullFleetHeartbeatSeconds = 5f;
+        private static bool   _fleetDirty;
+
+        /// <summary>Force the next SplitAndSend to ship a FULL fleet packet regardless of the resting
+        /// signature. Car-package belt (2026-08-25): a cargo change on a vehicle the OWNER is
+        /// currently DRIVING contributes only its id to the sig, so it waited for the 5 s heartbeat;
+        /// VehicleStorageSync.OwnerApply sets this the moment any routed cargo op succeeds — the
+        /// vehicle analogue of InteriorSync.PushOwnedBuildingNow. Zero cost when unset.</summary>
+        internal static void MarkFleetDirty() => _fleetDirty = true;
 
         public static void SplitAndSend(VehicleFleetPayload full)
         {
             if (full == null) return;
             float now = Time.unscaledTime;
             string sig = RestingFleetSig(full);
-            if (sig != _fleetFullSig || now - _fleetFullAt >= FullFleetHeartbeatSeconds)
+            if (_fleetDirty || sig != _fleetFullSig || now - _fleetFullAt >= FullFleetHeartbeatSeconds)
             {
+                _fleetDirty = false;
                 _fleetFullSig = sig; _fleetFullAt = now;
                 DispatchFleet(full);
                 return;
@@ -690,15 +732,18 @@ namespace BigAmbitionsMP
                     }
                     else if (rv.AppliedCargo != cargoSig)
                     {
-                        // DATA: GhostCargoFor reads AppliedCargo, so the trunk panel shows current contents to
-                        // whoever opens it (driver or not) the instant cargo changes.
-                        rv.AppliedCargo = cargoSig;
-
-                        // VISUAL: refresh IN PLACE, exactly as single-player does — re-apply the cargo to the
-                        // ghost's instance, then call the controller's own UpdateCargoCount (HandTruck →
-                        // UpdateCardboardBoxes toggles its box placeholders by count; cars show no loose cargo
-                        // → harmless no-op). NO despawn — despawning a ghost the borrower is driving/riding
-                        // destroyed their parented character: the OOM crash (run-2026-06-29). Works while driven.
+                        // VISUAL first, DATA second: refresh IN PLACE, exactly as single-player does —
+                        // re-apply the cargo to the ghost's instance, then the controller's own
+                        // UpdateCargoCount (HandTruck → UpdateCardboardBoxes toggles box placeholders by
+                        // count; cars show no loose cargo → harmless no-op). NO despawn — despawning a
+                        // ghost the borrower is driving/riding destroyed their parented character: the
+                        // OOM crash (run-2026-06-29). Works while driven. AppliedCargo (what
+                        // GhostCargoFor reads) is stamped only AFTER the refresh attempt COMPLETES
+                        // WITHOUT THROWING — stamping first meant a throw left the two stores split
+                        // forever with no retry (the sig already matched); now the next packet's
+                        // mismatch retries the whole refresh. A ghost with NO controller stamps
+                        // without a visual refresh ON PURPOSE (review M6): a stripped ghost has no
+                        // visual to refresh, and GhostCargoFor must still see the cargo.
                         try
                         {
                             var vc = rv.Go.GetComponentInChildren<VehicleController>();
@@ -707,8 +752,10 @@ namespace BigAmbitionsMP
                                 RefreshGhostCargo(vc.vehicleInstance, e);
                                 vc.UpdateCargoCount();
                             }
+                            Plugin.Logger.LogInfo($"[Vehicle] cargo transition '{e.VehicleId}': '{Snip(rv.AppliedCargo)}' -> '{Snip(cargoSig)}'.");
+                            rv.AppliedCargo = cargoSig;
                         }
-                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] in-place cargo refresh '{e.VehicleId}': {ex.Message}"); }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] in-place cargo refresh '{e.VehicleId}': {ex.Message} — AppliedCargo NOT stamped; next packet retries."); }
                     }
                     if (rv.Go != null && !PossessedByLocal(rv.Go)
                         && Vector3.Distance(rv.Go.transform.position, pos) > VehicleSnapDistance)
@@ -981,21 +1028,10 @@ namespace BigAmbitionsMP
             try
             {
                 if (inst.cargoInstances == null) return;
-                foreach (var part in manifest.Split(';'))
-                {
-                    if (string.IsNullOrEmpty(part)) continue;
-                    var bits = part.Split('=');
-                    if (bits.Length != 2 && bits.Length != 4) continue;   // 2 = legacy wire, 4 = +paid+price (Option A)
-                    if (string.IsNullOrEmpty(bits[0])) continue;
-                    if (!int.TryParse(bits[1], out var amount) || amount <= 0) continue;
-                    bool paid = true; float price = 0f;
-                    if (bits.Length == 4)
-                    {
-                        paid = bits[2] != "0";
-                        float.TryParse(bits[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out price);
-                    }
-                    inst.cargoInstances.Add(new BigAmbitions.Items.CargoInstance(bits[0], amount, price, paid));
-                }
+                // F-2026-08-25-D: parsing lives in ParseCargoManifest ONLY — this method and the UI
+                // reader consumed the same string through two hand-rolled parsers and diverged.
+                foreach (var (item, amount, paid, price) in ParseCargoManifest(manifest))
+                    inst.cargoInstances.Add(new BigAmbitions.Items.CargoInstance(item, amount, price, paid));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] cargo manifest: {ex.Message}"); }
         }

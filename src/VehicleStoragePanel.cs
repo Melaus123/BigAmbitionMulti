@@ -57,6 +57,7 @@ namespace BigAmbitionsMP
                 RenderChoice();
             }
             if (_root != null) _root.SetActive(true);
+            Plugin.Logger.LogInfo($"[VStore] choice menu OPENED for '{vid}' (owner '{_owner}').");
         }
 
         // Clone the game's own VehicleOverlay (the Enter Vehicle / Manage Storage menu) for a pixel-exact
@@ -137,6 +138,9 @@ namespace BigAmbitionsMP
                 if (_panel != null) _panel.SetActive(true);
                 RenderList();
             }
+            // Triage gap (2026-08-25): this route showed the storage without any "opened storage"
+            // line — the field report's "I opened an empty inventory" was unfalsifiable from logs.
+            Plugin.Logger.LogInfo($"[VStore] opened storage for '{_vid}' (owner '{_owner}', via choice menu).");
         }
 
         // "<owner>'s <Model>" for the menu title — model via the game's own localizer on the vehicle type
@@ -222,23 +226,28 @@ namespace BigAmbitionsMP
             int max = VehicleManager.MaxCargoFor(_vid);
             if (_cargoBoxesTmp != null) _cargoBoxesTmp.text = max > 0 ? $"Boxes: {rows.Count}/{max}" : $"Boxes: {rows.Count}";
 
-            // Merge identical items into one card (mirrors the native CargoItem grouping): count the instances,
-            // keep the per-instance amount → "<count>x<amount>" (blank when 1×1). A click takes ONE box.
+            // Merge identical items into one card (mirrors the native CargoItem grouping — which keys
+            // on name+amount+paid, so a paid and an unpaid stack of the same item stay separate
+            // cards; ruling 36 makes that distinction real). A click takes ONE box carrying the
+            // stack's REAL paid/price (F-2026-08-25-D follow-on: paid:true/price:0 defeated the
+            // owner-side exact-stack match and would silently launder unpaid stacks paid).
             var order = new System.Collections.Generic.List<string>();
-            var grp = new System.Collections.Generic.Dictionary<string, (int count, int amount)>();
+            var grp = new System.Collections.Generic.Dictionary<string, (int count, string item, int amount, bool paid, float price)>();
             foreach (var r in rows)
             {
-                if (grp.TryGetValue(r.item, out var g)) grp[r.item] = (g.count + 1, g.amount);
-                else { grp[r.item] = (1, r.amount); order.Add(r.item); }
+                string key = $"{r.item}|{r.amount}|{(r.paid ? 1 : 0)}";
+                if (grp.TryGetValue(key, out var g)) grp[key] = (g.count + 1, g.item, g.amount, g.paid, g.price);
+                else { grp[key] = (1, r.item, r.amount, r.paid, r.price); order.Add(key); }
             }
             int shown = 0;
-            foreach (var item in order)
+            foreach (var key in order)
             {
                 if (shown >= 50) break; shown++;
-                var g = grp[item];
+                var g = grp[key];
                 string amountText = (g.count * g.amount == 1) ? "" : $"{g.count}x{g.amount}";
-                int takeAmt = g.amount; string it = item, vid = _vid, owner = _owner;
-                MakeNativeCard(it, amountText, () => VehicleStorageSync.RequestTake(vid, owner, it, takeAmt, true, 0f));
+                string it = g.item; int takeAmt = g.amount; bool tPaid = g.paid; float tPrice = g.price;
+                string vid = _vid, owner = _owner;
+                MakeNativeCard(it, amountText, () => VehicleStorageSync.RequestTake(vid, owner, it, takeAmt, tPaid, tPrice), paid: tPaid);
             }
             if (_cargoSellAll != null)   // Deposit = repurpose the native Sell-All button when holding an item
             {
@@ -261,13 +270,34 @@ namespace BigAmbitionsMP
 
         // Instantiate a native cargo card from the cloned template and fill it WITHOUT running CargoItemUi
         // (calling SetUp would run owner-side cargo logic). We set its serialized fields directly via reflection.
-        private static void MakeNativeCard(string itemName, string amountText, UnityEngine.Events.UnityAction onTake)
+        /// <summary>The game's own unpaid-slot tint (CargoItemUi paints unpaid rows with it, decompile
+        /// :154-156) — parity finding (a), 2026-08-25: the borrower's panel showed unpaid stacks in
+        /// the normal color while the owner's native view marks them. Fallback only if the HUD is
+        /// unreadable at call time.</summary>
+        private static Color UnpaidTint()
+        {
+            try
+            {
+                var ip = InstanceBehavior<UI.UIs>.Instance?.playerHUD?.itemPanelUI;
+                if (ip != null) return ip.cargoUnpaidSlotColor;
+            }
+            catch { }
+            return new Color(0.72f, 0.45f, 0.20f, 1f);
+        }
+
+        private static void MakeNativeCard(string itemName, string amountText, UnityEngine.Events.UnityAction onTake, bool paid = true)
         {
             var card = UnityEngine.Object.Instantiate(_cargoTemplate, _cargoContent);
             var ci = card.GetComponent<CargoItemUi>();
             if (ci != null)
             {
                 ci.enabled = false;
+                if (!paid)
+                {
+                    // Native parity: the same backgroundImage + the same color the game uses.
+                    var bg = AccessTools.Field(typeof(CargoItemUi), "backgroundImage")?.GetValue(ci) as Image;
+                    if (bg != null) bg.color = UnpaidTint();
+                }
                 // Name: drive the card's OWN TextLocalizationComponent (set its Key, leave it enabled) — the game
                 // localizes it through its working pipeline. Do NOT call GetLocalization ourselves (runtime-absent overload).
                 var nl = AccessTools.Field(typeof(CargoItemUi), "nameLabel")?.GetValue(ci);
@@ -375,6 +405,9 @@ namespace BigAmbitionsMP
         public static void Close()
         {
             string vidWas = _vid;   // capture before clearing — used for the highlight reset below (round-12 #3)
+            // Triage gap (2026-08-25): a menu that "went away by itself" was invisible in logs —
+            // every close now says what closed. (The mode says whether a CHOICE menu or the LIST died.)
+            if (vidWas != "") Plugin.Logger.LogInfo($"[VStore] panel CLOSED for '{vidWas}' (mode {_mode}).");
             _vid = ""; _owner = ""; _enterCb = null;
             if (_menuClone != null) { UnityEngine.Object.Destroy(_menuClone); _menuClone = null; }
             if (_cargoClone != null) { UnityEngine.Object.Destroy(_cargoClone); _cargoClone = null; _cargoContent = null; _cargoTemplate = null; _cargoBoxesTmp = null; _cargoSellAll = null; }
@@ -426,9 +459,12 @@ namespace BigAmbitionsMP
 
         private static string Sig()
         {
+            // Paid state is part of the signature (ruling 35): the checkout mirror's OpMarkPaid
+            // changes ONLY the paid flags, and an open panel must repaint on that echo.
             var rows = VehicleManager.GhostCargoFor(_vid);
             var sb = new StringBuilder();
-            for (int i = 0; i < rows.Count; i++) sb.Append(rows[i].item).Append('=').Append(rows[i].amount).Append(';');
+            for (int i = 0; i < rows.Count; i++)
+                sb.Append(rows[i].item).Append('=').Append(rows[i].amount).Append('=').Append(rows[i].paid ? 1 : 0).Append(';');
             return sb.ToString();
         }
 
@@ -461,9 +497,14 @@ namespace BigAmbitionsMP
             int shown = 0;
             for (int i = 0; i < rows.Count && shown < MaxRows; i++, shown++)
             {
-                string item = rows[i].item; int amt = rows[i].amount; string vid = _vid, owner = _owner;
-                MakeCard(item, amt, CardColor, "Take", BtnBlue,
-                         () => VehicleStorageSync.RequestTake(vid, owner, item, amt, true, 0f));
+                // Ruling 36: unpaid stacks are takeable exactly like the owner's own — the native
+                // store-exit gate is the only enforcement. Real paid/price ride the request so the
+                // owner-side exact-stack match hits the right stack and paid state never launders.
+                string item = rows[i].item; int amt = rows[i].amount;
+                bool paid = rows[i].paid; float price = rows[i].price;
+                string vid = _vid, owner = _owner;
+                MakeCard(item, amt, paid ? CardColor : UnpaidTint(), "Take", BtnBlue,
+                         () => VehicleStorageSync.RequestTake(vid, owner, item, amt, paid, price));
             }
         }
 

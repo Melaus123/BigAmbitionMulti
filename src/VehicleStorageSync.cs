@@ -200,11 +200,11 @@ namespace BigAmbitionsMP
                 // and reverted. The fallback is GameInstance.VehicleInstances — the SAME
                 // VehicleInstance objects live controllers hold (CreateAndSpawnVehicle adds the
                 // one instance to both), so live-first vs data-first find one identical record and
-                // every mutation below works without a spawned controller. Review M4 correction:
-                // the fleet broadcast reads the LIVE list only, so a dormant mutation is NOT
-                // re-broadcast until the owner next loads that address — convergent regardless,
-                // because the borrower's replica already holds the change and nothing re-syncs to
-                // revert it; the owner's next spawn of the vehicle builds from this record.
+                // every mutation below works without a spawned controller. (Stage-3-era correction,
+                // 2026-08-25: an earlier version of this comment claimed the fleet broadcast reads
+                // the live list only — WRONG; ReadLocalFleet's dormant pass emits every save-data
+                // vehicle with its manifest, so a dormant mutation here re-broadcasts on the next
+                // resting-sig change. The MarkFleetDirty call below makes that immediate.)
                 if (found == null)
                 {
                     var dataList = SaveGameManager.Current?.VehicleInstances;
@@ -283,7 +283,13 @@ namespace BigAmbitionsMP
                 }
                 // The cargo change re-syncs to every ghost through VehicleManager's normal fleet broadcast.
                 if (res.Ok)
+                {
+                    // Car-package belt (2026-08-25): a change on a vehicle the owner is DRIVING
+                    // contributes only its id to the resting sig and would wait for the 5 s
+                    // heartbeat; the dirty flag forces the next tick's packet out full.
+                    try { VehicleManager.MarkFleetDirty(); } catch { }
                     Plugin.Logger.LogInfo($"[VStore] owner applied {(req.Op == OpTake ? "TAKE" : req.Op == OpMarkPaid ? "MARK-PAID" : "PUT")}{(req.Silent ? " (mirror)" : "")} {req.Amount}×{req.ItemName} on '{req.VehicleId}' for '{req.PlayerId}'.");
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] OwnerApply: {ex.Message}"); res.Ok = false; res.Reason = "error"; }
             return res;

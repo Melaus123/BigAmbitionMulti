@@ -64,6 +64,20 @@ namespace BigAmbitionsMP
                 var inst = __instance != null ? __instance.vehicleInstance : null;
                 if (inst != null && VehicleManager.IsDrivenRemotely(inst.id))
                 {
+                    // Parity (user field 2026-08-25): a pushed cargo cart has NO passenger seat, so
+                    // the board request below came back "vehicle full" — a dead end. The owner's
+                    // parity result on their own remotely-pushed cart is its STORAGE: the native
+                    // manage-cargo screen on the REAL instance (their own authority; the borrower's
+                    // replica converges through the fleet manifest like any other cargo change).
+                    bool cargoCart = false;
+                    try { cargoCart = inst.VehicleType != null && inst.VehicleType.spawnInPlayerObject && inst.VehicleType.maxCargoCapacity > 0; } catch { }
+                    if (cargoCart)
+                    {
+                        Plugin.Logger.LogInfo($"[Drive] owner click on remotely-pushed cart '{inst.id}' → native manage cargo (parity; was a 'vehicle full' board refusal).");
+                        try { InstanceBehavior<UI.UIs>.Instance.playerHUD.manageCargoUI.Show(inst); }
+                        catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Drive] manage-cargo open: {ex.Message}"); }
+                        return false;   // never a board request for a seatless cart
+                    }
                     Plugin.Logger.LogInfo($"[Drive] owner DriveVehicle on driven car '{inst.id}' → passenger board (walk to passenger door).");
                     PassengerRide.RequestBoard(inst.id);
                     return false;   // skip the native walk-to-driver-door + enter

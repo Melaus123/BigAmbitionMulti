@@ -6,7 +6,7 @@ using Helpers;
 
 namespace BigAmbitionsMP
 {
-    // A vehicle ghost has no EntityController (we strip it), so MouseController sees currentTargetEntity==null
+    // A STRIPPED vehicle ghost has no EntityController, so MouseController sees currentTargetEntity==null
     // and treats a click on it as plain click-to-move (SetNewDestination, removeGoal:true) — walking the player
     // to the clicked car body and fighting our directed walk. An interactive entity click suppresses
     // click-to-move; this does the same for a ghost click. Our SetGoal uses removeGoal:false, so it's untouched.
@@ -14,6 +14,44 @@ namespace BigAmbitionsMP
     public static class Patch_PlayerController_SetNewDestination_GhostClick
     {
         static bool Prefix(bool removeGoal) => !(removeGoal && PassengerRide.IsHoveringGhost);
+    }
+
+    // ONE DECIDER PER CLICK (car package, 2026-08-25; F-2026-08-25-D field case): a DRIVABLE ghost
+    // KEEPS its VehicleController and stays registered, so the game's own click machinery ran in
+    // FULL on it — the mod decided on mouse-DOWN from its manifest while native decided on mouse-UP
+    // from the instance, and one physical click could open the native Enter/Manage overlay AND arm
+    // the mod's walk-to-enter (which then hid that overlay on arrival: menu vanished into an
+    // enter). Route the native vehicle click on any BAMP_ ghost into the mod's single handler and
+    // consume it — the mod's rules, the mod's data, exactly once per click (the per-frame token in
+    // PassengerRide dedups against the mod's own release-branch, which stays alive for STRIPPED
+    // ghosts native cannot resolve: MouseController requires the EntityController on the hit
+    // transform itself).
+    [HarmonyPatch(typeof(VehicleController), nameof(VehicleController.OnIoLeftClick))]
+    public static class Patch_VehicleController_OnIoLeftClick_GhostSingleDecider
+    {
+        static bool Prefix(VehicleController __instance, ref bool __result)
+        {
+            try
+            {
+                if (__instance == null) return true;
+                string id = __instance.vehicleInstance?.id ?? "";
+                if (id.Length == 0 || !id.StartsWith("BAMP_")) return true;   // real vehicles: native
+                // Review MAJOR-2: BAMP_TESTRIG ids are REAL player-owned vehicles on pre-release
+                // rig saves (the five sibling sites all carry this exemption) — consuming their
+                // clicks would make them permanently unclickable with no heal.
+                if (id.StartsWith("BAMP_TESTRIG")) return true;
+                // Review MAJOR-1: a proxy the LOCAL player POSSESSES (pushing a cart, driving) keeps
+                // NATIVE click handling — HandleUnlockedClick's possessed branches deliberately do
+                // nothing because the native menu owns that click (loaded-cart deposit/manage lives
+                // there). The single-decider routing is for clicks on ghosts we are NOT possessing —
+                // the parked-car case where the double-decider bug lived.
+                if (VehicleManager.PossessedByLocal(__instance.gameObject)) return true;
+                __result = true;   // consumed — the native cta/overlay path never runs for a ghost
+                PassengerRide.RouteGhostClick(id.Substring(5), "native-cta");
+                return false;
+            }
+            catch { return true; }
+        }
     }
 
     /// <summary>
@@ -156,13 +194,45 @@ namespace BigAmbitionsMP
 #endif
                 ClearHighlight(); if (hit != "") SetHighlight(hit); _hovered = hit;
             }
-            if (_hovered != "" && Input.GetMouseButtonDown(0))
+            // Car package (2026-08-25): process a click ONCE, on RELEASE, with native click
+            // semantics — the old mouse-DOWN trigger fired a full frame-and-a-half before the
+            // game's own mouse-UP handler and the two decided the same click twice from different
+            // trunk copies. Native parity: a press that drifted >7px is a drag, not a click
+            // (MouseController's hold guard), and clicks over UI don't reach the world.
+            if (Input.GetMouseButtonDown(0)) { _pressed = true; _pressPos = Input.mousePosition; }
+            if (Input.GetMouseButtonUp(0))
             {
-                // A granted player holds a "key": the lock doesn't apply to them (ride + cargo).
-                if (PassengerSync.IsLocked(_hovered) && !GrantSync.IsGranted(VehicleManager.OwnerIdFor(_hovered), MPConfig.PlayerId))
-                    PassengerHud.Toast("Vehicle locked.");
-                else HandleUnlockedClick(_hovered);
+                bool wasPress = _pressed; _pressed = false;
+                if (wasPress && _hovered != ""
+                    && (Input.mousePosition - _pressPos).magnitude <= 7f
+                    && !(UnityEngine.EventSystems.EventSystem.current != null
+                         && UnityEngine.EventSystems.EventSystem.current.IsPointerOverGameObject()))
+                    RouteGhostClick(_hovered, "hover");
             }
+        }
+
+        private static bool    _pressed;
+        private static Vector3 _pressPos;
+        private static int     _routedClickFrame = -1;
+
+        /// <summary>THE single ghost-click entry (car package, 2026-08-25). Both detectors — the
+        /// native VehicleController.OnIoLeftClick prefix (drivable ghosts keep their controller)
+        /// and the mod's own hover release-branch (stripped ghosts native cannot resolve) — land
+        /// here; both fire on the same release frame, so the frame token makes whichever runs
+        /// second a no-op. The token is deliberately vid-BLIND (review M4, accepted): keying it
+        /// (frame,vid) would let one physical click fire TWO different ghosts — strictly worse
+        /// than the rare overlapping-ghosts frame dropping one route (the next click serves it).
+        /// Every decision reads live state inside HandleUnlockedClick.</summary>
+        internal static void RouteGhostClick(string vid, string via)
+        {
+            if (string.IsNullOrEmpty(vid)) return;
+            if (Time.frameCount == _routedClickFrame) return;   // this click is already decided
+            _routedClickFrame = Time.frameCount;
+            Plugin.Logger.LogInfo($"[Ride] ghost click '{vid}' via {via}.");
+            // A granted player holds a "key": the lock doesn't apply to them (ride + cargo).
+            if (PassengerSync.IsLocked(vid) && !GrantSync.IsGranted(VehicleManager.OwnerIdFor(vid), MPConfig.PlayerId))
+                PassengerHud.Toast("Vehicle locked.");
+            else HandleUnlockedClick(vid);
         }
 
         private static void SetHighlight(string vid)
