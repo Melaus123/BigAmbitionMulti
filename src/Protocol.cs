@@ -162,9 +162,9 @@ namespace BigAmbitionsMP
         PlayerStaffRoster   = 141,       // Owner → Host → All: the staff roster of one player business (round-30 WS3 — visitors inject these records so the game's own staffing engine can spawn EVERY scheduled worker, not just a synthetic cashier).
         HelperOrderForward  = 142,       // Helper → Host → building owner: an NPC customer order paid on the helper's machine (round-39f Phase 3 slice-2 step-2). Owner claims the entry, deducts stock, records the order.
         CustomerSimAuthority = 143,      // Host → All: which player SIMULATES customers in a given player building (slice 3: register-worker first, else earliest-arrived inside; "" = building empty).
-        CustomerPuppetState = 144,       // Simulator → Host → All: live customer bodies in one building (~4 Hz); non-simulator players inside render kinematic puppets from it.
-        CustomerPuppetEmote = 145,       // Simulator → Host → All: a customer showed an emoji expression (complaints etc.) — followers replay it on the matching puppet (round-42 parity).
-        CustomerPuppetLook  = 146,       // Simulator → Host → All: a customer's appearance (CharacterData JSON), once per customer — followers dress the puppet to match (round-44).
+        CustomerPuppetState = 144,       // Simulator → Host → the players INSIDE that building (v11/T8 — was All + sender echo; the mod's largest steady stream went to players who could not see it): live customer bodies (~4 Hz); non-simulator players inside render kinematic puppets from it.
+        CustomerPuppetEmote = 145,       // Simulator → Host → inside-players (v11/T8): a customer showed an emoji expression (complaints etc.) — followers replay it on the matching puppet (round-42 parity).
+        CustomerPuppetLook  = 146,       // Simulator → Host → inside-players (v11/T8), once per occupancy episode per customer — followers dress the puppet to match (round-44). The host caches the latest look per (building, customer), FIFO-capped, and REPLAYS them when a player walks in (presence edge), because followers deliberately cache looks ahead of entering (round-44c).
         MergerState         = 147,       // Host → All: merged-company membership (merger slice 1) — online member PlayerIds (what enforcement reads) + full display roster.
         MergerRequest       = 148,       // Member ↔ Host: propose/accept/decline/leave a company merger; host relays "proposal"/"declined" to the affected member.
         BusinessEditRequest = 149,       // Member → Host → business owner: an owner-only business edit made on a merger-flipped replica (slice 3: the open/close toggle) — the OWNER applies it natively and their sync republishes the truth.
@@ -1063,7 +1063,13 @@ namespace BigAmbitionsMP
         // direction to demand a full re-push); the shopper schedule (CustomerEntries) stops
         // riding the owner's 2 s tick pushes. A v9 peer lacks the type, the field, and both
         // new directions; refuse mixed sessions outright.
-        public const int Version = 10;
+        //
+        // v11 (2026-08, throughput T8): the puppet-class streams (CustomerPuppetState/Emote/Look,
+        // RegisterServe) go only to the players INSIDE the building (the position stream's Bldg
+        // presence map — NOT the InteriorSync subscription, which owners never join), without the
+        // sender echo; looks are host-cached + replayed on entry. A v10 peer's look-cache-ahead
+        // assumption (receive-everything) no longer holds; refuse mixed sessions outright.
+        public const int Version = 11;
     }
 
     /// <summary>Sent by client on connect.</summary>

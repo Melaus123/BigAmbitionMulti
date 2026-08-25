@@ -237,6 +237,12 @@ namespace BigAmbitionsMP
                 _followerHere = false;
             }
             DestroyAllPuppets();
+            // T8 review MAJOR-1: the ship-once look set is per OCCUPANCY EPISODE, not per session —
+            // the host's look cache clears when a building empties (authority ""), and a
+            // session-lifetime set here meant those looks could never re-ship: followers met
+            // permanently undressed puppets. Clearing on every building change makes looks
+            // re-ship exactly once per episode, mirroring the cache's lifecycle.
+            _looksSent.Clear();
             _myBldg = cur;
             ReactToAuthority();
         }

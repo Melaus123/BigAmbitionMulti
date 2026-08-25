@@ -976,6 +976,7 @@ namespace BigAmbitionsMP
             // "cargo-delta capable" record inherited by a peer that never announced it is exactly
             // the version-skew hole this gate exists to close.
             _peerBuild.TryRemove(peer.Id, out _);
+            _bldgByPeer.TryRemove(peer.Id, out _);   // T8: same recycled-id rule for the presence map
 
             // Clear any interior subscription the peer held so we stop polling
             // a building no client is in anymore.  Marshal — it mutates the same
@@ -1961,7 +1962,7 @@ namespace BigAmbitionsMP
                     if (cp != null && cp.SimulatorPid == senderPid)
                     {
                         GameStatePatcher.EnqueueOnMainThread(() => CustomerPuppets.ApplyState(cp));
-                        BroadcastCustomerPuppets(cp);   // receivers filter their own echo by SimulatorPid
+                        BroadcastCustomerPuppets(cp, peer.Id);   // T8: inside-players only, no sender echo (SimulatorPid filter stays as the belt)
                     }
                     break;
                 }
@@ -1972,7 +1973,7 @@ namespace BigAmbitionsMP
                     if (rs != null && rs.SimulatorPid == senderPid)
                     {
                         GameStatePatcher.EnqueueOnMainThread(() => CustomerPuppets.ApplyServe(rs));
-                        BroadcastRegisterServe(rs);
+                        BroadcastRegisterServe(rs, peer.Id);   // T8
                     }
                     break;
                 }
@@ -1983,7 +1984,7 @@ namespace BigAmbitionsMP
                     if (ce != null && ce.SimulatorPid == senderPid)
                     {
                         GameStatePatcher.EnqueueOnMainThread(() => CustomerPuppets.ApplyEmote(ce));
-                        BroadcastCustomerEmote(ce);
+                        BroadcastCustomerEmote(ce, peer.Id);   // T8
                     }
                     break;
                 }
@@ -1994,7 +1995,7 @@ namespace BigAmbitionsMP
                     if (cl != null && cl.SimulatorPid == senderPid)
                     {
                         GameStatePatcher.EnqueueOnMainThread(() => CustomerPuppets.ApplyLook(cl));
-                        BroadcastCustomerLook(cl);
+                        BroadcastCustomerLook(cl, peer.Id);   // T8 (also feeds the entry replay cache)
                     }
                     break;
                 }
@@ -3998,35 +3999,130 @@ namespace BigAmbitionsMP
         }
 
         // Round-41 (customer puppets): the host's simulator-election result / a puppet-state relay.
+        // T8: authority election deliberately STAYS a broadcast-to-all — it is tiny, fires only on
+        // occupancy changes, and a machine that just LEFT the building may need the "" revert.
         public static void BroadcastCustomerAuthority(CustomerSimAuthorityPayload p)
         {
             if (!_running || p == null) return;
+            if (string.IsNullOrEmpty(p.SimulatorPid)) ClearLookCache(p.AddressKey);   // T8: nobody inside — customer set dissolves
             Broadcast(MessageEnvelope.Create(MessageType.CustomerSimAuthority, "host", p));
         }
 
-        public static void BroadcastCustomerPuppets(CustomerPuppetStatePayload p)
+        /// <summary>T8 (2026-08 throughput audit): the puppet-class streams were the mod's largest
+        /// remaining steady flow (~7 KB/s measured with one busy shop) and went to EVERY client —
+        /// players nowhere near the building included — plus an echo to the simulator itself.
+        /// They describe what is visible INSIDE one building, so they go to exactly the players
+        /// standing in it (the _bldgByPeer PRESENCE map — review B1: NOT the InteriorSync
+        /// subscription, which owners never join), minus the sender. A new enterer converges
+        /// from the 4 Hz absolute state within a beat; looks are cache-replayed on entry.</summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, string> _bldgByPeer = new();
+
+        private static void SendToBuildingSubscribers(MessageType type, string addressKey, object payload, int exceptPeerId)
         {
-            if (!_running || p == null) return;
-            Broadcast(MessageEnvelope.Create(MessageType.CustomerPuppetState, "host", p));
+            if (string.IsNullOrEmpty(addressKey)) return;
+            byte[]? data = null;   // serialize lazily — often nobody but the sender is inside
+            foreach (var peer in _clients.Keys)
+            {
+                if (peer == null || peer.Id == exceptPeerId) continue;
+                if (!_bldgByPeer.TryGetValue(peer.Id, out var b) || b != addressKey) continue;
+                data ??= MessageEnvelope.Create(type, "host", payload).Serialize();
+                peer.Send(data, reliable: true);
+            }
         }
 
-        /// <summary>Round-119: relay a serve beat to everyone, so whoever is working that till performs it.</summary>
-        public static void BroadcastRegisterServe(RegisterServePayload p)
+        public static void BroadcastCustomerPuppets(CustomerPuppetStatePayload p, int exceptPeerId = -1)
         {
             if (!_running || p == null) return;
-            Broadcast(MessageEnvelope.Create(MessageType.RegisterServe, "host", p));
+            SendToBuildingSubscribers(MessageType.CustomerPuppetState, p.AddressKey, p, exceptPeerId);
         }
 
-        public static void BroadcastCustomerEmote(CustomerPuppetEmotePayload p)
+        /// <summary>Round-119: relay a serve beat so whoever is working that till performs it —
+        /// T8: the duty player is by definition inside, so the subscriber set covers them.</summary>
+        public static void BroadcastRegisterServe(RegisterServePayload p, int exceptPeerId = -1)
         {
             if (!_running || p == null) return;
-            Broadcast(MessageEnvelope.Create(MessageType.CustomerPuppetEmote, "host", p));
+            SendToBuildingSubscribers(MessageType.RegisterServe, p.AddressKey, p, exceptPeerId);
         }
 
-        public static void BroadcastCustomerLook(CustomerPuppetLookPayload p)
+        public static void BroadcastCustomerEmote(CustomerPuppetEmotePayload p, int exceptPeerId = -1)
         {
             if (!_running || p == null) return;
-            Broadcast(MessageEnvelope.Create(MessageType.CustomerPuppetLook, "host", p));
+            SendToBuildingSubscribers(MessageType.CustomerPuppetEmote, p.AddressKey, p, exceptPeerId);
+        }
+
+        // ── T8 look cache: followers deliberately cache looks AHEAD of entering (round-44c
+        // re-dress from _looksById) — with looks routed to inside-players only, the host keeps
+        // the latest look per (building, customer) and replays them on subscribe. Cosmetic
+        // data: capped per building, cleared when the building's customer set dissolves
+        // (authority → "") and at Stop. Lock-guarded — written from poll (relay) and main
+        // (host-simulator) threads alike.
+        private const int LookCachePerBuilding = 80;
+        private sealed class LookCacheEntry
+        {
+            public readonly Dictionary<string, CustomerPuppetLookPayload> Map = new();
+            public readonly Queue<string> Order = new();   // insertion order — FIFO eviction
+        }
+        private static readonly Dictionary<string, LookCacheEntry> _lookCacheByAddr = new();
+
+        private static void CacheLook(CustomerPuppetLookPayload p)
+        {
+            if (string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(p.CustomerId)) return;
+            // Review MAJOR-2: the address is client-authored — cache only for REAL player
+            // buildings (the only ones puppets exist for). Also bounds the outer dictionary.
+            if (!BuildingOwners.ContainsKey(p.AddressKey)) return;
+            lock (_lookCacheByAddr)
+            {
+                if (!_lookCacheByAddr.TryGetValue(p.AddressKey, out var e))
+                    _lookCacheByAddr[p.AddressKey] = e = new LookCacheEntry();
+                if (!e.Map.ContainsKey(p.CustomerId))
+                {
+                    e.Order.Enqueue(p.CustomerId);
+                    // Review MAJOR-1: FIFO eviction, never a wholesale wipe — customer ids are
+                    // never reused, so the oldest entries belong to shoppers long gone; a wipe
+                    // took LIVE customers' looks with it and nothing re-ships those mid-episode.
+                    while (e.Order.Count > LookCachePerBuilding) e.Map.Remove(e.Order.Dequeue());
+                }
+                e.Map[p.CustomerId] = p;
+            }
+        }
+
+        internal static void ClearLookCache(string addressKey)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return;
+            lock (_lookCacheByAddr) _lookCacheByAddr.Remove(addressKey);
+        }
+
+        /// <summary>T8: replay the cached looks for one building to a peer that just walked in
+        /// (POLL THREAD — called from HandlePlayerMove on the presence edge; peer.Send is
+        /// thread-safe, established pattern). Note MINOR-1: each replayed look keeps its
+        /// original SimulatorPid, and ApplyLook drops looks whose SimulatorPid is the receiver
+        /// itself — a returning FORMER simulator discards its own replay. That is safe by
+        /// MAJOR-1's rule: the current simulator's ship-once set clears per occupancy episode,
+        /// so those looks re-ship on the next stream beat.</summary>
+        internal static void SendCachedLooksTo(MPLink peer, string addressKey)
+        {
+            if (!_running || peer == null) return;
+            try
+            {
+                List<CustomerPuppetLookPayload>? looks = null;
+                lock (_lookCacheByAddr)
+                {
+                    if (_lookCacheByAddr.TryGetValue(addressKey, out var e) && e.Map.Count > 0)
+                        looks = new List<CustomerPuppetLookPayload>(e.Map.Values);
+                }
+                if (looks == null) return;
+                foreach (var l in looks)
+                    peer.Send(MessageEnvelope.Create(MessageType.CustomerPuppetLook, "host", l));
+                Plugin.Logger.LogInfo($"[Server] replayed {looks.Count} cached customer look(s) for '{addressKey}' to peer {peer.Id} (T8).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendCachedLooksTo: {ex.Message}"); }
+        }
+
+        public static void BroadcastCustomerLook(CustomerPuppetLookPayload p, int exceptPeerId = -1)
+        {
+            if (!_running || p == null) return;
+            CacheLook(p);
+            SendToBuildingSubscribers(MessageType.CustomerPuppetLook, p.AddressKey, p, exceptPeerId);
         }
 
         public static void BroadcastAppearanceSync()
@@ -4041,6 +4137,26 @@ namespace BigAmbitionsMP
         {
             var payload = env.GetPayload<PlayerPositionPayload>();
             if (payload == null || !SenderIs(payload.PlayerId, senderPid, MessageType.PlayerMove)) return;
+
+            // T8 review B1: the puppet-routing PRESENCE map — which building each peer's player
+            // is standing in, from the same Bldg field the simulator election reads. Poll-thread
+            // owned, self-healing every position tick, pruned at disconnect. (The InteriorSync
+            // subscription CANNOT serve this purpose: a building's owner never subscribes — the
+            // subscription replicates buildings to non-owners — yet owners are exactly who the
+            // puppet feature serves.)
+            string newBldg = payload.Bldg ?? "";
+            _bldgByPeer.TryGetValue(sender.Id, out var oldBldg);
+            if (newBldg != (oldBldg ?? ""))
+            {
+                if (newBldg.Length == 0) _bldgByPeer.TryRemove(sender.Id, out _);
+                else
+                {
+                    _bldgByPeer[sender.Id] = newBldg;
+                    // Entering a building = replay its cached customer looks (followers dress
+                    // puppets from a look cache they used to fill via the old broadcast-to-all).
+                    SendCachedLooksTo(sender, newBldg);
+                }
+            }
 
             // Show this player on the host's own screen
             GameStatePatcher.EnqueueOnMainThread(() =>
@@ -6190,6 +6306,8 @@ namespace BigAmbitionsMP
             lock (_mirrorSentByStable) _mirrorSentByStable.Clear();
             _joinBizSigs.Clear();
             _peerApplying.Clear();
+            lock (_lookCacheByAddr) _lookCacheByAddr.Clear();   // T8
+            _bldgByPeer.Clear();                                // T8: presence map dies with the session
         }
 
         /// <summary>v9 review BLOCKER-2: a client confirmed it holds a mirrored .hsg (written to

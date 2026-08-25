@@ -173,6 +173,9 @@ namespace BigAmbitionsMP
                 }
             }
         }
+        // (T8's short-lived subscriber mirror was REMOVED in the review fix pass: puppet routing
+        // runs on the _bldgByPeer PRESENCE map in MPServer — review B1: a building's OWNER never
+        // subscribes here, so this set was the wrong audience for puppet streams.)
 
         // ── Tick (poll subscribed buildings, broadcast diffs) ─────────────────
 
