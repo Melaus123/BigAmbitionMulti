@@ -186,6 +186,7 @@ namespace BigAmbitionsMP
         SharedWorkEdit      = 190,       // Shared-shop slice 6b/6c: helper → Host → building OWNER, one edit on a shared warehouse/factory — "driver" (slot assignment), "recipe", "produce" (up-to toggle + amount), "order" (workstation priority), "alias" (rename, ruled allowed 2026-08-24). Host: direct Business grant on the address, rate cap. The owner validates against ITS data (the native checks), applies natively, and echoes that tab's SharedWorkInfo snapshot to the editor — a rejected edit reverts on the helper by that same echo.
         BuildingsForSale    = 191,       // Host → All (v9, 2026-08 throughput T6): JUST the buy-marketplace list (~15 entries, a few KB). The daily RealEstateHelper refresh used to trigger a FULL ~826-building BusinessSnapshot broadcast (~1 MB/client) to move this one list; now only the list travels. Join snapshots still carry it inside BusinessSnapshot — this type is the steady-state refresh only. Rides Bulk (review M5: shares state with BusinessSnapshot).
         MirrorAck           = 192,       // Client → Host (v9 review B2): "I hold this exact mirrored .hsg" — sent after the file is WRITTEN to the client's store (or already present via the shared-store token). The host's absent-member mirror skip records delivery ONLY on this ack — never at send time, because the paced lane's documented loss recovery is "the next save re-mirrors", which a send-time record would silently delete (character loss on host handoff).
+        InteriorDirtSync    = 193,       // v10 (T7, ruling 33): ONE building's dirt VALUES as an ABSOLUTE dirty-set — every lattice spot with dirtiness > 0 as (X, Z, value); every spot NOT listed reads clean. Dirt is cleaning-only data: owner → Host on change (keeps the host cache/save current, ~KBs), Host → ONLY the players physically inside (the subscriber set) — nobody else, nothing when the building is empty. The receiver UPDATES matching lattice entries and zeroes the rest; it never adds or removes entries (the lattice is one fixed entry per floor tile — replacing the list would corrupt the cleanliness average). Rides Bulk (M5: InteriorSnapshot writes the same state).
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -1054,7 +1055,15 @@ namespace BigAmbitionsMP
         // (raw gzip .hsg after the JSON head — no base64), and the daily for-sale refresh is
         // its own small BuildingsForSale (191) message instead of a full business snapshot.
         // A v8 peer can parse neither; refuse mixed sessions outright.
-        public const int Version = 9;
+        //
+        // v10 (2026-08, throughput T7): the interior pipeline — dirt leaves the recurring
+        // snapshot triggers for its own InteriorDirtSync (193, inside-players only, ruling 33);
+        // the owner → Host leg goes cargo-only when only cargo changed (InteriorCargoSync gains
+        // OwnerStructHash and a client → Host direction; InteriorRequest gains a Host → owner
+        // direction to demand a full re-push); the shopper schedule (CustomerEntries) stops
+        // riding the owner's 2 s tick pushes. A v9 peer lacks the type, the field, and both
+        // new directions; refuse mixed sessions outright.
+        public const int Version = 10;
     }
 
     /// <summary>Sent by client on connect.</summary>
@@ -2331,7 +2340,36 @@ namespace BigAmbitionsMP
         public string AddressKey    { get; set; } = "";
         public string PlaythroughId { get; set; } = "";
         public int    StructVersion { get; set; }
+        /// <summary>v10 (T7): set ONLY on the owner → Host direction — the sender's structure
+        /// hash (ComputeHashes' `structure` band) of the interior this cargo belongs to. The
+        /// host grafts the cargo onto its cached owner snapshot ONLY when the cache's structure
+        /// hash matches exactly; a mismatch means the cache and the owner have diverged, and the
+        /// host asks for a full push instead (InteriorRequest, host → owner). 0 = host-minted
+        /// (the original Host → subscriber direction, StructVersion-guarded as before); a
+        /// computed hash that lands on 0 is remapped to 1 by the sender (review m2 — 0 must
+        /// stay unambiguous or a legitimate hash collision livelocks on full re-pushes).</summary>
+        public int    OwnerStructHash { get; set; }
+        /// <summary>v10 review M3: the sender's `structAndNonCargo` band, checked alongside
+        /// OwnerStructHash. Structure alone misses non-cargo volatile state (item StateIndex):
+        /// if an owner's FULL push was refused (ownership handover window, sanity gates), the
+        /// owner's baselines still advanced — a later cargo graft onto the stale cache would
+        /// freeze the stale item state in what the host serves. hn mismatch → full re-push
+        /// heals instead. Same 0→1 remap as OwnerStructHash.</summary>
+        public int    OwnerNonCargoHash { get; set; }
         public List<InteriorCargoItemInfo> Items { get; set; } = new();
+    }
+
+    /// <summary>v10 (T7, ruling 33): one building's dirt values — see MessageType.InteriorDirtSync.
+    /// Review B2: entries carry the lattice INDEX (DirtSpotDeltaInfo), NOT bare X/Z — the game
+    /// stacks storeys and discards Y when building the lattice, so (X, Z) is NOT unique in a
+    /// multi-floor building and a coordinate-keyed write lands on every storey at once. Index is
+    /// how the game itself addresses cells (MopController); X/Z ride along as the verification.</summary>
+    public class InteriorDirtSyncPayload
+    {
+        public string AddressKey    { get; set; } = "";
+        public string PlaythroughId { get; set; } = "";
+        /// <summary>Every lattice spot with dirtiness > 0. Absolute: unlisted spots read clean.</summary>
+        public List<DirtSpotDeltaInfo> Spots { get; set; } = new();
     }
 
     /// <summary>One item's cargo on the cargo-sync wire.  Reuses the snapshot's own CargoInstanceInfo

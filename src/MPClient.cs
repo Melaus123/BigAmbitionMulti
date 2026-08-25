@@ -674,6 +674,26 @@ namespace BigAmbitionsMP
                     HandleInteriorCargoSync(env);
                     break;
 
+                case MessageType.InteriorDirtSync:
+                    // v10 (T7/ruling 33): dirt values for the building this client is inside.
+                    GameStatePatcher.ApplyInteriorDirtSync(env.GetPayload<InteriorDirtSyncPayload>());
+                    break;
+
+                case MessageType.InteriorRequest:
+                {
+                    // v10 (T7): host → owner "your cargo sync didn't match my cache — push the
+                    // full interior". Only meaningful for a building this machine owns; the queued
+                    // push is force=true, so it bypasses the tick gates and re-seeds the host cache.
+                    // Review m4: ownership-checked LOCALLY — without it a host could make a guest
+                    // upload its replica of an arbitrary interior (the host rejects it, but the
+                    // ~300 KB upload would still travel).
+                    var irq = env.GetPayload<InteriorRequestPayload>();
+                    if (irq != null && !string.IsNullOrEmpty(irq.AddressKey)
+                        && InteriorSync.OwnsAddressLocally(irq.AddressKey))
+                        InteriorSync.PushOwnedBuildingNow(irq.AddressKey);
+                    break;
+                }
+
                 case MessageType.RivalsSnapshot:
                     MPLoadProfiler.Mark("CLIENT recv RivalsSnapshot");
                     HandleRivalsSnapshot(env);
@@ -1532,6 +1552,20 @@ namespace BigAmbitionsMP
             payload.ItemInstancesAuthoritative = true;
             payload.Authoritative = true;   // owner's own push — authoritative for the whole interior
             Send(MessageEnvelope.Create(MessageType.InteriorOwnerSnapshot, MPConfig.PlayerId, payload));
+        }
+
+        /// <summary>v10 (T7): owner → host, cargo-only interior update (OwnerStructHash set by the caller).</summary>
+        public static void SendInteriorCargoSync(InteriorCargoSyncPayload p)
+        {
+            if (!IsConnected || p == null || string.IsNullOrEmpty(p.AddressKey)) return;
+            Send(MessageEnvelope.Create(MessageType.InteriorCargoSync, MPConfig.PlayerId, p));
+        }
+
+        /// <summary>v10 (T7/ruling 33): owner → host, dirt-values update.</summary>
+        public static void SendInteriorDirtSync(InteriorDirtSyncPayload p)
+        {
+            if (!IsConnected || p == null || string.IsNullOrEmpty(p.AddressKey)) return;
+            Send(MessageEnvelope.Create(MessageType.InteriorDirtSync, MPConfig.PlayerId, p));
         }
 
         // ── Passenger (ride shotgun) ──────────────────────────────────────────

@@ -57,6 +57,9 @@ namespace BigAmbitionsMP
             _volatileSentAtByAddr.Clear();
             _lastLocalOwnerStructByAddr.Clear();
             _lastLocalOwnerVolatileAt.Clear();
+            _lastDirtHashByAddr.Clear();            // v10
+            _lastLocalOwnerDirtByAddr.Clear();      // v10
+            _lastLocalOwnerNonCargoByAddr.Clear();  // v10
             _applyTimes.Clear();
             _loopWarnedAt.Clear();
             // Round-281: the struct-version mint and its send-side bookkeeping.  Clearing the version
@@ -117,10 +120,11 @@ namespace BigAmbitionsMP
                 if (snap == null) return;
                 // Round-280 (S1): stamp ALL THREE trackers — stamping only the full hash left
                 // the Tick's 12s clock un-reset, so it could double-send moments later.
-                var (hsSub, hvSub, hnSub) = ComputeHashes(snap);
+                var (hsSub, hvSub, hnSub, hdSub) = ComputeHashes(snap);
                 _lastHashByAddr[addressKey] = hvSub;
                 _lastStructHashByAddr[addressKey] = hsSub;
                 _structVolHashByAddr[addressKey] = hnSub;   // round-281: the cargo-only discriminator's baseline
+                _lastDirtHashByAddr[addressKey] = hdSub;    // v10: the entry snapshot carries dirt — subscriber is current
                 _volatileSentAtByAddr[addressKey] = UnityEngine.Time.realtimeSinceStartup;
                 // Round-281: this snapshot is the receiver's BASELINE — it is what every later cargo
                 // sync for this address is measured against, so it must carry the structure's version.
@@ -193,7 +197,18 @@ namespace BigAmbitionsMP
                     // 2s beat as before; VOLATILE-only churn (cargo as customers buy,
                     // dirt underfoot, item state) coalesces - the rig 2026-08-01 loop
                     // shipped the full 754-item interior every beat for one visitor.
-                    var (hs, hv, hn) = ComputeHashes(snap);
+                    var (hs, hv, hn, hd) = ComputeHashes(snap);
+                    // v10 (T7/ruling 33): dirt has its own band and its own tiny message — checked
+                    // BEFORE the full gate, because a dirt-only beat leaves `full` unchanged and
+                    // would otherwise `continue` right past it. Subscribers ARE the players inside
+                    // this building, so this is exactly ruling 33's audience; an unsubscribed
+                    // building is never even polled here.
+                    if (!_lastDirtHashByAddr.TryGetValue(addr, out var pd) || pd != hd)
+                    {
+                        _lastDirtHashByAddr[addr] = hd;
+                        if (_subsByBuilding.TryGetValue(addr, out var dirtSubs))
+                            MPServer.BroadcastInteriorDirtSyncTo(dirtSubs, BuildDirtSync(snap));
+                    }
                     bool fullChanged = !_lastHashByAddr.TryGetValue(addr, out var pf) || pf != hv;
                     if (!fullChanged) continue;
                     bool structChanged = !_lastStructHashByAddr.TryGetValue(addr, out var ps) || ps != hs;
@@ -381,7 +396,7 @@ namespace BigAmbitionsMP
                         $"[InteriorSync] OwnerSnapshot from '{playerId}' addr='{payload.AddressKey}' carries NO items — " +
                         "item authority DENIED (it cannot clear the stored interior). Their character save likely disagrees " +
                         "with this session's ownership ledger; the stored copy is kept.");
-                int hash = ComputeHash(payload);
+                int hash = CacheHash(payload);   // v10 review M1: full + dirt — see CacheHash
                 bool changed = !_ownerSnapshotsByAddr.TryGetValue(payload.AddressKey, out var prev) || prev.Hash != hash;
                 // Round-103b: an EMPTY push must not replace a cached NON-EMPTY one either. This cache is
                 // what BuildSnapshotForHostSend serves to everyone who enters the building, so caching the
@@ -397,27 +412,39 @@ namespace BigAmbitionsMP
                         $"over {prev!.Snapshot.ItemInstances.Count} stored item(s). They will receive the stored copy when they enter.");
                     return;
                 }
+                // v10 (T7): the owner's 2 s tick pushes no longer carry the shopper schedule —
+                // an empty list on an accepted push means "unchanged", never "gone". The cache
+                // must keep serving the last known schedule to entering guests (round-39d's
+                // empty-shop bug returns otherwise). Same convention as round-103's empty-items rule.
+                if ((payload.CustomerEntries == null || payload.CustomerEntries.Count == 0)
+                    && prev?.Snapshot?.CustomerEntries != null && prev.Snapshot.CustomerEntries.Count > 0)
+                    payload.CustomerEntries = prev.Snapshot.CustomerEntries;
+                if ((payload.FulfilledDemands == null || payload.FulfilledDemands.Count == 0)
+                    && prev?.Snapshot?.FulfilledDemands != null && prev.Snapshot.FulfilledDemands.Count > 0)
+                    payload.FulfilledDemands = prev.Snapshot.FulfilledDemands;
                 _ownerSnapshotsByAddr[payload.AddressKey] = new OwnerInteriorState
                 {
                     OwnerPlayerId = playerId,
                     Snapshot = payload,
                     Hash = hash,
                 };
-                _lastHashByAddr[payload.AddressKey] = hash;
 
                 Plugin.Logger.LogInfo($"[InteriorSync] OwnerSnapshot accepted from '{playerId}' addr='{payload.AddressKey}': {SnapshotSummary(payload)}{(changed ? "" : " (unchanged)")}.");
                 if (!changed) return;
 
                 GameStatePatcher.ApplyInteriorSnapshot(payload);
-                if (_subsByBuilding.TryGetValue(payload.AddressKey, out var set))
-                {
-                    // Round-281: a relayed owner push is still a FULL send to subscribers, so it is
-                    // still a receiver's baseline — stamp it.  (The owner's own machine sent this
-                    // payload with StructVersion 0; the number is the HOST's to mint, since the host
-                    // is the only machine that sends cargo syncs for this address.)
-                    StampStructVersion(payload);
-                    MPServer.BroadcastInteriorSnapshotTo(set, payload);
-                }
+                // v10 (T7 relay fix, audit item a): DON'T relay the full payload here, and DON'T
+                // stamp _lastHashByAddr — both together were what bypassed the Tick's split gate,
+                // making every client-owner push a FULL send to subscribers. With the cache updated
+                // and the trackers untouched, the 2 s Tick sees the change and routes it through
+                // the same cargo-only-when-possible gate the host's own buildings use (≤2 s added
+                // latency on guest-visible changes; the round-281 baselines stay coherent because
+                // ONE path now stamps them).
+                // Review M2: the owner's OWN 12 s volatile coalesce already throttled this inflow —
+                // stacking the Tick's 12 s window on top doubled worst-case guest latency to ~24 s.
+                // Clearing the relay-side clock lets the next 2 s beat carry an accepted change
+                // without re-opening any spam path (inflow stays owner-throttled).
+                _volatileSentAtByAddr.Remove(payload.AddressKey);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] HandleOwnerSnapshot: {ex.Message}"); }
         }
@@ -507,8 +534,26 @@ namespace BigAmbitionsMP
                 // "what is the whole interior" — it would have to be merged into the stored snapshot,
                 // and a merge is where "absolute state" quietly becomes a diff-chain.  Shrinking this
                 // leg is its own round with its own design.
-                var (ohs, ohv, _) = ComputeHashes(snap);
+                // v10 (T7): the shopper schedule rides only the force pushes (entry/exit/publish) —
+                // the 2 s tick strips it, and the host cache keeps its last known copy (empty on an
+                // accepted push means "unchanged" there, per the round-103 convention).
+                if (!force) snap.CustomerEntries = new List<CustomerEntryInfo>();
+                var (ohs, ohv, ohn, ohd) = ComputeHashes(snap);
                 float onow = UnityEngine.Time.realtimeSinceStartup;
+                // v10 (T7/ruling 33): dirt is its own band and no longer perturbs `full` — a
+                // dirt-only change ships as a tiny InteriorDirtSync (owner → host keeps the cache
+                // and the save current; the host forwards to inside-players only). Checked BEFORE
+                // the full gate; a force push carries DirtSpots in the full snapshot below anyway.
+                if (!_lastLocalOwnerDirtByAddr.TryGetValue(addressKey, out var pDirt) || pDirt != ohd)
+                {
+                    _lastLocalOwnerDirtByAddr[addressKey] = ohd;
+                    if (!force)
+                    {
+                        var dirtUp = BuildDirtSync(snap);
+                        MPClient.SendInteriorDirtSync(dirtUp);
+                        Plugin.Logger.LogInfo($"[InteriorSync] Sent owner DIRT sync ({reason}) addr='{addressKey}': {dirtUp.Spots.Count} dirty spot(s) (v10).");
+                    }
+                }
                 if (!force)
                 {
                     bool fullChanged = !_lastLocalOwnerHashByAddr.TryGetValue(addressKey, out var prev) || prev != ohv;
@@ -518,9 +563,33 @@ namespace BigAmbitionsMP
                         && _lastLocalOwnerVolatileAt.TryGetValue(addressKey, out var tSent)
                         && onow - tSent < VolatileCoalesceSeconds)
                         return true;
+                    // v10 (T7 upload fix, audit item a): only cargo differs — ship the cargo channel
+                    // instead of the ~300 KB full snapshot. The v10 handshake refuses any other build,
+                    // so the host always has the client→host cargo handler; the OwnerStructHash lets
+                    // the host verify its cache still matches this structure before grafting.
+                    bool cargoOnlyUp = !structChanged
+                                       && _lastLocalOwnerNonCargoByAddr.TryGetValue(addressKey, out var pNc) && pNc == ohn;
+                    if (cargoOnlyUp)
+                    {
+                        var cargoUp = BuildCargoSync(snap, structVersion: 0);
+                        // Review m2: 0 means "host-minted direction" on the wire — a computed hash
+                        // that legitimately lands on 0 must not be mistaken for it (the refusal
+                        // loop would re-push ~300 KB every beat, forever). Review M3: the non-cargo
+                        // band travels too, so a graft can never freeze stale item state.
+                        cargoUp.OwnerStructHash   = ohs == 0 ? 1 : ohs;
+                        cargoUp.OwnerNonCargoHash = ohn == 0 ? 1 : ohn;
+                        _lastLocalOwnerHashByAddr[addressKey]     = ohv;
+                        _lastLocalOwnerStructByAddr[addressKey]   = ohs;
+                        _lastLocalOwnerNonCargoByAddr[addressKey] = ohn;
+                        _lastLocalOwnerVolatileAt[addressKey]     = onow;
+                        MPClient.SendInteriorCargoSync(cargoUp);
+                        Plugin.Logger.LogInfo($"[InteriorSync] Sent owner CARGO sync ({reason}) addr='{addressKey}': {cargoUp.Items.Count} item(s) (v10 — was a full snapshot).");
+                        return true;
+                    }
                 }
                 _lastLocalOwnerHashByAddr[addressKey] = ohv;
                 _lastLocalOwnerStructByAddr[addressKey] = ohs;
+                _lastLocalOwnerNonCargoByAddr[addressKey] = ohn;
                 _lastLocalOwnerVolatileAt[addressKey] = onow;
                 MPClient.SendInteriorOwnerSnapshot(snap);
                 // Sweep 3c (user-approved): promoted to ALL builds — this line is the completion
@@ -637,7 +706,7 @@ namespace BigAmbitionsMP
                         // send immediately, exactly as before.  Suppressions are counted and named
                         // on the next actual send so the coalescing stays diagnosable.
                         float nowIp = UnityEngine.Time.realtimeSinceStartup;
-                        var (hsIp, hvIp, hnIp) = ComputeHashes(snap);
+                        var (hsIp, hvIp, hnIp, _) = ComputeHashes(snap);
                         bool fullChangedIp = !_lastHashByAddr.TryGetValue(addressKey, out var pfIp) || pfIp != hvIp;
                         if (!fullChangedIp)
                         {
@@ -1286,6 +1355,17 @@ namespace BigAmbitionsMP
         /// </summary>
         internal static int ComputeHash(InteriorSnapshotPayload snap) => ComputeHashes(snap).full;
 
+        /// <summary>v10 review M1: the owner-cache change detector. `full` alone no longer sees
+        /// dirt, and HandleOwnerSnapshot's `changed` gate decides whether the host APPLIES a push
+        /// to its own world — a dirt-only force push (owner re-entering a shop that dirtied while
+        /// they were away) must not be judged "unchanged", or the host's world and save keep the
+        /// stale values indefinitely.</summary>
+        private static int CacheHash(InteriorSnapshotPayload snap)
+        {
+            var (_, f, _, d) = ComputeHashes(snap);
+            unchecked { return f * 31 + d; }
+        }
+
         // Round-213 state: split-gate bookkeeping (subscriber + owner ticks) and the
         // re-send-loop detector.
         private const float VolatileCoalesceSeconds = 12f;
@@ -1297,6 +1377,143 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<string, float> _volatileSentAtByAddr       = new(StringComparer.Ordinal);
         private static readonly Dictionary<string, int>   _lastLocalOwnerStructByAddr = new(StringComparer.Ordinal);
         private static readonly Dictionary<string, float> _lastLocalOwnerVolatileAt   = new(StringComparer.Ordinal);
+        // v10 (T7): the dirt band's baselines (host subscriber tick / owner tick) and the owner
+        // tick's non-cargo baseline (the client→host cargo-only discriminator).
+        private static readonly Dictionary<string, int>   _lastDirtHashByAddr         = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, int>   _lastLocalOwnerDirtByAddr   = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, int>   _lastLocalOwnerNonCargoByAddr = new(StringComparer.Ordinal);
+
+        /// <summary>v10: the absolute dirty-set for one building — every lattice spot with a
+        /// non-zero value; the receiver zeroes the rest (see MessageType.InteriorDirtSync).
+        /// Review B2: entries are lattice-INDEX keyed (X/Z verify) — (X, Z) collides across
+        /// stacked storeys, and the snapshot's DirtSpots list preserves the native lattice order.</summary>
+        private static InteriorDirtSyncPayload BuildDirtSync(InteriorSnapshotPayload snap)
+        {
+            var p = new InteriorDirtSyncPayload { AddressKey = snap.AddressKey };
+            try { p.PlaythroughId = MPSaveCoordinator.ActivePlaythroughId ?? ""; } catch { }
+            for (int i = 0; i < snap.DirtSpots.Count; i++)
+            {
+                var ds = snap.DirtSpots[i];
+                if (ds != null && ds.Dirtiness > 0f)
+                    p.Spots.Add(new DirtSpotDeltaInfo { Index = i, X = ds.X, Z = ds.Z, Dirtiness = ds.Dirtiness });
+            }
+            return p;
+        }
+
+        /// <summary>v10 (review m4): does THIS machine own the building at addressKey? Guards the
+        /// host→owner full-repush request so a host cannot make a guest upload an arbitrary replica.</summary>
+        internal static bool OwnsAddressLocally(string addressKey)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null || string.IsNullOrEmpty(addressKey)) return false;
+                foreach (var r in gi.BuildingRegistrations)
+                    if (r != null && GameStateReader.AddressKey(r) == addressKey) return IsLocalOwnerBusiness(r);
+                return false;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>v10 (T7): HOST — an owner's cargo-only upload for a building this host caches.
+        /// Grafts the cargo onto the cached owner snapshot ONLY when the cache's structure hash
+        /// matches the sender's (the graft is then exact: same item set, cargo band wholly
+        /// replaced — absolute state, not a diff-chain); any doubt → ask the owner for a full
+        /// push. The Tick's untouched trackers then relay the change to subscribers through the
+        /// normal split gate. MAIN THREAD (marshalled by the dispatcher).</summary>
+        public static void HandleOwnerCargoSync(MPLink peer, string playerId, InteriorCargoSyncPayload p)
+        {
+            if (!MPServer.IsRunning || peer == null || p == null || string.IsNullOrEmpty(p.AddressKey)) return;
+            try
+            {
+                if (!HostKnowsPlayerOwnsAddress(playerId, p.AddressKey))
+                {
+                    Plugin.Logger.LogWarning($"[InteriorSync] owner cargo sync rejected: '{playerId}' is not the recorded owner of '{p.AddressKey}'.");
+                    return;
+                }
+                if (!_ownerSnapshotsByAddr.TryGetValue(p.AddressKey, out var state) || state?.Snapshot == null)
+                {
+                    Plugin.Logger.LogInfo($"[InteriorSync] owner cargo sync for '{p.AddressKey}': no cached full snapshot to graft onto — requesting a full push.");
+                    MPServer.RequestOwnerInteriorResync(peer, p.AddressKey);
+                    return;
+                }
+                var cache = state.Snapshot;
+                // Review M3: verify BOTH the structure band and the non-cargo volatile band — the
+                // owner's baselines advance even when a full push was refused (sanity gates,
+                // ownership handover window), and structure alone would let a graft freeze stale
+                // item state (StateIndex) into the cache every guest is served from.
+                var (cacheStruct, _, cacheNonCargo, _) = ComputeHashes(cache);
+                cacheStruct   = cacheStruct   == 0 ? 1 : cacheStruct;     // mirror the sender's 0→1 remap
+                cacheNonCargo = cacheNonCargo == 0 ? 1 : cacheNonCargo;
+                if (p.OwnerStructHash == 0 || p.OwnerNonCargoHash == 0
+                    || cacheStruct != p.OwnerStructHash || cacheNonCargo != p.OwnerNonCargoHash)
+                {
+                    Plugin.Logger.LogWarning($"[InteriorSync] owner cargo sync for '{p.AddressKey}': hash mismatch (cache s={cacheStruct}/n={cacheNonCargo} vs sender s={p.OwnerStructHash}/n={p.OwnerNonCargoHash}) — requesting a full push.");
+                    MPServer.RequestOwnerInteriorResync(peer, p.AddressKey);
+                    return;
+                }
+                var byId = new Dictionary<string, List<CargoInstanceInfo>>(StringComparer.Ordinal);
+                foreach (var it in p.Items) if (it != null && !string.IsNullOrEmpty(it.Id)) byId[it.Id] = it.CargoInstances ?? new List<CargoInstanceInfo>();
+                int grafted = 0, unknown = 0;
+                foreach (var it in cache.ItemInstances)
+                {
+                    if (it == null || string.IsNullOrEmpty(it.Id)) continue;
+                    if (byId.TryGetValue(it.Id, out var cargo)) { it.CargoInstances = cargo; byId.Remove(it.Id); grafted++; }
+                }
+                unknown = byId.Count;
+                if (unknown > 0)
+                {
+                    // Equal structure hashes should preclude this — treat it as divergence, not noise.
+                    Plugin.Logger.LogWarning($"[InteriorSync] owner cargo sync for '{p.AddressKey}': {unknown} item(s) not in the cache despite matching structure — requesting a full push.");
+                    MPServer.RequestOwnerInteriorResync(peer, p.AddressKey);
+                    return;
+                }
+                state.Hash = CacheHash(cache);   // post-graft recompute — the graft moved the full band
+                // Review M2: same relay-clock clear as HandleOwnerSnapshot — the inflow is already
+                // owner-throttled, so the next 2 s beat may carry it to subscribers.
+                _volatileSentAtByAddr.Remove(p.AddressKey);
+                // The host's own world adopts the same cargo (the apply diffs internally and
+                // reports cargoOnly=N); subscribers get it from the next Tick beat, whose
+                // trackers this handler deliberately does not touch.
+                GameStatePatcher.ApplyInteriorSnapshot(cache);
+                Plugin.Logger.LogInfo($"[InteriorSync] owner cargo sync accepted from '{playerId}' addr='{p.AddressKey}': {grafted} item(s) grafted (v10).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] HandleOwnerCargoSync: {ex.Message}"); }
+        }
+
+        /// <summary>v10 (T7/ruling 33): HOST — an owner's dirt-values upload. Updates the cached
+        /// snapshot's dirt band and the host's own world; subscribers get it from the next Tick
+        /// beat (dirt band tracker untouched here). MAIN THREAD (marshalled).</summary>
+        public static void HandleOwnerDirtSync(MPLink peer, string playerId, InteriorDirtSyncPayload p)
+        {
+            if (!MPServer.IsRunning || peer == null || p == null || string.IsNullOrEmpty(p.AddressKey)) return;
+            try
+            {
+                if (!HostKnowsPlayerOwnsAddress(playerId, p.AddressKey))
+                {
+                    Plugin.Logger.LogWarning($"[InteriorSync] owner dirt sync rejected: '{playerId}' is not the recorded owner of '{p.AddressKey}'.");
+                    return;
+                }
+                if (_ownerSnapshotsByAddr.TryGetValue(p.AddressKey, out var state) && state?.Snapshot?.DirtSpots != null)
+                {
+                    // Review B2: index-keyed with X/Z verify — same rule as the world apply.
+                    var cacheSpots = state.Snapshot.DirtSpots;
+                    var byIndex = new Dictionary<int, DirtSpotDeltaInfo>();
+                    foreach (var s in p.Spots) if (s != null) byIndex[s.Index] = s;
+                    for (int i = 0; i < cacheSpots.Count; i++)
+                    {
+                        var ds = cacheSpots[i];
+                        if (ds == null) continue;
+                        if (byIndex.TryGetValue(i, out var sent))
+                        { if (sent.X == ds.X && sent.Z == ds.Z) ds.Dirtiness = sent.Dirtiness; }
+                        else ds.Dirtiness = 0f;
+                    }
+                    state.Hash = CacheHash(state.Snapshot);   // review M1: dirt is part of the cache hash now
+                }
+                GameStatePatcher.ApplyInteriorDirtSync(p);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] HandleOwnerDirtSync: {ex.Message}"); }
+        }
         private static readonly Dictionary<string, Queue<float>> _applyTimes   = new(StringComparer.Ordinal);
         private static readonly Dictionary<string, float>        _loopWarnedAt = new(StringComparer.Ordinal);
 
@@ -1339,14 +1556,17 @@ namespace BigAmbitionsMP
         /// some unrelated structural edit forced a full snapshot.  This hash is what
         /// lets the sender say cargo-only and MEAN it: `full` differs while this one
         /// matches ⇔ the delta is cargo and nothing else.</summary>
-        internal static (int structure, int full, int structAndNonCargo) ComputeHashes(InteriorSnapshotPayload snap)
+        internal static (int structure, int full, int structAndNonCargo, int dirt) ComputeHashes(InteriorSnapshotPayload snap)
         {
             unchecked
             {
-                int hs = 17, hv = 17, hn = 17;
-                void S(int v) { hs = hs * 31 + v; hv = hv * 31 + v; hn = hn * 31 + v; }   // structure -> all three
-                void V(int v) { hv = hv * 31 + v; hn = hn * 31 + v; }   // non-cargo volatile (dirt, state) -> full + structAndNonCargo
+                int hs = 17, hv = 17, hn = 17, hd = 17;
+                void S(int v) { hs = hs * 31 + v; hv = hv * 31 + v; hn = hn * 31 + v; }   // structure -> the three snapshot bands
+                void V(int v) { hv = hv * 31 + v; hn = hn * 31 + v; }   // non-cargo volatile (item state) -> full + structAndNonCargo
                 void C(int v) { hv = hv * 31 + v; }                     // cargo -> full only
+                void D(int v) { hd = hd * 31 + v; }                     // v10 (T7/ruling 33): dirt VALUES -> their own band ONLY —
+                                                                        // dirt churn no longer perturbs `full`, so it can never
+                                                                        // trigger a snapshot/cargo send; it rides InteriorDirtSync.
 
                 S(MPAudit.StableHash(snap.Layout));
                 S(snap.RadioStation); S(((int)System.Math.Round(snap.RadioVolume * 100f)));   // round-227
@@ -1359,7 +1579,7 @@ namespace BigAmbitionsMP
                 foreach (var ds in snap.DirtSpots)
                 {
                     S(ds.X); S(ds.Z);
-                    V(((int)System.Math.Round(ds.Dirtiness * 10f)).GetHashCode());   // 0.1 steps, as before
+                    D(((int)System.Math.Round(ds.Dirtiness * 10f)).GetHashCode());   // 0.1 steps, as before
                 }
                 foreach (var it in snap.ItemInstances)
                 {
@@ -1403,7 +1623,7 @@ namespace BigAmbitionsMP
                         foreach (var cc in c.CustomColors) { C(cc.Channel); C(cc.ColorPacked); }
                     }
                 }
-                return (hs, hv, hn);
+                return (hs, hv, hn, hd);
             }
         }
     }

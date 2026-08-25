@@ -988,8 +988,13 @@ namespace BigAmbitionsMP
                     // refused apply can never be mistaken for an applied one.
                     string applySig;
                     {
-                        var (sHs, sHv, _) = InteriorSync.ComputeHashes(payload);
-                        applySig = $"{sHs}|{sHv}|{(payload.ItemInstancesAuthoritative ? 1 : 0)}|{(grantedEdit ? 1 : 0)}|{payload.Layout ?? ""}";
+                        // v10 review B1: dirt moved out of `full` for the SEND gates, but this sig is
+                        // the RECEIVER's duplicate-apply detector — without the dirt band an entry
+                        // snapshot whose only news is dirt matches the old sig and gets skipped,
+                        // stranding stale dirt with no heal (the host's dirt tracker is seeded on the
+                        // assumption this snapshot applied). Fold the dirt band in explicitly.
+                        var (sHs, sHv, _, sHd) = InteriorSync.ComputeHashes(payload);
+                        applySig = $"{sHs}|{sHv}|{sHd}|{(payload.ItemInstancesAuthoritative ? 1 : 0)}|{(grantedEdit ? 1 : 0)}|{payload.Layout ?? ""}";
                     }
                     // Round-281b (verifier finding a): only an apply that RAN TO COMPLETION may
                     // become the S4-lite baseline.  The round-103 empty-snapshot refusal and the
@@ -1672,6 +1677,76 @@ namespace BigAmbitionsMP
                 MPClient.SendInteriorRequest(addr);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] cargo re-request for '{addr}': {ex.Message}"); }
+        }
+
+        /// <summary>v10 (T7/ruling 33): apply a dirt-values update (MessageType.InteriorDirtSync).
+        /// ABSOLUTE dirty-set semantics: listed lattice spots take the sent value, every other
+        /// spot reads clean. Deliberately UPDATE-only — the lattice is one fixed entry per floor
+        /// tile and the cleanliness score AVERAGES the values, so adding/removing entries (or the
+        /// snapshot path's clear-and-rebuild) on a partial list would corrupt the score.
+        /// Review B2: keyed by lattice INDEX with X/Z verification — (X, Z) alone is NOT unique
+        /// (stacked storeys share footprints; the lattice builder discards Y). A verify miss skips
+        /// that spot; the next entry snapshot heals.</summary>
+        public static void ApplyInteriorDirtSync(InteriorDirtSyncPayload payload)
+        {
+            if (payload == null || string.IsNullOrEmpty(payload.AddressKey)) return;
+            RunOnMainThread(() =>
+            {
+                try
+                {
+                    // Lineage guard — same rule as the cargo channel: a dirt write is state, and
+                    // names can collide across worlds. Either side empty = legacy, not a mismatch.
+                    try
+                    {
+                        string mine = MPSaveCoordinator.ActivePlaythroughId ?? "";
+                        if (!string.IsNullOrEmpty(mine) && !string.IsNullOrEmpty(payload.PlaythroughId)
+                            && mine != payload.PlaythroughId) return;
+                    }
+                    catch { }
+                    var gi = SaveGameManager.Current;
+                    if (gi == null) return;
+                    BuildingRegistration? reg = null;
+                    foreach (var r in gi.BuildingRegistrations)
+                        if (r != null && GameStateReader.AddressKey(r) == payload.AddressKey) { reg = r; break; }
+                    if (reg?.dirtSpots == null) return;
+                    var byIndex = new System.Collections.Generic.Dictionary<int, DirtSpotDeltaInfo>();
+                    foreach (var s in payload.Spots) if (s != null) byIndex[s.Index] = s;
+                    int touched = 0, mismatched = 0;
+                    for (int i = 0; i < reg.dirtSpots.Count; i++)
+                    {
+                        var ds = reg.dirtSpots[i];
+                        if (ds == null) continue;
+                        float v = 0f;
+                        if (byIndex.TryGetValue(i, out var sent))
+                        {
+                            if (sent.X != ds.x || sent.Z != ds.z) { mismatched++; continue; }   // lattice order divergence — don't guess
+                            v = sent.Dirtiness;
+                        }
+                        if (ds.dirtiness != v) { ds.dirtiness = v; touched++; }
+                    }
+                    if (touched > 0)
+                    {
+                        // Review B1 (the cargo channel's :1818 precedent): a dirt write moves state the
+                        // S4-lite fingerprint's local half cannot see (counts unchanged) — drop the
+                        // duplicate-apply baseline so the next full snapshot is never mistaken for a dupe.
+                        try { _lastAppliedSig.Remove(payload.AddressKey); } catch { }
+                        // Review m1: repaint the decals if the local player is standing in this very
+                        // building (otherwise the game repaints on entry / its own hourly tick).
+                        try
+                        {
+                            var bm = InstanceBehavior<BuildingManager>.Instance;
+                            if (bm?.buildingRegistration != null
+                                && GameStateReader.AddressKey(bm.buildingRegistration) == payload.AddressKey)
+                                bm.UpdateDirtinessInCurrentBuilding();
+                        }
+                        catch { }
+                        Plugin.Logger.LogInfo($"[Patcher] DirtSync '{payload.AddressKey}': {payload.Spots.Count} dirty spot(s) sent, {touched} value(s) updated{(mismatched > 0 ? $", {mismatched} index/coord MISMATCH(ES) skipped" : "")} (v10).");
+                    }
+                    else if (mismatched > 0)
+                        Plugin.Logger.LogWarning($"[Patcher] DirtSync '{payload.AddressKey}': {mismatched} index/coord mismatch(es), nothing applied — lattice order differs from the sender; the entry snapshot heals.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorDirtSync: {ex.Message}"); }
+            });
         }
 
         /// <summary>Apply a cargo-only interior update (MessageType.InteriorCargoSync, round-281).

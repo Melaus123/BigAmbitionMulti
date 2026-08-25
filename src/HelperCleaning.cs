@@ -111,8 +111,9 @@ namespace BigAmbitionsMP
         /// <summary>MAIN THREAD.  Apply a helper's cleaning to the local (owner's) registration copy.  Only
         /// ever lowers a value: a cleaning report that tried to raise dirtiness would be either a desync or a
         /// tampered client, and either way the owner's own simulation is the authority on getting dirtier.
-        /// The interior sync's own diff hash covers dirt, so the corrected state re-broadcasts to everyone
-        /// automatically — nothing extra to send from here.</summary>
+        /// v10: dirt lives in its OWN hash band now (InteriorSync's dirt gate, not the full-snapshot
+        /// hash) — the owner's next dirt tick detects the corrected values and re-broadcasts them via
+        /// InteriorDirtSync to the players inside; still nothing extra to send from here.</summary>
         public static void Apply(DirtEditPayload? p)
         {
             try

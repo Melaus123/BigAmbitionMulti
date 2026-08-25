@@ -1430,6 +1430,31 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.InteriorCargoSync:
+                {
+                    // v10 (T7): owner → host cargo-only upload (ownership + structure-hash
+                    // checked in the handler; main thread — it mutates the owner cache).
+                    var p = env.GetPayload<InteriorCargoSyncPayload>();
+                    if (p != null)
+                    {
+                        var pc = peer;
+                        GameStatePatcher.EnqueueOnMainThread(() => InteriorSync.HandleOwnerCargoSync(pc, senderPid, p));
+                    }
+                    break;
+                }
+
+                case MessageType.InteriorDirtSync:
+                {
+                    // v10 (T7/ruling 33): owner → host dirt-values upload.
+                    var p = env.GetPayload<InteriorDirtSyncPayload>();
+                    if (p != null)
+                    {
+                        var pc = peer;
+                        GameStatePatcher.EnqueueOnMainThread(() => InteriorSync.HandleOwnerDirtSync(pc, senderPid, p));
+                    }
+                    break;
+                }
+
                 case MessageType.PlayerExitedBuilding:
                 {
                     // Mutates the same subscriber dictionaries as Tick (main thread)
@@ -5405,6 +5430,32 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Server] Interior snapshot broadcast (full state) to {sent} subscriber(s) for '{snap.AddressKey}': {InteriorSync.SnapshotSummary(snap)}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BroadcastInteriorSnapshotTo: {ex.Message}"); }
+        }
+
+        /// <summary>v10 (T7/ruling 33): dirt values to exactly the players inside the building.</summary>
+        public static void BroadcastInteriorDirtSyncTo(System.Collections.Generic.HashSet<int> peerIds, InteriorDirtSyncPayload dirt)
+        {
+            if (!_running || peerIds == null || peerIds.Count == 0 || dirt == null) return;
+            try
+            {
+                var env = MessageEnvelope.Create(MessageType.InteriorDirtSync, "host", dirt);
+                byte[] data = env.Serialize();
+                foreach (var peer in _clients.Keys)
+                {
+                    if (peer == null || !peerIds.Contains(peer.Id)) continue;
+                    peer.Send(data, reliable: true);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BroadcastInteriorDirtSyncTo: {ex.Message}"); }
+        }
+
+        /// <summary>v10 (T7): host → owner "push me the full interior" — sent when an owner's
+        /// cargo-only upload can't be grafted (no cache / structure mismatch).</summary>
+        public static void RequestOwnerInteriorResync(MPLink peer, string addressKey)
+        {
+            if (!_running || peer == null || string.IsNullOrEmpty(addressKey)) return;
+            try { peer.Send(MessageEnvelope.Create(MessageType.InteriorRequest, "host", new InteriorRequestPayload { AddressKey = addressKey })); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RequestOwnerInteriorResync: {ex.Message}"); }
         }
 
         /// <summary>Round-281: broadcast one building's CARGO state to its subscribers.  Same shape as

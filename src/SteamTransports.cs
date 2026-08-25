@@ -54,6 +54,7 @@ namespace BigAmbitionsMP
                 case (int)MessageType.BusinessChange:
                 case (int)MessageType.BuildingsForSale:   // v9 review M5: writes gi.buildingsForSale, which BusinessSnapshot also writes
                 case (int)MessageType.InteriorCargoSync:
+                case (int)MessageType.InteriorDirtSync:   // v10 M5: writes dirt state InteriorSnapshot also writes
                 case (int)MessageType.RadioState:
                 // Review M6 — the megabyte class that was missed: a rejoiner's disconnect-save upload
                 // and gzipped log replies must not head-of-line-block their own gameplay lane.
