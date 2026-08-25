@@ -28,8 +28,12 @@ namespace BigAmbitionsMP
     {
         // ── Stage A profile flags — TODAY'S asymmetries, pinned and named ────────────────────
         // Each is one A2 flip (its own commit + justification), then the flag is deleted.
-        // A2-1 (fixes F-2026-08-25-E, LIVE DUP): vehicle put adopts the round-32 rollback.
-        internal const bool VehicleRollbackPartialMerge = false;
+        // A2-1 FLIPPED 2026-08-25 (fixes F-2026-08-25-E, LIVE DUP): vehicle put now rolls back a
+        // partial merge exactly as the building side has since round-32 — TryToAddToCargo absorbs
+        // part of a stack BEFORE returning false, so without the rollback the owner's trunk gained
+        // N units while the depositor kept the full stack ("full" is now all-or-nothing on both
+        // containers).
+        internal const bool VehicleRollbackPartialMerge = true;
         // A2-2 (fixes D2): vehicle take/put fire the cargo callback (native ItemInstance does;
         // native VehicleInstance does not — the owner's own UI never repaints on routed ops).
         internal const bool VehicleFireCargoChangedOnMutate = false;
@@ -168,8 +172,11 @@ namespace BigAmbitionsMP
                     MarkPaidWithSplit(inst, req, res);
                 else if (req.Op == OpPut)
                 {
-                    // Stage A profile: today's vehicle put has NO partial-merge rollback
-                    // (F-2026-08-25-E, live dup) — A2-1 flips VehicleRollbackPartialMerge.
+                    // A2-1: the rollback below is LIVE (F-2026-08-25-E) — "full" is all-or-nothing
+                    // on both containers now. Review-verified against BOTH native absorption shapes
+                    // (merge-into-existing and copy+append); reversal is amount-based per
+                    // (name, paid) — distribution across fungible stacks may differ, converging on
+                    // the next manifest (inherited round-32 semantics, both containers).
                     var ci = new CargoInstance(req.ItemName, req.Amount, req.PricePerUnit, req.Paid);
                     if (inst.TryToAddToCargo(ci)) { res.Ok = true; res.Reason = ""; }
                     else if (VehicleRollbackPartialMerge)
