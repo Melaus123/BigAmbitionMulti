@@ -9,6 +9,8 @@ using Player.HUD.ItemInfoOverlays;  // VehicleOverlay (clone the native Enter/Ma
 using HarmonyLib;                   // AccessTools (read the native UI's private serialized fields)
 using UI.MergeCargo;                // ManageCargoUi (the native cargo screen we clone)
 using UI.PlayerHUD;                 // CargoItemUi (the native card whose fields we set directly)
+using Localizor;                    // .Localize (native sell-confirm body — sell parity 2026-08-25)
+using Extensions;                   // ToShortCurrencyFormat (sell-confirm price)
 
 namespace BigAmbitionsMP
 {
@@ -251,7 +253,66 @@ namespace BigAmbitionsMP
                 // sealed rows rendered but every take answered "Already taken." (owner-side loose
                 // loop skips sealed). Sealed-ness derives from the item DEFINITION (F-2026-08-25-F).
                 string tCtx = IsSealedName(it) ? "boxtake" : "";
-                MakeNativeCard(it, amountText, () => VehicleStorageSync.RequestTake(vid, owner, it, takeAmt, tPaid, tPrice, tCtx), paid: tPaid);
+                // Sell parity (user 2026-08-25): the owner's native card shows a SELL button on
+                // paid rows and neither button on sealed rows (CargoItemUi :131-144) — mirror that
+                // rule. Confirm dialog + price basis are the native ones (GetSellingPrice × count,
+                // the same basis the engine credits on Ok — R2); the removal routes to the owner
+                // and the money credits THIS player's wallet at verdict time. Unpaid rows get the
+                // native DISCARD instead (user-approved same day; wired below).
+                System.Action? onSell = null;
+                if (tPaid && tCtx != "boxtake")
+                {
+                    int cnt = g.count;
+                    string amtText = amountText;   // per-card capture for the confirm body
+                    onSell = () =>
+                    {
+                        try
+                        {
+                            float total = 0f;
+                            try { total = new CargoInstance(it, takeAmt, tPrice, true).GetSellingPrice() * cnt; } catch { }
+                            // Native confirm shape (CargoItemUi :180-186): localized name, "(NxM) "
+                            // prefix when the amount label shows. Localize(it) below is OUR
+                            // reflection helper (:392) — ".Localize(new {...})" on the key string is
+                            // the Localizor extension; the two coexist by call shape.
+                            string locName = Localize(it);
+                            HudConfirm.Show(default, "itempanelui_hud_confirm_sellitem".Localize(new
+                            {
+                                type = string.IsNullOrEmpty(amtText) ? locName : "(" + amtText + ") " + locName,
+                                price = total.ToShortCurrencyFormat(),
+                            }), delegate
+                            {
+                                System.Action doSell = () =>
+                                {
+                                    VehicleStorageSync.RequestStackOp(vid, it, takeAmt, paid: true, tPrice, cnt, sell: true);
+                                    Plugin.Logger.LogInfo($"[VStore] borrower stack sell {cnt}×({it}×{takeAmt}) on '{vid}' → routed.");
+                                };
+                                // Native second confirm for special gifts (CargoItemUi :189-196) —
+                                // the borrower keeps the owner's friction (review MINOR-6a).
+                                bool gift = false;
+                                // != null, not ?. — Item is a ScriptableObject and ?. bypasses Unity's
+                                // fake-null (review NEW-6; the IsSealedName idiom).
+                                try { var itemDef = BigAmbitions.Items.ItemsGetter.GetByName(it); gift = itemDef != null && itemDef.isSpecialGift; } catch { }
+                                if (gift) UI.ItemPanel.ItemPanelUI.ConfirmDiscardingSpecialGift(doSell);
+                                else doSell();
+                            });
+                        }
+                        catch (System.Exception ex) { Plugin.Logger.LogWarning($"[VStore] sell route: {ex.Message}"); }
+                    };
+                }
+                // Discard parity (user-approved 2026-08-25 evening): the owner's native card shows
+                // DISCARD on unpaid rows (CargoItemUi :145-153) — no confirm dialog, ONE instance
+                // of the group per click (OnDiscardClick removes firstCargoInstance only). Same
+                // routed removal, count 1, no credit. Sealed rows still get neither button.
+                System.Action? onDiscard = null;
+                if (!tPaid && tCtx != "boxtake")
+                {
+                    onDiscard = () =>
+                    {
+                        VehicleStorageSync.RequestStackOp(vid, it, takeAmt, paid: false, tPrice, count: 1, sell: false);
+                        Plugin.Logger.LogInfo($"[VStore] borrower stack discard 1×({it}×{takeAmt}) on '{vid}' → routed.");
+                    };
+                }
+                MakeNativeCard(it, amountText, () => VehicleStorageSync.RequestTake(vid, owner, it, takeAmt, tPaid, tPrice, tCtx), paid: tPaid, onSell: onSell, onDiscard: onDiscard);
             }
             if (_cargoSellAll != null)   // Deposit = repurpose the native Sell-All button when holding an item
             {
@@ -302,7 +363,7 @@ namespace BigAmbitionsMP
             return new Color(0.72f, 0.45f, 0.20f, 1f);
         }
 
-        private static void MakeNativeCard(string itemName, string amountText, UnityEngine.Events.UnityAction onTake, bool paid = true)
+        private static void MakeNativeCard(string itemName, string amountText, UnityEngine.Events.UnityAction onTake, bool paid = true, System.Action? onSell = null, System.Action? onDiscard = null)
         {
             var card = UnityEngine.Object.Instantiate(_cargoTemplate, _cargoContent);
             var ci = card.GetComponent<CargoItemUi>();
@@ -322,7 +383,31 @@ namespace BigAmbitionsMP
                 var al = AccessTools.Field(typeof(CargoItemUi), "amountLabel")?.GetValue(ci) as TMP_Text;
                 if (al != null) { bool show = !string.IsNullOrEmpty(amountText); al.gameObject.SetActive(show); al.text = show ? amountText : ""; }
                 foreach (var f in new[] { "priceLabel", "discardButton", "sellButton", "actionButton", "bundleItemsTooltip" })
-                { var c = AccessTools.Field(typeof(CargoItemUi), f)?.GetValue(ci) as Component; if (c != null) c.gameObject.SetActive(false); }
+                {
+                    if (f == "sellButton" && onSell != null) continue;      // sell parity: this card keeps its native Sell button
+                    if (f == "discardButton" && onDiscard != null) continue; // discard parity: unpaid rows keep the native Discard
+                    var c = AccessTools.Field(typeof(CargoItemUi), f)?.GetValue(ci) as Component; if (c != null) c.gameObject.SetActive(false);
+                }
+                if (onSell != null)
+                {
+                    var sb = AccessTools.Field(typeof(CargoItemUi), "sellButton")?.GetValue(ci) as Button;
+                    if (sb != null)
+                    {
+                        sb.onClick = new Button.ButtonClickedEvent();   // fresh event — kills any template/prefab listeners (same pattern as itemButton)
+                        sb.onClick.AddListener(() => onSell());
+                        sb.gameObject.SetActive(true);
+                    }
+                }
+                if (onDiscard != null)
+                {
+                    var db = AccessTools.Field(typeof(CargoItemUi), "discardButton")?.GetValue(ci) as Button;
+                    if (db != null)
+                    {
+                        db.onClick = new Button.ButtonClickedEvent();
+                        db.onClick.AddListener(() => onDiscard());
+                        db.gameObject.SetActive(true);
+                    }
+                }
                 var ib = AccessTools.Field(typeof(CargoItemUi), "itemButton")?.GetValue(ci) as Button;
                 if (ib != null) { ib.onClick = new Button.ButtonClickedEvent(); ib.onClick.AddListener(onTake); }
             }
@@ -373,13 +458,15 @@ namespace BigAmbitionsMP
             return FriendlyModel(key);
         }
 
+        // Miss-path prettifier for BOTH key families this panel localizes (review NEW-1: the sell
+        // confirm was its first ITEM-key caller — "ba:itemname_x" used to render "Itemname x").
         private static string FriendlyModel(string key)
         {
-            if (string.IsNullOrEmpty(key)) return "Vehicle";
+            if (string.IsNullOrEmpty(key)) return "Unknown";   // caller-neutral: vehicle AND item callers share this path
             string s = key;
             int colon = s.IndexOf(':'); if (colon >= 0 && colon < s.Length - 1) s = s.Substring(colon + 1);
-            s = s.Replace("vehicletype_", "").Replace('_', ' ').Trim();
-            if (s.Length == 0) return "Vehicle";
+            s = s.Replace("vehicletype_", "").Replace("itemname_", "").Replace('_', ' ').Trim();
+            if (s.Length == 0) return "Unknown";
             return char.ToUpper(s[0]) + (s.Length > 1 ? s.Substring(1) : "");
         }
 

@@ -50,6 +50,24 @@ namespace BigAmbitionsMP
         public static void RequestPut(string realVehicleId, string ownerId, string itemName, int amount, bool paid, float price)
             => Send(OpPut, realVehicleId, ownerId, itemName, amount, paid, price);
 
+        /// <summary>Sell/discard parity (user 2026-08-25): the borrower's panel routes the native
+        /// card buttons — SELL removes the WHOLE grouped row (count = group size, native OnSellClick
+        /// loop) and the MONEY credits the requester's own wallet at verdict time (native
+        /// whoever-sells-pockets-it; risk R2 credit basis = Amount×Price×Count); DISCARD removes
+        /// exactly ONE instance per click (count = 1 — native OnDiscardClick passes only
+        /// firstCargoInstance; the sell/discard multiplicity asymmetry is native and deliberate).
+        /// No capacity pre-check — nothing is delivered.</summary>
+        public static void RequestStackOp(string realVehicleId, string itemName, int amount, bool paid, float price, int count, bool sell)
+        {
+            if (string.IsNullOrEmpty(realVehicleId) || string.IsNullOrEmpty(itemName) || count <= 0 || amount <= 0) return;
+            StorageSync.SendOp(new StorageOpPayload
+            {
+                Container = StorageSync.ContainerVehicle, VehicleId = realVehicleId, PlayerId = MPConfig.PlayerId,
+                Op = StorageSync.OpTake, Ctx = sell ? "stacksell" : "stackdiscard",
+                ItemName = itemName, Amount = amount, Paid = paid, PricePerUnit = price, Count = count,
+            });
+        }
+
         // Deposit what the accessor is CARRYING into the vehicle — hands first, else a pushed hand-truck/
         // flatbed (round-12 #1b). A carried item is wrapped in a closedcardboardbox, so we deposit the box's
         // CONTENTS (the real item), not the wrapper. NOTHING is removed locally on send — the source stack

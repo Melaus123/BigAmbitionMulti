@@ -105,8 +105,27 @@ namespace BigAmbitionsMP
                     && back.Count == op.Count && back.Silent == op.Silent
                     && back.Nested.Count == 1 && back.Nested[0].ItemName == "x"
                     && back.Nested[0].Amount == 4 && back.Nested[0].PricePerUnit == 2.5f;
-                if (!ok) Plugin.Logger.LogError("[Store] WIRE ROUND-TRIP CHECK FAILED — a StorageOp field does not survive serialization (the GhostCargoFor class). Fix before trusting any storage op.");
-                else Plugin.Logger.LogInfo("[Store] wire round-trip check OK (all StorageOp fields survive).");
+                // Review NEW-2 (2026-08-25): the RES payload is load-bearing too — Nested rides
+                // every put verdict since MINOR-2 (the boxreturn echo depends on it surviving) —
+                // so it gets the same all-fields-non-default round-trip.
+                var rp = new StorageResPayload
+                {
+                    Container = "building", AddressKey = "a", ItemId = "i", VehicleId = "v",
+                    PlayerId = "p", Op = "put", Ctx = "boxreturn", ItemName = "n", Amount = 2,
+                    Paid = false, PricePerUnit = 1.5f, Count = 3, Silent = true, Ok = true, Reason = "r",
+                    Nested = { new CargoNestedInfo { ItemName = "x", Amount = 4, PricePerUnit = 2.5f } },
+                };
+                var renv = MessageEnvelope.Create(MessageType.StorageRes, "p", rp);
+                var rback = renv.GetPayload<StorageResPayload>();
+                bool rok = rback != null && rback.Container == rp.Container && rback.AddressKey == rp.AddressKey
+                    && rback.ItemId == rp.ItemId && rback.VehicleId == rp.VehicleId && rback.PlayerId == rp.PlayerId
+                    && rback.Op == rp.Op && rback.Ctx == rp.Ctx && rback.ItemName == rp.ItemName
+                    && rback.Amount == rp.Amount && rback.Paid == rp.Paid && rback.PricePerUnit == rp.PricePerUnit
+                    && rback.Count == rp.Count && rback.Silent == rp.Silent && rback.Ok == rp.Ok && rback.Reason == rp.Reason
+                    && rback.Nested.Count == 1 && rback.Nested[0].ItemName == "x"
+                    && rback.Nested[0].Amount == 4 && rback.Nested[0].PricePerUnit == 2.5f;
+                if (!ok || !rok) Plugin.Logger.LogError($"[Store] WIRE ROUND-TRIP CHECK FAILED — a Storage{(ok ? "Res" : "Op")} field does not survive serialization (the GhostCargoFor class). Fix before trusting any storage op.");
+                else Plugin.Logger.LogInfo("[Store] wire round-trip check OK (all StorageOp + StorageRes fields survive).");
             }
             catch (Exception ex) { Plugin.Logger.LogError($"[Store] wire round-trip check THREW: {ex.Message}"); }
         }
@@ -118,6 +137,13 @@ namespace BigAmbitionsMP
             VehicleId = req.VehicleId, PlayerId = req.PlayerId, Op = req.Op, Ctx = req.Ctx,
             ItemName = req.ItemName, Amount = req.Amount, Paid = req.Paid,
             PricePerUnit = req.PricePerUnit, Count = req.Count, Silent = req.Silent,
+            // Review 2026-08-25 MINOR-2: the verdict ECHOES the request's Nested band (defensive
+            // copy, never an alias) — a PUT verdict previously carried an empty list, so the
+            // replica echo of a boxreturn give-back re-added a HOLLOW sealed box (the exact
+            // stripped-box shape round-47/Stage-B guard against). Takes still overwrite this
+            // with owner truth in TakeWholeInstance.
+            Nested = req.Nested == null ? new System.Collections.Generic.List<CargoNestedInfo>()
+                                        : new System.Collections.Generic.List<CargoNestedInfo>(req.Nested),
             Ok = false, Reason = "gone",
         };
 
@@ -145,6 +171,13 @@ namespace BigAmbitionsMP
         // MAIN THREAD ONLY. One body; container-specific pieces are resolution,
         // authorization and convergence — everything else is shared.
 
+        // Replica-echo guard: when this machine is ALSO the accessor (host requested an op on a
+        // container the host itself turned out to own — MPServer routes that result object straight
+        // back into OnResult), the apply above already mutated the REAL container; the accessor-side
+        // replica echo must not run a second application. Object identity is the discriminator: a
+        // result that crossed the wire is a different (deserialized) object. Main-thread only.
+        private static StorageResPayload? _lastLocalApplyRes;
+
         internal static StorageResPayload OwnerApply(StorageOpPayload req)
         {
             var res = ResFrom(req);
@@ -158,6 +191,7 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning($"[{Tag(req.Container)}] OwnerApply: {ex.Message}");
                 res.Ok = false; res.Reason = "error";
             }
+            _lastLocalApplyRes = res;
             return res;
         }
 
@@ -212,6 +246,14 @@ namespace BigAmbitionsMP
                     if (req.Ctx == "boxtake")
                         TakeWholeInstance(inst.cargoInstances, req, res,
                                           removeWhole: (ci) => inst.RemoveFromCargo(ci));
+                    // Sell parity (user 2026-08-25): the borrower's trunk panel sells/discards a
+                    // grouped row exactly like the building manage panel has since round-47b —
+                    // same ctx pair, same body, same requester-side credit (R2). Removal-only;
+                    // nothing is delivered. Native per-instance RemoveFromCargo fires the cargo
+                    // callback each removal, matching the owner's own native sell loop.
+                    else if (req.Ctx == "stacksell" || req.Ctx == "stackdiscard")
+                        RemoveStackInstances(inst.cargoInstances, req, res,
+                                             removeWhole: (ci) => inst.RemoveFromCargo(ci));
                     else if (!string.IsNullOrEmpty(req.Ctx))
                     {
                         res.Reason = "unsupported";
@@ -269,7 +311,12 @@ namespace BigAmbitionsMP
                 // contributes only its id to the resting sig and would wait for the 5 s
                 // heartbeat; the dirty flag forces the next tick's packet out full.
                 try { VehicleManager.MarkFleetDirty(); } catch { }
-                Plugin.Logger.LogInfo($"[VStore] owner applied {(req.Op == OpTake ? "TAKE" : req.Op == OpMarkPaid ? "MARK-PAID" : "PUT")}{(req.Silent ? " (mirror)" : "")} {req.Amount}×{req.ItemName} on '{req.VehicleId}' for '{req.PlayerId}'.");
+                // A stack op names the owner-confirmed instance count (res.Count) so this line and the
+                // requester's credit line reconcile from either log alone (review 2026-08-25 MINOR-7).
+                string vwhat = (req.Ctx == "stacksell" || req.Ctx == "stackdiscard")
+                    ? $"{req.Ctx.ToUpperInvariant()} {res.Count}×({req.Amount}×{req.ItemName})"
+                    : $"{(req.Op == OpTake ? "TAKE" : req.Op == OpMarkPaid ? "MARK-PAID" : "PUT")} {req.Amount}×{req.ItemName}";
+                Plugin.Logger.LogInfo($"[VStore] owner applied {vwhat}{(req.Silent ? " (mirror)" : "")} on '{req.VehicleId}' for '{req.PlayerId}'.");
             }
         }
 
@@ -307,7 +354,8 @@ namespace BigAmbitionsMP
                 // REQUESTER's side (credited there on this Ok); the owner only loses the stock,
                 // exactly as if the helper were standing at the shelf natively.
                 if (req.Ctx == "stacksell" || req.Ctx == "stackdiscard")
-                    RemoveStackInstances(item, req, res);
+                    RemoveStackInstances(item.cargoInstances, req, res,
+                                         removeWhole: (ci) => item.RemoveFromCargo(ci));
                 else if (req.Ctx == "boxtake")
                     TakeWholeInstance(item.cargoInstances, req, res,
                                       removeWhole: (ci) => item.RemoveFromCargo(ci));
@@ -360,8 +408,10 @@ namespace BigAmbitionsMP
                 OwnerBusinessTail(reg);   // round-39c: the business must RECOGNIZE the change (see below)
                 // Round-38: setstock used to log as "PUT 1×<name>" (its wire Amount is a hardcoded 1) —
                 // which read as a landed 1-unit deposit and derailed a log read. Name the op truthfully.
-                string opName = req.Op == OpTake ? "TAKE" : req.Op == OpPut ? "PUT" : "SETSTOCK";
-                string what   = req.Op == OpSetStock ? $"'{req.ItemName}'" : $"{req.Amount}×{req.ItemName}";
+                string opName = (req.Ctx == "stacksell" || req.Ctx == "stackdiscard") ? req.Ctx.ToUpperInvariant()
+                              : req.Op == OpTake ? "TAKE" : req.Op == OpPut ? "PUT" : "SETSTOCK";
+                string what   = (req.Ctx == "stacksell" || req.Ctx == "stackdiscard") ? $"{res.Count}×({req.Amount}×{req.ItemName})"   // owner-confirmed count (MINOR-7)
+                              : req.Op == OpSetStock ? $"'{req.ItemName}'" : $"{req.Amount}×{req.ItemName}";
                 Plugin.Logger.LogInfo($"[BStore] owner applied {opName} {what} on '{req.AddressKey}'/{req.ItemId} for '{req.PlayerId}'.");
             }
         }
@@ -434,9 +484,12 @@ namespace BigAmbitionsMP
                 slot.amount = 0;
                 slot.itemName = null;
                 slot.ResetItemCached();
-                try { item.OnItemsInCargoUpdated()?.Invoke(); } catch { }
-                try { BusinessHelper.UpdateCustomerCapacity(reg); } catch { }
-                try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
+                try { item.OnItemsInCargoUpdated()?.Invoke(); } catch { }   // the repaint driver — fires on echo replays too
+                if (!_echoReplay)   // owner business tails — never against a replica (review 2026-08-25 MINOR-3)
+                {
+                    try { BusinessHelper.UpdateCustomerCapacity(reg); } catch { }
+                    try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
+                }
                 res.Ok = true; res.Reason = "";
             }
             // else: slot gone/renamed/empty — res stays !Ok ("gone"); requester's replica was stale.
@@ -445,20 +498,22 @@ namespace BigAmbitionsMP
         /// <summary>Round-47b — helper SELL/DISCARD stacks: remove up to Count identical non-sealed
         /// instances (name+amount+paid identity). ECHO POLICY (risk R2): res.Amount/Paid/PricePerUnit
         /// deliberately stay the REQUESTER's values — the sell credit is computed from them; only
-        /// res.Count is owner truth. Never share an echo helper with the owner-truth branches.</summary>
-        private static void RemoveStackInstances(ItemInstance item, StorageOpPayload req, StorageResPayload res)
+        /// res.Count is owner truth. Never share an echo helper with the owner-truth branches.
+        /// Generalized to BOTH containers 2026-08-25 (borrower trunk sell parity) — the removeWhole
+        /// delegate carries the container's own RemoveFromCargo, exactly like TakeWholeInstance.</summary>
+        private static void RemoveStackInstances(System.Collections.Generic.List<CargoInstance>? src, StorageOpPayload req, StorageResPayload res,
+                                                 Action<CargoInstance> removeWhole)
         {
-            var ssrc = item.cargoInstances;
             int removed = 0;
-            if (ssrc != null)
-                for (int c = ssrc.Count - 1; c >= 0 && removed < req.Count; c--)
+            if (src != null)
+                for (int c = src.Count - 1; c >= 0 && removed < req.Count; c--)
                 {
-                    var ci = ssrc[c];
+                    var ci = src[c];
                     if (ci == null) continue;
                     bool sealedCi = ci.IsSealed;
                     if (sealedCi) continue;
                     if (ci.itemName != req.ItemName || ci.amount != req.Amount || ci.paid != req.Paid) continue;
-                    item.RemoveFromCargo(ci);
+                    removeWhole(ci);
                     removed++;
                 }
             if (removed > 0) { res.Ok = true; res.Reason = ""; res.Count = removed; }
@@ -482,7 +537,8 @@ namespace BigAmbitionsMP
                 if (take >= s.amount) removeWhole(s); else reduceBy(s, take);
                 absorbed -= take;
             }
-            Plugin.Logger.LogInfo($"[{Tag(req.Container)}] put of {req.Amount}×{req.ItemName} didn't fully fit — partial merge rolled back.");
+            if (!_echoReplay)   // an echo rollback is a replica-fuller-than-owner display case, not an owner refusal (MINOR-3)
+                Plugin.Logger.LogInfo($"[{Tag(req.Container)}] put of {req.Amount}×{req.ItemName} didn't fully fit — partial merge rolled back.");
         }
 
         /// <summary>Single-slot station put (producer refill / stationreturn give-back) — moved
@@ -501,7 +557,8 @@ namespace BigAmbitionsMP
             {
                 slot.itemName = req.ItemName;
                 slot.ResetItemCached();
-                Plugin.Logger.LogInfo($"[BStore] producer put named the unset slot '{req.ItemName}' on '{req.AddressKey}'/{req.ItemId} (owner-parity name-set).");
+                if (!_echoReplay)   // owner-voice log — a replica replay must not claim an owner action (MINOR-3)
+                    Plugin.Logger.LogInfo($"[BStore] producer put named the unset slot '{req.ItemName}' on '{req.AddressKey}'/{req.ItemId} (owner-parity name-set).");
             }
             else if (slot.itemName != req.ItemName)
             { res.Reason = "full"; return; }   // a different ingredient is loaded — genuine refusal
@@ -512,7 +569,8 @@ namespace BigAmbitionsMP
             if (slot.amount == 0 && (slot.paid != req.Paid || slot.pricePerUnit != req.PricePerUnit))
             {
                 slot.paid = req.Paid; slot.pricePerUnit = req.PricePerUnit;
-                Plugin.Logger.LogInfo($"[BStore] producer put adopted paid={req.Paid}/price={req.PricePerUnit:F2} onto the empty slot on '{req.AddressKey}'/{req.ItemId} (owner-parity stamp).");
+                if (!_echoReplay)   // owner-voice log (MINOR-3)
+                    Plugin.Logger.LogInfo($"[BStore] producer put adopted paid={req.Paid}/price={req.PricePerUnit:F2} onto the empty slot on '{req.AddressKey}'/{req.ItemId} (owner-parity stamp).");
             }
             // Round-38c: merge via the game's OWN station primitive (MergeCargo — TryToAddToCargo
             // hard-gates on cargoCapacity/whitelist, which a stock station's data doesn't satisfy).
@@ -656,6 +714,7 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogWarning($"[VStore] mirror {res.Op.ToUpperInvariant()} {res.Amount}×{res.ItemName} on '{res.VehicleId}' FAILED owner-side ({res.Reason}) — replica reverts on next re-sync.");
                     return;
                 }
+                EchoBuildingReplica(res);   // instant repaint for the actor (user-approved 2026-08-25); self-gating, display-only
                 if (res.Op == OpTake)       OnTakeResult(res);
                 else if (res.Op == OpPut)   OnPutResult(res);
                 else if (res.Op == OpSetStock)
@@ -669,6 +728,113 @@ namespace BigAmbitionsMP
                 // OpMarkPaid: mirrors are Silent by construction — nothing ever reaches here.
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[{Tag(res.Container)}] OnResult: {ex.Message}"); }
+        }
+
+        // ── Accessor-side replica echo (user-approved 2026-08-25) ──
+        // WHY: an owner's cargo-only interior push rides the ~12s volatile coalesce (round-280 S2,
+        // the resend-storm fix), so a guest's own CONFIRMED take/put repainted their shelf up to
+        // 12s late (field run 2026-08-25 — the stale panel rows caused 3 harmless double-sell
+        // refusals). WHAT: replay the SAME engine mutation bodies against the guest's local replica
+        // of the building item — the native cargo callbacks repaint the shelf instantly for the
+        // actor; everyone else still waits for the coalesced push, which OVERWRITES this echo with
+        // owner truth either way (convergent; an echo miss is display-only and heals ≤12s).
+        // BUILDINGS ONLY: a vehicle replica is a ghost manifest, re-synced ~0.1s by MarkFleetDirty.
+        // NOT echoed: setstock (native move semantics — ReturnToAShelf / shelf refill — too
+        // stateful to replay; the push repaints it). Consume IS echoed (review 2026-08-25 MINOR-1
+        // corrected the first cut's premise: the guest consume prefixes return false, so the native
+        // decrement — FridgeController.ConsumeItem's ReduceFromCargo — never runs on the replica;
+        // the stale row was the "phantom bite" window). One home per mutation shape (ruling 37):
+        // the bodies below are the owner apply's own helpers; authorization, owner tails,
+        // owner-voice logs (gated on _echoReplay) and result-sending are skipped.
+        private static bool _echoReplay;   // main-thread scoped flag: shared bodies skip owner tails/logs while set
+
+        private static void EchoBuildingReplica(StorageResPayload res)
+        {
+            try
+            {
+                if (res.Container != ContainerBuilding || !res.Ok) return;   // structural gates — silent by design
+                if (ReferenceEquals(res, _lastLocalApplyRes)) return;        // host applied THIS very object locally
+                if (res.Op == OpSetStock) return;
+
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return;
+                BuildingRegistration? reg = null;
+                foreach (var r in gi.BuildingRegistrations)
+                    if (r != null && GameStateReader.AddressKey(r) == res.AddressKey) { reg = r; break; }
+                if (reg == null)
+                { Plugin.Logger.LogInfo($"[BStore] echo skipped: no local reg for '{res.AddressKey}'."); return; }
+                // REVIEW 2026-08-25 MAJOR-1 — THE ownership guard. The identity check above only
+                // covers the host's inline path; a CLIENT that both owns the container and sent the
+                // op gets its verdict back DESERIALIZED (new object), and the echo would apply the
+                // change a SECOND time to authoritative data (reachable: operator-vs-real-estate
+                // ledger split; ownership-flip race). The echo is for REPLICAS only — skip anything
+                // this machine authoritatively owns. TrulyMine is the same predicate the round-38d
+                // cargo authority shield trusts (field-proven); its known transient (guests read
+                // RentedByPlayer=true inside HousingFurniture.Enter) errs toward SKIPPING an echo —
+                // a display-only miss the push heals, never a double apply.
+                if (MergerFlip.TrulyMine(reg))
+                {
+                    // WARNING deliberately (review NEW-3): on a CLIENT this line is the MAJOR-1
+                    // tripwire — it fires only when owner-resolution and the grant sets disagreed,
+                    // the exact anomaly that would have double-applied before this guard existed.
+                    Plugin.Logger.LogWarning($"[BStore] echo skipped: '{res.AddressKey}' is locally owned (authoritative copy already applied — owner-as-accessor anomaly).");
+                    return;
+                }
+                if (reg.itemInstances == null) return;
+                ItemInstance? item = null;
+                foreach (var kv in reg.itemInstances)
+                    if (kv.Value != null && (kv.Value.id?.ToString() ?? "") == res.ItemId) { item = kv.Value; break; }
+                if (item == null)
+                { Plugin.Logger.LogInfo($"[BStore] echo skipped: replica of '{res.AddressKey}' has no item {res.ItemId}."); return; }
+
+                // Rebuild the op the owner applied; res2 is a throwaway verdict the shared bodies
+                // can write into (the REAL res must keep its echoed owner-truth fields untouched —
+                // Nested is defensively COPIED, never aliased into the live result).
+                var req2 = new StorageOpPayload
+                {
+                    Container = res.Container, AddressKey = res.AddressKey, ItemId = res.ItemId,
+                    PlayerId = res.PlayerId, Op = res.Op, Ctx = res.Ctx, ItemName = res.ItemName,
+                    Amount = res.Amount, Paid = res.Paid, PricePerUnit = res.PricePerUnit,
+                    Count = res.Count,
+                    Nested = res.Nested == null ? new System.Collections.Generic.List<CargoNestedInfo>()
+                                                : new System.Collections.Generic.List<CargoNestedInfo>(res.Nested),
+                };
+                var res2 = ResFrom(req2);
+                try
+                {
+                    _echoReplay = true;
+                    if (req2.Op == OpTake)
+                    {
+                        if (req2.Ctx == "stacksell" || req2.Ctx == "stackdiscard")
+                            RemoveStackInstances(item.cargoInstances, req2, res2, (ci) => item.RemoveFromCargo(ci));
+                        else if (req2.Ctx == "boxtake")
+                            TakeWholeInstance(item.cargoInstances, req2, res2, (ci) => item.RemoveFromCargo(ci));
+                        else if (req2.Ctx == "stationtake")
+                            TakeStock(reg, item, req2, res2);
+                        else   // "", consume, vehicletake, placereduce — the owner routed these through TakeLoose too
+                            TakeLoose(item.cargoInstances, req2, res2, (ci, amt) => item.ReduceFromCargo(ci, amt));
+                    }
+                    else if (req2.Op == OpPut)
+                    {
+                        if (req2.Ctx == "producer" || req2.Ctx == "stationreturn")
+                            PutIntoSingleSlot(item, req2, res2);
+                        else
+                        {
+                            var ci = new CargoInstance(req2.ItemName, req2.Amount, req2.PricePerUnit, req2.Paid);
+                            DecodeNestedInto(ci, req2.Nested);
+                            if (item.TryToAddToCargo(ci)) res2.Ok = true;
+                            else RollbackPartialMerge(req2, req2.Amount - ci.amount, item.cargoInstances,
+                                                      (s) => item.RemoveFromCargo(s), (s, amt) => item.ReduceFromCargo(s, amt));
+                        }
+                    }
+                }
+                finally { _echoReplay = false; }
+                if (res2.Ok)
+                    Plugin.Logger.LogInfo($"[BStore] echo applied {res.Op}/{(res.Ctx == "" ? "-" : res.Ctx)} {res.Amount}×{res.ItemName} on replica '{res.AddressKey}'.");
+                else
+                    Plugin.Logger.LogInfo($"[BStore] echo miss: replica had no match for {res.Op}/{res.Ctx} {res.Amount}×{res.ItemName} on '{res.AddressKey}' (display-only; owner push heals).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] replica echo: {ex.Message}"); }
         }
 
         private static void OnTakeResult(StorageResPayload res)
@@ -692,12 +858,19 @@ namespace BigAmbitionsMP
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] sell credit: {ex.Message}"); }
                 }
+                // Native tail for BOTH verdicts (OnConfirmSell :211 / OnDiscardClick :218): any UI
+                // keyed to the cargo event refreshes on the clicker's machine (parity 2026-08-25).
+                try { GameEvent.Invoke("ba:gameevent_itemcargochanged"); } catch { }
                 return;
             }
             if (res.Ctx == "consume")
             {
-                // Eaten in place at click time (round-17 parity) — nothing to deliver. A failed
-                // confirm is the phantom-bite race: fridge unchanged, nothing lost; log only.
+                // The EATING (hunger effect) happened at click time (round-17 parity) — nothing to
+                // deliver. The replica ROW, however, was never decremented locally (the guest
+                // prefixes return false, suppressing the native ReduceFromCargo — review 2026-08-25
+                // MINOR-1 corrected the first cut's "eaten in place" premise): the echo above now
+                // reduces it on Ok, closing the phantom-bite stale-row window. A failed confirm is
+                // the phantom-bite race itself: owner fridge unchanged, nothing lost; log only.
                 if (!res.Ok) Plugin.Logger.LogInfo($"[BStore] consume confirm failed ({res.Reason}) — nothing removed, nothing delivered.");
                 return;
             }

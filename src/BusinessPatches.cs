@@ -546,14 +546,30 @@ namespace BigAmbitionsMP
                         {
                             float sellTotal = 0f;
                             try { sellTotal = first.GetSellingPrice() * stackCount; } catch { }
+                            // Native confirm shape (user-approved 2026-08-25, the trunk panel's twins):
+                            // localized name + "(NxM) " prefix when the amount label shows (CargoItemUi
+                            // :112-116/:180-186 — nested rows hide the amount label, so name only).
+                            bool hasNested = false;
+                            try { hasNested = first.nestedCargoInstances != null && first.nestedCargoInstances.Count > 0; } catch { }
+                            string amtText = (!hasNested && stackCount * amount != 1) ? $"{stackCount}x{amount}" : "";
+                            string locName = VehicleStoragePanel.Localize(name);
                             HudConfirm.Show(default, "itempanelui_hud_confirm_sellitem".Localize(new
                             {
-                                type = name,
+                                type = string.IsNullOrEmpty(amtText) ? locName : "(" + amtText + ") " + locName,
                                 price = sellTotal.ToShortCurrencyFormat(),
                             }), delegate
                             {
-                                BuildingStorageSync.RequestStackOp(addr, itemId, name, amount, paid, price, stackCount, sell: true);
-                                Plugin.Logger.LogInfo($"[Business] helper stack sell {stackCount}×({name}×{amount}) @'{addr}' → routed.");
+                                System.Action doSell = () =>
+                                {
+                                    BuildingStorageSync.RequestStackOp(addr, itemId, name, amount, paid, price, stackCount, sell: true);
+                                    Plugin.Logger.LogInfo($"[Business] helper stack sell {stackCount}×({name}×{amount}) @'{addr}' → routed.");
+                                };
+                                // Native second confirm for special gifts (CargoItemUi :189-196) —
+                                // the helper keeps the owner's friction (trunk twin, same day).
+                                bool gift = false;   // != null, not ?. — Unity fake-null (review NEW-6)
+                                try { var itemDef = first.ItemCached; gift = itemDef != null && itemDef.isSpecialGift; } catch { }
+                                if (gift) UI.ItemPanel.ItemPanelUI.ConfirmDiscardingSpecialGift(doSell);
+                                else doSell();
                             });
                         }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] sell route: {ex.Message}"); }
@@ -567,8 +583,12 @@ namespace BigAmbitionsMP
                     {
                         try
                         {
-                            BuildingStorageSync.RequestStackOp(addr, itemId, name, amount, paid, price, stackCount, sell: false);
-                            Plugin.Logger.LogInfo($"[Business] helper stack discard {stackCount}×({name}×{amount}) @'{addr}' → routed.");
+                            // Count=1, NOT stackCount (F-2026-08-25-G, user-approved fix 2026-08-25):
+                            // native discard removes ONE instance per click (OnDiscardClick gets only
+                            // firstCargoInstance) — round-47b had copied sell's whole-group multiplicity
+                            // here, so one helper click destroyed the owner's entire unpaid group.
+                            BuildingStorageSync.RequestStackOp(addr, itemId, name, amount, paid, price, count: 1, sell: false);
+                            Plugin.Logger.LogInfo($"[Business] helper stack discard 1×({name}×{amount}) @'{addr}' → routed.");
                         }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] discard route: {ex.Message}"); }
                     });
