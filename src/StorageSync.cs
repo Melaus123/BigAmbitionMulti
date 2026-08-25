@@ -34,9 +34,15 @@ namespace BigAmbitionsMP
         // N units while the depositor kept the full stack ("full" is now all-or-nothing on both
         // containers).
         internal const bool VehicleRollbackPartialMerge = true;
-        // A2-2 (fixes D2): vehicle take/put fire the cargo callback (native ItemInstance does;
-        // native VehicleInstance does not — the owner's own UI never repaints on routed ops).
-        internal const bool VehicleFireCargoChangedOnMutate = false;
+        // A2-2 FLIPPED 2026-08-25 (fixes D2, REVIEW-CORRECTED scope): the one native gap is the
+        // PARTIAL-REDUCE take — ItemInstance.ReduceFromCargo fires the cargo callback when the
+        // stack survives (:306-309) and VehicleInstance's does not (:217-231, no else). EVERY
+        // OTHER vehicle path already fires natively (put merge :148 / append :180; stack-emptying
+        // take via RemoveFromCargo :215; markpaid inline in MarkPaidWithSplit), and the callback
+        // PLAYS A SOUND (VehicleController.OnItemAddedToCargo = PlayAudio + UpdateCargoCount), so
+        // firing anywhere else audibly double-plays it. The invoke lives in the vehicle take's
+        // reduce delegate ONLY, mirroring the ItemInstance else-branch exactly.
+        internal const bool VehicleFireCargoChangedOnMutate = true;
         // A2-3 (fixes b3): building takes adopt the vehicle side's paid-preference two-pass
         // (matters under ruling 36 — paid and unpaid stacks of one item genuinely coexist).
         internal const bool BuildingPaidPreferencePass = false;
@@ -166,8 +172,15 @@ namespace BigAmbitionsMP
             {
                 var inst = found;
                 if (req.Op == OpTake)
+                    // A2-2: fire the callback ONLY when the reduce leaves the stack alive — the
+                    // single case native VehicleInstance omits (see the flag comment above).
                     TakeLoose(inst.cargoInstances, req, res, paidPreferencePass: true,
-                              reduce: (ci, amt) => inst.ReduceFromCargo(ci, amt));
+                              reduce: (ci, amt) =>
+                              {
+                                  inst.ReduceFromCargo(ci, amt);
+                                  if (VehicleFireCargoChangedOnMutate && ci.amount > 0)
+                                      try { inst.OnItemsInCargoUpdated()?.Invoke(); } catch { }
+                              });
                 else if (req.Op == OpMarkPaid)
                     MarkPaidWithSplit(inst, req, res);
                 else if (req.Op == OpPut)
