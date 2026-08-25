@@ -2411,7 +2411,7 @@ namespace BigAmbitionsMP
         /// is logged loudly, and the address is owed a re-sync so this machine reconciles toward the
         /// world at edit end. Never send a delta the receiver is contracted to refuse.
         /// `reason` on null: "no-changes" (silence — nothing to convey), "no-reg", "threw".</summary>
-        internal static InteriorEditDeltaPayload? BuildLocalEditDelta(string addressKey, out string reason)
+        internal static InteriorEditDeltaPayload? BuildLocalEditDelta(string addressKey, out string reason, bool bulkRemovesAllowed = false)
         {
             reason = "no-reg";
             try
@@ -2437,9 +2437,13 @@ namespace BigAmbitionsMP
                     var removes = new List<InteriorItemOp>();
                     foreach (var k in baseline!.Keys)
                         if (!newSer.ContainsKey(k)) removes.Add(new InteriorItemOp { Kind = "remove", Id = k });
-                    if (removes.Count > 25)
+                    // Stage 2: a DESIGNER CLOSE may legitimately remove a whole session's worth —
+                    // bulkRemovesAllowed lifts the action cap to the 500 sanity bound (the receiver
+                    // mirrors it via the BulkEdit flag). A 1-3-op action forward keeps the 25 cap.
+                    int cap = bulkRemovesAllowed ? 500 : 25;
+                    if (removes.Count > cap)
                     {
-                        Plugin.Logger.LogWarning($"[Patcher] edit delta for '{addressKey}': baseline skew — {removes.Count} removes from a single edit action SUPPRESSED (upserts still sent); owing a re-sync to reconcile this machine toward the world.");
+                        Plugin.Logger.LogWarning($"[Patcher] edit delta for '{addressKey}': baseline skew — {removes.Count} removes (cap {cap}) SUPPRESSED (upserts still sent); owing a re-sync to reconcile this machine toward the world.");
                         InteriorSync.NoteResyncOwed(addressKey, $"delta baseline skew ({removes.Count} removes suppressed)");
                     }
                     else ops.AddRange(removes);
@@ -2449,9 +2453,60 @@ namespace BigAmbitionsMP
                 _lastItemSer[addressKey] = newSer;
                 if (ops.Count == 0) { reason = "no-changes"; return null; }
                 reason = "ok";
-                return new InteriorEditDeltaPayload { AddressKey = addressKey, Ops = ops };
+                return new InteriorEditDeltaPayload { AddressKey = addressKey, Ops = ops, BulkEdit = bulkRemovesAllowed };
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] BuildLocalEditDelta '{addressKey}': {ex.Message}"); reason = "threw"; return null; }
+        }
+
+        /// <summary>STAGE 2: the designer-close delta — the session's item edits (bulk removes
+        /// allowed) PLUS the changed design elements, UPDATE-ONLY by UUID, diffed against
+        /// _lastDesignSer with the same ser-compare discipline as items. No baseline → every design
+        /// travels (update-only is absolute-safe; ~the designs band of one snapshot, once). Null =
+        /// the session changed nothing.</summary>
+        internal static InteriorEditDeltaPayload? BuildDesignerCloseDelta(string addressKey)
+        {
+            try
+            {
+                var p = BuildLocalEditDelta(addressKey, out _, bulkRemovesAllowed: true);
+                var reg = FindRegistration(addressKey);
+                if (reg?.interiorDesigns != null)
+                {
+                    bool hadDBase = _lastDesignSer.TryGetValue(addressKey, out var dBase) && dBase != null;
+                    var newDSer  = new Dictionary<string, string>();
+                    var changed  = new List<InteriorDesignInfo>();
+                    foreach (var d in reg.interiorDesigns)
+                    {
+                        if (d == null) continue;
+                        var dto = InteriorSync.SerializeDesign(d);
+                        string uuid = dto.UUID ?? "";
+                        if (string.IsNullOrEmpty(uuid)) continue;
+                        string ser = Newtonsoft.Json.JsonConvert.SerializeObject(dto);
+                        newDSer[uuid] = ser;
+                        if (!hadDBase || !dBase!.TryGetValue(uuid, out var prev) || prev != ser)
+                            changed.Add(dto);
+                    }
+                    _lastDesignSer[addressKey] = newDSer;
+                    if (changed.Count > 0)
+                    {
+                        p ??= new InteriorEditDeltaPayload { AddressKey = addressKey, BulkEdit = true };
+                        p.Designs = changed;
+                        if (!hadDBase)
+                            Plugin.Logger.LogInfo($"[Patcher] designer-close delta for '{addressKey}': no design baseline — all {changed.Count} design(s) travel (update-only, absolute-safe).");
+                    }
+                }
+                // PROBE-START: P-DESIGNER-EQ — Stage 2 equivalence probe (design-mandated): what the
+                // delta says vs what a full snapshot would carry, so a diff bug shows as a count
+                // mismatch in any field log. Retires with Stage 3 (140 removal after a clean run).
+                if (p != null)
+                {
+                    int up = 0, rm = 0;
+                    foreach (var op in p.Ops) { if (op?.Kind == "upsert") up++; else if (op?.Kind == "remove") rm++; }
+                    Plugin.Logger.LogInfo($"[PROBE] designer-close equivalence '{addressKey}': delta {up} upsert(s) / {rm} remove(s) / {p.Designs.Count} design(s) vs full {reg?.itemInstances?.Count ?? -1} item(s) / {reg?.interiorDesigns?.Count ?? -1} design(s).");
+                }
+                // PROBE-END: P-DESIGNER-EQ
+                return p;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] BuildDesignerCloseDelta '{addressKey}': {ex.Message}"); return null; }
         }
 
         /// <summary>Apply a BuildingInteriorDelta. NEVER discarded (the delta is its edit's only
@@ -2468,7 +2523,12 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (payload == null || string.IsNullOrEmpty(payload.AddressKey) || payload.Ops == null || payload.Ops.Count == 0) return;
+                // Stage 2 review BLOCKER-U: empty means NO ops AND NO designs — a paint-only close
+                // has zero item ops and must still apply its design band.
+                if (payload == null || string.IsNullOrEmpty(payload.AddressKey)
+                    || ((payload.Ops?.Count ?? 0) == 0 && (payload.Designs?.Count ?? 0) == 0)) return;
+                payload.Ops ??= new List<InteriorItemOp>();   // the guard permits ops-less payloads; the loops below must not
+                payload.Designs ??= new List<InteriorDesignInfo>();
                 try
                 {
                     string myPt = MPSaveCoordinator.ActivePlaythroughId ?? "";
@@ -2478,21 +2538,62 @@ namespace BigAmbitionsMP
                 catch { }
                 var reg = FindRegistration(payload.AddressKey);
                 if (reg?.itemInstances == null) { Plugin.Logger.LogWarning($"[Patcher] interior delta: no reg for '{payload.AddressKey}'"); return; }
-                // Receiver-side REMOVE CAP (guardrail 2): a compliant sender falls back to 140 before
-                // this can fire; over the cap here means a corrupt or hostile diff.
+                // Receiver-side REMOVE CAP (guardrail 2): a compliant sender suppresses before this
+                // can fire; over the cap here means a corrupt or hostile diff. Stage 2: a BulkEdit
+                // (designer close) legitimately carries a session's worth — 500 sanity bound instead
+                // of the 25-op action cap (mirrors the sender).
                 int removeCount = 0;
                 foreach (var op in payload.Ops) if (op != null && op.Kind == "remove") removeCount++;
-                if (removeCount > 25)
+                int removeCap = payload.BulkEdit ? 500 : 25;
+                if (removeCount > removeCap)
                 {
-                    Plugin.Logger.LogWarning($"[Patcher] interior delta for '{payload.AddressKey}' REFUSED — {removeCount} removes exceeds the cap; asking for a full serve instead.");
+                    Plugin.Logger.LogWarning($"[Patcher] interior delta for '{payload.AddressKey}' REFUSED — {removeCount} removes exceeds the cap ({removeCap}); asking for a full serve instead.");
                     // Owners are the truth and need no heal; replicas re-fetch via the owed drain.
                     if (!InteriorSync.OwnsAddressLocally(payload.AddressKey))
                         InteriorSync.NoteResyncOwed(payload.AddressKey, "over-cap delta refused");
                     return;
                 }
-                if ((payload.Designs != null && payload.Designs.Count > 0) || !string.IsNullOrEmpty(payload.Layout)
-                    || payload.RadioStation != -1 || (payload.RadioVolume > -998f))
-                    Plugin.Logger.LogWarning($"[Patcher] interior delta for '{payload.AddressKey}' carries design/layout/radio bands — those convert in Stage 2 and are IGNORED here (loud by design, never silent).");
+                if (!string.IsNullOrEmpty(payload.Layout) || payload.RadioStation != -1 || (payload.RadioVolume > -998f))
+                    Plugin.Logger.LogWarning($"[Patcher] interior delta for '{payload.AddressKey}' carries layout/radio bands — no delta leg sends those (layout is not a designer edit; radio has its own sync) — IGNORED loudly, never silently.");
+
+                // ── Stage 2: design entries, UPDATE-ONLY by UUID ─────────────────────────────────
+                // Never a clear+rebuild (that was M2's defect and the owner-paint-revert trap): each
+                // entry replaces its UUID in place — or adds it if unknown — with the full path's
+                // exact SerializedInteriorDesign construction (materials array NEVER null: the
+                // game's Deserialize does materials.Length unguarded — the black-screen bug).
+                var changedDesignUuids = new HashSet<string>();
+                try
+                {
+                    if (payload.Designs != null && payload.Designs.Count > 0 && reg.interiorDesigns != null)
+                    {
+                        if (!_lastDesignSer.TryGetValue(payload.AddressKey, out var dSer) || dSer == null)
+                            _lastDesignSer[payload.AddressKey] = dSer = new Dictionary<string, string>();
+                        foreach (var d in payload.Designs)
+                        {
+                            if (d == null || string.IsNullOrEmpty(d.UUID)) continue;
+                            int mcount = d.Materials?.Count ?? 0;
+                            var arr = new SerializedInteriorDesign.SerializableInteriorMaterial[mcount];
+                            for (int i = 0; i < mcount; i++)
+                            {
+                                var m = d.Materials[i];
+                                arr[i] = new SerializedInteriorDesign.SerializableInteriorMaterial
+                                {
+                                    MaterialID    = m.MaterialID,
+                                    MaterialIndex = m.MaterialIndex,
+                                    ColorIndex    = m.ColorIndex,
+                                };
+                            }
+                            var sd = new SerializedInteriorDesign { UUID = d.UUID, materials = arr };
+                            int at = reg.interiorDesigns.FindIndex(x => x != null && (x.UUID?.ToString() ?? "") == d.UUID);
+                            if (at >= 0) reg.interiorDesigns[at] = sd;
+                            else reg.interiorDesigns.Add(sd);
+                            string ser = Newtonsoft.Json.JsonConvert.SerializeObject(d);
+                            if (!dSer.TryGetValue(d.UUID, out var prev) || prev != ser) changedDesignUuids.Add(d.UUID);
+                            dSer[d.UUID] = ser;   // baseline merges per UUID — never replaced wholesale
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] delta designs apply: {ex.Message}"); }
 
                 if (!_lastItemSer.TryGetValue(payload.AddressKey, out var lastSer) || lastSer == null)
                     _lastItemSer[payload.AddressKey] = lastSer = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -2562,9 +2663,9 @@ namespace BigAmbitionsMP
                 // (it IS the host's stamped stream) — recording it keeps this machine cargo-sync
                 // coherent without a full re-serve. 0 = any other leg → never recorded (trap 2).
                 if (payload.StructVersion > 0) _lastAppliedStructVersion[payload.AddressKey] = payload.StructVersion;
-                Plugin.Logger.LogInfo($"[Patcher] interior delta applied for '{payload.AddressKey}': upserts={upserts} removes={removes} dragSkips={dragSkips} sv={payload.StructVersion} (changed={ctx.ChangedIds.Count} moved={ctx.MovedIds.Count} cargoOnly={ctx.CargoOnlyIds.Count}).");
+                Plugin.Logger.LogInfo($"[Patcher] interior delta applied for '{payload.AddressKey}': upserts={upserts} removes={removes} dragSkips={dragSkips} designs={changedDesignUuids.Count} sv={payload.StructVersion} (changed={ctx.ChangedIds.Count} moved={ctx.MovedIds.Count} cargoOnly={ctx.CargoOnlyIds.Count}).");
                 TryRefreshActiveInteriorIfMatches(payload.AddressKey, ctx.ChangedIds, removedIds,
-                    changedDesignUuids: new HashSet<string>(), layoutChanged: false, movedIds: ctx.MovedIds);
+                    changedDesignUuids: changedDesignUuids, layoutChanged: false, movedIds: ctx.MovedIds);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorEditDelta: {ex.Message}"); }
         }

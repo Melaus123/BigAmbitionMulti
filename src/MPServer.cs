@@ -3034,7 +3034,14 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (p == null || string.IsNullOrEmpty(p.AddressKey) || p.Ops == null || p.Ops.Count == 0) return;
+                // Stage 2 review BLOCKER-U: a delta is empty only when it has NO ops AND NO designs —
+                // a paint-only designer close legitimately carries zero item ops, and the old
+                // ops-only guard silently dropped it (permanently: the sender's baseline had
+                // already advanced, so the paint was never re-emitted).
+                if (p == null || string.IsNullOrEmpty(p.AddressKey)
+                    || ((p.Ops?.Count ?? 0) == 0 && (p.Designs?.Count ?? 0) == 0)) return;
+                p.Ops ??= new System.Collections.Generic.List<InteriorItemOp>();   // ops-less payloads pass the guard; downstream loops must not NRE
+                p.Designs ??= new System.Collections.Generic.List<InteriorDesignInfo>();
                 string owner = (BuildingOwners.TryGetValue(p.AddressKey, out var o) && !string.IsNullOrEmpty(o)) ? o
                              : (BuildingRealEstateOwners.TryGetValue(p.AddressKey, out var r) ? r : "");
                 // Review MAJOR-N: these refusals must be LOUD — the sender's baseline already

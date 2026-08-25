@@ -775,13 +775,15 @@ namespace BigAmbitionsMP
     }
 
     /// <summary>When a granted GUEST closes the interior designer, forward their edited interior to the owner,
-    /// who adopts it (the owner is the authority; the guest's local edits would otherwise be overwritten).</summary>
+    /// who adopts it (the owner is the authority; the guest's local edits would otherwise be overwritten).
+    /// STAGE 2: the forward is now the DELTA (session item ops + update-only designs) — the last
+    /// caller of the whole-replica 140 is gone; Stage 3 retires the type after a clean field run.</summary>
     [HarmonyPatch(typeof(InteriorDesignerController), "HandleOnClose")]
     public static class Patch_InteriorDesignerController_HandleOnClose_GuestForward
     {
         static void Postfix()
         {
-            try { if (HousingFurniture.LocalGuestHere() || HousingFurniture.LocalHelperHere()) InteriorSync.ForwardGuestInteriorEdit(HousingDesign.CurrentBuildingAddr()); }
+            try { if (HousingFurniture.LocalGuestHere() || HousingFurniture.LocalHelperHere()) InteriorSync.ForwardGuestDesignerClose(HousingDesign.CurrentBuildingAddr()); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] design close forward: {ex.Message}"); }
         }
     }

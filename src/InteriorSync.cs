@@ -1074,6 +1074,34 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] ForwardGuestInteriorEditDelta: {ex.Message}"); }
         }
 
+        /// <summary>STAGE 2 (design 2026-08): the DESIGNER CLOSE as a delta — the session's item
+        /// edits (diffed with bulk removes allowed; the sell/pack tools mostly pre-conveyed theirs
+        /// through the per-action removal forwards) plus the changed design elements, UPDATE-ONLY by
+        /// UUID. CommitLocalDesigns runs FIRST (bug #5: a guest's live paint never reaches
+        /// reg.interiorDesigns without the scoped serialize — forwarding before it would carry the
+        /// OLD walls). Nothing (not even a skewed baseline) falls back to the whole-replica 140.</summary>
+        public static void ForwardGuestDesignerClose(string addressKey)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return;
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected)
+                {
+                    Plugin.Logger.LogWarning($"[Housing] designer-close delta for '{addressKey}' NOT built — no session to send on; the changes stay in the local diffs for the next forward.");
+                    return;
+                }
+                HousingDesign.CommitLocalDesigns(addressKey);   // bug #5: flush live paint → reg BEFORE diffing
+                var p = GameStatePatcher.BuildDesignerCloseDelta(addressKey);
+                if (p == null) return;   // nothing changed this session
+                p.SenderId = MPConfig.PlayerId;
+                try { p.PlaythroughId = MPSaveCoordinator.ActivePlaythroughId ?? ""; } catch { }
+                if (MPServer.IsRunning) MPServer.HandleBuildingInteriorDelta(p, MPConfig.PlayerId);
+                else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BuildingInteriorDelta, MPConfig.PlayerId, p));
+                Plugin.Logger.LogInfo($"[Housing] guest forwarded DESIGNER-CLOSE delta for '{addressKey}': {p.Ops.Count} item op(s) + {p.Designs.Count} design(s) (Stage 2 — was the whole replica).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] ForwardGuestDesignerClose: {ex.Message}"); }
+        }
+
         /// <summary>HOST, after adopting (or forwarding) a grant-verified delta: the same delta goes
         /// to the building's subscribers minus the sender (their machines apply the identical ops),
         /// and the send trackers are stamped to the post-adopt state so the 2 s Tick does not
@@ -1115,6 +1143,19 @@ namespace BigAmbitionsMP
                         {
                             if (at >= 0) list[at] = op.Item;
                             else list.Add(op.Item);
+                        }
+                    }
+                    // Stage 2: design entries graft the same way — UPDATE-ONLY by UUID — so entry
+                    // serves built from this cache carry the new paint, not the pre-close walls.
+                    if (p.Designs != null && p.Designs.Count > 0 && st.Snapshot.InteriorDesigns != null)
+                    {
+                        var dlist = st.Snapshot.InteriorDesigns;
+                        foreach (var d in p.Designs)
+                        {
+                            if (d == null || string.IsNullOrEmpty(d.UUID)) continue;
+                            int at = dlist.FindIndex(x => x != null && x.UUID == d.UUID);
+                            if (at >= 0) dlist[at] = d;
+                            else dlist.Add(d);
                         }
                     }
                     st.Hash = CacheHash(st.Snapshot);
@@ -1345,21 +1386,7 @@ namespace BigAmbitionsMP
                     {
                         var d = reg.interiorDesigns[i];
                         if (d == null) continue;
-                        var dto = new InteriorDesignInfo { UUID = d.UUID?.ToString() ?? "" };
-                        if (d.materials != null)
-                        {
-                            for (int j = 0; j < d.materials.Length; j++)
-                            {
-                                var m = d.materials[j];
-                                dto.Materials.Add(new InteriorMaterialInfo
-                                {
-                                    MaterialID    = m.MaterialID?.ToString() ?? "",
-                                    MaterialIndex = m.MaterialIndex,
-                                    ColorIndex    = m.ColorIndex,
-                                });
-                            }
-                        }
-                        snap.InteriorDesigns.Add(dto);
+                        snap.InteriorDesigns.Add(SerializeDesign(d));   // Stage 2: shared with the designer-close diff
                     }
                 }
 
@@ -1416,6 +1443,28 @@ namespace BigAmbitionsMP
         }
 
         // ── ItemInstance serialization (Phase 2b) ────────────────────────────
+
+        /// <summary>Stage 2: one design element → its wire DTO. Extracted verbatim from
+        /// BuildSnapshot's loop so the designer-close diff serializes designs IDENTICALLY to a full
+        /// snapshot — the ser-compare baselines only work if both paths produce the same bytes.</summary>
+        internal static InteriorDesignInfo SerializeDesign(SerializedInteriorDesign d)
+        {
+            var dto = new InteriorDesignInfo { UUID = d.UUID?.ToString() ?? "" };
+            if (d.materials != null)
+            {
+                for (int j = 0; j < d.materials.Length; j++)
+                {
+                    var m = d.materials[j];
+                    dto.Materials.Add(new InteriorMaterialInfo
+                    {
+                        MaterialID    = m.MaterialID?.ToString() ?? "",
+                        MaterialIndex = m.MaterialIndex,
+                        ColorIndex    = m.ColorIndex,
+                    });
+                }
+            }
+            return dto;
+        }
 
         internal static ItemInstanceInfo SerializeItemInstance(BigAmbitions.Items.ItemInstance ii)   // internal for Stage 1b's delta builder
         {

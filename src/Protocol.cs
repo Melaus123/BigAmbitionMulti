@@ -1084,7 +1084,13 @@ namespace BigAmbitionsMP
         // sender; the owner's send trackers are stamped after adopting). A v12 peer lacks the type
         // AND still re-pushes full snapshots a v13 host no longer expects; refuse mixed sessions
         // outright.
-        public const int Version = 13;
+        //
+        // v14 (2026-08, interior-edit Stage 2): the DESIGNER CLOSE rides the delta too — item ops
+        // plus UPDATE-ONLY design entries (never a clear+rebuild) and the BulkEdit marker that
+        // relaxes the receiver's remove cap for the session's accumulated edits. A v13 peer sends
+        // designer closes as whole-replica 140s a v14 receiver's design expects to retire, and
+        // ignores the Designs band on 194; refuse mixed sessions outright.
+        public const int Version = 14;
     }
 
     /// <summary>Sent by client on connect.</summary>
@@ -2390,6 +2396,12 @@ namespace BigAmbitionsMP
         /// record a version the host's stamped stream did not state") kept intact, because this
         /// leg IS the stamped stream.</summary>
         public int                      StructVersion { get; set; }
+        /// <summary>v14 (Stage 2): TRUE on a DESIGNER-CLOSE delta, where a big remove set can be
+        /// legitimate (the session's accumulated edits; the sell/pack tools mostly pre-convey via
+        /// the per-action removal forwards, but a session can still tear down plenty). Receivers
+        /// apply the 500-remove sanity cap instead of the 25-op action cap. FALSE on the 1-3-op
+        /// placement/removal forwards, where >25 removes still means a corrupt diff.</summary>
+        public bool                     BulkEdit      { get; set; }
     }
 
     /// <summary>Round-281 — the cheap half of interior sync (MessageType.InteriorCargoSync).
