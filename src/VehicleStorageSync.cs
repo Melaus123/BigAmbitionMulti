@@ -36,13 +36,15 @@ namespace BigAmbitionsMP
 
         // ── Accessor side: start a take / put (unchanged) ────────────────────────
 
-        public static void RequestTake(string realVehicleId, string ownerId, string itemName, int amount, bool paid, float price)
+        public static void RequestTake(string realVehicleId, string ownerId, string itemName, int amount, bool paid, float price, string ctx = "")
         {
             // Respect the taker's capacity BEFORE asking the owner to remove it — the owner is authoritative
             // and drops the item on grant, so if we can't hold it we'd lose/overwrite it. Mirrors the host's
             // own ClickItem: a pushed hand-truck/flatbed with room, else EMPTY hands (you carry one).
+            // ctx "boxtake" (Stage C / M5): the row is a SEALED box — the whole instance moves,
+            // contents echoed, exactly like the owner's native ClickItem (which has no seal check).
             if (!AccessorCanHold()) { PassengerHud.Toast("No room to carry that."); return; }
-            Send(OpTake, realVehicleId, ownerId, itemName, amount, paid, price);
+            Send(OpTake, realVehicleId, ownerId, itemName, amount, paid, price, ctx: ctx);
         }
 
         public static void RequestPut(string realVehicleId, string ownerId, string itemName, int amount, bool paid, float price)
@@ -142,7 +144,7 @@ namespace BigAmbitionsMP
         // resolves the owner from PassengerSync.OwnerOf; there is nothing authoritative on the
         // sender side to cross-check against). The parameter survives only so the many call sites
         // stay untouched; it is deliberately unused.
-        private static void Send(byte op, string vid, string ownerId, string itemName, int amount, bool paid, float price, bool silent = false)
+        private static void Send(byte op, string vid, string ownerId, string itemName, int amount, bool paid, float price, bool silent = false, string ctx = "")
         {
             if (string.IsNullOrEmpty(vid) || string.IsNullOrEmpty(itemName) || amount <= 0)
                 return;
@@ -150,7 +152,7 @@ namespace BigAmbitionsMP
             StorageSync.SendOp(new StorageOpPayload
             {
                 Container = StorageSync.ContainerVehicle, VehicleId = vid, PlayerId = MPConfig.PlayerId,
-                Op = OpName(op), ItemName = itemName, Amount = amount, Paid = paid, PricePerUnit = price, Silent = silent,
+                Op = OpName(op), Ctx = ctx, ItemName = itemName, Amount = amount, Paid = paid, PricePerUnit = price, Silent = silent,
             });
         }
 

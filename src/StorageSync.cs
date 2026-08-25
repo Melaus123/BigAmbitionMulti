@@ -204,26 +204,50 @@ namespace BigAmbitionsMP
             {
                 var inst = found;
                 if (req.Op == OpTake)
-                    // A2-2: fire the callback ONLY when the reduce leaves the stack alive — the
-                    // single case native VehicleInstance omits (see the A2 header above).
-                    TakeLoose(inst.cargoInstances, req, res,
-                              reduce: (ci, amt) =>
-                              {
-                                  inst.ReduceFromCargo(ci, amt);
-                                  if (ci.amount > 0)
-                                      try { inst.OnItemsInCargoUpdated()?.Invoke(); } catch { }
-                              });
+                {
+                    // Stage C (M5, user-approved): sealed boxes take WHOLE from trunks through the
+                    // same codec fridges use — parity with the owner's native ClickItem, which has
+                    // no seal check. Ruling 39: any OTHER ctx is building-only machinery and
+                    // refuses "unsupported" rather than falling through to the loose loop.
+                    if (req.Ctx == "boxtake")
+                        TakeWholeInstance(inst.cargoInstances, req, res,
+                                          removeWhole: (ci) => inst.RemoveFromCargo(ci));
+                    else if (!string.IsNullOrEmpty(req.Ctx))
+                    {
+                        res.Reason = "unsupported";
+                        Plugin.Logger.LogWarning($"[VStore] take ctx '{req.Ctx}' unsupported for a vehicle container.");
+                    }
+                    else
+                        // A2-2: fire the callback ONLY when the reduce leaves the stack alive — the
+                        // single case native VehicleInstance omits (see the A2 header above).
+                        TakeLoose(inst.cargoInstances, req, res,
+                                  reduce: (ci, amt) =>
+                                  {
+                                      inst.ReduceFromCargo(ci, amt);
+                                      if (ci.amount > 0)
+                                          try { inst.OnItemsInCargoUpdated()?.Invoke(); } catch { }
+                                  });
+                }
                 else if (req.Op == OpMarkPaid)
                     MarkPaidWithSplit(inst, req, res);
                 else if (req.Op == OpPut)
                 {
+                    // Ruling 39: the vehicle put knows exactly two ctxs — plain and the sealed-box
+                    // give-back (Stage C). Building-only put machinery (producer/stationreturn/
+                    // worn) refuses rather than falling through to the generic path.
+                    if (!string.IsNullOrEmpty(req.Ctx) && req.Ctx != "boxreturn")
+                    {
+                        res.Reason = "unsupported";
+                        Plugin.Logger.LogWarning($"[VStore] put ctx '{req.Ctx}' unsupported for a vehicle container.");
+                        return;
+                    }
                     // A2-1: the rollback below is LIVE (F-2026-08-25-E) — "full" is all-or-nothing
                     // on both containers now. Review-verified against BOTH native absorption shapes
                     // (merge-into-existing and copy+append); reversal is amount-based per
                     // (name, paid) — distribution across fungible stacks may differ, converging on
                     // the next manifest (inherited round-32 semantics, both containers).
                     var ci = new CargoInstance(req.ItemName, req.Amount, req.PricePerUnit, req.Paid);
-                    DecodeNestedInto(ci, req.Nested);   // ONE codec — sealed give-backs keep contents on vehicles too (Stage C's other half)
+                    DecodeNestedInto(ci, req.Nested);   // ONE codec — a sealed give-back keeps its contents (Stage C)
                     if (inst.TryToAddToCargo(ci)) { res.Ok = true; res.Reason = ""; }
                     else
                     {
@@ -285,7 +309,8 @@ namespace BigAmbitionsMP
                 if (req.Ctx == "stacksell" || req.Ctx == "stackdiscard")
                     RemoveStackInstances(item, req, res);
                 else if (req.Ctx == "boxtake")
-                    TakeWholeInstance(item, req, res);
+                    TakeWholeInstance(item.cargoInstances, req, res,
+                                      removeWhole: (ci) => item.RemoveFromCargo(ci));
                 else if (req.Ctx == "stationtake")
                     TakeStock(reg, item, req, res);
                 else
@@ -371,25 +396,27 @@ namespace BigAmbitionsMP
                 }
         }
 
-        /// <summary>THE sealed-box codec's take half (from building boxtake, round-47 slice 2b):
-        /// whole-instance removal by name+amount+paid identity, nested contents echoed. Native
-        /// contract: sealed instances move ONLY whole (ReduceFromCargo no-ops on sealed;
-        /// MergeIntoCargo early-returns) — F-2026-08-25-F.</summary>
-        private static void TakeWholeInstance(ItemInstance item, StorageOpPayload req, StorageResPayload res)
+        /// <summary>THE sealed-box codec's take half (from building boxtake, round-47 slice 2b;
+        /// generalized to BOTH containers in Stage C): whole-instance removal by name+amount+paid
+        /// identity, nested contents echoed. Native contract: sealed instances move ONLY whole
+        /// (ReduceFromCargo no-ops on sealed; MergeIntoCargo early-returns) — F-2026-08-25-F.
+        /// The removeWhole delegate carries the container's own RemoveFromCargo, which fires the
+        /// native cargo callback on both container kinds (box-take sound parity for free).</summary>
+        private static void TakeWholeInstance(System.Collections.Generic.List<CargoInstance>? src, StorageOpPayload req, StorageResPayload res,
+                                              Action<CargoInstance> removeWhole)
         {
-            var bsrc = item.cargoInstances;
-            if (bsrc != null)
-                for (int c = 0; c < bsrc.Count; c++)
-                {
-                    var ci = bsrc[c];
-                    if (ci == null || ci.itemName != req.ItemName) continue;
-                    if (ci.amount != req.Amount || ci.paid != req.Paid) continue;
-                    res.Paid = ci.paid; res.PricePerUnit = ci.pricePerUnit; res.Amount = ci.amount;
-                    res.Nested = EncodeNested(ci.nestedCargoInstances);   // ONE codec (R7/R11)
-                    item.RemoveFromCargo(ci);
-                    res.Ok = true; res.Reason = "";
-                    break;
-                }
+            if (src == null) return;
+            for (int c = 0; c < src.Count; c++)
+            {
+                var ci = src[c];
+                if (ci == null || ci.itemName != req.ItemName) continue;
+                if (ci.amount != req.Amount || ci.paid != req.Paid) continue;
+                res.Paid = ci.paid; res.PricePerUnit = ci.pricePerUnit; res.Amount = ci.amount;
+                res.Nested = EncodeNested(ci.nestedCargoInstances);   // ONE codec (R7/R11)
+                removeWhole(ci);
+                res.Ok = true; res.Reason = "";
+                break;
+            }
         }
 
         /// <summary>Round-38e — "REMOVE CONTENT" routed for helpers: mirror of the native
@@ -513,6 +540,14 @@ namespace BigAmbitionsMP
                     var ci = src[c];
                     if (ci == null) continue;
                     bool sealedCi = ci.IsSealed;
+                    // PROBE-START: P-SEALED-MARKPAID — Stage C review MINOR-1: the checkout
+                    // collector bills unpaid sealed boxes but this mirror skips them, so the
+                    // borrower would pay while the owner's record stays unpaid (the fries class,
+                    // sealed edition — pre-existing; C makes sealed trunk traffic routine). This
+                    // line is the field-evidence gate for the proposed whole-instance branch.
+                    if (sealedCi && !ci.paid && ci.itemName == req.ItemName)
+                        Plugin.Logger.LogWarning($"[PROBE] sealed UNPAID '{ci.itemName}' skipped by mark-paid on '{req.VehicleId}' — the sealed-checkout gap is REAL here (C MINOR-1).");
+                    // PROBE-END: P-SEALED-MARKPAID
                     if (sealedCi || ci.paid) continue;
                     if (ci.itemName != req.ItemName) continue;
                     if (ci.amount <= remaining) { remaining -= ci.amount; ci.paid = true; }
@@ -734,12 +769,19 @@ namespace BigAmbitionsMP
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] Deliver hands: {ex.Message}"); }
-                // No room (race): return the item to the owner so it isn't lost (risk R9).
+                // No room (race): return the item to the owner so it isn't lost (risk R9). A
+                // sealed BOX returns with its nested contents (Stage C — the give-back would
+                // otherwise strip it, the exact hazard the building boxreturn closed in round-47).
                 try
                 {
-                    var owner = VehicleManager.OwnerIdFor(vid);
-                    if (!string.IsNullOrEmpty(owner)) VehicleStorageSync.RequestPut(vid, owner, ci.itemName, ci.amount, ci.paid, ci.pricePerUnit);
-                    Plugin.Logger.LogInfo($"[VStore] gave back {ci.amount}×{ci.itemName} to '{vid}' (no room to carry).");
+                    SendOp(new StorageOpPayload
+                    {
+                        Container = ContainerVehicle, VehicleId = vid, PlayerId = MPConfig.PlayerId,
+                        Op = OpPut, Ctx = res.Ctx == "boxtake" ? "boxreturn" : "",
+                        ItemName = ci.itemName, Amount = ci.amount, Paid = ci.paid, PricePerUnit = ci.pricePerUnit,
+                        Nested = res.Nested ?? new System.Collections.Generic.List<CargoNestedInfo>(),
+                    });
+                    Plugin.Logger.LogInfo($"[VStore] gave back {ci.amount}×{ci.itemName} to '{vid}' (no room to carry{(res.Ctx == "boxtake" ? "; contents preserved" : "")}).");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] give-back: {ex.Message}"); }
                 PassengerHud.Toast("No room to carry that.");

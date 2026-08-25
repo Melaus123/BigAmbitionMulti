@@ -247,7 +247,11 @@ namespace BigAmbitionsMP
                 string amountText = (g.count * g.amount == 1) ? "" : $"{g.count}x{g.amount}";
                 string it = g.item; int takeAmt = g.amount; bool tPaid = g.paid; float tPrice = g.price;
                 string vid = _vid, owner = _owner;
-                MakeNativeCard(it, amountText, () => VehicleStorageSync.RequestTake(vid, owner, it, takeAmt, tPaid, tPrice), paid: tPaid);
+                // Stage C (M5): a SEALED row takes the WHOLE box (contents echoed) — before this,
+                // sealed rows rendered but every take answered "Already taken." (owner-side loose
+                // loop skips sealed). Sealed-ness derives from the item DEFINITION (F-2026-08-25-F).
+                string tCtx = IsSealedName(it) ? "boxtake" : "";
+                MakeNativeCard(it, amountText, () => VehicleStorageSync.RequestTake(vid, owner, it, takeAmt, tPaid, tPrice, tCtx), paid: tPaid);
             }
             if (_cargoSellAll != null)   // Deposit = repurpose the native Sell-All button when holding an item
             {
@@ -270,6 +274,19 @@ namespace BigAmbitionsMP
 
         // Instantiate a native cargo card from the cloned template and fill it WITHOUT running CargoItemUi
         // (calling SetUp would run owner-side cargo logic). We set its serialized fields directly via reflection.
+        /// <summary>Stage C (M5): does this item NAME derive a sealed container? Same derivation
+        /// the game's own CargoInstance.IsSealed getter runs (F-2026-08-25-F: sealed-ness is item
+        /// DEFINITION data, never instance state — a name is enough).</summary>
+        private static bool IsSealedName(string itemName)
+        {
+            try
+            {
+                var it = BigAmbitions.Items.ItemsGetter.GetByName(itemName);
+                return it != null && it.HasTag(BigAmbitions.Tags.TagRef.Itemtag.issealedcontainer);
+            }
+            catch { return false; }
+        }
+
         /// <summary>The game's own unpaid-slot tint (CargoItemUi paints unpaid rows with it, decompile
         /// :154-156) — parity finding (a), 2026-08-25: the borrower's panel showed unpaid stacks in
         /// the normal color while the owner's native view marks them. Fallback only if the HUD is
@@ -503,8 +520,9 @@ namespace BigAmbitionsMP
                 string item = rows[i].item; int amt = rows[i].amount;
                 bool paid = rows[i].paid; float price = rows[i].price;
                 string vid = _vid, owner = _owner;
+                string ctx = IsSealedName(item) ? "boxtake" : "";   // Stage C (M5): sealed = whole box
                 MakeCard(item, amt, paid ? CardColor : UnpaidTint(), "Take", BtnBlue,
-                         () => VehicleStorageSync.RequestTake(vid, owner, item, amt, paid, price));
+                         () => VehicleStorageSync.RequestTake(vid, owner, item, amt, paid, price, ctx));
             }
         }
 
