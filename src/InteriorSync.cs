@@ -121,14 +121,17 @@ namespace BigAmbitionsMP
         public static bool IsResyncOwed(string addressKey)
             => !string.IsNullOrEmpty(addressKey) && _owedResyncs.ContainsKey(addressKey);
 
-        /// <summary>Belt for the event drain — self-throttled; called every frame from the UI tick.</summary>
+        /// <summary>Belt for the event drains — self-throttled; called every frame from the UI tick.
+        /// Verification MINOR-T: the emptiness fast-path comes first so the empty-queues frame costs
+        /// two count reads and nothing else (this file is perf-annotated throughout).</summary>
         public static void TickOwedResyncs()
         {
-            if (_owedResyncs.Count == 0) return;
+            if (_owedResyncs.Count == 0 && !GameStatePatcher.HasDeferredDeltaRemoves) return;
             float now = UnityEngine.Time.unscaledTime;
             if (now - _lastOwedTickAt < 2f) return;
             _lastOwedTickAt = now;
-            DrainOwedResyncs("tick");
+            try { GameStatePatcher.DrainDeferredDeltaRemoves(); } catch { }   // Stage 1b MAJOR-M belt
+            if (_owedResyncs.Count > 0) DrainOwedResyncs("tick");
         }
 
         /// <summary>Fire the re-ask for every owed address whose edit has ended.  The re-ask route is
@@ -1040,9 +1043,154 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] direct send: {ex.Message}"); }
         }
 
+        /// <summary>STAGE 1b (design 2026-08): forward a placement/removal edit as the 1-3 ops it
+        /// actually made (BuildingInteriorDelta) instead of the whole replica. NEVER falls back to
+        /// the 140 (review MAJOR-O — a guest whole-replica assertion is the exact class this design
+        /// removes): a missing baseline becomes an upserts-only seed and a skewed baseline suppresses
+        /// its removes + owes a re-sync, both inside the builder. "no-changes" is silence: the
+        /// double-routed second fire of one intent has nothing left to say.</summary>
+        public static void ForwardGuestInteriorEditDelta(string addressKey)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return;
+            try
+            {
+                // Review MAJOR-N: check the send path BEFORE building — the builder advances the
+                // baseline, and a delta dropped after that is permanent divergence (unlike the 140,
+                // whose next whole-replica send self-healed). Not building keeps this edit inside
+                // the next diff, so the next successful forward carries it.
+                if (!MPServer.IsRunning && !MPClient.IsConnected)
+                {
+                    Plugin.Logger.LogWarning($"[Housing] edit delta for '{addressKey}' NOT built — no session to send on; the change stays in the local diff for the next forward.");
+                    return;
+                }
+                var p = GameStatePatcher.BuildLocalEditDelta(addressKey, out string reason);
+                if (p == null) return;   // no-changes / no-reg / threw — nothing to convey (guardrails handle the rest inside)
+                p.SenderId = MPConfig.PlayerId;
+                try { p.PlaythroughId = MPSaveCoordinator.ActivePlaythroughId ?? ""; } catch { }
+                if (MPServer.IsRunning) MPServer.HandleBuildingInteriorDelta(p, MPConfig.PlayerId);
+                else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BuildingInteriorDelta, MPConfig.PlayerId, p));
+                Plugin.Logger.LogInfo($"[Housing] guest forwarded interior DELTA for '{addressKey}': {p.Ops.Count} op(s) (Stage 1b — was the whole replica).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] ForwardGuestInteriorEditDelta: {ex.Message}"); }
+        }
+
+        /// <summary>HOST, after adopting (or forwarding) a grant-verified delta: the same delta goes
+        /// to the building's subscribers minus the sender (their machines apply the identical ops),
+        /// and the send trackers are stamped to the post-adopt state so the 2 s Tick does not
+        /// double-convey the change as a full snapshot — this retires T7-gap-(b)'s force-push cost
+        /// (Q1). MAIN THREAD ONLY.</summary>
+        internal static void RelayDeltaAfterHostAdopt(InteriorEditDeltaPayload p, string senderPid)
+        {
+            try
+            {
+                // Mint FIRST (review MAJOR-L): the relay carries the new struct version so
+                // subscribers stay cargo-sync-coherent without a full re-serve.
+                p.StructVersion = StampTrackersCurrent(p.AddressKey);
+                if (_subsByBuilding.TryGetValue(p.AddressKey, out var set) && set.Count > 0)
+                    MPServer.BroadcastInteriorDeltaTo(set, senderPid, p);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] RelayDeltaAfterHostAdopt: {ex.Message}"); }
+        }
+
+        /// <summary>Q1 (user-approved): id-keyed ABSOLUTE-PER-ITEM graft of a guest's delta onto the
+        /// host's cached owner snapshot — the cache every entry serve is built from — with the
+        /// RequestOwnerInteriorResync fallback when there is no cache to graft (mirrors the accepted
+        /// v10 cargo graft). The subscribers get the delta either way (it is grant-verified truth);
+        /// only the stamp is skipped in the fallback, so the Tick's next full send can still heal.
+        /// MAIN THREAD ONLY.</summary>
+        internal static void GraftDeltaOntoOwnerCache(InteriorEditDeltaPayload p, string senderPid, string ownerPid)
+        {
+            try
+            {
+                bool grafted = false;
+                if (_ownerSnapshotsByAddr.TryGetValue(p.AddressKey, out var st) && st?.Snapshot?.ItemInstances != null)
+                {
+                    var list = st.Snapshot.ItemInstances;
+                    foreach (var op in p.Ops)
+                    {
+                        if (op == null || string.IsNullOrEmpty(op.Id)) continue;
+                        int at = list.FindIndex(x => x != null && x.Id == op.Id);
+                        if (op.Kind == "remove") { if (at >= 0) list.RemoveAt(at); }
+                        else if (op.Kind == "upsert" && op.Item != null)
+                        {
+                            if (at >= 0) list[at] = op.Item;
+                            else list.Add(op.Item);
+                        }
+                    }
+                    st.Hash = CacheHash(st.Snapshot);
+                    grafted = true;
+                }
+                // Mint BEFORE broadcasting (review MAJOR-L) so the relay carries the new struct
+                // version; in the no-cache fallback nothing is minted (StructVersion stays 0 =
+                // "not the stamped stream") and the owner's forced push re-seeds everyone.
+                if (grafted) p.StructVersion = StampTrackersCurrent(p.AddressKey);
+                if (_subsByBuilding.TryGetValue(p.AddressKey, out var set) && set.Count > 0)
+                    MPServer.BroadcastInteriorDeltaTo(set, senderPid, p);
+                if (!grafted)
+                {
+                    Plugin.Logger.LogInfo($"[InteriorSync] no owner cache to graft for '{p.AddressKey}' — asking '{ownerPid}' for a full push (Q1 fallback).");
+                    MPServer.RequestOwnerInteriorResyncByPid(ownerPid, p.AddressKey);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] GraftDeltaOntoOwnerCache: {ex.Message}"); }
+        }
+
+        /// <summary>Stamp the host send trackers to the CURRENT post-adopt state, exactly as a full
+        /// send would have — the subscribers were conveyed by the delta, so the next Tick beat must
+        /// see "already spoken" rather than re-shipping the room. Anything that changes after this
+        /// moves the hashes again and sends normally.
+        /// Review MAJOR-K: the DIRT tracker is deliberately NOT stamped — a delta carries no dirt,
+        /// and stamping it would claim a conveyance that never happened, silently eating a pending
+        /// one-shot dirt send (a mopped floor has no recurrence).
+        /// Review MAJOR-L: returns the MINTED struct version so the relay can CARRY it — the
+        /// host→subscriber delta IS the host's stamped stream; minting without conveying made every
+        /// later cargo sync mismatch into a full re-serve, a throughput regression in exactly the
+        /// busy shops this stage targets.</summary>
+        private static int StampTrackersCurrent(string addressKey)
+        {
+            try
+            {
+                var snap = BuildSnapshotForHostSend(addressKey);
+                if (snap == null) return 0;
+                var (hs, hv, hn, _) = ComputeHashes(snap);
+                _lastHashByAddr[addressKey] = hv;
+                _lastStructHashByAddr[addressKey] = hs;
+                _structVolHashByAddr[addressKey] = hn;
+                _volatileSentAtByAddr[addressKey] = UnityEngine.Time.realtimeSinceStartup;
+                return StampStructVersion(snap, hs);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] StampTrackersCurrent: {ex.Message}"); return 0; }
+        }
+
+        /// <summary>CLIENT-OWNER, after adopting a delta for a building it owns: stamp the owner-side
+        /// send trackers to the post-adopt state so the 2 s tick does not answer the adoption with a
+        /// full ~300 KB push — the host already grafted its cache and conveyed the subscribers with
+        /// the same delta (Q1's whole point). ComputeHashes ignores CustomerEntries/FulfilledDemands
+        /// and the flag fields (review MINOR-P), so no shape adjustment is needed for the hashes to
+        /// compare against what the tick would send. Any LATER real change moves the hashes again
+        /// and pushes normally. Review MAJOR-K: the DIRT tracker is deliberately NOT stamped — the
+        /// delta carried no dirt, and stamping would eat a pending one-shot dirt sync.</summary>
+        public static void NoteOwnerDeltaApplied(string addressKey)
+        {
+            try
+            {
+                if (!MPClient.IsConnected || MPServer.IsRunning || string.IsNullOrEmpty(addressKey)) return;
+                var snap = BuildSnapshot(addressKey);
+                if (snap == null) return;
+                var (hs, hv, hn, _) = ComputeHashes(snap);
+                _lastLocalOwnerHashByAddr[addressKey] = hv;
+                _lastLocalOwnerStructByAddr[addressKey] = hs;
+                _lastLocalOwnerNonCargoByAddr[addressKey] = hn;
+                _lastLocalOwnerVolatileAt[addressKey] = UnityEngine.Time.realtimeSinceStartup;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] NoteOwnerDeltaApplied: {ex.Message}"); }
+        }
+
         /// <summary>GUEST: forward our just-edited LOCAL interior for this building to the owner, who ADOPTS it
         /// (ApplyInteriorSnapshot) + re-syncs. Called when the interior designer closes (HandleOnClose). Flagged
-        /// Authoritative so the owner's apply accepts it as the new truth.</summary>
+        /// Authoritative so the owner's apply accepts it as the new truth.
+        /// STAGE 1b: placement/removal forwards now ride ForwardGuestInteriorEditDelta above; this
+        /// whole-replica path remains ONLY for the DESIGNER CLOSE (converts in Stage 2).</summary>
         public static void ForwardGuestInteriorEdit(string addressKey)
         {
             if (string.IsNullOrEmpty(addressKey)) return;
@@ -1269,7 +1417,7 @@ namespace BigAmbitionsMP
 
         // ── ItemInstance serialization (Phase 2b) ────────────────────────────
 
-        private static ItemInstanceInfo SerializeItemInstance(BigAmbitions.Items.ItemInstance ii)
+        internal static ItemInstanceInfo SerializeItemInstance(BigAmbitions.Items.ItemInstance ii)   // internal for Stage 1b's delta builder
         {
             var info = new ItemInstanceInfo
             {

@@ -187,6 +187,7 @@ namespace BigAmbitionsMP
         BuildingsForSale    = 191,       // Host → All (v9, 2026-08 throughput T6): JUST the buy-marketplace list (~15 entries, a few KB). The daily RealEstateHelper refresh used to trigger a FULL ~826-building BusinessSnapshot broadcast (~1 MB/client) to move this one list; now only the list travels. Join snapshots still carry it inside BusinessSnapshot — this type is the steady-state refresh only. Rides Bulk (review M5: shares state with BusinessSnapshot).
         MirrorAck           = 192,       // Client → Host (v9 review B2): "I hold this exact mirrored .hsg" — sent after the file is WRITTEN to the client's store (or already present via the shared-store token). The host's absent-member mirror skip records delivery ONLY on this ack — never at send time, because the paced lane's documented loss recovery is "the next save re-mirrors", which a send-time record would silently delete (character loss on host handoff).
         InteriorDirtSync    = 193,       // v10 (T7, ruling 33): ONE building's dirt VALUES as an ABSOLUTE dirty-set — every lattice spot with dirtiness > 0 as (X, Z, value); every spot NOT listed reads clean. Dirt is cleaning-only data: owner → Host on change (keeps the host cache/save current, ~KBs), Host → ONLY the players physically inside (the subscriber set) — nobody else, nothing when the building is empty. The receiver UPDATES matching lattice entries and zeroes the rest; it never adds or removes entries (the lattice is one fixed entry per floor tile — replacing the list would corrupt the cleanliness average). Rides Bulk (M5: InteriorSnapshot writes the same state).
+        BuildingInteriorDelta = 194,     // v13 (interior-edit Stage 1b, design 2026-08): a PERMITTED EDIT as the ops it actually made — upsert/remove naming exactly the items touched; silence about an id means "no opinion", never "delete" (THE INVARIANT). Editor → Host (grant-gated exactly like 140); Host → owner to adopt, PLUS the same delta to that building's subscribers minus the sender, PLUS an id-keyed graft onto the host's owner cache (Q1) — one delta conveys everyone, retiring the owner's post-adopt full re-push. Absolute per item, idempotent, orderless (no sequence numbers). Receivers apply ops through the SAME ApplyOneItem the full snapshot runs (Stage 1a) and NEVER discard the message (it is the edit's only carrier); the per-item drag/hands rules are the mid-edit protection. A >25-remove delta is refused (a placement/removal forward is 1-3 ops; more means a corrupt diff) — the sender falls back to 140 rather than send one.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -1076,7 +1077,14 @@ namespace BigAmbitionsMP
         // the flag, so a v12 receiver would discard its entry serves and heals — and a v11
         // receiver applies mid-edit snapshots a v12 sender assumes it will refuse (the concurrent-
         // furnishing deletion class, field 20260823-110955); refuse mixed sessions outright.
-        public const int Version = 12;
+        //
+        // v13 (2026-08, interior-edit Stage 1b): placement and removal forwards ride
+        // BuildingInteriorDelta (194) instead of the whole-replica 140, and the owner's post-adopt
+        // full re-push is retired (host grafts its cache and rebroadcasts the delta minus the
+        // sender; the owner's send trackers are stamped after adopting). A v12 peer lacks the type
+        // AND still re-pushes full snapshots a v13 host no longer expects; refuse mixed sessions
+        // outright.
+        public const int Version = 13;
     }
 
     /// <summary>Sent by client on connect.</summary>
@@ -2345,6 +2353,43 @@ namespace BigAmbitionsMP
         // deferral must never be stale" — the answer is rebuilt live at send time).  PER-HOP:
         // consumed at receipt, never cached or relayed onward as true.
         public bool                       SeedOrHeal      { get; set; }
+    }
+
+    /// <summary>v13 (interior-edit Stage 1b): one item operation inside a BuildingInteriorDelta.
+    /// "upsert" carries the item's FULL absolute state (never a field diff — idempotent, orderless,
+    /// round-281's rule scoped to one id); "remove" carries the id alone.</summary>
+    public class InteriorItemOp
+    {
+        public string            Kind { get; set; } = "";   // "upsert" | "remove"
+        public string            Id   { get; set; } = "";
+        public ItemInstanceInfo? Item { get; set; }         // full absolute state on upsert; null on remove
+    }
+
+    /// <summary>v13 (interior-edit Stage 1b) — MessageType.BuildingInteriorDelta: a permitted edit as
+    /// the operations it made, replacing the whole-replica 140 for placement/removal forwards.
+    /// Bands are ABSENT by design (M2 fix): no RetailPrices, DirtSpots, CustomerEntries or
+    /// FulfilledDemands — each has its own channel or is owner-only. Designs (update-only by UUID)
+    /// and Layout/Radio ride only from Stage 2's designer-close conversion; in Stage 1b they are
+    /// always empty/sentinel and a receiver logs if one arrives filled. PlaythroughId is the world
+    /// identity (same rule as InteriorCargoSync): an address collision from another lineage must not
+    /// mutate this world.</summary>
+    public class InteriorEditDeltaPayload
+    {
+        public string                   AddressKey    { get; set; } = "";
+        public string                   PlaythroughId { get; set; } = "";
+        public string                   SenderId      { get; set; } = "";
+        public List<InteriorItemOp>     Ops           { get; set; } = new();
+        public List<InteriorDesignInfo> Designs       { get; set; } = new();   // UPDATE-ONLY by UUID (Stage 2)
+        public string                   Layout        { get; set; } = "";      // empty = no opinion
+        public int                      RadioStation  { get; set; } = -1;      // -1 = absent
+        public float                    RadioVolume   { get; set; } = -999f;   // -999 = absent
+        /// <summary>Review MAJOR-L: set ONLY on the Host→subscriber relay leg — the host mints the
+        /// post-adopt structure version and the relay carries it, so receivers stay cargo-sync
+        /// coherent without a full re-serve. 0 everywhere else (editor→Host, Host→owner forward,
+        /// the no-graft fallback); a receiver records it only when > 0 — trap 2's rule ("never
+        /// record a version the host's stamped stream did not state") kept intact, because this
+        /// leg IS the stamped stream.</summary>
+        public int                      StructVersion { get; set; }
     }
 
     /// <summary>Round-281 — the cheap half of interior sync (MessageType.InteriorCargoSync).

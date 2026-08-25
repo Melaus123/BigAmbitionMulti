@@ -1809,7 +1809,72 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Session hygiene — called from InteriorSync.Reset (scene-ready).</summary>
-        public static void ClearPendingLocalPlacements() => _pendingLocalPlacements.Clear();
+        public static void ClearPendingLocalPlacements() { _pendingLocalPlacements.Clear(); _deferredDeltaRemoves.Clear(); }
+
+        // ── Stage 1b review MAJOR-M: remove ops deferred past a local drag of the same id ────────
+        // A named remove's information exists nowhere else once dropped; while the id is being moved
+        // HERE, the remove waits and executes the moment the drag ends. addr → ids. MAIN THREAD ONLY.
+        private static readonly Dictionary<string, HashSet<string>> _deferredDeltaRemoves = new(StringComparer.Ordinal);
+        /// <summary>Verification MINOR-T: cheap emptiness probe so the per-frame belt can fast-path out.</summary>
+        internal static bool HasDeferredDeltaRemoves => _deferredDeltaRemoves.Count > 0;
+
+        /// <summary>Drains at drag end (the StopPlacingItem postfix, alongside the owed-resync drain)
+        /// plus the 2 s belt. Executes each deferred remove whose id is no longer being dragged, then
+        /// RE-CONVEYS the removal: this machine's own confirm forward (which fired an instant earlier
+        /// in the same frame) re-asserted the item to everyone, so without re-conveyance the remove
+        /// would win here and lose everywhere else. A guest re-forwards (the diff emits the remove);
+        /// an owner's own send channels carry the absence on their next beat (hash moved).</summary>
+        public static void DrainDeferredDeltaRemoves()
+        {
+            if (_deferredDeltaRemoves.Count == 0) return;
+            // Verification MINOR-S: no draining while ANY placement is active — the re-convey diffs
+            // the whole registration, and a different item's mid-drag pose must not be asserted (the
+            // owner-push path has PlacementQuiesced for exactly this; the diff path gets the same
+            // rule here). The exact game variable, not a proxy; the StopPlacingItem postfix fires
+            // with this already false, and the 2 s belt re-tries — recurrence-covered.
+            try { if (BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode) return; } catch { }
+            try
+            {
+                List<string>? doneAddrs = null;
+                foreach (var kv in _deferredDeltaRemoves)
+                {
+                    string addr = kv.Key; var ids = kv.Value;
+                    var reg = FindRegistration(addr);
+                    var removedIds = new HashSet<string>();
+                    List<string>? doneIds = null;
+                    foreach (var id in ids)
+                    {
+                        (doneIds ??= new List<string>()).Add(id);
+                        if (reg?.itemInstances != null && reg.itemInstances.Remove(id))
+                        {
+                            removedIds.Add(id);
+                            // Verification BLOCKER-R: the baseline entry is deliberately KEPT — the
+                            // re-convey's diff emits a remove only for an id present in the baseline
+                            // and absent from live; deleting it here silenced the re-convey and let
+                            // the confirm's upsert stand (duplication, round-10 #3b). The builder
+                            // itself reconciles the baseline in the same call that emits the remove.
+                            Plugin.Logger.LogInfo($"[Patcher] deferred delta REMOVE of '{id}' in '{addr}' executed at drag end (Stage 1b) — the removal wins over the local move.");
+                        }
+                    }
+                    if (doneIds != null) foreach (var id in doneIds) ids.Remove(id);
+                    if (ids.Count == 0) (doneAddrs ??= new List<string>()).Add(addr);
+                    if (removedIds.Count > 0)
+                    {
+                        TryRefreshActiveInteriorIfMatches(addr, new HashSet<string>(), removedIds,
+                            changedDesignUuids: new HashSet<string>(), layoutChanged: false, movedIds: new HashSet<string>());
+                        // Re-convey: the confirm forward that just fired re-asserted the item; the
+                        // removal must overtake it. Guests forward the diff; owners' own channels
+                        // (tick/immediate push — the hash moved) carry the absence.
+                        if (!InteriorSync.OwnsAddressLocally(addr))
+                            InteriorSync.ForwardGuestInteriorEditDelta(addr);
+                        else if (!MPServer.IsRunning)
+                            InteriorSync.PushOwnedBuildingNow(addr);
+                    }
+                }
+                if (doneAddrs != null) foreach (var a in doneAddrs) _deferredDeltaRemoves.Remove(a);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] DrainDeferredDeltaRemoves: {ex.Message}"); }
+        }
         private static readonly Dictionary<string, int>    _applySkipCount           = new(StringComparer.Ordinal);
         private static readonly Dictionary<string, float>  _applySkipLoggedAt        = new(StringComparer.Ordinal);
         private static readonly Dictionary<string, float>  _cargoReRequestedAt       = new(StringComparer.Ordinal);
@@ -2331,6 +2396,179 @@ namespace BigAmbitionsMP
         /// the PlacementMode navigation blocker stranded = the guest locked in place (round-14 #3,
         /// client log :1232+). The echo must match byte-for-byte: both sides build the DTO with the same
         /// SerializeItemInstance and the diff key is the same JsonConvert of it.</summary>
+        // ── STAGE 1b (design 2026-08): the edit-delta builder and its apply ──────────────────────
+
+        /// <summary>Build the ops a local edit actually made: DIFF the live registration against the
+        /// _lastItemSer baseline — never hand-built op lists (parent stackedItems bookkeeping,
+        /// round-278/F3, lives inside the serialized form; a hand-built list would miss it).
+        /// Advances the baseline to the live state so the next edit diffs incrementally.
+        /// Guardrail 1 (review MAJOR-O: implemented as DESIGNED, no whole-replica fallback): NO
+        /// BASELINE means upserts-only for every live item and ZERO removes — that list is still
+        /// invariant-compliant (absence asserts nothing), unlike the 140 the first cut fell back to,
+        /// which re-opened the full-replica-authority class this design exists to remove.
+        /// Guardrail 2: a >25-remove diff on a 1-3-op action means baseline/registration skew NOT
+        /// caused by this edit — the removes are SUPPRESSED (upserts still convey the edit), the skew
+        /// is logged loudly, and the address is owed a re-sync so this machine reconciles toward the
+        /// world at edit end. Never send a delta the receiver is contracted to refuse.
+        /// `reason` on null: "no-changes" (silence — nothing to convey), "no-reg", "threw".</summary>
+        internal static InteriorEditDeltaPayload? BuildLocalEditDelta(string addressKey, out string reason)
+        {
+            reason = "no-reg";
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey)) return null;
+                var reg = FindRegistration(addressKey);
+                if (reg?.itemInstances == null) return null;
+                bool hadBaseline = _lastItemSer.TryGetValue(addressKey, out var baseline) && baseline != null;
+                var ops    = new List<InteriorItemOp>();
+                var newSer = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (var kv in reg.itemInstances)
+                {
+                    if (kv.Value == null) continue;
+                    var dto = InteriorSync.SerializeItemInstance(kv.Value);
+                    if (dto == null || string.IsNullOrEmpty(dto.Id)) continue;
+                    string ser = Newtonsoft.Json.JsonConvert.SerializeObject(dto);
+                    newSer[dto.Id] = ser;
+                    if (!hadBaseline || !baseline!.TryGetValue(dto.Id, out var prev) || prev != ser)
+                        ops.Add(new InteriorItemOp { Kind = "upsert", Id = dto.Id, Item = dto });
+                }
+                if (hadBaseline)
+                {
+                    var removes = new List<InteriorItemOp>();
+                    foreach (var k in baseline!.Keys)
+                        if (!newSer.ContainsKey(k)) removes.Add(new InteriorItemOp { Kind = "remove", Id = k });
+                    if (removes.Count > 25)
+                    {
+                        Plugin.Logger.LogWarning($"[Patcher] edit delta for '{addressKey}': baseline skew — {removes.Count} removes from a single edit action SUPPRESSED (upserts still sent); owing a re-sync to reconcile this machine toward the world.");
+                        InteriorSync.NoteResyncOwed(addressKey, $"delta baseline skew ({removes.Count} removes suppressed)");
+                    }
+                    else ops.AddRange(removes);
+                }
+                else if (newSer.Count > 0)
+                    Plugin.Logger.LogInfo($"[Patcher] edit delta for '{addressKey}': no baseline — seeding with {ops.Count} upsert(s), zero removes (guardrail 1).");
+                _lastItemSer[addressKey] = newSer;
+                if (ops.Count == 0) { reason = "no-changes"; return null; }
+                reason = "ok";
+                return new InteriorEditDeltaPayload { AddressKey = addressKey, Ops = ops };
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] BuildLocalEditDelta '{addressKey}': {ex.Message}"); reason = "threw"; return null; }
+        }
+
+        /// <summary>Apply a BuildingInteriorDelta. NEVER discarded (the delta is its edit's only
+        /// carrier — the invariant's guest→owner direction); mid-edit safety is PER-ITEM: any op on
+        /// the id being placed here is skipped (drag rule), an upsert re-creating a held id is
+        /// skipped inside ApplyOneItem (hands rule), and an EXPLICIT remove op overrides the
+        /// pending-placement rule (whole-set ABSENCE never removes a pending id; a named remove is a
+        /// deliberate statement — the design's Stage 1b endgame for the accepted B1 edge).
+        /// Upserts run through Stage 1a's ApplyOneItem — identical semantics to a full snapshot,
+        /// round-38d cargo shield included. Trap 2 honored: no struct version, no S4 baseline, no
+        /// owed-clear. Grant verification happens host-side before this is ever enqueued; callers
+        /// enqueue UNKEYED (trap 1: keyed coalescing loses superseded deltas). MAIN THREAD ONLY.</summary>
+        public static void ApplyInteriorEditDelta(InteriorEditDeltaPayload payload)
+        {
+            try
+            {
+                if (payload == null || string.IsNullOrEmpty(payload.AddressKey) || payload.Ops == null || payload.Ops.Count == 0) return;
+                try
+                {
+                    string myPt = MPSaveCoordinator.ActivePlaythroughId ?? "";
+                    if (!string.IsNullOrEmpty(payload.PlaythroughId) && !string.IsNullOrEmpty(myPt) && payload.PlaythroughId != myPt)
+                    { Plugin.Logger.LogWarning($"[Patcher] interior delta for '{payload.AddressKey}' REFUSED — wrong playthrough lineage."); return; }
+                }
+                catch { }
+                var reg = FindRegistration(payload.AddressKey);
+                if (reg?.itemInstances == null) { Plugin.Logger.LogWarning($"[Patcher] interior delta: no reg for '{payload.AddressKey}'"); return; }
+                // Receiver-side REMOVE CAP (guardrail 2): a compliant sender falls back to 140 before
+                // this can fire; over the cap here means a corrupt or hostile diff.
+                int removeCount = 0;
+                foreach (var op in payload.Ops) if (op != null && op.Kind == "remove") removeCount++;
+                if (removeCount > 25)
+                {
+                    Plugin.Logger.LogWarning($"[Patcher] interior delta for '{payload.AddressKey}' REFUSED — {removeCount} removes exceeds the cap; asking for a full serve instead.");
+                    // Owners are the truth and need no heal; replicas re-fetch via the owed drain.
+                    if (!InteriorSync.OwnsAddressLocally(payload.AddressKey))
+                        InteriorSync.NoteResyncOwed(payload.AddressKey, "over-cap delta refused");
+                    return;
+                }
+                if ((payload.Designs != null && payload.Designs.Count > 0) || !string.IsNullOrEmpty(payload.Layout)
+                    || payload.RadioStation != -1 || (payload.RadioVolume > -998f))
+                    Plugin.Logger.LogWarning($"[Patcher] interior delta for '{payload.AddressKey}' carries design/layout/radio bands — those convert in Stage 2 and are IGNORED here (loud by design, never silent).");
+
+                if (!_lastItemSer.TryGetValue(payload.AddressKey, out var lastSer) || lastSer == null)
+                    _lastItemSer[payload.AddressKey] = lastSer = new Dictionary<string, string>(StringComparer.Ordinal);
+                bool receiverOwnsThis = false;
+                try { receiverOwnsThis = MergerFlip.TrulyMine(reg); } catch { }
+                string? heldId = null;
+                try { heldId = PlayerHelper.ItemInstanceInHands?.id; } catch { }
+                _pendingLocalPlacements.TryGetValue(payload.AddressKey, out var pendingPlaced);
+                string? dragId = null;
+                try
+                {
+                    if (BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode)
+                        dragId = BigAmbitions.PlacementSystem.PlacementSystem.CurrentPlaceableItemBeingPlaced?.GetItemInstance()?.id;
+                }
+                catch { }
+                var ctx = new ItemApplyCtx
+                {
+                    Reg = reg, AddressKey = payload.AddressKey,
+                    LastSer = lastSer, NewSer = new Dictionary<string, string>(StringComparer.Ordinal),
+                    NewDict = new Dictionary<string, BigAmbitions.Items.ItemInstance>(),
+                    ChangedIds = new HashSet<string>(), MovedIds = new HashSet<string>(), CargoOnlyIds = new HashSet<string>(),
+                    HeldId = heldId, PendingPlaced = pendingPlaced, ReceiverOwnsThis = receiverOwnsThis,
+                };
+                var removedIds = new HashSet<string>();
+                int upserts = 0, removes = 0, dragSkips = 0;
+                foreach (var op in payload.Ops)
+                {
+                    if (op == null || string.IsNullOrEmpty(op.Id)) continue;
+                    if (dragId != null && op.Id == dragId)
+                    {
+                        // Review MAJOR-M: an UPSERT on the dragged id is droppable (Q2 LWW — this
+                        // machine's own confirm re-asserts its version moments later), but a REMOVE
+                        // is not: its information exists nowhere else once dropped, and dropping it
+                        // left the item in two places at once (the sender's hands AND this floor —
+                        // round-10 #3b's duplication, permanent). A named remove is a deliberate
+                        // statement — DEFER it to drag end, where the drain deletes the item and
+                        // re-conveys the removal, so the remove wins over the in-flight move.
+                        if (op.Kind == "remove")
+                        {
+                            if (!_deferredDeltaRemoves.TryGetValue(payload.AddressKey, out var defSet))
+                                _deferredDeltaRemoves[payload.AddressKey] = defSet = new HashSet<string>(StringComparer.Ordinal);
+                            defSet.Add(op.Id);
+                            Plugin.Logger.LogWarning($"[Patcher] delta REMOVE of '{op.Id}' in '{payload.AddressKey}' DEFERRED — it is being moved on this machine right now; executes at drag end (Stage 1b, review MAJOR-M).");
+                        }
+                        else
+                        {
+                            dragSkips++;
+                            Plugin.Logger.LogInfo($"[Patcher] delta upsert on '{op.Id}' in '{payload.AddressKey}' SKIPPED — it is being placed on this machine right now (drag rule); this machine's own confirm forward re-asserts it (Q2 LWW).");
+                        }
+                        continue;
+                    }
+                    if (op.Kind == "remove")
+                    {
+                        // An EXPLICIT remove overrides the pending rule — retire the pending entry too.
+                        if (pendingPlaced != null && pendingPlaced.Remove(op.Id) && pendingPlaced.Count == 0)
+                            _pendingLocalPlacements.Remove(payload.AddressKey);
+                        if (reg.itemInstances.Remove(op.Id)) { removedIds.Add(op.Id); removes++; }
+                        lastSer.Remove(op.Id);
+                        continue;
+                    }
+                    if (op.Kind != "upsert" || op.Item == null || op.Item.Id != op.Id) continue;
+                    ApplyOneItem(ctx, op.Item);   // Stage 1a: the identical per-item semantics
+                    if (ctx.NewDict.TryGetValue(op.Id, out var inst) && inst != null) { reg.itemInstances[op.Id] = inst; upserts++; }
+                    if (ctx.NewSer.TryGetValue(op.Id, out var s)) lastSer[op.Id] = s;   // baseline merges per id — never replaced wholesale
+                }
+                // Review MAJOR-L: the Host→subscriber relay leg CARRIES the minted struct version
+                // (it IS the host's stamped stream) — recording it keeps this machine cargo-sync
+                // coherent without a full re-serve. 0 = any other leg → never recorded (trap 2).
+                if (payload.StructVersion > 0) _lastAppliedStructVersion[payload.AddressKey] = payload.StructVersion;
+                Plugin.Logger.LogInfo($"[Patcher] interior delta applied for '{payload.AddressKey}': upserts={upserts} removes={removes} dragSkips={dragSkips} sv={payload.StructVersion} (changed={ctx.ChangedIds.Count} moved={ctx.MovedIds.Count} cargoOnly={ctx.CargoOnlyIds.Count}).");
+                TryRefreshActiveInteriorIfMatches(payload.AddressKey, ctx.ChangedIds, removedIds,
+                    changedDesignUuids: new HashSet<string>(), layoutChanged: false, movedIds: ctx.MovedIds);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorEditDelta: {ex.Message}"); }
+        }
+
         public static void NoteLocalItemState(string addressKey, System.Collections.Generic.List<ItemInstanceInfo> items)
         {
             try

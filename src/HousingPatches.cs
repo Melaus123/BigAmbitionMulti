@@ -666,7 +666,7 @@ namespace BigAmbitionsMP
             try
             {
                 if ((HousingFurniture.LocalGuestHere() || HousingFurniture.LocalHelperHere()) && !InteriorDesignerUI.IsOpen)
-                    InteriorSync.ForwardGuestInteriorEdit(HousingDesign.CurrentBuildingAddr());
+                    InteriorSync.ForwardGuestInteriorEditDelta(HousingDesign.CurrentBuildingAddr());   // Stage 1b: the 1-3 ops, not the room
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] placement guest forward: {ex.Message}"); }
         }
@@ -755,7 +755,7 @@ namespace BigAmbitionsMP
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;   // single-player → native only
                 string addr = GameStateReader.AddressKey(__instance);
                 if (!GrantSync.CanEnterGranted(addr) && !GrantSync.IsHelperBusiness(addr)) return;   // owner / non-guest → native only
-                InteriorSync.ForwardGuestInteriorEdit(addr);
+                InteriorSync.ForwardGuestInteriorEditDelta(addr);   // Stage 1b: one remove op, not the room
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] guest removal forward: {ex.Message}"); }
         }
@@ -798,6 +798,8 @@ namespace BigAmbitionsMP
         {
             try { InteriorSync.DrainOwedResyncs("placement-end"); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] owed-resync drain (placement-end): {ex.Message}"); }
+            try { GameStatePatcher.DrainDeferredDeltaRemoves(); }   // Stage 1b review MAJOR-M: a remove deferred past this drag executes now
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] deferred-remove drain (placement-end): {ex.Message}"); }
         }
     }
 

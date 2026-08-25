@@ -1020,6 +1020,20 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.BuildingInteriorDelta:   // v13 (Stage 1b): an edit as its ops — owner adoption OR subscriber replication
+                {
+                    var bid = env.GetPayload<InteriorEditDeltaPayload>();
+                    if (bid != null) GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        GameStatePatcher.ApplyInteriorEditDelta(bid);
+                        // Owner adoption: stamp the send trackers so the 2 s tick doesn't answer the
+                        // adoption with a full push — the host grafted its cache and conveyed the
+                        // subscribers with this same delta (Q1). No re-publish, by design.
+                        if (InteriorSync.OwnsAddressLocally(bid.AddressKey)) InteriorSync.NoteOwnerDeltaApplied(bid.AddressKey);
+                    });   // UNKEYED deliberately (design trap 1): keyed coalescing would LOSE a superseded delta
+                    break;
+                }
+
                 default:
                     Plugin.Logger.LogWarning($"[Client] Unknown message type: {env.Type}");
                     break;

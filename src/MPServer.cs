@@ -2007,6 +2007,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.BuildingInteriorDelta:   // v13 (Stage 1b): a permitted edit as its ops
+                {
+                    var bid = env.GetPayload<InteriorEditDeltaPayload>();
+                    if (bid != null) HandleBuildingInteriorDelta(bid, senderPid);
+                    break;
+                }
+
                 case MessageType.CashSync:
                 {
                     var c = env.GetPayload<CashSyncPayload>();
@@ -3012,6 +3019,53 @@ namespace BigAmbitionsMP
                     SendHubTo(ownerPid, MessageType.BuildingInteriorEdit, snap);   // forward to the owner's machine to adopt
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] HandleBuildingInteriorEdit: {ex.Message}"); }
+        }
+
+        /// <summary>STAGE 1b (design 2026-08): route a permitted edit DELTA. Authorization mirrors
+        /// HandleBuildingInteriorEdit verbatim (owner, or Housing/Business grant from the owner).
+        /// Host-owned building: adopt locally + relay the delta to subscribers minus the sender +
+        /// stamp the send trackers (RelayDeltaAfterHostAdopt). Remote-owned: forward to the owner to
+        /// adopt, apply to the HOST's own replica too (the host player's view must not wait for an
+        /// owner round-trip — the owner no longer re-pushes after adopting; Q1 retired that), graft
+        /// the host's owner cache, and relay to subscribers minus the sender.
+        /// TRAP 1 (design): every apply is enqueued UNKEYED — the "interior:"+addr key is
+        /// newest-wins full-state coalescing, and a superseded delta is a LOST EDIT.</summary>
+        public static void HandleBuildingInteriorDelta(InteriorEditDeltaPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.AddressKey) || p.Ops == null || p.Ops.Count == 0) return;
+                string owner = (BuildingOwners.TryGetValue(p.AddressKey, out var o) && !string.IsNullOrEmpty(o)) ? o
+                             : (BuildingRealEstateOwners.TryGetValue(p.AddressKey, out var r) ? r : "");
+                // Review MAJOR-N: these refusals must be LOUD — the sender's baseline already
+                // advanced, so a silently dropped delta is permanent divergence with no recurrence.
+                if (string.IsNullOrEmpty(owner))
+                { Plugin.Logger.LogWarning($"[Housing] interior delta for '{p.AddressKey}' from '{senderPid}' DROPPED — no recorded owner; the sender's edit is not conveyed."); return; }
+                string ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;
+                if (ownerPid != senderPid
+                    && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, senderPid)
+                    && !GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))
+                { Plugin.Logger.LogWarning($"[Housing] interior delta for '{p.AddressKey}' from '{senderPid}' DROPPED — no grant from '{ownerPid}'; the sender's edit is not conveyed."); return; }
+                if (ownerPid == MPConfig.PlayerId)
+                {
+                    GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        GameStatePatcher.ApplyInteriorEditDelta(p);
+                        InteriorSync.RelayDeltaAfterHostAdopt(p, senderPid);
+                    });   // UNKEYED — see trap 1 above
+                }
+                else
+                {
+                    SendHubTo(ownerPid, MessageType.BuildingInteriorDelta, p);   // the owner adopts the same ops
+                    GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        if (senderPid != MPConfig.PlayerId)   // host-as-guest already made the edit natively; re-applying is idempotent but pointless
+                            GameStatePatcher.ApplyInteriorEditDelta(p);
+                        InteriorSync.GraftDeltaOntoOwnerCache(p, senderPid, ownerPid);
+                    });   // UNKEYED — see trap 1 above
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] HandleBuildingInteriorDelta: {ex.Message}"); }
         }
 
         /// <summary>Round-112 — route a HELPER's cleaning report (MessageType.BuildingDirtEdit) to whoever owns
@@ -5585,6 +5639,30 @@ namespace BigAmbitionsMP
             if (peer == null) return false;
             RequestOwnerInteriorResync(peer, addressKey);
             return true;
+        }
+
+        /// <summary>STAGE 1b: send one edit delta to a building's subscribers, excluding the peer who
+        /// SENT the edit (their machine made it natively; echoing it back is pure cost and the echo's
+        /// ops would ser-match into no-ops anyway). One serialization, reliable lane.
+        /// Review MINOR-Q: unlike BroadcastInteriorCargoSyncTo there is deliberately NO per-peer
+        /// capability filter — protocol v13 refuses mixed sessions at the handshake, so every
+        /// connected peer can parse type 194 by construction.</summary>
+        public static void BroadcastInteriorDeltaTo(System.Collections.Generic.HashSet<int> peerIds, string excludePid, InteriorEditDeltaPayload p)
+        {
+            if (!_running || peerIds == null || peerIds.Count == 0 || p == null) return;
+            try
+            {
+                int excludeId = -1;
+                try { var xp = PeerForPid(excludePid); if (xp != null) excludeId = xp.Id; } catch { }
+                var env = MessageEnvelope.Create(MessageType.BuildingInteriorDelta, "host", p);
+                byte[] data = env.Serialize();
+                foreach (var peer in _clients.Keys)
+                {
+                    if (peer == null || !peerIds.Contains(peer.Id) || peer.Id == excludeId) continue;
+                    peer.Send(data, reliable: true);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BroadcastInteriorDeltaTo: {ex.Message}"); }
         }
 
         /// <summary>Round-281: broadcast one building's CARGO state to its subscribers.  Same shape as
