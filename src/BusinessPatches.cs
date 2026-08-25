@@ -437,6 +437,14 @@ namespace BigAmbitionsMP
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return null;
                 var ii = holder as ItemInstance;
                 if (ii == null) return null;   // own vehicles/boxes etc. — not building-owned
+                // The player's own HAND item is never building storage.  The native grab is
+                // hands-first, reg-removal-second (TryToGrabItem :599 vs :637) with the item
+                // panel rebuilt synchronously in between (AddItemToHands :326), so a just-grabbed
+                // box sits in BOTH hands and reg.itemInstances when the rows build — without this
+                // guard the rewire below treated it as storage and hid the native Place button
+                // for guests only (the owner never enters this gate; the parity gap).  Identity
+                // against the game's own hand variable, the Stage-0 hand-slot rule's shape.
+                if (ReferenceEquals(ii, PlayerHelper.ItemInstanceInHands)) return null;
                 if (!HousingFurniture.LocalGuestHere() && !HousingFurniture.LocalHelperHere()) return null;
                 var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
                 if (reg == null) return null;
