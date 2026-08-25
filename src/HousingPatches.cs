@@ -556,11 +556,57 @@ namespace BigAmbitionsMP
             catch { return ""; }
         }
 
-        /// <summary>True when the LOCAL player is a granted guest currently in design mode in this building —
-        /// used to suppress applying received interior snapshots that would clobber their in-progress edits.</summary>
-        internal static bool GuestIsDesigning(string addressKey)
+        /// <summary>Interior-edit Stage 0 (design 2026-08, replaces the guest-only GuestIsDesigning):
+        /// non-null (a named reason) while the LOCAL player is mid-edit in THIS building — placement
+        /// mode (an open drag: the item is already in reg with a per-frame pose, and the placement
+        /// machinery holds live object references) or the interior designer.  Deliberately ROLE-BLIND:
+        /// the owner needs this gate too (referee's owner-paint-revert hole — a mid-session apply
+        /// re-Deserializes InteriorElements, the scene reverts, and the designer close serializes the
+        /// reverted scene back).  Both oracles are the game's own state, read live: IsInPlacementMode
+        /// IS CurrentPlaceableItemBeingPlaced != null (PlacementSystem:83), nulled inside
+        /// StopPlacingItem — so the drain postfix on that method fires with this already clear.
+        /// MAIN THREAD ONLY (reads BuildingManager + placement statics).</summary>
+        internal static string? InteriorEditBusyAt(string addressKey)
         {
-            try { return InteriorDesignerUI.IsOpen && HousingFurniture.LocalGuestHere() && CurrentBuildingAddr() == addressKey; }
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey) || CurrentBuildingAddr() != addressKey) return null;
+                if (BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode)
+                {
+                    // Review MAJOR-5: verify the item being placed BELONGS to this building.  A
+                    // placement wedge (IsInPlacementMode stranded true — design ADDITION 2; the
+                    // round-279 heal can't clear it) would otherwise deafen EVERY building the
+                    // player subsequently walks into; keyed to the item's own registration, the
+                    // deafness stays confined to the building where it stranded (and its tripwire).
+                    // A drag that cannot name this building does NOT make it busy: every legitimate
+                    // drag's instance carries this building's address (stamped at insert; present on
+                    // move), so null/unreadable/foreign here is a wedge signature — and a wedge that
+                    // reads as "busy" would be the deafness this check exists to confine.  The
+                    // dragged item itself stays safe regardless: the drag/pending/hands rules and
+                    // round-48b are per-item and do not depend on this gate.
+                    try
+                    {
+                        var inst = BigAmbitions.PlacementSystem.PlacementSystem.CurrentPlaceableItemBeingPlaced?.GetItemInstance();
+                        var ireg = inst != null ? ItemHelper.GetBuildingRegistration(inst) : null;
+                        if (ireg != null && GameStateReader.AddressKey(ireg) == addressKey) return "placement";
+                    }
+                    catch { }
+                }
+                if (InteriorDesignerUI.IsOpen) return "designer";
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>Verification MAJOR-B: the DESIGNER question asked directly.  InteriorEditBusyAt
+        /// answers placement first, and the game runs placement WHILE the designer is open
+        /// (PlacementHelper.Run guards its confirm on !InteriorDesignerUI.IsOpen — only meaningful if
+        /// the states coexist) — so "busy == designer" is false mid-drag and the design-band skip
+        /// went inert in exactly the window it protects.  Any caller deciding about DESIGN bands
+        /// must use this, not the combined oracle.</summary>
+        internal static bool DesignerOpenAt(string addressKey)
+        {
+            try { return InteriorDesignerUI.IsOpen && !string.IsNullOrEmpty(addressKey) && CurrentBuildingAddr() == addressKey; }
             catch { return false; }
         }
 
@@ -623,6 +669,28 @@ namespace BigAmbitionsMP
                     InteriorSync.ForwardGuestInteriorEdit(HousingDesign.CurrentBuildingAddr());
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] placement guest forward: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>Stage 0 review BLOCKER-1 — register a NEW-from-hands placement the moment the game
+    /// inserts it into the building's data (this is the insert: AddItemInstanceToBuilding runs inside
+    /// TryToStartPlacingItem on success).  Until some incoming payload ECHOES the id back, no
+    /// whole-set apply may compute it as a removal — without this, the owed-resync drain's own
+    /// re-request answer (SeedOrHeal, built before the confirm's forward could round-trip) arrived in
+    /// the exact frame the drag rule went inert and deterministically deleted the just-placed item.
+    /// MP-only; single-player applies nothing.</summary>
+    [HarmonyPatch(typeof(UI.ItemPanel.ItemPanelUI), "TryToStartPlacingItem")]
+    public static class Patch_ItemPanelUI_TryToStartPlacingItem_NotePending
+    {
+        static void Postfix(bool __result, ItemInstance itemInstanceToPlace)
+        {
+            try
+            {
+                if (!__result || itemInstanceToPlace == null) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                GameStatePatcher.NotePendingLocalPlacement(HousingDesign.CurrentBuildingAddr(), itemInstanceToPlace.id);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] pending-placement note: {ex.Message}"); }
         }
     }
 
@@ -715,6 +783,33 @@ namespace BigAmbitionsMP
         {
             try { if (HousingFurniture.LocalGuestHere() || HousingFurniture.LocalHelperHere()) InteriorSync.ForwardGuestInteriorEdit(HousingDesign.CurrentBuildingAddr()); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] design close forward: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>Interior-edit Stage 0 — EDIT-END DRAIN, placement half.  A snapshot discarded while
+    /// this machine was mid-edit owes a re-ask; the owing edit ends exactly here (StopPlacingItem
+    /// runs on EVERY placement exit — confirm, grab-back, discard — and nulls
+    /// CurrentPlaceableItemBeingPlaced first, so the busy oracle is already clear when this fires).
+    /// Event-driven per the deferral contract; InteriorSync's 2 s tick is the belt.</summary>
+    [HarmonyPatch(typeof(BigAmbitions.PlacementSystem.PlacementSystem), nameof(BigAmbitions.PlacementSystem.PlacementSystem.StopPlacingItem))]
+    public static class Patch_PlacementSystem_StopPlacingItem_DrainOwedResyncs
+    {
+        static void Postfix()
+        {
+            try { InteriorSync.DrainOwedResyncs("placement-end"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] owed-resync drain (placement-end): {ex.Message}"); }
+        }
+    }
+
+    /// <summary>Interior-edit Stage 0 — EDIT-END DRAIN, designer half (any role; the guest-forward
+    /// postfix above conveys the edit, this one pulls whatever was discarded while designing).</summary>
+    [HarmonyPatch(typeof(InteriorDesignerController), "HandleOnClose")]
+    public static class Patch_InteriorDesignerController_HandleOnClose_DrainOwedResyncs
+    {
+        static void Postfix()
+        {
+            try { InteriorSync.DrainOwedResyncs("designer-close"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] owed-resync drain (designer-close): {ex.Message}"); }
         }
     }
 }

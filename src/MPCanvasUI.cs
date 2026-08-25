@@ -3712,6 +3712,7 @@ namespace BigAmbitionsMP
             TickHubWindow();
             _pt = MPPerf.Begin(); InteriorSync.Tick();         MPPerf.End("Interior", _pt);   // diff-push to subscribed clients
             _pt = MPPerf.Begin(); InteriorSync.TickClientOwner(); MPPerf.End("InteriorOwner", _pt);   // owner pushes their own shop interior to host
+            _pt = MPPerf.Begin(); InteriorSync.TickOwedResyncs(); MPPerf.End("IntOwed", _pt);   // Stage 0 belt: re-asks owed after a mid-edit discard if the edit-end events missed (self-throttled 2s)
             InteriorSync.TickDirtWatch();   // [DirtWatch] diagnostic — does a shop's dirt ever go down, or only up? (throttled 60s, anomaly-gated, removable)
             _pt = MPPerf.Begin(); GameStatePatcher.DrainPendingLogoRefreshes(); MPPerf.End("LogoRefresh", _pt);
 

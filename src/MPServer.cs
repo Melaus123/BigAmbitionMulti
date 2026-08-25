@@ -5574,6 +5574,19 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RequestOwnerInteriorResync: {ex.Message}"); }
         }
 
+        /// <summary>Stage 0 (interior-edit design 2026-08): the owed-resync drain resolves the owner's
+        /// peer LIVE at drain time (live reads at commitment — a peer captured at note time could be a
+        /// reconnected player's dead link).  False = not connected; the caller drops the owed entry
+        /// (the owner's next push or the entry serve heals).</summary>
+        public static bool RequestOwnerInteriorResyncByPid(string ownerPid, string addressKey)
+        {
+            if (!_running || string.IsNullOrEmpty(ownerPid) || string.IsNullOrEmpty(addressKey)) return false;
+            var peer = PeerForPid(ownerPid);
+            if (peer == null) return false;
+            RequestOwnerInteriorResync(peer, addressKey);
+            return true;
+        }
+
         /// <summary>Round-281: broadcast one building's CARGO state to its subscribers.  Same shape as
         /// BroadcastInteriorSnapshotTo (one serialization, reliable send to the subscriber peer ids) —
         /// only the payload is the small absolute cargo message instead of the whole interior.  The

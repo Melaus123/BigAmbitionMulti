@@ -1069,7 +1069,14 @@ namespace BigAmbitionsMP
         // presence map — NOT the InteriorSync subscription, which owners never join), without the
         // sender echo; looks are host-cached + replayed on entry. A v10 peer's look-cache-ahead
         // assumption (receive-everything) no longer holds; refuse mixed sessions outright.
-        public const int Version = 11;
+        //
+        // v12 (2026-08, interior-edit Stage 0): InteriorSnapshot gains SeedOrHeal, and receivers
+        // DISCARD any full snapshot without it while the local player is mid-edit (placement mode
+        // or designer open in that building), re-asking when the edit ends. A v11 peer never sets
+        // the flag, so a v12 receiver would discard its entry serves and heals — and a v11
+        // receiver applies mid-edit snapshots a v12 sender assumes it will refuse (the concurrent-
+        // furnishing deletion class, field 20260823-110955); refuse mixed sessions outright.
+        public const int Version = 12;
     }
 
     /// <summary>Sent by client on connect.</summary>
@@ -2330,6 +2337,14 @@ namespace BigAmbitionsMP
         // host leaves this 0, the receiver records 0, and — since that host also never sends cargo
         // syncs — nothing downstream ever reads it.
         public int                        StructVersion   { get; set; }
+        // v12 (interior-edit Stage 0): TRUE marks recovery traffic — entry serves, sale/takeover/
+        // arbitration deliveries, round-184 heals, and answers to a re-request — which a receiver
+        // must apply even while its local player is mid-edit (discarding a recovery answer can
+        // loop; the per-item hands/drag protections still apply inside).  FALSE marks routine
+        // traffic, which a mid-edit receiver discards and re-asks for when the edit ends ("a
+        // deferral must never be stale" — the answer is rebuilt live at send time).  PER-HOP:
+        // consumed at receipt, never cached or relayed onward as true.
+        public bool                       SeedOrHeal      { get; set; }
     }
 
     /// <summary>Round-281 — the cheap half of interior sync (MessageType.InteriorCargoSync).

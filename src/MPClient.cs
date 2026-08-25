@@ -690,7 +690,9 @@ namespace BigAmbitionsMP
                     var irq = env.GetPayload<InteriorRequestPayload>();
                     if (irq != null && !string.IsNullOrEmpty(irq.AddressKey)
                         && InteriorSync.OwnsAddressLocally(irq.AddressKey))
-                        InteriorSync.PushOwnedBuildingNow(irq.AddressKey);
+                        // Stage 0: this push ANSWERS the host's re-ask — recovery traffic (SeedOrHeal),
+                        // and RETRIED by the owner tick until one send lands (review BLOCKER-2/MAJOR-6).
+                        InteriorSync.QueueResyncAnswer(irq.AddressKey);
                     break;
                 }
 

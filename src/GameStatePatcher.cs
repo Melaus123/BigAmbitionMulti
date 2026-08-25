@@ -964,8 +964,12 @@ namespace BigAmbitionsMP
 
         /// <summary>grantedEdit=true ONLY from the BuildingInteriorEdit adoption sites (a permitted
         /// helper's renovation, grant-verified upstream) — the single flow allowed to modify a
-        /// building its receiver owns.</summary>
-        public static void ApplyInteriorSnapshot(InteriorSnapshotPayload payload, bool grantedEdit)
+        /// building its receiver owns.
+        /// seedOrHealOverride (Stage 0): the host's owner-push accept consumes the wire's per-hop
+        /// SeedOrHeal flag before caching (the cached object must never carry it into rebroadcasts)
+        /// and passes the consumed value through here; every other caller leaves it null and the
+        /// gate reads the payload's own flag.</summary>
+        public static void ApplyInteriorSnapshot(InteriorSnapshotPayload payload, bool grantedEdit, bool? seedOrHealOverride = null)
         {
             // Round-227: the piggybacked speaker state lands first — cheap, and the
             // entering player hears the right station from the first frame.
@@ -1019,6 +1023,9 @@ namespace BigAmbitionsMP
                         // would mismatch, and the re-request would loop forever against a snapshot
                         // that keeps getting skipped.  One line closes that loop.
                         if (!grantedEdit) _lastAppliedStructVersion[payload.AddressKey] = payload.StructVersion;
+                        // Stage 0 review MAJOR-6: an identical payload against an unchanged local copy
+                        // means this machine already HOLDS the state a re-ask would fetch — owed satisfied.
+                        if (!grantedEdit) InteriorSync.ClearResyncOwed(payload.AddressKey);
                         NoteApplySkipped(payload.AddressKey);
                         return;
                     }
@@ -1106,14 +1113,12 @@ namespace BigAmbitionsMP
                         return;
                     }
 
-                    // Housing: a guest editing this interior holds in-progress LOCAL edits they forward on close;
-                    // don't let an incoming snapshot clobber them mid-session.
-                    if (HousingDesign.GuestIsDesigning(payload.AddressKey)) return;
-
                     // CATCH-ALL (2026-06-17): the host's own replica of a PLAYER-owned business is flagged
                     // non-authoritative (InteriorSync.BuildSnapshotForHostSend). Such a snapshot must NEVER
                     // touch the owner's real interior — only the owner's OWN authoritative push may. This one
                     // gate protects EVERY collection below (designs / prices / dirt / items + any added later).
+                    // Stage 0 review MIN-7: this REFUSAL runs BEFORE the busy gate — a snapshot that would
+                    // be refused anyway must not owe a re-ask (the answer would just be refused again).
                     bool isPlayerBusiness = false;
                     try { isPlayerBusiness = IsAnyPlayerBusiness(reg) || reg.RentedByPlayer || !string.IsNullOrEmpty(payload.OwnerPlayerId); }
                     catch { }
@@ -1123,6 +1128,40 @@ namespace BigAmbitionsMP
                         return;
                     }
 
+                    // ── Interior-edit Stage 0 (design 2026-08): ROLE-BLIND mid-edit gate ─────────────
+                    // Replaces the guest-only designer drop (which was also a drop with NO recurrence —
+                    // the host stamps its hash trackers BEFORE broadcasting, so a dropped snapshot was
+                    // never re-sent).  While the LOCAL player — any role, the owner included — is
+                    // mid-edit in this building, a routine full snapshot is DISCARDED, never applied
+                    // and never deferred as bytes (a deferred snapshot is stale by construction), and
+                    // a re-ask is owed: the edit-end events drain it and the answer is rebuilt live.
+                    // Exempt: SeedOrHeal (recovery traffic — entry serves, heals, re-request answers;
+                    // discarding those can loop) and grantedEdit (a guest's edit is the ONLY carrier
+                    // of that edit — never discardable; the per-item hands/drag/pending protections and
+                    // the designer-LWW skip below are what defang it mid-edit instead).
+                    bool seedOrHeal = seedOrHealOverride ?? payload.SeedOrHeal;
+                    string? busyHere = HousingDesign.InteriorEditBusyAt(payload.AddressKey);
+                    if (!grantedEdit && !seedOrHeal && busyHere != null)
+                    {
+                        InteriorSync.NoteResyncOwed(payload.AddressKey, $"snapshot discarded ({busyHere} here)");
+                        Plugin.Logger.LogInfo($"[Patcher] Interior snapshot for '{payload.AddressKey}' DISCARDED — local player mid-edit ({busyHere}); re-ask owed, drained at edit end (Stage 0).");
+                        return;   // nothing recorded — an identical re-send stays news (round-281b)
+                    }
+                    // Stage 0 review MAJOR-3 (the round-281 serialized-then-reverted trap): while the
+                    // DESIGNER is open here, an exempt apply (grantedEdit/SeedOrHeal) must not rewrite
+                    // the design bands — the scene's InteriorElements would revert under the open
+                    // designer, and its close would then serialize the REVERTED scene back out as this
+                    // player's own edit (worse than losing: it launders the other side's state as the
+                    // last writer's).  Skipping designs+layout IS the approved Q2 last-write-wins: the
+                    // designer close that is open right now will write this player's version last.
+                    // Items and the rest still apply — furniture must never be lost to a paint session.
+                    // Verification MAJOR-B: asked via DesignerOpenAt, NOT busyHere — placement runs
+                    // WHILE the designer is open and busyHere answers placement first, which made the
+                    // skip inert during every drag of a designer session.
+                    bool skipDesignBands = HousingDesign.DesignerOpenAt(payload.AddressKey);
+                    if (skipDesignBands)
+                        Plugin.Logger.LogInfo($"[Patcher] design bands (layout/designs) of an exempt apply for '{payload.AddressKey}' SKIPPED — designer open here; local designer close writes last (Q2 LWW, Stage 0).");
+
                     // Layout (string; controls which BusinessLayoutSet is used).
                     // Capture whether it ACTUALLY changes — the visual refresh below re-calls
                     // LoadBuilding only when it did.  Re-calling LoadBuilding on a building that already
@@ -1130,7 +1169,7 @@ namespace BigAmbitionsMP
                     // DUPLICATE set of stations on top → the "8 booths vs 4 / 30 stations" duplication
                     // (user 2026-06-23) plus malformed duplicates that NRE on staffing.
                     string _layoutBefore = reg.Layout;
-                    if (!string.IsNullOrEmpty(payload.Layout))
+                    if (!string.IsNullOrEmpty(payload.Layout) && !skipDesignBands)
                         reg.Layout = payload.Layout;
                     bool _layoutChanged = !string.Equals(_layoutBefore, reg.Layout, StringComparison.Ordinal);
 
@@ -1140,7 +1179,7 @@ namespace BigAmbitionsMP
                     var changedDesignUuids = new HashSet<string>();
                     try
                     {
-                        if (reg.interiorDesigns != null)
+                        if (reg.interiorDesigns != null && !skipDesignBands)
                         {
                             if (!_lastDesignSer.TryGetValue(payload.AddressKey, out var lastDSer))
                                 lastDSer = new Dictionary<string, string>();
@@ -1259,9 +1298,29 @@ namespace BigAmbitionsMP
                             bool receiverOwnsThis = false;
                             try { receiverOwnsThis = MergerFlip.TrulyMine(reg); } catch { }   // TrulyMine: never shield replica cargo against the true owner
                             int cargoShielded = 0;
+                            // Stage 0 — THE HANDS RULE (user decision Q4 + F-2026-08-25-A): while an item is
+                            // in the LOCAL player's hands, no incoming message may RE-CREATE it in this
+                            // building.  Re-creation started the whole 20260823-110955 cascade: ground
+                            // ghost, ArgumentException on the next Place click, leaked previews, poisoned
+                            // AddressCached, and the sweep destroying the hand-slot visual.  Narrow by
+                            // design: only a true re-creation (id NOT locally present) is skipped — an
+                            // update to a locally-present id, and the REMOVAL of a held id (legitimate
+                            // convergence: it is what freed the id in the field episode), pass through.
+                            string? heldId = null;
+                            try { heldId = PlayerHelper.ItemInstanceInHands?.id; } catch { }
+                            _pendingLocalPlacements.TryGetValue(payload.AddressKey, out var pendingPlaced);
                             foreach (var i in payload.ItemInstances)
                             {
                                 if (string.IsNullOrEmpty(i.Id)) continue;
+                                // BLOCKER-1: the ECHO — a payload that CONTAINS the id proves the wire
+                                // has carried our placement; the removal protection retires.
+                                if (pendingPlaced != null && pendingPlaced.Remove(i.Id) && pendingPlaced.Count == 0)
+                                    _pendingLocalPlacements.Remove(payload.AddressKey);
+                                if (heldId != null && i.Id == heldId && !reg.itemInstances.ContainsKey(i.Id))
+                                {
+                                    Plugin.Logger.LogInfo($"[Patcher] hands rule: skipped re-creating '{i.ItemName}' ({i.Id}) in '{payload.AddressKey}' — it is in the local player's hands (Stage 0).");
+                                    continue;   // also kept out of newSer: if it lands back here later, the diff treats it as news
+                                }
                                 string ser = Newtonsoft.Json.JsonConvert.SerializeObject(i);
                                 newSer[i.Id] = ser;
                                 if (lastSer.TryGetValue(i.Id, out var prev) && prev == ser
@@ -1436,8 +1495,51 @@ namespace BigAmbitionsMP
                                 newDict[i.Id] = ii;
                                 changedIds.Add(i.Id);
                             }
+                            // Stage 0 — THE DRAG RULE, data half (referee ADDITION 1): the id being
+                            // actively placed is in reg since drag START; placement-confirm only writes
+                            // its position, never re-adds — so a whole-set apply computing "not in the
+                            // payload → remove" mid-drag deletes it PERMANENTLY while round-48b keeps
+                            // the GameObject ("looks placed, data gone"; the toilet stall).  The busy
+                            // gate discards routine snapshots, so this guards the never-discardable
+                            // legs (grantedEdit, SeedOrHeal) that can still land mid-drag.  The kept
+                            // baseline entry keeps the next diff honest.
+                            string? dragId = null;
+                            try
+                            {
+                                if (BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode)
+                                    dragId = BigAmbitions.PlacementSystem.PlacementSystem.CurrentPlaceableItemBeingPlaced?.GetItemInstance()?.id;
+                            }
+                            catch { }
                             foreach (var k in reg.itemInstances.Keys)
-                                if (!newDict.ContainsKey(k)) removedIds.Add(k);
+                                if (!newDict.ContainsKey(k))
+                                {
+                                    if (dragId != null && k == dragId)
+                                    {
+                                        newDict[k] = reg.itemInstances[k];   // survives; the confirm's own forward conveys it
+                                        if (lastSer.TryGetValue(k, out var dragSer)) newSer[k] = dragSer;
+                                        Plugin.Logger.LogInfo($"[Patcher] drag rule: kept '{k}' in '{payload.AddressKey}' — it is being placed on this machine and the sender cannot know it yet (Stage 0).");
+                                        continue;
+                                    }
+                                    // BLOCKER-1: placed here, not yet echoed by any incoming payload —
+                                    // the sender cannot know it; its absence is ignorance, not deletion.
+                                    if (pendingPlaced != null && pendingPlaced.TryGetValue(k, out var placedAt))
+                                    {
+                                        newDict[k] = reg.itemInstances[k];
+                                        if (lastSer.TryGetValue(k, out var pSer)) newSer[k] = pSer;
+                                        Plugin.Logger.LogInfo($"[Patcher] pending-placement rule: kept '{k}' in '{payload.AddressKey}' — placed locally {UnityEngine.Time.unscaledTime - placedAt:F0}s ago, not yet echoed (Stage 0; a never-shrinking age here means the forward was refused upstream).");
+                                        continue;
+                                    }
+                                    removedIds.Add(k);
+                                }
+                            // BLOCKER-1 prune: a pending id no longer in the local data (picked back up,
+                            // discarded) has nothing left to protect.
+                            if (pendingPlaced != null && pendingPlaced.Count > 0)
+                            {
+                                List<string>? gone = null;
+                                foreach (var pk in pendingPlaced.Keys)
+                                    if (!newDict.ContainsKey(pk)) (gone ??= new List<string>()).Add(pk);
+                                if (gone != null) foreach (var pk in gone) pendingPlaced.Remove(pk);
+                            }
 
                             // Round-198c (field 20260730-235612, user-approved): a SMALL delta names
                             // its items — an item rhythmically flapping in/out of snapshots was
@@ -1574,14 +1676,43 @@ namespace BigAmbitionsMP
                     // they come from the guest-edit channel (BuildingInteriorEdit), which is not the
                     // host's stamped subscriber stream and always carries 0 — recording it would tell
                     // this machine it holds a structure the host never described.
+                    // Verification MAJOR-C: an apply whose design bands were withheld is a PARTIAL
+                    // apply — recording it as a baseline would let the S4-lite skip absorb the very
+                    // re-send that must deliver those bands after the designer closes, and clearing
+                    // the owed entry would end the recurrence entirely (an entry serve only repeats
+                    // on re-entry).  So: no baseline (the identical answer stays news, round-281b),
+                    // and — for recovery/routine traffic — the address is RE-OWED so the drain
+                    // re-fetches at designer close.  grantedEdit stays un-owed: the guest's dropped
+                    // design edits are the accepted Q2 LWW loss, not missing authoritative state.
+                    if (skipDesignBands)
+                    {
+                        appliedFully = false;
+                        // Round-3 verification MAJOR-G: INVALIDATE the baselines, don't merely skip
+                        // refreshing them — the old fully-applied sig survives a partial, and since
+                        // LocalInteriorTag is three COUNTS (blind to a paint session, which recolors
+                        // existing UUIDs), a later answer byte-equal to an older applied payload could
+                        // S4-match the stale baseline, skip, and CLEAR the bands debt unpaid.
+                        _lastAppliedSig.Remove(payload.AddressKey);
+                        _lastAppliedLocalTag.Remove(payload.AddressKey);
+                        if (!grantedEdit) InteriorSync.NoteResyncOwed(payload.AddressKey, "design bands deferred (designer open here)");
+                    }
                     if (appliedFully)
                     {
                         _lastAppliedSig[payload.AddressKey]      = applySig;
                         _lastAppliedLocalTag[payload.AddressKey] = LocalInteriorTag(reg);   // what our copy looks like NOW
                         if (!grantedEdit) _lastAppliedStructVersion[payload.AddressKey] = payload.StructVersion;
+                        // Stage 0 review MAJOR-6: the owed entry retires only when an authoritative
+                        // apply actually COMPLETES here — never at re-ask time (fire-and-forget lost
+                        // the answer whenever the owner's push deferred or skipped).  grantedEdit does
+                        // NOT clear: a guest replica changing our copy is not the host-fresh state the
+                        // owed entry is waiting for (the host's tracker stamped before broadcast means
+                        // that state would otherwise never come — the M1 no-recurrence hole).
+                        if (!grantedEdit) InteriorSync.ClearResyncOwed(payload.AddressKey);
                     }
                     else
-                        Plugin.Logger.LogInfo($"[Patcher] baseline NOT recorded for '{payload.AddressKey}' — the apply was refused or threw, so an identical re-send stays news (round-281b).");
+                        Plugin.Logger.LogInfo($"[Patcher] baseline NOT recorded for '{payload.AddressKey}' — " +
+                            (skipDesignBands ? "design bands were deliberately withheld (designer open), so the re-send must stay news (Stage 0)."
+                                             : "the apply was refused or threw, so an identical re-send stays news (round-281b)."));
 
                     // Trigger a visual refresh of the interior IF the local
                     // player is currently inside THIS building.  Writing to
@@ -1603,6 +1734,30 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<string, string> _lastAppliedSig           = new(StringComparer.Ordinal);
         private static readonly Dictionary<string, string> _lastAppliedLocalTag      = new(StringComparer.Ordinal);
         private static readonly Dictionary<string, int>    _lastAppliedStructVersion = new(StringComparer.Ordinal);
+
+        // ── Stage 0 review BLOCKER-1: locally-placed ids the wire has not echoed yet ──────────
+        // A NEW item is inserted into reg at placement START and forwarded at CONFIRM; until some
+        // incoming payload CONTAINS the id (the echo — the world now knows it), no whole-set apply
+        // may compute it as a removal.  Without this, the drain's own re-request answer — built
+        // from a copy that cannot know the item yet, arriving SeedOrHeal so no gate stops it, in
+        // the same frame the drag rule went inert — deterministically deleted the item just
+        // placed.  Event-cleared (echo / local disappearance), never time-expired; a block is
+        // logged each time so a never-echoing id (an upstream-refused forward) stays visible.
+        // MAIN THREAD ONLY.  addr → (id → realtime noted).
+        private static readonly Dictionary<string, Dictionary<string, float>> _pendingLocalPlacements = new(StringComparer.Ordinal);
+
+        /// <summary>Called from the TryToStartPlacingItem postfix — the moment the game inserts a
+        /// new-from-hands item into the building's data.</summary>
+        public static void NotePendingLocalPlacement(string addressKey, string id)
+        {
+            if (string.IsNullOrEmpty(addressKey) || string.IsNullOrEmpty(id)) return;
+            if (!_pendingLocalPlacements.TryGetValue(addressKey, out var set))
+                _pendingLocalPlacements[addressKey] = set = new Dictionary<string, float>(StringComparer.Ordinal);
+            set[id] = UnityEngine.Time.unscaledTime;
+        }
+
+        /// <summary>Session hygiene — called from InteriorSync.Reset (scene-ready).</summary>
+        public static void ClearPendingLocalPlacements() => _pendingLocalPlacements.Clear();
         private static readonly Dictionary<string, int>    _applySkipCount           = new(StringComparer.Ordinal);
         private static readonly Dictionary<string, float>  _applySkipLoggedAt        = new(StringComparer.Ordinal);
         private static readonly Dictionary<string, float>  _cargoReRequestedAt       = new(StringComparer.Ordinal);
@@ -2539,6 +2694,24 @@ namespace BigAmbitionsMP
                                 if (icReg != reg) continue;
                             }
                             catch { continue; }
+                            // Stage 0 guard (F-2026-08-25-A, user-approved 2026-08-25): NEVER destroy the
+                            // object that IS the item in the local player's hands.  REFERENCE identity, not
+                            // id or address: the native AddItemInstanceToBuilding stamps AddressCached
+                            // BEFORE its dict.Add can throw, so a failed re-add re-marks the HELD instance
+                            // as this building's and the id-matched sweep below destroyed the hand-slot
+                            // visual (destroyed=4, peer :3707).  Guarding the harm directly also covers the
+                            // poisoning-free route (grabbing a stacked child leaves AddressCached set).
+                            // Deliberate tradeoff: any controller SHARING the held instance (a leaked
+                            // placement preview after a native throw) is protected too — a lingering
+                            // visible ghost beats destroying the player's hands, and Stage 0's hands rule
+                            // removes the only known way those leaks occur.
+                            try
+                            {
+                                if (ic.ItemInstance != null
+                                    && object.ReferenceEquals(ic.ItemInstance, PlayerHelper.ItemInstanceInHands))
+                                    continue;
+                            }
+                            catch { }
                             string id = "";
                             try { id = ic.ItemInstance?.id ?? ""; } catch { }
                             bool isChanged = changedIds != null && changedIds.Contains(id);

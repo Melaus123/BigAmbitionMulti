@@ -81,7 +81,174 @@ namespace BigAmbitionsMP
             // the second join in the same launch published nothing, so the host received
             // that client's shop contents only for buildings they physically walked into.
             _publishedAllOwned = false;
+            _owedResyncs.Clear();                                          // Stage 0
+            lock (_pendingResyncAnswers) _pendingResyncAnswers.Clear();    // Stage 0
+            GameStatePatcher.ClearPendingLocalPlacements();                // Stage 0 (BLOCKER-1 registry)
         }
+
+        // ── Interior-edit Stage 0: owed re-syncs (design 2026-08) ─────────────────────────────
+        // A routine full snapshot that arrives while THIS machine is mid-edit in that building is
+        // DISCARDED (never deferred as bytes — a deferred snapshot is stale by construction) and
+        // the address is recorded here.  The drain re-ASKS, so the answer is rebuilt live at send
+        // time.  Drained by the edit-end events (StopPlacingItem / designer HandleOnClose
+        // postfixes) with the 2 s tick as the belt; an address still busy at drain time stays owed
+        // (recurrence-covered).  MAIN THREAD ONLY (noted from applies, drained from postfixes and
+        // the tick — all main thread).
+        private sealed class OwedResync { public string Reason = ""; public float Since; public float WarnedAt; public float LastAskedAt = -999f; }
+        private static readonly Dictionary<string, OwedResync> _owedResyncs = new(StringComparer.Ordinal);
+        private static float _lastOwedTickAt;
+        private const float OwedTripwireSeconds = 60f;   // long drags legitimately re-owe; it must be visible
+        private const float OwedReAskSeconds    = 10f;   // review MAJOR-6: asks repeat until an apply completes; this spaces them
+
+        public static void NoteResyncOwed(string addressKey, string reason)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return;
+            if (!_owedResyncs.TryGetValue(addressKey, out var o))
+                _owedResyncs[addressKey] = o = new OwedResync { Since = UnityEngine.Time.unscaledTime };
+            o.Reason = reason ?? "";
+        }
+
+        /// <summary>Review MAJOR-6: the owed entry retires when an authoritative apply for the address
+        /// COMPLETES on this machine (called from the apply's baseline-recording sites) — an ask is
+        /// only a request, and the answer can be deferred or skipped on the other side.</summary>
+        public static void ClearResyncOwed(string addressKey)
+        {
+            if (!string.IsNullOrEmpty(addressKey)) _owedResyncs.Remove(addressKey);
+        }
+
+        /// <summary>Verification BLOCKER-A2/MAJOR-C seam: whether this address still owes a re-sync.
+        /// Main thread only.</summary>
+        public static bool IsResyncOwed(string addressKey)
+            => !string.IsNullOrEmpty(addressKey) && _owedResyncs.ContainsKey(addressKey);
+
+        /// <summary>Belt for the event drain — self-throttled; called every frame from the UI tick.</summary>
+        public static void TickOwedResyncs()
+        {
+            if (_owedResyncs.Count == 0) return;
+            float now = UnityEngine.Time.unscaledTime;
+            if (now - _lastOwedTickAt < 2f) return;
+            _lastOwedTickAt = now;
+            DrainOwedResyncs("tick");
+        }
+
+        /// <summary>Fire the re-ask for every owed address whose edit has ended.  The re-ask route is
+        /// derived LIVE at drain time (live reads at commitment), never stored at note time:
+        /// host → ask the building's remote owner for a fresh push (RequestOwnerInteriorResync);
+        /// client → re-request the host's serve, but only if still inside (the entry serve heals a
+        /// left building anyway).  Either answer arrives flagged SeedOrHeal and applies.
+        /// Review MAJOR-6: asking does NOT retire the entry — only a completed apply does
+        /// (ClearResyncOwed from the apply's recording sites); asks repeat every OwedReAskSeconds
+        /// until then, so a deferred/skipped answer on the other side cannot silently strand us.</summary>
+        public static void DrainOwedResyncs(string trigger)
+        {
+            if (_owedResyncs.Count == 0) return;
+            try
+            {
+                float now = UnityEngine.Time.unscaledTime;
+                bool inSession = MPServer.IsRunning || MPClient.IsConnected;
+                if (!inSession)
+                {
+                    Plugin.Logger.LogInfo($"[InteriorSync] {_owedResyncs.Count} owed re-sync(s) dropped — session ended.");
+                    _owedResyncs.Clear();
+                    return;
+                }
+                List<string>? drop = null;
+                foreach (var kv in _owedResyncs)
+                {
+                    string addr = kv.Key; var owed = kv.Value;
+                    if (HousingDesign.InteriorEditBusyAt(addr) != null)
+                    {
+                        if (now - owed.Since > OwedTripwireSeconds && now - owed.WarnedAt > OwedTripwireSeconds)
+                        {
+                            owed.WarnedAt = now;
+                            Plugin.Logger.LogWarning($"[InteriorSync] '{addr}' has owed a re-sync for {now - owed.Since:F0}s ({owed.Reason}) — the local edit there has not ended (long drag/designer session, or a stuck placement state).");
+                        }
+                        continue;   // still busy — stays owed; the next edit-end or tick retries
+                    }
+                    if (MPServer.IsRunning)
+                    {
+                        // Host role: the only discardable inbound full state is a remote owner's push.
+                        // Verification BLOCKER-A1: the SEND sits INSIDE the throttle — it triggers a
+                        // ~300 KB answer, so an unthrottled ask loop would eat the whole per-connection
+                        // budget (the first cut throttled only the log line).
+                        if (now - owed.LastAskedAt < OwedReAskSeconds && owed.LastAskedAt >= 0f) continue;
+                        string ownerPid = "";
+                        try
+                        {
+                            if (MPServer.BuildingOwners.TryGetValue(addr, out var op)
+                                && !string.IsNullOrEmpty(op) && !GameStatePatcher.IsHostLedgerId(op)) ownerPid = op;
+                        }
+                        catch { }
+                        if (ownerPid.Length == 0 || !MPServer.RequestOwnerInteriorResyncByPid(ownerPid, addr))
+                        {
+                            (drop ??= new List<string>()).Add(addr);
+                            Plugin.Logger.LogInfo($"[InteriorSync] owed re-sync for '{addr}' dropped ({trigger}, was: {owed.Reason}) — no reachable remote owner (their next push or entry serve heals).");
+                        }
+                        else
+                        {
+                            owed.LastAskedAt = now;
+                            Plugin.Logger.LogInfo($"[InteriorSync] owed re-sync for '{addr}' — asked the owner for a fresh push ({trigger}, was: {owed.Reason}); retires when an apply completes.");
+                        }
+                    }
+                    else
+                    {
+                        if (HousingDesign.CurrentBuildingAddr() == addr)
+                        {
+                            if (now - owed.LastAskedAt >= OwedReAskSeconds || owed.LastAskedAt < 0f)
+                            {
+                                owed.LastAskedAt = now;
+                                MPClient.SendInteriorRequest(addr);   // the host re-serves, flagged SeedOrHeal
+                                Plugin.Logger.LogInfo($"[InteriorSync] owed re-sync for '{addr}' — re-requested the host's serve ({trigger}, was: {owed.Reason}); retires when the serve applies.");
+                            }
+                        }
+                        else
+                        {
+                            (drop ??= new List<string>()).Add(addr);
+                            Plugin.Logger.LogInfo($"[InteriorSync] owed re-sync for '{addr}' dropped ({trigger}) — no longer inside; the next entry serve heals.");
+                        }
+                    }
+                }
+                if (drop != null) foreach (var a in drop) _owedResyncs.Remove(a);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] DrainOwedResyncs: {ex.Message}"); }
+        }
+
+        // Stage 0 review BLOCKER-2 rework: the SeedOrHeal intent travels WITH each push request as an
+        // argument (PushOwnedBuildingNow → coalesced pending entry → PushOwnedBuildingImmediate →
+        // SendLocalOwnerSnapshot) — the old side-channel set stranded marks on every skip path and a
+        // later ROUTINE push then consumed one and bypassed the host's mid-edit gate.  A flag whose
+        // push is skipped (all-zero reg, no snapshot) dies with it: nothing was asserted, and the
+        // host's owed re-ask machinery keeps re-asking until an apply completes.
+        // _pendingResyncAnswers: addresses the HOST re-asked us for (owner side) — retried by
+        // TickClientOwner until one send actually lands, exactly the sweep-3b exit-push pattern,
+        // because the one-shot answer was silently droppable at every placement/build gate.
+        // Locked: queued from the client dispatch thread, consumed on the main thread.
+        private static readonly HashSet<string> _pendingResyncAnswers = new(StringComparer.Ordinal);
+        public static void QueueResyncAnswer(string addressKey)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return;
+            // Verification BLOCKER-A3: registration ONLY — TickClientOwner's retry (next frame) is
+            // the single sender.  Also pushing here raced the tick and could ship the ~300 KB answer
+            // twice per ask.
+            lock (_pendingResyncAnswers) _pendingResyncAnswers.Add(addressKey);
+        }
+        private static void ClearPendingResyncAnswer(string addressKey)
+        {
+            lock (_pendingResyncAnswers) _pendingResyncAnswers.Remove(addressKey);
+        }
+
+        /// <summary>Shallow copy with SeedOrHeal set — the host's serve paths hand out the CACHED
+        /// owner snapshot object, and stamping the flag on that shared object would leak "always
+        /// apply" into every later Tick broadcast of it.  Lists are shared (sends only read them).</summary>
+        private static InteriorSnapshotPayload AsSeedOrHeal(InteriorSnapshotPayload s) => new()
+        {
+            AddressKey = s.AddressKey, Layout = s.Layout, OwnerPlayerId = s.OwnerPlayerId,
+            ItemInstancesAuthoritative = s.ItemInstancesAuthoritative, Authoritative = s.Authoritative,
+            InteriorDesigns = s.InteriorDesigns, RadioStation = s.RadioStation, RadioVolume = s.RadioVolume,
+            RetailPrices = s.RetailPrices, DirtSpots = s.DirtSpots, ItemInstances = s.ItemInstances,
+            CustomerEntries = s.CustomerEntries, FulfilledDemands = s.FulfilledDemands,
+            StructVersion = s.StructVersion, SeedOrHeal = true,
+        };
 
         // ── Subscription management ───────────────────────────────────────────
 
@@ -129,7 +296,10 @@ namespace BigAmbitionsMP
                 // Round-281: this snapshot is the receiver's BASELINE — it is what every later cargo
                 // sync for this address is measured against, so it must carry the structure's version.
                 StampStructVersion(snap, hsSub);
-                MPServer.SendInteriorSnapshotTo(peer, snap);
+                // Stage 0: an entry serve (and the drain's re-request answer, which re-enters here)
+                // is RECOVERY traffic — the receiver applies it even mid-edit.  Cloned, never stamped
+                // on the (possibly cached) object itself.
+                MPServer.SendInteriorSnapshotTo(peer, AsSeedOrHeal(snap));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] HandleRequest: {ex.Message}"); }
         }
@@ -262,6 +432,17 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[InteriorSync] parked exit push for '{_pendingExitPush}' delivered (sweep 3b).");
                     _pendingExitPush = "";
                 }
+            }
+            // Stage 0 (review BLOCKER-2/MAJOR-6): a host re-ask ANSWER retries until one send lands —
+            // same 3b contract; every placement/build gate could otherwise silently drop the one-shot
+            // answer while the host keeps re-asking.
+            if (_pendingResyncAnswers.Count > 0)
+            {
+                string[] answers;
+                lock (_pendingResyncAnswers) { answers = new string[_pendingResyncAnswers.Count]; _pendingResyncAnswers.CopyTo(answers); }
+                foreach (var a in answers)
+                    if (SendLocalOwnerSnapshot(a, force: true, reason: "resync-answer", seedOrHeal: true))
+                        ClearPendingResyncAnswer(a);
             }
             if (string.IsNullOrEmpty(_localOwnerAddress)) return;
             float now = UnityEngine.Time.realtimeSinceStartup;
@@ -399,6 +580,39 @@ namespace BigAmbitionsMP
                         $"[InteriorSync] OwnerSnapshot from '{playerId}' addr='{payload.AddressKey}' carries NO items — " +
                         "item authority DENIED (it cannot clear the stored interior). Their character save likely disagrees " +
                         "with this session's ownership ledger; the stored copy is kept.");
+                // Stage 0: the ACCEPT half — the busy oracle is main-thread state, and the
+                // toilet-stall loss (field 20260823-110955) was exactly this payload applying while
+                // the host player was mid-drag in that room.  Busy means DISCARD BOTH the cache
+                // write and the world apply (an accepted cache would serve pre-edit state and
+                // diverge from the deferred world), then owe a re-ask that drains at edit end.
+                // INLINE, not re-enqueued (review MAJOR-4): this handler ALREADY runs on the main
+                // thread (MPServer's dispatch enqueues it, :1429), and a second hop would re-order
+                // the cache write behind an already-queued cargo graft — the graft would land on the
+                // pre-push cache, then be overwritten by the older full state, and the dual-hash
+                // guard misses exactly the common only-cargo-moved case.
+                AcceptOwnerSnapshot(playerId, payload);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] HandleOwnerSnapshot: {ex.Message}"); }
+        }
+
+        private static void AcceptOwnerSnapshot(string playerId, InteriorSnapshotPayload payload)
+        {
+            try
+            {
+                // Stage 0 gate — per-hop flag: read, then cleared, so the cached object the Tick
+                // rebroadcasts can never carry "always apply" to subscribers.
+                bool seedOrHeal = payload.SeedOrHeal;
+                payload.SeedOrHeal = false;
+                if (!seedOrHeal)
+                {
+                    string? busy = HousingDesign.InteriorEditBusyAt(payload.AddressKey);
+                    if (busy != null)
+                    {
+                        NoteResyncOwed(payload.AddressKey, $"owner push from '{playerId}' discarded ({busy} here)");
+                        Plugin.Logger.LogInfo($"[InteriorSync] OwnerSnapshot for '{payload.AddressKey}' DISCARDED — local player mid-edit ({busy}); cache and world both kept, re-ask owed (Stage 0).");
+                        return;
+                    }
+                }
                 int hash = CacheHash(payload);   // v10 review M1: full + dirt — see CacheHash
                 bool changed = !_ownerSnapshotsByAddr.TryGetValue(payload.AddressKey, out var prev) || prev.Hash != hash;
                 // Round-103b: an EMPTY push must not replace a cached NON-EMPTY one either. This cache is
@@ -413,6 +627,14 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogWarning(
                         $"[InteriorSync] KEEPING the stored interior for '{payload.AddressKey}': '{playerId}' pushed an empty one " +
                         $"over {prev!.Snapshot.ItemInstances.Count} stored item(s). They will receive the stored copy when they enter.");
+                    // Verification BLOCKER-A2: this IS the re-ask's terminal answer ("the owner has
+                    // nothing better; the stored copy stands").  If the address still owes — e.g. the
+                    // stored copy's earlier apply withheld its design bands (MAJOR-C partial) — the
+                    // best truth to deliver is the STORED snapshot; its completed apply retires the
+                    // debt (or re-skips and keeps it while the designer stays open — the drain
+                    // terminates at designer close).  Not owed → nothing to do.
+                    if (IsResyncOwed(payload.AddressKey) && prev?.Snapshot != null)
+                        GameStatePatcher.ApplyInteriorSnapshot(prev.Snapshot, grantedEdit: false, seedOrHealOverride: true);
                     return;
                 }
                 // v10 (T7): the owner's 2 s tick pushes no longer carry the shopper schedule —
@@ -433,9 +655,23 @@ namespace BigAmbitionsMP
                 };
 
                 Plugin.Logger.LogInfo($"[InteriorSync] OwnerSnapshot accepted from '{playerId}' addr='{payload.AddressKey}': {SnapshotSummary(payload)}{(changed ? "" : " (unchanged)")}.");
-                if (!changed) return;
+                // Verification BLOCKER-A2: a byte-identical answer normally means the earlier apply of
+                // this exact state already satisfied the debt — but if THAT apply withheld its design
+                // bands (MAJOR-C partial: designer was open), the debt is real and the answer must run
+                // the apply again: it delivers the bands now, or re-skips and keeps the debt while the
+                // designer stays open (the drain terminates at designer close).  Either way the loop
+                // the first cut had — re-asking a shop whose cache pre-dated the edit session forever —
+                // cannot form: a completed apply clears, and an un-owed unchanged answer is a no-op.
+                if (!changed)
+                {
+                    if (IsResyncOwed(payload.AddressKey))
+                        GameStatePatcher.ApplyInteriorSnapshot(payload, grantedEdit: false, seedOrHealOverride: seedOrHeal);
+                    return;
+                }
 
-                GameStatePatcher.ApplyInteriorSnapshot(payload);
+                // seedOrHealOverride carries the consumed per-hop flag into the apply's own gate
+                // (the flag on the payload object is already cleared — deliberately, see above).
+                GameStatePatcher.ApplyInteriorSnapshot(payload, grantedEdit: false, seedOrHealOverride: seedOrHeal);
                 // v10 (T7 relay fix, audit item a): DON'T relay the full payload here, and DON'T
                 // stamp _lastHashByAddr — both together were what bypassed the Tick's split gate,
                 // making every client-owner push a FULL send to subscribers. With the cache updated
@@ -449,8 +685,10 @@ namespace BigAmbitionsMP
                 // without re-opening any spam path (inflow stays owner-throttled).
                 _volatileSentAtByAddr.Remove(payload.AddressKey);
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] HandleOwnerSnapshot: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] AcceptOwnerSnapshot: {ex.Message}"); }
         }
+        // (The accept was briefly a second EnqueueOnMainThread hop; review MAJOR-4 showed the
+        // handler is already main-thread and the extra hop re-ordered it behind cargo grafts.)
 
         /// <summary>Task-28 fix 2: true while an item is mid-placement on THIS machine.  The staged
         /// item is already live in reg.itemInstances with a per-frame drag pose (PlacementSystem
@@ -480,7 +718,7 @@ namespace BigAmbitionsMP
         /// (deferred mid-placement, or threw).  "Nothing to deliver" outcomes — no snapshot
         /// buildable, all-zero skip, hash-unchanged — return TRUE so a parked exit push
         /// can't spin forever on a shop that has nothing to say.</summary>
-        private static bool SendLocalOwnerSnapshot(string addressKey, bool force, string reason)
+        private static bool SendLocalOwnerSnapshot(string addressKey, bool force, string reason, bool seedOrHeal = false)
         {
             try
             {
@@ -594,6 +832,12 @@ namespace BigAmbitionsMP
                 _lastLocalOwnerStructByAddr[addressKey] = ohs;
                 _lastLocalOwnerNonCargoByAddr[addressKey] = ohn;
                 _lastLocalOwnerVolatileAt[addressKey] = onow;
+                // Stage 0: only a push ANSWERING the host's re-ask (or the world-live seed) carries
+                // SeedOrHeal — routine entry/exit/tick/guest-edit pushes stay discardable on a
+                // mid-edit host (that discardability IS the toilet-stall fix).  The flag arrives as
+                // an ARGUMENT with this specific push (review BLOCKER-2 — a stored mark outlived its
+                // push and a later routine send wrongly bypassed the host's gate).
+                snap.SeedOrHeal = seedOrHeal;
                 MPClient.SendInteriorOwnerSnapshot(snap);
                 // Sweep 3c (user-approved): promoted to ALL builds — this line is the completion
                 // evidence every field triage of "furniture never appeared" lacked (Release logs
@@ -636,7 +880,8 @@ namespace BigAmbitionsMP
                 foreach (var reg in gi.BuildingRegistrations)
                 {
                     if (reg == null || !IsLocalOwnerBusiness(reg)) continue;
-                    PushOwnedBuildingNow(GameStateReader.AddressKey(reg));
+                    // Stage 0: the world-live publish SEEDS the host cache (flag rides the push itself).
+                    PushOwnedBuildingNow(GameStateReader.AddressKey(reg), seedOrHeal: true);
                     n++;
                 }
                 if (n > 0) Plugin.Logger.LogInfo($"[InteriorSync] published ALL {n} owned interior(s) ({reason}) — visitors no longer wait for the owner to enter first.");
@@ -650,35 +895,38 @@ namespace BigAmbitionsMP
         /// applied 6 full snapshots in one frame, and the per-apply destroy/respawn of the changed fridge with
         /// DEFERRED Destroys left a broken controller — the "fridge menu never opens" bug, round-12 #2). All
         /// same-flush mutations now ride ONE snapshot, so the receiver refreshes each changed item exactly once.</summary>
-        public static void PushOwnedBuildingNow(string addressKey)
+        public static void PushOwnedBuildingNow(string addressKey, bool seedOrHeal = false)
         {
             if (string.IsNullOrEmpty(addressKey)) return;
             lock (_pendingOwnedPushes)
             {
-                _pendingOwnedPushes[addressKey] = _pendingOwnedPushes.TryGetValue(addressKey, out var n) ? n + 1 : 1;
+                // Review BLOCKER-2: the flag rides the pending entry (OR-merged on coalesce) — never
+                // a side channel that can outlive the push it belonged to.
+                _pendingOwnedPushes[addressKey] = _pendingOwnedPushes.TryGetValue(addressKey, out var e)
+                    ? (e.Count + 1, e.SeedOrHeal || seedOrHeal) : (1, seedOrHeal);
                 if (_ownedPushFlushQueued) return;
                 _ownedPushFlushQueued = true;
             }
             GameStatePatcher.EnqueueOnMainThread(FlushOwnedPushes);
         }
 
-        // addressKey → number of coalesced mutations awaiting the flush (count is for the log only).
-        private static readonly System.Collections.Generic.Dictionary<string, int> _pendingOwnedPushes = new();
+        // addressKey → (coalesced mutation count — log only; SeedOrHeal intent for the flush).
+        private static readonly System.Collections.Generic.Dictionary<string, (int Count, bool SeedOrHeal)> _pendingOwnedPushes = new();
         private static bool _ownedPushFlushQueued;
 
         private static void FlushOwnedPushes()
         {
-            System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string, int>> pushes;
+            System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string, (int Count, bool SeedOrHeal)>> pushes;
             lock (_pendingOwnedPushes)
             {
-                pushes = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string, int>>(_pendingOwnedPushes);
+                pushes = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string, (int Count, bool SeedOrHeal)>>(_pendingOwnedPushes);
                 _pendingOwnedPushes.Clear();
                 _ownedPushFlushQueued = false;
             }
             foreach (var p in pushes)
             {
-                if (p.Value > 1) Plugin.Logger.LogInfo($"[InteriorSync] coalesced {p.Value} mutations → 1 push for '{p.Key}'.");
-                PushOwnedBuildingImmediate(p.Key);
+                if (p.Value.Count > 1) Plugin.Logger.LogInfo($"[InteriorSync] coalesced {p.Value.Count} mutations → 1 push for '{p.Key}'.");
+                PushOwnedBuildingImmediate(p.Key, p.Value.SeedOrHeal);
             }
         }
 
@@ -689,9 +937,9 @@ namespace BigAmbitionsMP
         /// <summary>The actual push. Works regardless of where the owner's avatar is — BuildSnapshot reads the
         /// SAVE data, not loaded objects. Host owner → broadcast to that building's subscribers; client owner →
         /// push to the host, which rebroadcasts.</summary>
-        private static void PushOwnedBuildingImmediate(string addressKey)
+        private static void PushOwnedBuildingImmediate(string addressKey, bool seedOrHeal = false)
         {
-            if (PlacementQuiesced($"immediate-push {addressKey}")) return;   // task-28 fix 2: hash unchanged — the owner tick re-converges post-placement
+            if (PlacementQuiesced($"immediate-push {addressKey}")) return;   // task-28 fix 2: hash unchanged — the owner tick re-converges post-placement; a SeedOrHeal answer is retried by _pendingResyncAnswers
             try
             {
                 if (MPServer.IsRunning)
@@ -747,7 +995,10 @@ namespace BigAmbitionsMP
                 }
                 else
                 {
-                    SendLocalOwnerSnapshot(addressKey, force: true, reason: "guest-edit");
+                    // Review MIN-3 note stands: "guest-edit" is this leg's historical catch-all reason.
+                    bool delivered = SendLocalOwnerSnapshot(addressKey, force: true,
+                        reason: seedOrHeal ? "resync-answer" : "guest-edit", seedOrHeal: seedOrHeal);
+                    if (delivered && seedOrHeal) ClearPendingResyncAnswer(addressKey);
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] PushOwnedBuildingImmediate: {ex.Message}"); }
@@ -781,7 +1032,9 @@ namespace BigAmbitionsMP
                 // version: writing the round-280 trackers from here would give an ungated path a say
                 // in the coalescing clock, which is exactly the bug round-280 fixed.
                 StampStructVersion(snap);
-                MPServer.SendToPlayer(pid, MessageEnvelope.Create(MessageType.InteriorSnapshot, "host", snap));
+                // Stage 0: every caller of this path is a heal or hand-over (sale, takeover,
+                // arbitration, round-184) — recovery traffic, applies even mid-edit.
+                MPServer.SendToPlayer(pid, MessageEnvelope.Create(MessageType.InteriorSnapshot, "host", AsSeedOrHeal(snap)));
                 Plugin.Logger.LogInfo($"[InteriorSync] snapshot of '{addressKey}' sent directly to '{pid}' ({SnapshotSummary(snap)}{(forceItemAuthority ? ", sale-authoritative" : "")}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] direct send: {ex.Message}"); }
