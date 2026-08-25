@@ -7,19 +7,14 @@ using Vehicles.VehicleTypes;   // VehicleInstance resolution (matches VehicleSto
 namespace BigAmbitionsMP
 {
     /// <summary>
-    /// THE storage engine (unification Stage A, 2026-08-25 — design:
-    /// .modding/03-systems/storage-unification-2026-08.md). One owner-apply and one result
-    /// handler serve BOTH containers (building interior items and vehicles); the two legacy wire
-    /// families (VehicleCargoReq/Res 125/126, BuildingCargoReq/Res 138/139) remain, as thin
-    /// adapters in VehicleStorageSync / BuildingStorageSync that translate to the neutral records
-    /// below. Ruling 37 made this structural: the twin implementations drifted four separate
-    /// times (sealed takes, manifest parser, put rollback, cargo callbacks) — from Stage A on, a
-    /// storage fix has exactly one home.
-    ///
-    /// Stage A is a PURE EXTRACTION: every moved body is verbatim from its source file, and the
-    /// three known behavior asymmetries are pinned behind the named StorageProfile flags so the
-    /// diff of this stage contains NO behavior change. Stage A2 flips the flags one commit at a
-    /// time (see the design doc); Stage B replaces the wire; Stage C adds sealed trunk takes.
+    /// THE storage engine (unification Stages A/A2/B, 2026-08 — design:
+    /// .modding/03-systems/storage-unification-2026-08.md). One owner-apply, one result handler
+    /// and ONE wire family (StorageOp/StorageRes, 195/196, v16) serve BOTH containers (building
+    /// interior items and vehicles). VehicleStorageSync / BuildingStorageSync remain only as
+    /// per-container SENDER facades (request-side conveniences building StorageOpPayload). Ruling
+    /// 37 made this structural: the twin implementations drifted four separate times (sealed
+    /// takes, manifest parser, put rollback, cargo callbacks) — a storage fix now has exactly one
+    /// home, and the wire has exactly one parser on each side.
     ///
     /// THREADING: OwnerApply() and OnResult() mutate game state and MUST run on the Unity main
     /// thread — the network dispatch marshals them (see MPServer/MPClient), unchanged.
@@ -35,40 +30,89 @@ namespace BigAmbitionsMP
         //   A2-3  both containers take with the paid-preference two-pass (ruling 36 makes paid
         //         and unpaid stacks of one item genuinely coexist).
 
-        // ── Neutral records (NOT wire types — Stage B introduces the wire form) ──────────────
+        // ── The wire types ARE the engine types since Stage B (StorageOpPayload/StorageResPayload
+        // in Protocol.cs, v16) — the Stage-A internal records and the adapters' mapping layers are
+        // deleted; the facades build wire payloads and call SendOp below. ──
         internal const string ContainerBuilding = "building";
         internal const string ContainerVehicle  = "vehicle";
         internal const string OpTake = "take", OpPut = "put", OpMarkPaid = "markpaid", OpSetStock = "setstock";
 
-        internal sealed class StorageOpData
+        /// <summary>The one send seam: host hands the op straight to its broker; a client sends to
+        /// the host, which resolves the owner (ruling 38) and routes.</summary>
+        internal static void SendOp(StorageOpPayload req)
         {
-            public string Container = "";      // ContainerBuilding | ContainerVehicle
-            public string AddressKey = "";     // building band
-            public string ItemId = "";         // building band
-            public string VehicleId = "";      // vehicle band (REAL id, no BAMP_)
-            public string PlayerId = "";
-            public string Op = "";             // OpTake | OpPut | OpMarkPaid | OpSetStock
-            public string Ctx = "";
-            public string ItemName = "";
-            public int    Amount;
-            public bool   Paid = true;
-            public float  PricePerUnit;
-            public int    Count = 1;
-            public bool   Silent;
-            public System.Collections.Generic.List<CargoNestedInfo> Nested = new();
+            if (req == null) return;
+#if DEBUG || BAMP_DEV
+            DebugWireRoundTripOnce();
+#endif
+            if (MPServer.IsRunning) MPServer.HandleStorageOp(req, MPConfig.PlayerId);
+            else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.StorageOp, MPConfig.PlayerId, req));
         }
 
-        internal sealed class StorageResData
+        // ── THE nested-contents codec (risk R7/R11): the ONLY place the Nested band is built or
+        // consumed. Depth-1 by construction (NestedCargoInstance has no nested field). The 24
+        // bound is a TRIPWIRE ONLY — never a truncation (Stage B review MAJOR-1: the take removes
+        // the WHOLE box from the owner, so a truncated echo would DESTROY the remainder; the bound
+        // is the packed item's own cargoCapacity, item-database data the mod cannot assume).
+        // customColors deferred (D4 — SerializableColor's shape is not in the decompile; extend
+        // BOTH halves here when it is read). ──
+        internal static System.Collections.Generic.List<CargoNestedInfo> EncodeNested(System.Collections.Generic.List<NestedCargoInstance>? nested)
         {
-            public string Container = "", AddressKey = "", ItemId = "", VehicleId = "";
-            public string PlayerId = "", Op = "", Ctx = "", ItemName = "";
-            public int    Amount; public bool Paid = true; public float PricePerUnit;
-            public int    Count = 1; public bool Silent;
-            public System.Collections.Generic.List<CargoNestedInfo> Nested = new();
-            public bool   Ok; public string Reason = "";
+            var outList = new System.Collections.Generic.List<CargoNestedInfo>();
+            if (nested == null) return outList;
+            foreach (var n in nested)
+            {
+                if (n == null) continue;
+                outList.Add(new CargoNestedInfo { ItemName = n.itemName ?? "", Amount = n.amount, PricePerUnit = n.pricePerUnit });
+            }
+            if (outList.Count > 24)
+                Plugin.Logger.LogWarning($"[Store] nested encode carries {outList.Count} entries (>24 tripwire) — conveyed IN FULL; if this recurs, revisit the payload size assumptions.");
+            return outList;
         }
 
-        private static StorageResData ResFrom(StorageOpData req) => new StorageResData
+        internal static void DecodeNestedInto(CargoInstance ci, System.Collections.Generic.List<CargoNestedInfo>? nested)
+        {
+            if (ci == null || nested == null || nested.Count == 0) return;
+            foreach (var n in nested)
+                if (n != null) ci.nestedCargoInstances.Add(new NestedCargoInstance(n.ItemName, n.Amount, n.PricePerUnit, null));
+        }
+
+#if DEBUG || BAMP_DEV
+        // Risk R7 — the guard against the GhostCargoFor disease (a field written by one side and
+        // not read by the other): round-trip an all-fields-non-default payload through the REAL
+        // envelope serializer once per session and compare every field. Runs lazily on the first
+        // storage op (main thread) so it needs no entry-point hook.
+        private static bool _wireChecked;
+        private static void DebugWireRoundTripOnce()
+        {
+            if (_wireChecked) return;
+            _wireChecked = true;
+            try
+            {
+                var op = new StorageOpPayload
+                {
+                    Container = "vehicle", AddressKey = "a", ItemId = "i", VehicleId = "v",
+                    PlayerId = "p", Op = "take", Ctx = "boxtake", ItemName = "n", Amount = 2,
+                    Paid = false, PricePerUnit = 1.5f, Count = 3, Silent = true,
+                    Nested = { new CargoNestedInfo { ItemName = "x", Amount = 4, PricePerUnit = 2.5f } },
+                };
+                var env = MessageEnvelope.Create(MessageType.StorageOp, "p", op);
+                var back = env.GetPayload<StorageOpPayload>();
+                bool ok = back != null && back.Container == op.Container && back.AddressKey == op.AddressKey
+                    && back.ItemId == op.ItemId && back.VehicleId == op.VehicleId && back.PlayerId == op.PlayerId
+                    && back.Op == op.Op && back.Ctx == op.Ctx && back.ItemName == op.ItemName
+                    && back.Amount == op.Amount && back.Paid == op.Paid && back.PricePerUnit == op.PricePerUnit
+                    && back.Count == op.Count && back.Silent == op.Silent
+                    && back.Nested.Count == 1 && back.Nested[0].ItemName == "x"
+                    && back.Nested[0].Amount == 4 && back.Nested[0].PricePerUnit == 2.5f;
+                if (!ok) Plugin.Logger.LogError("[Store] WIRE ROUND-TRIP CHECK FAILED — a StorageOp field does not survive serialization (the GhostCargoFor class). Fix before trusting any storage op.");
+                else Plugin.Logger.LogInfo("[Store] wire round-trip check OK (all StorageOp fields survive).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogError($"[Store] wire round-trip check THREW: {ex.Message}"); }
+        }
+#endif
+
+        private static StorageResPayload ResFrom(StorageOpPayload req) => new StorageResPayload
         {
             Container = req.Container, AddressKey = req.AddressKey, ItemId = req.ItemId,
             VehicleId = req.VehicleId, PlayerId = req.PlayerId, Op = req.Op, Ctx = req.Ctx,
@@ -101,7 +145,7 @@ namespace BigAmbitionsMP
         // MAIN THREAD ONLY. One body; container-specific pieces are resolution,
         // authorization and convergence — everything else is shared.
 
-        internal static StorageResData OwnerApply(StorageOpData req)
+        internal static StorageResPayload OwnerApply(StorageOpPayload req)
         {
             var res = ResFrom(req);
             try
@@ -119,7 +163,7 @@ namespace BigAmbitionsMP
 
         private static string Tag(string container) => container == ContainerVehicle ? "VStore" : "BStore";
 
-        private static void OwnerApplyVehicle(StorageOpData req, StorageResData res)
+        private static void OwnerApplyVehicle(StorageOpPayload req, StorageResPayload res)
         {
             // Locked storage opens only to a granted key-holder (authoritative backstop).
             if (PassengerSync.IsLocked(req.VehicleId) && !GrantSync.IsGranted(MPConfig.PlayerId, req.PlayerId)) { res.Reason = "locked"; return; }
@@ -179,6 +223,7 @@ namespace BigAmbitionsMP
                     // (name, paid) — distribution across fungible stacks may differ, converging on
                     // the next manifest (inherited round-32 semantics, both containers).
                     var ci = new CargoInstance(req.ItemName, req.Amount, req.PricePerUnit, req.Paid);
+                    DecodeNestedInto(ci, req.Nested);   // ONE codec — sealed give-backs keep contents on vehicles too (Stage C's other half)
                     if (inst.TryToAddToCargo(ci)) { res.Ok = true; res.Reason = ""; }
                     else
                     {
@@ -186,6 +231,9 @@ namespace BigAmbitionsMP
                             inst.cargoInstances,
                             (s) => inst.RemoveFromCargo(s), (s, amt) => inst.ReduceFromCargo(s, amt));
                         res.Reason = "full";
+                        // Risk R12: DeliveryVehicleInstance overrides TryToAddToCargo with a whitelist —
+                        // name the holder's runtime type so a whitelist refusal doesn't read as capacity.
+                        Plugin.Logger.LogInfo($"[VStore] put refused 'full' by holder type {inst.GetType().Name}.");
                     }
                 }
                 else { res.Reason = "unsupported"; Plugin.Logger.LogWarning($"[VStore] op '{req.Op}' unsupported for a vehicle container."); }
@@ -201,7 +249,7 @@ namespace BigAmbitionsMP
             }
         }
 
-        private static void OwnerApplyBuilding(StorageOpData req, StorageResData res)
+        private static void OwnerApplyBuilding(StorageOpPayload req, StorageResPayload res)
         {
             // Grant backstop (the host already gated; re-verify on the authoritative machine).
             // Housing OR Business (round-32): the gates only ever OFFER these ops in buildings the
@@ -256,9 +304,7 @@ namespace BigAmbitionsMP
                 {
                     var ci = new CargoInstance(req.ItemName, req.Amount, req.PricePerUnit, req.Paid);
                     // Round-47: a returned sealed box keeps its contents ("boxreturn" give-backs).
-                    if (req.Nested != null && req.Nested.Count > 0)
-                        foreach (var n in req.Nested)
-                            if (n != null) ci.nestedCargoInstances.Add(new NestedCargoInstance(n.ItemName, n.Amount, n.PricePerUnit, null));
+                    DecodeNestedInto(ci, req.Nested);   // ONE codec (R7)
                     if (item.TryToAddToCargo(ci)) { res.Ok = true; res.Reason = ""; }
                     else
                     {
@@ -270,6 +316,9 @@ namespace BigAmbitionsMP
                             item.cargoInstances,
                             (s) => item.RemoveFromCargo(s), (s, amt) => item.ReduceFromCargo(s, amt));
                         res.Reason = "full";
+                        // Risk R12: DeliveryVehicleInstance-class overrides refuse for reasons capacity
+                        // can't explain — name the holder's runtime type so the log can.
+                        Plugin.Logger.LogInfo($"[BStore] put refused 'full' by holder type {item.GetType().Name}.");
                     }
                 }
             }
@@ -300,7 +349,7 @@ namespace BigAmbitionsMP
         /// makes mixed paid states real), pass 1 falls back to any match so UI takes keep working.
         /// IsSealed hoisted per iteration (risk R13 — the getter re-resolves through ItemsGetter
         /// on every access).</summary>
-        private static void TakeLoose(System.Collections.Generic.List<CargoInstance>? src, StorageOpData req, StorageResData res,
+        private static void TakeLoose(System.Collections.Generic.List<CargoInstance>? src, StorageOpPayload req, StorageResPayload res,
                                       Action<CargoInstance, int> reduce)
         {
             if (src == null) return;
@@ -326,7 +375,7 @@ namespace BigAmbitionsMP
         /// whole-instance removal by name+amount+paid identity, nested contents echoed. Native
         /// contract: sealed instances move ONLY whole (ReduceFromCargo no-ops on sealed;
         /// MergeIntoCargo early-returns) — F-2026-08-25-F.</summary>
-        private static void TakeWholeInstance(ItemInstance item, StorageOpData req, StorageResData res)
+        private static void TakeWholeInstance(ItemInstance item, StorageOpPayload req, StorageResPayload res)
         {
             var bsrc = item.cargoInstances;
             if (bsrc != null)
@@ -336,9 +385,7 @@ namespace BigAmbitionsMP
                     if (ci == null || ci.itemName != req.ItemName) continue;
                     if (ci.amount != req.Amount || ci.paid != req.Paid) continue;
                     res.Paid = ci.paid; res.PricePerUnit = ci.pricePerUnit; res.Amount = ci.amount;
-                    if (ci.nestedCargoInstances != null)
-                        foreach (var n in ci.nestedCargoInstances)
-                            if (n != null) res.Nested.Add(new CargoNestedInfo { ItemName = n.itemName ?? "", Amount = n.amount, PricePerUnit = n.pricePerUnit });
+                    res.Nested = EncodeNested(ci.nestedCargoInstances);   // ONE codec (R7/R11)
                     item.RemoveFromCargo(ci);
                     res.Ok = true; res.Reason = "";
                     break;
@@ -350,7 +397,7 @@ namespace BigAmbitionsMP
         /// ENTIRE stock (owner truth, not the requester's replica amount), clear the emptied
         /// slot's NAME like native does (:1123/:1138), fire the cargo callback, run the native
         /// tail refreshers. Echoes the real amount/paid/price so the delivered box is faithful.</summary>
-        private static void TakeStock(BuildingRegistration reg, ItemInstance item, StorageOpData req, StorageResData res)
+        private static void TakeStock(BuildingRegistration reg, ItemInstance item, StorageOpPayload req, StorageResPayload res)
         {
             var slot = (item.cargoInstances != null && item.cargoInstances.Count == 1) ? item.cargoInstances[0] : null;
             if (slot != null && !slot.IsSealed && !string.IsNullOrEmpty(slot.itemName)
@@ -372,7 +419,7 @@ namespace BigAmbitionsMP
         /// instances (name+amount+paid identity). ECHO POLICY (risk R2): res.Amount/Paid/PricePerUnit
         /// deliberately stay the REQUESTER's values — the sell credit is computed from them; only
         /// res.Count is owner truth. Never share an echo helper with the owner-truth branches.</summary>
-        private static void RemoveStackInstances(ItemInstance item, StorageOpData req, StorageResData res)
+        private static void RemoveStackInstances(ItemInstance item, StorageOpPayload req, StorageResPayload res)
         {
             var ssrc = item.cargoInstances;
             int removed = 0;
@@ -393,7 +440,7 @@ namespace BigAmbitionsMP
 
         /// <summary>Round-32's rollback: TryToAddToCargo PARTIALLY merges before returning false —
         /// remove the absorbed part back out so "full" is all-or-nothing.</summary>
-        private static void RollbackPartialMerge(StorageOpData req, int absorbed,
+        private static void RollbackPartialMerge(StorageOpPayload req, int absorbed,
             System.Collections.Generic.List<CargoInstance>? src,
             Action<CargoInstance> removeWhole, Action<CargoInstance, int> reduceBy)
         {
@@ -415,7 +462,7 @@ namespace BigAmbitionsMP
         /// verbatim from BuildingStorageSync (rounds 37f/38/38c; see those comments in git history
         /// for the field evidence). Partial fills are native semantics; res.Amount echoes what
         /// LANDED and the requester consumes exactly that.</summary>
-        private static void PutIntoSingleSlot(ItemInstance item, StorageOpData req, StorageResData res)
+        private static void PutIntoSingleSlot(ItemInstance item, StorageOpPayload req, StorageResPayload res)
         {
             var slot = (item.cargoInstances != null && item.cargoInstances.Count == 1) ? item.cargoInstances[0] : null;
             if (slot == null) { res.Reason = "full"; return; }
@@ -455,7 +502,7 @@ namespace BigAmbitionsMP
         /// AddToCargo, NEVER TryToAddToCargo (risk R10): the net slot count is unchanged, so
         /// capacity must not be consulted — a full trunk refusing the split would silently void
         /// the borrower's payment (the F-2026-08-25-C fries class, reintroduced).</summary>
-        private static void MarkPaidWithSplit(VehicleInstance inst, StorageOpData req, StorageResData res)
+        private static void MarkPaidWithSplit(VehicleInstance inst, StorageOpPayload req, StorageResPayload res)
         {
             int remaining = req.Amount;
             var src = inst.cargoInstances;
@@ -509,7 +556,7 @@ namespace BigAmbitionsMP
 
         /// <summary>Round-32, OWNER side: change what an item stocks — moved verbatim (dropdown
         /// moves minus UI; producerset = bare name-set for producers; signset = linkedItemName).</summary>
-        private static bool ApplySetStock(BuildingRegistration reg, ItemInstance item, StorageOpData req, out string reason)
+        private static bool ApplySetStock(BuildingRegistration reg, ItemInstance item, StorageOpPayload req, out string reason)
         {
             reason = "";
             // Round-49 slice 5 — a SIGN's dropdown pick: linkedItemName lives on the ItemInstance
@@ -560,7 +607,7 @@ namespace BigAmbitionsMP
         // ══════════════════════════════ ACCESSOR SIDE ══════════════════════════════
         // MAIN THREAD ONLY.
 
-        internal static void OnResult(StorageResData res)
+        internal static void OnResult(StorageResPayload res)
         {
             try
             {
@@ -589,7 +636,7 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[{Tag(res.Container)}] OnResult: {ex.Message}"); }
         }
 
-        private static void OnTakeResult(StorageResData res)
+        private static void OnTakeResult(StorageResPayload res)
         {
             // ── building-only ctx routes (moved verbatim) ──
             if (res.Ctx == "stacksell" || res.Ctx == "stackdiscard")
@@ -635,9 +682,7 @@ namespace BigAmbitionsMP
             var ci = new CargoInstance(res.ItemName, res.Amount, res.PricePerUnit, res.Paid);
             // Round-47: a taken sealed box arrives with its contents (building boxtake today;
             // Stage C extends the same band to vehicles).
-            if (res.Nested != null && res.Nested.Count > 0)
-                foreach (var n in res.Nested)
-                    if (n != null) ci.nestedCargoInstances.Add(new NestedCargoInstance(n.ItemName, n.Amount, n.PricePerUnit, null));
+            DecodeNestedInto(ci, res.Nested);   // ONE codec (R7)
             Deliver(res, ci);
         }
 
@@ -646,7 +691,7 @@ namespace BigAmbitionsMP
         /// pushed) → stale-ActiveVehicleId repair → empty hands + session-guarded panel close →
         /// give-back to the vehicle; building = empty hands → ctx-routed give-back (risk R3:
         /// stationtake returns via stationreturn; boxtake returns WITH nested).</summary>
-        private static void Deliver(StorageResData res, CargoInstance ci)
+        private static void Deliver(StorageResPayload res, CargoInstance ci)
         {
             if (res.Container == ContainerVehicle)
             {
@@ -720,7 +765,7 @@ namespace BigAmbitionsMP
             PassengerHud.Toast("No room to carry that.");
         }
 
-        private static void OnPlaceReduceResult(StorageResData res)
+        private static void OnPlaceReduceResult(StorageResPayload res)
         {
             // Round-49 slice 2: the owner reduced one furniture unit off the delivery spot —
             // start the native placement from the click-time captured cargo. Any local failure
@@ -754,7 +799,7 @@ namespace BigAmbitionsMP
             else Plugin.Logger.LogInfo($"[BStore] helper placement started: {pc.itemName} (unit reduced owner-side; completion forwards the interior).");
         }
 
-        private static void OnVehicleTakeResult(StorageResData res)
+        private static void OnVehicleTakeResult(StorageResPayload res)
         {
             // Round-49 slice 4: the owner's storage lost the packed hand truck/flatbed — spawn
             // it HERE as the HELPER'S OWN vehicle (user ruling 2026-07-21) with the same native
@@ -790,7 +835,7 @@ namespace BigAmbitionsMP
             }
         }
 
-        private static void OnPutResult(StorageResData res)
+        private static void OnPutResult(StorageResPayload res)
         {
             if (res.Ctx == "stationreturn")
             {
@@ -835,7 +880,7 @@ namespace BigAmbitionsMP
         /// <summary>Stored OK → drop the deposited item from wherever it came from, and ONLY now:
         /// hands (held directly or as box content) → pushed hand-vehicle. One body for both
         /// containers — the two originals were duplicate implementations (round-12 #1b / B).</summary>
-        private static void ConsumeSource(StorageResData res)
+        private static void ConsumeSource(StorageResPayload res)
         {
             try
             {
@@ -885,7 +930,7 @@ namespace BigAmbitionsMP
 
         // Round-32: amount-aware put consume for producer refills — reduce exactly res.Amount of
         // res.ItemName from the helper's source (held box contents, held single, or hand-vehicle).
-        private static void ReducePutSourceByAmount(StorageResData res)
+        private static void ReducePutSourceByAmount(StorageResPayload res)
         {
             try
             {
@@ -935,7 +980,7 @@ namespace BigAmbitionsMP
         // The owner confirmed a PUT of the guest's WORN accessory (hat/hand item → wardrobe/coat
         // rack) — unequip it now, and only now (unequipping on send would vanish the item if the
         // holder was full). Mirrors the native StorePlayerWornItemIntoItemHolder tail. (round-12 A)
-        private static void UnequipWornAfterStore(StorageResData res)
+        private static void UnequipWornAfterStore(StorageResPayload res)
         {
             try
             {

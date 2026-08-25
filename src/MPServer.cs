@@ -1928,31 +1928,17 @@ namespace BigAmbitionsMP
                     break;
                 }
 
-                case MessageType.VehicleCargoReq:
+                case MessageType.StorageOp:     // v16 (storage unification): both containers, one channel
                 {
-                    var vq = env.GetPayload<VehicleCargoReqPayload>();
-                    if (vq != null) HandleVehicleCargoReq(vq, senderPid);
+                    var sq = env.GetPayload<StorageOpPayload>();
+                    if (sq != null) HandleStorageOp(sq, senderPid);
                     break;
                 }
 
-                case MessageType.VehicleCargoRes:
+                case MessageType.StorageRes:
                 {
-                    var vr = env.GetPayload<VehicleCargoResPayload>();
-                    if (vr != null) HandleVehicleCargoRes(vr, senderPid);
-                    break;
-                }
-
-                case MessageType.BuildingCargoReq:
-                {
-                    var bq = env.GetPayload<BuildingCargoReqPayload>();
-                    if (bq != null) HandleBuildingCargoReq(bq, senderPid);
-                    break;
-                }
-
-                case MessageType.BuildingCargoRes:
-                {
-                    var br = env.GetPayload<BuildingCargoResPayload>();
-                    if (br != null) HandleBuildingCargoRes(br, senderPid);
+                    var sr = env.GetPayload<StorageResPayload>();
+                    if (sr != null) HandleStorageRes(sr, senderPid);
                     break;
                 }
 
@@ -2881,86 +2867,82 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[RemoteSale] {ex.Message}"); }
         }
 
-        /// <summary>Broker for shared vehicle storage: an accessor wants to take/put in another player's
-        /// UNLOCKED vehicle. Route it to the OWNER's machine (the authority on its own cargo). If the host
-        /// owns the vehicle, apply here on the main thread and answer the accessor directly.</summary>
-        public static void HandleVehicleCargoReq(VehicleCargoReqPayload req, string senderPid)
+        /// <summary>Broker for ALL shared storage since v16 (storage unification Stage B): an
+        /// accessor wants an op on a container it does not own. The HOST resolves the owner itself
+        /// (ruling 38 — the retired vehicle wire trusted a sender-supplied OwnerId): buildings
+        /// from the host's own ledgers (clients keep no building→owner map), vehicles from
+        /// PassengerSync.OwnerOf (populated by every fleet broadcast). Building ops are grant-gated
+        /// here AND re-verified on the owner (the vehicle lock/grant gate stays owner-side —
+        /// container-inherent, unchanged). Owner==host → apply on the main thread and answer the
+        /// accessor directly; else forward to the owner's machine.</summary>
+        public static void HandleStorageOp(StorageOpPayload req, string senderPid)
         {
             try
             {
-                if (req == null || string.IsNullOrEmpty(req.OwnerId)) return;
-                if (!SenderIs(req.PlayerId, senderPid, MessageType.VehicleCargoReq)) return;   // accessor reports its OWN action
-                if (req.OwnerId == MPConfig.PlayerId)
+                if (req == null) return;
+                if (!SenderIs(req.PlayerId, senderPid, MessageType.StorageOp)) return;   // accessor reports its OWN action
+                string ownerPid;
+                if (req.Container == "vehicle")
+                {
+                    if (string.IsNullOrEmpty(req.VehicleId)) return;
+                    ownerPid = PassengerSync.OwnerOf(req.VehicleId);
+                    if (string.IsNullOrEmpty(ownerPid))
+                    {
+                        Plugin.Logger.LogWarning($"[Store] storage op on vehicle '{req.VehicleId}' dropped — the host has no owner on record for it (fleet not yet noted?).");
+                        return;
+                    }
+                }
+                else
+                {
+                    if (string.IsNullOrEmpty(req.AddressKey)) return;
+                    string owner = (BuildingOwners.TryGetValue(req.AddressKey, out var o) && !string.IsNullOrEmpty(o)) ? o
+                                 : (BuildingRealEstateOwners.TryGetValue(req.AddressKey, out var r) ? r : "");
+                    if (string.IsNullOrEmpty(owner)) return;
+                    ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;   // resolve the host sentinel
+                    // Grant gate — Housing OR Business, matching the authoritative check in OwnerApply:
+                    // the Housing-only pre-filter silently dropped every cargo op from a business-only
+                    // helper (round-38e relay/apply drift).
+                    if (ownerPid != req.PlayerId
+                        && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, req.PlayerId)
+                        && !GrantSync.IsGranted(GrantKind.Business, ownerPid, req.PlayerId)) return;
+                }
+                if (ownerPid == MPConfig.PlayerId)
                 {
                     GameStatePatcher.EnqueueOnMainThread(() =>
                     {
-                        var res = VehicleStorageSync.OwnerApply(req);
-                        if (res.PlayerId == MPConfig.PlayerId) VehicleStorageSync.OnResult(res);   // host is also the accessor
-                        else SendHubTo(res.PlayerId, MessageType.VehicleCargoRes, res);
+                        var res = StorageSync.OwnerApply(req);
+                        if (res.PlayerId == MPConfig.PlayerId) StorageSync.OnResult(res);   // host is also the accessor
+                        else SendHubTo(res.PlayerId, MessageType.StorageRes, res);
                     });
                 }
                 else
                 {
-                    SendHubTo(req.OwnerId, MessageType.VehicleCargoReq, req);   // forward to the owner's machine
+                    SendHubTo(ownerPid, MessageType.StorageOp, req);   // forward to the owner's machine to apply
                 }
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] HandleVehicleCargoReq: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Store] HandleStorageOp: {ex.Message}"); }
         }
 
-        /// <summary>A vehicle owner answered a cargo request — relay the verdict to the accessor.
-        /// (Co-op trust model: the result is relayed as-is; a pending-request table could be added later
-        /// to reject forged grants — out of scope for friends-only play.)</summary>
-        public static void HandleVehicleCargoRes(VehicleCargoResPayload res, string senderPid)
+        /// <summary>A container owner answered a storage op — relay the verdict to the accessor.
+        /// (Co-op trust model: the result is relayed as-is; a pending-request table could be added
+        /// later to reject forged grants — out of scope for friends-only play.) ONE method for both
+        /// containers — risk R14: the relay leg must be structurally identical so exercising either
+        /// container exercises it.</summary>
+        public static void HandleStorageRes(StorageResPayload res, string senderPid)
         {
             try
             {
                 if (res == null || string.IsNullOrEmpty(res.PlayerId)) return;
                 if (res.PlayerId == MPConfig.PlayerId)
-                    GameStatePatcher.EnqueueOnMainThread(() => VehicleStorageSync.OnResult(res));   // host is the accessor
+                    GameStatePatcher.EnqueueOnMainThread(() => StorageSync.OnResult(res));   // host is the accessor
                 else
-                    SendHubTo(res.PlayerId, MessageType.VehicleCargoRes, res);
+                    SendHubTo(res.PlayerId, MessageType.StorageRes, res);
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] HandleVehicleCargoRes: {ex.Message}"); }
-        }
-
-        /// <summary>HOST: a guest wants to take/put on a home interior item (the fridge). Resolve the building
-        /// owner from the addressKey (clients don't keep a building→owner map), gate on the Housing grant, then
-        /// route to the owner's machine to apply (or apply here if the host owns it). Mirrors the vehicle path.</summary>
-        public static void HandleBuildingCargoReq(BuildingCargoReqPayload req, string senderPid)
-        {
-            try
-            {
-                if (req == null || string.IsNullOrEmpty(req.AddressKey)) return;
-                if (!SenderIs(req.PlayerId, senderPid, MessageType.BuildingCargoReq)) return;   // guest reports its OWN action
-                string owner = (BuildingOwners.TryGetValue(req.AddressKey, out var o) && !string.IsNullOrEmpty(o)) ? o
-                             : (BuildingRealEstateOwners.TryGetValue(req.AddressKey, out var r) ? r : "");
-                if (string.IsNullOrEmpty(owner)) return;
-                string ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;   // resolve the host sentinel
-                // Grant gate — Housing OR Business, matching the authoritative check in OwnerApply: the
-                // Housing-only pre-filter silently dropped every cargo op from a business-only helper
-                // (round-38e relay/apply drift).
-                if (ownerPid != req.PlayerId
-                    && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, req.PlayerId)
-                    && !GrantSync.IsGranted(GrantKind.Business, ownerPid, req.PlayerId)) return;
-                if (ownerPid == MPConfig.PlayerId)
-                {
-                    GameStatePatcher.EnqueueOnMainThread(() =>
-                    {
-                        var res = BuildingStorageSync.OwnerApply(req);
-                        if (res.PlayerId == MPConfig.PlayerId) BuildingStorageSync.OnResult(res);   // host is also the guest
-                        else SendHubTo(res.PlayerId, MessageType.BuildingCargoRes, res);
-                    });
-                }
-                else
-                {
-                    SendHubTo(ownerPid, MessageType.BuildingCargoReq, req);   // forward to the owner's machine to apply
-                }
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] HandleBuildingCargoReq: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Store] HandleStorageRes: {ex.Message}"); }
         }
 
         /// <summary>Round-39f: a helper's machine hosted an NPC sale — route the paid order to the
-        /// building owner (or adopt directly when the host owns it). Same shape as HandleBuildingCargoReq.</summary>
+        /// building owner (or adopt directly when the host owns it). Same routing shape as HandleStorageOp's building branch.</summary>
         public static void HandleHelperOrder(HelperOrderPayload p, string senderPid)
         {
             try
@@ -2982,19 +2964,8 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] HandleHelperOrder: {ex.Message}"); }
         }
 
-        /// <summary>A building owner answered a guest's interior-cargo request — relay the verdict to the guest.</summary>
-        public static void HandleBuildingCargoRes(BuildingCargoResPayload res, string senderPid)
-        {
-            try
-            {
-                if (res == null || string.IsNullOrEmpty(res.PlayerId)) return;
-                if (res.PlayerId == MPConfig.PlayerId)
-                    GameStatePatcher.EnqueueOnMainThread(() => BuildingStorageSync.OnResult(res));   // host is the guest
-                else
-                    SendHubTo(res.PlayerId, MessageType.BuildingCargoRes, res);
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] HandleBuildingCargoRes: {ex.Message}"); }
-        }
+        // (HandleVehicleCargoRes / HandleBuildingCargoRes retired with their wire types in v16 —
+        // HandleStorageRes above is the one relay for both containers.)
 
         // STAGE 3 (2026-08-25): HandleBuildingInteriorEdit — the host route for the guest
         // whole-replica edit (type 140) — is RETIRED with the type.  Its grant rule (sender is

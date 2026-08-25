@@ -931,39 +931,21 @@ namespace BigAmbitionsMP
                     break;
                 }
 
-                case MessageType.VehicleCargoReq:   // host forwarded an accessor's request — I'm the vehicle owner
+                case MessageType.StorageOp:   // v16: host forwarded an accessor's op — I'm the container owner
                 {
-                    var vq = env.GetPayload<VehicleCargoReqPayload>();
-                    if (vq != null) GameStatePatcher.EnqueueOnMainThread(() =>
+                    var sq = env.GetPayload<StorageOpPayload>();
+                    if (sq != null) GameStatePatcher.EnqueueOnMainThread(() =>
                     {
-                        var res = VehicleStorageSync.OwnerApply(vq);
-                        MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.VehicleCargoRes, MPConfig.PlayerId, res));
+                        var res = StorageSync.OwnerApply(sq);
+                        MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.StorageRes, MPConfig.PlayerId, res));
                     });
                     break;
                 }
 
-                case MessageType.VehicleCargoRes:   // the owner's verdict on my take/put — I'm the accessor
+                case MessageType.StorageRes:   // the owner's verdict on my op — I'm the accessor
                 {
-                    var vr = env.GetPayload<VehicleCargoResPayload>();
-                    if (vr != null) GameStatePatcher.EnqueueOnMainThread(() => VehicleStorageSync.OnResult(vr));
-                    break;
-                }
-
-                case MessageType.BuildingCargoReq:   // host forwarded a guest's request — I'm the building owner
-                {
-                    var bq = env.GetPayload<BuildingCargoReqPayload>();
-                    if (bq != null) GameStatePatcher.EnqueueOnMainThread(() =>
-                    {
-                        var res = BuildingStorageSync.OwnerApply(bq);
-                        MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BuildingCargoRes, MPConfig.PlayerId, res));
-                    });
-                    break;
-                }
-
-                case MessageType.BuildingCargoRes:   // the owner's verdict on my take/put — I'm the guest
-                {
-                    var br = env.GetPayload<BuildingCargoResPayload>();
-                    if (br != null) GameStatePatcher.EnqueueOnMainThread(() => BuildingStorageSync.OnResult(br));
+                    var sr = env.GetPayload<StorageResPayload>();
+                    if (sr != null) GameStatePatcher.EnqueueOnMainThread(() => StorageSync.OnResult(sr));
                     break;
                 }
 

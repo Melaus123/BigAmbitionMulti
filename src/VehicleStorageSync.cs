@@ -7,18 +7,17 @@ using BigAmbitions.Items;   // CargoInstance
 namespace BigAmbitionsMP
 {
     /// <summary>
-    /// Shared vehicle storage — WIRE ADAPTER since unification Stage A (2026-08-25, design:
-    /// .modding/03-systems/storage-unification-2026-08.md). The request side (capacity pre-check,
-    /// deposit source resolution + dedup, Silent mirrors) lives here unchanged; the owner-apply
-    /// and result handling moved VERBATIM into StorageSync, the one engine both containers share
-    /// (ruling 37). The VehicleCargoReq/Res wire (125/126) is unchanged in Stage A; Stage B
-    /// replaces it with the unified StorageOp/Res family and this adapter collapses.
+    /// Shared vehicle storage — pure per-container SENDER facade since unification Stage B
+    /// (2026-08, design: .modding/03-systems/storage-unification-2026-08.md). The request side
+    /// (capacity pre-check, deposit source resolution + dedup, Silent mirrors) lives here; the
+    /// wire is the unified StorageOp/StorageRes family (195/196, v16) and ALL apply/result logic
+    /// is StorageSync, the one engine both containers share (ruling 37).
     ///
     /// Host-authoritative request/grant: the owner's machine is the sole authority on its own
     /// cargo — the take/put only commits once the owner confirms (first request wins; no
     /// optimistic local edit to roll back). Relay: accessor → host → owner → host → accessor.
-    /// THREADING: OwnerApply()/OnResult() mutate game state and MUST run on the Unity main
-    /// thread; the network dispatch marshals them (see MPServer/MPClient).
+    /// THREADING: the engine's OwnerApply()/OnResult() mutate game state and MUST run on the
+    /// Unity main thread; the network dispatch marshals them (see MPServer/MPClient).
     /// </summary>
     public static class VehicleStorageSync
     {
@@ -26,58 +25,14 @@ namespace BigAmbitionsMP
         public const byte OpPut      = 1;   // add Amount of ItemName to the vehicle (from the accessor)
         public const byte OpMarkPaid = 2;   // flip Amount of unpaid ItemName stacks to paid (borrowed-vehicle checkout mirror)
 
-        // ── wire byte ↔ engine op string (the byte space COLLIDES with the building channel's —
-        // 2 means MarkPaid here, SetStock there — which is exactly why the engine's op is a string).
-        // Purity review D-1: an UNKNOWN byte maps to the "" sentinel and is refused "unsupported"
-        // (ruling 39) — HEAD's if/else-if fallthrough silently ran PUT for it. ──
+        // ── LOCAL byte → engine op string. The byte survives only as this facade's API surface
+        // (MirrorToOwner's five call sites keep their byte argument); the WIRE carries the string
+        // since Stage B. An unknown byte maps to "" and the engine refuses it "unsupported"
+        // (ruling 39) — the D-1 sentinel, now enforced engine-side. ──
         private static string OpName(byte op) => op == OpTake     ? StorageSync.OpTake
                                                : op == OpPut      ? StorageSync.OpPut
                                                : op == OpMarkPaid ? StorageSync.OpMarkPaid
                                                :                    "";
-        private static byte OpByte(string op) => op == StorageSync.OpTake ? OpTake
-                                               : op == StorageSync.OpPut  ? OpPut
-                                               :                            OpMarkPaid;
-
-        private static StorageSync.StorageOpData ToEngine(VehicleCargoReqPayload req) => new()
-        {
-            Container = StorageSync.ContainerVehicle, VehicleId = req.VehicleId,
-            PlayerId = req.PlayerId, Op = OpName(req.Op), ItemName = req.ItemName,
-            Amount = req.Amount, Paid = req.Paid, PricePerUnit = req.PricePerUnit, Silent = req.Silent,
-        };
-
-        private static StorageSync.StorageResData ToEngine(VehicleCargoResPayload res) => new()
-        {
-            Container = StorageSync.ContainerVehicle, VehicleId = res.VehicleId,
-            PlayerId = res.PlayerId, Op = OpName(res.Op), ItemName = res.ItemName,
-            Amount = res.Amount, Paid = res.Paid, PricePerUnit = res.PricePerUnit,
-            Silent = res.Silent, Ok = res.Ok, Reason = res.Reason,
-        };
-
-        private static VehicleCargoResPayload ToWire(StorageSync.StorageResData res) => new()
-        {
-            VehicleId = res.VehicleId, PlayerId = res.PlayerId, Op = OpByte(res.Op),
-            ItemName = res.ItemName, Amount = res.Amount, Paid = res.Paid,
-            PricePerUnit = res.PricePerUnit, Ok = res.Ok, Reason = res.Reason, Silent = res.Silent,
-        };
-
-        // ── Owner / accessor seams (MAIN THREAD ONLY) — engine delegation ────────
-        public static VehicleCargoResPayload OwnerApply(VehicleCargoReqPayload req)
-        {
-            if (OpName(req.Op).Length == 0)   // off-contract byte: refuse without touching the engine
-            {
-                Plugin.Logger.LogWarning($"[VStore] unknown op byte {req.Op} from '{req.PlayerId}' — refused (unsupported).");
-                return new VehicleCargoResPayload
-                {
-                    VehicleId = req.VehicleId, PlayerId = req.PlayerId, Op = req.Op, ItemName = req.ItemName,
-                    Amount = req.Amount, Paid = req.Paid, PricePerUnit = req.PricePerUnit,
-                    Ok = false, Reason = "unsupported", Silent = req.Silent,
-                };
-            }
-            return ToWire(StorageSync.OwnerApply(ToEngine(req)));
-        }
-
-        public static void OnResult(VehicleCargoResPayload res)
-            => StorageSync.OnResult(ToEngine(res));
 
         // ── Accessor side: start a take / put (unchanged) ────────────────────────
 
@@ -131,10 +86,10 @@ namespace BigAmbitionsMP
                 }
                 else
                 {
-                    // Hands empty → pushed hand-vehicle as the source. Sealed stacks stay on the truck: the
-                    // legacy vehicle wire has no Nested band, so routing one through would silently DELETE
-                    // its contents owner-side (F-2026-08-25-F — IsSealed itself is type-derived and would
-                    // re-derive fine; the CONTENTS are what the wire cannot carry until Stage B).
+                    // Hands empty → pushed hand-vehicle as the source. Sealed stacks stay on the truck
+                    // FOR NOW: the v16 wire CAN carry nested contents (the one codec), but wiring the
+                    // deposit path for whole sealed boxes is Stage C work — an unwired send here would
+                    // still strip them (F-2026-08-25-F: IsSealed re-derives fine; contents are the loss).
                     var cur = VehicleHelper.GetCurrentVehicle();
                     if (cur == null || cur.VehicleType == null || !cur.VehicleType.spawnInPlayerObject) return;
                     var src = cur.cargoInstances;
@@ -182,18 +137,21 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
+        // ownerId is NO LONGER on the wire — ruling 38 landed STRONGER than written: the claim is
+        // not "demoted to a logged cross-check", it is REMOVED from the wire entirely (the host
+        // resolves the owner from PassengerSync.OwnerOf; there is nothing authoritative on the
+        // sender side to cross-check against). The parameter survives only so the many call sites
+        // stay untouched; it is deliberately unused.
         private static void Send(byte op, string vid, string ownerId, string itemName, int amount, bool paid, float price, bool silent = false)
         {
-            if (string.IsNullOrEmpty(vid) || string.IsNullOrEmpty(ownerId) || string.IsNullOrEmpty(itemName) || amount <= 0)
+            if (string.IsNullOrEmpty(vid) || string.IsNullOrEmpty(itemName) || amount <= 0)
                 return;
-            var req = new VehicleCargoReqPayload
+            _ = ownerId;
+            StorageSync.SendOp(new StorageOpPayload
             {
-                VehicleId = vid, OwnerId = ownerId, PlayerId = MPConfig.PlayerId,
-                Op = op, ItemName = itemName, Amount = amount, Paid = paid, PricePerUnit = price, Silent = silent,
-            };
-            // Host: hand straight to the broker. Client: send to the host, which forwards to the owner.
-            if (MPServer.IsRunning) MPServer.HandleVehicleCargoReq(req, MPConfig.PlayerId);
-            else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.VehicleCargoReq, MPConfig.PlayerId, req));
+                Container = StorageSync.ContainerVehicle, VehicleId = vid, PlayerId = MPConfig.PlayerId,
+                Op = OpName(op), ItemName = itemName, Amount = amount, Paid = paid, PricePerUnit = price, Silent = silent,
+            });
         }
 
         // ── Borrowed-cart shopping (Option A, user-approved 2026-07-07) ──────────────────────────
@@ -207,13 +165,10 @@ namespace BigAmbitionsMP
             {
                 if (proxyInst == null || amount <= 0 || string.IsNullOrEmpty(itemName)) return;
                 string realVid = proxyInst.id != null && proxyInst.id.StartsWith("BAMP_") ? proxyInst.id.Substring(5) : proxyInst.id;
-                string owner = VehicleManager.OwnerIdFor(realVid);
-                if (string.IsNullOrEmpty(owner))
-                {
-                    Plugin.Logger.LogWarning($"[VStore] mirror {op} {amount}×{itemName} on '{realVid}': no owner known — mirror LOST (re-sync will revert the local change).");
-                    return;
-                }
-                Send(op, realVid, owner, itemName, amount, paid, price, silent: true);
+                // Ruling 38 retired the old "no owner known → mirror LOST" failure: the HOST
+                // resolves the owner now, so a mirror routes even when this machine's owner map
+                // is momentarily cold (the fleet-note race that used to lose them).
+                Send(op, realVid, ownerId: "", itemName, amount, paid, price, silent: true);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] MirrorToOwner: {ex.Message}"); }
         }

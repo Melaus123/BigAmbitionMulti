@@ -6,17 +6,16 @@ using Helpers;
 namespace BigAmbitionsMP
 {
     /// <summary>
-    /// Shared BUILDING storage (fridges, shelves, registers, producers, delivery spots…) — WIRE
-    /// ADAPTER since unification Stage A (2026-08-25, design:
-    /// .modding/03-systems/storage-unification-2026-08.md). The request side lives here
-    /// unchanged; the owner-apply and result handling moved VERBATIM into StorageSync, the one
-    /// engine both containers share (ruling 37). The BuildingCargoReq/Res wire (138/139) is
-    /// unchanged in Stage A; Stage B replaces it with the unified StorageOp/Res family.
+    /// Shared BUILDING storage (fridges, shelves, registers, producers, delivery spots…) — pure
+    /// per-container SENDER facade since unification Stage B (2026-08, design:
+    /// .modding/03-systems/storage-unification-2026-08.md). The request side lives here; the wire
+    /// is the unified StorageOp/StorageRes family (195/196, v16) and ALL apply/result logic is
+    /// StorageSync, the one engine both containers share (ruling 37).
     ///
     /// Host-authoritative: guest → host (resolves the building owner from the addressKey —
     /// clients don't keep a building→owner map) → owner (applies to reg + pushes the room) →
-    /// host → guest. THREADING: OwnerApply()/OnResult() MUST run on the Unity main thread; the
-    /// network dispatch marshals them (see MPServer/MPClient). See docs/PERMISSIONS-SYSTEM.md.
+    /// host → guest. THREADING: the engine's OwnerApply()/OnResult() MUST run on the Unity main
+    /// thread; the network dispatch marshals them (see MPServer/MPClient). See docs/PERMISSIONS-SYSTEM.md.
     /// </summary>
     public static class BuildingStorageSync
     {
@@ -24,71 +23,13 @@ namespace BigAmbitionsMP
         public const byte OpPut      = 1;   // add Amount of ItemName to the interior item (from the guest)
         public const byte OpSetStock = 2;   // round-32: set the item's STOCK type — NOTE: byte 2 means MarkPaid on the vehicle wire (the collision is why the engine's op is a string)
 
-        // Purity review D-2: an UNKNOWN byte maps to the "" sentinel and is refused "unsupported"
-        // (ruling 39) — a fallthrough here would RUN ApplySetStock for junk bytes (mutating).
+        // ── LOCAL byte → engine op string (the byte survives only as this facade's API surface;
+        // the WIRE carries the string since Stage B). Unknown byte → "" → the engine refuses it
+        // "unsupported" (ruling 39; the D-2 sentinel, now enforced engine-side). ──
         private static string OpName(byte op) => op == OpTake     ? StorageSync.OpTake
                                                : op == OpPut      ? StorageSync.OpPut
                                                : op == OpSetStock ? StorageSync.OpSetStock
                                                :                    "";
-        private static byte OpByte(string op) => op == StorageSync.OpTake ? OpTake
-                                               : op == StorageSync.OpPut  ? OpPut
-                                               :                            OpSetStock;
-
-        private static StorageSync.StorageOpData ToEngine(BuildingCargoReqPayload req)
-        {
-            var d = new StorageSync.StorageOpData
-            {
-                Container = StorageSync.ContainerBuilding, AddressKey = req.AddressKey, ItemId = req.ItemId,
-                PlayerId = req.PlayerId, Op = OpName(req.Op), Ctx = req.Ctx ?? "", ItemName = req.ItemName,
-                Amount = req.Amount, Paid = req.Paid, PricePerUnit = req.PricePerUnit, Count = req.Count,
-            };
-            if (req.Nested != null) d.Nested.AddRange(req.Nested);
-            return d;
-        }
-
-        private static StorageSync.StorageResData ToEngine(BuildingCargoResPayload res)
-        {
-            var d = new StorageSync.StorageResData
-            {
-                Container = StorageSync.ContainerBuilding, AddressKey = res.AddressKey, ItemId = res.ItemId,
-                PlayerId = res.PlayerId, Op = OpName(res.Op), Ctx = res.Ctx ?? "", ItemName = res.ItemName,
-                Amount = res.Amount, Paid = res.Paid, PricePerUnit = res.PricePerUnit, Count = res.Count,
-                Ok = res.Ok, Reason = res.Reason,
-            };
-            if (res.Nested != null) d.Nested.AddRange(res.Nested);
-            return d;
-        }
-
-        private static BuildingCargoResPayload ToWire(StorageSync.StorageResData res)
-        {
-            var w = new BuildingCargoResPayload
-            {
-                AddressKey = res.AddressKey, ItemId = res.ItemId, PlayerId = res.PlayerId, Op = OpByte(res.Op),
-                ItemName = res.ItemName, Amount = res.Amount, Paid = res.Paid, PricePerUnit = res.PricePerUnit,
-                Ctx = res.Ctx, Count = res.Count, Ok = res.Ok, Reason = res.Reason,
-            };
-            if (res.Nested != null) w.Nested.AddRange(res.Nested);
-            return w;
-        }
-
-        // ── Owner / guest seams (MAIN THREAD ONLY) — engine delegation ───────────
-        public static BuildingCargoResPayload OwnerApply(BuildingCargoReqPayload req)
-        {
-            if (OpName(req.Op).Length == 0)   // off-contract byte: refuse without touching the engine
-            {
-                Plugin.Logger.LogWarning($"[BStore] unknown op byte {req.Op} from '{req.PlayerId}' — refused (unsupported).");
-                return new BuildingCargoResPayload
-                {
-                    AddressKey = req.AddressKey, ItemId = req.ItemId, PlayerId = req.PlayerId, Op = req.Op,
-                    ItemName = req.ItemName, Amount = req.Amount, Paid = req.Paid, PricePerUnit = req.PricePerUnit,
-                    Ctx = req.Ctx, Ok = false, Reason = "unsupported",
-                };
-            }
-            return ToWire(StorageSync.OwnerApply(ToEngine(req)));
-        }
-
-        public static void OnResult(BuildingCargoResPayload res)
-            => StorageSync.OnResult(ToEngine(res));
 
         /// <summary>Round-39c recognition tail — second consumer CustomerEntrySync calls through
         /// this name; the body lives in the engine.</summary>
@@ -108,14 +49,13 @@ namespace BigAmbitionsMP
         public static void RequestStackOp(string addressKey, string itemId, string itemName, int amount, bool paid, float price, int count, bool sell)
         {
             if (string.IsNullOrEmpty(addressKey) || string.IsNullOrEmpty(itemId) || string.IsNullOrEmpty(itemName) || count <= 0) return;
-            var req = new BuildingCargoReqPayload
+            StorageSync.SendOp(new StorageOpPayload
             {
-                AddressKey = addressKey, ItemId = itemId, PlayerId = MPConfig.PlayerId,
-                Op = OpTake, ItemName = itemName, Amount = amount, Paid = paid, PricePerUnit = price,
+                Container = StorageSync.ContainerBuilding, AddressKey = addressKey, ItemId = itemId,
+                PlayerId = MPConfig.PlayerId, Op = StorageSync.OpTake, ItemName = itemName,
+                Amount = amount, Paid = paid, PricePerUnit = price,
                 Count = count, Ctx = sell ? "stacksell" : "stackdiscard",
-            };
-            if (MPServer.IsRunning) MPServer.HandleBuildingCargoReq(req, MPConfig.PlayerId);
-            else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BuildingCargoReq, MPConfig.PlayerId, req));
+            });
         }
 
         /// <summary>Round-47: put a SEALED BOX back (hands-full race after a boxtake) — nested contents
@@ -123,14 +63,14 @@ namespace BigAmbitionsMP
         public static void RequestPutBox(string addressKey, string itemId, string itemName, int amount, bool paid, float price, List<CargoNestedInfo> nested)
         {
             if (string.IsNullOrEmpty(addressKey) || string.IsNullOrEmpty(itemId) || amount <= 0 || string.IsNullOrEmpty(itemName)) return;
-            var req = new BuildingCargoReqPayload
+            var req = new StorageOpPayload
             {
-                AddressKey = addressKey, ItemId = itemId, PlayerId = MPConfig.PlayerId,
-                Op = OpPut, ItemName = itemName, Amount = amount, Paid = paid, PricePerUnit = price, Ctx = "boxreturn",
+                Container = StorageSync.ContainerBuilding, AddressKey = addressKey, ItemId = itemId,
+                PlayerId = MPConfig.PlayerId, Op = StorageSync.OpPut, ItemName = itemName,
+                Amount = amount, Paid = paid, PricePerUnit = price, Ctx = "boxreturn",
             };
             if (nested != null) req.Nested.AddRange(nested);
-            if (MPServer.IsRunning) MPServer.HandleBuildingCargoReq(req, MPConfig.PlayerId);
-            else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BuildingCargoReq, MPConfig.PlayerId, req));
+            StorageSync.SendOp(req);
         }
 
         /// <summary>Round-32 (business helpers): ask the owner to change what a display/showcase item — or a
@@ -150,13 +90,12 @@ namespace BigAmbitionsMP
             if (string.IsNullOrEmpty(addressKey) || string.IsNullOrEmpty(itemId) || amount <= 0
                 || (string.IsNullOrEmpty(itemName) && op != OpSetStock))
                 return;
-            var req = new BuildingCargoReqPayload
+            StorageSync.SendOp(new StorageOpPayload
             {
-                AddressKey = addressKey, ItemId = itemId, PlayerId = MPConfig.PlayerId,
-                Op = op, ItemName = itemName, Amount = amount, Paid = paid, PricePerUnit = price, Ctx = ctx,
-            };
-            if (MPServer.IsRunning) MPServer.HandleBuildingCargoReq(req, MPConfig.PlayerId);
-            else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BuildingCargoReq, MPConfig.PlayerId, req));
+                Container = StorageSync.ContainerBuilding, AddressKey = addressKey, ItemId = itemId,
+                PlayerId = MPConfig.PlayerId, Op = OpName(op), ItemName = itemName,
+                Amount = amount, Paid = paid, PricePerUnit = price, Ctx = ctx,
+            });
         }
     }
 }

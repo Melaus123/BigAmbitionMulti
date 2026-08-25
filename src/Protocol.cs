@@ -128,8 +128,9 @@ namespace BigAmbitionsMP
         PassengerSnapshot     = 124, // Host → joiner: full passenger lock + seat state (join replay).
 
         // Shared vehicle storage (take/put from another player's UNLOCKED vehicle — host-authoritative request/grant).
-        VehicleCargoReq       = 125, // Accessor → Host → owner: take (Op=0) / put (Op=1) an item in vehicle V's storage.
-        VehicleCargoRes       = 126, // Owner → Host → accessor: result (Ok = applied to real cargo; else Reason = gone/full).
+        // 125/126 RETIRED (storage unification Stage B, 2026-08-25): VehicleCargoReq/Res — the
+        // vehicle half of the twin storage channels; both containers ride StorageOp/StorageRes
+        // (195/196) since v16. Do not reuse the numbers.
 
         // Passenger follows the driver through a building entrance (host-authoritative).
         PassengerFollowEnter  = 127, // Host → rider P: vehicle V drove into a building (AddressKey); rider should enter it too.
@@ -156,8 +157,9 @@ namespace BigAmbitionsMP
         PermissionOwnGrants = 135,       // Host → one owner: your grantee list incl. OFFLINE ones (handle + name + online), for the UI.
         VehicleDrive        = 136,       // Driver(borrower) → Host → All: live pose + fuel of owner O's car V while the borrower drives it (Released on exit).
         PermissionBuildingAccess = 137,  // Host → one client: the building addressKeys it may ENTER as a granted housing guest (clients lack a building→owner map).
-        BuildingCargoReq    = 138,       // Guest → Host → building owner: take/put on a home interior item's cargo (the fridge). Owner applies to reg.itemInstances.
-        BuildingCargoRes    = 139,       // Owner → Host → guest: the verdict (mirrors VehicleCargoRes).
+        // 138/139 RETIRED (storage unification Stage B, 2026-08-25): BuildingCargoReq/Res — the
+        // building half of the twin storage channels; both containers ride StorageOp/StorageRes
+        // (195/196) since v16. Do not reuse the numbers.
         // 140 RETIRED (interior-edit Stage 3, 2026-08-25): BuildingInteriorEdit — the guest
         // WHOLE-REPLICA edit snapshot. Every edit now travels as BuildingInteriorDelta (194);
         // a guest whole-set assertion is the exact class the 2026-08 design removed. Do not
@@ -191,6 +193,8 @@ namespace BigAmbitionsMP
         MirrorAck           = 192,       // Client → Host (v9 review B2): "I hold this exact mirrored .hsg" — sent after the file is WRITTEN to the client's store (or already present via the shared-store token). The host's absent-member mirror skip records delivery ONLY on this ack — never at send time, because the paced lane's documented loss recovery is "the next save re-mirrors", which a send-time record would silently delete (character loss on host handoff).
         InteriorDirtSync    = 193,       // v10 (T7, ruling 33): ONE building's dirt VALUES as an ABSOLUTE dirty-set — every lattice spot with dirtiness > 0 as (X, Z, value); every spot NOT listed reads clean. Dirt is cleaning-only data: owner → Host on change (keeps the host cache/save current, ~KBs), Host → ONLY the players physically inside (the subscriber set) — nobody else, nothing when the building is empty. The receiver UPDATES matching lattice entries and zeroes the rest; it never adds or removes entries (the lattice is one fixed entry per floor tile — replacing the list would corrupt the cleanliness average). Rides Bulk (M5: InteriorSnapshot writes the same state).
         BuildingInteriorDelta = 194,     // v13 (interior-edit Stage 1b, design 2026-08): a PERMITTED EDIT as the ops it actually made — upsert/remove naming exactly the items touched; silence about an id means "no opinion", never "delete" (THE INVARIANT). Editor → Host (grant-gated: owner, or a Housing/Business grant from the owner); Host → owner to adopt, PLUS the same delta to that building's subscribers minus the sender, PLUS an id-keyed graft onto the host's owner cache (Q1) — one delta conveys everyone, retiring the owner's post-adopt full re-push. Absolute per item, idempotent, orderless (no sequence numbers). Receivers apply ops through the SAME ApplyOneItem the full snapshot runs (Stage 1a) and NEVER discard the message (it is the edit's only carrier); the per-item drag/hands rules are the mid-edit protection. A >25-remove delta without the BulkEdit marker is refused by the receiver (a placement/removal forward is 1-3 ops; more means a corrupt diff), and the BUILDER never emits one: over-cap removes are suppressed at diff time and the address owes a re-sync instead (Stage 1b review MAJOR-O — there is no whole-replica fallback; 140 is retired).
+        StorageOp             = 195,     // Accessor → Host → container owner (v16, storage unification): ONE storage operation — take/put/markpaid/setstock with a container discriminator (building addr+itemId | vehicle id) and the retired channels' ctx literals verbatim. Host resolves the owner itself (ruling 38) and grant-gates building ops; the owner's machine is the sole authority and re-verifies.
+        StorageRes            = 196,     // Owner → Host → accessor: the verdict (Ok, Reason, owner-truth echoes per ctx policy, nested contents for sealed-box ops).
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -704,23 +708,58 @@ namespace BigAmbitionsMP
     /// ICargoHolder / cargoInstances model as a vehicle). The host resolves the building owner from AddressKey
     /// and routes to them; the owner applies to reg.itemInstances[ItemId] (always present in their save) and
     /// pushes that building's snapshot. Mirrors VehicleCargoReq. Op: 0 = take, 1 = put.</summary>
-    public class BuildingCargoReqPayload
+    // STORAGE UNIFICATION Stage B (2026-08-25): BuildingCargoReqPayload / BuildingCargoResPayload
+    // (138/139) and VehicleCargoReqPayload / VehicleCargoResPayload (125/126) are RETIRED — both
+    // containers ride the ONE StorageOp/StorageRes family below (ruling 37; design:
+    // .modding/03-systems/storage-unification-2026-08.md).
+
+    /// <summary>ONE storage operation against a container the SENDER does not own — the unified
+    /// wire (v16) for both container kinds. Container discriminates the reference bands. Op is a
+    /// STRING because the retired byte spaces collided (2 = MarkPaid on vehicles, SetStock on
+    /// buildings); Ctx keeps the retired channels' literals VERBATIM. The sender does NOT name the
+    /// owner: the host resolves it (ruling 38 — buildings from its ledgers, vehicles from
+    /// PassengerSync.OwnerOf).</summary>
+    public class StorageOpPayload
     {
-        public string AddressKey   { get; set; } = "";   // which building's interior
-        public string ItemId       { get; set; } = "";   // the interior item instance (the fridge) within it
-        public string PlayerId     { get; set; } = "";   // the accessor (guest)
-        public byte   Op           { get; set; }          // 0 = take, 1 = put
+        public string Container    { get; set; } = "";   // "building" | "vehicle"
+        public string AddressKey   { get; set; } = "";   // building band
+        public string ItemId       { get; set; } = "";   // building band: the interior item instance within it
+        public string VehicleId    { get; set; } = "";   // vehicle band: the REAL id (no BAMP_ ghost prefix)
+        public string PlayerId     { get; set; } = "";   // the accessor (SenderIs-checked at the host)
+        public string Op           { get; set; } = "";   // "take" | "put" | "markpaid" | "setstock"
+        public string Ctx          { get; set; } = "";   // op modifier — "" = plain; literals unchanged from 138/139
         public string ItemName     { get; set; } = "";
         public int    Amount       { get; set; }
-        public bool   Paid         { get; set; }
+        public bool   Paid         { get; set; } = true;
         public float  PricePerUnit { get; set; }
-        public string Ctx          { get; set; } = "";   // put-source context ("wornHead"/"wornHand"/"") so the
-                                                         // accessor's confirm handler knows what to consume locally —
-                                                         // explicit beats inferring the source by item name (round-12 A)
-        // Round-47: sealed-box give-backs carry their nested contents (see BuildingCargoResPayload.Nested).
+        public int    Count        { get; set; } = 1;    // stack-op multiplicity (sell/discard)
+        public bool   Silent       { get; set; }         // MIRROR of a native action already applied locally:
+                                                         // accessor-side OnResult must NOT place/consume/toast.
+        // Sealed-box ops carry nested contents (ONE codec: StorageSync.EncodeNested/DecodeNested).
         public List<CargoNestedInfo> Nested { get; set; } = new();
-        // Round-47b (helper sell/discard parity): how many identical stack instances the op targets.
-        public int Count { get; set; } = 1;
+    }
+
+    /// <summary>Owner → host → accessor: the verdict on a StorageOp. Ok=false → Reason ("gone" /
+    /// "full" / "locked" / "denied" / "mixed" / "occupied" / "unsupported") and the accessor
+    /// places/consumes nothing.</summary>
+    public class StorageResPayload
+    {
+        public string Container    { get; set; } = "";
+        public string AddressKey   { get; set; } = "";
+        public string ItemId       { get; set; } = "";
+        public string VehicleId    { get; set; } = "";
+        public string PlayerId     { get; set; } = "";   // the accessor this verdict is for
+        public string Op           { get; set; } = "";
+        public string Ctx          { get; set; } = "";
+        public string ItemName     { get; set; } = "";
+        public int    Amount       { get; set; }
+        public bool   Paid         { get; set; } = true;
+        public float  PricePerUnit { get; set; }
+        public int    Count        { get; set; } = 1;    // how many stack instances the owner actually removed
+        public bool   Silent       { get; set; }
+        public List<CargoNestedInfo> Nested { get; set; } = new();
+        public bool   Ok           { get; set; }
+        public string Reason       { get; set; } = "";
     }
 
     /// <summary>One player business's staff roster (round-30 WS3). The synced work shifts
@@ -749,31 +788,15 @@ namespace BigAmbitionsMP
         public List<string> Skills { get; set; } = new();   // "name=value" pairs
     }
 
-    public class BuildingCargoResPayload
-    {
-        public string AddressKey   { get; set; } = "";
-        public string ItemId       { get; set; } = "";
-        public string PlayerId     { get; set; } = "";   // the accessor this verdict is for
-        public byte   Op           { get; set; }
-        public string ItemName     { get; set; } = "";
-        public int    Amount       { get; set; }
-        public bool   Paid         { get; set; }
-        public float  PricePerUnit { get; set; }
-        public bool   Ok           { get; set; }
-        public string Reason       { get; set; } = "";
-        public string Ctx          { get; set; } = "";   // echoed from the request (see req)
-        // Round-47 (slice 2b — helper shelf take): a taken SEALED BOX's contents, so the delivered
-        // in-hands box carries exactly what the owner's box held. Empty for loose-cargo takes.
-        public List<CargoNestedInfo> Nested { get; set; } = new();
-        // Round-47b: how many stack instances the owner actually removed (sell/discard credit basis).
-        public int Count { get; set; } = 1;
-    }
-
     public class CargoNestedInfo
     {
         public string ItemName     { get; set; } = "";
         public int    Amount       { get; set; }
         public float  PricePerUnit { get; set; }
+        // DEFERRED (D4, 2026-08-25): nested customColors stay off the wire — SerializableColor's
+        // shape is not in the decompile tree, so a serializer for it is unverifiable; the loss is
+        // cosmetic and pre-existing in both directions. Extend HERE + the one codec pair
+        // (StorageSync.EncodeNested/DecodeNested) when the type is read.
     }
 
     /// <summary>Driver (a granted borrower) → host → all: the live pose of owner O's car V while the borrower
@@ -806,41 +829,11 @@ namespace BigAmbitionsMP
         public float  T { get; set; }
     }
 
-    // ── Shared vehicle storage payloads ──────────────────────────────────────────
-
-    /// <summary>Accessor → host → owner: take (Op=0) or put (Op=1) an item in another player's UNLOCKED
-    /// vehicle storage. Host-authoritative: the owner validates against the real cargo (first request wins,
-    /// so there is no optimistic local edit to roll back).</summary>
-    public class VehicleCargoReqPayload
-    {
-        public string VehicleId    { get; set; } = "";   // the REAL vehicle id (no BAMP_ ghost prefix)
-        public string OwnerId      { get; set; } = "";   // the vehicle's owner (accessor reads it off the ghost) — host forwards here
-        public string PlayerId     { get; set; } = "";   // the accessor (who takes / puts)
-        public byte   Op           { get; set; }          // 0 = take (remove from vehicle), 1 = put (add to vehicle), 2 = mark paid (checkout)
-        public string ItemName     { get; set; } = "";
-        public int    Amount       { get; set; }
-        public bool   Paid         { get; set; } = true;
-        public float  PricePerUnit { get; set; }
-        public bool   Silent       { get; set; }          // MIRROR of a native action already applied locally (borrowed-cart
-                                                          // shopping): accessor-side OnResult must NOT place/consume/toast.
-    }
-
-    /// <summary>Owner → host → accessor: result of a VehicleCargoReq. Ok=true means the real cargo changed
-    /// (take = the accessor may now place ItemName×Amount via the game's own logic; put = it was stored).
-    /// Ok=false → Reason ("gone" / "full") and the accessor places nothing / keeps the item.</summary>
-    public class VehicleCargoResPayload
-    {
-        public string VehicleId    { get; set; } = "";
-        public string PlayerId     { get; set; } = "";
-        public byte   Op           { get; set; }
-        public string ItemName     { get; set; } = "";
-        public int    Amount       { get; set; }
-        public bool   Paid         { get; set; } = true;
-        public float  PricePerUnit { get; set; }
-        public bool   Ok           { get; set; }
-        public string Reason       { get; set; } = "";
-        public bool   Silent       { get; set; }   // echoed from the request — see VehicleCargoReqPayload.Silent
-    }
+    // ── Shared vehicle storage payloads: RETIRED (unification Stage B, 2026-08-25) ──
+    // VehicleCargoReqPayload / VehicleCargoResPayload rode types 125/126; both containers now use
+    // StorageOpPayload / StorageResPayload above. The retired req's OwnerId field is deliberately
+    // NOT carried forward: ruling 38 — the host resolves the vehicle owner itself
+    // (PassengerSync.OwnerOf); a sender-supplied owner was an unverified routing input.
 
     // ── Envelope ───────────────────────────────────────────────────────────────
 
@@ -1099,7 +1092,16 @@ namespace BigAmbitionsMP
         // its callers in Stage 2), so this bump is contract hygiene per the clean-break policy
         // (every wire-contract change bumps) rather than a behavioral incompatibility: the type
         // set the two sides agree on has changed; refuse mixed sessions outright.
-        public const int Version = 15;
+        //
+        // v16 (2026-08, storage unification Stage B): the twin storage channels are ONE —
+        // VehicleCargoReq/Res (125/126) and BuildingCargoReq/Res (138/139) are removed, senders
+        // and receivers, replaced by StorageOp/StorageRes (195/196) with a container
+        // discriminator, STRING ops (the retired byte spaces collided at 2), the ctx literals
+        // carried verbatim, and one nested-contents codec. The host now resolves the vehicle
+        // owner itself (ruling 38) — the retired sender-supplied OwnerId is gone from the wire.
+        // A v15 peer sends types a v16 build no longer handles and lacks 195/196 entirely;
+        // refuse mixed sessions outright.
+        public const int Version = 16;
     }
 
     /// <summary>Sent by client on connect.</summary>
