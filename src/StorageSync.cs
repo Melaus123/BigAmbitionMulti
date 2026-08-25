@@ -26,26 +26,14 @@ namespace BigAmbitionsMP
     /// </summary>
     internal static class StorageSync
     {
-        // ── Stage A profile flags — TODAY'S asymmetries, pinned and named ────────────────────
-        // Each is one A2 flip (its own commit + justification), then the flag is deleted.
-        // A2-1 FLIPPED 2026-08-25 (fixes F-2026-08-25-E, LIVE DUP): vehicle put now rolls back a
-        // partial merge exactly as the building side has since round-32 — TryToAddToCargo absorbs
-        // part of a stack BEFORE returning false, so without the rollback the owner's trunk gained
-        // N units while the depositor kept the full stack ("full" is now all-or-nothing on both
-        // containers).
-        internal const bool VehicleRollbackPartialMerge = true;
-        // A2-2 FLIPPED 2026-08-25 (fixes D2, REVIEW-CORRECTED scope): the one native gap is the
-        // PARTIAL-REDUCE take — ItemInstance.ReduceFromCargo fires the cargo callback when the
-        // stack survives (:306-309) and VehicleInstance's does not (:217-231, no else). EVERY
-        // OTHER vehicle path already fires natively (put merge :148 / append :180; stack-emptying
-        // take via RemoveFromCargo :215; markpaid inline in MarkPaidWithSplit), and the callback
-        // PLAYS A SOUND (VehicleController.OnItemAddedToCargo = PlayAudio + UpdateCargoCount), so
-        // firing anywhere else audibly double-plays it. The invoke lives in the vehicle take's
-        // reduce delegate ONLY, mirroring the ItemInstance else-branch exactly.
-        internal const bool VehicleFireCargoChangedOnMutate = true;
-        // A2-3 (fixes b3): building takes adopt the vehicle side's paid-preference two-pass
-        // (matters under ruling 36 — paid and unpaid stacks of one item genuinely coexist).
-        internal const bool BuildingPaidPreferencePass = false;
+        // ── Stage A2 COMPLETE (2026-08-25): the extraction-era profile flags are deleted — the
+        // three behavior asymmetries they pinned are resolved permanently (each was its own
+        // reviewed commit; the field evidence lives in the design doc and F-2026-08-25-E):
+        //   A2-1  both containers roll back partial merges — "full" is all-or-nothing.
+        //   A2-2  partial vehicle takes fire the cargo callback (the one native gap; every other
+        //         path fires natively and the callback plays the box SOUND — never add fires).
+        //   A2-3  both containers take with the paid-preference two-pass (ruling 36 makes paid
+        //         and unpaid stacks of one item genuinely coexist).
 
         // ── Neutral records (NOT wire types — Stage B introduces the wire form) ──────────────
         internal const string ContainerBuilding = "building";
@@ -173,12 +161,12 @@ namespace BigAmbitionsMP
                 var inst = found;
                 if (req.Op == OpTake)
                     // A2-2: fire the callback ONLY when the reduce leaves the stack alive — the
-                    // single case native VehicleInstance omits (see the flag comment above).
-                    TakeLoose(inst.cargoInstances, req, res, paidPreferencePass: true,
+                    // single case native VehicleInstance omits (see the A2 header above).
+                    TakeLoose(inst.cargoInstances, req, res,
                               reduce: (ci, amt) =>
                               {
                                   inst.ReduceFromCargo(ci, amt);
-                                  if (VehicleFireCargoChangedOnMutate && ci.amount > 0)
+                                  if (ci.amount > 0)
                                       try { inst.OnItemsInCargoUpdated()?.Invoke(); } catch { }
                               });
                 else if (req.Op == OpMarkPaid)
@@ -192,14 +180,13 @@ namespace BigAmbitionsMP
                     // the next manifest (inherited round-32 semantics, both containers).
                     var ci = new CargoInstance(req.ItemName, req.Amount, req.PricePerUnit, req.Paid);
                     if (inst.TryToAddToCargo(ci)) { res.Ok = true; res.Reason = ""; }
-                    else if (VehicleRollbackPartialMerge)
+                    else
                     {
                         RollbackPartialMerge(req, req.Amount - ci.amount,
                             inst.cargoInstances,
                             (s) => inst.RemoveFromCargo(s), (s, amt) => inst.ReduceFromCargo(s, amt));
                         res.Reason = "full";
                     }
-                    else res.Reason = "full";
                 }
                 else { res.Reason = "unsupported"; Plugin.Logger.LogWarning($"[VStore] op '{req.Op}' unsupported for a vehicle container."); }
             }
@@ -254,9 +241,11 @@ namespace BigAmbitionsMP
                 else if (req.Ctx == "stationtake")
                     TakeStock(reg, item, req, res);
                 else
-                    // Stage A profile: today's building take is single-pass (no paid preference) —
-                    // A2-3 flips BuildingPaidPreferencePass.
-                    TakeLoose(item.cargoInstances, req, res, paidPreferencePass: BuildingPaidPreferencePass,
+                    // A2-3: the paid-preference two-pass now applies here too (ruling 36 —
+                    // paid and unpaid stacks of one item genuinely coexist; a request naming
+                    // one must not consume the other while both fit). ItemInstance.ReduceFromCargo
+                    // fires the cargo callback natively on both branches — no engine fire here.
+                    TakeLoose(item.cargoInstances, req, res,
                               reduce: (ci, amt) => item.ReduceFromCargo(ci, amt));
             }
             else if (req.Op == OpPut)
@@ -305,17 +294,17 @@ namespace BigAmbitionsMP
 
         // ── Shared apply internals (moved verbatim; delegates carry the container's mutators) ──
 
-        /// <summary>First matching unsealed stack with enough on hand (first request wins). With
-        /// paidPreferencePass: prefer a stack whose paid flag matches the request (mirrored takes
-        /// name the exact stack the borrower consumed natively); fall back to any match so UI
-        /// takes keep working. IsSealed hoisted per iteration (risk R13 — the getter re-resolves
-        /// through ItemsGetter on every access).</summary>
+        /// <summary>First matching unsealed stack with enough on hand (first request wins), in TWO
+        /// passes (A2-3, both containers): pass 0 prefers a stack whose paid flag matches the
+        /// request (mirrored takes name the exact stack the borrower consumed natively; ruling 36
+        /// makes mixed paid states real), pass 1 falls back to any match so UI takes keep working.
+        /// IsSealed hoisted per iteration (risk R13 — the getter re-resolves through ItemsGetter
+        /// on every access).</summary>
         private static void TakeLoose(System.Collections.Generic.List<CargoInstance>? src, StorageOpData req, StorageResData res,
-                                      bool paidPreferencePass, Action<CargoInstance, int> reduce)
+                                      Action<CargoInstance, int> reduce)
         {
             if (src == null) return;
-            int firstPass = paidPreferencePass ? 0 : 1;   // single-pass mode (start at 1) = today's building loop, no paid filter
-            for (int pass = firstPass; pass < 2 && !res.Ok; pass++)
+            for (int pass = 0; pass < 2 && !res.Ok; pass++)
                 for (int c = 0; c < src.Count; c++)
                 {
                     var ci = src[c];
