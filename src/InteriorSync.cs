@@ -356,7 +356,6 @@ namespace BigAmbitionsMP
         {
             if (!MPServer.IsRunning) return;
             if (_subsByBuilding.Count == 0) return;
-            if (PlacementQuiesced("host-subscriber-push")) return;   // task-28 fix 2: hashes not stored — next poll retries
             float now = UnityEngine.Time.realtimeSinceStartup;
             if (now - _lastPollAt < PollIntervalSeconds) return;
             _lastPollAt = now;
@@ -367,6 +366,10 @@ namespace BigAmbitionsMP
                 var addrs = new List<string>(_subsByBuilding.Keys);
                 foreach (var addr in addrs)
                 {
+                    // Stage 3/MIN1: PER-ADDRESS, not the old whole-loop gate — a drag in building A
+                    // must not stall B's and C's pushes.  Before any hash store (task-28 fix 2), so
+                    // the next poll retries this address.
+                    if (PlacementQuiescedAt(addr, "host-subscriber-push")) continue;
                     var snap = BuildSnapshotForHostSend(addr);
                     if (snap == null) continue;
                     // Round-213: split gate. Structure changes (owner edits) send at the
@@ -637,7 +640,7 @@ namespace BigAmbitionsMP
                     // debt (or re-skips and keeps it while the designer stays open — the drain
                     // terminates at designer close).  Not owed → nothing to do.
                     if (IsResyncOwed(payload.AddressKey) && prev?.Snapshot != null)
-                        GameStatePatcher.ApplyInteriorSnapshot(prev.Snapshot, grantedEdit: false, seedOrHealOverride: true);
+                        GameStatePatcher.ApplyInteriorSnapshot(prev.Snapshot, seedOrHealOverride: true);
                     return;
                 }
                 // v10 (T7): the owner's 2 s tick pushes no longer carry the shopper schedule —
@@ -668,13 +671,13 @@ namespace BigAmbitionsMP
                 if (!changed)
                 {
                     if (IsResyncOwed(payload.AddressKey))
-                        GameStatePatcher.ApplyInteriorSnapshot(payload, grantedEdit: false, seedOrHealOverride: seedOrHeal);
+                        GameStatePatcher.ApplyInteriorSnapshot(payload, seedOrHealOverride: seedOrHeal);
                     return;
                 }
 
                 // seedOrHealOverride carries the consumed per-hop flag into the apply's own gate
                 // (the flag on the payload object is already cleared — deliberately, see above).
-                GameStatePatcher.ApplyInteriorSnapshot(payload, grantedEdit: false, seedOrHealOverride: seedOrHeal);
+                GameStatePatcher.ApplyInteriorSnapshot(payload, seedOrHealOverride: seedOrHeal);
                 // v10 (T7 relay fix, audit item a): DON'T relay the full payload here, and DON'T
                 // stamp _lastHashByAddr — both together were what bypassed the Tick's split gate,
                 // making every client-owner push a FULL send to subscribers. With the cache updated
@@ -693,24 +696,29 @@ namespace BigAmbitionsMP
         // (The accept was briefly a second EnqueueOnMainThread hop; review MAJOR-4 showed the
         // handler is already main-thread and the extra hop re-ordered it behind cargo grafts.)
 
-        /// <summary>Task-28 fix 2: true while an item is mid-placement on THIS machine.  The staged
-        /// item is already live in reg.itemInstances with a per-frame drag pose (PlacementSystem
-        /// writes ItemInstance.position every frame) and security flags churn around it — a capture
-        /// in that window ships half-placed state.  Callers are tick-driven, so a deferral retries
-        /// until placement ends (retry contract); the throttled log is the tripwire.</summary>
+        /// <summary>Task-28 fix 2: true while an item is mid-placement on THIS machine IN THIS
+        /// building.  The staged item is already live in reg.itemInstances with a per-frame drag
+        /// pose (PlacementSystem writes ItemInstance.position every frame) and security flags churn
+        /// around it — a capture in that window ships half-placed state.  Callers are tick-driven,
+        /// so a deferral retries until placement ends (retry contract); the throttled log is the
+        /// tripwire.  Stage 3/MIN1: per-ADDRESS via HousingDesign.PlacementBusyAt — the old global
+        /// IsInPlacementMode form stalled EVERY building's push for the length of any drag, and a
+        /// stranded placement state (design ADDITION 2) wedged all outbound sync forever; keyed to
+        /// the dragged item's own building, both confine to the one building actually mid-edit.</summary>
         private static readonly System.Collections.Generic.Dictionary<string, float> _nextPlacementDeferLogAt = new();
-        internal static bool PlacementQuiesced(string what)
+        internal static bool PlacementQuiescedAt(string addressKey, string what)
         {
             bool placing = false;
-            try { placing = BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode; } catch { }
+            try { placing = HousingDesign.PlacementBusyAt(addressKey); } catch { }
             if (!placing) return false;
             try
             {
                 float now = UnityEngine.Time.unscaledTime;
-                if (!_nextPlacementDeferLogAt.TryGetValue(what, out var at) || now >= at)
+                string key = what + "|" + addressKey;
+                if (!_nextPlacementDeferLogAt.TryGetValue(key, out var at) || now >= at)
                 {
-                    _nextPlacementDeferLogAt[what] = now + 5f;
-                    Plugin.Logger.LogInfo($"[Settle] '{what}' deferred — an item is being placed on this machine (mid-drag state must not convey). Will retry.");
+                    _nextPlacementDeferLogAt[key] = now + 5f;
+                    Plugin.Logger.LogInfo($"[Settle] '{what}' for '{addressKey}' deferred — an item is being placed there on this machine (mid-drag state must not convey). Will retry.");
                 }
             }
             catch { }
@@ -725,7 +733,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (PlacementQuiesced($"owner-push {addressKey}")) return false;   // before hash-store — retried by the tick
+                if (PlacementQuiescedAt(addressKey, "owner-push")) return false;   // before hash-store — retried by the tick
                 var snap = BuildSnapshot(addressKey);
                 if (snap == null)
                 {
@@ -836,7 +844,7 @@ namespace BigAmbitionsMP
                 _lastLocalOwnerNonCargoByAddr[addressKey] = ohn;
                 _lastLocalOwnerVolatileAt[addressKey] = onow;
                 // Stage 0: only a push ANSWERING the host's re-ask (or the world-live seed) carries
-                // SeedOrHeal — routine entry/exit/tick/guest-edit pushes stay discardable on a
+                // SeedOrHeal — routine entry/exit/tick/immediate pushes stay discardable on a
                 // mid-edit host (that discardability IS the toilet-stall fix).  The flag arrives as
                 // an ARGUMENT with this specific push (review BLOCKER-2 — a stored mark outlived its
                 // push and a later routine send wrongly bypassed the host's gate).
@@ -942,7 +950,7 @@ namespace BigAmbitionsMP
         /// push to the host, which rebroadcasts.</summary>
         private static void PushOwnedBuildingImmediate(string addressKey, bool seedOrHeal = false)
         {
-            if (PlacementQuiesced($"immediate-push {addressKey}")) return;   // task-28 fix 2: hash unchanged — the owner tick re-converges post-placement; a SeedOrHeal answer is retried by _pendingResyncAnswers
+            if (PlacementQuiescedAt(addressKey, "immediate-push")) return;   // task-28 fix 2: hash unchanged — the owner tick re-converges post-placement; a SeedOrHeal answer is retried by _pendingResyncAnswers
             try
             {
                 if (MPServer.IsRunning)
@@ -998,9 +1006,10 @@ namespace BigAmbitionsMP
                 }
                 else
                 {
-                    // Review MIN-3 note stands: "guest-edit" is this leg's historical catch-all reason.
+                    // Stage 3/MIN3: the reason is a LOG label only (verified: never compared) — the
+                    // old "guest-edit" literal read as evidence of a guest edit on every push.
                     bool delivered = SendLocalOwnerSnapshot(addressKey, force: true,
-                        reason: seedOrHeal ? "resync-answer" : "guest-edit", seedOrHeal: seedOrHeal);
+                        reason: seedOrHeal ? "resync-answer" : "immediate-push", seedOrHeal: seedOrHeal);
                     if (delivered && seedOrHeal) ClearPendingResyncAnswer(addressKey);
                 }
             }
@@ -1049,7 +1058,7 @@ namespace BigAmbitionsMP
         /// removes): a missing baseline becomes an upserts-only seed and a skewed baseline suppresses
         /// its removes + owes a re-sync, both inside the builder. "no-changes" is silence: the
         /// double-routed second fire of one intent has nothing left to say.</summary>
-        public static void ForwardGuestInteriorEditDelta(string addressKey)
+        public static void ForwardGuestInteriorEditDelta(string addressKey, string? knownRemovedId = null)
         {
             if (string.IsNullOrEmpty(addressKey)) return;
             try
@@ -1063,7 +1072,7 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogWarning($"[Housing] edit delta for '{addressKey}' NOT built — no session to send on; the change stays in the local diff for the next forward.");
                     return;
                 }
-                var p = GameStatePatcher.BuildLocalEditDelta(addressKey, out string reason);
+                var p = GameStatePatcher.BuildLocalEditDelta(addressKey, out string reason, bulkRemovesAllowed: false, knownRemovedId: knownRemovedId);
                 if (p == null) return;   // no-changes / no-reg / threw — nothing to convey (guardrails handle the rest inside)
                 p.SenderId = MPConfig.PlayerId;
                 try { p.PlaythroughId = MPSaveCoordinator.ActivePlaythroughId ?? ""; } catch { }
@@ -1227,30 +1236,11 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] NoteOwnerDeltaApplied: {ex.Message}"); }
         }
 
-        /// <summary>GUEST: forward our just-edited LOCAL interior for this building to the owner, who ADOPTS it
-        /// (ApplyInteriorSnapshot) + re-syncs. Called when the interior designer closes (HandleOnClose). Flagged
-        /// Authoritative so the owner's apply accepts it as the new truth.
-        /// STAGE 1b: placement/removal forwards now ride ForwardGuestInteriorEditDelta above; this
-        /// whole-replica path remains ONLY for the DESIGNER CLOSE (converts in Stage 2).</summary>
-        public static void ForwardGuestInteriorEdit(string addressKey)
-        {
-            if (string.IsNullOrEmpty(addressKey)) return;
-            try
-            {
-                HousingDesign.CommitLocalDesigns(addressKey);   // bug #5: flush the guest's live floor/wall edits → reg before snapshotting
-                var snap = BuildSnapshot(addressKey);
-                if (snap == null) return;
-                snap.Authoritative = true;
-                snap.ItemInstancesAuthoritative = true;
-                snap.OwnerPlayerId = "";   // a guest edit — the owner adopts it as the new truth
-                GameStatePatcher.NoteLocalItemState(addressKey, snap.ItemInstances);   // echo-suppression: our own
-                                           // edit coming back must ser-match and keep live objects (round-14 #3)
-                if (MPServer.IsRunning) MPServer.HandleBuildingInteriorEdit(snap, MPConfig.PlayerId);
-                else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BuildingInteriorEdit, MPConfig.PlayerId, snap));
-                Plugin.Logger.LogInfo($"[Housing] guest forwarded interior edit for '{addressKey}' ({SnapshotSummary(snap)}).");
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] ForwardGuestInteriorEdit: {ex.Message}"); }
-        }
+        // STAGE 3 (2026-08-25): ForwardGuestInteriorEdit — the guest WHOLE-REPLICA forward
+        // (BuildingInteriorEdit, type 140) — is RETIRED.  Placement/removal forwards ride
+        // ForwardGuestInteriorEditDelta (Stage 1b) and the designer close rides
+        // ForwardGuestDesignerClose (Stage 2); a guest whole-set assertion is exactly the
+        // class THE INVARIANT removes.  It had zero callers since Stage 2.
 
         private static InteriorSnapshotPayload? BuildSnapshotForHostSend(string addressKey)
         {

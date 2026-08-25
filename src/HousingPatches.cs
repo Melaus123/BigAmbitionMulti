@@ -571,6 +571,25 @@ namespace BigAmbitionsMP
             try
             {
                 if (string.IsNullOrEmpty(addressKey) || CurrentBuildingAddr() != addressKey) return null;
+                if (PlacementBusyAt(addressKey)) return "placement";
+                if (InteriorDesignerUI.IsOpen) return "designer";
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>The PLACEMENT half of InteriorEditBusyAt alone (Stage 3/MIN1): true only while
+        /// the local player is dragging an item whose registration IS this building.  Outbound push
+        /// gates use this — a drag makes exactly ONE building's state unserializable (the dragged
+        /// item's per-frame pose lives in ITS reg), so gating other buildings' pushes on the global
+        /// IsInPlacementMode stalled every building for the length of any drag.  Deliberately NOT
+        /// the designer half: a designer session mutates the live scene, not reg (designs commit at
+        /// close), so mid-designer snapshots are stale-but-consistent and always conveyed.</summary>
+        internal static bool PlacementBusyAt(string addressKey)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey) || CurrentBuildingAddr() != addressKey) return false;
                 if (BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode)
                 {
                     // Review MAJOR-5: verify the item being placed BELONGS to this building.  A
@@ -588,14 +607,13 @@ namespace BigAmbitionsMP
                     {
                         var inst = BigAmbitions.PlacementSystem.PlacementSystem.CurrentPlaceableItemBeingPlaced?.GetItemInstance();
                         var ireg = inst != null ? ItemHelper.GetBuildingRegistration(inst) : null;
-                        if (ireg != null && GameStateReader.AddressKey(ireg) == addressKey) return "placement";
+                        if (ireg != null && GameStateReader.AddressKey(ireg) == addressKey) return true;
                     }
                     catch { }
                 }
-                if (InteriorDesignerUI.IsOpen) return "designer";
             }
             catch { }
-            return null;
+            return false;
         }
 
         /// <summary>Verification MAJOR-B: the DESIGNER question asked directly.  InteriorEditBusyAt
@@ -748,14 +766,19 @@ namespace BigAmbitionsMP
     [HarmonyPatch(typeof(BuildingRegistration), nameof(BuildingRegistration.RemoveItemInstanceFromBuilding))]
     public static class Patch_BuildingRegistration_RemoveItem_GuestForward
     {
-        static void Postfix(BuildingRegistration __instance)
+        static void Postfix(BuildingRegistration __instance, ItemInstance itemInstance)
         {
             try
             {
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;   // single-player → native only
                 string addr = GameStateReader.AddressKey(__instance);
                 if (!GrantSync.CanEnterGranted(addr) && !GrantSync.IsHelperBusiness(addr)) return;   // owner / non-guest → native only
-                InteriorSync.ForwardGuestInteriorEditDelta(addr);   // Stage 1b: one remove op, not the room
+                // Grab audit P1 (ruling 37): NAME the removed id — the chokepoint is the one place
+                // that knows it, and a named remove survives the builder's no-baseline and
+                // cap-suppression guardrails (where the diff-computed remove silently died and the
+                // owner resurrected the item). A failed native remove is harmless to name: the id is
+                // then still live and the builder skips it.
+                InteriorSync.ForwardGuestInteriorEditDelta(addr, itemInstance?.id);   // Stage 1b: one remove op, not the room
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] guest removal forward: {ex.Message}"); }
         }
@@ -776,8 +799,8 @@ namespace BigAmbitionsMP
 
     /// <summary>When a granted GUEST closes the interior designer, forward their edited interior to the owner,
     /// who adopts it (the owner is the authority; the guest's local edits would otherwise be overwritten).
-    /// STAGE 2: the forward is now the DELTA (session item ops + update-only designs) — the last
-    /// caller of the whole-replica 140 is gone; Stage 3 retires the type after a clean field run.</summary>
+    /// STAGE 2: the forward is now the DELTA (session item ops + update-only designs); the
+    /// whole-replica 140 it replaced was retired outright in Stage 3.</summary>
     [HarmonyPatch(typeof(InteriorDesignerController), "HandleOnClose")]
     public static class Patch_InteriorDesignerController_HandleOnClose_GuestForward
     {

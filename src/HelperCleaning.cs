@@ -27,7 +27,8 @@ namespace BigAmbitionsMP
     ///      that does nothing when they click the floor.
     ///   3. Dirt is owner-authoritative interior state. MopController.FloorCellClick writes straight into
     ///      buildingRegistration.dirtSpots[...].dirtiness, but the ONLY pre-existing guest→owner interior
-    ///      channel is InteriorSync.ForwardGuestInteriorEdit, whose sole trigger is the interior designer
+    ///      channel was the designer-close forward (retired in interior-edit Stage 3; edits now ride
+    ///      BuildingInteriorDelta), whose sole trigger was the interior designer
     ///      closing. Mopping never triggers it, so a helper's cleaning would look right on their screen and
     ///      then be overwritten by the owner's next authoritative push.
     ///

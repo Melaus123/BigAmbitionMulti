@@ -55,12 +55,12 @@ namespace BigAmbitionsMP
                 case (int)MessageType.BuildingsForSale:   // v9 review M5: writes gi.buildingsForSale, which BusinessSnapshot also writes
                 case (int)MessageType.InteriorCargoSync:
                 case (int)MessageType.InteriorDirtSync:   // v10 M5: writes dirt state InteriorSnapshot also writes
+                case (int)MessageType.BuildingInteriorDelta:   // Stage 3 review MAJOR-W (M5): writes the same item/design state InteriorSnapshot writes — a Gameplay-lane delta could overtake a fragmented Bulk snapshot, and the late older snapshot would revert the edit with no re-push (host trackers already stamped)
                 case (int)MessageType.RadioState:
                 // Review M6 — the megabyte class that was missed: a rejoiner's disconnect-save upload
                 // and gzipped log replies must not head-of-line-block their own gameplay lane.
                 case (int)MessageType.ClientDisconnectUpload:
                 case (int)MessageType.PeerLogReply:
-                case (int)MessageType.BuildingInteriorEdit:
                 case (int)MessageType.AuditDrillReply:
                     return Bulk;
                 default:

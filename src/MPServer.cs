@@ -1193,8 +1193,15 @@ namespace BigAmbitionsMP
                     break;
 
                 case MessageType.RadioState:            // round-227: relay a member's speaker change
-                    MPRadioSync.HostHandle(env.GetPayload<RadioStatePayload>(), senderPid);
+                {
+                    // Stage 3 review MINOR-X/Y: whole handler (validate + apply + relay) rides the
+                    // main-thread queue — the apply touched Unity audio off-thread, and inline it
+                    // could be overtaken by a QUEUED snapshot's older radio. A frame of relay
+                    // latency on a human-initiated station change is nothing.
+                    var rs = env.GetPayload<RadioStatePayload>();
+                    if (rs != null) GameStatePatcher.EnqueueOnMainThread(() => MPRadioSync.HostHandle(rs, senderPid));
                     break;
+                }
 
                 case MessageType.BillboardAds:          // round-290: relay a member's billboard campaigns
                     BillboardAdSync.HostHandle(env.GetPayload<BillboardAdsPayload>(), senderPid, env);
@@ -1997,13 +2004,6 @@ namespace BigAmbitionsMP
                         GameStatePatcher.EnqueueOnMainThread(() => CustomerPuppets.ApplyLook(cl));
                         BroadcastCustomerLook(cl, peer.Id);   // T8 (also feeds the entry replay cache)
                     }
-                    break;
-                }
-
-                case MessageType.BuildingInteriorEdit:
-                {
-                    var bie = env.GetPayload<InteriorSnapshotPayload>();
-                    if (bie != null) HandleBuildingInteriorEdit(bie, senderPid);
                     break;
                 }
 
@@ -2996,33 +2996,14 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] HandleBuildingCargoRes: {ex.Message}"); }
         }
 
-        /// <summary>HOST: a guest forwarded an interior edit (furniture/flooring) for a home. Resolve the owner
-        /// from the addressKey, grant-gate, then route to the owner (or apply if the host owns it) — the owner
-        /// ADOPTS the snapshot (ApplyInteriorSnapshot, flagged Authoritative) + re-syncs.</summary>
-        public static void HandleBuildingInteriorEdit(InteriorSnapshotPayload snap, string senderPid)
-        {
-            try
-            {
-                if (snap == null || string.IsNullOrEmpty(snap.AddressKey)) return;
-                string owner = (BuildingOwners.TryGetValue(snap.AddressKey, out var o) && !string.IsNullOrEmpty(o)) ? o
-                             : (BuildingRealEstateOwners.TryGetValue(snap.AddressKey, out var r) ? r : "");
-                if (string.IsNullOrEmpty(owner)) return;
-                string ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;
-                // Housing OR Business — business helpers forward furniture edits too (round-32 helper-aware
-                // placement); the Housing-only gate silently dropped a business-only helper's edits.
-                if (ownerPid != senderPid
-                    && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, senderPid)
-                    && !GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid)) return;
-                if (ownerPid == MPConfig.PlayerId)
-                    GameStatePatcher.EnqueueOnMainThread(() => { GameStatePatcher.ApplyInteriorSnapshot(snap, grantedEdit: true); InteriorSync.PushOwnedBuildingNow(snap.AddressKey); }, "interior:" + snap.AddressKey);   // full-state → newest-wins coalescing
-                else
-                    SendHubTo(ownerPid, MessageType.BuildingInteriorEdit, snap);   // forward to the owner's machine to adopt
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] HandleBuildingInteriorEdit: {ex.Message}"); }
-        }
+        // STAGE 3 (2026-08-25): HandleBuildingInteriorEdit — the host route for the guest
+        // whole-replica edit (type 140) — is RETIRED with the type.  Its grant rule (sender is
+        // the owner, or holds a Housing/Business grant from the owner) lives on verbatim in
+        // HandleBuildingInteriorDelta below.
 
-        /// <summary>STAGE 1b (design 2026-08): route a permitted edit DELTA. Authorization mirrors
-        /// HandleBuildingInteriorEdit verbatim (owner, or Housing/Business grant from the owner).
+        /// <summary>STAGE 1b (design 2026-08): route a permitted edit DELTA. Authorization: the
+        /// sender must be the building's owner, or hold a Housing OR Business grant from the owner
+        /// (business helpers forward furniture edits too — round-32 helper-aware placement).
         /// Host-owned building: adopt locally + relay the delta to subscribers minus the sender +
         /// stamp the send trackers (RelayDeltaAfterHostAdopt). Remote-owned: forward to the owner to
         /// adopt, apply to the HOST's own replica too (the host player's view must not wait for an
@@ -3076,9 +3057,9 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Round-112 — route a HELPER's cleaning report (MessageType.BuildingDirtEdit) to whoever owns
-        /// the building.  Authorization mirrors HandleBuildingInteriorEdit exactly: the sender must be the owner
+        /// the building.  Authorization mirrors HandleBuildingInteriorDelta exactly: the sender must be the owner
         /// or hold a Housing/Business grant from them.  Deliberately narrow — this carries only floor-cell
-        /// dirtiness, so unlike the whole-snapshot forward it cannot bring anything else with it.</summary>
+        /// dirtiness, so unlike an interior payload it cannot bring anything else with it.</summary>
         public static void HandleBuildingDirtEdit(DirtEditPayload payload, string senderPid)
         {
             try

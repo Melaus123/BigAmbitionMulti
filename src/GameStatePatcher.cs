@@ -960,20 +960,16 @@ namespace BigAmbitionsMP
         /// Phase 2a writes Layout / interiorDesigns / retailPrices / dirtSpots.
         /// ItemInstances are NOT yet synced (Phase 2b).
         /// </summary>
-        public static void ApplyInteriorSnapshot(InteriorSnapshotPayload payload) => ApplyInteriorSnapshot(payload, grantedEdit: false);
-
-        /// <summary>grantedEdit=true ONLY from the BuildingInteriorEdit adoption sites (a permitted
-        /// helper's renovation, grant-verified upstream) — the single flow allowed to modify a
-        /// building its receiver owns.
+        /// <summary>Stage 3 (2026-08-25): the grantedEdit parameter is GONE with the 140 — a guest's
+        /// edit now arrives only as a BuildingInteriorDelta (ApplyInteriorEditDelta below), never as
+        /// a full snapshot, so every remaining caller of this method is host-stream / owner-push /
+        /// seed-heal traffic and the granted-edit special cases folded away.
         /// seedOrHealOverride (Stage 0): the host's owner-push accept consumes the wire's per-hop
         /// SeedOrHeal flag before caching (the cached object must never carry it into rebroadcasts)
         /// and passes the consumed value through here; every other caller leaves it null and the
         /// gate reads the payload's own flag.</summary>
-        public static void ApplyInteriorSnapshot(InteriorSnapshotPayload payload, bool grantedEdit, bool? seedOrHealOverride = null)
+        public static void ApplyInteriorSnapshot(InteriorSnapshotPayload payload, bool? seedOrHealOverride = null)
         {
-            // Round-227: the piggybacked speaker state lands first — cheap, and the
-            // entering player hears the right station from the first frame.
-            try { if (payload != null) MPRadioSync.ApplyFromSnapshot(payload.AddressKey, payload.RadioStation, payload.RadioVolume); } catch { }
             if (payload == null || string.IsNullOrEmpty(payload.AddressKey)) return;
             RunOnMainThread(() =>
             {
@@ -998,7 +994,7 @@ namespace BigAmbitionsMP
                         // stranding stale dirt with no heal (the host's dirt tracker is seeded on the
                         // assumption this snapshot applied). Fold the dirt band in explicitly.
                         var (sHs, sHv, _, sHd) = InteriorSync.ComputeHashes(payload);
-                        applySig = $"{sHs}|{sHv}|{sHd}|{(payload.ItemInstancesAuthoritative ? 1 : 0)}|{(grantedEdit ? 1 : 0)}|{payload.Layout ?? ""}";
+                        applySig = $"{sHs}|{sHv}|{sHd}|{(payload.ItemInstancesAuthoritative ? 1 : 0)}|0|{payload.Layout ?? ""}";   // the constant 0 was the grantedEdit bit (Stage 3)
                     }
                     // Round-281b (verifier finding a): only an apply that RAN TO COMPLETION may
                     // become the S4-lite baseline.  The round-103 empty-snapshot refusal and the
@@ -1022,21 +1018,21 @@ namespace BigAmbitionsMP
                         // would be skipped, the receiver would keep the old number, every cargo sync
                         // would mismatch, and the re-request would loop forever against a snapshot
                         // that keeps getting skipped.  One line closes that loop.
-                        if (!grantedEdit) _lastAppliedStructVersion[payload.AddressKey] = payload.StructVersion;
+                        _lastAppliedStructVersion[payload.AddressKey] = payload.StructVersion;
                         // Stage 0 review MAJOR-6: an identical payload against an unchanged local copy
                         // means this machine already HOLDS the state a re-ask would fetch — owed satisfied.
-                        if (!grantedEdit) InteriorSync.ClearResyncOwed(payload.AddressKey);
+                        InteriorSync.ClearResyncOwed(payload.AddressKey);
                         NoteApplySkipped(payload.AddressKey);
                         return;
                     }
                     // Round-178 (user design ruling, 2026-07-28): FOR A BUILDING THIS MACHINE OWNS, a
                     // generic snapshot may only FILL AN EMPTY COPY — never modify a developed one.  The
                     // owner is the authority; the generic channel exists to update REPLICAS, and the
-                    // only legitimate inbound edit of your own building is the granted-edit channel
-                    // (its own message type, grant-verified, bypasses via grantedEdit).  Keeping the
-                    // fill-when-empty case preserves the stale-save heal (a player whose save lost its
-                    // interiors receives the host's good copy) and the arbitration hand-over.
-                    if (!grantedEdit)
+                    // only legitimate inbound edit of your own building is the delta channel
+                    // (BuildingInteriorDelta, grant-verified at the host — Stage 3 retired the 140
+                    // full-snapshot bypass).  Keeping the fill-when-empty case preserves the
+                    // stale-save heal (a player whose save lost its interiors receives the host's
+                    // good copy) and the arbitration hand-over.
                     {
                         var regO = FindRegistration(payload.AddressKey);
                         bool mineO = false; try { mineO = regO != null && MergerFlip.TrulyMine(regO); } catch { }
@@ -1044,7 +1040,7 @@ namespace BigAmbitionsMP
                         {
                             Plugin.Logger.LogWarning($"[Patcher] Interior apply REFUSED for '{payload.AddressKey}': this machine OWNS the building and its copy is "
                                 + (myScore < 0 ? "not yet readable" : $"developed (score {myScore})")
-                                + " — a generic snapshot may only fill an empty copy; renovations arrive via the granted-edit channel only.");
+                                + " — a generic snapshot may only fill an empty copy; renovations arrive via the delta channel only.");
                             return;
                         }
                     }
@@ -1059,7 +1055,7 @@ namespace BigAmbitionsMP
                     // the owner instead (heal), and their next push carries the restored content.
                     // A legitimate teardown converges per-change and never presents this cliff;
                     // after the window, force pushes apply normally.
-                    if (!grantedEdit && MPServer.IsRunning)
+                    if (MPServer.IsRunning)
                     {
                         try
                         {
@@ -1136,19 +1132,29 @@ namespace BigAmbitionsMP
                     // and never deferred as bytes (a deferred snapshot is stale by construction), and
                     // a re-ask is owed: the edit-end events drain it and the answer is rebuilt live.
                     // Exempt: SeedOrHeal (recovery traffic — entry serves, heals, re-request answers;
-                    // discarding those can loop) and grantedEdit (a guest's edit is the ONLY carrier
-                    // of that edit — never discardable; the per-item hands/drag/pending protections and
-                    // the designer-LWW skip below are what defang it mid-edit instead).
+                    // discarding those can loop).  A guest's edit — the other never-discardable class —
+                    // no longer arrives here at all: it is a BuildingInteriorDelta (Stage 3 retired
+                    // the 140), and the delta apply's per-item hands/drag/pending rules defang it.
                     bool seedOrHeal = seedOrHealOverride ?? payload.SeedOrHeal;
                     string? busyHere = HousingDesign.InteriorEditBusyAt(payload.AddressKey);
-                    if (!grantedEdit && !seedOrHeal && busyHere != null)
+                    if (!seedOrHeal && busyHere != null)
                     {
                         InteriorSync.NoteResyncOwed(payload.AddressKey, $"snapshot discarded ({busyHere} here)");
                         Plugin.Logger.LogInfo($"[Patcher] Interior snapshot for '{payload.AddressKey}' DISCARDED — local player mid-edit ({busyHere}); re-ask owed, drained at edit end (Stage 0).");
                         return;   // nothing recorded — an identical re-send stays news (round-281b)
                     }
+                    // Round-227 (repositioned in Stage 3, review M3): the piggybacked speaker state —
+                    // applied FIRST among the bands, so an entering player hears the right station
+                    // before the heavy item apply runs, but BEHIND every refusal above.  The old
+                    // pre-gate call flipped the radio from snapshots this machine then refused —
+                    // non-authoritative replicas of a player business included — with no ownership
+                    // check at all.  A snapshot that is not entitled to assert this building's state
+                    // is not entitled to assert its radio either (THE INVARIANT).  The S4-identical
+                    // skip path above no longer re-asserts the radio: its values were applied when
+                    // the recorded apply completed, and live changes are RadioState's own channel.
+                    try { MPRadioSync.ApplyFromSnapshot(payload.AddressKey, payload.RadioStation, payload.RadioVolume); } catch { }
                     // Stage 0 review MAJOR-3 (the round-281 serialized-then-reverted trap): while the
-                    // DESIGNER is open here, an exempt apply (grantedEdit/SeedOrHeal) must not rewrite
+                    // DESIGNER is open here, an exempt apply (SeedOrHeal) must not rewrite
                     // the design bands — the scene's InteriorElements would revert under the open
                     // designer, and its close would then serialize the REVERTED scene back out as this
                     // player's own edit (worse than losing: it launders the other side's state as the
@@ -1342,7 +1348,7 @@ namespace BigAmbitionsMP
                             // payload → remove" mid-drag deletes it PERMANENTLY while round-48b keeps
                             // the GameObject ("looks placed, data gone"; the toilet stall).  The busy
                             // gate discards routine snapshots, so this guards the never-discardable
-                            // legs (grantedEdit, SeedOrHeal) that can still land mid-drag.  The kept
+                            // SeedOrHeal leg that can still land mid-drag.  The kept
                             // baseline entry keeps the next diff honest.
                             string? dragId = null;
                             try
@@ -1513,18 +1519,15 @@ namespace BigAmbitionsMP
                     InteriorSync.NoteSnapshotApply(payload.AddressKey);   // round-213: re-send-loop detector
                     // Round-281: this apply COMPLETED, so it is now the baseline for both guards —
                     // the S4-lite duplicate test above, and the struct version every incoming cargo
-                    // sync is measured against.  grantedEdit payloads are excluded from the version:
-                    // they come from the guest-edit channel (BuildingInteriorEdit), which is not the
-                    // host's stamped subscriber stream and always carries 0 — recording it would tell
-                    // this machine it holds a structure the host never described.
+                    // sync is measured against.  (Stage 3: with the 140 gone, every payload reaching
+                    // here is host-stream / owner-push / seed-heal traffic, so the version and the
+                    // owed-clear record unconditionally — the grantedEdit exclusions folded away.)
                     // Verification MAJOR-C: an apply whose design bands were withheld is a PARTIAL
                     // apply — recording it as a baseline would let the S4-lite skip absorb the very
                     // re-send that must deliver those bands after the designer closes, and clearing
                     // the owed entry would end the recurrence entirely (an entry serve only repeats
                     // on re-entry).  So: no baseline (the identical answer stays news, round-281b),
-                    // and — for recovery/routine traffic — the address is RE-OWED so the drain
-                    // re-fetches at designer close.  grantedEdit stays un-owed: the guest's dropped
-                    // design edits are the accepted Q2 LWW loss, not missing authoritative state.
+                    // and the address is RE-OWED so the drain re-fetches at designer close.
                     if (skipDesignBands)
                     {
                         appliedFully = false;
@@ -1535,20 +1538,17 @@ namespace BigAmbitionsMP
                         // S4-match the stale baseline, skip, and CLEAR the bands debt unpaid.
                         _lastAppliedSig.Remove(payload.AddressKey);
                         _lastAppliedLocalTag.Remove(payload.AddressKey);
-                        if (!grantedEdit) InteriorSync.NoteResyncOwed(payload.AddressKey, "design bands deferred (designer open here)");
+                        InteriorSync.NoteResyncOwed(payload.AddressKey, "design bands deferred (designer open here)");
                     }
                     if (appliedFully)
                     {
                         _lastAppliedSig[payload.AddressKey]      = applySig;
                         _lastAppliedLocalTag[payload.AddressKey] = LocalInteriorTag(reg);   // what our copy looks like NOW
-                        if (!grantedEdit) _lastAppliedStructVersion[payload.AddressKey] = payload.StructVersion;
+                        _lastAppliedStructVersion[payload.AddressKey] = payload.StructVersion;
                         // Stage 0 review MAJOR-6: the owed entry retires only when an authoritative
                         // apply actually COMPLETES here — never at re-ask time (fire-and-forget lost
-                        // the answer whenever the owner's push deferred or skipped).  grantedEdit does
-                        // NOT clear: a guest replica changing our copy is not the host-fresh state the
-                        // owed entry is waiting for (the host's tracker stamped before broadcast means
-                        // that state would otherwise never come — the M1 no-recurrence hole).
-                        if (!grantedEdit) InteriorSync.ClearResyncOwed(payload.AddressKey);
+                        // the answer whenever the owner's push deferred or skipped).
+                        InteriorSync.ClearResyncOwed(payload.AddressKey);
                     }
                     else
                         Plugin.Logger.LogInfo($"[Patcher] baseline NOT recorded for '{payload.AddressKey}' — " +
@@ -1829,8 +1829,10 @@ namespace BigAmbitionsMP
             if (_deferredDeltaRemoves.Count == 0) return;
             // Verification MINOR-S: no draining while ANY placement is active — the re-convey diffs
             // the whole registration, and a different item's mid-drag pose must not be asserted (the
-            // owner-push path has PlacementQuiesced for exactly this; the diff path gets the same
-            // rule here). The exact game variable, not a proxy; the StopPlacingItem postfix fires
+            // owner-push path has PlacementQuiescedAt for exactly this; the diff path keeps the
+            // broader ANY-drag rule deliberately — reviewed as MINOR-S, and a drain is rare enough
+            // that per-address precision buys nothing). The exact game variable, not a proxy; the
+            // StopPlacingItem postfix fires
             // with this already false, and the 2 s belt re-tries — recurrence-covered.
             try { if (BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode) return; } catch { }
             try
@@ -2410,8 +2412,16 @@ namespace BigAmbitionsMP
         /// caused by this edit — the removes are SUPPRESSED (upserts still convey the edit), the skew
         /// is logged loudly, and the address is owed a re-sync so this machine reconciles toward the
         /// world at edit end. Never send a delta the receiver is contracted to refuse.
+        /// knownRemovedId (grab audit P1, ruling 37): an id the CALLER witnessed being removed (the
+        /// RemoveItemInstanceFromBuilding chokepoint names it) — emitted as a remove op even when
+        /// the guardrails would drop it (no baseline → the diff cannot see removals at all;
+        /// cap-suppression → the grab's remove died with the skew's). A NAMED remove is a
+        /// deliberate statement, not an absence inference, so it is invariant-compliant without a
+        /// baseline; without it those two windows left the owner resurrecting the grabbed item
+        /// (audit F1/F2, the permanently-divergent pair). Ignored if the id is still live or the
+        /// ordinary diff already emitted it.
         /// `reason` on null: "no-changes" (silence — nothing to convey), "no-reg", "threw".</summary>
-        internal static InteriorEditDeltaPayload? BuildLocalEditDelta(string addressKey, out string reason, bool bulkRemovesAllowed = false)
+        internal static InteriorEditDeltaPayload? BuildLocalEditDelta(string addressKey, out string reason, bool bulkRemovesAllowed = false, string? knownRemovedId = null)
         {
             reason = "no-reg";
             try
@@ -2450,6 +2460,17 @@ namespace BigAmbitionsMP
                 }
                 else if (newSer.Count > 0)
                     Plugin.Logger.LogInfo($"[Patcher] edit delta for '{addressKey}': no baseline — seeding with {ops.Count} upsert(s), zero removes (guardrail 1).");
+                if (!string.IsNullOrEmpty(knownRemovedId) && !newSer.ContainsKey(knownRemovedId!))
+                {
+                    bool alreadyEmitted = false;
+                    for (int i = 0; i < ops.Count; i++)
+                        if (ops[i].Kind == "remove" && ops[i].Id == knownRemovedId) { alreadyEmitted = true; break; }
+                    if (!alreadyEmitted)
+                    {
+                        ops.Add(new InteriorItemOp { Kind = "remove", Id = knownRemovedId! });
+                        Plugin.Logger.LogInfo($"[Patcher] edit delta for '{addressKey}': chokepoint-NAMED remove '{knownRemovedId}' added ({(hadBaseline ? "the diff had suppressed it" : "no baseline — the diff could not see it")}); the owner will not resurrect it (audit P1).");
+                    }
+                }
                 _lastItemSer[addressKey] = newSer;
                 if (ops.Count == 0) { reason = "no-changes"; return null; }
                 reason = "ok";
@@ -2494,16 +2515,6 @@ namespace BigAmbitionsMP
                             Plugin.Logger.LogInfo($"[Patcher] designer-close delta for '{addressKey}': no design baseline — all {changed.Count} design(s) travel (update-only, absolute-safe).");
                     }
                 }
-                // PROBE-START: P-DESIGNER-EQ — Stage 2 equivalence probe (design-mandated): what the
-                // delta says vs what a full snapshot would carry, so a diff bug shows as a count
-                // mismatch in any field log. Retires with Stage 3 (140 removal after a clean run).
-                if (p != null)
-                {
-                    int up = 0, rm = 0;
-                    foreach (var op in p.Ops) { if (op?.Kind == "upsert") up++; else if (op?.Kind == "remove") rm++; }
-                    Plugin.Logger.LogInfo($"[PROBE] designer-close equivalence '{addressKey}': delta {up} upsert(s) / {rm} remove(s) / {p.Designs.Count} design(s) vs full {reg?.itemInstances?.Count ?? -1} item(s) / {reg?.interiorDesigns?.Count ?? -1} design(s).");
-                }
-                // PROBE-END: P-DESIGNER-EQ
                 return p;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] BuildDesignerCloseDelta '{addressKey}': {ex.Message}"); return null; }

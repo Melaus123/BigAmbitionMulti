@@ -158,7 +158,10 @@ namespace BigAmbitionsMP
         PermissionBuildingAccess = 137,  // Host → one client: the building addressKeys it may ENTER as a granted housing guest (clients lack a building→owner map).
         BuildingCargoReq    = 138,       // Guest → Host → building owner: take/put on a home interior item's cargo (the fridge). Owner applies to reg.itemInstances.
         BuildingCargoRes    = 139,       // Owner → Host → guest: the verdict (mirrors VehicleCargoRes).
-        BuildingInteriorEdit = 140,      // Guest → Host → building owner: my edited interior snapshot (furniture/flooring from the designer). Owner ADOPTS it (ApplyInteriorSnapshot).
+        // 140 RETIRED (interior-edit Stage 3, 2026-08-25): BuildingInteriorEdit — the guest
+        // WHOLE-REPLICA edit snapshot. Every edit now travels as BuildingInteriorDelta (194);
+        // a guest whole-set assertion is the exact class the 2026-08 design removed. Do not
+        // reuse the number.
         PlayerStaffRoster   = 141,       // Owner → Host → All: the staff roster of one player business (round-30 WS3 — visitors inject these records so the game's own staffing engine can spawn EVERY scheduled worker, not just a synthetic cashier).
         HelperOrderForward  = 142,       // Helper → Host → building owner: an NPC customer order paid on the helper's machine (round-39f Phase 3 slice-2 step-2). Owner claims the entry, deducts stock, records the order.
         CustomerSimAuthority = 143,      // Host → All: which player SIMULATES customers in a given player building (slice 3: register-worker first, else earliest-arrived inside; "" = building empty).
@@ -187,7 +190,7 @@ namespace BigAmbitionsMP
         BuildingsForSale    = 191,       // Host → All (v9, 2026-08 throughput T6): JUST the buy-marketplace list (~15 entries, a few KB). The daily RealEstateHelper refresh used to trigger a FULL ~826-building BusinessSnapshot broadcast (~1 MB/client) to move this one list; now only the list travels. Join snapshots still carry it inside BusinessSnapshot — this type is the steady-state refresh only. Rides Bulk (review M5: shares state with BusinessSnapshot).
         MirrorAck           = 192,       // Client → Host (v9 review B2): "I hold this exact mirrored .hsg" — sent after the file is WRITTEN to the client's store (or already present via the shared-store token). The host's absent-member mirror skip records delivery ONLY on this ack — never at send time, because the paced lane's documented loss recovery is "the next save re-mirrors", which a send-time record would silently delete (character loss on host handoff).
         InteriorDirtSync    = 193,       // v10 (T7, ruling 33): ONE building's dirt VALUES as an ABSOLUTE dirty-set — every lattice spot with dirtiness > 0 as (X, Z, value); every spot NOT listed reads clean. Dirt is cleaning-only data: owner → Host on change (keeps the host cache/save current, ~KBs), Host → ONLY the players physically inside (the subscriber set) — nobody else, nothing when the building is empty. The receiver UPDATES matching lattice entries and zeroes the rest; it never adds or removes entries (the lattice is one fixed entry per floor tile — replacing the list would corrupt the cleanliness average). Rides Bulk (M5: InteriorSnapshot writes the same state).
-        BuildingInteriorDelta = 194,     // v13 (interior-edit Stage 1b, design 2026-08): a PERMITTED EDIT as the ops it actually made — upsert/remove naming exactly the items touched; silence about an id means "no opinion", never "delete" (THE INVARIANT). Editor → Host (grant-gated exactly like 140); Host → owner to adopt, PLUS the same delta to that building's subscribers minus the sender, PLUS an id-keyed graft onto the host's owner cache (Q1) — one delta conveys everyone, retiring the owner's post-adopt full re-push. Absolute per item, idempotent, orderless (no sequence numbers). Receivers apply ops through the SAME ApplyOneItem the full snapshot runs (Stage 1a) and NEVER discard the message (it is the edit's only carrier); the per-item drag/hands rules are the mid-edit protection. A >25-remove delta is refused (a placement/removal forward is 1-3 ops; more means a corrupt diff) — the sender falls back to 140 rather than send one.
+        BuildingInteriorDelta = 194,     // v13 (interior-edit Stage 1b, design 2026-08): a PERMITTED EDIT as the ops it actually made — upsert/remove naming exactly the items touched; silence about an id means "no opinion", never "delete" (THE INVARIANT). Editor → Host (grant-gated: owner, or a Housing/Business grant from the owner); Host → owner to adopt, PLUS the same delta to that building's subscribers minus the sender, PLUS an id-keyed graft onto the host's owner cache (Q1) — one delta conveys everyone, retiring the owner's post-adopt full re-push. Absolute per item, idempotent, orderless (no sequence numbers). Receivers apply ops through the SAME ApplyOneItem the full snapshot runs (Stage 1a) and NEVER discard the message (it is the edit's only carrier); the per-item drag/hands rules are the mid-edit protection. A >25-remove delta without the BulkEdit marker is refused by the receiver (a placement/removal forward is 1-3 ops; more means a corrupt diff), and the BUILDER never emits one: over-cap removes are suppressed at diff time and the address owes a re-sync instead (Stage 1b review MAJOR-O — there is no whole-replica fallback; 140 is retired).
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -1090,7 +1093,13 @@ namespace BigAmbitionsMP
         // relaxes the receiver's remove cap for the session's accumulated edits. A v13 peer sends
         // designer closes as whole-replica 140s a v14 receiver's design expects to retire, and
         // ignores the Designs band on 194; refuse mixed sessions outright.
-        public const int Version = 14;
+        //
+        // v15 (2026-08, interior-edit Stage 3): BuildingInteriorEdit (140) is REMOVED — a v15
+        // build neither sends nor handles it. No v14 peer sends 140 either (its last sender lost
+        // its callers in Stage 2), so this bump is contract hygiene per the clean-break policy
+        // (every wire-contract change bumps) rather than a behavioral incompatibility: the type
+        // set the two sides agree on has changed; refuse mixed sessions outright.
+        public const int Version = 15;
     }
 
     /// <summary>Sent by client on connect.</summary>

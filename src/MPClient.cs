@@ -833,8 +833,14 @@ namespace BigAmbitionsMP
                 }
 
                 case MessageType.RadioState:            // round-227: a building's speaker state
-                    MPRadioSync.Apply(env.GetPayload<RadioStatePayload>(), "from host");
+                {
+                    // Stage 3 review MINOR-X/Y: on the main-thread queue like every other state
+                    // apply — inline it both touched Unity audio off-thread AND could be overtaken
+                    // by a QUEUED snapshot's older radio (the two paths now share one FIFO).
+                    var rs = env.GetPayload<RadioStatePayload>();
+                    if (rs != null) GameStatePatcher.EnqueueOnMainThread(() => MPRadioSync.Apply(rs, "from host"));
                     break;
+                }
 
                 case MessageType.BillboardAds:          // round-290: a partner's billboard campaigns
                     BillboardAdSync.Apply(env.GetPayload<BillboardAdsPayload>());
@@ -1010,13 +1016,6 @@ namespace BigAmbitionsMP
                 {
                     var bde = env.GetPayload<DirtEditPayload>();
                     if (bde != null) GameStatePatcher.EnqueueOnMainThread(() => HelperCleaning.Apply(bde));
-                    break;
-                }
-
-                case MessageType.BuildingInteriorEdit:   // host forwarded a guest's interior edit — I'm the owner: adopt it
-                {
-                    var bie = env.GetPayload<InteriorSnapshotPayload>();
-                    if (bie != null) GameStatePatcher.EnqueueOnMainThread(() => { GameStatePatcher.ApplyInteriorSnapshot(bie, grantedEdit: true); InteriorSync.PushOwnedBuildingNow(bie.AddressKey); }, "interior:" + bie.AddressKey);   // full-state → newest-wins coalescing
                     break;
                 }
 
