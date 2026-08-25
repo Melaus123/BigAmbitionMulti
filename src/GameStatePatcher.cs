@@ -1309,191 +1309,32 @@ namespace BigAmbitionsMP
                             string? heldId = null;
                             try { heldId = PlayerHelper.ItemInstanceInHands?.id; } catch { }
                             _pendingLocalPlacements.TryGetValue(payload.AddressKey, out var pendingPlaced);
-                            foreach (var i in payload.ItemInstances)
+                            // ── STAGE 1a (design 2026-08): PURE EXTRACTION ─────────────────────────
+                            // The ~180-line per-item body now lives in ApplyOneItem below — verbatim
+                            // logic, `continue` → `return`, locals threaded through ItemApplyCtx — so
+                            // Stage 1b's delta path can apply a single item through the IDENTICAL code
+                            // the full-snapshot path runs. NO semantic change in this build.
+                            var itemCtx = new ItemApplyCtx
                             {
-                                if (string.IsNullOrEmpty(i.Id)) continue;
-                                // BLOCKER-1: the ECHO — a payload that CONTAINS the id proves the wire
-                                // has carried our placement; the removal protection retires.
-                                if (pendingPlaced != null && pendingPlaced.Remove(i.Id) && pendingPlaced.Count == 0)
-                                    _pendingLocalPlacements.Remove(payload.AddressKey);
-                                if (heldId != null && i.Id == heldId && !reg.itemInstances.ContainsKey(i.Id))
-                                {
-                                    Plugin.Logger.LogInfo($"[Patcher] hands rule: skipped re-creating '{i.ItemName}' ({i.Id}) in '{payload.AddressKey}' — it is in the local player's hands (Stage 0).");
-                                    continue;   // also kept out of newSer: if it lands back here later, the diff treats it as news
-                                }
-                                string ser = Newtonsoft.Json.JsonConvert.SerializeObject(i);
-                                newSer[i.Id] = ser;
-                                if (lastSer.TryGetValue(i.Id, out var prev) && prev == ser
-                                    && reg.itemInstances.TryGetValue(i.Id, out var live) && live != null)
-                                {
-                                    newDict[i.Id] = live;   // unchanged → keep the live object
-                                    continue;
-                                }
-                                var ii = DeserializeItemInstance(i);
-                                if (ii == null) continue;
-                                // Round-37j — IN-PLACE APPLY (the flatbed model, user-mandated after the 6th
-                                // destroy+respawn bug): deltas that don't change WHAT the item is keep the LIVE
-                                // ItemInstance object — its native callbacks (ShelfController.UpdateVisuals et al,
-                                // wired at Start) and any PlacementSystem references stay valid. IdentitySig is
-                                // 'core#cargo#stacked':
-                                //   whole sig equal            → transform-only  → move in place (round-22);
-                                //   core+stacked equal         → cargo-only      → swap the cargo list on the live
-                                //                                 object + fire the native cargo callback (visuals
-                                //                                 refresh exactly like a local deposit);
-                                //   core or stacked changed    → a genuinely different item → destroy+respawn.
-                                if (reg.itemInstances.TryGetValue(i.Id, out var prevLive) && prevLive != null)
-                                {
-                                    string ns = IdentitySig(i), ls = IdentitySig(prevLive);
-                                    bool transformOnly = ns == ls;
-                                    bool cargoOnly = false, stackedOnly = false;
-                                    if (!transformOnly)
-                                    {
-                                        var np = ns.Split('#'); var lp = ls.Split('#');
-                                        cargoOnly = np.Length == 3 && lp.Length == 3 && np[0] == lp[0] && np[2] == lp[2];
-                                        // Round-278/F3 (field 20260818-222130): an attachment-list-only delta is
-                                        // NOT a different item.  Destroying the parent took its attached children
-                                        // down as Unity collateral — the guest attaching to the host's counter ate
-                                        // the till the counter carried.  The stacked list swaps onto the live
-                                        // object; the child travels under its OWN id and the post-spawn re-link
-                                        // attaches it to this kept parent.
-                                        stackedOnly = !cargoOnly && np.Length == 3 && lp.Length == 3 && np[0] == lp[0] && np[1] == lp[1];
-                                    }
-                                    // Task-28 fix 1: a workstation arriving where a base copy lives (or vice
-                                    // versa) cannot be updated in place — the TYPE is wrong; fall through to
-                                    // destroy+respawn, which heals a previously type-erased copy.
-                                    bool typeMismatch = (ii is FactoryWorkstationInstance) != (prevLive is FactoryWorkstationInstance);
-                                    if (!typeMismatch && (transformOnly || cargoOnly || stackedOnly))
-                                    {
-                                        if (cargoOnly)
-                                        {
-                                            if (receiverOwnsThis)
-                                            {
-                                                cargoShielded++;             // keep the live (owner-true) cargo
-                                            }
-                                            else
-                                            {
-                                                prevLive.cargoInstances = ii.cargoInstances;
-                                                try { prevLive.OnItemsInCargoUpdated()?.Invoke(); } catch { }
-                                                restocked++;
-                                            }
-                                        }
-                                        else if (stackedOnly)
-                                        {
-                                            prevLive.stackedItems = ii.stackedItems;   // round-278/F3: in-place attachment-list update
-                                            stackedInPlace++;
-                                        }
-                                        // Round-86b (user-approved, MEASURED): the move pass's ONLY effects are a
-                                        // controller rebind (same live object → no-op) and a transform set — so when
-                                        // the position/rotation did NOT actually change, there is provably nothing
-                                        // left to do. Bucketing sales (cargo-only deltas) into movedIds opened the
-                                        // itemWork gate and ran the ~120ms whole-scene ItemController scan every 2s
-                                        // in a busy shop. Only a REAL pose delta feeds movedIds now.
-                                        bool posDelta = false;
-                                        try
-                                        {
-                                            posDelta = prevLive.position.x != ii.position.x
-                                                    || prevLive.position.y != ii.position.y
-                                                    || prevLive.position.z != ii.position.z
-                                                    || prevLive.yRotation  != ii.yRotation;
-                                        }
-                                        catch { posDelta = true; }           // can't compare → conservative: full move pass
-                                        prevLive.position  = ii.position;    // data transform follows the wire
-                                        prevLive.yRotation = ii.yRotation;
-                                        // ROUND-137: the drawn queue (customPositions) was FROZEN on every
-                                        // receiver - this branch copied pose+cargo only and the diff hash
-                                        // ignored the field, so each machine kept its own version forever
-                                        // (field-proved: custPos=8 on the placer vs a truncated 4 here, whose
-                                        // lone stored spot then blocked the native rebuild -> a 1-spot till
-                                        // every session).  Copy on change and rebuild the live line.
-                                        try
-                                        {
-                                            var incQ = ii.customPositions;
-                                            if (incQ != null && incQ.Count > 0)
-                                            {
-                                                var curQ = prevLive.customPositions;
-                                                bool qDelta = curQ == null || curQ.Count != incQ.Count;
-                                                if (!qDelta)
-                                                    for (int qi = 0; qi < incQ.Count; qi++)
-                                                    {
-                                                        UnityEngine.Vector3 qa = incQ[qi], qb = curQ[qi];
-                                                        if ((qa - qb).sqrMagnitude > 0.0001f) { qDelta = true; break; }
-                                                    }
-                                                if (qDelta)
-                                                {
-                                                    prevLive.customPositions = incQ;
-                                                    MPRegisterSync.RebuildDrawnQueueAt(
-                                                        new UnityEngine.Vector3(ii.position.x, ii.position.y, ii.position.z), incQ);
-                                                }
-                                            }
-                                            else if (prevLive.customPositions != null && prevLive.customPositions.Count > 0)
-                                            {
-                                                // Task-28 fix 3: the owner's copy holds NO line data (moving-service
-                                                // reset, or a poison-stripped sender) — follow it.  ResetQueueAt
-                                                // rebuilds the live line at its template position and re-nulls the
-                                                // data copy afterwards (Reset's callback writes the rebuilt line
-                                                // back into the instance), so repeated empty pushes are no-ops.
-                                                prevLive.customPositions = null;
-                                                MPRegisterSync.ResetQueueAt(
-                                                    new UnityEngine.Vector3(ii.position.x, ii.position.y, ii.position.z), prevLive);
-                                            }
-                                        }
-                                        catch { }
-                                        // Task-28 fix 3: the dirt footprint follows the wire — native recomputes it
-                                        // only at placement-confirm on the MOVING machine, so the pose-only copy
-                                        // above left ours stale after moves (dirt kept appearing at the item's OLD
-                                        // footprint on the simulating machine).
-                                        try
-                                        {
-                                            var incD = ii.dirtSpotsThatAffects;
-                                            var curD = prevLive.dirtSpotsThatAffects;
-                                            bool dDelta = (incD?.Count ?? 0) != (curD?.Count ?? 0);
-                                            if (!dDelta && incD != null && curD != null)
-                                                for (int di = 0; di < incD.Count; di++)
-                                                    if (incD[di] != curD[di]) { dDelta = true; break; }
-                                            if (dDelta) prevLive.dirtSpotsThatAffects = incD;
-                                        }
-                                        catch { }
-                                        // Task-28 fix 1 (in-place leg): factory config follows the wire on the LIVE
-                                        // instance — a recipe/priority edit needs no respawn.
-                                        try
-                                        {
-                                            if (prevLive is FactoryWorkstationInstance pfw && ii is FactoryWorkstationInstance nfw)
-                                            {
-                                                bool recipeChanged = pfw.selectedRecipeId != nfw.selectedRecipeId;
-                                                if (recipeChanged || pfw.priority != nfw.priority || pfw.produceUpTo != nfw.produceUpTo
-                                                    || pfw.produceUpToValue != nfw.produceUpToValue || pfw.workstationType != nfw.workstationType)
-                                                {
-                                                    pfw.selectedRecipeId = nfw.selectedRecipeId;
-                                                    pfw.priority         = nfw.priority;
-                                                    pfw.produceUpTo      = nfw.produceUpTo;
-                                                    pfw.produceUpToValue = nfw.produceUpToValue;
-                                                    pfw.workstationType  = nfw.workstationType;
-                                                    // Slice-6 review #5: tell the work-tab scan this write is NOT a
-                                                    // user edit — a stale in-flight snapshot could otherwise be routed
-                                                    // back and silently revert the owner's config.
-                                                    try { SharedShopWorkTabs.OnExternalWorkstationWrite(pfw); } catch { }
-                                                    // native tools announce recipe edits with exactly this event; the
-                                                    // assembly controller re-reads its config on it
-                                                    if (recipeChanged) try { GameEvent.Invoke("ba:gameevent_onfactorymachinerecipechanged"); } catch { }
-                                                }
-                                            }
-                                        }
-                                        catch { }
-                                        newDict[i.Id] = prevLive;            // KEEP the live object
-                                        if (posDelta) movedIds.Add(i.Id);    // GameObject transform sync pass
-                                        else cargoOnlyIds.Add(i.Id);         // in-place restock/no-op — nothing to refresh
-                                        continue;
-                                    }
-                                    // Core/stacked changed → respawn below; the shield still applies: the
-                                    // replacement keeps the OWNER's live cargo, not the guest replica's.
-                                    if (receiverOwnsThis)
-                                    {
-                                        ii.cargoInstances = prevLive.cargoInstances;
-                                        cargoShielded++;
-                                    }
-                                }
-                                newDict[i.Id] = ii;
-                                changedIds.Add(i.Id);
+                                Reg = reg, AddressKey = payload.AddressKey,
+                                LastSer = lastSer, NewSer = newSer, NewDict = newDict,
+                                ChangedIds = changedIds, MovedIds = movedIds, CargoOnlyIds = cargoOnlyIds,
+                                HeldId = heldId, PendingPlaced = pendingPlaced,
+                                ReceiverOwnsThis = receiverOwnsThis,
+                            };
+                            try
+                            {
+                                foreach (var i in payload.ItemInstances)
+                                    ApplyOneItem(itemCtx, i);
+                            }
+                            finally
+                            {
+                                // Review MIN-J (purity, exact): pre-move the counters WERE the locals, so a
+                                // thrown apply still logged the partial stackedInPlace count downstream —
+                                // the read-back must survive the throw the same way.
+                                restocked      = itemCtx.Restocked;
+                                cargoShielded  = itemCtx.CargoShielded;
+                                stackedInPlace = itemCtx.StackedInPlace;
                             }
                             // Stage 0 — THE DRAG RULE, data half (referee ADDITION 1): the id being
                             // actively placed is in reg since drag START; placement-confirm only writes
@@ -1725,6 +1566,217 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorSnapshot: {ex.Message}"); }
             });
+        }
+
+        // ── STAGE 1a (design 2026-08): the per-item apply, extracted ─────────────────────────────
+        // PURE extraction of the full-snapshot path's per-item body (verbatim; `continue`→`return`).
+        // The context object threads the caller's per-apply locals through unchanged — collections
+        // are the caller's own references (no copy-back needed); the three counters are read back
+        // after the loop. Stage 1b's BuildingInteriorDelta upserts will call this same method so a
+        // single-item delta and a full snapshot apply one item through IDENTICAL code (round-37j
+        // flatbed model, round-278/F3 stacked lists, round-137 queue, task-28 factory config,
+        // round-38d cargo shield, Stage 0 hands rule + pending-placement echo all included).
+        private sealed class ItemApplyCtx
+        {
+            public BuildingRegistration Reg = null!;
+            public string AddressKey = "";
+            public Dictionary<string, string> LastSer = null!;
+            public Dictionary<string, string> NewSer = null!;
+            public Dictionary<string, BigAmbitions.Items.ItemInstance> NewDict = null!;
+            public HashSet<string> ChangedIds = null!;
+            public HashSet<string> MovedIds = null!;
+            public HashSet<string> CargoOnlyIds = null!;
+            public string? HeldId;
+            public Dictionary<string, float>? PendingPlaced;
+            public bool ReceiverOwnsThis;
+            public int Restocked, CargoShielded, StackedInPlace;
+        }
+
+        private static void ApplyOneItem(ItemApplyCtx ctx, ItemInstanceInfo i)
+        {
+            if (string.IsNullOrEmpty(i.Id)) return;
+            // BLOCKER-1: the ECHO — a payload that CONTAINS the id proves the wire
+            // has carried our placement; the removal protection retires.
+            if (ctx.PendingPlaced != null && ctx.PendingPlaced.Remove(i.Id) && ctx.PendingPlaced.Count == 0)
+                _pendingLocalPlacements.Remove(ctx.AddressKey);
+            if (ctx.HeldId != null && i.Id == ctx.HeldId && !ctx.Reg.itemInstances.ContainsKey(i.Id))
+            {
+                Plugin.Logger.LogInfo($"[Patcher] hands rule: skipped re-creating '{i.ItemName}' ({i.Id}) in '{ctx.AddressKey}' — it is in the local player's hands (Stage 0).");
+                return;   // also kept out of newSer: if it lands back here later, the diff treats it as news
+            }
+            string ser = Newtonsoft.Json.JsonConvert.SerializeObject(i);
+            ctx.NewSer[i.Id] = ser;
+            if (ctx.LastSer.TryGetValue(i.Id, out var prev) && prev == ser
+                && ctx.Reg.itemInstances.TryGetValue(i.Id, out var live) && live != null)
+            {
+                ctx.NewDict[i.Id] = live;   // unchanged → keep the live object
+                return;
+            }
+            var ii = DeserializeItemInstance(i);
+            if (ii == null) return;
+            // Round-37j — IN-PLACE APPLY (the flatbed model, user-mandated after the 6th
+            // destroy+respawn bug): deltas that don't change WHAT the item is keep the LIVE
+            // ItemInstance object — its native callbacks (ShelfController.UpdateVisuals et al,
+            // wired at Start) and any PlacementSystem references stay valid. IdentitySig is
+            // 'core#cargo#stacked':
+            //   whole sig equal            → transform-only  → move in place (round-22);
+            //   core+stacked equal         → cargo-only      → swap the cargo list on the live
+            //                                 object + fire the native cargo callback (visuals
+            //                                 refresh exactly like a local deposit);
+            //   core or stacked changed    → a genuinely different item → destroy+respawn.
+            if (ctx.Reg.itemInstances.TryGetValue(i.Id, out var prevLive) && prevLive != null)
+            {
+                string ns = IdentitySig(i), ls = IdentitySig(prevLive);
+                bool transformOnly = ns == ls;
+                bool cargoOnly = false, stackedOnly = false;
+                if (!transformOnly)
+                {
+                    var np = ns.Split('#'); var lp = ls.Split('#');
+                    cargoOnly = np.Length == 3 && lp.Length == 3 && np[0] == lp[0] && np[2] == lp[2];
+                    // Round-278/F3 (field 20260818-222130): an attachment-list-only delta is
+                    // NOT a different item.  Destroying the parent took its attached children
+                    // down as Unity collateral — the guest attaching to the host's counter ate
+                    // the till the counter carried.  The stacked list swaps onto the live
+                    // object; the child travels under its OWN id and the post-spawn re-link
+                    // attaches it to this kept parent.
+                    stackedOnly = !cargoOnly && np.Length == 3 && lp.Length == 3 && np[0] == lp[0] && np[1] == lp[1];
+                }
+                // Task-28 fix 1: a workstation arriving where a base copy lives (or vice
+                // versa) cannot be updated in place — the TYPE is wrong; fall through to
+                // destroy+respawn, which heals a previously type-erased copy.
+                bool typeMismatch = (ii is FactoryWorkstationInstance) != (prevLive is FactoryWorkstationInstance);
+                if (!typeMismatch && (transformOnly || cargoOnly || stackedOnly))
+                {
+                    if (cargoOnly)
+                    {
+                        if (ctx.ReceiverOwnsThis)
+                        {
+                            ctx.CargoShielded++;         // keep the live (owner-true) cargo
+                        }
+                        else
+                        {
+                            prevLive.cargoInstances = ii.cargoInstances;
+                            try { prevLive.OnItemsInCargoUpdated()?.Invoke(); } catch { }
+                            ctx.Restocked++;
+                        }
+                    }
+                    else if (stackedOnly)
+                    {
+                        prevLive.stackedItems = ii.stackedItems;   // round-278/F3: in-place attachment-list update
+                        ctx.StackedInPlace++;
+                    }
+                    // Round-86b (user-approved, MEASURED): the move pass's ONLY effects are a
+                    // controller rebind (same live object → no-op) and a transform set — so when
+                    // the position/rotation did NOT actually change, there is provably nothing
+                    // left to do. Bucketing sales (cargo-only deltas) into movedIds opened the
+                    // itemWork gate and ran the ~120ms whole-scene ItemController scan every 2s
+                    // in a busy shop. Only a REAL pose delta feeds movedIds now.
+                    bool posDelta = false;
+                    try
+                    {
+                        posDelta = prevLive.position.x != ii.position.x
+                                || prevLive.position.y != ii.position.y
+                                || prevLive.position.z != ii.position.z
+                                || prevLive.yRotation  != ii.yRotation;
+                    }
+                    catch { posDelta = true; }           // can't compare → conservative: full move pass
+                    prevLive.position  = ii.position;    // data transform follows the wire
+                    prevLive.yRotation = ii.yRotation;
+                    // ROUND-137: the drawn queue (customPositions) was FROZEN on every
+                    // receiver - this branch copied pose+cargo only and the diff hash
+                    // ignored the field, so each machine kept its own version forever
+                    // (field-proved: custPos=8 on the placer vs a truncated 4 here, whose
+                    // lone stored spot then blocked the native rebuild -> a 1-spot till
+                    // every session).  Copy on change and rebuild the live line.
+                    try
+                    {
+                        var incQ = ii.customPositions;
+                        if (incQ != null && incQ.Count > 0)
+                        {
+                            var curQ = prevLive.customPositions;
+                            bool qDelta = curQ == null || curQ.Count != incQ.Count;
+                            if (!qDelta)
+                                for (int qi = 0; qi < incQ.Count; qi++)
+                                {
+                                    UnityEngine.Vector3 qa = incQ[qi], qb = curQ[qi];
+                                    if ((qa - qb).sqrMagnitude > 0.0001f) { qDelta = true; break; }
+                                }
+                            if (qDelta)
+                            {
+                                prevLive.customPositions = incQ;
+                                MPRegisterSync.RebuildDrawnQueueAt(
+                                    new UnityEngine.Vector3(ii.position.x, ii.position.y, ii.position.z), incQ);
+                            }
+                        }
+                        else if (prevLive.customPositions != null && prevLive.customPositions.Count > 0)
+                        {
+                            // Task-28 fix 3: the owner's copy holds NO line data (moving-service
+                            // reset, or a poison-stripped sender) — follow it.  ResetQueueAt
+                            // rebuilds the live line at its template position and re-nulls the
+                            // data copy afterwards (Reset's callback writes the rebuilt line
+                            // back into the instance), so repeated empty pushes are no-ops.
+                            prevLive.customPositions = null;
+                            MPRegisterSync.ResetQueueAt(
+                                new UnityEngine.Vector3(ii.position.x, ii.position.y, ii.position.z), prevLive);
+                        }
+                    }
+                    catch { }
+                    // Task-28 fix 3: the dirt footprint follows the wire — native recomputes it
+                    // only at placement-confirm on the MOVING machine, so the pose-only copy
+                    // above left ours stale after moves (dirt kept appearing at the item's OLD
+                    // footprint on the simulating machine).
+                    try
+                    {
+                        var incD = ii.dirtSpotsThatAffects;
+                        var curD = prevLive.dirtSpotsThatAffects;
+                        bool dDelta = (incD?.Count ?? 0) != (curD?.Count ?? 0);
+                        if (!dDelta && incD != null && curD != null)
+                            for (int di = 0; di < incD.Count; di++)
+                                if (incD[di] != curD[di]) { dDelta = true; break; }
+                        if (dDelta) prevLive.dirtSpotsThatAffects = incD;
+                    }
+                    catch { }
+                    // Task-28 fix 1 (in-place leg): factory config follows the wire on the LIVE
+                    // instance — a recipe/priority edit needs no respawn.
+                    try
+                    {
+                        if (prevLive is FactoryWorkstationInstance pfw && ii is FactoryWorkstationInstance nfw)
+                        {
+                            bool recipeChanged = pfw.selectedRecipeId != nfw.selectedRecipeId;
+                            if (recipeChanged || pfw.priority != nfw.priority || pfw.produceUpTo != nfw.produceUpTo
+                                || pfw.produceUpToValue != nfw.produceUpToValue || pfw.workstationType != nfw.workstationType)
+                            {
+                                pfw.selectedRecipeId = nfw.selectedRecipeId;
+                                pfw.priority         = nfw.priority;
+                                pfw.produceUpTo      = nfw.produceUpTo;
+                                pfw.produceUpToValue = nfw.produceUpToValue;
+                                pfw.workstationType  = nfw.workstationType;
+                                // Slice-6 review #5: tell the work-tab scan this write is NOT a
+                                // user edit — a stale in-flight snapshot could otherwise be routed
+                                // back and silently revert the owner's config.
+                                try { SharedShopWorkTabs.OnExternalWorkstationWrite(pfw); } catch { }
+                                // native tools announce recipe edits with exactly this event; the
+                                // assembly controller re-reads its config on it
+                                if (recipeChanged) try { GameEvent.Invoke("ba:gameevent_onfactorymachinerecipechanged"); } catch { }
+                            }
+                        }
+                    }
+                    catch { }
+                    ctx.NewDict[i.Id] = prevLive;            // KEEP the live object
+                    if (posDelta) ctx.MovedIds.Add(i.Id);    // GameObject transform sync pass
+                    else ctx.CargoOnlyIds.Add(i.Id);         // in-place restock/no-op — nothing to refresh
+                    return;
+                }
+                // Core/stacked changed → respawn below; the shield still applies: the
+                // replacement keeps the OWNER's live cargo, not the guest replica's.
+                if (ctx.ReceiverOwnsThis)
+                {
+                    ii.cargoInstances = prevLive.cargoInstances;
+                    ctx.CargoShielded++;
+                }
+            }
+            ctx.NewDict[i.Id] = ii;
+            ctx.ChangedIds.Add(i.Id);
         }
 
         // ── Round-281: cargo sync (receiver) ──────────────────────────────────────────────────────
