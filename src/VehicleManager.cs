@@ -786,6 +786,24 @@ namespace BigAmbitionsMP
                         if (rv.Go.activeSelf == maskVeh)
                         {
                             rv.Go.SetActive(!maskVeh);
+                            // Review 2026-08-24 (ROOT of field 20260821-180203, "cart stuck in hands"):
+                            // SetActive(false) fires native VehicleController.OnDisable → Unregister-
+                            // PlayerVehicle, and registration happens ONLY in Awake — so a hidden-then-
+                            // shown DRIVABLE ghost stayed out of AllPlayerVehicles for the rest of the
+                            // session, and GetCurrentVehicleBase() returned null while a player pushed
+                            // it (the whole NRE family, plus every consumer in the class entry). Re-
+                            // register on show: the native method dupe-guards, non-drivable ghosts have
+                            // no controller to find, and BAMP_ ids are already excluded from fleet
+                            // reads and the owned-interior mask, so nothing leaks anywhere else.
+                            if (!maskVeh)
+                            {
+                                try
+                                {
+                                    var shownVc = rv.Go.GetComponentInChildren<VehicleController>(true);
+                                    if (shownVc != null) VehicleHelper.RegisterPlayerVehicle(shownVc);
+                                }
+                                catch { }
+                            }
                             Plugin.Logger.LogInfo(
                                 $"[InteriorMask] ghost '{e.TypeName}' ({e.VehicleId}) {(maskVeh ? "hidden" : "shown")} — " +
                                 $"tag='{e.Bldg}' mine='{MPRegisterSync.CurrentShopAddress}' possessed={iPossessIt}.");
@@ -1508,6 +1526,36 @@ namespace BigAmbitionsMP
         /// Flatbed(Clone)', and run-7 proved controlledByPlayer stays FALSE for pushed carts, which
         /// is why the mask ejected a cart from the pusher's hands: SetActive(false) on a possessed
         /// cart breaks the native possession, 2026-07-07 user report).</summary>
+        // ── Field 20260821-180203 (the borrowed-cart class, two live NREs): SCOPED ghost
+        // resolution for VehicleHelper.GetCurrentVehicleBase. Ghosts are deliberately outside
+        // AllPlayerVehicles, so the native resolver returns null while a player possesses a
+        // borrowed cart — and two native consumers deref it: ItemController.SecondaryInteract's
+        // `.vehicleType.spawnInPlayerObject` gate (crashed on EVERY right-click) and
+        // PlacementHelper.CancelPlacementMode → ItemPanelUI.SetVehicle → VehicleInfoPanel.
+        // Initialize (crashed mid-cancel — "cart stuck in hands"). Round-289 (user decision)
+        // removed a GLOBAL resolver answer as a landmine; this is the class-guidance narrow
+        // form: the substitution happens ONLY inside the named consumer windows (the depth
+        // brackets in HousingPatches), same call-scoped pattern as RaiseTenancy/LowerTenancy.
+        // MAIN THREAD only.
+        internal static int GhostResolveDepth;
+
+        /// <summary>The ghost the LOCAL player is currently pushing/driving, if any — the
+        /// drivable (granted) ghosts keep their VehicleController (possession detection and
+        /// native enter/exit already use it).</summary>
+        internal static VehicleController? LocalPossessedGhostController()
+        {
+            try
+            {
+                foreach (var rv in _remoteVehicles.Values)
+                {
+                    if (rv?.Go == null || !PossessedByLocal(rv.Go)) continue;
+                    return rv.Go.GetComponentInChildren<VehicleController>(true);
+                }
+            }
+            catch { }
+            return null;
+        }
+
         internal static bool PossessedByLocal(UnityEngine.GameObject go)
         {
             if (go == null) return false;
@@ -1733,6 +1781,7 @@ namespace BigAmbitionsMP
                 _remoteVehicles.Clear();
                 _orphanPossessed.Clear();   // round-109: episodes die with the ghosts (per-session, not per-process)
                 _pendingGhostReconcile = false;
+                GhostResolveDepth = 0;      // review M5: a leaked bracket must not outlive the session (round-106 statics lesson)
                 return;
             }
             var survivors = kept.Where(_remoteVehicles.ContainsKey)

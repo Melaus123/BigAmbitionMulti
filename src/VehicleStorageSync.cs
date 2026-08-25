@@ -186,13 +186,43 @@ namespace BigAmbitionsMP
             try
             {
                 if (PassengerSync.IsLocked(req.VehicleId) && !GrantSync.IsGranted(MPConfig.PlayerId, req.PlayerId)) { res.Reason = "locked"; return res; }   // locked storage opens only to a granted key-holder (authoritative backstop)
+                VehicleInstance? found = null;
                 var list = VehicleHelper.AllPlayerVehicles;
-                if (list == null) return res;
-
-                for (int i = 0; i < list.Count; i++)
+                if (list != null)
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        var vi = list[i]?.vehicleInstance;
+                        if (vi != null && vi.id == req.VehicleId) { found = vi; break; }
+                    }
+                // Field 20260821-180203: AllPlayerVehicles is the LIVE controller list — a cart
+                // left inside an interior the owner doesn't have loaded has NO live object on the
+                // owner's machine ("data-follow"), so every borrower TAKE/PUT on it failed "gone"
+                // and reverted. The fallback is GameInstance.VehicleInstances — the SAME
+                // VehicleInstance objects live controllers hold (CreateAndSpawnVehicle adds the
+                // one instance to both), so live-first vs data-first find one identical record and
+                // every mutation below works without a spawned controller. Review M4 correction:
+                // the fleet broadcast reads the LIVE list only, so a dormant mutation is NOT
+                // re-broadcast until the owner next loads that address — convergent regardless,
+                // because the borrower's replica already holds the change and nothing re-syncs to
+                // revert it; the owner's next spawn of the vehicle builds from this record.
+                if (found == null)
                 {
-                    var inst = list[i]?.vehicleInstance;
-                    if (inst == null || inst.id != req.VehicleId) continue;
+                    var dataList = SaveGameManager.Current?.VehicleInstances;
+                    if (dataList != null)
+                        for (int i = 0; i < dataList.Count; i++)
+                        {
+                            var vi = dataList[i];
+                            if (vi != null && vi.id == req.VehicleId)
+                            {
+                                found = vi;
+                                Plugin.Logger.LogInfo($"[VStore] owner apply on '{req.VehicleId}': no live object — using the data record (dormant vehicle).");
+                                break;
+                            }
+                        }
+                }
+                if (found != null)
+                {
+                    var inst = found;
 
                     if (req.Op == OpTake)
                     {
@@ -250,7 +280,6 @@ namespace BigAmbitionsMP
                         if (inst.TryToAddToCargo(ci)) { res.Ok = true; res.Reason = ""; }
                         else res.Reason = "full";
                     }
-                    break;   // found the vehicle — done either way
                 }
                 // The cargo change re-syncs to every ghost through VehicleManager's normal fleet broadcast.
                 if (res.Ok)

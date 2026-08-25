@@ -233,8 +233,69 @@ namespace BigAmbitionsMP
         // includeHelper (round-32): a business HELPER gets the right-click move/pick-up menu too — the move
         // completes through the placement forward and a pick-up through the removal forward, both helper-
         // aware. Right-click offers placement actions only, so the brief flip can't reach the economy paths.
-        static void Prefix()    { HousingFurniture.Enter(includeHelper: true); }
-        static void Finalizer() { HousingFurniture.Exit(); }
+        // Field 20260821-180203: the ghost-resolve scope opens here too — the native body derefs
+        // GetCurrentVehicleBase().vehicleType while possessing a BORROWED cart (null → NRE on every
+        // right-click). Depth INCREMENTS FIRST (review M5: the prefix runs inside Harmony's try when
+        // a finalizer exists — if Enter threw after a later increment, the finalizer's decrement
+        // would drive the depth negative and permanently disable the resolver).
+        static void Prefix()    { VehicleManager.GhostResolveDepth++; HousingFurniture.Enter(includeHelper: true); }
+        static void Finalizer() { if (VehicleManager.GhostResolveDepth > 0) VehicleManager.GhostResolveDepth--; HousingFurniture.Exit(); }
+    }
+
+    /// <summary>Field 20260821-180203 ("cart stuck in hands and cant let go after placing desk
+    /// from cart"): ending a placement runs CancelPlacementMode → ItemPanelUI.SetVehicle(
+    /// GetCurrentVehicleBase()) → VehicleInfoPanel.Initialize — null while possessing a borrowed
+    /// cart, and the NRE aborted the cancel MID-WAY, wedging the cart in the player's hands.
+    /// Open the scoped ghost resolve for the duration so the chain gets the possessed ghost's
+    /// real controller (its vehicleType is set by the normal spawn path).</summary>
+    [HarmonyPatch(typeof(Buildings.Indoors.InteriorDesign.PlacementHelper), nameof(Buildings.Indoors.InteriorDesign.PlacementHelper.CancelPlacementMode))]
+    public static class Patch_CancelPlacementMode_GhostResolveScope
+    {
+        static void Prefix()    { VehicleManager.GhostResolveDepth++; }
+        static void Finalizer() { if (VehicleManager.GhostResolveDepth > 0) VehicleManager.GhostResolveDepth--; }   // review M5: clamped
+    }
+
+    /// <summary>Same field bundle, the scoped resolver itself: inside a named consumer window
+    /// (depth > 0), a null current-vehicle answer while the local player possesses a ghost is
+    /// substituted with that ghost's controller. Round-289 removed the GLOBAL version of this
+    /// answer as a landmine (every native caller would suddenly see ghost controllers); the
+    /// depth gate confines it to the two consumers the field crashes named.</summary>
+    [HarmonyPatch(typeof(Helpers.VehicleHelper), nameof(Helpers.VehicleHelper.GetCurrentVehicleBase))]
+    public static class Patch_GetCurrentVehicleBase_ScopedGhostResolve
+    {
+        private static float _nextLogAt;
+        static void Postfix(ref VehicleController __result)
+        {
+            if (__result != null || VehicleManager.GhostResolveDepth <= 0) return;
+            var g = VehicleManager.LocalPossessedGhostController();
+            if (g == null) return;
+            __result = g;
+            if (UnityEngine.Time.unscaledTime >= _nextLogAt)
+            {
+                _nextLogAt = UnityEngine.Time.unscaledTime + 30f;
+                Plugin.Logger.LogInfo("[Vehicle] scoped ghost resolve: GetCurrentVehicleBase answered with the possessed ghost (field 20260821-180203; throttled 30s).");
+            }
+        }
+    }
+
+    /// <summary>Belt for the same chain, placed where it actually helps (review B2/B3): the
+    /// guard must sit on ItemPanelUI.SetVehicle, not VehicleInfoPanel.Initialize — SetVehicle
+    /// derefs the vehicle again right after the Initialize call, so guarding only Initialize
+    /// moved the NRE one line down. Worse, Initialize's FIRST line writes GameManager.
+    /// selectedVehicle — a null there is the real "can't let go" wedge: every release path
+    /// (the release key, the Park button, Unstuck) silently no-ops while selectedVehicle is
+    /// null. Skipping the whole SetVehicle on a null keeps the previous selectedVehicle (the
+    /// vehicle being used) intact. The PassengerLockButton postfix on this method already
+    /// null-checks, so skipping the original is safe.</summary>
+    [HarmonyPatch(typeof(UI.ItemPanel.ItemPanelUI), nameof(UI.ItemPanel.ItemPanelUI.SetVehicle))]
+    public static class Patch_ItemPanelUI_SetVehicle_NullGuard
+    {
+        static bool Prefix(VehicleController vehicle)
+        {
+            if (vehicle != null && vehicle.vehicleType != null) return true;
+            Plugin.Logger.LogWarning($"[Vehicle] ItemPanelUI.SetVehicle skipped: {(vehicle == null ? "vehicle is null" : "vehicleType is null")} (field 20260821-180203 — selectedVehicle keeps its previous value; release paths stay alive).");
+            return false;
+        }
     }
 
     /// <summary>Shared residency — FRIDGE interception. A granted guest's fridge actions must change the

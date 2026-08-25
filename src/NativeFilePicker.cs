@@ -38,9 +38,22 @@ namespace BigAmbitionsMP
                     "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $d.FileNames | Set-Content -LiteralPath '" + outLiteral + "' -Encoding UTF8 }\n";
                 File.WriteAllText(ps1, script);
 
+                // Field 20260821-181447: with UseShellExecute=false the bare name resolves against
+                // the GAME PROCESS's PATH, and on that machine (Steam-launched, pt-BR Windows) it
+                // wasn't there — "O sistema não pode encontrar o arquivo especificado". The System32
+                // path is fixed on every Windows; the bare name stays as the fallback.
+                string psExe = "powershell.exe";
+                try
+                {
+                    string sys = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                        @"System32\WindowsPowerShell\v1.0\powershell.exe");
+                    if (File.Exists(sys)) psExe = sys;
+                }
+                catch { }
                 var psi = new ProcessStartInfo
                 {
-                    FileName        = "powershell.exe",
+                    FileName        = psExe,
                     Arguments       = "-NoProfile -ExecutionPolicy Bypass -Sta -WindowStyle Hidden -File \"" + ps1 + "\"",
                     UseShellExecute = false,
                     CreateNoWindow  = true,
