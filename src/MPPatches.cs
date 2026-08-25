@@ -4364,75 +4364,81 @@ namespace BigAmbitionsMP
         public static class Patch_ItemController_TryToGrabItem_ForeignShopGate
         {
             private static int _logged;
-            // Round-269 (field 20260816-101747, approved 2026-08-18): the ALLOWED foreign
-            // grabs (Business grant / merger flip) still ran native-local only — the owner's
-            // next push restored the item and a granted partner could repeat-sell it (the
-            // same mint the gate blocks for strangers). Stash the identity in the Prefix
-            // (the native body may remove the reg entry), convey in the Postfix.
-            private static string? _grabAddr, _grabId, _grabName;
 
-            static bool Prefix(ItemController __instance, ref bool __result)
+            /// <summary>The one foreign-grab refusal decision (grab audit P3 extracted it so the
+            /// in-vehicle gate below cannot drift from this one): refuse when the current building
+            /// is another player's business and the local player holds neither a Business grant
+            /// from its owner nor a merger flip on it.</summary>
+            internal static bool RefusedForeignGrab(out string owner)
             {
-                _grabAddr = _grabId = _grabName = null;
+                owner = "";
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return false;
                     var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
-                    if (reg == null || !GameStatePatcher.IsForeignPlayerBusiness(reg)) return true;
-                    string owner = MPRegisterSync.CurrentShopOwner;
+                    if (reg == null || !GameStatePatcher.IsForeignPlayerBusiness(reg)) return false;
+                    owner = MPRegisterSync.CurrentShopOwner;
                     if (string.IsNullOrEmpty(owner)) { try { owner = reg.businessOwnerRivalId?.ToString() ?? ""; } catch { } }
                     bool granted = !string.IsNullOrEmpty(owner) && GrantSync.IsGranted(GrantKind.Business, owner, MPConfig.PlayerId);
                     bool flipped = false;
                     try { flipped = MergerFlip.IsFlipped(GameStateReader.AddressKey(reg)); } catch { }
-                    if (granted || flipped)
-                    {
-                        try
-                        {
-                            _grabAddr = GameStateReader.AddressKey(reg);
-                            _grabId   = __instance?.ItemInstance?.id;
-                            _grabName = __instance?.ItemInstance?.itemName ?? "";
-                        }
-                        catch { }
-                        return true;
-                    }
+                    return !(granted || flipped);
+                }
+                catch { return false; }   // never break native pickup on a guard error
+            }
+
+            internal static void RefusalToast(string owner, string where)
+            {
+                PassengerHud.Toast($"This belongs to {(string.IsNullOrEmpty(owner) ? "another player" : owner)} — you need permission to take items here.");
+                if (_logged++ < 10)
+                    Plugin.Logger.LogInfo($"[PickupGate] grab refused at {where} (owner '{owner}', no Business grant).");
+            }
+
+            static bool Prefix(ItemController __instance, ref bool __result)
+            {
+                try
+                {
+                    if (!RefusedForeignGrab(out string owner)) return true;
                     __result = false;
-                    PassengerHud.Toast($"This belongs to {(string.IsNullOrEmpty(owner) ? "another player" : owner)} — you need permission to take items here.");
-                    if (_logged++ < 10)
-                        Plugin.Logger.LogInfo($"[PickupGate] grab refused in '{reg.BusinessName}' (owner '{owner}', no Business grant).");
+                    RefusalToast(owner, "'" + (InstanceBehavior<BuildingManager>.Instance?.buildingRegistration?.BusinessName ?? "?") + "'");
                     return false;
                 }
                 catch { return true; }   // never break native pickup on a guard error
             }
 
-            static void Postfix(bool __result)
+            // GRAB AUDIT P2 (ruling 37, 2026-08-25): the round-269 GuestCargoGrab SENDER is RETIRED.
+            // The removal chokepoint's delta forward now carries a chokepoint-NAMED remove that
+            // survives the no-baseline and cap-suppression windows (BuildLocalEditDelta
+            // knownRemovedId) — the one job this second channel actually performed. Audit findings
+            // that sealed it: ordering-equivalent to the delta (same lane, same FIFO apply queue —
+            // never an ordering guarantee); applier strictly weaker (no parent stackedItems fix-up,
+            // no lineage guard, no mid-drag defer); its StockOnly branch was UNREACHABLE (every
+            // TryToGrabItem success passes the removal first, so stillThere was always false). The
+            // message type and both receive-side appliers stay for older-peer compatibility.
+        }
+
+        // GRAB AUDIT P3 (2026-08-25): the round-269 gate covered TryToGrabItem, but
+        // ItemController.Interact has an UNGATED in-vehicle branch (:509-528, EA 0.11): sitting in
+        // a vehicle inside a foreign business, a click on an alwaysinteractable item moves its
+        // cargo STRAIGHT into the vehicle and removes the item — no grant check anywhere on the
+        // path, the same local-only mint the gate exists to block (live dup exploit at drive-in
+        // buildings). Same refusal decision, same toast, extracted from the gate so the two can
+        // never drift.
+        [HarmonyPatch(typeof(ItemController), nameof(ItemController.Interact))]
+        public static class Patch_ItemController_Interact_ForeignVehicleGate
+        {
+            static bool Prefix(ItemController __instance, ref bool __result)
             {
-                string? addr = _grabAddr, id = _grabId, name = _grabName;
-                _grabAddr = _grabId = _grabName = null;
-                if (!__result || string.IsNullOrEmpty(addr) || string.IsNullOrEmpty(id)) return;
                 try
                 {
-                    // Which native semantic ran? A shelf-stock take DRAINS the shelf but keeps
-                    // the instance in the reg; a box/item grab removes it. Mirror exactly —
-                    // deleting the owner's shelf for a stock take would be its own bug.
-                    bool stillThere = false;
-                    try
-                    {
-                        var reg = GameStatePatcher.FindRegistration(addr!);
-                        if (reg?.itemInstances != null)
-                            foreach (var kv in reg.itemInstances)
-                                if (kv.Value?.id == id) { stillThere = true; break; }
-                    }
-                    catch { }
-                    var p = new GuestCargoGrabPayload
-                    {
-                        AddressKey = addr!, ItemInstanceId = id!, ItemName = name ?? "",
-                        StockOnly = stillThere, TakerPid = MPConfig.PlayerId,
-                    };
-                    if (MPServer.IsRunning) MPServer.HandleGuestCargoGrab(MPConfig.PlayerId, p);
-                    else MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.GuestCargoGrab, MPConfig.PlayerId, p));
-                    Plugin.Logger.LogInfo($"[PickupGate] granted grab conveyed: '{name}' ({(stillThere ? "stock drained" : "item removed")}) at '{addr}' (round-269).");
+                    if (!PlayerHelper.IsUsingVehicle) return true;               // the ungated branch needs a vehicle
+                    if (!(__instance?.Item?.HasTag(BigAmbitions.Tags.TagRef.Itemtag.alwaysinteractable) ?? false)) return true;
+                    if (!Patch_ItemController_TryToGrabItem_ForeignShopGate.RefusedForeignGrab(out string owner)) return true;
+                    __result = true;   // consumed — nothing moves
+                    Patch_ItemController_TryToGrabItem_ForeignShopGate.RefusalToast(owner, "the in-vehicle pickup");
+                    return false;
                 }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[PickupGate] grab convey: {ex.Message}"); }
+                catch { return true; }   // never break native interaction on a guard error
             }
         }
 
