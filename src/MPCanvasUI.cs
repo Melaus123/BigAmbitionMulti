@@ -509,6 +509,11 @@ namespace BigAmbitionsMP
                     if (_dock != null && _dock.activeSelf) { _dock.SetActive(false); Plugin.Logger.LogInfo("[Lifecycle] left world — rest dock force-hidden."); }
                     if (_hub != null && !_hubNative && _hub.activeSelf) { _hub.SetActive(false); _hubVisible = false; }
                     if (_joinPop != null && _joinPop.activeSelf) _joinPop.SetActive(false);
+                    // The loiter button's tick stops outside the world (TickPositionSync gate),
+                    // so it can never hide itself — same survival hole as the dock above.
+                    if (_loiterBtn != null && _loiterBtn.activeSelf) _loiterBtn.SetActive(false);
+                    if (_loiterTip != null && _loiterTip.activeSelf) _loiterTip.SetActive(false);
+                    _loiterUiHover = false;
                 }
                 catch { }
             }
@@ -932,7 +937,7 @@ namespace BigAmbitionsMP
             // SOLE OWNER of the input-suppression flag: computed fresh every
             // frame from live contributions — a stale latch once locked a
             // player's keyboard permanently (2026-06-10).
-            MPChat.SuppressGameInput = _chatSuppress || _restUiHover || _hubUiHover || _joinPopHover || _crashReportPopupVisible;
+            MPChat.SuppressGameInput = _chatSuppress || _restUiHover || _loiterUiHover || _hubUiHover || _joinPopHover || _crashReportPopupVisible;
             // Player-movement / click-to-move block — owned here (LateUpdate runs every frame, even
             // when the MP window is closed) so the bug-report/crash popup blocks input like the chat does.
             SyncChatNavBlock(_chatSuppress || _crashReportPopupVisible);
@@ -1209,8 +1214,139 @@ namespace BigAmbitionsMP
             "Entertain" => "relaxing",
             "Hygiene" => "showering",
             "Swimming" => "swimming",
+            "loitering" => "Loitering",   // standing skip vote (wording user-approved 2026-08-26)
             _ => string.IsNullOrEmpty(a) ? "resting" : a.ToLowerInvariant(),
         };
+
+        // ── Loitering button (user feature 2026-08-26): bottom-left HUD toggle that
+        // opens the rest dock in "Loitering" mode — a skip vote from anywhere, no
+        // seat required, no needs benefit. Icon: assets\BAMP_LoiterIcon.png (user
+        // artwork); tooltip wording user-approved. RectHit pattern like the dock. ──
+        private GameObject? _loiterBtn; private RectTransform? _loiterBtnRT;
+        private GameObject? _loiterTip;
+        private GameObject? _loiterRing;   // active-state frame (user 2026-08-26: the icon stays SOLID always; no alpha states)
+        private bool _loiterUiHover;
+        private bool _loiterBuildFailed;  // review MINOR-6: a build throw must not retry every frame
+
+        private void TickLoiterButton()
+        {
+            try
+            {
+                _loiterUiHover = false;   // recomputed below; EVERY early return must leave it false
+                // Review finding-7: duck under native fullscreen surfaces (the same set the game's
+                // own CityMapCam composes) so the icon never floats over the map/menus.
+                bool nativeFullscreen = false;
+                try { nativeFullscreen = UI.Smartphone.FullMenu.IsOpen || UI.MiniMenu.MiniMenu.IsOpen || CityMap.IsOpen || Scenes.MainMenu.Options.IsVisible; } catch { }
+                bool show = IsInGame() && (MPServer.IsRunning || MPClient.IsConnected) && !nativeFullscreen;
+                if (_loiterBtn == null)
+                {
+                    if (!show || _canvasGO == null || _loiterBuildFailed) return;
+                    try { BuildLoiterButton(); }
+                    catch (Exception bex)
+                    {
+                        _loiterBuildFailed = true;
+                        // Review N3 + ring round N2: a throw AFTER _loiterBtn (or the tip) was
+                        // created would leave a half-built, hit-testable rect and make this latch
+                        // unreachable — tear everything down fully.
+                        try { if (_loiterBtn != null) Destroy(_loiterBtn); } catch { }
+                        try { if (_loiterTip != null) Destroy(_loiterTip); } catch { }
+                        _loiterBtn = null; _loiterTip = null; _loiterRing = null;
+                        Plugin.Logger.LogWarning($"[Rest] loiter button build failed (giving up): {bex.Message}");
+                    }
+                    if (_loiterBtn == null) return;
+                }
+                if (_loiterBtn!.activeSelf != show) _loiterBtn.SetActive(show);
+                if (!show) { if (_loiterTip != null && _loiterTip.activeSelf) _loiterTip.SetActive(false); return; }
+
+                // User field ruling 2026-08-26: the icon is SOLID at all times — no alpha states.
+                // The active indicator is the purple frame ring behind the tile instead.
+                if (_loiterRing != null && _loiterRing.activeSelf != MPRestSync.Loitering)
+                    _loiterRing.SetActive(MPRestSync.Loitering);
+
+                var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+                bool hover = RectHit(_loiterBtnRT, mp);
+                _loiterUiHover = hover;
+                if (_loiterTip != null && _loiterTip.activeSelf != hover) _loiterTip.SetActive(hover);
+                if (!hover || !Input.GetMouseButtonDown(0)) return;
+                if (MPRestSync.SeatedForUi)
+                {
+                    // The seated dock already owns the vote UI — one line so the click isn't silent.
+                    Plugin.Logger.LogInfo("[Rest] loiter button ignored — seated (the dock owns the vote).");
+                    return;
+                }
+                MPRestSync.SetLoitering(!MPRestSync.Loitering);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] loiter button: {ex.Message}"); }
+        }
+
+        private void BuildLoiterButton()
+        {
+            var go = MakeGO("BAMP_LoiterBtn", _canvasGO!.transform);
+            _loiterBtn = go;
+            _loiterBtnRT = go.GetComponent<RectTransform>();
+            _loiterBtnRT.anchorMin = _loiterBtnRT.anchorMax = _loiterBtnRT.pivot = new Vector2(0f, 0f);
+            _loiterBtnRT.sizeDelta = new Vector2(44f, 44f);
+            // Review MINOR-5 + ring round N5: the MOD's version tag (which leaks into the in-game
+            // view and is what the user sees there) spans y 50-74 at this x — the RING's 4px
+            // overhang (bottom edge y-4) must clear it too, so the button sits at 82.
+            _loiterBtnRT.anchoredPosition = new Vector2(14f, 82f);
+
+            // Child [0]: the active-state RING — first sibling so it renders BEHIND the icon.
+            // (User field ruling: the icon itself is solid always; state lives in this frame.)
+            _loiterRing = MakeGO("Ring", go.transform);
+            var rrt = _loiterRing.GetComponent<RectTransform>();
+            rrt.anchorMin = Vector2.zero; rrt.anchorMax = Vector2.one;
+            rrt.pivot = new Vector2(0.5f, 0.5f);   // ring round N4: symmetric overhang by statement, not by default
+            rrt.sizeDelta = new Vector2(8f, 8f);   // 4px frame on every side
+            rrt.anchoredPosition = Vector2.zero;
+            var ringImg = _loiterRing.AddComponent<Image>();
+            ringImg.color = new Color(0.66f, 0.56f, 0.85f, 1f);   // the icon's purple, solid
+            // Ring round N1: a bare Image is a SQUARE plate and the icon tile has rounded
+            // corners — use the same rounded-corner source every mod panel uses.
+            var ringSp = EnsureRoundedSprite();
+            if (ringSp != null) { try { ringImg.sprite = ringSp; ringImg.type = Image.Type.Sliced; } catch { } }
+            ringImg.raycastTarget = false;   // ring round N3: the 4px overhang must not eat world clicks
+            _loiterRing.SetActive(false);
+
+            // Child [1]: the icon itself — always solid.
+            var iconGo = MakeGO("Icon", go.transform);
+            var irt = iconGo.GetComponent<RectTransform>();
+            irt.anchorMin = Vector2.zero; irt.anchorMax = Vector2.one;
+            irt.sizeDelta = Vector2.zero; irt.anchoredPosition = Vector2.zero;
+            var img = iconGo.AddComponent<Image>();
+            var sp = MPPhoneButton.LoadIconFile("BAMP_LoiterIcon.png");
+            if (sp != null) { img.sprite = sp; img.preserveAspect = true; }
+            else
+            {
+                // Icon missing on disk — the feature still works: plain dark tile + letter.
+                img.color = new Color(0.16f, 0.17f, 0.22f, 1f);
+                var lbl = MakeGO("Lbl", iconGo.transform);
+                var lrt = lbl.GetComponent<RectTransform>();
+                lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one; lrt.sizeDelta = Vector2.zero;
+                var lt = lbl.AddComponent<TextMeshProUGUI>();
+                lt.text = "L"; lt.fontSize = 22; lt.alignment = TextAlignmentOptions.Center;
+                ApplyFont(lt);
+            }
+
+            _loiterTip = MakeGO("BAMP_LoiterTip", _canvasGO.transform);
+            var trt = _loiterTip.GetComponent<RectTransform>();
+            trt.anchorMin = trt.anchorMax = trt.pivot = new Vector2(0f, 0f);
+            trt.sizeDelta = new Vector2(214f, 24f);
+            trt.anchoredPosition = new Vector2(14f, 132f);   // above the button AND its ring overhang, never under the cursor
+            var tbg = _loiterTip.AddComponent<Image>();
+            tbg.color = new Color(0.07f, 0.08f, 0.11f, 0.92f);
+            var ttxt = MakeGO("Txt", _loiterTip.transform);
+            var ttrt = ttxt.GetComponent<RectTransform>();
+            ttrt.anchorMin = Vector2.zero; ttrt.anchorMax = Vector2.one;
+            ttrt.sizeDelta = new Vector2(-12f, 0f); ttrt.anchoredPosition = Vector2.zero;
+            var tt = ttxt.AddComponent<TextMeshProUGUI>();
+            tt.text = "Loitering — vote to skip time";   // wording user-approved 2026-08-26
+            tt.fontSize = 13; tt.alignment = TextAlignmentOptions.MidlineLeft;
+            tt.color = new Color(0.92f, 0.93f, 0.98f, 1f);
+            ApplyFont(tt);
+            _loiterTip.SetActive(false);
+            Plugin.Logger.LogInfo($"[Rest] loiter button built (icon {(sp != null ? "loaded" : "MISSING — letter fallback")}).");
+        }
 
         // ── Rest dock (v7) — chat-program styling, centered "Rest until".
         // Left: who-voted checklist (+match).  Center: day (amber when not
@@ -1265,7 +1401,11 @@ namespace BigAmbitionsMP
                 // dock instantly. The delay never PREVENTS the dock — AvatarInActivity reads the game's
                 // live state, so once seated it reliably shows.
                 bool inActivity = MPRestSync.SeatedForUi;
-                bool show = inActivity && MPRestSync.AvatarInActivity();
+                // Loitering (user feature 2026-08-26): the dock also opens for a standing skip
+                // session. Seated mode WINS — UpdateSeated clears the flag on sit-down, this is
+                // just the same-frame tiebreak.
+                bool loiter = MPRestSync.Loitering && !inActivity;
+                bool show = (inActivity && MPRestSync.AvatarInActivity()) || loiter;
                 _restUiHover = false;   // recomputed below; EVERY early return must leave it false
 
                 // ESCAPE HATCH — independent of any UI existing: movement keys
@@ -1293,7 +1433,7 @@ namespace BigAmbitionsMP
                 bool voting = MPRestSync.LocalVoteActive;
 
                 if (_dockTitle != null)
-                    _dockTitle.text = NiceActivity(MPRestSync.ActivityName);
+                    _dockTitle.text = loiter ? "Loitering" : NiceActivity(MPRestSync.ActivityName);   // title wording user-approved 2026-08-26
 
                 // The X is UNCONDITIONAL: it used to mirror the game's
                 // per-state cancel-button list, which blinks during activity
@@ -1393,7 +1533,13 @@ namespace BigAmbitionsMP
                 if (!Input.GetMouseButtonDown(0) || !_restUiHover) return;
 
                 if (_dockXRT != null && RectHit(_dockXRT, mp))
-                { MPRestSync.StandUp(); return; }   // StandUp prefers the game's cancel button, falls back otherwise
+                {
+                    // Loiterers have no activity to stand from — the X ends the loiter session
+                    // (which drops the vote). Seated: unchanged.
+                    if (loiter) MPRestSync.SetLoitering(false);
+                    else        MPRestSync.StandUp();   // StandUp prefers the game's cancel button, falls back otherwise
+                    return;
+                }
 
                 if (RectHit(_dockHdrRT, mp))
                 { _dockDragging = true; _dockDragLast = mp; return; }
@@ -3685,11 +3831,26 @@ namespace BigAmbitionsMP
 
         private void TickPositionSync()
         {
-            if (!IsInGame()) return;
+            // Review 2026-08-26 MAJOR-1: _loiterUiHover is set only inside TickLoiterButton, which
+            // dies with the gates below — a disconnect with the cursor on the button would latch
+            // SuppressGameInput (WASD + driving dead) with nothing left running to clear it.
+            // Reset BEFORE the gates; TickLoiterButton recomputes it when it runs.
+            _loiterUiHover = false;
+            if (!IsInGame())
+            {
+                if (_loiterTip != null && _loiterTip.activeSelf) _loiterTip.SetActive(false);
+                if (_loiterBtn != null && _loiterBtn.activeSelf) _loiterBtn.SetActive(false);   // review N2: no dead raycast zone after a mid-world disconnect
+                return;
+            }
             // Everything below is multiplayer machinery (sync ticks + MP UI ticks).
             // It must NOT run in single-player — it was leaking ~12ms/frame with
             // 100ms+ spikes into SP (perf log 2026-06-14).  One gate covers it all.
-            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            if (!MPServer.IsRunning && !MPClient.IsConnected)
+            {
+                if (_loiterTip != null && _loiterTip.activeSelf) _loiterTip.SetActive(false);
+                if (_loiterBtn != null && _loiterBtn.activeSelf) _loiterBtn.SetActive(false);   // review N2: no dead raycast zone after a mid-world disconnect
+                return;
+            }
 
             // (Discovery-probe block removed 2026-06-12 dead-code sweep: all
             //  verified log-only with missions complete — see .modding/04-probes.md.)
@@ -3705,6 +3866,7 @@ namespace BigAmbitionsMP
             MPServer.TickFencePrune();    // excuse menu-bailed clients from the load fence
             TickRestBanner();
             TickRestUI();
+            TickLoiterButton();           // loitering: standing skip vote (user feature 2026-08-26)
             MPHubNativePage.Tick();       // "Business" in the native full menu
             // (spawn sidestep moved to the WorldReady event — OnLifecyclePhase)
             TickJoinPopup();              // host approval panel for mid-game joiners

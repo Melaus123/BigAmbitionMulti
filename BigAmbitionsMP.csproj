@@ -122,6 +122,7 @@
     <Copy SourceFiles="$(TargetDir)LiteNetLib.dll" DestinationFolder="$(ModDeployDir)Dependencies\" ContinueOnError="true" />
     <Copy Condition="Exists('$(ProjectDir)assets\BAMP_ChatIcon.png')" SourceFiles="$(ProjectDir)assets\BAMP_ChatIcon.png" DestinationFolder="$(ModDeployDir)assets\" ContinueOnError="true" />
     <Copy Condition="Exists('$(ProjectDir)assets\BAMP_HubIcon.png')" SourceFiles="$(ProjectDir)assets\BAMP_HubIcon.png" DestinationFolder="$(ModDeployDir)assets\" ContinueOnError="true" />
+    <Copy Condition="Exists('$(ProjectDir)assets\BAMP_LoiterIcon.png')" SourceFiles="$(ProjectDir)assets\BAMP_LoiterIcon.png" DestinationFolder="$(ModDeployDir)assets\" ContinueOnError="true" />
     <Copy Condition="Exists('$(ProjectDir)assets\preview.png')" SourceFiles="$(ProjectDir)assets\preview.png" DestinationFolder="$(ModDeployDir)" ContinueOnError="true" />
     <!-- MIT notices must travel with the bundled Harmony/LiteNetLib binaries —
          the deployed folder is also the Workshop upload source. -->

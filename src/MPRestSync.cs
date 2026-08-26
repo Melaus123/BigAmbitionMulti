@@ -182,6 +182,24 @@ namespace BigAmbitionsMP
         private static float  _nextPollAt;
 
         public static bool LocalVoteActive => _localVoteActive;
+
+        // ── Loitering (user feature 2026-08-26): a skip vote WITHOUT a seat ──────
+        // The bottom-left HUD button (MPCanvasUI) toggles this; the dock opens in
+        // "Loitering" mode and SetSkipRequest accepts the vote standing up. Votes are
+        // unchanged on the wire — the host never validated seatedness; the Activity
+        // field carries the display string "loitering". Sitting down CONVERTS the
+        // session to the seated contract (flag clears, the vote carries — user ruling
+        // #2); WASD never cancels a loiterer (they are allowed to walk — ruling #1).
+        public static bool Loitering { get; private set; }
+
+        public static void SetLoitering(bool on)
+        {
+            if (on == Loitering) return;
+            Loitering = on;
+            Plugin.Logger.LogInfo($"[Rest] loitering {(on ? "ON" : "OFF")}.");
+            if (!on && _localVoteActive && !Seated) SetSkipRequest(false);        // the loiter vote dies with its session
+            else if (on && _localVoteActive) SendVote(true, _localGoal, "loitering");   // review MINOR-8: a vote carried INTO loitering re-labels for everyone
+        }
         public static double LocalGoal     => _localGoal;
 
         /// <summary>The live activity object (null when not seated) — lets
@@ -214,6 +232,7 @@ namespace BigAmbitionsMP
         public static void Reset()
         {
             Seated = false; ActivityName = ""; ActivityState = -1;
+            Loitering = false;
             DockButtons.Clear();
             _localVoteActive = false; _localGoal = 0;
             _machine = null;
@@ -298,11 +317,11 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo("[Rest] skip request OFF.");
                 return;
             }
-            if (!Seated)
+            if (!Seated && !Loitering)
             {
                 // Never swallow a player's commit silently (Goonie report, 2026-07-09): a click landing
                 // in a seated-flag flicker was indistinguishable from "never clicked" in the logs.
-                Plugin.Logger.LogInfo("[Rest] skip request IGNORED — not seated at click time.");
+                Plugin.Logger.LogInfo("[Rest] skip request IGNORED — not seated (and not loitering) at click time.");
                 return;
             }
             double now = NowMinutes();
@@ -310,9 +329,10 @@ namespace BigAmbitionsMP
             goalMinutes = Math.Ceiling(goalMinutes / 5.0) * 5.0;
             _localGoal = goalMinutes;
             _localVoteActive = true;
-            EnsureActivityCovers(goalMinutes);   // game must not auto-stand us mid-vote
-            SendVote(true, goalMinutes, ActivityName);
-            Plugin.Logger.LogInfo($"[Rest] skip request ON: until {Fmt(goalMinutes)} ({ActivityName}).");
+            if (Seated) EnsureActivityCovers(goalMinutes);   // game must not auto-stand us mid-vote; a loiterer has no activity to extend
+            string act = Seated ? ActivityName : "loitering";
+            SendVote(true, goalMinutes, act);
+            Plugin.Logger.LogInfo($"[Rest] skip request ON: until {Fmt(goalMinutes)} ({act}).");
         }
 
 
@@ -876,10 +896,12 @@ namespace BigAmbitionsMP
                 EnsureActivityCovers(NowMinutes() + need + 10);
             }
 
-            // Vote lifecycle: standing up (or losing the activity) drops it.
+            // Vote lifecycle: standing up (or losing the activity) drops it — unless the
+            // vote is a LOITER vote, which lives standing by definition (its lifecycle is
+            // SetLoitering: the button, the dock's X, or sitting-down conversion).
             if (_localVoteActive)
             {
-                if (!Seated)
+                if (!Seated && !Loitering)
                 {
                     _localVoteActive = false;
                     SendVote(false, 0, "");
@@ -889,8 +911,10 @@ namespace BigAmbitionsMP
                 {
                     _localVoteActive = false;
                     SendVote(false, 0, "");
-                    Plugin.Logger.LogInfo("[Rest] vote OFF (goal time reached) — standing up.");
-                    StandUp();   // wake at the chosen time, like vanilla — movement restored
+                    Plugin.Logger.LogInfo($"[Rest] vote OFF (goal time reached){(Seated ? " — standing up" : "")}.");
+                    // Review MINOR-3: a loiterer has nothing to stand from — the old unconditional
+                    // call routed into a STALE CancelButtonIndex from the last seat.
+                    if (Seated) StandUp();   // wake at the chosen time, like vanilla — movement restored
                 }
             }
 
@@ -909,6 +933,14 @@ namespace BigAmbitionsMP
                 if (seated != Seated)
                     Plugin.Logger.LogInfo($"[Rest] seated → {seated}{(seated ? $" ({nm})" : "")}");
                 Seated = seated;
+                bool loiterConverted = false;
+                if (seated && Loitering)
+                {
+                    // Ruling #2: sitting down converts loitering to the seated contract — the
+                    // vote carries; the dock re-titles itself; standing now cancels normally.
+                    Loitering = false; loiterConverted = true;
+                    Plugin.Logger.LogInfo("[Rest] loitering → seated (vote carries; seated rules apply).");
+                }
                 _curAct = seated ? act : null;
                 _curActRef = _curAct;   // Mono: object identity replaces pointer identity
                 if (!seated) _buttonsReadStackLogged = false;   // round-266: re-arm the one-shot stack per activity
@@ -916,6 +948,10 @@ namespace BigAmbitionsMP
                 ActivityName = seated ? nm : "";
                 ActivityState = -1;
                 DockButtons.Clear();
+                CancelButtonIndex = -1;   // review MINOR-3: never leave a stale index from the last seat
+                // Review MAJOR-2: the carried vote still says "loitering" on every OTHER machine —
+                // re-send it under the real activity now that ActivityName is current.
+                if (loiterConverted && _localVoteActive) SendVote(true, _localGoal, ActivityName);
                 if (!seated) return;
 
                 // (Instant-study removed 2026-06-12: superseded by the honorary-
