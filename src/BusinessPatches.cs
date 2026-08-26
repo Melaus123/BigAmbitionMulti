@@ -668,10 +668,18 @@ namespace BigAmbitionsMP
                         }
                         if (PlayerHelper.IsHoldingItem || PlayerHelper.IsUsingVehicle)
                         { PassengerHud.Toast("Empty your hands to take that."); return; }
-                        // Sealed boxes ride "boxtake" (whole instance + nested contents); loose stacks
-                        // ride the generic take (the fridge path).
-                        BuildingStorageSync.RequestTake(addr, itemId, name, amount, paid, price, isSealed ? "boxtake" : "");
-                        Plugin.Logger.LogInfo($"[Business] helper {(isSealed ? "box" : "stack")} take {name}×{amount} @'{addr}' → routed to owner.");
+                        // "Moves whole" rides "boxtake" (whole instance + nested contents); loose
+                        // stacks ride the generic take (the fridge path). F-2026-08-25-I
+                        // (user-approved + field-confirmed): the predicate is sealed OR
+                        // nested-bearing — a filled UNSEALED bag routed through the generic take
+                        // had its contents annihilated (TakeLoose reduces 1→0, nested never
+                        // echoed). Nested is STATE, read LIVE at click (sealed is type-derived,
+                        // safe to capture).
+                        bool bundle = false;
+                        try { bundle = first.nestedCargoInstances != null && first.nestedCargoInstances.Count > 0; } catch { }
+                        bool whole = isSealed || bundle;
+                        BuildingStorageSync.RequestTake(addr, itemId, name, amount, paid, price, whole ? "boxtake" : "");
+                        Plugin.Logger.LogInfo($"[Business] helper {(whole ? (isSealed ? "box" : "bundle") : "stack")} take {name}×{amount} @'{addr}' → routed to owner.");
                         try { InstanceBehavior<UI.UIs>.Instance.playerHUD.manageCargoUI.Close(); } catch { }
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] take route: {ex.Message}"); }

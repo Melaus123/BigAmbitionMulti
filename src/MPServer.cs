@@ -1942,6 +1942,20 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.TrunkDetailReq:   // v17: borrower wants a trunk's full cargo detail
+                {
+                    var tq = env.GetPayload<TrunkDetailReqPayload>();
+                    if (tq != null) HandleTrunkDetailReq(tq, senderPid);
+                    break;
+                }
+
+                case MessageType.TrunkDetailRes:
+                {
+                    var tr = env.GetPayload<TrunkDetailResPayload>();
+                    if (tr != null) HandleTrunkDetailRes(tr, senderPid);
+                    break;
+                }
+
                 case MessageType.HelperOrderForward:
                 {
                     var ho = env.GetPayload<HelperOrderPayload>();
@@ -2921,6 +2935,51 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Store] HandleStorageOp: {ex.Message}"); }
+        }
+
+        /// <summary>v17 trunk detail broker — the same routing shape as HandleStorageOp's vehicle
+        /// branch (ruling 38: the host resolves the owner itself; no sender-supplied owner).</summary>
+        public static void HandleTrunkDetailReq(TrunkDetailReqPayload req, string senderPid)
+        {
+            try
+            {
+                if (req == null || string.IsNullOrEmpty(req.VehicleId)) return;
+                if (!SenderIs(req.PlayerId, senderPid, MessageType.TrunkDetailReq)) return;
+                string ownerPid = PassengerSync.OwnerOf(req.VehicleId);
+                if (string.IsNullOrEmpty(ownerPid))
+                {
+                    Plugin.Logger.LogWarning($"[Store] trunk detail on '{req.VehicleId}' dropped — the host has no owner on record for it.");
+                    return;
+                }
+                if (ownerPid == MPConfig.PlayerId)
+                {
+                    GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        var res = StorageSync.BuildTrunkDetail(req);
+                        if (res.PlayerId == MPConfig.PlayerId) StorageSync.OnTrunkDetail(res);   // host is also the accessor
+                        else SendHubTo(res.PlayerId, MessageType.TrunkDetailRes, res);
+                    });
+                }
+                else
+                {
+                    SendHubTo(ownerPid, MessageType.TrunkDetailReq, req);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Store] HandleTrunkDetailReq: {ex.Message}"); }
+        }
+
+        /// <summary>v17: a vehicle owner answered a trunk-detail request — relay to the requester.</summary>
+        public static void HandleTrunkDetailRes(TrunkDetailResPayload res, string senderPid)
+        {
+            try
+            {
+                if (res == null || string.IsNullOrEmpty(res.PlayerId)) return;
+                if (res.PlayerId == MPConfig.PlayerId)
+                    GameStatePatcher.EnqueueOnMainThread(() => StorageSync.OnTrunkDetail(res));   // host is the accessor
+                else
+                    SendHubTo(res.PlayerId, MessageType.TrunkDetailRes, res);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Store] HandleTrunkDetailRes: {ex.Message}"); }
         }
 
         /// <summary>A container owner answered a storage op — relay the verdict to the accessor.

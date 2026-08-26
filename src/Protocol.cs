@@ -195,6 +195,8 @@ namespace BigAmbitionsMP
         BuildingInteriorDelta = 194,     // v13 (interior-edit Stage 1b, design 2026-08): a PERMITTED EDIT as the ops it actually made — upsert/remove naming exactly the items touched; silence about an id means "no opinion", never "delete" (THE INVARIANT). Editor → Host (grant-gated: owner, or a Housing/Business grant from the owner); Host → owner to adopt, PLUS the same delta to that building's subscribers minus the sender, PLUS an id-keyed graft onto the host's owner cache (Q1) — one delta conveys everyone, retiring the owner's post-adopt full re-push. Absolute per item, idempotent, orderless (no sequence numbers). Receivers apply ops through the SAME ApplyOneItem the full snapshot runs (Stage 1a) and NEVER discard the message (it is the edit's only carrier); the per-item drag/hands rules are the mid-edit protection. A >25-remove delta without the BulkEdit marker is refused by the receiver (a placement/removal forward is 1-3 ops; more means a corrupt diff), and the BUILDER never emits one: over-cap removes are suppressed at diff time and the address owes a re-sync instead (Stage 1b review MAJOR-O — there is no whole-replica fallback; 140 is retired).
         StorageOp             = 195,     // Accessor → Host → container owner (v16, storage unification): ONE storage operation — take/put/markpaid/setstock with a container discriminator (building addr+itemId | vehicle id) and the retired channels' ctx literals verbatim. Host resolves the owner itself (ruling 38) and grant-gates building ops; the owner's machine is the sole authority and re-verifies.
         StorageRes            = 196,     // Owner → Host → accessor: the verdict (Ok, Reason, owner-truth echoes per ctx policy, nested contents for sealed-box ops).
+        TrunkDetailReq        = 197,     // Accessor → Host → vehicle owner (v17, F-2026-08-25-I proposal 2): "send me the FULL cargo detail of this trunk" — fired when the borrower OPENS the storage panel (and again when the fleet manifest moves while it is open). Event-driven, no steady-state cost; the 4-field broadcast manifest stays the fallback row source.
+        TrunkDetailRes        = 198,     // Owner → Host → accessor: every cargo instance with real paid/price AND nested contents (THE codec) — the borrower's panel renders the native card shapes the owner sees (sealed contents label, bundle tooltip) and every stack past the manifest's 24-instance cap. Display-only on the receiver: rows feed the panel, never game state (Gameplay lane is correct — no Bulk-written state is touched).
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -762,6 +764,44 @@ namespace BigAmbitionsMP
         public string Reason       { get; set; } = "";
     }
 
+    /// <summary>v17 (F-2026-08-25-I proposal 2): a borrower asks the vehicle owner for the FULL
+    /// cargo detail of one trunk — fired on panel open and on manifest movement while open.
+    /// Routed exactly like StorageOp's vehicle branch: host resolves the owner (ruling 38).</summary>
+    public class TrunkDetailReqPayload
+    {
+        public string VehicleId { get; set; } = "";   // REAL id (no BAMP_ prefix)
+        public string PlayerId  { get; set; } = "";   // the requesting accessor
+        public string Sig       { get; set; } = "";   // the requester's manifest signature at ask time —
+                                                      // OPAQUE to the owner, echoed back verbatim so the
+                                                      // answer can be matched to ITS request (review
+                                                      // MINOR-B: without it, an answer to an older ask
+                                                      // could be accepted as fresh under a newer one).
+    }
+
+    /// <summary>One cargo instance, display-grade: real paid/price plus nested contents through
+    /// THE codec (CargoNestedInfo). Never applied to game state — feeds the borrower's panel.</summary>
+    public class CargoDetailInfo
+    {
+        public string ItemName     { get; set; } = "";
+        public int    Amount       { get; set; }
+        public bool   Paid         { get; set; } = true;
+        public float  PricePerUnit { get; set; }
+        public List<CargoNestedInfo> Nested { get; set; } = new();
+    }
+
+    /// <summary>v17: the owner's answer — every instance in the trunk, uncapped (the broadcast
+    /// manifest's 24-instance cap does not apply here). Ok=false means "could not serve"
+    /// (locked to this requester / vehicle unknown) — the panel keeps its manifest fallback and
+    /// must NOT render an empty trunk from a refusal.</summary>
+    public class TrunkDetailResPayload
+    {
+        public string VehicleId { get; set; } = "";
+        public string PlayerId  { get; set; } = "";
+        public string Sig       { get; set; } = "";   // the request's Sig, echoed verbatim (MINOR-B)
+        public bool   Ok        { get; set; }
+        public List<CargoDetailInfo> Rows { get; set; } = new();
+    }
+
     /// <summary>One player business's staff roster (round-30 WS3). The synced work shifts
     /// (BusinessSync ScheduleDayInfo.WorkShifts) already carry the REAL employee ids per station+hour;
     /// the only thing other machines lack is the employee RECORDS those ids point to. Receivers inject a
@@ -1101,7 +1141,13 @@ namespace BigAmbitionsMP
         // owner itself (ruling 38) — the retired sender-supplied OwnerId is gone from the wire.
         // A v15 peer sends types a v16 build no longer handles and lacks 195/196 entirely;
         // refuse mixed sessions outright.
-        public const int Version = 16;
+        //
+        // v17 (2026-08-25, F-2026-08-25-I proposal 2 — trunk display parity): TrunkDetailReq/Res
+        // (197/198) added — on-open full cargo detail for borrowed trunks (real paid/price +
+        // nested contents via THE codec), so the borrower's panel renders the same card shapes
+        // the owner's native window shows (sealed contents label, bundle tooltip, stacks past
+        // the manifest's 24 cap). A v16 peer lacks both types; refuse mixed sessions outright.
+        public const int Version = 17;
     }
 
     /// <summary>Sent by client on connect.</summary>

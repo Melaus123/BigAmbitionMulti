@@ -949,6 +949,24 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.TrunkDetailReq:   // v17: host forwarded a borrower's detail ask — I'm the vehicle owner
+                {
+                    var tq = env.GetPayload<TrunkDetailReqPayload>();
+                    if (tq != null) GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        var res = StorageSync.BuildTrunkDetail(tq);
+                        MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.TrunkDetailRes, MPConfig.PlayerId, res));
+                    });
+                    break;
+                }
+
+                case MessageType.TrunkDetailRes:   // the trunk detail I asked for — I'm the accessor
+                {
+                    var tr = env.GetPayload<TrunkDetailResPayload>();
+                    if (tr != null) GameStatePatcher.EnqueueOnMainThread(() => StorageSync.OnTrunkDetail(tr));
+                    break;
+                }
+
                 case MessageType.HelperOrderForward:   // host forwarded a helper-hosted sale — I'm the building owner
                 {
                     var ho = env.GetPayload<HelperOrderPayload>();

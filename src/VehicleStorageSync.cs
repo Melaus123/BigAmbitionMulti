@@ -174,6 +174,18 @@ namespace BigAmbitionsMP
             });
         }
 
+        /// <summary>v17 (proposal 2): ask the owner for the trunk's FULL cargo detail — fired by
+        /// the panel on open and on manifest movement while open. Event-driven; the answer feeds
+        /// display only (StorageSync.OnTrunkDetail → panel), never game state.</summary>
+        public static void RequestTrunkDetail(string realVehicleId, string sig)
+        {
+            if (string.IsNullOrEmpty(realVehicleId)) return;
+            StorageSync.DebugWireCheck();   // MINOR-G: a detail-only session still self-tests its wire
+            var req = new TrunkDetailReqPayload { VehicleId = realVehicleId, PlayerId = MPConfig.PlayerId, Sig = sig ?? "" };
+            if (MPServer.IsRunning) MPServer.HandleTrunkDetailReq(req, MPConfig.PlayerId);
+            else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.TrunkDetailReq, MPConfig.PlayerId, req));
+        }
+
         // ── Borrowed-cart shopping (Option A, user-approved 2026-07-07) ──────────────────────────
         // MIRROR of a native cargo mutation that already ran on the possessed pushed proxy: replay the
         // same change on the owner's REAL vehicle, fire-and-forget (Silent — the accessor consumed/placed

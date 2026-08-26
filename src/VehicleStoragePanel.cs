@@ -42,6 +42,13 @@ namespace BigAmbitionsMP
 
         private static Mode _mode = Mode.List;
         private static string _vid = "", _owner = "", _sig = "";
+
+        // ── v17 trunk detail (proposal 2, display parity): the owner's FULL cargo answer.
+        // _detailRows = the current rows (null → manifest fallback); _detailSig = the manifest
+        // signature the rows were accepted under (manifest moved → rows stale → drop + re-ask);
+        // _detailPendingSig = the signature a request is in flight for (one ask per state).
+        private static System.Collections.Generic.List<CargoDetailInfo>? _detailRows;
+        private static string _detailSig = "", _detailPendingSig = "";
         private static System.Action _enterCb;
 
         public static bool IsOpen => _vid != "";
@@ -52,6 +59,7 @@ namespace BigAmbitionsMP
             if (!_built) Build();
             if (_canvas == null) return;
             _vid = vid; _owner = ownerId ?? ""; _enterCb = enterCb; _mode = Mode.Choice;
+            _detailRows = null; _detailSig = ""; _detailPendingSig = "";   // fresh session, fresh detail
             if (!CloneMenu())   // exact native menu; on failure, fall back to the hand-built one
             {
                 SizePanel(440f, 250f);
@@ -214,19 +222,83 @@ namespace BigAmbitionsMP
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[VStore] CloneCargo: {ex.Message}"); _cargoClone = null; return false; }
         }
 
+        // Review MINOR-F: the wrapper contains the file's documented failure class — a
+        // compile-time binding resolving to a runtime-absent overload throws at JIT/prepare time
+        // in the ENCLOSING frame, and Tick would re-surface it per movement. The body sets _sig
+        // first, so a throw cannot re-fire every frame either way.
         private static void PopulateCargo()
+        {
+            try { PopulateCargoBody(); }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[VStore] PopulateCargo: {ex.Message}"); }
+        }
+
+        /// <summary>Risky native-label bindings live ONLY in this non-inlined helper (review
+        /// MINOR-F, the :492 GetLocalization precedent): if the running build lacks the
+        /// GetItemLabel overload, the JIT failure surfaces at THIS call's site — inside the
+        /// callers' try/catch — instead of killing whole render frames.</summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static object? ItemLabelOrNull(string itemName, int amount)
+        {
+            try { return LocalizationHelper.GetItemLabel(itemName, amount); } catch { return null; }
+        }
+
+        private static void PopulateCargoBody()
         {
             if (_cargoClone == null || _cargoContent == null || _cargoTemplate == null) return;
             _sig = Sig();
+            // v17 detail freshness (proposal 2): the manifest moved → any held detail is stale —
+            // drop it (manifest fallback below) and ask the owner again. Event-driven: requests
+            // fire only here (open + manifest movement), never on a timer; a lost response simply
+            // leaves the manifest rendering until the next movement or reopen.
+            if (_detailRows != null && _detailSig != _sig) _detailRows = null;
+            if (_detailRows == null && _detailPendingSig != _sig)
+            {
+                _detailPendingSig = _sig;
+                // The sig rides the ask and is echoed back verbatim (review MINOR-B) — the answer
+                // is matched to ITS request, so an answer to an older ask can never pass as fresh.
+                try { VehicleStorageSync.RequestTrunkDetail(_vid, _sig); } catch { }
+            }
             for (int i = _cargoContent.childCount - 1; i >= 0; i--)   // clear old cards; keep the template (inactive)
             {
                 var ch = _cargoContent.GetChild(i);
                 if (ch == _cargoTemplate) { ch.gameObject.SetActive(false); continue; }
                 UnityEngine.Object.Destroy(ch.gameObject);
             }
-            var rows = VehicleManager.GhostCargoFor(_vid);
+            // Row source (proposal 2): the owner's detail when fresh (real paid/price + nested →
+            // the native card shapes), else the 4-field broadcast manifest (24-cap, no nested)
+            // exactly as before. Detail SPECIAL rows — sealed boxes and unsealed bundles — render
+            // as native singletons (the native grouping never merges a nested-bearing instance,
+            // CargoItem.cs:42); PLAIN detail rows feed the same grouped loop the manifest feeds.
+            var det = _detailRows;
+            var rows = new System.Collections.Generic.List<(string item, int amount, bool paid, float price)>();
+            int trueCount;
+            if (det != null)
+            {
+                trueCount = det.Count;
+                int specials = 0, specialsCapped = 0;
+                foreach (var r in det)
+                {
+                    if (r == null || string.IsNullOrEmpty(r.ItemName)) continue;
+                    // Native's own predicate (CargoItemUi :83) — STATE, not type (review MINOR-J):
+                    // a sealed-but-EMPTY instance groups like any plain row, "(NxM)" label and all;
+                    // only an instance actually CARRYING contents becomes a singleton card.
+                    bool special = r.Nested != null && r.Nested.Count > 0;
+                    if (!special) { rows.Add((r.ItemName, r.Amount, r.Paid, r.PricePerUnit)); continue; }
+                    if (specials >= 50) { specialsCapped++; continue; }
+                    specials++;
+                    MakeDetailSpecialCard(r, IsSealedName(r.ItemName));
+                }
+                if (specialsCapped > 0)   // no silent caps
+                    Plugin.Logger.LogInfo($"[VStore] panel display cap: {specialsCapped} sealed/bundle row(s) beyond 50 not rendered.");
+            }
+            else
+            {
+                var m = VehicleManager.GhostCargoFor(_vid);
+                trueCount = m.Count;
+                foreach (var r in m) rows.Add((r.item, r.amount, r.paid, r.price));
+            }
             int max = VehicleManager.MaxCargoFor(_vid);
-            if (_cargoBoxesTmp != null) _cargoBoxesTmp.text = max > 0 ? $"Boxes: {rows.Count}/{max}" : $"Boxes: {rows.Count}";
+            if (_cargoBoxesTmp != null) _cargoBoxesTmp.text = max > 0 ? $"Boxes: {trueCount}/{max}" : $"Boxes: {trueCount}";
 
             // Merge identical items into one card (mirrors the native CargoItem grouping — which keys
             // on name+amount+paid, so a paid and an unpaid stack of the same item stay separate
@@ -244,7 +316,9 @@ namespace BigAmbitionsMP
             int shown = 0;
             foreach (var key in order)
             {
-                if (shown >= 50) break; shown++;
+                if (shown >= 50)   // reachable since the uncapped detail (review MINOR-H) — no silent caps
+                { Plugin.Logger.LogInfo($"[VStore] panel display cap: {order.Count - shown} grouped row(s) beyond 50 not rendered."); break; }
+                shown++;
                 var g = grp[key];
                 string amountText = (g.count * g.amount == 1) ? "" : $"{g.count}x{g.amount}";
                 string it = g.item; int takeAmt = g.amount; bool tPaid = g.paid; float tPrice = g.price;
@@ -333,6 +407,73 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>v17 (proposal 2): one native-truth SPECIAL card — a sealed box or an unsealed
+        /// bundle (filled bag) from the owner's detail. Native shapes (CargoItemUi :83-108):
+        /// sealed → the CONTENTS label ("(400) Hot Dog"), no amount, no tooltip; unsealed bundle →
+        /// the container's own name + the contents TOOLTIP; both hide the amount label. Take = the
+        /// whole instance (ctx boxtake — exact identity, contents echoed). Sell/discard stay OFF
+        /// these rows for now: native would SELL a paid bundle with its contents priced in, but
+        /// the engine's credit basis is nested-free (R2) — a known residual awaiting its own
+        /// ruling; the take-then-sell route works meanwhile.</summary>
+        private static void MakeDetailSpecialCard(CargoDetailInfo r, bool sealedRow)
+        {
+            string vid = _vid, owner = _owner;
+            string it = r.ItemName; int amt = r.Amount; bool p = r.Paid; float pr = r.PricePerUnit;
+            System.Collections.Generic.List<string>? tip = null;
+            (string name, int amount)? contents = null;
+            if (sealedRow)
+            {
+                if (r.Nested != null && r.Nested.Count > 0) contents = (r.Nested[0].ItemName, r.Nested[0].Amount);
+            }
+            else
+            {
+                // Native aggregates the tooltip by item name (CargoItemUi :94-106).
+                var agg = new System.Collections.Generic.Dictionary<string, int>();
+                var ordered = new System.Collections.Generic.List<string>();
+                if (r.Nested != null)
+                    foreach (var n in r.Nested)
+                    {
+                        if (n == null || string.IsNullOrEmpty(n.ItemName)) continue;
+                        if (agg.TryGetValue(n.ItemName, out var v)) agg[n.ItemName] = v + n.Amount;
+                        else { agg[n.ItemName] = n.Amount; ordered.Add(n.ItemName); }
+                    }
+                tip = new System.Collections.Generic.List<string>();
+                foreach (var nm in ordered)
+                {
+                    string line = nm;
+                    var lbl = ItemLabelOrNull(nm, agg[nm]);   // JIT-contained binding (MINOR-F)
+                    if (lbl != null) { try { line = lbl.ToString(); } catch { } }
+                    tip.Add(line);
+                }
+            }
+            MakeNativeCard(it, "", () => VehicleStorageSync.RequestTake(vid, owner, it, amt, p, pr, "boxtake"),
+                           paid: p, tooltip: tip, contentsLabel: contents);
+        }
+
+        /// <summary>v17 (proposal 2): the owner's trunk detail arrived. Guards, in order: the R5
+        /// session guard (only MY open panel, only THIS vehicle); Ok=false keeps the manifest (a
+        /// refusal must never render an empty trunk); a manifest that moved since the request
+        /// makes the answer stale — drop it, PopulateCargo already re-asked (or will on its next
+        /// signature tick).</summary>
+        internal static void ApplyDetail(TrunkDetailResPayload res)
+        {
+            try
+            {
+                if (res == null || !IsOpenFor(res.VehicleId)) return;
+                if (!res.Ok)
+                { Plugin.Logger.LogInfo($"[VStore] trunk detail for '{res.VehicleId}' unavailable ({(res.Rows?.Count ?? 0)} rows ignored) — manifest fallback stays."); return; }
+                // Exact request matching (review MINOR-B): the echoed Sig must be the one the
+                // CURRENT pending ask carried — an answer to any older ask is stale by definition.
+                if ((res.Sig ?? "") != _detailPendingSig)
+                { Plugin.Logger.LogInfo($"[VStore] trunk detail for '{res.VehicleId}' answers an older ask — dropped; the current ask's answer is on the way."); return; }
+                _detailRows = res.Rows ?? new System.Collections.Generic.List<CargoDetailInfo>();
+                _detailSig = _detailPendingSig;
+                Plugin.Logger.LogInfo($"[VStore] trunk detail applied for '{res.VehicleId}': {_detailRows.Count} instance(s).");
+                if (_mode == Mode.List && _cargoClone != null) PopulateCargo();
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[VStore] ApplyDetail: {ex.Message}"); }
+        }
+
         // Instantiate a native cargo card from the cloned template and fill it WITHOUT running CargoItemUi
         // (calling SetUp would run owner-side cargo logic). We set its serialized fields directly via reflection.
         /// <summary>Stage C (M5): does this item NAME derive a sealed container? Same derivation
@@ -363,7 +504,8 @@ namespace BigAmbitionsMP
             return new Color(0.72f, 0.45f, 0.20f, 1f);
         }
 
-        private static void MakeNativeCard(string itemName, string amountText, UnityEngine.Events.UnityAction onTake, bool paid = true, System.Action? onSell = null, System.Action? onDiscard = null)
+        private static void MakeNativeCard(string itemName, string amountText, UnityEngine.Events.UnityAction onTake, bool paid = true, System.Action? onSell = null, System.Action? onDiscard = null,
+                                           System.Collections.Generic.List<string>? tooltip = null, (string name, int amount)? contentsLabel = null)
         {
             var card = UnityEngine.Object.Instantiate(_cargoTemplate, _cargoContent);
             var ci = card.GetComponent<CargoItemUi>();
@@ -379,14 +521,45 @@ namespace BigAmbitionsMP
                 // Name: drive the card's OWN TextLocalizationComponent (set its Key, leave it enabled) — the game
                 // localizes it through its working pipeline. Do NOT call GetLocalization ourselves (runtime-absent overload).
                 var nl = AccessTools.Field(typeof(CargoItemUi), "nameLabel")?.GetValue(ci);
-                if (nl != null) SetKey(nl, itemName);
+                if (nl != null)
+                {
+                    SetKey(nl, itemName);   // the container's own name — stands as the fallback
+                    // v17 sealed parity: native labels a sealed box by its CONTENTS ("(400) Hot
+                    // Dog", CargoItemUi :88-89 SetData(GetItemLabel(...))). Reflection because the
+                    // fragile compile-time bindings burned us before (:389 comment); a miss leaves
+                    // the SetKey'd container name — readable, just not native-exact.
+                    if (contentsLabel != null) TrySetContentsLabel(nl, contentsLabel.Value.name, contentsLabel.Value.amount);
+                }
                 var al = AccessTools.Field(typeof(CargoItemUi), "amountLabel")?.GetValue(ci) as TMP_Text;
                 if (al != null) { bool show = !string.IsNullOrEmpty(amountText); al.gameObject.SetActive(show); al.text = show ? amountText : ""; }
                 foreach (var f in new[] { "priceLabel", "discardButton", "sellButton", "actionButton", "bundleItemsTooltip" })
                 {
                     if (f == "sellButton" && onSell != null) continue;      // sell parity: this card keeps its native Sell button
                     if (f == "discardButton" && onDiscard != null) continue; // discard parity: unpaid rows keep the native Discard
+                    if (f == "bundleItemsTooltip" && tooltip != null) continue; // v17 bundle parity: contents tooltip stays
                     var c = AccessTools.Field(typeof(CargoItemUi), f)?.GetValue(ci) as Component; if (c != null) c.gameObject.SetActive(false);
+                }
+                if (tooltip != null)
+                {
+                    // Native bundle tooltip (CargoItemUi :106-107): a LocalizedListTooltip whose
+                    // public 'list' holds the pre-localized contents lines. Any failure HIDES the
+                    // tooltip (review MINOR-E) — never populated-nor-hidden indeterminate state.
+                    Component? tt = null;
+                    try
+                    {
+                        tt = AccessTools.Field(typeof(CargoItemUi), "bundleItemsTooltip")?.GetValue(ci) as Component;
+                        if (tt != null)
+                        {
+                            var lf = AccessTools.Field(tt.GetType(), "list");
+                            if (lf != null) { lf.SetValue(tt, tooltip); tt.gameObject.SetActive(true); }
+                            else tt.gameObject.SetActive(false);
+                        }
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Plugin.Logger.LogWarning($"[VStore] bundle tooltip: {ex.Message}");
+                        try { if (tt != null) tt.gameObject.SetActive(false); } catch { }
+                    }
                 }
                 if (onSell != null)
                 {
@@ -470,6 +643,28 @@ namespace BigAmbitionsMP
             return char.ToUpper(s[0]) + (s.Length > 1 ? s.Substring(1) : "");
         }
 
+        /// <summary>v17 sealed-contents label: native nameLabel.SetData(LocalizationHelper.
+        /// GetItemLabel(name, amount)) via reflection (SetData's parameter type is Localizor
+        /// runtime data we do not bind at compile time). A miss is silent — the SetKey'd
+        /// container name already stands.</summary>
+        private static void TrySetContentsLabel(object nameLabel, string itemName, int amount)
+        {
+            try
+            {
+                object? label = ItemLabelOrNull(itemName, amount);   // JIT-contained binding (MINOR-F)
+                if (label == null) return;
+                foreach (var m in nameLabel.GetType().GetMethods())
+                {
+                    if (m.Name != "SetData") continue;
+                    var ps = m.GetParameters();
+                    if (ps.Length != 1 || !ps[0].ParameterType.IsInstanceOfType(label)) continue;
+                    m.Invoke(nameLabel, new[] { label });
+                    return;
+                }
+            }
+            catch { }
+        }
+
         // Set a TextLocalizationComponent's Key (property or field) via reflection — the game then localizes it
         // through its OWN (working) pipeline, so we never call the fragile GetLocalization extension ourselves.
         private static void SetKey(object localizationComponent, string key)
@@ -490,6 +685,7 @@ namespace BigAmbitionsMP
             if (!_built) Build();
             if (_canvas == null) return;
             _vid = vid; _owner = ownerId ?? ""; _mode = Mode.List; _sig = " ";
+            _detailRows = null; _detailSig = ""; _detailPendingSig = "";
             if (!CloneCargo())   // exact native cargo screen; on failure, fall back to the hand-built list
             {
                 SizePanel(620f, 540f);
@@ -513,6 +709,7 @@ namespace BigAmbitionsMP
             // every close now says what closed. (The mode says whether a CHOICE menu or the LIST died.)
             if (vidWas != "") Plugin.Logger.LogInfo($"[VStore] panel CLOSED for '{vidWas}' (mode {_mode}).");
             _vid = ""; _owner = ""; _enterCb = null;
+            _detailRows = null; _detailSig = ""; _detailPendingSig = "";
             if (_menuClone != null) { UnityEngine.Object.Destroy(_menuClone); _menuClone = null; }
             if (_cargoClone != null) { UnityEngine.Object.Destroy(_cargoClone); _cargoClone = null; _cargoContent = null; _cargoTemplate = null; _cargoBoxesTmp = null; _cargoSellAll = null; }
             if (_root != null) _root.SetActive(false);

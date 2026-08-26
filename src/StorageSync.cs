@@ -124,8 +124,25 @@ namespace BigAmbitionsMP
                     && rback.Count == rp.Count && rback.Silent == rp.Silent && rback.Ok == rp.Ok && rback.Reason == rp.Reason
                     && rback.Nested.Count == 1 && rback.Nested[0].ItemName == "x"
                     && rback.Nested[0].Amount == 4 && rback.Nested[0].PricePerUnit == 2.5f;
-                if (!ok || !rok) Plugin.Logger.LogError($"[Store] WIRE ROUND-TRIP CHECK FAILED — a Storage{(ok ? "Res" : "Op")} field does not survive serialization (the GhostCargoFor class). Fix before trusting any storage op.");
-                else Plugin.Logger.LogInfo("[Store] wire round-trip check OK (all StorageOp + StorageRes fields survive).");
+                // v17: the trunk-detail payloads are load-bearing display data — same guard.
+                var dp = new TrunkDetailResPayload
+                {
+                    VehicleId = "v", PlayerId = "p", Sig = "s", Ok = true,
+                    Rows = { new CargoDetailInfo { ItemName = "n", Amount = 2, Paid = false, PricePerUnit = 1.5f,
+                                                   Nested = { new CargoNestedInfo { ItemName = "x", Amount = 4, PricePerUnit = 2.5f } } } },
+                };
+                var dback = MessageEnvelope.Create(MessageType.TrunkDetailRes, "p", dp).GetPayload<TrunkDetailResPayload>();
+                bool dok = dback != null && dback.VehicleId == "v" && dback.PlayerId == "p" && dback.Sig == "s" && dback.Ok
+                    && dback.Rows.Count == 1 && dback.Rows[0].ItemName == "n" && dback.Rows[0].Amount == 2
+                    && !dback.Rows[0].Paid && dback.Rows[0].PricePerUnit == 1.5f
+                    && dback.Rows[0].Nested.Count == 1 && dback.Rows[0].Nested[0].ItemName == "x"
+                    && dback.Rows[0].Nested[0].Amount == 4 && dback.Rows[0].Nested[0].PricePerUnit == 2.5f;
+                var qback = MessageEnvelope.Create(MessageType.TrunkDetailReq, "p",
+                    new TrunkDetailReqPayload { VehicleId = "v", PlayerId = "p", Sig = "s" }).GetPayload<TrunkDetailReqPayload>();
+                bool qok = qback != null && qback.VehicleId == "v" && qback.PlayerId == "p" && qback.Sig == "s";
+                if (!ok || !rok || !dok || !qok)
+                    Plugin.Logger.LogError($"[Store] WIRE ROUND-TRIP CHECK FAILED — a {(!ok ? "StorageOp" : !rok ? "StorageRes" : !dok ? "TrunkDetailRes" : "TrunkDetailReq")} field does not survive serialization (the GhostCargoFor class). Fix before trusting any storage op.");
+                else Plugin.Logger.LogInfo("[Store] wire round-trip check OK (all StorageOp + StorageRes + TrunkDetail fields survive).");
             }
             catch (Exception ex) { Plugin.Logger.LogError($"[Store] wire round-trip check THREW: {ex.Message}"); }
         }
@@ -197,43 +214,102 @@ namespace BigAmbitionsMP
 
         private static string Tag(string container) => container == ContainerVehicle ? "VStore" : "BStore";
 
-        private static void OwnerApplyVehicle(StorageOpPayload req, StorageResPayload res)
+        /// <summary>The one vehicle resolution (owner side), shared by OwnerApplyVehicle and
+        /// BuildTrunkDetail. Field 20260821-180203: AllPlayerVehicles is the LIVE controller
+        /// list — a cart left inside an interior the owner doesn't have loaded has NO live object
+        /// on the owner's machine ("data-follow"), so every borrower TAKE/PUT on it failed "gone"
+        /// and reverted. The fallback is GameInstance.VehicleInstances — the SAME VehicleInstance
+        /// objects live controllers hold (CreateAndSpawnVehicle adds the one instance to both),
+        /// so live-first vs data-first find one identical record and every mutation works without
+        /// a spawned controller. LIVE-FIRST ORDER IS KEPT DELIBERATELY (unification risk R8).
+        /// ReadLocalFleet's dormant pass emits every save-data vehicle with its manifest, so a
+        /// dormant mutation re-broadcasts on the next resting-sig change; MarkFleetDirty makes it
+        /// immediate.</summary>
+        private static VehicleInstance? FindVehicleById(string vid, string why)
         {
-            // Locked storage opens only to a granted key-holder (authoritative backstop).
-            if (PassengerSync.IsLocked(req.VehicleId) && !GrantSync.IsGranted(MPConfig.PlayerId, req.PlayerId)) { res.Reason = "locked"; return; }
-            VehicleInstance? found = null;
             var list = VehicleHelper.AllPlayerVehicles;
             if (list != null)
                 for (int i = 0; i < list.Count; i++)
                 {
                     var vi = list[i]?.vehicleInstance;
-                    if (vi != null && vi.id == req.VehicleId) { found = vi; break; }
+                    if (vi != null && vi.id == vid) return vi;
                 }
-            // Field 20260821-180203: AllPlayerVehicles is the LIVE controller list — a cart
-            // left inside an interior the owner doesn't have loaded has NO live object on the
-            // owner's machine ("data-follow"), so every borrower TAKE/PUT on it failed "gone"
-            // and reverted. The fallback is GameInstance.VehicleInstances — the SAME
-            // VehicleInstance objects live controllers hold (CreateAndSpawnVehicle adds the
-            // one instance to both), so live-first vs data-first find one identical record and
-            // every mutation below works without a spawned controller. LIVE-FIRST ORDER IS
-            // KEPT DELIBERATELY (unification risk R8). ReadLocalFleet's dormant pass emits
-            // every save-data vehicle with its manifest, so a dormant mutation here
-            // re-broadcasts on the next resting-sig change; MarkFleetDirty makes it immediate.
-            if (found == null)
-            {
-                var dataList = SaveGameManager.Current?.VehicleInstances;
-                if (dataList != null)
-                    for (int i = 0; i < dataList.Count; i++)
+            var dataList = SaveGameManager.Current?.VehicleInstances;
+            if (dataList != null)
+                for (int i = 0; i < dataList.Count; i++)
+                {
+                    var vi = dataList[i];
+                    if (vi != null && vi.id == vid)
                     {
-                        var vi = dataList[i];
-                        if (vi != null && vi.id == req.VehicleId)
-                        {
-                            found = vi;
-                            Plugin.Logger.LogInfo($"[VStore] owner apply on '{req.VehicleId}': no live object — using the data record (dormant vehicle).");
-                            break;
-                        }
+                        // R8 tripwire — attributed (review MINOR-A): a mutation on a dormant record
+                        // and a mere display query must stay distinguishable in a log read.
+                        Plugin.Logger.LogInfo($"[VStore] {why} on '{vid}': no live object — using the data record (dormant vehicle).");
+                        return vi;
                     }
+                }
+            return null;
+        }
+
+        // ══════════ Trunk detail (v17, F-2026-08-25-I proposal 2 — display parity) ══════════
+
+        /// <summary>OWNER side, main thread: the full cargo detail of one trunk — real paid/price
+        /// + nested contents through THE codec, uncapped (the broadcast manifest's 24-instance
+        /// cap does not apply). Display-only data: the receiver renders it, never applies it.
+        /// The lock backstop mirrors OwnerApplyVehicle's — a locked trunk reveals nothing to a
+        /// non-granted requester (Ok=false; the panel keeps its manifest fallback).</summary>
+        internal static TrunkDetailResPayload BuildTrunkDetail(TrunkDetailReqPayload req)
+        {
+            var res = new TrunkDetailResPayload { VehicleId = req.VehicleId, PlayerId = req.PlayerId, Sig = req.Sig };
+            try
+            {
+                if (PassengerSync.IsLocked(req.VehicleId) && !GrantSync.IsGranted(MPConfig.PlayerId, req.PlayerId))
+                { Plugin.Logger.LogInfo($"[VStore] trunk detail on '{req.VehicleId}' refused — locked to '{req.PlayerId}'."); return res; }
+                var inst = FindVehicleById(req.VehicleId, "trunk detail");
+                if (inst == null) { Plugin.Logger.LogInfo($"[VStore] trunk detail on '{req.VehicleId}': vehicle unknown here."); return res; }
+                var src = inst.cargoInstances;
+                if (src != null)
+                    for (int i = 0; i < src.Count; i++)
+                    {
+                        var ci = src[i];
+                        if (ci == null || string.IsNullOrEmpty(ci.itemName)) continue;
+                        res.Rows.Add(new CargoDetailInfo
+                        {
+                            ItemName = ci.itemName, Amount = ci.amount, Paid = ci.paid,
+                            PricePerUnit = ci.pricePerUnit,
+                            Nested = EncodeNested(ci.nestedCargoInstances),   // ONE codec (R7/R11)
+                        });
+                    }
+                res.Ok = true;
+                if (res.Rows.Count > 48)   // R11 discipline: warn-only tripwire, never truncation (review MINOR-I)
+                    Plugin.Logger.LogWarning($"[VStore] trunk detail for '{req.VehicleId}' carries {res.Rows.Count} instances (>48 tripwire) — conveyed IN FULL on the Gameplay lane; if this recurs, revisit the payload assumptions.");
             }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] BuildTrunkDetail: {ex.Message}"); res.Ok = false; }
+            return res;
+        }
+
+        /// <summary>Review MINOR-G: RequestTrunkDetail bypasses SendOp, so a detail-only session
+        /// would never run the wire self-test that validates its own payloads — this hook lets the
+        /// facade trigger it. No-op outside Dev/Debug.</summary>
+        internal static void DebugWireCheck()
+        {
+#if DEBUG || BAMP_DEV
+            DebugWireRoundTripOnce();
+#endif
+        }
+
+        /// <summary>ACCESSOR side, main thread: hand the arrived detail to the panel (which
+        /// applies its own open-session and freshness guards — R5 shape).</summary>
+        internal static void OnTrunkDetail(TrunkDetailResPayload res)
+        {
+            try { if (res != null) VehicleStoragePanel.ApplyDetail(res); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] OnTrunkDetail: {ex.Message}"); }
+        }
+
+        private static void OwnerApplyVehicle(StorageOpPayload req, StorageResPayload res)
+        {
+            // Locked storage opens only to a granted key-holder (authoritative backstop).
+            if (PassengerSync.IsLocked(req.VehicleId) && !GrantSync.IsGranted(MPConfig.PlayerId, req.PlayerId)) { res.Reason = "locked"; return; }
+            var found = FindVehicleById(req.VehicleId, "owner apply");
             if (found != null)
             {
                 var inst = found;
@@ -262,13 +338,15 @@ namespace BigAmbitionsMP
                     else
                         // A2-2: fire the callback ONLY when the reduce leaves the stack alive — the
                         // single case native VehicleInstance omits (see the A2 header above).
+                        // removeWhole (the bundle upgrade) fires it natively — no extra fire.
                         TakeLoose(inst.cargoInstances, req, res,
                                   reduce: (ci, amt) =>
                                   {
                                       inst.ReduceFromCargo(ci, amt);
                                       if (ci.amount > 0)
                                           try { inst.OnItemsInCargoUpdated()?.Invoke(); } catch { }
-                                  });
+                                  },
+                                  removeWhole: (ci) => inst.RemoveFromCargo(ci));
                 }
                 else if (req.Op == OpMarkPaid)
                     MarkPaidWithSplit(inst, req, res);
@@ -367,7 +445,8 @@ namespace BigAmbitionsMP
                     // one must not consume the other while both fit). ItemInstance.ReduceFromCargo
                     // fires the cargo callback natively on both branches — no engine fire here.
                     TakeLoose(item.cargoInstances, req, res,
-                              reduce: (ci, amt) => item.ReduceFromCargo(ci, amt));
+                              reduce: (ci, amt) => item.ReduceFromCargo(ci, amt),
+                              removeWhole: (ci) => item.RemoveFromCargo(ci));
             }
             else if (req.Op == OpPut)
             {
@@ -423,9 +502,23 @@ namespace BigAmbitionsMP
         /// request (mirrored takes name the exact stack the borrower consumed natively; ruling 36
         /// makes mixed paid states real), pass 1 falls back to any match so UI takes keep working.
         /// IsSealed hoisted per iteration (risk R13 — the getter re-resolves through ItemsGetter
-        /// on every access).</summary>
+        /// on every access).
+        ///
+        /// F-2026-08-25-I (user-approved proposal 1, field-confirmed): BUNDLES — unsealed
+        /// instances carrying nested contents (filled bags) — are never reduced here. Reducing one
+        /// 1→0 ran the native RemoveFromCargo and ANNIHILATED its contents (nothing echoes them on
+        /// this path); five senders could reach that, and a stale replica made it unclosable from
+        /// the requester side. Phase A below takes plain instances only (bundles skipped). Phase B
+        /// — reached only when nothing plain matched AND the ctx is the PLAIN take "" — upgrades
+        /// the take at the moment of commitment on the machine that holds the truth: the bundle
+        /// moves WHOLE, contents echoed through THE codec, and res.Ctx is stamped "boxtake" so
+        /// delivery reconstructs the filled bag (ItemHelper's own isbag branch) and a hands-full
+        /// give-back returns it WITH contents (both give-back switches key on res.Ctx). The other
+        /// TakeLoose ctxs (consume/placereduce/vehicletake) must never receive a bundle — their
+        /// no-deliver/spawn semantics would misfire — so for them bundles simply never match and
+        /// the op refuses "gone".</summary>
         private static void TakeLoose(System.Collections.Generic.List<CargoInstance>? src, StorageOpPayload req, StorageResPayload res,
-                                      Action<CargoInstance, int> reduce)
+                                      Action<CargoInstance, int> reduce, Action<CargoInstance> removeWhole)
         {
             if (src == null) return;
             for (int pass = 0; pass < 2 && !res.Ok; pass++)
@@ -435,6 +528,7 @@ namespace BigAmbitionsMP
                     if (ci == null) continue;
                     bool sealedCi = ci.IsSealed;
                     if (sealedCi) continue;
+                    if (ci.nestedCargoInstances != null && ci.nestedCargoInstances.Count > 0) continue;   // bundles: phase B only
                     if (ci.itemName != req.ItemName) continue;   // match by item; carry the owner's REAL paid/price back (manifest is lossy)
                     if (pass == 0 && ci.paid != req.Paid) continue;
                     if (ci.amount < req.Amount) continue;
@@ -444,6 +538,47 @@ namespace BigAmbitionsMP
                     res.Ok = true; res.Reason = "";
                     break;
                 }
+            // Phase B — the bundle upgrade (plain takes only; plain instances always win first).
+            // MATCHING policy lives here (bundle-required, paid-preference, instance-exact
+            // amount); the MUTATION is TakeWholeOf — the one whole-instance body (review NEW-7 /
+            // ruling 37: one home per mutation shape; TakeWholeInstance shares it).
+            if (res.Ok || !string.IsNullOrEmpty(req.Ctx)) return;
+            for (int pass = 0; pass < 2 && !res.Ok; pass++)
+                for (int c = 0; c < src.Count; c++)
+                {
+                    var ci = src[c];
+                    if (ci == null) continue;
+                    bool sealedCi = ci.IsSealed;
+                    if (sealedCi) continue;
+                    if (ci.nestedCargoInstances == null || ci.nestedCargoInstances.Count == 0) continue;
+                    if (ci.itemName != req.ItemName) continue;
+                    if (pass == 0 && ci.paid != req.Paid) continue;
+                    if (ci.amount != req.Amount) continue;   // whole move — instance-exact (bundles are amount 1 by ConvertToCargoInstance)
+                    TakeWholeOf(ci, res, removeWhole);
+                    res.Ctx = "boxtake";   // designed-in requirement #1: delivery + give-back route by ctx
+                    // Review NEW-8: the preservation guarantee is conditional on DELIVERY. A
+                    // Silent mirror (ctx "" by construction) never delivers — its res is
+                    // discarded at the Silent early-out, so the contents are NOT echoed anywhere
+                    // (unchanged from pre-fix: the borrower's native copy was nested-free; a
+                    // refusal here would DUPLICATE the bag instead). Name that honestly.
+                    if (req.Silent)
+                        Plugin.Logger.LogInfo($"[{Tag(req.Container)}] mirror take of '{req.ItemName}' matched a BUNDLE — removed whole to mirror the native take; contents are not delivered on a mirror (pre-existing shape, F-2026-08-25-I).");
+                    else
+                        Plugin.Logger.LogInfo($"[{Tag(req.Container)}] plain take of '{req.ItemName}' matched a BUNDLE — upgraded to whole-instance take, contents echoed (F-2026-08-25-I).");
+                    break;
+                }
+        }
+
+        /// <summary>THE whole-instance mutation body (review NEW-7 / ruling 37 — one home):
+        /// owner-truth echoes, nested contents through THE codec, whole removal via the
+        /// container's own RemoveFromCargo. Callers own their MATCHING policy: TakeWholeInstance
+        /// (exact-identity boxtake) and TakeLoose phase B (the bundle upgrade).</summary>
+        private static void TakeWholeOf(CargoInstance ci, StorageResPayload res, Action<CargoInstance> removeWhole)
+        {
+            res.Paid = ci.paid; res.PricePerUnit = ci.pricePerUnit; res.Amount = ci.amount;
+            res.Nested = EncodeNested(ci.nestedCargoInstances);   // ONE codec (R7/R11)
+            removeWhole(ci);
+            res.Ok = true; res.Reason = "";
         }
 
         /// <summary>THE sealed-box codec's take half (from building boxtake, round-47 slice 2b;
@@ -461,10 +596,7 @@ namespace BigAmbitionsMP
                 var ci = src[c];
                 if (ci == null || ci.itemName != req.ItemName) continue;
                 if (ci.amount != req.Amount || ci.paid != req.Paid) continue;
-                res.Paid = ci.paid; res.PricePerUnit = ci.pricePerUnit; res.Amount = ci.amount;
-                res.Nested = EncodeNested(ci.nestedCargoInstances);   // ONE codec (R7/R11)
-                removeWhole(ci);
-                res.Ok = true; res.Reason = "";
+                TakeWholeOf(ci, res, removeWhole);   // THE one whole-instance body (NEW-7)
                 break;
             }
         }
@@ -512,6 +644,12 @@ namespace BigAmbitionsMP
                     if (ci == null) continue;
                     bool sealedCi = ci.IsSealed;
                     if (sealedCi) continue;
+                    // F-2026-08-25-H (user-approved): native grouping never lets a nested-bearing
+                    // instance join a plain row (CargoItem.cs:42 requires nestedCargoInstances
+                    // empty) — a routed sell/discard on a plain row must not consume a
+                    // same-identity BUNDLE (contents destroyed, seller under-credited). With no
+                    // plain match left the op refuses "gone" instead of guessing.
+                    if (ci.nestedCargoInstances != null && ci.nestedCargoInstances.Count > 0) continue;
                     if (ci.itemName != req.ItemName || ci.amount != req.Amount || ci.paid != req.Paid) continue;
                     removeWhole(ci);
                     removed++;
@@ -811,8 +949,12 @@ namespace BigAmbitionsMP
                             TakeWholeInstance(item.cargoInstances, req2, res2, (ci) => item.RemoveFromCargo(ci));
                         else if (req2.Ctx == "stationtake")
                             TakeStock(reg, item, req2, res2);
-                        else   // "", consume, vehicletake, placereduce — the owner routed these through TakeLoose too
-                            TakeLoose(item.cargoInstances, req2, res2, (ci, amt) => item.ReduceFromCargo(ci, amt));
+                        else   // "", consume, vehicletake, placereduce — the owner routed these through
+                               // TakeLoose too. An owner-upgraded bundle take arrives with res.Ctx
+                               // ALREADY "boxtake" (the stamp survives into req2) → routes to
+                               // TakeWholeInstance above; this branch only sees genuinely-plain takes.
+                            TakeLoose(item.cargoInstances, req2, res2, (ci, amt) => item.ReduceFromCargo(ci, amt),
+                                      (ci) => item.RemoveFromCargo(ci));
                     }
                     else if (req2.Op == OpPut)
                     {
