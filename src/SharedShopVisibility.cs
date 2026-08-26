@@ -97,6 +97,10 @@ namespace BigAmbitionsMP
         /// (HousingMapCues.SharedColor) — one colour means "someone else's, shared with you" everywhere.</summary>
         private static Color Tint => HousingMapCues.SharedColor;
 
+        /// <summary>The same teal, for the other shared-shop surfaces that need it (7c colours the agency
+        /// call's business dropdown with it).</summary>
+        internal static Color SharedTint => HousingMapCues.SharedColor;
+
         // ── Tab allow-list ────────────────────────────────────────────────────
 
         /// <summary>The tabs another player's shop page may show in this slice, by business type. RealEstate is the
@@ -135,6 +139,7 @@ namespace BigAmbitionsMP
                     list.Add("InventoryPricing");     // slice 4: the helper sets this shop's retail prices
                     list.Add("Insight");              // slice 7a: read-only dashboard, owner-carried figures
                     list.Add("Deliveries");           // slice 7b: carried contracts + routed edits (ruling 33: billed-on-delivery = allowed)
+                    list.Add("Marketing");            // slice 7c: carried campaigns + routed toggles/cancel (ruling 33/40: a daily expense, never a click-time cost)
                     break;
             }
             return list;

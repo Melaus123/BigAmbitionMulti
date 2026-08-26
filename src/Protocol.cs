@@ -362,6 +362,7 @@ namespace BigAmbitionsMP
         public List<ContractInfo>     Contracts { get; set; } = new();     // v18 7b: the owner's wholesale delivery contracts for this shop
         public List<StockInfo>        Stock     { get; set; } = new();     // v18 7b-2: units on hand per deliveries-tab row, counted on the OWNER's machine (the native row builder counts the shop's INTERIOR, which a helper does not hold)
         public List<StockInfo>        SoldLastWeek { get; set; } = new();  // v18 7b-2: units sold in the last 7 days per deliveries-tab row — native sums the shop's own orderHistory, which a replica does not have
+        public List<CampaignInfo>     Campaigns { get; set; } = new();     // v18 7c: the shop's marketing campaigns; both Marketing-tab readouts DERIVE from this list, so carrying it is enough
     }
 
     /// <summary>v18 7b — one wholesale delivery contract, carried whole. Identity on the wire is
@@ -384,6 +385,16 @@ namespace BigAmbitionsMP
         public int    Amount          { get; set; }
         public int    OrderedThisWeek { get; set; }   // feeds the native weekly-limit label + input cap
         public int    OrderedLastWeek { get; set; }
+    }
+
+    /// <summary>v18 7c — one marketing campaign, exactly the native entity's three fields. The tab's daily-expense
+    /// total and its efficiency bar are both DERIVED from this list plus static building data (GetDailyMarketingExpenses
+    /// / GetMarketingEfficiency), so nothing else has to be carried for that screen.</summary>
+    public class CampaignInfo
+    {
+        public string AgencyKey { get; set; } = "";    // the agency building's address key
+        public string TypeName  { get; set; } = "";    // MarketingTypeName, by NAME
+        public bool   Enabled   { get; set; }
     }
 
     /// <summary>v18 7a — the Insight tab's scalar figures. All native fields are ints (Promotion /
@@ -467,6 +478,8 @@ namespace BigAmbitionsMP
         public bool   BoolValue  { get; set; }         // produce: up-to on/off
         public ContractInfo? Contract { get; set; }    // v18 7b: "contract"/"endcontract" — identity + (for "contract") the desired state; days OWNER-basis via OwnerDay
         public int    OwnerDay   { get; set; } = -1;   // v18 7b: the SENDER's Day for rebasing Contract.NextDeliveryDay
+        public string AgencyKey  { get; set; } = "";   // v18 7c: marketing ops — the agency building's address key
+        public string TypeName   { get; set; } = "";   // v18 7c: marketing ops — MarketingTypeName as its enum NAME (a reorder in a game update must not silently re-point a campaign); BoolValue carries "enabled" 
     }
 
     /// <summary>One row of the warehouse/factory Inventory table, owner-computed: the deliveries ledger
@@ -1226,6 +1239,8 @@ namespace BigAmbitionsMP
         //       SharedWorkEditPayload gains Contract + OwnerDay and the ops "contract" / "endcontract".
         //   7b-2 … gains Stock and SoldLastWeek — owner-counted figures the native tabs otherwise derive
         //       from a shop INTERIOR and an orderHistory that a replica does not have.
+        //   7c  … gains Campaigns (CampaignInfo); Tab accepts "marketing"; SharedWorkEditPayload gains
+        //       AgencyKey + TypeName and the ops "campaign" / "campaignremove" / "campaigncancel".
         // A v17 peer would drop the fields silently and render zeros; the freeze rule (design doc §8) makes
         // ANY wire-visible change a version bump — refuse mixed sessions outright.
         public const int Version = 18;

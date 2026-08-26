@@ -63,6 +63,7 @@ namespace BigAmbitionsMP
         private const int   MaxContractRows = 120;   // 7b-2 sanity cap: product rows carried per contract
         private const int   MaxStockRows    = 200;   // 7b-2 sanity cap: owner-counted stock figures per shop
         private const float StockAskQuiet   = 1.5f;  // 7b-2 rate cap on the stock refresh
+        private const int   MaxCampaigns    = 64;    // 7c sanity cap: marketing campaigns carried per shop
         private const float PendingHoldSeconds = 30f;// 7b-2: how long an unanswered local edit may hold owner truth back before the owner wins (review M5)
 
         // ── helper-side session ──
@@ -116,6 +117,10 @@ namespace BigAmbitionsMP
         private static bool  _dcForceApply;      // apply the next deliveries snapshot even when its sig is unchanged
         private static bool  _dcListChanged;     // the applied snapshot added/removed a contract — rebuild the tab, not just the open panel
         private static float _dcNextStockAsk;    // rate cap on the on-selection stock refresh
+        private static bool  _mkReseeding;       // our own re-seed re-enters the picker's selection handler; it must not ask again
+        private static bool  _mkPickerDirty;     // the helper has ticked something since this selection — never re-seed over their input
+        private static bool  _mkPickerLive;      // a picker exists (not just populating) — gates the dropdown row tint
+        private static string _mkTabAddr = "";   // the shop the Marketing tab last rendered, for callbacks that outlive the session
         private static bool  _dcRepainting;      // our own repaint re-enters the native row builder — it must not ask again (ask→snapshot→repaint→ask)
         private static float _dcPendingSince;    // when this machine first held owner truth back for an unanswered edit (0 = nothing pending)
         private static readonly Dictionary<string, Dictionary<string, string>> _dcSentDigest = new();   // addr → (wk#ord → the digest we ROUTED); an echo answering an older one must not overwrite a newer local edit
@@ -126,6 +131,10 @@ namespace BigAmbitionsMP
             _cardSlots.Clear(); _cardInv.Clear(); _cardSig.Clear(); _cardNext.Clear(); _whList = null; _renderCards = false;
             _insCapByAddr.Clear(); _insSigByAddr.Clear(); _insScalarsByAddr.Clear();
             _dcByAddr.Clear(); _dcSigByAddr.Clear(); _dcStockSig.Clear(); _dcBaseline.Clear(); _dcSentDigest.Clear();
+            _mkByAddr.Clear(); _mkSigByAddr.Clear(); _renderMarketing = false;
+            _mkPickerOpen = false; _mkPicker = null; _mkPickerIndex = -1; _mkWantAddr = "";
+            _mkPickerRegs.Clear(); _mkPickerShared.Clear(); _mkDialogRaised.Clear(); _mkReseeding = false;
+            _mkPickerDirty = false; _mkPickerLive = false; _mkTabAddr = ""; _mkAgencyAddr.Clear();
             _dcLastSentSig = ""; _dcNextAllowedSend = 0f; _dcSendTries = 0;
             _dcWindowDepth = 0; _dcInsertActive = false; _dcTenancyRaised = false; _dcInsertReg = null; _dcInsertAddr = "";
             _dcHiddenLocal.Clear();
@@ -216,6 +225,7 @@ namespace BigAmbitionsMP
             _renderInventory = false; _renderDrivers = false; _renderFactory = false; _renderDcFigures = false;
             _renderInsight = false;   // the per-address insight caches deliberately survive (ruling 36)
             _renderDeliveries = false; _renderDcFigures = false;   // carried contracts survive too (ruling 36); only Reset() drops them
+            _renderMarketing = false;
             _dcForceApply = false; _dcListChanged = false; _dcPendingSince = 0f;   // per-session flags; the carried caches survive (ruling 36)
             _dcSentDigest.Clear();   // a stale "what we routed" map must not trip the re-route test on a later echo
             _rows.Clear(); _boxesMax = 0; _boxesCurrent = 0;
@@ -1878,6 +1888,16 @@ namespace BigAmbitionsMP
                     RepaintDeliveries(del, listChanged, _dcByAddr.TryGetValue(_openAddr, out var lcarried) ? lcarried : null);
                 }
             }
+            if (_renderMarketing)
+            {
+                var mk = page.GetComponentInChildren<BizManMarketing>(true);
+                if (mk != null && mk.gameObject.activeInHierarchy)
+                {
+                    _renderMarketing = false;
+                    try { mk.RefreshData(); }   // re-enters our prefix; same tab, so no re-request
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} marketing render: {ex.Message}"); }
+                }
+            }
             if (_renderDcFigures)
             {
                 _renderDcFigures = false;
@@ -2039,6 +2059,11 @@ namespace BigAmbitionsMP
                         if (fac != null && fac.gameObject.activeInHierarchy && fac.machineList != null && reg != null)
                             fac.machineList.SetUp(reg);
                     }
+                    else if (tab == "marketing")
+                    {
+                        var mk = page.GetComponentInChildren<BizManMarketing>(true);
+                        if (mk != null && mk.gameObject.activeInHierarchy) mk.RefreshData();
+                    }
                     else if (tab == "deliveries")
                     {
                         // 7b ruling 32: the OWNER's open Deliveries tab repaints after a helper's edit — without
@@ -2071,7 +2096,7 @@ namespace BigAmbitionsMP
                     // 7a review: EVERY session-opening tab MUST be in this keep-list — their RefreshData
                     // prefixes open the session DURING the native SetTab body, and this postfix would
                     // close it instantly (the 7a blocker).
-                    if (tabName == "Inventory" || tabName == "Drivers" || tabName == "Factory" || tabName == "Insight" || tabName == "Deliveries") return;
+                    if (tabName == "Inventory" || tabName == "Drivers" || tabName == "Factory" || tabName == "Insight" || tabName == "Deliveries" || tabName == "Marketing") return;
                     CloseSession();
                 }
                 catch { }
@@ -2140,6 +2165,7 @@ namespace BigAmbitionsMP
                         _dcByAddr.Remove(addr); _dcSigByAddr.Remove(addr); _dcStockSig.Remove(addr);
                         _dcBaseline.Remove(addr); _dcSentDigest.Remove(addr);
                         _insCapByAddr.Remove(addr); _insSigByAddr.Remove(addr); _insScalarsByAddr.Remove(addr);
+                        _mkByAddr.Remove(addr); _mkSigByAddr.Remove(addr);
                         SharedShopStock.Clear(addr);
                         try
                         {
@@ -2181,6 +2207,565 @@ namespace BigAmbitionsMP
             BuildAndSendSnapshot(req.AddressKey, req.Tab, req.PlayerId, req.Sig);
         }
 
+        // ═══════════════════════════ 7c · MARKETING ═══════════════════════════
+        // Rulings 33/40/41. The whole tab is money-free at click time: a toggle only adds or flips a
+        // MarketingCampaign on the registration, and `pricePerDay` is a DISPLAY figure billed by the
+        // owner's own MarketingHelper.RunDaily — which skips registrations that are not RentedByPlayer,
+        // so a helper's machine can never bill a replica's campaigns.
+        //
+        // Both readouts DERIVE from the campaign list plus static building data (GetDailyMarketingExpenses,
+        // GetMarketingEfficiency), so carrying that list is the whole carry.
+
+        private static readonly Dictionary<string, List<CampaignInfo>> _mkByAddr = new();
+        private static readonly Dictionary<string, string> _mkSigByAddr = new();
+        private static bool _renderMarketing;
+        // ── agency-call plumbing (ruling 41) ──
+        private static bool _mkPickerOpen;                                          // the dialog's business picker is populating
+        private static readonly List<BuildingRegistration> _mkPickerRegs = new();   // what we handed it, in order
+        private static readonly HashSet<int> _mkPickerShared = new();               // which of those indexes are shared shops
+        private static UI.Dialog.MarketingCampaignSettings? _mkPicker;              // the live widget, for the re-seed when data lands
+        private static int    _mkPickerIndex = -1;                                  // its current selection
+        private static string _mkWantAddr = "";                                     // the shop a call is aimed at (no tab session is open during a call)
+        private static readonly List<BuildingRegistration> _mkDialogRaised = new();  // tenancy raised for the dialog's own gate
+
+        private static string TypeNameOf(Entities.MarketingTypeName t) => t.ToString();
+
+        /// <summary>Resolve an agency's address key against the WORLD's buildings, never against the
+        /// registration list (review MAJOR-1). A registration for an agency is created lazily, the first time
+        /// anyone looks it up — so an owner who has never dealt with that agency simply has no row for it, and
+        /// resolving through the registration list refused exactly the case ruling 41 exists for: a helper
+        /// signing an agency THEY know for a shop whose owner has never met it. Buildings are world data and
+        /// identical on both machines.</summary>
+        private static readonly Dictionary<string, Address> _mkAgencyAddr = new();
+
+        private static Address? AgencyAddress(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return null;
+            if (_mkAgencyAddr.TryGetValue(key, out var hit)) return hit;
+            try
+            {
+                foreach (var b in BuildingHelper.allBuildings)
+                {
+                    if (b == null) continue;
+                    if (GameStateReader.AddressKey(b) != key) continue;
+                    _mkAgencyAddr[key] = b.Address; return b.Address;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static bool TryParseType(string name, out Entities.MarketingTypeName t)
+            => Enum.TryParse<Entities.MarketingTypeName>(name ?? "", out t);
+
+        /// <summary>Every marketing type this agency actually sells. The owner gates on it so a routed op can
+        /// never inject a service the agency does not offer — the native UI only ever offers these.</summary>
+        private static List<Entities.MarketingTypeName> AgencyTypes(Address agencyAddress)
+        {
+            try
+            {
+                if (BuildingHelper.GetBuilding(agencyAddress).SpecialService.settings is Buildings.MarketingAgencySettings ms && ms.marketingTypesAvailable != null)
+                    return ms.marketingTypesAvailable;
+            }
+            catch { }
+            return new List<Entities.MarketingTypeName>();
+        }
+
+        /// <summary>OWNER: the shop's campaigns, exactly as stored.</summary>
+        private static void BuildMarketing(BuildingRegistration reg, SharedWorkInfoPayload reply)
+        {
+            try
+            {
+                if (reg.marketingCampaigns == null) return;
+                foreach (var c in reg.marketingCampaigns)
+                {
+                    if (c == null) continue;
+                    string ak = ""; try { ak = GameStateReader.AddressKey(c.agencyAddress); } catch { }
+                    if (ak.Length == 0) continue;
+                    reply.Campaigns.Add(new CampaignInfo { AgencyKey = ak, TypeName = TypeNameOf(c.marketingTypeName), Enabled = c.enabled });
+                    if (reply.Campaigns.Count >= MaxCampaigns)
+                    {
+                        if (_logged.Add("mk-cap|" + AddrOf(reg)))
+                            Plugin.Logger.LogWarning($"{Tag} more than {MaxCampaigns} marketing campaigns at '{AddrOf(reg)}' — the remainder is NOT carried.");
+                        break;
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} marketing build: {ex.Message}"); }
+        }
+
+        /// <summary>HELPER: put the owner's campaign list on the replica. Both of the tab's figures compute from
+        /// it locally, so nothing else needs carrying — promotion.marketing recomputes correctly here because it
+        /// reads only campaigns and static building data.</summary>
+        private static void ApplyMarketingSnapshot(SharedWorkInfoPayload p, BuildingRegistration reg)
+        {
+            var rows = new List<CampaignInfo>();
+            bool dropped = false;
+            if (p.Campaigns != null)
+                foreach (var c in p.Campaigns)
+                {
+                    if (c == null || string.IsNullOrEmpty(c.AgencyKey) || string.IsNullOrEmpty(c.TypeName)) continue;
+                    if (rows.Count >= MaxCampaigns)
+                    {
+                        dropped = true;
+                        if (_logged.Add("mk-rcap|" + p.AddressKey))
+                            Plugin.Logger.LogWarning($"{Tag} more than {MaxCampaigns} campaigns received for '{p.AddressKey}' — the rest are not shown.");
+                        break;
+                    }
+                    rows.Add(c);
+                }
+            _mkByAddr[p.AddressKey] = rows;
+            bool applyOk = false;
+            try
+            {
+                if (reg.marketingCampaigns == null) reg.marketingCampaigns = new List<Entities.MarketingCampaign>();
+                reg.marketingCampaigns.Clear();
+                foreach (var c in rows)
+                {
+                    var aaddr = AgencyAddress(c.AgencyKey);
+                    if (aaddr == null || !TryParseType(c.TypeName, out var mt))
+                    {
+                        dropped = true;
+                        if (_logged.Add("mk-unres|" + c.AgencyKey + "|" + c.TypeName))
+                            Plugin.Logger.LogWarning($"{Tag} a campaign at '{p.AddressKey}' names agency '{c.AgencyKey}' / type '{c.TypeName}', which this machine cannot resolve — that row is NOT shown.");
+                        continue;
+                    }
+                    reg.marketingCampaigns.Add(new Entities.MarketingCampaign { agencyAddress = aaddr, marketingTypeName = mt, enabled = c.Enabled });
+                }
+                // The efficiency bar reads promotion.marketing, so recompute it from what just landed. That call
+                // also rewrites promotion.total from LOCAL traffic data, which 7a's Insight carry owns — so put
+                // the carried scalars back when we hold them: they are the owner's truth, this is derived.
+                BusinessHelper.UpdatePromotion(reg);
+                if (_insScalarsByAddr.TryGetValue(p.AddressKey, out var sc) && sc != null)
+                {
+                    // MAJOR-4: promotion.marketing and .total DERIVE from the campaign list that just landed,
+                    // so the freshly computed pair is owner truth and the cached Insight pair predates it.
+                    // Carry the satisfaction half back, keep the derived half, and refresh the cache so the
+                    // Insight tab stops re-asserting a value the owner no longer has.
+                    int mk = reg.promotion?.marketing ?? sc.PromoMarketing;
+                    int tot = reg.promotion?.total ?? sc.PromoTotal;
+                    ApplyInsightScalars(reg, sc);
+                    if (reg.promotion != null) { reg.promotion.marketing = mk; reg.promotion.total = tot; }
+                    sc.PromoMarketing = mk; sc.PromoTotal = tot;
+                }
+                applyOk = true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} marketing apply: {ex.Message}"); }
+            // The sig may only claim what actually landed (review MINOR): a partial list under a "current" sig
+            // would be answered with silence on the next ask, and the agency call would then diff against it.
+            if (applyOk && !dropped) _mkSigByAddr[p.AddressKey] = p.Sig ?? "";
+            else _mkSigByAddr.Remove(p.AddressKey);
+            if (_openTab == "marketing" && _openAddr == p.AddressKey) _renderMarketing = true;   // MINOR: no stranded render flag
+            // An agency call reads the campaign list straight off the replica — re-seed its ticks now that truth
+            // has landed, or a stale picker decides what the owner ends up with (ruling 41, the user's item 1).
+            ReseedMarketingPicker(p.AddressKey);
+        }
+
+        /// <summary>OWNER: apply one routed marketing op with the native semantics.</summary>
+        private static bool ApplyMarketingOp(BuildingRegistration reg, SharedWorkEditPayload p)
+        {
+            var aaddr = AgencyAddress(p.AgencyKey ?? "");
+            if (aaddr == null) return false;
+            if (reg.marketingCampaigns == null) reg.marketingCampaigns = new List<Entities.MarketingCampaign>();
+            bool changed = false;
+            if (p.Op == "campaigncancel")
+            {
+                // Native: the tab's Cancel button drops that agency's campaigns from this shop (ruling 40).
+                int n = reg.marketingCampaigns.RemoveAll(x => x != null && x.agencyAddress == aaddr);
+                changed = n > 0;
+                if (changed) Plugin.Logger.LogInfo($"{Tag} '{p.PlayerId}' cancelled {n} marketing campaign(s) from '{p.AgencyKey}' at '{p.AddressKey}'.");
+            }
+            else
+            {
+                if (!TryParseType(p.TypeName, out var mt)) return false;
+                if (!AgencyTypes(aaddr).Contains(mt))
+                {
+                    Plugin.Logger.LogWarning($"{Tag} '{p.PlayerId}' asked for marketing type '{p.TypeName}' from '{p.AgencyKey}', which that agency does not offer — refused.");
+                    return false;
+                }
+                if (p.Op == "campaignremove")
+                {
+                    // Native QUIRK, mirrored deliberately: the agency dialog's un-tick removes that type from
+                    // EVERY agency on the shop, not only the one being called (MarketingAgencyDialog:131).
+                    int n = reg.marketingCampaigns.RemoveAll(x => x != null && x.marketingTypeName == mt);
+                    changed = n > 0;
+                }
+                else
+                {
+                    var row = reg.marketingCampaigns.Find(x => x != null && x.agencyAddress == aaddr && x.marketingTypeName == mt);
+                    if (row == null)
+                    {
+                        reg.marketingCampaigns.Add(new Entities.MarketingCampaign { agencyAddress = aaddr, marketingTypeName = mt, enabled = p.BoolValue });
+                        changed = true;
+                    }
+                    else if (row.enabled != p.BoolValue) { row.enabled = p.BoolValue; changed = true; }
+                }
+                if (changed) Plugin.Logger.LogInfo($"{Tag} '{p.PlayerId}' set marketing '{p.TypeName}' from '{p.AgencyKey}' at '{p.AddressKey}' (op {p.Op}, enabled={p.BoolValue}).");
+            }
+            if (changed) { try { BusinessHelper.UpdatePromotion(reg); } catch { } }
+            return changed;
+        }
+
+        private static void SendMarketingOp(string addr, string op, string agencyKey, string typeName, bool enabled)
+        {
+            SendEdit(new SharedWorkEditPayload
+            {
+                PlayerId = MPConfig.PlayerId, AddressKey = addr, Op = op,
+                AgencyKey = agencyKey, TypeName = typeName, BoolValue = enabled,
+            });
+        }
+
+        /// <summary>Is this a shop shared with me, and what is its address key?</summary>
+        private static bool SharedAddrOf(BuildingRegistration reg, out string addr)
+        {
+            addr = AddrOf(reg);
+            return reg != null && addr.Length > 0 && SharedShopSchedule.IsSharedShop(reg, addr);
+        }
+
+        /// <summary>The Marketing tab on a shared shop: open the session so the carry lands and the poll runs.</summary>
+        [HarmonyPatch(typeof(BizManMarketing), nameof(BizManMarketing.RefreshData))]
+        public static class Patch_BizManMarketing_RefreshData_Session
+        {
+            static void Prefix()
+            {
+                try { if (OpenSession("marketing")) _mkTabAddr = _openAddr; }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} marketing tab: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>The tab's per-service toggle. Native has already written the replica; route the same change.</summary>
+        [HarmonyPatch(typeof(BizManMarketing), "UpdateCampaignEnabled")]
+        public static class Patch_BizManMarketing_Toggle_Routed
+        {
+            static void Postfix(bool isEnabled, Entities.MarketingTypeName marketingTypeName, Address agencyAddress)
+            {
+                try
+                {
+                    if (_openTab != "marketing" || _openAddr.Length == 0) return;
+                    string ak = ""; try { ak = GameStateReader.AddressKey(agencyAddress); } catch { }
+                    if (ak.Length == 0) return;
+                    SendMarketingOp(_openAddr, "campaign", ak, TypeNameOf(marketingTypeName), isEnabled);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} marketing toggle route: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>The tab's per-agency Cancel button (ruling 40).</summary>
+        [HarmonyPatch(typeof(BizManMarketing), "CancelAllCampaignsFromAgency")]
+        public static class Patch_BizManMarketing_Cancel_Routed
+        {
+            static void Postfix(List<Entities.MarketingCampaign> campaignGroup)
+            {
+                try
+                {
+                    // Native's Cancel goes through a confirm dialog, which can be answered after the helper
+                    // has left the tab — reading the live session then would drop the routed op (review MINOR).
+                    string addr = _openTab == "marketing" && _openAddr.Length > 0 ? _openAddr : _mkTabAddr;
+                    if (addr.Length == 0) return;
+                    if (campaignGroup == null || campaignGroup.Count == 0 || campaignGroup[0] == null) return;
+                    string ak = ""; try { ak = GameStateReader.AddressKey(campaignGroup[0].agencyAddress); } catch { }
+                    if (ak.Length == 0) return;
+                    SendMarketingOp(addr, "campaigncancel", ak, "", false);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} marketing cancel route: {ex.Message}"); }
+            }
+        }
+
+        // ── the agency call (ruling 41) ───────────────────────────────────────────────────────────────
+        // The helper uses THEIR OWN marketing contacts — you call an agency you have met — and the call's
+        // business picker offers the shops they hold permissions on, in the shared teal, with the resulting
+        // changes routed to each owner. Native supports this cleanly: a campaign keys on the agency's
+        // ADDRESS, never on a contact relationship, so signing an agency the owner has never met is legal.
+        //
+        // Two native gates read "businesses I rent", and BOTH must see the shared shops or the flow dies
+        // before the picker appears: the dialog's own opening check, and the picker's list. Tenancy is
+        // raised for the dialog's construction (its check is an inline LINQ query with nothing to patch)
+        // and the picker's list is substituted call-scoped.
+
+        /// <summary>The dialog refuses to start unless the caller rents a named business — a helper who owns
+        /// nothing would never reach the picker (the user's item 2). Tenancy is raised across construction only.</summary>
+        [HarmonyPatch(typeof(Dialogs.MarketingAgencyDialog), MethodType.Constructor)]
+        public static class Patch_MarketingAgencyDialog_Ctor_Gate
+        {
+            // PER-CALL state (review MINOR): a shared list would let a nested construction lower and clear
+            // the outer one's raises, stranding "this is mine" on somebody else's shop — the single worst
+            // outcome in this feature, since the daily biller keys on exactly that flag.
+            static void Prefix(out List<BuildingRegistration> __state)
+            {
+                __state = new List<BuildingRegistration>();
+                try
+                {
+                    var gi = SaveGameManager.Current; if (gi?.BuildingRegistrations == null) return;
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null || string.IsNullOrWhiteSpace(reg.BusinessName)) continue;
+                        if (!SharedAddrOf(reg, out var addr)) continue;
+                        if (SharedShopVisibility.RaiseTenancy(reg, addr)) __state.Add(reg);
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} agency dialog gate: {ex.Message}"); }
+            }
+            static void Finalizer(List<BuildingRegistration> __state)
+            {
+                if (__state == null) return;
+                foreach (var reg in __state)
+                {
+                    try { SharedShopVisibility.LowerTenancy(reg, true); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} agency dialog gate release: {ex.Message}"); }
+                }
+            }
+        }
+
+        /// <summary>The picker's business list. Substituted call-scoped: `GetPlayerBuildingRegistrations` is
+        /// used all over the game and is never patched broadly.</summary>
+        [HarmonyPatch(typeof(UI.Dialog.MarketingCampaignSettings), "SetMarketingTypes")]
+        public static class Patch_MarketingPicker_Populate
+        {
+            static void Prefix(UI.Dialog.MarketingCampaignSettings __instance, out bool __state)
+            {
+                __state = true;
+                _mkPickerOpen = true; _mkPickerLive = true; _mkPicker = __instance;
+                _mkPickerIndex = -1; _mkWantAddr = ""; _mkPickerDirty = false;
+                _mkPickerRegs.Clear(); _mkPickerShared.Clear();
+            }
+            static void Finalizer(bool __state) { if (__state) _mkPickerOpen = false; }
+        }
+
+        /// <summary>While that one list is being built, add the shops this player holds permissions on.</summary>
+        [HarmonyPatch(typeof(BuildingHelper), nameof(BuildingHelper.GetPlayerBuildingRegistrations))]
+        public static class Patch_PlayerRegistrations_SharedShops
+        {
+            static void Postfix(ref List<BuildingRegistration> __result)
+            {
+                try
+                {
+                    if (!_mkPickerOpen || __result == null) return;
+                    var gi = SaveGameManager.Current; if (gi?.BuildingRegistrations == null) return;
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null || __result.Contains(reg)) continue;
+                        if (string.IsNullOrWhiteSpace(reg.BusinessName)) continue;
+                        if (!SharedAddrOf(reg, out _)) continue;
+                        // The native filter this list is built with: only businesses that make money can be
+                        // advertised. Applied here too, so the two halves of the list agree.
+                        try { if (!BusinessTypeHelper.GetData(reg).HasTag(BigAmbitions.Tags.TagRef.Businesstag.generatesrevenue)) continue; } catch { continue; }
+                        __result.Add(reg);
+                    }
+                    // Native sorts this list by display name; appending would leave an alphabetised own-shop
+                    // list with an unsorted teal tail (ruling 28). Same comparison native uses.
+                    __result.Sort((x, y) =>
+                    {
+                        string a = "", b = "";
+                        try { a = x?.GetDisplayName()?.ToLower() ?? ""; } catch { }
+                        try { b = y?.GetDisplayName()?.ToLower() ?? ""; } catch { }
+                        return string.Compare(a, b, StringComparison.Ordinal);
+                    });
+                    _mkPickerRegs.Clear(); _mkPickerShared.Clear();
+                    for (int i = 0; i < __result.Count; i++)
+                    {
+                        _mkPickerRegs.Add(__result[i]);
+                        if (SharedAddrOf(__result[i], out _)) _mkPickerShared.Add(i);
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} agency picker list: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>Teal for the shared entries, the same colour the rest of the feature uses for "someone
+        /// else's, shared with you". Applied to the drawn ROW, never to the option string (review MINOR): the
+        /// dropdown matches typed text against the raw strings and sizes its panel by their raw LENGTH, so a
+        /// colour tag in the string would break selecting a shared shop by name and would widen the panel by
+        /// the tag's characters, clipping the owner's longer entries.</summary>
+        [HarmonyPatch(typeof(UI.Elements.DropdownOptionCellView), nameof(UI.Elements.DropdownOptionCellView.SetData))]
+        public static class Patch_DropdownRow_TealSharedShops
+        {
+            static void Postfix(UI.Elements.DropdownOptionCellView __instance, UI.Elements.DropdownOptionModel data)
+            {
+                try
+                {
+                    if (!_mkPickerLive || data == null || __instance == null || __instance.optionText == null) return;
+                    if (_mkPicker == null || !_mkPicker.gameObject.activeInHierarchy) return;   // some other dropdown
+                    if (_mkPickerShared.Contains(data.optionId)) __instance.optionText.color = SharedShopVisibility.SharedTint;
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>Picking a shop seeds the tick boxes from ITS campaign list, so that list has to be the
+        /// owner's and not a stale replica (the user's item 1). Ask on selection; the reply re-seeds.</summary>
+        [HarmonyPatch(typeof(UI.Dialog.MarketingCampaignSettings), "SelectBusiness")]
+        public static class Patch_MarketingPicker_Select
+        {
+            static void Postfix(UI.Dialog.MarketingCampaignSettings __instance, int businessIndex)
+            {
+                try
+                {
+                    if (_mkReseeding) return;
+                    _mkPickerDirty = false;   // a fresh selection: nothing of the helper's to protect yet
+                    _mkPicker = __instance; _mkPickerIndex = businessIndex; _mkWantAddr = "";
+                    var reg = __instance.selectedBusiness;
+                    if (reg == null || !SharedAddrOf(reg, out var addr)) return;
+                    _mkWantAddr = addr;
+                    RequestInfo(addr, "marketing", _mkSigByAddr.TryGetValue(addr, out var sg) ? sg : "");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} agency picker select: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>The helper ticking a service in the call. From here on their selection is theirs, and an
+        /// owner's list arriving late must not overwrite it (review MAJOR-3).</summary>
+        [HarmonyPatch(typeof(UI.Dialog.MarketingCampaignSettings), "UpdateMarketingTypeEnabled")]
+        public static class Patch_MarketingPicker_Ticked
+        {
+            static void Postfix() { if (!_mkReseeding) _mkPickerDirty = true; }
+        }
+
+        /// <summary>Re-run the picker's own selection so its tick boxes show the campaigns that just landed.
+        /// Native's SelectBusiness reads the registration and repaints the toggles and the price, so calling it
+        /// again is exactly the refresh — no state of ours is involved.</summary>
+        private static void ReseedMarketingPicker(string addressKey)
+        {
+            try
+            {
+                if (_mkPicker == null || _mkPickerIndex < 0 || _mkWantAddr.Length == 0 || _mkWantAddr != addressKey) return;
+                if (_mkPickerDirty)
+                {
+                    // Review MAJOR-3: native SelectBusiness REPLACES marketingTypeNamesSelected from the
+                    // registration and rebuilds every toggle — so re-seeding after the helper has started
+                    // ticking silently undoes their choices. Worse, if the owner's campaigns for this agency
+                    // are all disabled, the reseeded selection is empty while rows exist, and Confirm then
+                    // takes native's "nothing selected" branch: a tick meant to ADD a service would CANCEL
+                    // the agency. Their input wins; the routed DIFF is what keeps a stale picker safe.
+                    Plugin.Logger.LogInfo($"{Tag} agency call: the owner's campaign list for '{addressKey}' landed after the helper began ticking — picker NOT re-seeded.");
+                    return;
+                }
+                var m = AccessTools.Method(typeof(UI.Dialog.MarketingCampaignSettings), "SelectBusiness");
+                if (m == null) return;
+                _mkReseeding = true;
+                try { m.Invoke(_mkPicker, new object[] { _mkPickerIndex }); }
+                finally { _mkReseeding = false; _mkPickerDirty = false; }
+                Plugin.Logger.LogInfo($"{Tag} agency call: re-seeded the campaign ticks for '{addressKey}' from the owner's list.");
+            }
+            catch (Exception ex)
+            {
+                _mkReseeding = false;
+                Plugin.Logger.LogWarning($"{Tag} agency picker re-seed: {ex.Message}");
+            }
+        }
+
+        /// <summary>A call ends: drop the picker state, or a marketing snapshot arriving later would invoke
+        /// the selection handler on a hidden-but-not-destroyed widget, reading whichever contact is current by
+        /// then (review MINOR).</summary>
+        [HarmonyPatch(typeof(DialogController), nameof(DialogController.FinishDialog))]
+        public static class Patch_DialogFinish_ClearPicker
+        {
+            static void Postfix() => ClearMarketingCall();
+        }
+
+        [HarmonyPatch(typeof(DialogController), nameof(DialogController.CancelDialog))]
+        public static class Patch_DialogCancel_ClearPicker
+        {
+            static void Postfix() => ClearMarketingCall();
+        }
+
+        private static void ClearMarketingCall()
+        {
+            _mkPicker = null; _mkPickerIndex = -1; _mkWantAddr = "";
+            _mkPickerDirty = false; _mkPickerLive = false;
+            _mkPickerRegs.Clear(); _mkPickerShared.Clear();
+        }
+
+        /// <summary>The call's confirm. Native has already rewritten the replica's campaign list for the chosen
+        /// agency; route the DIFFERENCE rather than the resulting set, so a picker that was one round-trip stale
+        /// can only ever add what the helper ticked — never silently drop services they were never shown.</summary>
+        [HarmonyPatch(typeof(Dialogs.MarketingAgencyDialog), "OnMarketingSettingsSet")]
+        public static class Patch_MarketingAgencyDialog_Confirm_Routed
+        {
+            static void Prefix(out (string addr, string agency, Dictionary<string, bool> before, bool cancelAll)? __state)
+            {
+                __state = null;
+                try
+                {
+                    // Read the widget the way native does, so a destroyed picker is skipped rather than
+                    // dereferenced (review MINOR): `?.` is C#'s null test, not Unity's.
+                    var picker = DialogController.current?.GetInputTransform<UI.Dialog.MarketingCampaignSettings>(null);
+                    if (picker == null) return;
+                    _mkPicker = picker;
+                    var reg = picker.selectedBusiness;
+                    if (reg == null || !SharedAddrOf(reg, out var addr)) return;
+                    var contact = DialogController.current?.contact;
+                    string agency = ""; try { if (contact != null) agency = GameStateReader.AddressKey(contact.Address); } catch { }
+                    if (agency.Length == 0) return;
+                    var before = new Dictionary<string, bool>();
+                    if (reg.marketingCampaigns != null)
+                        foreach (var c in reg.marketingCampaigns)
+                            if (c != null) before[TypeNameOf(c.marketingTypeName) + "@" + GameStateReader.AddressKey(c.agencyAddress)] = c.enabled;
+                    // Native has TWO removal shapes and they are not interchangeable (review MAJOR-2):
+                    // with nothing ticked it drops this AGENCY's rows (MarketingAgencyDialog:93), while an
+                    // ordinary un-tick drops that TYPE from every agency (:131). Capture which branch this is
+                    // before native runs, or a per-type remove would destroy another agency's campaign that
+                    // the helper was never shown.
+                    bool cancelAll = (picker.marketingTypeNamesSelected?.Count ?? -1) == 0;
+                    __state = (addr, agency, before, cancelAll);
+                }
+                catch { __state = null; }
+            }
+
+            static void Postfix((string addr, string agency, Dictionary<string, bool> before, bool cancelAll)? __state)
+            {
+                try
+                {
+                    if (__state == null) return;
+                    var (addr, agency, before, cancelAll) = __state.Value;
+                    var reg = GameStatePatcher.FindRegistration(addr);
+                    if (reg == null) return;
+                    if (cancelAll)
+                    {
+                        // Native dropped only THIS agency's rows — route exactly that, whatever their types
+                        // or enabled state (a disabled row and a type the agency no longer offers both count,
+                        // and neither survives a per-type remove's availability gate).
+                        bool had = false;
+                        foreach (var k in before.Keys) if (k.EndsWith("@" + agency, StringComparison.Ordinal)) { had = true; break; }
+                        if (had)
+                        {
+                            SendMarketingOp(addr, "campaigncancel", agency, "", false);
+                            Plugin.Logger.LogInfo($"{Tag} agency call for '{agency}': cancel-all routed to the owner of '{addr}'.");
+                        }
+                        return;
+                    }
+                    var after = new Dictionary<string, bool>();
+                    if (reg.marketingCampaigns != null)
+                        foreach (var c in reg.marketingCampaigns)
+                            if (c != null) after[TypeNameOf(c.marketingTypeName) + "@" + GameStateReader.AddressKey(c.agencyAddress)] = c.enabled;
+                    int sent = 0;
+                    foreach (var kv in after)
+                    {
+                        if (before.TryGetValue(kv.Key, out var was) && was == kv.Value) continue;   // unchanged
+                        int at = kv.Key.LastIndexOf('@');
+                        if (at <= 0) continue;
+                        SendMarketingOp(addr, "campaign", kv.Key.Substring(at + 1), kv.Key.Substring(0, at), kv.Value);
+                        sent++;
+                    }
+                    var removedTypes = new HashSet<string>();
+                    foreach (var kv in before)
+                    {
+                        if (after.ContainsKey(kv.Key)) continue;                                     // still there
+                        int at = kv.Key.LastIndexOf('@');
+                        if (at <= 0) continue;
+                        // Native's un-tick sweeps that TYPE from every agency, so one op does the whole sweep;
+                        // sending one per agency would have the owner answer "not applied" to the rest and
+                        // echo a full snapshot for each (review MINOR).
+                        if (!removedTypes.Add(kv.Key.Substring(0, at))) continue;
+                        SendMarketingOp(addr, "campaignremove", kv.Key.Substring(at + 1), kv.Key.Substring(0, at), false);
+                        sent++;
+                    }
+                    if (sent > 0)
+                        Plugin.Logger.LogInfo($"{Tag} agency call for '{agency}': {sent} marketing change(s) routed to the owner of '{addr}'.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} agency confirm route: {ex.Message}"); }
+            }
+        }
+
         /// <summary>OWNER: build one tab's snapshot and send it to one helper (also the echo after an edit).
         /// When the requester's sig matches the fresh content, nothing is sent - the poll costs no reply.</summary>
         private static void BuildAndSendSnapshot(string addressKey, string tab, string toPid, string requesterSig = "", bool echo = false)
@@ -2189,7 +2774,7 @@ namespace BigAmbitionsMP
             if (reg == null || !MergerFlip.TrulyMine(reg)) return;
             // 7a/7b: Insight + Deliveries serve ORDINARY shops — only the warehouse-backed tabs need the cast.
             Entities.Warehouse? wh = reg as Entities.Warehouse;
-            if (tab != "insight" && tab != "deliveries" && wh == null)
+            if (tab != "insight" && tab != "deliveries" && tab != "marketing" && wh == null)
             {
                 if (_logged.Add("work-notwh|" + addressKey))
                     Plugin.Logger.LogWarning($"{Tag} work-info request for '{addressKey}' but its registration is not a warehouse/factory — ignored.");
@@ -2205,6 +2790,7 @@ namespace BigAmbitionsMP
             {
                 if (tab == "insight") BuildInsight(reg, reply);
                 else if (tab == "deliveries") BuildDeliveries(reg, reply);
+                else if (tab == "marketing")  BuildMarketing(reg, reply);
                 else if (tab == "inventory") BuildInventory(wh!, reply);   // wh non-null past the guard above
                 else if (tab == "drivers") BuildDrivers(wh!, reply);
                 else if (tab == "factory") BuildFactory(wh!, reply);
@@ -2222,6 +2808,7 @@ namespace BigAmbitionsMP
                     : tab == "card"     ? $"{reply.Slots.Count} slot(s), {reply.Products.Count} inventory row(s)."
                     : tab == "insight"  ? $"{reply.InsightDays.Count} day(s), {reply.Capacity.Count} capacity row(s)."
                     : tab == "deliveries" ? $"{reply.Contracts.Count} contract(s), {reply.Products.Count} product(s)."
+                    : tab == "marketing"  ? $"{reply.Campaigns.Count} marketing campaign(s)."
                     :                     $"{reply.Stations.Count} workstation(s), {reply.ResourceStock.Count} resource count(s)."));
             if (MPServer.IsRunning) MPServer.HostRouteSharedWorkInfo(reply, MPConfig.PlayerId);
             else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedWorkInfo, MPConfig.PlayerId, reply));
@@ -2242,6 +2829,7 @@ namespace BigAmbitionsMP
                 .Append(':').Append(r.Insight.SatInterior).Append(':').Append(r.Insight.SatClean);
             if (r.InsightDays != null) foreach (var d in r.InsightDays) if (d != null) { sb.Append('|').Append(d.Day).Append(':').Append(d.Customers); if (d.Hours != null) foreach (var h in d.Hours) sb.Append(',').Append(h); }
             if (r.Capacity != null) foreach (var c in r.Capacity) if (c != null) { sb.Append('|').Append(c.ItemName); if (c.Shelves != null) foreach (var s in c.Shelves) if (s != null) sb.Append(':').Append(s.Name).Append('~').Append(s.Amount).Append('~').Append(s.PerHour); }
+            if (r.Campaigns != null) foreach (var c in r.Campaigns) if (c != null) sb.Append('|').Append(c.AgencyKey).Append(':').Append(c.TypeName).Append(':').Append(c.Enabled ? 1 : 0);
             if (r.Contracts != null) foreach (var c in r.Contracts) if (c != null) { sb.Append('|').Append(c.WholesaleKey).Append('#').Append(c.Ordinal).Append(':').Append(c.Enabled ? 1 : 0).Append(c.Urgent ? 1 : 0).Append(c.Repeating ? 1 : 0).Append(':').Append(c.NextDeliveryDay).Append(':').Append(c.DeliveryFee.ToString("F0")); if (c.Items != null) foreach (var it in c.Items) if (it != null) sb.Append(',').Append(it.ItemName).Append('=').Append(it.Amount).Append('~').Append(it.OrderedThisWeek); }
             return sb.Length.ToString() + ":" + sb.ToString().GetHashCode().ToString("X8");
         }
@@ -2369,6 +2957,14 @@ namespace BigAmbitionsMP
                 _renderCards = true;
                 return;
             }
+            // An agency call has no tab session, so a marketing reply for the shop it is aimed at is
+            // accepted on its own account (ruling 41).
+            if (p.Tab == "marketing" && _mkWantAddr.Length > 0 && p.AddressKey == _mkWantAddr && p.AddressKey != _openAddr)
+            {
+                var mreg = GameStatePatcher.FindRegistration(p.AddressKey);
+                if (mreg != null) ApplyMarketingSnapshot(p, mreg);
+                return;
+            }
             if (_openAddr.Length == 0 || p.AddressKey != _openAddr) return;   // stale reply for a tab no longer open
             // Unchanged content never disturbs the open screen — EXCEPT an edit echo: a REJECTED edit
             // leaves the owner's content (and so its sig) unchanged, and the gate would swallow the
@@ -2399,6 +2995,7 @@ namespace BigAmbitionsMP
             else if (p.Tab == "factory") ApplyFactorySnapshot(p, reg);
             else if (p.Tab == "insight" && p.Tab == _openTab) ApplyInsightSnapshot(p, reg);   // review MINOR-10: never while another tab is up
             else if (p.Tab == "deliveries" && p.Tab == _openTab) ApplyDeliveriesSnapshot(p, reg);
+            else if (p.Tab == "marketing" && p.Tab == _openTab) ApplyMarketingSnapshot(p, reg);   // never while Insight is up: UpdatePromotion would overwrite its deliberately-zeroed first open
         }
 
         // ═══════════════ owner-side edit apply ═══════════════
@@ -2419,7 +3016,13 @@ namespace BigAmbitionsMP
                 var reg = GameStatePatcher.FindRegistration(p.AddressKey);
                 if (reg == null || !MergerFlip.TrulyMine(reg)) return;
                 bool applied; string echoTab;
-                if (p.Op == "contract" || p.Op == "endcontract")
+                if (p.Op == "campaign" || p.Op == "campaignremove" || p.Op == "campaigncancel")
+                {
+                    // 7c: marketing ops serve ORDINARY shops — no warehouse cast.
+                    echoTab = "marketing";
+                    applied = ApplyMarketingOp(reg, p);
+                }
+                else if (p.Op == "contract" || p.Op == "endcontract")
                 {
                     // 7b: contract ops serve ORDINARY shops — no warehouse cast.
                     echoTab = "deliveries";
