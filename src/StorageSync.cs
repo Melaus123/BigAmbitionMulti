@@ -330,6 +330,12 @@ namespace BigAmbitionsMP
                     else if (req.Ctx == "stacksell" || req.Ctx == "stackdiscard")
                         RemoveStackInstances(inst.cargoInstances, req, res,
                                              removeWhole: (ci) => inst.RemoveFromCargo(ci));
+                    // Bundle sell/discard (user-approved 2026-08-25): remove ONE filled bag whole,
+                    // nested echoed so the seller's credit can price the contents in (native basis).
+                    // Removal-only — ctx untouched, so the result routes to the credit branch.
+                    else if (req.Ctx == "bundlesell" || req.Ctx == "bundlediscard")
+                        TakeBundleInstance(inst.cargoInstances, req, res,
+                                           removeWhole: (ci) => inst.RemoveFromCargo(ci));
                     else if (!string.IsNullOrEmpty(req.Ctx))
                     {
                         res.Reason = "unsupported";
@@ -352,10 +358,11 @@ namespace BigAmbitionsMP
                     MarkPaidWithSplit(inst, req, res);
                 else if (req.Op == OpPut)
                 {
-                    // Ruling 39: the vehicle put knows exactly two ctxs — plain and the sealed-box
-                    // give-back (Stage C). Building-only put machinery (producer/stationreturn/
-                    // worn) refuses rather than falling through to the generic path.
-                    if (!string.IsNullOrEmpty(req.Ctx) && req.Ctx != "boxreturn")
+                    // Ruling 39: the vehicle put knows exactly three ctxs — plain, and the two
+                    // give-back shapes (boxreturn = whole box, "return" = loose, R9 hardening).
+                    // Building-only put machinery (producer/stationreturn/worn) refuses rather
+                    // than falling through to the generic path.
+                    if (!string.IsNullOrEmpty(req.Ctx) && req.Ctx != "boxreturn" && req.Ctx != "return")
                     {
                         res.Reason = "unsupported";
                         Plugin.Logger.LogWarning($"[VStore] put ctx '{req.Ctx}' unsupported for a vehicle container.");
@@ -369,6 +376,19 @@ namespace BigAmbitionsMP
                     var ci = new CargoInstance(req.ItemName, req.Amount, req.PricePerUnit, req.Paid);
                     DecodeNestedInto(ci, req.Nested);   // ONE codec — a sealed give-back keeps its contents (Stage C)
                     if (inst.TryToAddToCargo(ci)) { res.Ok = true; res.Reason = ""; }
+                    else if (req.Ctx == "boxreturn" || req.Ctx == "return")
+                    {
+                        // R9 hardening (user-approved 2026-08-25): a give-back is the second half
+                        // of a removal this container just granted — refusing it DESTROYS the item
+                        // (hands-full + holder-refilled double race; native gives SEALED boxes a
+                        // capacity-free pass, open bags got none). Force the remainder in — ci
+                        // already holds only what the partial merge didn't absorb, and a bundle
+                        // never partial-merges (native MergeIntoCargo refuses nested). Overfill-
+                        // by-one mirrors the native sealed pass; the next take drains it.
+                        inst.AddToCargo(ci);
+                        res.Ok = true; res.Reason = "";
+                        Plugin.Logger.LogWarning($"[VStore] give-back force-landed {ci.amount}×{ci.itemName} on '{req.VehicleId}' — holder refused 'full' (overfill-by-one, R9 hardening).");
+                    }
                     else
                     {
                         RollbackPartialMerge(req, req.Amount - ci.amount,
@@ -434,11 +454,24 @@ namespace BigAmbitionsMP
                 if (req.Ctx == "stacksell" || req.Ctx == "stackdiscard")
                     RemoveStackInstances(item.cargoInstances, req, res,
                                          removeWhole: (ci) => item.RemoveFromCargo(ci));
+                else if (req.Ctx == "bundlesell" || req.Ctx == "bundlediscard")   // one filled bag, whole (see the vehicle twin)
+                    TakeBundleInstance(item.cargoInstances, req, res,
+                                       removeWhole: (ci) => item.RemoveFromCargo(ci));
                 else if (req.Ctx == "boxtake")
                     TakeWholeInstance(item.cargoInstances, req, res,
                                       removeWhole: (ci) => item.RemoveFromCargo(ci));
                 else if (req.Ctx == "stationtake")
                     TakeStock(reg, item, req, res);
+                else if (!string.IsNullOrEmpty(req.Ctx) && req.Ctx != "consume" && req.Ctx != "placereduce" && req.Ctx != "vehicletake")
+                {
+                    // Ruling 39 symmetry (2026-08-25 review): the vehicle take refuses unknown
+                    // ctx; the building take silently fell through to the loose loop — so a
+                    // NEWER build's ctx literal reaching an older peer would remove a PLAIN
+                    // stack while the sender's result handling credits something else entirely
+                    // (wrong item AND wrong money). Refuse loudly instead.
+                    res.Reason = "unsupported";
+                    Plugin.Logger.LogWarning($"[BStore] take ctx '{req.Ctx}' unsupported for a building container.");
+                }
                 else
                     // A2-3: the paid-preference two-pass now applies here too (ruling 36 —
                     // paid and unpaid stacks of one item genuinely coexist; a request naming
@@ -451,13 +484,46 @@ namespace BigAmbitionsMP
             else if (req.Op == OpPut)
             {
                 if (req.Ctx == "producer" || req.Ctx == "stationreturn")
+                {
                     PutIntoSingleSlot(item, req, res);
+                    // R9 hardening, the 7th give-back shape (review MINOR-2): a refused STATION
+                    // give-back strands the removed stock — R3's named loss path (the slot was
+                    // renamed/reloaded mid-round-trip). Rescue via the native ReturnToAShelf —
+                    // the same primitive ApplySetStock trusts — before accepting the loss; only
+                    // a shop with no shelf room anywhere still refuses (loud on both sides).
+                    if (!res.Ok && req.Ctx == "stationreturn")
+                    {
+                        string was = res.Reason;
+                        try
+                        {
+                            var rescue = new CargoInstance(req.ItemName, req.Amount, req.PricePerUnit, req.Paid);
+                            if (rescue.ReturnToAShelf(item.AddressCached, item))
+                            {
+                                res.Ok = true; res.Reason = ""; res.Amount = req.Amount;
+                                Plugin.Logger.LogWarning($"[BStore] station give-back landed on a SHELF instead ({req.Amount}×{req.ItemName} @'{req.AddressKey}' — the station refused '{was}'; R9 rescue).");
+                            }
+                            else if (rescue.amount < req.Amount)
+                                // Review MINOR-6: ReturnToAShelf merges as it goes before a false
+                                // return — a PARTIAL landing must not read as a total failure.
+                                Plugin.Logger.LogWarning($"[BStore] station give-back PARTIALLY shelved: {req.Amount - rescue.amount} of {req.Amount}×{req.ItemName} landed @'{req.AddressKey}', {rescue.amount} stranded (station refused '{was}'; no shelf slot for the rest).");
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] station give-back shelf rescue: {ex.Message}"); }
+                    }
+                }
                 else
                 {
                     var ci = new CargoInstance(req.ItemName, req.Amount, req.PricePerUnit, req.Paid);
                     // Round-47: a returned sealed box keeps its contents ("boxreturn" give-backs).
                     DecodeNestedInto(ci, req.Nested);   // ONE codec (R7)
                     if (item.TryToAddToCargo(ci)) { res.Ok = true; res.Reason = ""; }
+                    else if (req.Ctx == "boxreturn" || req.Ctx == "return")
+                    {
+                        // R9 hardening — the vehicle twin's reasoning verbatim (see OwnerApplyVehicle):
+                        // a refused give-back destroys the item; force the remainder in, overfill-by-one.
+                        item.AddToCargo(ci);
+                        res.Ok = true; res.Reason = "";
+                        Plugin.Logger.LogWarning($"[BStore] give-back force-landed {ci.amount}×{ci.itemName} on '{req.AddressKey}'/{req.ItemId} — holder refused 'full' (overfill-by-one, R9 hardening).");
+                    }
                     else
                     {
                         // Round-32 (decompile ItemInstance.cs:198-231): TryToAddToCargo PARTIALLY merges
@@ -543,6 +609,31 @@ namespace BigAmbitionsMP
             // amount); the MUTATION is TakeWholeOf — the one whole-instance body (review NEW-7 /
             // ruling 37: one home per mutation shape; TakeWholeInstance shares it).
             if (res.Ok || !string.IsNullOrEmpty(req.Ctx)) return;
+            TakeBundleInstance(src, req, res, removeWhole);
+            if (res.Ok)
+            {
+                res.Ctx = "boxtake";   // designed-in requirement #1: delivery + give-back route by ctx
+                // Review NEW-8: the preservation guarantee is conditional on DELIVERY. A
+                // Silent mirror (ctx "" by construction) never delivers — its res is
+                // discarded at the Silent early-out, so the contents are NOT echoed anywhere
+                // (unchanged from pre-fix: the borrower's native copy was nested-free; a
+                // refusal here would DUPLICATE the bag instead). Name that honestly.
+                if (req.Silent)
+                    Plugin.Logger.LogInfo($"[{Tag(req.Container)}] mirror take of '{req.ItemName}' matched a BUNDLE — removed whole to mirror the native take; contents are not delivered on a mirror (pre-existing shape, F-2026-08-25-I).");
+                else
+                    Plugin.Logger.LogInfo($"[{Tag(req.Container)}] plain take of '{req.ItemName}' matched a BUNDLE — upgraded to whole-instance take, contents echoed (F-2026-08-25-I).");
+            }
+        }
+
+        /// <summary>THE bundle matcher (one home): the first unsealed NESTED-BEARING instance
+        /// matching name (paid-preference two-pass) with an instance-EXACT amount, taken whole
+        /// via TakeWholeOf. Callers: TakeLoose phase B (the plain-take upgrade, which then stamps
+        /// res.Ctx) and the bundlesell/bundlediscard ctx routes (removal-only; ctx untouched so
+        /// the result routes to the credit branch, never to delivery).</summary>
+        private static void TakeBundleInstance(System.Collections.Generic.List<CargoInstance>? src, StorageOpPayload req, StorageResPayload res,
+                                               Action<CargoInstance> removeWhole)
+        {
+            if (src == null) return;
             for (int pass = 0; pass < 2 && !res.Ok; pass++)
                 for (int c = 0; c < src.Count; c++)
                 {
@@ -555,16 +646,6 @@ namespace BigAmbitionsMP
                     if (pass == 0 && ci.paid != req.Paid) continue;
                     if (ci.amount != req.Amount) continue;   // whole move — instance-exact (bundles are amount 1 by ConvertToCargoInstance)
                     TakeWholeOf(ci, res, removeWhole);
-                    res.Ctx = "boxtake";   // designed-in requirement #1: delivery + give-back route by ctx
-                    // Review NEW-8: the preservation guarantee is conditional on DELIVERY. A
-                    // Silent mirror (ctx "" by construction) never delivers — its res is
-                    // discarded at the Silent early-out, so the contents are NOT echoed anywhere
-                    // (unchanged from pre-fix: the borrower's native copy was nested-free; a
-                    // refusal here would DUPLICATE the bag instead). Name that honestly.
-                    if (req.Silent)
-                        Plugin.Logger.LogInfo($"[{Tag(req.Container)}] mirror take of '{req.ItemName}' matched a BUNDLE — removed whole to mirror the native take; contents are not delivered on a mirror (pre-existing shape, F-2026-08-25-I).");
-                    else
-                        Plugin.Logger.LogInfo($"[{Tag(req.Container)}] plain take of '{req.ItemName}' matched a BUNDLE — upgraded to whole-instance take, contents echoed (F-2026-08-25-I).");
                     break;
                 }
         }
@@ -945,6 +1026,8 @@ namespace BigAmbitionsMP
                     {
                         if (req2.Ctx == "stacksell" || req2.Ctx == "stackdiscard")
                             RemoveStackInstances(item.cargoInstances, req2, res2, (ci) => item.RemoveFromCargo(ci));
+                        else if (req2.Ctx == "bundlesell" || req2.Ctx == "bundlediscard")
+                            TakeBundleInstance(item.cargoInstances, req2, res2, (ci) => item.RemoveFromCargo(ci));
                         else if (req2.Ctx == "boxtake")
                             TakeWholeInstance(item.cargoInstances, req2, res2, (ci) => item.RemoveFromCargo(ci));
                         else if (req2.Ctx == "stationtake")
@@ -965,6 +1048,8 @@ namespace BigAmbitionsMP
                             var ci = new CargoInstance(req2.ItemName, req2.Amount, req2.PricePerUnit, req2.Paid);
                             DecodeNestedInto(ci, req2.Nested);
                             if (item.TryToAddToCargo(ci)) res2.Ok = true;
+                            else if (req2.Ctx == "return" || req2.Ctx == "boxreturn")
+                            { item.AddToCargo(ci); res2.Ok = true; }   // mirror the owner's R9 force-landing
                             else RollbackPartialMerge(req2, req2.Amount - ci.amount, item.cargoInstances,
                                                       (s) => item.RemoveFromCargo(s), (s, amt) => item.ReduceFromCargo(s, amt));
                         }
@@ -1003,6 +1088,29 @@ namespace BigAmbitionsMP
                 // Native tail for BOTH verdicts (OnConfirmSell :211 / OnDiscardClick :218): any UI
                 // keyed to the cargo event refreshes on the clicker's machine (parity 2026-08-25).
                 try { GameEvent.Invoke("ba:gameevent_itemcargochanged"); } catch { }
+                return;
+            }
+            // Bundle sell/discard (user-approved 2026-08-25): removal-only, ONE filled bag.
+            // Credit is the NATIVE basis — GetSellingPrice over the reconstructed instance WITH
+            // its nested contents (GetWorth includes them; the plain stacksell's R2 basis is
+            // nested-free by design, which is exactly why bundles needed their own route).
+            if (res.Ctx == "bundlesell" || res.Ctx == "bundlediscard")
+            {
+                if (!res.Ok) { PassengerHud.Toast("Already gone."); return; }
+                if (res.Ctx == "bundlesell")
+                {
+                    try
+                    {
+                        var priced = new CargoInstance(res.ItemName, res.Amount, res.PricePerUnit, res.Paid);
+                        DecodeNestedInto(priced, res.Nested);   // ONE codec — contents priced in
+                        float total = priced.GetSellingPrice();
+                        var data = new System.Collections.Generic.Dictionary<string, string> { { "itemName", res.ItemName } };
+                        GameManager.ChangeMoneySafe(total, new TransactionInfo("ba:transaction_itemsold", data));
+                        Plugin.Logger.LogInfo($"[Store] bundle sell confirmed: {res.ItemName}×{res.Amount} + {res.Nested?.Count ?? 0} nested line(s) → ${total:F2} credited locally (nested-inclusive basis).");
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[{Tag(res.Container)}] bundle-sell credit: {ex.Message}"); }
+                }
+                try { GameEvent.Invoke("ba:gameevent_itemcargochanged"); } catch { }   // native tail, both verdicts
                 return;
             }
             if (res.Ctx == "consume")
@@ -1092,7 +1200,10 @@ namespace BigAmbitionsMP
                     SendOp(new StorageOpPayload
                     {
                         Container = ContainerVehicle, VehicleId = vid, PlayerId = MPConfig.PlayerId,
-                        Op = OpPut, Ctx = res.Ctx == "boxtake" ? "boxreturn" : "",
+                        // "return" (R9 hardening, user-approved 2026-08-25): a give-back must be
+                        // DISTINGUISHABLE from a normal deposit — the owner force-lands it and the
+                        // accessor's confirm consumes nothing (see OnPutResult).
+                        Op = OpPut, Ctx = res.Ctx == "boxtake" ? "boxreturn" : "return",
                         ItemName = ci.itemName, Amount = ci.amount, Paid = ci.paid, PricePerUnit = ci.pricePerUnit,
                         Nested = res.Nested ?? new System.Collections.Generic.List<CargoNestedInfo>(),
                     });
@@ -1116,8 +1227,9 @@ namespace BigAmbitionsMP
             if (res.Ctx == "boxtake")
                 BuildingStorageSync.RequestPutBox(res.AddressKey, res.ItemId, res.ItemName, res.Amount, res.Paid, res.PricePerUnit, res.Nested);
             else
+                // "return" (R9 hardening): a loose give-back is not a deposit — see the vehicle twin above.
                 BuildingStorageSync.RequestPut(res.AddressKey, res.ItemId, res.ItemName, res.Amount, res.Paid, res.PricePerUnit,
-                                               res.Ctx == "stationtake" ? "stationreturn" : "");
+                                               res.Ctx == "stationtake" ? "stationreturn" : "return");
             Plugin.Logger.LogInfo($"[BStore] gave back {res.Amount}×{res.ItemName} to '{res.AddressKey}'/{res.ItemId} (no room to carry).");
             PassengerHud.Toast("No room to carry that.");
         }
@@ -1131,7 +1243,7 @@ namespace BigAmbitionsMP
             if (!res.Ok) { PassengerHud.Toast("Already gone."); return; }
             if (pc == null || pc.itemName != res.ItemName)
             {
-                BuildingStorageSync.RequestPut(res.AddressKey, res.ItemId, res.ItemName, 1, res.Paid, res.PricePerUnit);
+                BuildingStorageSync.RequestPut(res.AddressKey, res.ItemId, res.ItemName, 1, res.Paid, res.PricePerUnit, "return");
                 Plugin.Logger.LogWarning("[BStore] placereduce Ok without a matching pending place — unit returned to the owner (gave back 1).");
                 return;
             }
@@ -1149,7 +1261,7 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] place start: {ex.Message}"); }
             if (!started)
             {
-                BuildingStorageSync.RequestPut(res.AddressKey, res.ItemId, res.ItemName, 1, res.Paid, res.PricePerUnit);
+                BuildingStorageSync.RequestPut(res.AddressKey, res.ItemId, res.ItemName, 1, res.Paid, res.PricePerUnit, "return");
                 PassengerHud.Toast("Couldn't start placing that — it was put back.");
                 Plugin.Logger.LogInfo($"[BStore] gave back 1×{res.ItemName} to '{res.AddressKey}'/{res.ItemId} (placement failed to start).");
             }
@@ -1166,14 +1278,14 @@ namespace BigAmbitionsMP
             try { vt = ItemsGetter.GetByName(res.ItemName)?.vehicleType ?? ""; } catch { }
             if (string.IsNullOrEmpty(vt))
             {
-                BuildingStorageSync.RequestPut(res.AddressKey, res.ItemId, res.ItemName, res.Amount, res.Paid, res.PricePerUnit);
+                BuildingStorageSync.RequestPut(res.AddressKey, res.ItemId, res.ItemName, res.Amount, res.Paid, res.PricePerUnit, "return");
                 Plugin.Logger.LogWarning($"[BStore] vehicletake Ok but '{res.ItemName}' has no vehicleType — returned to the owner (gave back {res.Amount}).");
                 return;
             }
             if (PlayerHelper.IsHoldingItem || PlayerHelper.IsUsingVehicle)
             {
                 // Hands filled during the round-trip — give it back rather than strand it (risk R9).
-                BuildingStorageSync.RequestPut(res.AddressKey, res.ItemId, res.ItemName, res.Amount, res.Paid, res.PricePerUnit);
+                BuildingStorageSync.RequestPut(res.AddressKey, res.ItemId, res.ItemName, res.Amount, res.Paid, res.PricePerUnit, "return");
                 PassengerHud.Toast("No room to unpack that now.");
                 Plugin.Logger.LogInfo($"[BStore] gave back {res.Amount}×{res.ItemName} to '{res.AddressKey}'/{res.ItemId} (hands filled mid-round-trip).");
                 return;
@@ -1188,7 +1300,7 @@ namespace BigAmbitionsMP
             catch (Exception ex)
             {
                 Plugin.Logger.LogWarning($"[BStore] vehicle spawn: {ex.Message}");
-                BuildingStorageSync.RequestPut(res.AddressKey, res.ItemId, res.ItemName, res.Amount, res.Paid, res.PricePerUnit);
+                BuildingStorageSync.RequestPut(res.AddressKey, res.ItemId, res.ItemName, res.Amount, res.Paid, res.PricePerUnit, "return");
             }
         }
 
@@ -1203,6 +1315,21 @@ namespace BigAmbitionsMP
                 {
                     PassengerHud.Toast("Couldn't return the contents to the station.");
                     Plugin.Logger.LogWarning($"[BStore] stationreturn REFUSED ({res.Reason}) for {res.Amount}×{res.ItemName} on '{res.AddressKey}'/{res.ItemId} — removed stock could not be returned.");
+                }
+                return;
+            }
+            if (res.Ctx == "return" || res.Ctx == "boxreturn")
+            {
+                // A give-back landing needs NOTHING locally — the item never entered this
+                // machine's hands or truck, so the generic consume below must not run: it could
+                // eat a SAME-NAME stack from whatever the accessor happens to be holding (hazard
+                // spotted during the R9 hardening — give-backs previously rode ctx "" straight
+                // into ConsumeSource). On !Ok the removed goods are stranded owner-side with no
+                // local copy — exception-only now that the owner force-lands; log loud.
+                if (!res.Ok)
+                {
+                    PassengerHud.Toast("Couldn't return the item.");
+                    Plugin.Logger.LogWarning($"[{Tag(res.Container)}] give-back REFUSED ({res.Reason}) for {res.Amount}×{res.ItemName} — removed goods could not be returned (R9 tripwire).");
                 }
                 return;
             }

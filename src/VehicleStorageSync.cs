@@ -174,6 +174,21 @@ namespace BigAmbitionsMP
             });
         }
 
+        /// <summary>Bundle sell/discard (user-approved 2026-08-25): remove ONE filled bag whole —
+        /// on a sell the money credits the requester at the NATIVE nested-inclusive basis
+        /// (computed from the owner's echoed contents at verdict time). Removal-only, no
+        /// capacity pre-check, no delivery.</summary>
+        public static void RequestBundleOp(string realVehicleId, string itemName, int amount, bool paid, float price, bool sell)
+        {
+            if (string.IsNullOrEmpty(realVehicleId) || string.IsNullOrEmpty(itemName) || amount <= 0) return;
+            StorageSync.SendOp(new StorageOpPayload
+            {
+                Container = StorageSync.ContainerVehicle, VehicleId = realVehicleId, PlayerId = MPConfig.PlayerId,
+                Op = StorageSync.OpTake, Ctx = sell ? "bundlesell" : "bundlediscard",
+                ItemName = itemName, Amount = amount, Paid = paid, PricePerUnit = price, Count = 1,
+            });
+        }
+
         /// <summary>v17 (proposal 2): ask the owner for the trunk's FULL cargo detail — fired by
         /// the panel on open and on manifest movement while open. Event-driven; the answer feeds
         /// display only (StorageSync.OnTrunkDetail → panel), never game state.</summary>

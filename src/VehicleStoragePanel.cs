@@ -58,6 +58,7 @@ namespace BigAmbitionsMP
             if (string.IsNullOrEmpty(vid)) return;
             if (!_built) Build();
             if (_canvas == null) return;
+            EnsureTooltipsAboveUs();
             _vid = vid; _owner = ownerId ?? ""; _enterCb = enterCb; _mode = Mode.Choice;
             _detailRows = null; _detailSig = ""; _detailPendingSig = "";   // fresh session, fresh detail
             if (!CloneMenu())   // exact native menu; on failure, fall back to the hand-built one
@@ -366,7 +367,7 @@ namespace BigAmbitionsMP
                                 // != null, not ?. — Item is a ScriptableObject and ?. bypasses Unity's
                                 // fake-null (review NEW-6; the IsSealedName idiom).
                                 try { var itemDef = BigAmbitions.Items.ItemsGetter.GetByName(it); gift = itemDef != null && itemDef.isSpecialGift; } catch { }
-                                if (gift) UI.ItemPanel.ItemPanelUI.ConfirmDiscardingSpecialGift(doSell);
+                                if (gift) { try { GiftConfirm(doSell); } catch { doSell(); } }   // JIT-contained (hardening)
                                 else doSell();
                             });
                         }
@@ -409,24 +410,71 @@ namespace BigAmbitionsMP
 
         /// <summary>v17 (proposal 2): one native-truth SPECIAL card — a sealed box or an unsealed
         /// bundle (filled bag) from the owner's detail. Native shapes (CargoItemUi :83-108):
-        /// sealed → the CONTENTS label ("(400) Hot Dog"), no amount, no tooltip; unsealed bundle →
-        /// the container's own name + the contents TOOLTIP; both hide the amount label. Take = the
-        /// whole instance (ctx boxtake — exact identity, contents echoed). Sell/discard stay OFF
-        /// these rows for now: native would SELL a paid bundle with its contents priced in, but
-        /// the engine's credit basis is nested-free (R2) — a known residual awaiting its own
-        /// ruling; the take-then-sell route works meanwhile.</summary>
+        /// sealed → the CONTENTS label ("(400) Hot Dog"), no amount, no tooltip, NO buttons;
+        /// unsealed bundle → the container's own name + the contents TOOLTIP, amount hidden, and
+        /// (user-approved 2026-08-25) the native buttons: paid → SELL at the nested-INCLUSIVE
+        /// native price (contents priced in — CargoItemUi's own GetSellingPrice basis), unpaid →
+        /// DISCARD (no confirm, one bag per click). Take = the whole instance (ctx boxtake).</summary>
         private static void MakeDetailSpecialCard(CargoDetailInfo r, bool sealedRow)
         {
             string vid = _vid, owner = _owner;
             string it = r.ItemName; int amt = r.Amount; bool p = r.Paid; float pr = r.PricePerUnit;
             System.Collections.Generic.List<string>? tip = null;
             (string name, int amount)? contents = null;
+            System.Action? onSell = null, onDiscard = null;
             if (sealedRow)
             {
                 if (r.Nested != null && r.Nested.Count > 0) contents = (r.Nested[0].ItemName, r.Nested[0].Amount);
             }
             else
             {
+                if (p)
+                {
+                    onSell = () =>
+                    {
+                        try
+                        {
+                            float total = 0f;
+                            try
+                            {
+                                // The native basis (CargoItemUi OnSellClick → GetSellingPrice →
+                                // GetWorth, which INCLUDES nested) over the reconstructed bag.
+                                var priced = new CargoInstance(it, amt, pr, true);
+                                if (r.Nested != null)
+                                    foreach (var n in r.Nested)
+                                        if (n != null) priced.nestedCargoInstances.Add(new NestedCargoInstance(n.ItemName, n.Amount, n.PricePerUnit, null));
+                                total = priced.GetSellingPrice();
+                            }
+                            catch { }
+                            string locName = Localize(it);
+                            HudConfirm.Show(default, "itempanelui_hud_confirm_sellitem".Localize(new
+                            {
+                                type = locName,   // native hides the amount label on bundle rows → bare name
+                                price = total.ToShortCurrencyFormat(),
+                            }), delegate
+                            {
+                                System.Action doSell = () =>
+                                {
+                                    VehicleStorageSync.RequestBundleOp(vid, it, amt, paid: true, pr, sell: true);
+                                    Plugin.Logger.LogInfo($"[VStore] borrower bundle sell {it}×{amt} on '{vid}' → routed (nested-inclusive credit at verdict).");
+                                };
+                                bool gift = false;
+                                try { var itemDef = BigAmbitions.Items.ItemsGetter.GetByName(it); gift = itemDef != null && itemDef.isSpecialGift; } catch { }
+                                if (gift) { try { GiftConfirm(doSell); } catch { doSell(); } }
+                                else doSell();
+                            });
+                        }
+                        catch (System.Exception ex) { Plugin.Logger.LogWarning($"[VStore] bundle sell route: {ex.Message}"); }
+                    };
+                }
+                else
+                {
+                    onDiscard = () =>
+                    {
+                        VehicleStorageSync.RequestBundleOp(vid, it, amt, paid: false, pr, sell: false);
+                        Plugin.Logger.LogInfo($"[VStore] borrower bundle discard {it}×{amt} on '{vid}' → routed.");
+                    };
+                }
                 // Native aggregates the tooltip by item name (CargoItemUi :94-106).
                 var agg = new System.Collections.Generic.Dictionary<string, int>();
                 var ordered = new System.Collections.Generic.List<string>();
@@ -447,7 +495,26 @@ namespace BigAmbitionsMP
                 }
             }
             MakeNativeCard(it, "", () => VehicleStorageSync.RequestTake(vid, owner, it, amt, p, pr, "boxtake"),
-                           paid: p, tooltip: tip, contentsLabel: contents);
+                           paid: p, onSell: onSell, onDiscard: onDiscard, tooltip: tip, contentsLabel: contents);
+        }
+
+        /// <summary>The LAST direct native binding of the risky JIT shape, contained (review
+        /// carry-forward, user-approved hardening): an absent ConfirmDiscardingSpecialGift
+        /// overload surfaces at THIS call's site — callers catch that and act WITHOUT the gift
+        /// friction (the method never began, so the dialog callback was never armed — the
+        /// fallback cannot double-fire). A runtime throw INSIDE the dialog is swallowed here
+        /// with NO fallback: the callback may already be armed, and acting directly could act
+        /// twice. Shared cross-file like Localize.</summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        internal static void GiftConfirm(System.Action onConfirm)
+        {
+            try { UI.ItemPanel.ItemPanelUI.ConfirmDiscardingSpecialGift(onConfirm); }
+            catch (System.Exception ex)
+            {
+                // No fallback (the callback may be armed — acting directly could act twice), but
+                // never a SILENT drop (review MINOR-5): name it so it can't read as a user cancel.
+                Plugin.Logger.LogWarning($"[VStore] gift confirm threw mid-dialog — the action was NOT taken: {ex.Message}");
+            }
         }
 
         /// <summary>v17 (proposal 2): the owner's trunk detail arrived. Guards, in order: the R5
@@ -684,6 +751,7 @@ namespace BigAmbitionsMP
             if (string.IsNullOrEmpty(vid)) return;
             if (!_built) Build();
             if (_canvas == null) return;
+            EnsureTooltipsAboveUs();
             _vid = vid; _owner = ownerId ?? ""; _mode = Mode.List; _sig = " ";
             _detailRows = null; _detailSig = ""; _detailPendingSig = "";
             if (!CloneCargo())   // exact native cargo screen; on failure, fall back to the hand-built list
@@ -694,6 +762,35 @@ namespace BigAmbitionsMP
             }
             if (_root != null) _root.SetActive(true);
             Plugin.Logger.LogInfo($"[VStore] opened storage for '{vid}' (owner '{_owner}').");
+        }
+
+        /// <summary>Field find (user 2026-08-25): the bundle tooltip draws on TooltipSystem's OWN
+        /// canvas — our panel at 5001 sat ABOVE it, burying the borrower's tooltip (the owner's
+        /// native window sits BELOW the tooltip canvas, so only ours clipped it). Review MINOR-1
+        /// killed the first cut (lowering OUR canvas has no safe floor — it could land under
+        /// PassengerHud 5000 or, for a low tooltip order, under MPCanvasUI/native HUD). The
+        /// correct direction: tooltips are TOPMOST BY DESIGN — RAISE the game's tooltip canvas
+        /// just above us. Native relative order is unchanged (it was already above every native
+        /// canvas); our 5001/5000 toast adjacency stays intact; and any native tooltip that was
+        /// under our chat/HUD canvases is fixed for free. Idempotent (once above, the condition
+        /// is false); re-tried on every Open in case the singleton wasn't alive at first build;
+        /// the singleton is DontDestroyOnLoad, so the raise persists.</summary>
+        private static void EnsureTooltipsAboveUs()
+        {
+            try
+            {
+                var cv = _canvas != null ? _canvas.GetComponent<Canvas>() : null;
+                if (cv == null) return;
+                var ts = InstanceBehavior<Tooltip.TooltipSystem>.Instance;
+                var tc = ts != null ? AccessTools.Field(typeof(Tooltip.TooltipSystem), "canvas")?.GetValue(ts) as Canvas : null;
+                if (tc != null && tc.sortingOrder <= cv.sortingOrder)
+                {
+                    int was = tc.sortingOrder;
+                    tc.sortingOrder = cv.sortingOrder + 1;
+                    Plugin.Logger.LogInfo($"[VStore] tooltip canvas raised {was} → {tc.sortingOrder} (tooltips are topmost by design; our panel stays {cv.sortingOrder}).");
+                }
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[VStore] tooltip-sort probe: {ex.Message}"); }
         }
 
         /// <summary>Round-35: is the panel currently showing THIS vehicle? Take-result deliveries close the
@@ -872,7 +969,7 @@ namespace BigAmbitionsMP
                 UnityEngine.Object.DontDestroyOnLoad(canvasGO);
                 var canvas = canvasGO.AddComponent<Canvas>();
                 canvas.renderMode  = RenderMode.ScreenSpaceOverlay;
-                canvas.sortingOrder = 5001;
+                canvas.sortingOrder = 5001;   // the tooltip canvas is raised above us at Open (EnsureTooltipsAboveUs)
                 var scaler = canvasGO.AddComponent<CanvasScaler>();
                 scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
                 scaler.referenceResolution = new Vector2(3840f, 2160f);   // MATCH the game's overlay canvas (probe: ItemOverlayManager) — our 1920 ref rendered cloned UI 2x too big

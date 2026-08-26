@@ -46,6 +46,21 @@ namespace BigAmbitionsMP
         /// whole stack row. The REMOVAL routes to the owner (stock truth); on a sell, the MONEY credits
         /// the HELPER's own wallet locally on confirm — native "whoever sells pockets it" semantics; the
         /// grant is trust-scoped and Transfers exist for gifting it back (user's design).</summary>
+        /// <summary>Bundle sell/discard (user-approved 2026-08-25): the building twin of
+        /// VehicleStorageSync.RequestBundleOp — one filled bag, whole, nested-inclusive credit
+        /// on a sell. The plain RequestStackOp below deliberately never matches bundles
+        /// (F-2026-08-25-H); this is their own route.</summary>
+        public static void RequestBundleOp(string addressKey, string itemId, string itemName, int amount, bool paid, float price, bool sell)
+        {
+            if (string.IsNullOrEmpty(addressKey) || string.IsNullOrEmpty(itemId) || string.IsNullOrEmpty(itemName) || amount <= 0) return;
+            StorageSync.SendOp(new StorageOpPayload
+            {
+                Container = StorageSync.ContainerBuilding, AddressKey = addressKey, ItemId = itemId,
+                PlayerId = MPConfig.PlayerId, Op = StorageSync.OpTake, Ctx = sell ? "bundlesell" : "bundlediscard",
+                ItemName = itemName, Amount = amount, Paid = paid, PricePerUnit = price, Count = 1,
+            });
+        }
+
         public static void RequestStackOp(string addressKey, string itemId, string itemName, int amount, bool paid, float price, int count, bool sell)
         {
             if (string.IsNullOrEmpty(addressKey) || string.IsNullOrEmpty(itemId) || string.IsNullOrEmpty(itemName) || count <= 0) return;

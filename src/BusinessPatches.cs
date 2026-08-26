@@ -531,6 +531,16 @@ namespace BigAmbitionsMP
                 int amount = first.amount; bool paid = first.paid; float price = first.pricePerUnit;
                 int stackCount = cargoItem.cargoInstances.Count;
                 bool isSealed = first.IsSealed;
+                // Bundle rows (user-approved 2026-08-25): native grouping makes every nested-bearing
+                // row a SINGLETON (stackCount==1), and its sell price below is already
+                // nested-inclusive (first.GetSellingPrice includes contents) — only the ROUTE and
+                // the CREDIT needed the bundle channel (the plain stack matcher skips bundles,
+                // F-2026-08-25-H, which had turned bundle sells into refusals). Nested is STATE:
+                // read LIVE at click, like the take predicate below (review MINOR-3 — both
+                // directions of staleness fail safe to "gone", but the two predicates over one
+                // field must not disagree on when they read it).
+                System.Func<bool> isBundleRow = () =>
+                { try { return first.nestedCargoInstances != null && first.nestedCargoInstances.Count > 0; } catch { return false; } };
                 string itemId = ii.id?.ToString() ?? "";
 
                 // Round-47b (full parity): SELL/DISCARD stay visible per the native rules (paid→sell,
@@ -561,14 +571,22 @@ namespace BigAmbitionsMP
                             {
                                 System.Action doSell = () =>
                                 {
-                                    BuildingStorageSync.RequestStackOp(addr, itemId, name, amount, paid, price, stackCount, sell: true);
-                                    Plugin.Logger.LogInfo($"[Business] helper stack sell {stackCount}×({name}×{amount}) @'{addr}' → routed.");
+                                    if (isBundleRow())
+                                    {
+                                        BuildingStorageSync.RequestBundleOp(addr, itemId, name, amount, paid, price, sell: true);
+                                        Plugin.Logger.LogInfo($"[Business] helper bundle sell {name}×{amount} @'{addr}' → routed (nested-inclusive credit at verdict).");
+                                    }
+                                    else
+                                    {
+                                        BuildingStorageSync.RequestStackOp(addr, itemId, name, amount, paid, price, stackCount, sell: true);
+                                        Plugin.Logger.LogInfo($"[Business] helper stack sell {stackCount}×({name}×{amount}) @'{addr}' → routed.");
+                                    }
                                 };
                                 // Native second confirm for special gifts (CargoItemUi :189-196) —
                                 // the helper keeps the owner's friction (trunk twin, same day).
                                 bool gift = false;   // != null, not ?. — Unity fake-null (review NEW-6)
                                 try { var itemDef = first.ItemCached; gift = itemDef != null && itemDef.isSpecialGift; } catch { }
-                                if (gift) UI.ItemPanel.ItemPanelUI.ConfirmDiscardingSpecialGift(doSell);
+                                if (gift) { try { VehicleStoragePanel.GiftConfirm(doSell); } catch { doSell(); } }   // JIT-contained (hardening)
                                 else doSell();
                             });
                         }
@@ -587,8 +605,16 @@ namespace BigAmbitionsMP
                             // native discard removes ONE instance per click (OnDiscardClick gets only
                             // firstCargoInstance) — round-47b had copied sell's whole-group multiplicity
                             // here, so one helper click destroyed the owner's entire unpaid group.
-                            BuildingStorageSync.RequestStackOp(addr, itemId, name, amount, paid, price, count: 1, sell: false);
-                            Plugin.Logger.LogInfo($"[Business] helper stack discard 1×({name}×{amount}) @'{addr}' → routed.");
+                            if (isBundleRow())
+                            {
+                                BuildingStorageSync.RequestBundleOp(addr, itemId, name, amount, paid, price, sell: false);
+                                Plugin.Logger.LogInfo($"[Business] helper bundle discard {name}×{amount} @'{addr}' → routed.");
+                            }
+                            else
+                            {
+                                BuildingStorageSync.RequestStackOp(addr, itemId, name, amount, paid, price, count: 1, sell: false);
+                                Plugin.Logger.LogInfo($"[Business] helper stack discard 1×({name}×{amount}) @'{addr}' → routed.");
+                            }
                         }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] discard route: {ex.Message}"); }
                     });
