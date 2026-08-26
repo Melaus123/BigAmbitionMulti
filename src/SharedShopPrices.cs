@@ -47,7 +47,7 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<string, float> _baseline = new();              // item → the price we believe the OWNER has
         private static readonly Dictionary<string, (float price, float at)> _dirty = new();// item → last seen local price, when
         private static readonly Dictionary<string, (float price, float at)> _held = new(); // item → value we routed, when (suppresses the re-assert)
-        private static readonly Dictionary<string, int> _stock = new();                    // item → units on hand, as the OWNER counted them
+        // Units on hand live in SharedShopStock (one table, one substitution, shared with the deliveries tab).
         private static readonly Dictionary<string, int> _seq = new();                      // item → last seq (never cleared)
         private static readonly int _seqEpoch = new System.Random().Next(1, int.MaxValue);
 
@@ -57,8 +57,13 @@ namespace BigAmbitionsMP
 
         public static void Reset()
         {
-            _openAddr = ""; _baseline.Clear(); _dirty.Clear(); _held.Clear(); _stock.Clear(); _appliedSeq.Clear(); _logged.Clear();
+            _openAddr = ""; _baseline.Clear(); _dirty.Clear(); _held.Clear(); _appliedSeq.Clear(); _logged.Clear();
+            SharedShopStock.Reset();
         }
+
+        /// <summary>The shared shop whose pricing tab is open here, or "" — read by SharedShopStock's
+        /// substitution, which is scoped to the surface on screen.</summary>
+        internal static string OpenAddr => _openAddr;
 
         /// <summary>Is an edit of this item in flight here? MPPriceSync asks before overwriting a received price, and
         /// passes the value that arrived so a hold can end the moment the owner's copy agrees with ours.
@@ -281,13 +286,20 @@ namespace BigAmbitionsMP
                 reg.cachedAvailableProducts.Clear();
                 foreach (var prod in p.Products) if (!string.IsNullOrEmpty(prod)) reg.cachedAvailableProducts.Add(prod);
             }
-            _stock.Clear();
-            if (p.Stock != null)
-                foreach (var st in p.Stock)
-                    if (st != null && !string.IsNullOrEmpty(st.ItemName)) _stock[st.ItemName] = st.Count;
+            // PARTIAL coverage by design: this list is the shop's sale list, which is exactly the rows this
+            // tab draws. SharedShopStock leaves anything else on the native count. Keyed to THIS surface —
+            // the deliveries tab's wider table for the same shop must not be replaced by this narrower one
+            // (review M1).
+            SharedShopStock.Set(SharedShopStock.Pricing, p.AddressKey, p.Stock);
             int shift = gi.Day - p.OwnerDay;   // normally 0 (one world clock); rebased so the tab's day arithmetic lands on the same window
             if (reg.orderHistory == null) reg.orderHistory = new List<OrderHistoryEntry>();
             int lo = gi.Day - HistoryDays, hi = gi.Day;
+            // Slice 7a: the Insight carry writes totalCustomers/hourReports on the SAME window this
+            // REPLACE covers — keep the outgoing entries so those fields survive a pricing refresh
+            // (they re-attach below; days the snapshot omits are re-added with their sales cleared).
+            var keepCustomers = new Dictionary<int, OrderHistoryEntry>();
+            foreach (var h in reg.orderHistory)
+                if (h != null && h.dayNumber >= lo && h.dayNumber <= hi) keepCustomers[h.dayNumber] = h;
             reg.orderHistory.RemoveAll(h => h == null || (h.dayNumber >= lo && h.dayNumber <= hi));
             int rows = 0;
             foreach (var d in p.Days)
@@ -299,6 +311,11 @@ namespace BigAmbitionsMP
                     itemSales = new List<OrderHistoryEntry.ItemReport>(),
                     hourReports = new List<OrderHistoryEntry.HourReport>(),   // never null: the game LINQs over these
                 };
+                if (keepCustomers.TryGetValue(e.dayNumber, out var old))
+                {
+                    e.totalCustomers = old.totalCustomers;
+                    if (old.hourReports != null && old.hourReports.Count > 0) e.hourReports = old.hourReports;
+                }
                 float revenue = 0f;
                 foreach (var it in d.Items)
                 {
@@ -314,6 +331,11 @@ namespace BigAmbitionsMP
                 e.totalRevenue = revenue;
                 reg.orderHistory.Add(e);
             }
+            // Days the pricing snapshot omits had no sales — re-add their kept entry (customers intact,
+            // sales cleared) so the Insight chart never loses a day to a pricing refresh.
+            foreach (var kv in keepCustomers)
+                if (!reg.orderHistory.Exists(h => h != null && h.dayNumber == kv.Key))
+                { kv.Value.itemSales?.Clear(); kv.Value.totalRevenue = 0f; reg.orderHistory.Add(kv.Value); }
             Plugin.Logger.LogInfo($"{Tag} applied the owner's figures for '{p.AddressKey}': {p.Days.Count} day(s), {rows} row(s), {p.Products?.Count ?? 0} product(s) on sale.");
             RefreshPricingTabIfOpen(p.AddressKey);
         }
@@ -420,25 +442,9 @@ namespace BigAmbitionsMP
 
         private static readonly System.Reflection.FieldInfo _fCellModel = AccessTools.Field(typeof(InventoryProductCellView), "_data");
 
-        /// <summary>Units on hand come from `BuildingHelper.CountTotalResourcesInStock`, which walks the shop's
-        /// INTERIOR — present on the owner's machine, and on a helper's only if that interior happens to have synced.
-        /// While the helper has this shop's pricing tab open, the owner's own count is used instead. Scoped to that
-        /// one screen: outside it the native count stands everywhere, for every building.</summary>
-        [HarmonyPatch(typeof(BuildingHelper), nameof(BuildingHelper.CountTotalResourcesInStock),
-                      typeof(BuildingRegistration), typeof(string), typeof(bool), typeof(bool))]
-        public static class Patch_CountTotalResourcesInStock_OwnerFigure
-        {
-            static void Postfix(BuildingRegistration buildingRegistration, string itemName, ref int __result)
-            {
-                try
-                {
-                    if (_openAddr.Length == 0 || _stock.Count == 0 || string.IsNullOrEmpty(itemName)) return;
-                    if (buildingRegistration == null || AddrOf(buildingRegistration) != _openAddr) return;
-                    if (_stock.TryGetValue(itemName, out var owned)) __result = owned;
-                }
-                catch { }
-            }
-        }
+        // The units-on-hand substitution moved to SharedShopStock (2026-08-26): the deliveries tab needs the
+        // same figures over a WIDER set of items, and two copies of one mechanism is the shape that gets fixed
+        // in one place and forgotten in the other (ruling 37).
 
         /// <summary>The native price guide asks "does a rival nearby sell this?" as "someone else owns it AND I do not
         /// rent it" — on this machine the shop being priced answers yes to both and competes with ITSELF, shifting the

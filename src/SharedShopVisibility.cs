@@ -133,6 +133,8 @@ namespace BigAmbitionsMP
                 default:
                     list.Add("Schedule");             // every ordinary business
                     list.Add("InventoryPricing");     // slice 4: the helper sets this shop's retail prices
+                    list.Add("Insight");              // slice 7a: read-only dashboard, owner-carried figures
+                    list.Add("Deliveries");           // slice 7b: carried contracts + routed edits (ruling 33: billed-on-delivery = allowed)
                     break;
             }
             return list;
@@ -201,12 +203,13 @@ namespace BigAmbitionsMP
                     string sel = _fSelectedTab?.GetValue(__instance) as string ?? "";
                     // Native defaults gate on RentedByPlayer (false on a replica) and land on Presentation —
                     // re-derive them for a shared building so the page opens where the owner's would
-                    // (field 2026-08-24): factory → Factory, warehouse → Drivers, else the native Insight is
-                    // hidden here so Schedule stands in. An explicitly requested tab was already vetted above.
+                    // (field 2026-08-24): factory → Factory, warehouse → Drivers, ordinary → Insight
+                    // (allowed since slice 7a — before that Schedule stood in; the fallback chain still
+                    // lands there when Insight is pruned). An explicitly requested tab was vetted above.
                     string type = ""; try { type = reg.businessTypeName ?? ""; } catch { }
                     string want = type == "ba:businesstype_factory" ? "Factory"
                                 : type == "ba:businesstype_warehouse" ? "Drivers"
-                                : "Schedule";
+                                : "Insight";
                     if (sel == "Presentation" && allowed.Contains(want)) { _fSelectedTab?.SetValue(__instance, want); return; }
                     if (!allowed.Contains(sel))
                         _fSelectedTab?.SetValue(__instance, allowed.Contains(want) ? want : allowed.Contains("Schedule") ? "Schedule" : "Presentation");

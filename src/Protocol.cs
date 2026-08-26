@@ -355,6 +355,73 @@ namespace BigAmbitionsMP
         public List<DriverSlotInfo>   Slots    { get; set; } = new();   // 6b: Drivers tab
         public List<WorkstationInfo>  Stations { get; set; } = new();   // 6c: Factory tab
         public List<StockInfo>        ResourceStock { get; set; } = new();   // 6c: ingredient units in pallets, owner-counted
+        public SharedInsightInfo?     Insight  { get; set; }            // v18 7a: promotion + satisfaction scalars
+        public List<InsightDayInfo>   InsightDays { get; set; } = new();   // v18 7a: customers per day, hours for yesterday
+        public List<CapacityRowInfo>  Capacity { get; set; } = new();      // v18 7a: owner-computed customer-capacity rows
+        public int                    OwnerDay { get; set; } = -1;         // v18 7a: the owner's Day when the snapshot was built — day rebasing (the pricing carry's shift, review MAJOR-1)
+        public List<ContractInfo>     Contracts { get; set; } = new();     // v18 7b: the owner's wholesale delivery contracts for this shop
+        public List<StockInfo>        Stock     { get; set; } = new();     // v18 7b-2: units on hand per deliveries-tab row, counted on the OWNER's machine (the native row builder counts the shop's INTERIOR, which a helper does not hold)
+        public List<StockInfo>        SoldLastWeek { get; set; } = new();  // v18 7b-2: units sold in the last 7 days per deliveries-tab row — native sums the shop's own orderHistory, which a replica does not have
+    }
+
+    /// <summary>v18 7b — one wholesale delivery contract, carried whole. Identity on the wire is
+    /// (business address, WholesaleKey, Ordinal-among-same-pair) — the native entity has no id.</summary>
+    public class ContractInfo
+    {
+        public string WholesaleKey { get; set; } = "";
+        public int    Ordinal      { get; set; }
+        public bool   Enabled      { get; set; }
+        public bool   Urgent       { get; set; }
+        public int    NextDeliveryDay { get; set; }   // OWNER-basis; rebased with OwnerDay on apply
+        public bool   Repeating    { get; set; }
+        public float  DeliveryFee  { get; set; }
+        public List<ContractItemInfo> Items { get; set; } = new();
+    }
+
+    public class ContractItemInfo
+    {
+        public string ItemName        { get; set; } = "";
+        public int    Amount          { get; set; }
+        public int    OrderedThisWeek { get; set; }   // feeds the native weekly-limit label + input cap
+        public int    OrderedLastWeek { get; set; }
+    }
+
+    /// <summary>v18 7a — the Insight tab's scalar figures. All native fields are ints (Promotion /
+    /// Satisfaction, global namespace); carried as-is and written onto the replica before render.</summary>
+    public class SharedInsightInfo
+    {
+        public int PromoTotal    { get; set; }
+        public int PromoTraffic  { get; set; }
+        public int PromoMarketing{ get; set; }
+        public int SatOverall    { get; set; }
+        public int SatService    { get; set; }
+        public int SatPricing    { get; set; }
+        public int SatInterior   { get; set; }   // native field name: facility
+        public int SatClean      { get; set; }
+    }
+
+    /// <summary>v18 7a — one chart day. Hours (24 per-hour customer counts) carried for YESTERDAY only —
+    /// the native "1 day" filter reads only that day's hourReports.</summary>
+    public class InsightDayInfo
+    {
+        public int Day       { get; set; }
+        public int Customers { get; set; }
+        public List<int>? Hours { get; set; }
+    }
+
+    /// <summary>v18 7a — one customer-capacity row (per item type), shelves carried raw; the native
+    /// CustomersLimit/TotalCustomersPerHour recompute themselves from these on the helper.</summary>
+    public class CapacityRowInfo
+    {
+        public string ItemName { get; set; } = "";
+        public List<CapShelfInfo> Shelves { get; set; } = new();
+    }
+
+    public class CapShelfInfo
+    {
+        public string Name    { get; set; } = "";
+        public int    Amount  { get; set; }
+        public int    PerHour { get; set; }
     }
 
     /// <summary>6b — one warehouse/factory vehicle slot. The helper's machine does NOT hold the owner's
@@ -392,12 +459,14 @@ namespace BigAmbitionsMP
     {
         public string PlayerId   { get; set; } = "";   // sender (validated SenderIs at the host)
         public string AddressKey { get; set; } = "";
-        public string Op         { get; set; } = "";   // "driver" | "recipe" | "produce" | "order" | "alias"
+        public string Op         { get; set; } = "";   // "driver" | "recipe" | "produce" | "order" | "alias" | v18 7b: "contract" (full editable state) | "endcontract"
         public int    SlotIndex  { get; set; } = -1;   // driver: which vehicle slot
         public string StationId  { get; set; } = "";   // recipe/produce/alias: which workstation
         public string StrValue   { get; set; } = "";   // driver: employee id ("" = unassign); recipe: recipe id; alias: name; order: "type|id,id,id"
         public int    IntValue   { get; set; }         // produce: up-to amount
         public bool   BoolValue  { get; set; }         // produce: up-to on/off
+        public ContractInfo? Contract { get; set; }    // v18 7b: "contract"/"endcontract" — identity + (for "contract") the desired state; days OWNER-basis via OwnerDay
+        public int    OwnerDay   { get; set; } = -1;   // v18 7b: the SENDER's Day for rebasing Contract.NextDeliveryDay
     }
 
     /// <summary>One row of the warehouse/factory Inventory table, owner-computed: the deliveries ledger
@@ -1149,7 +1218,17 @@ namespace BigAmbitionsMP
         // nested contents via THE codec), so the borrower's panel renders the same card shapes
         // the owner's native window shows (sealed contents label, bundle tooltip, stacks past
         // the manifest's 24 cap). A v16 peer lacks both types; refuse mixed sessions outright.
-        public const int Version = 17;
+        //
+        // v18 (2026-08-26, slice 7 — shared-shop Insight AND Deliveries tabs). Everything below is one
+        // unreleased version; while v18 is unreleased, further wire changes stay in v18.
+        //   7a  SharedWorkInfoPayload gains Insight / InsightDays / Capacity; Tab accepts "insight".
+        //   7b  … gains Contracts (ContractInfo, ContractItemInfo) and OwnerDay; Tab accepts "deliveries";
+        //       SharedWorkEditPayload gains Contract + OwnerDay and the ops "contract" / "endcontract".
+        //   7b-2 … gains Stock and SoldLastWeek — owner-counted figures the native tabs otherwise derive
+        //       from a shop INTERIOR and an orderHistory that a replica does not have.
+        // A v17 peer would drop the fields silently and render zeros; the freeze rule (design doc §8) makes
+        // ANY wire-visible change a version bump — refuse mixed sessions outright.
+        public const int Version = 18;
     }
 
     /// <summary>Sent by client on connect.</summary>
