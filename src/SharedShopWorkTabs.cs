@@ -1892,6 +1892,7 @@ namespace BigAmbitionsMP
                     RepaintDeliveries(del, listChanged, _dcByAddr.TryGetValue(_openAddr, out var lcarried) ? lcarried : null);
                 }
             }
+            DrainWarehouseLogoQueue();   // a warehouse logo waiting on the shared render rig
             if (_renderSettings)
             {
                 var st = page.GetComponentInChildren<BizManSettings>(true);
@@ -3006,7 +3007,13 @@ namespace BigAmbitionsMP
                 // sign textures), which is why native regenerates after every rename. Without this the street
                 // sign, the cards and the billboards keep the old name on every machine — and nothing heals
                 // it, because the sign controller only regenerates when a texture is MISSING (review M2).
-                RegenerateLogo(reg);
+                RegenerateLogo(reg, mirrorRename: true);
+                // Native's rename also refreshes the map pin, the owner's task list and the guiders — and
+                // the pin does NOT self-heal (the registration-change handler updates the sign, not the POI),
+                // so these run unconditionally rather than only when the owner has that page open.
+                try { InstanceBehavior<CityManager>.Instance.FindCityBuildingController(reg.Address)?.UpdatePoi(); } catch { }
+                try { UI.Tasks.TasksUI.UpdateTasksFromBusiness(reg); } catch { }
+                try { UI.Guiders.GuidersManager.UpdateGuidersWithAddress(reg.Address); } catch { }
                 Plugin.Logger.LogInfo($"{Tag} '{p.PlayerId}' renamed '{p.AddressKey}' from '{have}' to '{want}'.");
                 return true;
             }
@@ -3019,27 +3026,108 @@ namespace BigAmbitionsMP
             reg.logoSettings.backgroundColor.color = info.BackColor;
             // Regenerate the owner's own image files, exactly as their own Save would. BusinessSync's
             // content diff then carries them to every machine, so no image data rides this op.
-            RegenerateLogo(reg);
+            RegenerateLogo(reg, mirrorRename: false);   // native's logo save never takes the warehouse branch
             Plugin.Logger.LogInfo($"{Tag} '{p.PlayerId}' changed the logo of '{p.AddressKey}'.");
             return true;
         }
 
-        /// <summary>Regenerate the owner's own logo images and let the world notice — the same follow-up
-        /// native runs after a name or logo change. Settings is offered only on ordinary shops, so this is
-        /// the right generator (a warehouse has its own).</summary>
-        private static void RegenerateLogo(BuildingRegistration reg)
+        /// <summary>Regenerate the owner's own logo images and let the world notice.
+        ///
+        /// Native has TWO regenerate call sites and they do NOT agree, so neither may be assumed (review
+        /// MAJOR 1): a RENAME goes through BizManSettings.GenerateNewLogo, which picks its generator on the
+        /// BUILDING type (a factory lives in a warehouse building, so keying on the business would choose
+        /// wrongly); a LOGO edit goes through LogoCustomizer.SaveLogo, which uses the shape/colour generator
+        /// unconditionally. Sending a logo edit down the warehouse branch would DISCARD all five carried
+        /// values — that generator hard-codes its colours and draws the business-type icon — leaving the
+        /// owner's stored settings describing a picture no machine has.</summary>
+        private static void RegenerateLogo(BuildingRegistration reg, bool mirrorRename)
+        {
+            string name = reg.BusinessName ?? "";
+            try
+            {
+                bool warehouseBuilding = false;
+                if (mirrorRename)
+                {
+                    string bt = "";
+                    try { bt = reg.GetBuildingType() ?? ""; } catch { }
+                    if (bt.Length == 0)
+                    {
+                        // "I could not tell" must not silently mean "not a warehouse" (review MINOR): the
+                        // wrong generator writes files native would never create there.
+                        Plugin.Logger.LogWarning($"{Tag} could not determine the building type of '{AddrOf(reg)}' — its logo was NOT regenerated; the sign keeps its previous art.");
+                        return;
+                    }
+                    warehouseBuilding = bt == "ba:buildingtype_warehouse";
+                }
+                if (warehouseBuilding) { QueueWarehouseLogo(reg); return; }
+                BusinessLogoGenerator.Create(name, reg.logoSettings, LogoHelper.GetPlayerBusinessLogoPath(name), reg.RentedByPlayer, delegate
+                {
+                    try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
+                    try { InstanceBehavior<CityManager>.Instance.UpdateBillboardsFromBusiness(name); } catch { }
+                    ReloadOpenPageLogo(reg);
+                });
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} logo regenerate: {ex.Message}"); }
+        }
+
+        private static readonly List<BuildingRegistration> _stWarehouseLogoQueue = new();
+        private static readonly System.Reflection.FieldInfo? _fLogoBusy =
+            AccessTools.Field(typeof(BusinessLogoGenerator), "_logoIsGenerating");
+
+        /// <summary>The warehouse generator runs SYNCHRONOUSLY on the one shared render rig and — unlike
+        /// Create — neither checks nor sets the generator's busy flag (review MAJOR 2). Firing it while a
+        /// Create coroutine is parked mid-render reconfigures that rig underneath it, and the other
+        /// business's sign file is then written with this warehouse's colours and icon, published by the
+        /// business sync, and never regenerated because the file exists. Native can only hit that if the
+        /// local player clicks Save at the exact instant; a routed op arrives whenever the helper likes, so
+        /// it waits for the rig instead.</summary>
+        private static void QueueWarehouseLogo(BuildingRegistration reg)
+        {
+            if (reg == null) return;
+            if (!_stWarehouseLogoQueue.Contains(reg)) _stWarehouseLogoQueue.Add(reg);
+            DrainWarehouseLogoQueue();
+        }
+
+        private static void DrainWarehouseLogoQueue()
+        {
+            if (_stWarehouseLogoQueue.Count == 0) return;
+            var gen = BusinessLogoGenerator.Instance;
+            if (gen == null)
+            {
+                if (_logged.Add("st-nogen"))
+                    Plugin.Logger.LogWarning($"{Tag} the logo generator is absent — warehouse signs keep their previous art.");
+                _stWarehouseLogoQueue.Clear();
+                return;
+            }
+            try { if (_fLogoBusy?.GetValue(gen) is bool busy && busy) return; }   // the rig is mid-render; try again next tick
+            catch { }
+            var reg = _stWarehouseLogoQueue[0];
+            _stWarehouseLogoQueue.RemoveAt(0);
+            try
+            {
+                gen.GenerateWarehouseLogo(reg.BusinessName ?? "", BusinessTypeHelper.GetData(reg),
+                    LogoHelper.GetPlayerBusinessLogoPath(reg.BusinessName ?? ""), reg.RentedByPlayer);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} warehouse logo regenerate: {ex.Message}"); }
+            // The follow-up runs whether or not the generate threw — the name has already changed, and the
+            // world has to be told either way.
+            try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
+            ReloadOpenPageLogo(reg);
+        }
+
+        /// <summary>Reload the BizMan page's logo ONLY when it is showing this building. Ungated, this
+        /// reloads whatever page the owner happens to have open — and for a warehouse that misses the
+        /// texture cache it calls the SHOP generator, overwriting that warehouse's icon logo with a
+        /// shape-and-text one, which then syncs out (review MINOR).</summary>
+        private static void ReloadOpenPageLogo(BuildingRegistration reg)
         {
             try
             {
-                string name = reg.BusinessName ?? "";
-                BusinessLogoGenerator.Create(name, reg.logoSettings, LogoHelper.GetPlayerBusinessLogoPath(name),
-                    reg.RentedByPlayer, delegate
-                    {
-                        try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
-                        try { InstanceBehavior<CityManager>.Instance.UpdateBillboardsFromBusiness(name); } catch { }
-                    });
+                var page = OpenPage();
+                if (page != null && page.buildingRegistration != null && AddrOf(page.buildingRegistration) == AddrOf(reg))
+                    page.LoadBusinessLogo();
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} logo regenerate: {ex.Message}"); }
+            catch { }
         }
 
         /// <summary>The mod's own logo plumbing is keyed by business NAME (a file cache and the game's
@@ -3066,7 +3154,11 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(BizManSettings), nameof(BizManSettings.RefreshData))]
         public static class Patch_BizManSettings_RefreshData_Session
         {
-            static void Postfix(BizManSettings __instance)
+            // A FINALIZER, not a postfix (review MINOR): native's RefreshData opens with the uniform
+            // window, which can throw on a building whose skill list comes back empty — and a postfix does
+            // not run when the original throws, leaving the type dropdown and Shutdown LIVE-looking on a
+            // shared building.
+            static void Finalizer(BizManSettings __instance)
             {
                 try
                 {
@@ -3132,6 +3224,11 @@ namespace BigAmbitionsMP
                         typed = (f.text ?? "").Trim();
                     if (typed.Length > 0 && typed != (reg.BusinessName ?? ""))
                         SendEdit(new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = addr, Op = "rename", StrValue = typed });
+                    // Clear the panel's own dirty flag (review MINOR). Left set, it makes every later tab
+                    // click pop native's unsaved-changes confirm — and, worse, our snapshot apply reads it as
+                    // "the helper is typing" and suppresses the repaint, so a REFUSED rename never snaps
+                    // back and the field keeps showing a name the owner rejected.
+                    try { AccessTools.Method(typeof(BizManSettings), "UpdateSaveButton")?.Invoke(__instance, null); } catch { }
                     return false;   // nothing else on this screen may touch the replica
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} settings save route: {ex.Message}"); return false; }
@@ -3545,7 +3642,9 @@ namespace BigAmbitionsMP
         {
             var reg = GameStatePatcher.FindRegistration(addressKey);
             if (reg == null || !MergerFlip.TrulyMine(reg)) return;
-            // 7a/7b: Insight + Deliveries serve ORDINARY shops — only the warehouse-backed tabs need the cast.
+            // Insight, Deliveries, Marketing and Settings serve registrations that are not necessarily
+            // warehouse-backed — only the warehouse-backed tabs need the cast. (Settings is reachable on a
+            // warehouse or factory too, where the cast would succeed anyway.)
             Entities.Warehouse? wh = reg as Entities.Warehouse;
             if (tab != "insight" && tab != "deliveries" && tab != "marketing" && tab != "settings" && wh == null)
             {

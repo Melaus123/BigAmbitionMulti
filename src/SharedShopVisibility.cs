@@ -127,12 +127,14 @@ namespace BigAmbitionsMP
                 case "ba:businesstype_warehouse":
                     list.Add("Drivers");              // slice 6b: carried slot info + routed assignment
                     list.Add("Inventory");            // slice 6a: owner-computed figures; Sell All greyed (ruling 29)
+                    list.Add("Settings");             // slice 7d (user 2026-08-26): rename + logo routed, type/shutdown greyed
                     break;
                 case "ba:businesstype_factory":
                     list.Add("Factory");              // slice 6c: carried config/state + routed edits (rename allowed, 2026-08-24)
                     list.Add("Schedule");
                     list.Add("Drivers");              // slice 6b
                     list.Add("Inventory");            // slice 6a — no pricing tab natively (ruling 30)
+                    list.Add("Settings");             // slice 7d (user 2026-08-26): rename + logo routed, type/shutdown greyed
                     break;
                 default:
                     list.Add("Schedule");             // every ordinary business
