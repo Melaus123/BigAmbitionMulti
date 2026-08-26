@@ -1011,6 +1011,14 @@ namespace BigAmbitionsMP
         }
         private static readonly System.Collections.Generic.Dictionary<string, LogoCacheEntry> _logoCache = new();
 
+        /// <summary>Drop a business's cached logo-file signature. A RENAME moves the folder, so both the old
+        /// and the new name must be forgotten or the next scan compares against a directory that has moved
+        /// (slice 7d).</summary>
+        internal static void ForgetLogoCache(string businessName)
+        {
+            if (!string.IsNullOrEmpty(businessName)) _logoCache.Remove(businessName);
+        }
+
         // Reading + Base64-encoding every named business's logo files every 10s was a
         // main-thread BusinessSync spike (~70ms, BizHost) AND the bulk of the per-frame
         // save-folder I/O (Procmon-confirmed 2026-06-14): hundreds of AI/rival businesses

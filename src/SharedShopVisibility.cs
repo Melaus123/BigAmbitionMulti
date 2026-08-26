@@ -140,6 +140,7 @@ namespace BigAmbitionsMP
                     list.Add("Insight");              // slice 7a: read-only dashboard, owner-carried figures
                     list.Add("Deliveries");           // slice 7b: carried contracts + routed edits (ruling 33: billed-on-delivery = allowed)
                     list.Add("Marketing");            // slice 7c: carried campaigns + routed toggles/cancel (ruling 33/40: a daily expense, never a click-time cost)
+                    list.Add("Settings");             // slice 7d: rename + logo routed (ruling 42); type change and shutdown greyed (ruling 34)
                     break;
             }
             return list;
@@ -504,6 +505,10 @@ namespace BigAmbitionsMP
         /// that name, and set its interactable state. Greyed = Unity's disabled tint; the control stays visible.
         /// The wiring is a prefab fact the decompile cannot show — so when GREYING finds nothing, say so once: the
         /// hard Prefix guards still hold, but a control would be live-looking, which ruling 14 forbids.</summary>
+        /// <summary>Same, for the other shared-shop surfaces (7d greys Shutdown with it).</summary>
+        internal static int SetButtonsCallingPublic(Transform root, string methodName, bool interactable)
+            => SetButtonsCalling(root, methodName, interactable);
+
         private static int SetButtonsCalling(Transform root, string methodName, bool interactable)
         {
             int matched = 0;

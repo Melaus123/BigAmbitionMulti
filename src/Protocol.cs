@@ -363,6 +363,7 @@ namespace BigAmbitionsMP
         public List<StockInfo>        Stock     { get; set; } = new();     // v18 7b-2: units on hand per deliveries-tab row, counted on the OWNER's machine (the native row builder counts the shop's INTERIOR, which a helper does not hold)
         public List<StockInfo>        SoldLastWeek { get; set; } = new();  // v18 7b-2: units sold in the last 7 days per deliveries-tab row — native sums the shop's own orderHistory, which a replica does not have
         public List<CampaignInfo>     Campaigns { get; set; } = new();     // v18 7c: the shop's marketing campaigns; both Marketing-tab readouts DERIVE from this list, so carrying it is enough
+        public SettingsInfo?          Settings  { get; set; }             // v18 7d: the Settings tab's name + logo settings
     }
 
     /// <summary>v18 7b — one wholesale delivery contract, carried whole. Identity on the wire is
@@ -385,6 +386,52 @@ namespace BigAmbitionsMP
         public int    Amount          { get; set; }
         public int    OrderedThisWeek { get; set; }   // feeds the native weekly-limit label + input cap
         public int    OrderedLastWeek { get; set; }
+    }
+
+    /// <summary>v18 7d — the Settings tab's carried state. The logo is FIVE SCALARS, not an image: the game
+    /// writes these onto the registration and then GENERATES the logo files from them, and the existing
+    /// business sync already carries those generated files owner→everyone. Colours are the game's own packed
+    /// values; the font is its enum, carried as an int.</summary>
+    public class SettingsInfo
+    {
+        public string BusinessName { get; set; } = "";
+        public string LogoShape    { get; set; } = "";
+        public int    LogoFont     { get; set; }
+        public int    LogoColor    { get; set; }
+        public int    FontColor    { get; set; }
+        public int    BackColor    { get; set; }
+        // v18 7d uniforms (rulings 35/42): the shop's per-skill assignments, the OWNER's presets so the
+        // helper can pick one, and whether the shop has a uniform locker — the native gate for that reads
+        // the building's own items, which a helper does not hold off-site.
+        public List<UniformInfo> Uniforms { get; set; } = new();
+        public List<PresetInfo>  Presets  { get; set; } = new();
+        public bool   HasUniformLocker { get; set; }
+    }
+
+    public class UniformInfo
+    {
+        public string Skill    { get; set; } = "";
+        public string PresetId { get; set; } = "";
+    }
+
+    /// <summary>One uniform preset. Presets are PLAYER-level data, so a helper assigning one of their own
+    /// sends the whole thing and the owner keeps a copy under a fresh id (ruling 35).</summary>
+    public class PresetInfo
+    {
+        public string Id             { get; set; } = "";
+        public string Name           { get; set; } = "";
+        public bool   SkillDependent { get; set; }
+        public string Skill          { get; set; } = "";
+        public List<ElemInfo> Male   { get; set; } = new();
+        public List<ElemInfo> Female { get; set; } = new();
+    }
+
+    /// <summary>One clothing slot of a preset: the game's element type plus the two ids it stores.</summary>
+    public class ElemInfo
+    {
+        public int    Type      { get; set; }
+        public string VariantId { get; set; } = "";
+        public string ColorId   { get; set; } = "";
     }
 
     /// <summary>v18 7c — one marketing campaign, exactly the native entity's three fields. The tab's daily-expense
@@ -480,6 +527,10 @@ namespace BigAmbitionsMP
         public int    OwnerDay   { get; set; } = -1;   // v18 7b: the SENDER's Day for rebasing Contract.NextDeliveryDay
         public string AgencyKey  { get; set; } = "";   // v18 7c: marketing ops — the agency building's address key
         public string TypeName   { get; set; } = "";   // v18 7c: marketing ops — MarketingTypeName as its enum NAME (a reorder in a game update must not silently re-point a campaign); BoolValue carries "enabled" 
+        public SettingsInfo? Settings { get; set; }    // v18 7d: "logo" — the five values LogoCustomizer would have written; "rename" uses StrValue
+        public string SkillName  { get; set; } = "";   // v18 7d uniforms: which skill's uniform
+        public string PresetId   { get; set; } = "";   // v18 7d uniforms: the OWNER's preset id ("" clears)
+        public PresetInfo? Preset { get; set; }        // v18 7d uniforms: "uniformimport" — the helper's own preset, copied into the owner's save
     }
 
     /// <summary>One row of the warehouse/factory Inventory table, owner-computed: the deliveries ledger
@@ -1241,6 +1292,9 @@ namespace BigAmbitionsMP
         //       from a shop INTERIOR and an orderHistory that a replica does not have.
         //   7c  … gains Campaigns (CampaignInfo); Tab accepts "marketing"; SharedWorkEditPayload gains
         //       AgencyKey + TypeName and the ops "campaign" / "campaignremove" / "campaigncancel".
+        //   7d  … gains Settings (SettingsInfo, incl. Uniforms/Presets/HasUniformLocker); Tab accepts
+        //       "settings"; SharedWorkEditPayload gains Settings, SkillName, PresetId, Preset and the ops
+        //       "rename" / "logo" / "uniform" / "uniformimport".
         // A v17 peer would drop the fields silently and render zeros; the freeze rule (design doc §8) makes
         // ANY wire-visible change a version bump — refuse mixed sessions outright.
         public const int Version = 18;

@@ -64,6 +64,7 @@ namespace BigAmbitionsMP
         private const int   MaxStockRows    = 200;   // 7b-2 sanity cap: owner-counted stock figures per shop
         private const float StockAskQuiet   = 1.5f;  // 7b-2 rate cap on the stock refresh
         private const int   MaxCampaigns    = 64;    // 7c sanity cap: marketing campaigns carried per shop
+        private const int   MaxPresets      = 32;    // 7d sanity cap: uniform presets carried per owner
         private const float PendingHoldSeconds = 30f;// 7b-2: how long an unanswered local edit may hold owner truth back before the owner wins (review M5)
 
         // ── helper-side session ──
@@ -120,7 +121,7 @@ namespace BigAmbitionsMP
         private static bool  _mkReseeding;       // our own re-seed re-enters the picker's selection handler; it must not ask again
         private static bool  _mkPickerDirty;     // the helper has ticked something since this selection — never re-seed over their input
         private static bool  _mkPickerLive;      // a picker exists (not just populating) — gates the dropdown row tint
-        private static string _mkTabAddr = "";   // the shop the Marketing tab last rendered, for callbacks that outlive the session
+        private static readonly Dictionary<int, Color> _mkCellDefault = new();   // pooled dropdown cell → its untinted colour
         private static bool  _dcRepainting;      // our own repaint re-enters the native row builder — it must not ask again (ask→snapshot→repaint→ask)
         private static float _dcPendingSince;    // when this machine first held owner truth back for an unanswered edit (0 = nothing pending)
         private static readonly Dictionary<string, Dictionary<string, string>> _dcSentDigest = new();   // addr → (wk#ord → the digest we ROUTED); an echo answering an older one must not overwrite a newer local edit
@@ -132,9 +133,11 @@ namespace BigAmbitionsMP
             _insCapByAddr.Clear(); _insSigByAddr.Clear(); _insScalarsByAddr.Clear();
             _dcByAddr.Clear(); _dcSigByAddr.Clear(); _dcStockSig.Clear(); _dcBaseline.Clear(); _dcSentDigest.Clear();
             _mkByAddr.Clear(); _mkSigByAddr.Clear(); _renderMarketing = false;
+            _stByAddr.Clear(); _stSigByAddr.Clear(); _renderSettings = false;
+            _uniOwnerPresets.Clear(); _uniRowIds.Clear(); _uniRowForeign.Clear(); _uniHasLocker = false;
             _mkPickerOpen = false; _mkPicker = null; _mkPickerIndex = -1; _mkWantAddr = "";
-            _mkPickerRegs.Clear(); _mkPickerShared.Clear(); _mkDialogRaised.Clear(); _mkReseeding = false;
-            _mkPickerDirty = false; _mkPickerLive = false; _mkTabAddr = ""; _mkAgencyAddr.Clear();
+            _mkPickerRegs.Clear(); _mkPickerShared.Clear(); _mkReseeding = false;
+            _mkPickerDirty = false; _mkPickerLive = false; _mkAgencyAddr.Clear();
             _dcLastSentSig = ""; _dcNextAllowedSend = 0f; _dcSendTries = 0;
             _dcWindowDepth = 0; _dcInsertActive = false; _dcTenancyRaised = false; _dcInsertReg = null; _dcInsertAddr = "";
             _dcHiddenLocal.Clear();
@@ -225,7 +228,8 @@ namespace BigAmbitionsMP
             _renderInventory = false; _renderDrivers = false; _renderFactory = false; _renderDcFigures = false;
             _renderInsight = false;   // the per-address insight caches deliberately survive (ruling 36)
             _renderDeliveries = false; _renderDcFigures = false;   // carried contracts survive too (ruling 36); only Reset() drops them
-            _renderMarketing = false;
+            _renderMarketing = false; _renderSettings = false;
+            _uniOwnerPresets.Clear(); _uniRowIds.Clear(); _uniRowForeign.Clear(); _uniHasLocker = false; _uniAddr = "";
             _dcForceApply = false; _dcListChanged = false; _dcPendingSince = 0f;   // per-session flags; the carried caches survive (ruling 36)
             _dcSentDigest.Clear();   // a stale "what we routed" map must not trip the re-route test on a later echo
             _rows.Clear(); _boxesMax = 0; _boxesCurrent = 0;
@@ -1888,6 +1892,16 @@ namespace BigAmbitionsMP
                     RepaintDeliveries(del, listChanged, _dcByAddr.TryGetValue(_openAddr, out var lcarried) ? lcarried : null);
                 }
             }
+            if (_renderSettings)
+            {
+                var st = page.GetComponentInChildren<BizManSettings>(true);
+                if (st != null && st.gameObject.activeInHierarchy)
+                {
+                    _renderSettings = false;
+                    try { st.RefreshData(); }   // re-enters our postfix; same tab, so no re-request
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} settings render: {ex.Message}"); }
+                }
+            }
             if (_renderMarketing)
             {
                 var mk = page.GetComponentInChildren<BizManMarketing>(true);
@@ -2059,6 +2073,14 @@ namespace BigAmbitionsMP
                         if (fac != null && fac.gameObject.activeInHierarchy && fac.machineList != null && reg != null)
                             fac.machineList.SetUp(reg);
                     }
+                    else if (tab == "settings")
+                    {
+                        var st = page.GetComponentInChildren<BizManSettings>(true);
+                        if (st != null && st.gameObject.activeInHierarchy) st.RefreshData();
+                        // A rename also changes what the page header, the logo preview and the map pin say.
+                        try { page.RefreshData(); } catch { }
+                        try { InstanceBehavior<CityManager>.Instance.FindCityBuildingController(page.buildingRegistration.Address)?.UpdatePoi(); } catch { }
+                    }
                     else if (tab == "marketing")
                     {
                         var mk = page.GetComponentInChildren<BizManMarketing>(true);
@@ -2096,7 +2118,7 @@ namespace BigAmbitionsMP
                     // 7a review: EVERY session-opening tab MUST be in this keep-list — their RefreshData
                     // prefixes open the session DURING the native SetTab body, and this postfix would
                     // close it instantly (the 7a blocker).
-                    if (tabName == "Inventory" || tabName == "Drivers" || tabName == "Factory" || tabName == "Insight" || tabName == "Deliveries" || tabName == "Marketing") return;
+                    if (tabName == "Inventory" || tabName == "Drivers" || tabName == "Factory" || tabName == "Insight" || tabName == "Deliveries" || tabName == "Marketing" || tabName == "Settings") return;
                     CloseSession();
                 }
                 catch { }
@@ -2166,6 +2188,7 @@ namespace BigAmbitionsMP
                         _dcBaseline.Remove(addr); _dcSentDigest.Remove(addr);
                         _insCapByAddr.Remove(addr); _insSigByAddr.Remove(addr); _insScalarsByAddr.Remove(addr);
                         _mkByAddr.Remove(addr); _mkSigByAddr.Remove(addr);
+                        _stByAddr.Remove(addr); _stSigByAddr.Remove(addr);
                         SharedShopStock.Clear(addr);
                         try
                         {
@@ -2226,7 +2249,6 @@ namespace BigAmbitionsMP
         private static UI.Dialog.MarketingCampaignSettings? _mkPicker;              // the live widget, for the re-seed when data lands
         private static int    _mkPickerIndex = -1;                                  // its current selection
         private static string _mkWantAddr = "";                                     // the shop a call is aimed at (no tab session is open during a call)
-        private static readonly List<BuildingRegistration> _mkDialogRaised = new();  // tenancy raised for the dialog's own gate
 
         private static string TypeNameOf(Entities.MarketingTypeName t) => t.ToString();
 
@@ -2354,7 +2376,13 @@ namespace BigAmbitionsMP
             // The sig may only claim what actually landed (review MINOR): a partial list under a "current" sig
             // would be answered with silence on the next ask, and the agency call would then diff against it.
             if (applyOk && !dropped) _mkSigByAddr[p.AddressKey] = p.Sig ?? "";
-            else _mkSigByAddr.Remove(p.AddressKey);
+            else
+            {
+                _mkSigByAddr.Remove(p.AddressKey);
+                // The TAB's sig was committed by the caller before this ran; take it back too, or the 5 s
+                // poll goes silent over a half-applied list (fix-verification MINOR).
+                if (_openTab == "marketing" && _openAddr == p.AddressKey) _tabSig = "";
+            }
             if (_openTab == "marketing" && _openAddr == p.AddressKey) _renderMarketing = true;   // MINOR: no stranded render flag
             // An agency call reads the campaign list straight off the replica — re-seed its ticks now that truth
             // has landed, or a stale picker decides what the owner ends up with (ruling 41, the user's item 1).
@@ -2400,7 +2428,14 @@ namespace BigAmbitionsMP
                     }
                     else if (row.enabled != p.BoolValue) { row.enabled = p.BoolValue; changed = true; }
                 }
-                if (changed) Plugin.Logger.LogInfo($"{Tag} '{p.PlayerId}' set marketing '{p.TypeName}' from '{p.AgencyKey}' at '{p.AddressKey}' (op {p.Op}, enabled={p.BoolValue}).");
+                if (changed)
+                {
+                    // Native fires this where the campaign is created; the owner's machine is where that is
+                    // true here, and it is their quest state that should advance (the driver op set the
+                    // precedent). The helper's own copy fires nothing.
+                    if (p.Op == "campaign" && p.BoolValue) { try { GameEvent.Invoke("ba:gameevent_newmarketing"); } catch { } }
+                    Plugin.Logger.LogInfo($"{Tag} '{p.PlayerId}' set marketing '{p.TypeName}' from '{p.AgencyKey}' at '{p.AddressKey}' (op {p.Op}, enabled={p.BoolValue}).");
+                }
             }
             if (changed) { try { BusinessHelper.UpdatePromotion(reg); } catch { } }
             return changed;
@@ -2413,6 +2448,21 @@ namespace BigAmbitionsMP
                 PlayerId = MPConfig.PlayerId, AddressKey = addr, Op = op,
                 AgencyKey = agencyKey, TypeName = typeName, BoolValue = enabled,
             });
+        }
+
+        /// <summary>The shop the Marketing page is showing RIGHT NOW, if it is one shared with me. Read from
+        /// the page itself (what native's own handlers use), never from the session — a confirm dialog can be
+        /// answered long after the session moved or closed.</summary>
+        private static bool SharedShopOfMarketingPage(BizManMarketing inst, out string addr)
+        {
+            addr = "";
+            try
+            {
+                var biz = inst != null ? inst.GetComponentInParent<BizManBusiness>() : null;
+                var reg = biz != null ? biz.buildingRegistration : null;
+                return reg != null && SharedAddrOf(reg, out addr);
+            }
+            catch { return false; }
         }
 
         /// <summary>Is this a shop shared with me, and what is its address key?</summary>
@@ -2428,7 +2478,23 @@ namespace BigAmbitionsMP
         {
             static void Prefix()
             {
-                try { if (OpenSession("marketing")) _mkTabAddr = _openAddr; }
+                try
+                {
+                    if (!OpenSession("marketing")) return;
+                    // TRUE first open: the replica's own campaign list is local/AI-derived data, and native is
+                    // about to draw it as if it were the owner's. 7a's rule — plausible-wrong must never pose
+                    // as owner truth — and here it has teeth: a toggle clicked on a phantom row would route a
+                    // real op and sign the owner up to a daily cost they never had.
+                    if (!_mkSigByAddr.ContainsKey(_openAddr))
+                    {
+                        var reg = GameStatePatcher.FindRegistration(_openAddr);
+                        if (reg?.marketingCampaigns != null && reg.marketingCampaigns.Count > 0)
+                        {
+                            reg.marketingCampaigns.Clear();
+                            Plugin.Logger.LogInfo($"{Tag} first Marketing open for '{_openAddr}' — cleared this machine's own campaign rows; the owner's list is on its way.");
+                        }
+                    }
+                }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} marketing tab: {ex.Message}"); }
             }
         }
@@ -2437,14 +2503,16 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(BizManMarketing), "UpdateCampaignEnabled")]
         public static class Patch_BizManMarketing_Toggle_Routed
         {
-            static void Postfix(bool isEnabled, Entities.MarketingTypeName marketingTypeName, Address agencyAddress)
+            static void Postfix(BizManMarketing __instance, bool isEnabled, Entities.MarketingTypeName marketingTypeName, Address agencyAddress)
             {
                 try
                 {
-                    if (_openTab != "marketing" || _openAddr.Length == 0) return;
+                    // The shop is read from the page native just wrote to, not from our session state: the
+                    // session is the wrong authority for something that can fire after the page has moved on.
+                    if (!SharedShopOfMarketingPage(__instance, out var addr)) return;
                     string ak = ""; try { ak = GameStateReader.AddressKey(agencyAddress); } catch { }
                     if (ak.Length == 0) return;
-                    SendMarketingOp(_openAddr, "campaign", ak, TypeNameOf(marketingTypeName), isEnabled);
+                    SendMarketingOp(addr, "campaign", ak, TypeNameOf(marketingTypeName), isEnabled);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} marketing toggle route: {ex.Message}"); }
             }
@@ -2454,18 +2522,35 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(BizManMarketing), "CancelAllCampaignsFromAgency")]
         public static class Patch_BizManMarketing_Cancel_Routed
         {
-            static void Postfix(List<Entities.MarketingCampaign> campaignGroup)
+            // Native's Cancel runs behind a confirm dialog, so it can be answered after the page has moved
+            // to another shop. Falling back to "the last shared shop whose Marketing tab we saw" was WRONG in
+            // the worst way (fix-verification MAJOR-A): cancelling on the helper's OWN shop then routed a
+            // cancel-all to somebody else's, destroying campaigns they never touched. The Prefix reads the
+            // registration native is about to mutate AND checks these very campaign objects are in it — if
+            // the page has moved, native's own removal is a no-op by reference identity, so we route nothing.
+            static void Prefix(BizManMarketing __instance, List<Entities.MarketingCampaign> campaignGroup, out string __state)
+            {
+                __state = "";
+                try
+                {
+                    if (campaignGroup == null || campaignGroup.Count == 0 || campaignGroup[0] == null) return;
+                    if (!SharedShopOfMarketingPage(__instance, out var addr)) return;
+                    var reg = GameStatePatcher.FindRegistration(addr);
+                    if (reg?.marketingCampaigns == null || !reg.marketingCampaigns.Contains(campaignGroup[0])) return;
+                    __state = addr;
+                }
+                catch { __state = ""; }
+            }
+
+            static void Postfix(List<Entities.MarketingCampaign> campaignGroup, string __state)
             {
                 try
                 {
-                    // Native's Cancel goes through a confirm dialog, which can be answered after the helper
-                    // has left the tab — reading the live session then would drop the routed op (review MINOR).
-                    string addr = _openTab == "marketing" && _openAddr.Length > 0 ? _openAddr : _mkTabAddr;
-                    if (addr.Length == 0) return;
+                    if (string.IsNullOrEmpty(__state)) return;
                     if (campaignGroup == null || campaignGroup.Count == 0 || campaignGroup[0] == null) return;
                     string ak = ""; try { ak = GameStateReader.AddressKey(campaignGroup[0].agencyAddress); } catch { }
                     if (ak.Length == 0) return;
-                    SendMarketingOp(addr, "campaigncancel", ak, "", false);
+                    SendMarketingOp(__state, "campaigncancel", ak, "", false);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} marketing cancel route: {ex.Message}"); }
             }
@@ -2583,9 +2668,27 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!_mkPickerLive || data == null || __instance == null || __instance.optionText == null) return;
+                    if (data == null || __instance == null || __instance.optionText == null) return;
+                    // The uniform list marks the helper's OWN presets, because picking one of those COPIES it
+                    // into the owner's save — the same "this one is not theirs" signal the rest of the
+                    // feature uses. Scoped by the actual dropdown object, so it cannot stray onto the skill
+                    // dropdown sitting next to it.
+                    if (_uniDropdown != null && _uniRowIds.Count > 0 && __instance.transform.IsChildOf(_uniDropdown.transform))
+                    {
+                        int uid = __instance.GetInstanceID();
+                        if (!_mkCellDefault.TryGetValue(uid, out var udef)) { udef = __instance.optionText.color; _mkCellDefault[uid] = udef; }
+                        __instance.optionText.color = _uniRowForeign.Contains(data.optionId) ? SharedShopVisibility.SharedTint : udef;
+                        return;
+                    }
+                    if (!_mkPickerLive) return;
                     if (_mkPicker == null || !_mkPicker.gameObject.activeInHierarchy) return;   // some other dropdown
-                    if (_mkPickerShared.Contains(data.optionId)) __instance.optionText.color = SharedShopVisibility.SharedTint;
+                    // Cells come from the scroller's recycle pool and native never repaints this label
+                    // (its VisualizeSelected override does not call base), so tinting without ALSO
+                    // restoring leaves a stale teal on whatever row inherits the cell — filter the list or
+                    // scroll it and one of the helper's own shops turns teal (fix-verification MINOR).
+                    int cid = __instance.GetInstanceID();
+                    if (!_mkCellDefault.TryGetValue(cid, out var def)) { def = __instance.optionText.color; _mkCellDefault[cid] = def; }
+                    __instance.optionText.color = _mkPickerShared.Contains(data.optionId) ? SharedShopVisibility.SharedTint : def;
                 }
                 catch { }
             }
@@ -2668,11 +2771,19 @@ namespace BigAmbitionsMP
             static void Postfix() => ClearMarketingCall();
         }
 
+        /// <summary>The walk-in dialog's finish overrides WITHOUT calling base, so the controller patches
+        /// above never see it (fix-verification MINOR). The agency can be reached in person.</summary>
+        [HarmonyPatch(typeof(UI.Dialog.DialogUI), nameof(UI.Dialog.DialogUI.FinishDialog))]
+        public static class Patch_DialogUIFinish_ClearPicker
+        {
+            static void Postfix() => ClearMarketingCall();
+        }
+
         private static void ClearMarketingCall()
         {
             _mkPicker = null; _mkPickerIndex = -1; _mkWantAddr = "";
             _mkPickerDirty = false; _mkPickerLive = false;
-            _mkPickerRegs.Clear(); _mkPickerShared.Clear();
+            _mkPickerRegs.Clear(); _mkPickerShared.Clear(); _mkCellDefault.Clear();
         }
 
         /// <summary>The call's confirm. Native has already rewritten the replica's campaign list for the chosen
@@ -2766,6 +2877,668 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ═══════════════════════════ 7d · SETTINGS ═══════════════════════════
+        // Rulings 34 and 42. A helper may RENAME the shop and edit its LOGO; the business-type dropdown and
+        // Shutdown stay greyed (merger-only). Nothing here spends money.
+        //
+        // The logo is five scalars, not an image: LogoCustomizer.SaveLogo writes logoSettings and then
+        // GENERATES the files from them, and BusinessSync already carries the generated files owner→everyone.
+        // So a routed logo edit is five fields and the OWNER regenerates their own images.
+        //
+        // The NAME is not just a label: it names the folder the logo files live in, so an owner-side apply
+        // that only assigns BusinessName would orphan their custom logo. The apply mirrors native's own
+        // rename (validations, RenameLogoSpriteFolder) and drops the mod's name-keyed logo caches.
+
+        private static readonly Dictionary<string, SettingsInfo> _stByAddr = new();
+        private static readonly Dictionary<string, string> _stSigByAddr = new();
+        private static bool _renderSettings;
+
+        /// <summary>OWNER: the shop's name and logo settings.</summary>
+        private static void BuildSettings(BuildingRegistration reg, SharedWorkInfoPayload reply)
+        {
+            try
+            {
+                var ls = reg.logoSettings;
+                reply.Settings = new SettingsInfo
+                {
+                    BusinessName = reg.BusinessName ?? "",
+                    LogoShape    = ls?.logoShape ?? "",
+                    LogoFont     = ls != null ? (int)ls.font : 0,
+                    LogoColor    = ls != null ? ls.logoColor.color : 0,
+                    FontColor    = ls != null ? ls.fontColor.color : 0,
+                    BackColor    = ls != null ? ls.backgroundColor.color : 0,
+                };
+                BuildUniforms(reg, reply.Settings);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} settings build: {ex.Message}"); }
+        }
+
+        /// <summary>HELPER: put the owner's name and logo settings on the replica so the tab shows their
+        /// values and its unsaved-changes tracking compares against the truth.</summary>
+        private static void ApplySettingsSnapshot(SharedWorkInfoPayload p, BuildingRegistration reg)
+        {
+            var info = p.Settings;
+            if (info == null) return;
+            _stByAddr[p.AddressKey] = info;
+            bool ok = false;
+            try
+            {
+                if (!string.IsNullOrEmpty(info.BusinessName)) reg.BusinessName = info.BusinessName;
+                if (reg.logoSettings != null)
+                {
+                    reg.logoSettings.logoShape = info.LogoShape ?? "";
+                    try { reg.logoSettings.font = (Enums.FontFace)info.LogoFont; } catch { }
+                    reg.logoSettings.logoColor.color = info.LogoColor;
+                    reg.logoSettings.fontColor.color = info.FontColor;
+                    reg.logoSettings.backgroundColor.color = info.BackColor;
+                }
+                ApplyUniforms(info, reg);
+                ok = true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} settings apply: {ex.Message}"); }
+            if (ok) _stSigByAddr[p.AddressKey] = p.Sig ?? "";
+            else
+            {
+                _stSigByAddr.Remove(p.AddressKey);
+                // The TAB's sig was committed before this ran; take it back or the poll goes silent over a
+                // half-applied screen (the same fix Marketing carries).
+                if (_openTab == "settings" && _openAddr == p.AddressKey) _tabSig = "";
+            }
+            // A repaint rewrites the name field from the registration, so it would eat a rename in progress.
+            bool typing = false;
+            try
+            {
+                var page = OpenPage();
+                var st = page != null ? page.GetComponentInChildren<BizManSettings>(true) : null;
+                if (st != null && st.gameObject.activeInHierarchy && st.HasUnsavedChanges) typing = true;
+            }
+            catch { }
+            if (_openTab == "settings" && _openAddr == p.AddressKey && !typing) _renderSettings = true;
+        }
+
+        /// <summary>OWNER: apply a routed rename or logo edit with the native checks.</summary>
+        private static bool ApplySettingsOp(BuildingRegistration reg, SharedWorkEditPayload p)
+        {
+            if (p.Op == "rename")
+            {
+                string want = (p.StrValue ?? "").Trim();
+                string have = reg.BusinessName ?? "";
+                if (want.Length == 0 || want == have) return false;
+                // Native's own guards (BizManSettings.SaveBusinessInformation): a leading dot and any
+                // character illegal in a file name are refused because the name IS a folder name, and a
+                // duplicate would collide with another business's logo folder.
+                if (want.StartsWith(".", StringComparison.Ordinal))
+                {
+                    Plugin.Logger.LogWarning($"{Tag} '{p.PlayerId}' tried to rename '{p.AddressKey}' to a name starting with '.' — refused.");
+                    return false;
+                }
+                try { if (want.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0) { Plugin.Logger.LogWarning($"{Tag} '{p.PlayerId}' tried to rename '{p.AddressKey}' to a name with characters that cannot be a folder name — refused."); return false; } }
+                catch { }
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations != null && gi.BuildingRegistrations.Exists(x => x != null && x.BusinessName == want))
+                {
+                    Plugin.Logger.LogWarning($"{Tag} '{p.PlayerId}' tried to rename '{p.AddressKey}' to '{want}', which is already taken — refused.");
+                    return false;
+                }
+                if (want.Length > 64)
+                {
+                    // Native relies on the input field's character limit, which a routed op bypasses; an
+                    // over-long name throws inside the folder move (review M6).
+                    Plugin.Logger.LogWarning($"{Tag} '{p.PlayerId}' tried to rename '{p.AddressKey}' to a {want.Length}-character name — refused.");
+                    return false;
+                }
+                // The logo folder is named after the business; native moves it as part of the rename, and
+                // skipping that would strand the owner's custom logo under the old name. If the move FAILS
+                // the rename must fail with it (review M6): native's call is unguarded, so a throw aborts
+                // before the name is assigned — swallowing it would leave the registration pointing at a
+                // folder that does not exist, and the images parked in the generator's temp folder for the
+                // next rename to delete. The folder-safe name strips dots and invalid characters, so two
+                // distinct business names CAN collide there even though the duplicate check passed.
+                try { BizManSettings.RenameLogoSpriteFolder(have, want); }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogWarning($"{Tag} rename of '{p.AddressKey}' from '{have}' to '{want}' REFUSED — the logo folder could not be moved: {ex.Message}");
+                    return false;
+                }
+                reg.BusinessName = want;
+                InvalidateLogoCaches(have, want);
+                // The business name is DRAWN INTO the logo images (BusinessLogoGenerator prints it onto the
+                // sign textures), which is why native regenerates after every rename. Without this the street
+                // sign, the cards and the billboards keep the old name on every machine — and nothing heals
+                // it, because the sign controller only regenerates when a texture is MISSING (review M2).
+                RegenerateLogo(reg);
+                Plugin.Logger.LogInfo($"{Tag} '{p.PlayerId}' renamed '{p.AddressKey}' from '{have}' to '{want}'.");
+                return true;
+            }
+            if (p.Op != "logo" || p.Settings == null || reg.logoSettings == null) return false;
+            var info = p.Settings;
+            reg.logoSettings.logoShape = info.LogoShape ?? "";
+            try { reg.logoSettings.font = (Enums.FontFace)info.LogoFont; } catch { }
+            reg.logoSettings.logoColor.color = info.LogoColor;
+            reg.logoSettings.fontColor.color = info.FontColor;
+            reg.logoSettings.backgroundColor.color = info.BackColor;
+            // Regenerate the owner's own image files, exactly as their own Save would. BusinessSync's
+            // content diff then carries them to every machine, so no image data rides this op.
+            RegenerateLogo(reg);
+            Plugin.Logger.LogInfo($"{Tag} '{p.PlayerId}' changed the logo of '{p.AddressKey}'.");
+            return true;
+        }
+
+        /// <summary>Regenerate the owner's own logo images and let the world notice — the same follow-up
+        /// native runs after a name or logo change. Settings is offered only on ordinary shops, so this is
+        /// the right generator (a warehouse has its own).</summary>
+        private static void RegenerateLogo(BuildingRegistration reg)
+        {
+            try
+            {
+                string name = reg.BusinessName ?? "";
+                BusinessLogoGenerator.Create(name, reg.logoSettings, LogoHelper.GetPlayerBusinessLogoPath(name),
+                    reg.RentedByPlayer, delegate
+                    {
+                        try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
+                        try { InstanceBehavior<CityManager>.Instance.UpdateBillboardsFromBusiness(name); } catch { }
+                    });
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} logo regenerate: {ex.Message}"); }
+        }
+
+        /// <summary>The mod's own logo plumbing is keyed by business NAME (a file cache and the game's
+        /// texture cache), so a rename has to drop both or the sign and cards keep drawing the old logo.</summary>
+        private static void InvalidateLogoCaches(string oldName, string newName)
+        {
+            try { BusinessSync.ForgetLogoCache(oldName); BusinessSync.ForgetLogoCache(newName); } catch { }
+            try
+            {
+                var dict = LogoHelper.BusinessLogoTextures;
+                if (dict != null)
+                {
+                    var kill = new List<(string businessName, LogoSize logoSize, bool isPlayerBusiness)>();
+                    foreach (var k in dict.Keys)
+                        if (k.businessName == oldName || k.businessName == newName) kill.Add(k);
+                    foreach (var k in kill) dict.Remove(k);
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>The Settings tab on a shared shop: open the session, and grey what ruling 34 reserves
+        /// for the merger — the business-type dropdown and Shutdown.</summary>
+        [HarmonyPatch(typeof(BizManSettings), nameof(BizManSettings.RefreshData))]
+        public static class Patch_BizManSettings_RefreshData_Session
+        {
+            static void Postfix(BizManSettings __instance)
+            {
+                try
+                {
+                    // BOTH states, every time: this panel is one shared prefab instance that serves every
+                    // business, and native never touches these two controls — so greying without releasing
+                    // left the helper's OWN shops unable to change type or shut down for the rest of the
+                    // session (review M3).
+                    bool shared = OpenSession("settings");
+                    SetSettingsControlsInteractable(__instance, !shared);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} settings tab: {ex.Message}"); }
+            }
+        }
+
+        private static readonly System.Reflection.FieldInfo? _fTypeDropdown =
+            AccessTools.Field(typeof(BizManSettings), "businessTypeDropdown");
+
+        private static void SetSettingsControlsInteractable(BizManSettings inst, bool interactable)
+        {
+            // The dropdown is disabled through its own API, which also kills the search input: greying only
+            // its Button leaves that field live, and typing in it re-opens the option panel.
+            try { if (_fTypeDropdown?.GetValue(inst) is UI.Elements.Dropdown dd) dd.SetInteractable(interactable); }
+            catch { }
+            // Shutdown is wired in the PREFAB, so it is found by the method its click calls — the project's
+            // own way, which also says so once when it matches nothing rather than leaving a live-looking
+            // control (a name guess would fail silently).
+            try { SharedShopVisibility.SetButtonsCallingPublic(inst.transform, "ShutdownBusiness", interactable); }
+            catch { }
+        }
+
+        /// <summary>Ruling 34: a helper never changes the business type or shuts the shop down. The buttons
+        /// are greyed above; these are the blocks, because a greyed control is a courtesy and not a gate.</summary>
+        [HarmonyPatch(typeof(BizManSettings), nameof(BizManSettings.ShutdownBusiness))]
+        public static class Patch_BizManSettings_Shutdown_Blocked
+        {
+            static bool Prefix(BizManSettings __instance)
+            {
+                var biz = __instance != null ? __instance.GetComponentInParent<BizManBusiness>() : null;
+                var reg = biz != null ? biz.buildingRegistration : null;
+                if (reg == null || !SharedAddrOf(reg, out var addr)) return true;
+                if (_logged.Add("st-shutdown|" + addr))
+                    Plugin.Logger.LogInfo($"{Tag} shutdown refused on shared '{addr}' — reserved for the merger (ruling 34).");
+                return false;
+            }
+        }
+
+        /// <summary>Save on a shared shop: route the rename and the logo instead of writing the replica.
+        /// The type change is dropped on the floor — native would cascade employee unassignments and
+        /// delivery cancellations through the replica, none of which the owner would ever hear about.</summary>
+        [HarmonyPatch(typeof(BizManSettings), nameof(BizManSettings.SaveBusinessInformation))]
+        public static class Patch_BizManSettings_Save_Routed
+        {
+            static bool Prefix(BizManSettings __instance)
+            {
+                try
+                {
+                    // Read the page native is about to write to, not the session.
+                    var biz = __instance != null ? __instance.GetComponentInParent<BizManBusiness>() : null;
+                    var reg = biz != null ? biz.buildingRegistration : null;
+                    if (reg == null || !SharedAddrOf(reg, out var addr)) return true;
+                    string typed = "";
+                    if (AccessTools.Field(typeof(BizManSettings), "businessName")?.GetValue(__instance) is TMP_InputField f)
+                        typed = (f.text ?? "").Trim();
+                    if (typed.Length > 0 && typed != (reg.BusinessName ?? ""))
+                        SendEdit(new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = addr, Op = "rename", StrValue = typed });
+                    return false;   // nothing else on this screen may touch the replica
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} settings save route: {ex.Message}"); return false; }
+            }
+        }
+
+        /// <summary>Saving the logo on a shared shop routes the five settings; the owner regenerates the
+        /// images and the existing business sync carries them back to everyone.</summary>
+        [HarmonyPatch(typeof(LogoCustomizer), nameof(LogoCustomizer.SaveLogo))]
+        public static class Patch_LogoCustomizer_Save_Routed
+        {
+            static bool Prefix(LogoCustomizer __instance)
+            {
+                try
+                {
+                    var biz = __instance != null ? __instance.GetComponentInParent<BizManBusiness>() : null;
+                    var lreg = biz != null ? biz.buildingRegistration : null;
+                    if (lreg == null || !SharedAddrOf(lreg, out var addr)) return true;
+                    var info = new SettingsInfo();
+                    var t = typeof(LogoCustomizer);
+                    info.LogoShape = AccessTools.Field(t, "_logoShape")?.GetValue(__instance) as string ?? "";
+                    try { info.LogoFont = (int)(AccessTools.Field(t, "_logoFont")?.GetValue(__instance) ?? 0); } catch { }
+                    info.LogoColor = ColorIdOf(AccessTools.Field(t, "_logoColor")?.GetValue(__instance));
+                    info.FontColor = ColorIdOf(AccessTools.Field(t, "_fontColor")?.GetValue(__instance));
+                    info.BackColor = ColorIdOf(AccessTools.Field(t, "_backgroundColor")?.GetValue(__instance));
+                    SendEdit(new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = addr, Op = "logo", Settings = info });
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} logo save route: {ex.Message}"); return false; }
+            }
+        }
+
+        /// <summary>The customizer's PENDING colours are plain UnityEngine.Color — only what is already
+        /// stored on the registration is the game's packed colour object (review M1). Reflecting for a
+        /// "color" field therefore found nothing and every routed logo edit carried 0/0/0, which the owner
+        /// then generated a black logo from and published to everyone. Convert instead.</summary>
+        private static int ColorIdOf(object? holder)
+        {
+            try
+            {
+                if (holder is Color c) { SerializableColor sc = c; return sc.color; }
+                if (holder == null) return 0;
+                var v = AccessTools.Field(holder.GetType(), "color")?.GetValue(holder);
+                return v is int i ? i : 0;
+            }
+            catch { return 0; }
+        }
+
+        // ── uniforms (rulings 35 and 42) ──────────────────────────────────────────────────────────────
+        // The helper sees the OWNER's presets and their OWN. Assigning one of the owner's routes the id;
+        // assigning one of their own IMPORTS a copy into the owner's save under a fresh id, because a preset
+        // is player-level data (SaveGameManager.Current.employeePresets) that the owner's machine must hold
+        // for itself. Creating and editing presets stays entirely local — a helper never edits the owner's.
+        //
+        // Native reads the assignment through its OWN preset list, so a carried owner id would never resolve
+        // and every assigned skill would read "unassigned". The two list-building handlers are therefore
+        // taken over wholesale for a shared shop rather than nudged.
+
+        private static readonly List<PresetInfo> _uniOwnerPresets = new();   // the owner's presets, as carried
+        private static readonly List<string> _uniRowIds = new();             // dropdown row → preset id ("" = unassigned)
+        private static readonly HashSet<int> _uniRowForeign = new();         // rows that are the HELPER's own (teal: assigning imports a copy)
+        private static bool _uniHasLocker;
+        private static string _uniAddr = "";     // which shop the carried presets/locker flag describe
+        private static UI.Elements.Dropdown? _uniDropdown;   // the live uniform dropdown, so the tint cannot stray onto another one
+
+        private static List<EmployeePreset> LocalPresets =>
+            SaveGameManager.Current?.employeePresets ?? new List<EmployeePreset>();
+
+        /// <summary>OWNER: the shop's per-skill assignments, the owner's presets, and whether the shop has a
+        /// uniform locker — the last because the native gate reads the building's own items, which a helper
+        /// does not hold off-site.</summary>
+        private static void BuildUniforms(BuildingRegistration reg, SettingsInfo info)
+        {
+            try
+            {
+                if (reg.uniformsBySkill != null)
+                    foreach (var kv in reg.uniformsBySkill)
+                        if (!string.IsNullOrEmpty(kv.Key)) info.Uniforms.Add(new UniformInfo { Skill = kv.Key, PresetId = kv.Value ?? "" });
+                // Anything this shop actually USES goes first: a truncated assigned preset would leave the
+                // helper's dropdown reading "unassigned" for an assigned skill, and one click there would
+                // overwrite a real uniform (review MINOR).
+                var used = new HashSet<string>();
+                if (reg.uniformsBySkill != null) foreach (var kv in reg.uniformsBySkill) if (!string.IsNullOrEmpty(kv.Value)) used.Add(kv.Value);
+                foreach (var p in LocalPresets)
+                    if (p != null && used.Contains(p.id ?? "")) info.Presets.Add(ToPresetInfo(p));
+                foreach (var p in LocalPresets)
+                {
+                    if (p == null || used.Contains(p.id ?? "")) continue;
+                    if (info.Presets.Count >= MaxPresets)
+                    {
+                        if (_logged.Add("uni-cap|" + AddrOf(reg)))
+                            Plugin.Logger.LogWarning($"{Tag} more than {MaxPresets} uniform presets at '{AddrOf(reg)}' — the remainder is NOT offered to helpers (assigned ones are always carried).");
+                        break;
+                    }
+                    info.Presets.Add(ToPresetInfo(p));
+                }
+                info.HasUniformLocker = HasUniformLockerNative(reg);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} uniforms build: {ex.Message}"); }
+        }
+
+        private static bool HasUniformLockerNative(BuildingRegistration reg)
+        {
+            try
+            {
+                if (reg.itemInstances == null) return false;
+                foreach (var it in reg.itemInstances.Values)
+                    if (it != null && BigAmbitions.Items.ItemsGetter.GetByName(it.itemName).HasTag(BigAmbitions.Tags.TagRef.Itemtag.isuniformlocker)) return true;
+            }
+            catch { }
+            return false;
+        }
+
+        private static PresetInfo ToPresetInfo(EmployeePreset p)
+        {
+            var info = new PresetInfo { Id = p.id ?? "", Name = p.name ?? "", SkillDependent = p.skillDependent, Skill = p.skill ?? "" };
+            AddElems(info.Male, p.maleElements);
+            AddElems(info.Female, p.femaleElements);
+            return info;
+        }
+
+        private static void AddElems(List<ElemInfo> into, List<BigAmbitions.Characters.Appearance.AppearanceElementData> from)
+        {
+            if (from == null) return;
+            foreach (var e in from)
+                if (e != null) into.Add(new ElemInfo { Type = (int)e.type, VariantId = e.variantId ?? "", ColorId = e.colorId ?? "" });
+        }
+
+        /// <summary>Is this preset the same OUTFIT as the carried one? Content, never id: an import lands
+        /// under a fresh id by design, so ids can never match across machines.</summary>
+        private static bool SamePresetContent(EmployeePreset a, PresetInfo b)
+        {
+            try
+            {
+                if ((a.name ?? "") != (b.Name ?? "") || a.skillDependent != b.SkillDependent || (a.skill ?? "") != (b.Skill ?? "")) return false;
+                return SameElems(a.maleElements, b.Male) && SameElems(a.femaleElements, b.Female);
+            }
+            catch { return false; }
+        }
+
+        private static bool SameElems(List<BigAmbitions.Characters.Appearance.AppearanceElementData> a, List<ElemInfo> b)
+        {
+            int an = a?.Count ?? 0, bn = b?.Count ?? 0;
+            if (an != bn) return false;
+            for (int i = 0; i < an; i++)
+            {
+                var x = a![i]; var y = b![i];
+                if (x == null || y == null) return false;
+                if ((int)x.type != y.Type || (x.variantId ?? "") != (y.VariantId ?? "") || (x.colorId ?? "") != (y.ColorId ?? "")) return false;
+            }
+            return true;
+        }
+
+        private static EmployeePreset FromPresetInfo(PresetInfo info)
+        {
+            var p = new EmployeePreset { name = info.Name ?? "", skillDependent = info.SkillDependent, skill = info.Skill ?? "" };
+            // The ctor already minted a FRESH id — the owner's save must never inherit the helper's, or a
+            // later edit on either machine would silently address the other's preset.
+            foreach (var e in info.Male ?? new List<ElemInfo>())
+                p.maleElements.Add(new BigAmbitions.Characters.Appearance.AppearanceElementData { type = (BigAmbitions.Characters.Appearance.AppearanceElementType)e.Type, variantId = e.VariantId, colorId = e.ColorId });
+            foreach (var e in info.Female ?? new List<ElemInfo>())
+                p.femaleElements.Add(new BigAmbitions.Characters.Appearance.AppearanceElementData { type = (BigAmbitions.Characters.Appearance.AppearanceElementType)e.Type, variantId = e.VariantId, colorId = e.ColorId });
+            return p;
+        }
+
+        /// <summary>HELPER: hold the owner's presets and write the assignments onto the replica.</summary>
+        private static void ApplyUniforms(SettingsInfo info, BuildingRegistration reg)
+        {
+            try
+            {
+                _uniOwnerPresets.Clear();
+                if (info.Presets != null) foreach (var p in info.Presets) if (p != null) _uniOwnerPresets.Add(p);
+                _uniHasLocker = info.HasUniformLocker;
+                _uniAddr = AddrOf(reg);
+                if (reg.uniformsBySkill == null) reg.uniformsBySkill = new Dictionary<string, string>();
+                reg.uniformsBySkill.Clear();
+                if (info.Uniforms != null)
+                    foreach (var u in info.Uniforms)
+                        if (u != null && !string.IsNullOrEmpty(u.Skill)) reg.uniformsBySkill[u.Skill] = u.PresetId ?? "";
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} uniforms apply: {ex.Message}"); }
+        }
+
+        /// <summary>OWNER: assign, clear, or IMPORT-then-assign a uniform, with native's own follow-up.</summary>
+        private static bool ApplyUniformOp(BuildingRegistration reg, SharedWorkEditPayload p)
+        {
+            string skill = p.SkillName ?? "";
+            if (skill.Length == 0) return false;
+            if (reg.uniformsBySkill == null) reg.uniformsBySkill = new Dictionary<string, string>();
+            string? assigned = null;
+            if (p.Op == "uniformimport")
+            {
+                if (p.Preset == null) return false;
+                var list = SaveGameManager.Current?.employeePresets;
+                if (list == null) return false;
+                // Re-use an identical copy rather than breeding one per click (review MINOR): assigning the
+                // same preset to a second skill, or clearing and re-picking it, would otherwise leave the
+                // owner's list growing from someone else's clicks — and each copy comes BACK in the carry,
+                // so the helper sees the same name twice and imports again.
+                var existing = list.Find(x => x != null && SamePresetContent(x, p.Preset));
+                if (existing != null)
+                {
+                    assigned = existing.id;
+                    reg.uniformsBySkill[skill] = existing.id;
+                    Plugin.Logger.LogInfo($"{Tag} '{p.PlayerId}' assigned '{existing.name}' to '{skill}' at '{p.AddressKey}' — I already hold an identical preset, so no copy was made.");
+                }
+                else
+                {
+                    var copy = FromPresetInfo(p.Preset);
+                    list.Add(copy);
+                    assigned = copy.id;
+                    reg.uniformsBySkill[skill] = copy.id;
+                    Plugin.Logger.LogInfo($"{Tag} '{p.PlayerId}' assigned their own uniform preset '{copy.name}' to '{skill}' at '{p.AddressKey}' — imported as a copy (id {copy.id}).");
+                }
+            }
+            else
+            {
+                string id = p.PresetId ?? "";
+                if (id.Length == 0)
+                {
+                    if (!reg.uniformsBySkill.Remove(skill)) return false;
+                    Plugin.Logger.LogInfo($"{Tag} '{p.PlayerId}' cleared the uniform for '{skill}' at '{p.AddressKey}'.");
+                }
+                else
+                {
+                    // Only a preset the owner actually holds — an id from anywhere else would assign a
+                    // uniform their own screens could never resolve.
+                    var list = SaveGameManager.Current?.employeePresets;
+                    if (list == null || !list.Exists(x => x != null && x.id == id))
+                    {
+                        Plugin.Logger.LogWarning($"{Tag} '{p.PlayerId}' asked for uniform preset '{id}' at '{p.AddressKey}', which I do not have — refused.");
+                        return false;
+                    }
+                    if (reg.uniformsBySkill.TryGetValue(skill, out var had) && had == id) return false;
+                    reg.uniformsBySkill[skill] = id;
+                    assigned = id;
+                    Plugin.Logger.LogInfo($"{Tag} '{p.PlayerId}' set the uniform for '{skill}' at '{p.AddressKey}'.");
+                }
+            }
+            // Native's own follow-up, so the owner's world reacts exactly as if they had done it.
+            try { Entities.CustomerDemandHelper.ReloadCachedFulfilled(reg.Address); } catch { }
+            try { InstanceBehavior<BuildingManager>.Instance.onUniformChanged.Invoke(skill, assigned); } catch { }
+            try { GameEvent.Invoke("ba:gameevent_employeeuniformassigned"); } catch { }
+            return true;
+        }
+
+        /// <summary>The uniform window's gate reads the shop's own items, which a helper does not hold off
+        /// site — so it would always say "no uniform locker". Answer with what the owner reported.</summary>
+        [HarmonyPatch(typeof(SetUpUniformsWindow), "ShouldShowWindow")]
+        public static class Patch_Uniforms_Gate
+        {
+            static void Postfix(BuildingRegistration registration, ref bool __result)
+            {
+                try
+                {
+                    if (registration == null || !SharedAddrOf(registration, out var addr)) return;
+                    if (!_stSigByAddr.ContainsKey(addr) || _uniAddr != addr)
+                    {
+                        // Nothing carried yet (review M5). Native's answer reads the REPLICA's own items,
+                        // which a helper does hold if they have ever stood in the shop — so deferring to it
+                        // would open the window over this machine's own data, show "unassigned" for skills
+                        // the owner has assigned, and let one click overwrite a real uniform.
+                        __result = false;
+                        return;
+                    }
+                    __result = _uniHasLocker;
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>The uniform list for a shared shop: the OWNER's presets first, then the helper's own in
+        /// the shared teal (picking one of those imports a copy). Taken over rather than adjusted, because
+        /// native resolves the current assignment through its own list, where an owner's id does not exist.</summary>
+        [HarmonyPatch(typeof(SetUpUniformsWindow), "SetUniformDropdownOptions")]
+        public static class Patch_Uniforms_Options
+        {
+            static void Postfix(SetUpUniformsWindow __instance, int skillNameIndex)
+            {
+                try
+                {
+                    if (!SharedUniformShop(__instance, out var reg, out var addr)) return;
+                    if (_uniAddr != addr) return;   // carried presets belong to another shop — leave native's list alone
+                    var skills = AccessTools.Field(typeof(SetUpUniformsWindow), "_skillNames")?.GetValue(__instance) as List<string>;
+                    if (skills == null || skillNameIndex < 0 || skillNameIndex >= skills.Count) return;
+                    var dd = AccessTools.Field(typeof(SetUpUniformsWindow), "uniformDropdown")?.GetValue(__instance) as UI.Elements.Dropdown;
+                    if (dd == null) return;
+                    string skill = skills[skillNameIndex];
+                    // Row 0 is native's own localized "unassigned" — reused rather than re-derived, because
+                    // the string extension lives in an assembly this project does not reference.
+                    var had = AccessTools.Field(typeof(UI.Elements.Dropdown), "_options")?.GetValue(dd) as List<string>;
+                    if (had == null || had.Count == 0) return;
+
+                    _uniRowIds.Clear(); _uniRowForeign.Clear();
+                    var names = new List<string> { had[0] };
+                    _uniRowIds.Add("");
+                    foreach (var p in _uniOwnerPresets)
+                    {
+                        if (p == null) continue;
+                        names.Add(p.Name ?? ""); _uniRowIds.Add(p.Id ?? "");
+                    }
+                    foreach (var p in LocalPresets)
+                    {
+                        if (p == null) continue;
+                        _uniRowForeign.Add(names.Count);
+                        names.Add(p.name ?? ""); _uniRowIds.Add(p.id ?? "");
+                    }
+                    int sel = 0;
+                    if (reg.uniformsBySkill != null && reg.uniformsBySkill.TryGetValue(skill, out var cur) && !string.IsNullOrEmpty(cur))
+                    {
+                        int at = _uniRowIds.IndexOf(cur);
+                        if (at > 0) sel = at;
+                    }
+                    _uniDropdown = dd;
+                    dd.SetOptions(names, localize: false, sel);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} uniform options: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>Choosing a uniform on a shared shop. The owner's presets route by id; the helper's own
+        /// route as an IMPORT, because a preset lives in a player's save and the owner must hold their own
+        /// copy (ruling 35).</summary>
+        [HarmonyPatch(typeof(SetUpUniformsWindow), "OnUniformDropdownOptionSelected")]
+        public static class Patch_Uniforms_Selected
+        {
+            static bool Prefix(SetUpUniformsWindow __instance, int optionIndex)
+            {
+                try
+                {
+                    if (!SharedUniformShop(__instance, out var reg, out var addr)) return true;
+                    if (_uniAddr != addr) return false;   // no owner truth for THIS shop yet — never write on its behalf
+                    var skills = AccessTools.Field(typeof(SetUpUniformsWindow), "_skillNames")?.GetValue(__instance) as List<string>;
+                    var skillDd = AccessTools.Field(typeof(SetUpUniformsWindow), "skillNameDropdown")?.GetValue(__instance) as UI.Elements.Dropdown;
+                    if (skills == null || skillDd == null) return true;
+                    int si = skillDd.SelectedOptionIndex;
+                    if (si < 0 || si >= skills.Count) return true;
+                    string skill = skills[si];
+                    if (optionIndex < 0 || optionIndex >= _uniRowIds.Count) return false;
+                    string id = _uniRowIds[optionIndex];
+
+                    if (optionIndex == 0 || id.Length == 0)
+                    {
+                        reg.uniformsBySkill?.Remove(skill);
+                        SendEdit(new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = addr, Op = "uniform", SkillName = skill, PresetId = "" });
+                    }
+                    else if (_uniRowForeign.Contains(optionIndex))
+                    {
+                        var mine = LocalPresets.Find(x => x != null && x.id == id);
+                        if (mine == null) return false;
+                        if (reg.uniformsBySkill != null) reg.uniformsBySkill[skill] = id;   // optimistic; the owner's echo replaces it with their copy's id
+                        SendEdit(new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = addr, Op = "uniformimport", SkillName = skill, Preset = ToPresetInfo(mine) });
+                    }
+                    else
+                    {
+                        if (reg.uniformsBySkill != null) reg.uniformsBySkill[skill] = id;
+                        SendEdit(new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = addr, Op = "uniform", SkillName = skill, PresetId = id });
+                    }
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} uniform select: {ex.Message}"); return false; }
+            }
+        }
+
+        /// <summary>Configure presets edits the LOCAL player's own presets (ruling 35 keeps that local). With
+        /// one of the OWNER's presets selected, native would hand the customizer an id this machine does not
+        /// have — open it with no initial preset instead.</summary>
+        [HarmonyPatch(typeof(SetUpUniformsWindow), nameof(SetUpUniformsWindow.OnConfigureUniformPresetsButtonClick))]
+        public static class Patch_Uniforms_Configure
+        {
+            static bool Prefix(SetUpUniformsWindow __instance)
+            {
+                try
+                {
+                    if (!SharedUniformShop(__instance, out _, out var addr) || _uniAddr != addr) return true;
+                    var dd = AccessTools.Field(typeof(SetUpUniformsWindow), "uniformDropdown")?.GetValue(__instance) as UI.Elements.Dropdown;
+                    var skillDd = AccessTools.Field(typeof(SetUpUniformsWindow), "skillNameDropdown")?.GetValue(__instance) as UI.Elements.Dropdown;
+                    // NEVER delegate to native here (review M4): its own handler indexes the HELPER's preset
+                    // list with the merged list's index, which either throws or silently opens a different
+                    // preset than the one shown selected. And the rebuild afterwards must use the skill the
+                    // user is actually looking at, not 0.
+                    int idx = dd?.SelectedOptionIndex ?? 0;
+                    int si = skillDd?.SelectedOptionIndex ?? 0;
+                    string? initial = (idx > 0 && idx < _uniRowIds.Count && _uniRowForeign.Contains(idx)) ? _uniRowIds[idx] : null;
+                    InstanceBehavior<UI.UIs>.Instance.employeePresetCustomizer.Show(initial, BigAmbitions.Characters.Gender.Male, delegate
+                    {
+                        try { AccessTools.Method(typeof(SetUpUniformsWindow), "SetUniformDropdownOptions")?.Invoke(__instance, new object[] { si }); } catch { }
+                    });
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} uniform configure: {ex.Message}"); return true; }
+            }
+        }
+
+        private static bool SharedUniformShop(SetUpUniformsWindow inst, out BuildingRegistration reg, out string addr)
+        {
+            reg = null!; addr = "";
+            try
+            {
+                var found = AccessTools.Field(typeof(SetUpUniformsWindow), "_registration")?.GetValue(inst) as BuildingRegistration;
+                if (found == null) return false;
+                reg = found;
+                return SharedAddrOf(reg, out addr);
+            }
+            catch { return false; }
+        }
+
         /// <summary>OWNER: build one tab's snapshot and send it to one helper (also the echo after an edit).
         /// When the requester's sig matches the fresh content, nothing is sent - the poll costs no reply.</summary>
         private static void BuildAndSendSnapshot(string addressKey, string tab, string toPid, string requesterSig = "", bool echo = false)
@@ -2774,7 +3547,7 @@ namespace BigAmbitionsMP
             if (reg == null || !MergerFlip.TrulyMine(reg)) return;
             // 7a/7b: Insight + Deliveries serve ORDINARY shops — only the warehouse-backed tabs need the cast.
             Entities.Warehouse? wh = reg as Entities.Warehouse;
-            if (tab != "insight" && tab != "deliveries" && tab != "marketing" && wh == null)
+            if (tab != "insight" && tab != "deliveries" && tab != "marketing" && tab != "settings" && wh == null)
             {
                 if (_logged.Add("work-notwh|" + addressKey))
                     Plugin.Logger.LogWarning($"{Tag} work-info request for '{addressKey}' but its registration is not a warehouse/factory — ignored.");
@@ -2791,6 +3564,7 @@ namespace BigAmbitionsMP
                 if (tab == "insight") BuildInsight(reg, reply);
                 else if (tab == "deliveries") BuildDeliveries(reg, reply);
                 else if (tab == "marketing")  BuildMarketing(reg, reply);
+                else if (tab == "settings")   BuildSettings(reg, reply);
                 else if (tab == "inventory") BuildInventory(wh!, reply);   // wh non-null past the guard above
                 else if (tab == "drivers") BuildDrivers(wh!, reply);
                 else if (tab == "factory") BuildFactory(wh!, reply);
@@ -2809,6 +3583,7 @@ namespace BigAmbitionsMP
                     : tab == "insight"  ? $"{reply.InsightDays.Count} day(s), {reply.Capacity.Count} capacity row(s)."
                     : tab == "deliveries" ? $"{reply.Contracts.Count} contract(s), {reply.Products.Count} product(s)."
                     : tab == "marketing"  ? $"{reply.Campaigns.Count} marketing campaign(s)."
+                    : tab == "settings"   ? $"name '{reply.Settings?.BusinessName}' + logo settings."
                     :                     $"{reply.Stations.Count} workstation(s), {reply.ResourceStock.Count} resource count(s)."));
             if (MPServer.IsRunning) MPServer.HostRouteSharedWorkInfo(reply, MPConfig.PlayerId);
             else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedWorkInfo, MPConfig.PlayerId, reply));
@@ -2829,6 +3604,14 @@ namespace BigAmbitionsMP
                 .Append(':').Append(r.Insight.SatInterior).Append(':').Append(r.Insight.SatClean);
             if (r.InsightDays != null) foreach (var d in r.InsightDays) if (d != null) { sb.Append('|').Append(d.Day).Append(':').Append(d.Customers); if (d.Hours != null) foreach (var h in d.Hours) sb.Append(',').Append(h); }
             if (r.Capacity != null) foreach (var c in r.Capacity) if (c != null) { sb.Append('|').Append(c.ItemName); if (c.Shelves != null) foreach (var s in c.Shelves) if (s != null) sb.Append(':').Append(s.Name).Append('~').Append(s.Amount).Append('~').Append(s.PerHour); }
+            if (r.Settings != null)
+            {
+                sb.Append('|').Append(r.Settings.BusinessName).Append(':').Append(r.Settings.LogoShape).Append(':').Append(r.Settings.LogoFont)
+                  .Append(':').Append(r.Settings.LogoColor).Append(':').Append(r.Settings.FontColor).Append(':').Append(r.Settings.BackColor)
+                  .Append(':').Append(r.Settings.HasUniformLocker ? 1 : 0);
+                if (r.Settings.Uniforms != null) foreach (var u in r.Settings.Uniforms) if (u != null) sb.Append('|').Append(u.Skill).Append('=').Append(u.PresetId);
+                if (r.Settings.Presets != null) foreach (var pr in r.Settings.Presets) if (pr != null) sb.Append('|').Append(pr.Id).Append('~').Append(pr.Name).Append('~').Append(pr.Male.Count).Append('~').Append(pr.Female.Count);
+            }
             if (r.Campaigns != null) foreach (var c in r.Campaigns) if (c != null) sb.Append('|').Append(c.AgencyKey).Append(':').Append(c.TypeName).Append(':').Append(c.Enabled ? 1 : 0);
             if (r.Contracts != null) foreach (var c in r.Contracts) if (c != null) { sb.Append('|').Append(c.WholesaleKey).Append('#').Append(c.Ordinal).Append(':').Append(c.Enabled ? 1 : 0).Append(c.Urgent ? 1 : 0).Append(c.Repeating ? 1 : 0).Append(':').Append(c.NextDeliveryDay).Append(':').Append(c.DeliveryFee.ToString("F0")); if (c.Items != null) foreach (var it in c.Items) if (it != null) sb.Append(',').Append(it.ItemName).Append('=').Append(it.Amount).Append('~').Append(it.OrderedThisWeek); }
             return sb.Length.ToString() + ":" + sb.ToString().GetHashCode().ToString("X8");
@@ -2995,7 +3778,8 @@ namespace BigAmbitionsMP
             else if (p.Tab == "factory") ApplyFactorySnapshot(p, reg);
             else if (p.Tab == "insight" && p.Tab == _openTab) ApplyInsightSnapshot(p, reg);   // review MINOR-10: never while another tab is up
             else if (p.Tab == "deliveries" && p.Tab == _openTab) ApplyDeliveriesSnapshot(p, reg);
-            else if (p.Tab == "marketing" && p.Tab == _openTab) ApplyMarketingSnapshot(p, reg);   // never while Insight is up: UpdatePromotion would overwrite its deliberately-zeroed first open
+            else if (p.Tab == "marketing" && p.Tab == _openTab) ApplyMarketingSnapshot(p, reg);
+            else if (p.Tab == "settings" && p.Tab == _openTab) ApplySettingsSnapshot(p, reg);   // never while Insight is up: UpdatePromotion would overwrite its deliberately-zeroed first open
         }
 
         // ═══════════════ owner-side edit apply ═══════════════
@@ -3016,7 +3800,17 @@ namespace BigAmbitionsMP
                 var reg = GameStatePatcher.FindRegistration(p.AddressKey);
                 if (reg == null || !MergerFlip.TrulyMine(reg)) return;
                 bool applied; string echoTab;
-                if (p.Op == "campaign" || p.Op == "campaignremove" || p.Op == "campaigncancel")
+                if (p.Op == "rename" || p.Op == "logo")
+                {
+                    echoTab = "settings";
+                    applied = ApplySettingsOp(reg, p);
+                }
+                else if (p.Op == "uniform" || p.Op == "uniformimport")
+                {
+                    echoTab = "settings";
+                    applied = ApplyUniformOp(reg, p);
+                }
+                else if (p.Op == "campaign" || p.Op == "campaignremove" || p.Op == "campaigncancel")
                 {
                     // 7c: marketing ops serve ORDINARY shops — no warehouse cast.
                     echoTab = "marketing";
