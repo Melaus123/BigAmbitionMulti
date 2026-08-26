@@ -396,7 +396,9 @@ namespace BigAmbitionsMP
 
     // PUT route — the on-foot "deposit held item" path (VehicleController.AddHeldItemToStorage) adds straight to the
     // proxy's local cargo; with the chokepoint guard above that add is now blocked, so without this the deposit
-    // would silently do nothing. Route it to the owner (RequestDeposit is box-aware: it unwraps a carried item).
+    // would silently do nothing. Route it to the owner. RequestDeposit follows the NATIVE tag rule
+    // (parity 2026-08-26): a held BOX pours its contents; a bag or bare item goes in WHOLE as one
+    // bundle (review MINOR-4 — the old "unwraps a carried item" blanket is gone).
     [HarmonyPatch(typeof(VehicleController), "AddHeldItemToStorage")]
     public static class Patch_VehicleController_AddHeldItem_Borrowed
     {
@@ -406,6 +408,10 @@ namespace BigAmbitionsMP
             {
                 var inst = __instance?.vehicleInstance;
                 if (!ProxyCargo.IsProxy(inst)) return true;            // my own car → native deposit
+                // Basket/mop: let NATIVE run — its entry guard (:504-515) shows the exact warning
+                // and returns before any cargo work, proxy-safe (review MAJOR-1 belt; the funnel
+                // carries the same guard for the CTA/panel routes).
+                if (PlayerHelper.IsHoldingShoppingBasket || PlayerHelper.IsHoldingAMop) return true;
                 string realId = inst.id.Substring(5);
                 string owner = VehicleManager.OwnerIdFor(realId);
                 if (string.IsNullOrEmpty(owner)) return true;

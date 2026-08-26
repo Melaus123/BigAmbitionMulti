@@ -3,6 +3,7 @@ using UnityEngine;
 using Helpers;
 using Vehicles.VehicleTypes;
 using BigAmbitions.Items;   // CargoInstance
+using BigAmbitions.Tags;    // TagRef.Itemtag.isbox — the native deposit rule is TAG-based (2026-08-26)
 
 namespace BigAmbitionsMP
 {
@@ -84,45 +85,89 @@ namespace BigAmbitionsMP
         {
             try
             {
-                // Resolve the source FIRST (hands-box contents / bare held item / pushed hand-truck stacks),
-                // so the dedup can sign exactly what would be sent.
-                var toSend = new System.Collections.Generic.List<CargoInstance>();
+                // Resolve the source FIRST (held container / bare held item / pushed hand-truck
+                // stacks), so the dedup can sign exactly what would be sent. NATIVE DEPOSIT RULE
+                // (AddHeldItemToStorage :517-522, user parity 2026-08-26): the rule is TAG-based —
+                // a held BOX (isbox) POURS its contents into the trunk as loose stacks; anything
+                // else (a filled BAG included) goes in WHOLE as one bundle instance
+                // (ConvertToCargoInstance — the same call native makes). The old blanket pour
+                // predates the nested wire band and flattened bags to loose stacks, destroying
+                // the wrapper. `whole` entries ride ctx "wholeput" with their contents: the owner
+                // adds the instance whole, and the confirm consumes the SOURCE whole (a plain
+                // confirm's consume would skip sealed stacks and duplicate them).
+                var toSend = new System.Collections.Generic.List<(CargoInstance c, bool whole)>();
                 var held = PlayerHelper.ItemInstanceInHands;
                 if (held != null)
                 {
+                    // Review 2026-08-26 MAJOR-1 (scoped per its follow-up MINOR-1): native
+                    // AddHeldItemToStorage REFUSES a held shopping basket or mop before any cargo
+                    // work (:501-515) — without this, the whole-put becomes a money exploit (a
+                    // basket of UNPAID groceries deposits as a paid=true bundle whose contents
+                    // carry no paid state — NestedCargoInstance has none — so the borrowed-cart
+                    // checkout could never bill it). HELD-source only: native's hand-truck deposit
+                    // (:540-546) has no such guard, so the truck branch below stays unrestricted.
+                    // Same native notification, same data shape.
+                    if (PlayerHelper.IsHoldingShoppingBasket || PlayerHelper.IsHoldingAMop)
+                    {
+                        try
+                        {
+                            var ndata = new System.Collections.Generic.Dictionary<string, string>
+                            {
+                                { "fromname", VehicleManager.TypeNameFor(realVehicleId) ?? "" },
+                                { "toname",   held.itemName ?? "" },
+                            };
+                            UI.Notification.Notifications.Show(UI.Notification.NotificationType.Warning, "notification_cant_interact_with_item_in_hand", ndata);
+                        }
+                        catch { }
+                        return;
+                    }
+                    bool isBox = false;
+                    try { var def = held.ItemCached; isBox = def != null && def.HasTag(TagRef.Itemtag.isbox); } catch { }
                     var contents = held.cargoInstances;
-                    if (contents != null && contents.Count > 0)
+                    if (isBox && contents != null && contents.Count > 0)
                     {
                         foreach (var c in new System.Collections.Generic.List<CargoInstance>(contents))
                             if (c != null && !string.IsNullOrEmpty(c.itemName) && c.amount > 0)
-                                toSend.Add(c);
+                                toSend.Add((c, false));   // native box rule: pour
                     }
-                    else   // not a container — deposit the held item itself
+                    else   // bag / bare item — native whole-instance rule
                     {
                         var c = held.ConvertToCargoInstance();
                         if (c != null && !string.IsNullOrEmpty(c.itemName) && c.amount > 0)
-                            toSend.Add(c);
+                            toSend.Add((c, c.nestedCargoInstances != null && c.nestedCargoInstances.Count > 0));
                     }
                 }
                 else
                 {
-                    // Hands empty → pushed hand-vehicle as the source. Sealed stacks stay on the truck
-                    // FOR NOW: the v16 wire CAN carry nested contents (the one codec), but wiring the
-                    // deposit path for whole sealed boxes is Stage C work — an unwired send here would
-                    // still strip them (F-2026-08-25-F: IsSealed re-derives fine; contents are the loss).
+                    // Hands empty → pushed hand-vehicle as the source. Sealed boxes and bundles
+                    // now deposit WHOLE with their contents (user parity item 2, 2026-08-26 —
+                    // the old skip predates the nested band and left them behind).
                     var cur = VehicleHelper.GetCurrentVehicle();
                     if (cur == null || cur.VehicleType == null || !cur.VehicleType.spawnInPlayerObject) return;
                     var src = cur.cargoInstances;
                     if (src == null || src.Count == 0) { PassengerHud.Toast("Nothing to store."); return; }
                     foreach (var c in new System.Collections.Generic.List<CargoInstance>(src))
-                        if (c != null && !c.IsSealed && !string.IsNullOrEmpty(c.itemName) && c.amount > 0)
-                            toSend.Add(c);
+                    {
+                        if (c == null || string.IsNullOrEmpty(c.itemName) || c.amount <= 0) continue;
+                        bool sealedC = c.IsSealed;
+                        bool bundleC = c.nestedCargoInstances != null && c.nestedCargoInstances.Count > 0;
+                        // Review MINOR-2: an UNSEALED bundle with amount>1 would be SPLIT by the
+                        // owner's TryToAddToCargo (Copy() drops nested → hollow copies, contents
+                        // destroyed) — native has the same hole, which is evidence the shape never
+                        // occurs; if it ever does, leaving it on the truck loses nothing.
+                        if (bundleC && !sealedC && c.amount > 1)
+                        {
+                            Plugin.Logger.LogWarning($"[VStore] deposit skipped an unsealed bundle {c.amount}×{c.itemName} (amount>1 would split hollow — left on the truck; MINOR-2 tripwire).");
+                            continue;
+                        }
+                        toSend.Add((c, sealedC || bundleC));
+                    }
                 }
                 if (toSend.Count == 0) return;
 
                 var sb = new System.Text.StringBuilder(realVehicleId).Append('|');
-                foreach (var c in toSend)
-                    sb.Append(c.itemName).Append('=').Append(c.amount).Append('=').Append(c.paid ? '1' : '0').Append(';');
+                foreach (var e in toSend)   // the whole flag joins the sig (review MINOR-3: a filled bag then an empty same-name bag must not collide)
+                    sb.Append(e.c.itemName).Append('=').Append(e.c.amount).Append('=').Append(e.c.paid ? '1' : '0').Append('=').Append(e.whole ? 'w' : 'p').Append(';');
                 string sig = sb.ToString();
                 if (sig == _lastDepositSig && Time.unscaledTime - _lastDepositAt < DepositDedupSeconds)
                 {
@@ -131,8 +176,10 @@ namespace BigAmbitionsMP
                 }
                 _lastDepositSig = sig; _lastDepositAt = Time.unscaledTime;
 
-                foreach (var c in toSend)
-                    Send(OpPut, realVehicleId, ownerId, c.itemName, c.amount, c.paid, c.pricePerUnit);
+                foreach (var e in toSend)
+                    Send(OpPut, realVehicleId, ownerId, e.c.itemName, e.c.amount, e.c.paid, e.c.pricePerUnit,
+                         ctx: e.whole ? "wholeput" : "",
+                         nested: e.whole ? StorageSync.EncodeNested(e.c.nestedCargoInstances) : null);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] RequestDeposit: {ex.Message}"); }
         }
@@ -162,7 +209,8 @@ namespace BigAmbitionsMP
         // resolves the owner from PassengerSync.OwnerOf; there is nothing authoritative on the
         // sender side to cross-check against). The parameter survives only so the many call sites
         // stay untouched; it is deliberately unused.
-        private static void Send(byte op, string vid, string ownerId, string itemName, int amount, bool paid, float price, bool silent = false, string ctx = "")
+        private static void Send(byte op, string vid, string ownerId, string itemName, int amount, bool paid, float price, bool silent = false, string ctx = "",
+                                 System.Collections.Generic.List<CargoNestedInfo>? nested = null)
         {
             if (string.IsNullOrEmpty(vid) || string.IsNullOrEmpty(itemName) || amount <= 0)
                 return;
@@ -171,6 +219,7 @@ namespace BigAmbitionsMP
             {
                 Container = StorageSync.ContainerVehicle, VehicleId = vid, PlayerId = MPConfig.PlayerId,
                 Op = OpName(op), Ctx = ctx, ItemName = itemName, Amount = amount, Paid = paid, PricePerUnit = price, Silent = silent,
+                Nested = nested ?? new System.Collections.Generic.List<CargoNestedInfo>(),
             });
         }
 

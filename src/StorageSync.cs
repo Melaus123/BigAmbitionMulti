@@ -358,11 +358,13 @@ namespace BigAmbitionsMP
                     MarkPaidWithSplit(inst, req, res);
                 else if (req.Op == OpPut)
                 {
-                    // Ruling 39: the vehicle put knows exactly three ctxs — plain, and the two
-                    // give-back shapes (boxreturn = whole box, "return" = loose, R9 hardening).
-                    // Building-only put machinery (producer/stationreturn/worn) refuses rather
-                    // than falling through to the generic path.
-                    if (!string.IsNullOrEmpty(req.Ctx) && req.Ctx != "boxreturn" && req.Ctx != "return")
+                    // Ruling 39: the vehicle put knows exactly four ctxs — plain, the two
+                    // give-back shapes (boxreturn = whole box, "return" = loose, R9 hardening),
+                    // and "wholeput" (a bag/sealed instance DEPOSITED whole with contents —
+                    // parity 2026-08-26; NOT a give-back: a full trunk refuses it normally and
+                    // the source stays with the accessor). Building-only put machinery
+                    // (producer/stationreturn/worn) refuses rather than falling through.
+                    if (!string.IsNullOrEmpty(req.Ctx) && req.Ctx != "boxreturn" && req.Ctx != "return" && req.Ctx != "wholeput")
                     {
                         res.Reason = "unsupported";
                         Plugin.Logger.LogWarning($"[VStore] put ctx '{req.Ctx}' unsupported for a vehicle container.");
@@ -1358,19 +1360,24 @@ namespace BigAmbitionsMP
             // The worn case is Ctx-tagged rather than name-inferred so it can never be confused
             // with a truck stack of the same item (round-12 A).
             if (res.Ctx == "wornHead" || res.Ctx == "wornHand") { UnequipWornAfterStore(res); return; }
-            ConsumeSource(res);
+            // "wholeput" (parity 2026-08-26): the deposit moved a bag/sealed INSTANCE whole —
+            // the source must leave whole too. The plain consume's sealed-skip would leave a
+            // deposited sealed box ON the truck (duplication), and its box-contents branch
+            // would mis-consume from inside a held container.
+            ConsumeSource(res, wholeInstance: res.Ctx == "wholeput");
         }
 
         /// <summary>Stored OK → drop the deposited item from wherever it came from, and ONLY now:
         /// hands (held directly or as box content) → pushed hand-vehicle. One body for both
         /// containers — the two originals were duplicate implementations (round-12 #1b / B).</summary>
-        private static void ConsumeSource(StorageResPayload res)
+        private static void ConsumeSource(StorageResPayload res, bool wholeInstance = false)
         {
             try
             {
                 var held = PlayerHelper.ItemInstanceInHands;
-                if (held == null) { RemoveFromAccessorHandVehicle(res.ItemName, res.Amount); return; }   // truck-sourced deposit
-                if (held.itemName == res.ItemName) { PlayerHelper.ItemInstanceInHands = null; return; }   // held the item directly
+                if (held == null) { RemoveFromAccessorHandVehicle(res.ItemName, res.Amount, wholeInstance); return; }   // truck-sourced deposit
+                if (held.itemName == res.ItemName) { PlayerHelper.ItemInstanceInHands = null; return; }   // held the item directly (a whole-put bag lands here — hands clear like native)
+                if (wholeInstance) return;   // a whole-put never consumes from INSIDE a held container
                 // Remove ONLY the content that actually went in; keep anything a near-full holder
                 // refused (its put comes back !Ok and never reaches here), so partial deposits
                 // never drop items.
@@ -1390,7 +1397,7 @@ namespace BigAmbitionsMP
         /// the truck. Native chokepoints (RemoveFromCargo fires onItemsInCargoUpdated → box visuals
         /// update); the truck is the accessor's OWN vehicle (no BAMP_ prefix), so the proxy guard
         /// passes it. One body — the two originals were identical.</summary>
-        private static void RemoveFromAccessorHandVehicle(string itemName, int amount)
+        private static void RemoveFromAccessorHandVehicle(string itemName, int amount, bool wholeInstance = false)
         {
             try
             {
@@ -1398,6 +1405,24 @@ namespace BigAmbitionsMP
                 if (cur == null || cur.VehicleType == null || !cur.VehicleType.spawnInPlayerObject) return;
                 var src = cur.cargoInstances;
                 if (src == null) return;
+                if (wholeInstance)
+                {
+                    // A whole-put deposit moved ONE sealed/bundle instance — remove exactly that
+                    // shape (the plain loop below deliberately skips sealed, which would leave
+                    // the deposited box on the truck = duplication). Instance-exact amount.
+                    for (int i = 0; i < src.Count; i++)
+                    {
+                        var ci = src[i];
+                        if (ci == null || ci.itemName != itemName || ci.amount != amount) continue;
+                        bool sealedCi = ci.IsSealed;
+                        bool bundleCi = ci.nestedCargoInstances != null && ci.nestedCargoInstances.Count > 0;
+                        if (!sealedCi && !bundleCi) continue;
+                        cur.RemoveFromCargo(ci);
+                        return;
+                    }
+                    Plugin.Logger.LogWarning($"[Store] whole-put consume: no matching sealed/bundle {amount}×{itemName} on the truck (source changed mid-request).");
+                    return;
+                }
                 for (int i = 0; i < src.Count; i++)
                 {
                     var ci = src[i];
