@@ -8,19 +8,30 @@ using UnityEngine.UI;
 namespace BigAmbitionsMP
 {
     /// <summary>
-    /// Owner-facing Lock / Unlock toggle on the in-car action menu (ItemPanelUI), placed to the
-    /// LEFT of the native Park / Sell / Sleep buttons. The game only calls SetVehicle for a car
-    /// the local player has entered — i.e. their OWN car — so showing the toggle there is
-    /// inherently owner-only. Clicking flips PassengerSync's lock through the host-authoritative
-    /// path (HostSetLock on the host, SendVehicleLock on a client owner). Replaces the dev F8
-    /// stand-in. Default state is LOCKED (privacy-first); see docs/PASSENGER-SYSTEM.md.
+    /// Lock / Unlock toggle on the in-car action menu (ItemPanelUI), placed to the LEFT of the
+    /// native Park / Sell / Sleep buttons. SetVehicle fires for ANY car the local player enters —
+    /// their own real vehicle OR a granted owner's GHOST (field 20260823-223742 disproved the
+    /// original "inherently owner-only" premise) — so the toggle serves both: the OWNER and any
+    /// KEY-HOLDER (ruling 2026-08-26: a granted key works like real car keys — the holder may
+    /// lock/unlock too). State is read and written under the REAL vehicle id (a ghost's proxy
+    /// prefix is stripped); the host authorizes the SENDER against its live owner/grant tables
+    /// (HostSetLock on the host, SendVehicleLock on a client). Replaces the dev F8 stand-in.
+    /// Default state is LOCKED (privacy-first); see docs/PASSENGER-SYSTEM.md.
     /// </summary>
     [HarmonyPatch(typeof(ItemPanelUI), nameof(ItemPanelUI.SetVehicle))]
     public static class Patch_ItemPanelUI_SetVehicle_Lock
     {
         static void Postfix(ItemPanelUI __instance, VehicleController vehicle)
         {
-            try { PassengerLockButton.Show(__instance, vehicle); }
+            try
+            {
+                // Harmony runs postfixes even when a prefix skipped the original: HousingPatches'
+                // SetVehicle NullGuard bails on vehicleType == null and the panel keeps showing the
+                // PREVIOUS car — rebinding here would point the button at a car the panel isn't
+                // showing (review 2026-08-26 MAJOR-4). Mirror the guard.
+                if (vehicle == null || vehicle.vehicleType == null) return;
+                PassengerLockButton.Show(__instance, vehicle);
+            }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[LockBtn] SetVehicle: {ex.Message}"); }
         }
     }
@@ -110,6 +121,7 @@ namespace BigAmbitionsMP
     internal static class PassengerLockButton
     {
         private static readonly Dictionary<ItemPanelUI, Button> _btn = new();   // one per panel
+        private static readonly Dictionary<ItemPanelUI, string> _boundVid = new();   // panel → REAL vid the label/click act on
 
         public static void Show(ItemPanelUI panel, VehicleController vehicle)
         {
@@ -117,6 +129,16 @@ namespace BigAmbitionsMP
             if (!MPServer.IsRunning && !MPClient.IsConnected) { Hide(panel); return; }   // no lock concept in SP
             string vid = vehicle.vehicleInstance.id;
             if (string.IsNullOrEmpty(vid)) { Hide(panel); return; }
+            // A key-holder who entered a GRANTED vehicle is sitting in its GHOST — that instance id
+            // carries the proxy prefix, but the lock table (and every gate that reads it) is keyed
+            // by the REAL id. Strip it so the label shows the mirrored truth and the toggle acts on
+            // the real lock. (Field 20260823-223742: the prefixed lookup made every borrower's label
+            // read "Unlock" regardless of state, and the click wrote a key no gate ever read.)
+            // BAMP_TESTRIG ids are REAL owner-side vehicles on pre-release rig saves — the six
+            // sibling prefix tests all carry this exemption (PassengerRide.cs:42's MAJOR-2 rule).
+            bool ghost = vid.StartsWith("BAMP_", System.StringComparison.Ordinal)
+                         && !vid.StartsWith("BAMP_TESTRIG", System.StringComparison.Ordinal);
+            string realVid = ghost ? vid.Substring(5) : vid;
 
             // A scooter has no passenger seats AND no shareable storage, so the lock/unlock toggle only
             // confuses. (Flatbed/hand-truck are also 0-seat but KEEP the toggle — it gates shared storage.)
@@ -124,7 +146,7 @@ namespace BigAmbitionsMP
             if (tn.IndexOf("scooter", System.StringComparison.OrdinalIgnoreCase) >= 0) { Hide(panel); return; }
 
             var btn = GetOrCreate(panel);
-            if (btn == null) return;
+            if (btn == null) { Hide(panel); return; }   // clear the previous car's binding, not just bail
             btn.gameObject.SetActive(true);
             // The clone inherits parkButton's interactable state — and Park is greyed/non-interactable when you
             // can't park where you are, which left our toggle greyed AND click-dead (a non-interactable Button
@@ -132,21 +154,66 @@ namespace BigAmbitionsMP
             // gating) every time we show it.
             btn.interactable = true;
             try { var cg = btn.GetComponent<CanvasGroup>(); if (cg != null) { cg.interactable = true; cg.blocksRaycasts = true; cg.alpha = 1f; } } catch { }
-            SetLabel(btn, PassengerSync.IsLocked(vid));
+            _boundVid[panel] = realVid;
+            SetLabel(btn, PassengerSync.IsLocked(realVid));
             btn.onClick.RemoveAllListeners();
             btn.onClick.AddListener(() =>
             {
-                bool setLocked = !PassengerSync.IsLocked(vid);
-                if (MPServer.IsRunning) MPServer.HostSetLock(vid, setLocked);
-                else                    MPClient.SendVehicleLock(vid, setLocked);
-                SetLabel(btn, setLocked);   // immediate feedback (host applies synchronously; client is optimistic)
-                Plugin.Logger.LogInfo($"[LockBtn] '{vid}' -> {(setLocked ? "LOCKED" : "UNLOCKED")}");
+                // Live read at commitment (never the Show-time snapshot): a key revoked while
+                // sitting inside must no-op with the truthful label, not lie optimistically.
+                // The host's authorization is the backstop; this only spares the wire.
+                if (ghost && !GrantSync.IsGranted(VehicleManager.OwnerIdFor(realVid), MPConfig.PlayerId))
+                {
+                    Plugin.Logger.LogInfo($"[LockBtn] '{realVid}' toggle refused locally — key no longer granted.");
+                    SetLabel(btn, PassengerSync.IsLocked(realVid));
+                    return;
+                }
+                bool setLocked = !PassengerSync.IsLocked(realVid);
+                if (MPServer.IsRunning)
+                {
+                    bool applied = MPServer.HostSetLock(realVid, setLocked);
+                    SetLabel(btn, applied ? setLocked : PassengerSync.IsLocked(realVid));   // synchronous truth
+                }
+                else
+                {
+                    MPClient.SendVehicleLock(realVid, setLocked);
+                    // Optimistic; on apply the host's broadcast confirms, and on REFUSAL the host
+                    // unicasts the current true state back (HandleVehicleLockSet), which lands in
+                    // HandleVehicleLockMsg → RefreshFor and snaps this label to truth.
+                    SetLabel(btn, setLocked);
+                }
+                Plugin.Logger.LogInfo($"[LockBtn] '{realVid}' -> {(setLocked ? "LOCKED" : "UNLOCKED")}{(ghost ? " (key-holder)" : "")}");
             });
+        }
+
+        /// <summary>A lock change landed (either side may toggle now). If a live panel's button is
+        /// bound to this vehicle, snap its label to the mirrored truth. MAIN THREAD.</summary>
+        public static void RefreshFor(string realVid)
+        {
+            if (string.IsNullOrEmpty(realVid)) return;
+            foreach (var kv in _boundVid)
+            {
+                if (kv.Key == null || kv.Value != realVid) continue;
+                if (_btn.TryGetValue(kv.Key, out var b) && b != null && b.gameObject.activeInHierarchy)
+                    SetLabel(b, PassengerSync.IsLocked(realVid));
+            }
+            // Prune destroyed panels (one pair per scene load). Swept over _btn — the SUPERSET: a
+            // panel Hidden (dropped from _boundVid) and THEN destroyed is only findable here.
+            // kv.Key == null is Unity's fake-null overload probing the native side — LOAD-BEARING:
+            // the managed reference stays real (that's what makes the Remove below find its bucket),
+            // so `is null` or a null-forgiveness "fix" here would silently break the prune.
+            List<ItemPanelUI>? dead = null;
+            foreach (var kv in _btn)
+                if (kv.Key == null) (dead ??= new List<ItemPanelUI>()).Add(kv.Key!);
+            if (dead != null)
+                foreach (var k in dead) { _boundVid.Remove(k); _btn.Remove(k); }
         }
 
         public static void Hide(ItemPanelUI panel)
         {
-            if (panel != null && _btn.TryGetValue(panel, out var b) && b != null)
+            if (panel == null) return;
+            _boundVid.Remove(panel);
+            if (_btn.TryGetValue(panel, out var b) && b != null)
                 b.gameObject.SetActive(false);
         }
 

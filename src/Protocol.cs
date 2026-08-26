@@ -124,7 +124,7 @@ namespace BigAmbitionsMP
         PassengerBoardRequest = 120, // Client → Host: request to ride vehicle V.
         PassengerBoardResult  = 121, // Host → All: V's passenger = player P at seat S (S<0 = rejected; Reason set for the requester's popup).
         PassengerExit         = 122, // Any → Host → All: player P left vehicle V (rider exit OR host kick).
-        VehicleLockSet        = 123, // Owner → Host → All: vehicle V passenger-lock = Locked.
+        VehicleLockSet        = 123, // Owner/key-holder → Host → All: vehicle V passenger-lock = Locked (2026-08-26: host authorizes the SENDER — owner or currently-granted; broadcast OwnerId = the real owner, host-normalized; same fields, no wire change).
         PassengerSnapshot     = 124, // Host → joiner: full passenger lock + seat state (join replay).
 
         // Shared vehicle storage (take/put from another player's UNLOCKED vehicle — host-authoritative request/grant).
@@ -602,7 +602,9 @@ namespace BigAmbitionsMP
         public string VehicleId { get; set; } = "";
     }
 
-    /// <summary>Owner → host → all: set a vehicle's passenger lock.</summary>
+    /// <summary>Owner/key-holder → host → all: set a vehicle's passenger lock. Inbound, OwnerId is
+    /// the spoof-checked SENDER; the host authorizes that sender (owner or currently-granted) and
+    /// rebroadcasts with OwnerId normalized to the vehicle's real owner.</summary>
     public class VehicleLockPayload
     {
         public string OwnerId   { get; set; } = "";

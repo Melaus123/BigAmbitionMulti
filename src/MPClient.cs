@@ -1600,7 +1600,9 @@ namespace BigAmbitionsMP
                 new PassengerExitPayload { PlayerId = MPConfig.PlayerId, VehicleId = vehicleId }));
         }
 
-        /// <summary>Owner-client → host: set my vehicle's passenger lock.</summary>
+        /// <summary>Key-holder client → host: set vehicle V's passenger lock. The host authorizes
+        /// the SENDER against its live tables (owner or currently-granted); OwnerId here is just
+        /// the spoof-checked sender identity.</summary>
         public static void SendVehicleLock(string vehicleId, bool locked)
         {
             if (!IsConnected || string.IsNullOrEmpty(vehicleId)) return;
@@ -1731,7 +1733,11 @@ namespace BigAmbitionsMP
         {
             var p = env.GetPayload<VehicleLockPayload>();
             if (p == null) return;
-            GameStatePatcher.EnqueueOnMainThread(() => PassengerSync.SetLock(p.VehicleId, p.Locked));
+            GameStatePatcher.EnqueueOnMainThread(() =>
+            {
+                PassengerSync.SetLock(p.VehicleId, p.Locked);
+                PassengerLockButton.RefreshFor(p.VehicleId);   // live label if this player sits in it (either side may toggle now)
+            });
         }
 
         private static void HandlePermissionOwnGrantsMsg(MessageEnvelope env)

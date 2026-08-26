@@ -4605,8 +4605,26 @@ namespace BigAmbitionsMP
             if (p == null || !SenderIs(p.OwnerId, senderPid, MessageType.VehicleLockSet)) return;
             GameStatePatcher.EnqueueOnMainThread(() =>
             {
-                if (PassengerSync.OwnerOf(p.VehicleId) != p.OwnerId) return;   // only the real owner may lock
+                // Authorization reads the SENDER against the live tables — the payload's OwnerId is
+                // only the spoof-checked sender identity (the guard above). The vehicle's OWNER or a
+                // currently-granted KEY-HOLDER may toggle (ruling 2026-08-26: a granted key works
+                // like real car keys — the widening from "only the real owner may lock").
+                string realOwner = PassengerSync.OwnerOf(p.VehicleId);
+                if (string.IsNullOrEmpty(realOwner))
+                {
+                    LogRejectThrottled("VehicleLock", p.VehicleId, $"from '{senderPid}' — owner unknown here (fleet not synced yet?)");
+                    EchoLockTruth(senderPid, p.VehicleId, "");   // 1:1 reply, non-amplifying
+                    return;
+                }
+                if (realOwner != senderPid && !GrantSync.IsGranted(realOwner, senderPid))
+                {
+                    LogRejectThrottled("VehicleLock", p.VehicleId, $"from '{senderPid}' — not the owner and no key");
+                    EchoLockTruth(senderPid, p.VehicleId, realOwner);   // 1:1 reply, non-amplifying
+                    return;
+                }
                 PassengerSync.SetLock(p.VehicleId, p.Locked);
+                PassengerLockButton.RefreshFor(p.VehicleId);   // the host player may be sitting in it
+                p.OwnerId = realOwner;   // normalize: receivers see the vehicle's real owner, not the sender
                 Broadcast(MessageEnvelope.Create(MessageType.VehicleLockSet, MPConfig.PlayerId, p));
             });
         }
@@ -4627,12 +4645,41 @@ namespace BigAmbitionsMP
                 new PassengerExitPayload { PlayerId = MPConfig.PlayerId, VehicleId = vehicleId }));
         }
 
-        public static void HostSetLock(string vehicleId, bool locked)
+        /// <summary>On a REFUSED lock set, unicast the vehicle's current true lock state back to the
+        /// sender — their optimistic label corrects via HandleVehicleLockMsg → RefreshFor. Same
+        /// message type and fields as an apply; receivers ignore OwnerId. MAIN THREAD.</summary>
+        private static void EchoLockTruth(string senderPid, string vehicleId, string realOwner)
         {
-            if (!_running || PassengerSync.OwnerOf(vehicleId) != MPConfig.PlayerId) return;
+            try
+            {
+                var peer = PeerForPlayer(senderPid);
+                if (peer != null) Send(peer, MessageEnvelope.Create(MessageType.VehicleLockSet, MPConfig.PlayerId,
+                    new VehicleLockPayload { OwnerId = realOwner, VehicleId = vehicleId, Locked = PassengerSync.IsLocked(vehicleId) }));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[LockBtn] refusal echo: {ex.Message}"); }
+        }
+
+        /// <summary>Host-local lock toggle. The host player may be the vehicle's OWNER or a
+        /// currently-GRANTED key-holder (sitting in a borrowed ghost — the button passes the real
+        /// id). Returns whether it applied, so the caller can label truthfully. MAIN THREAD.</summary>
+        public static bool HostSetLock(string vehicleId, bool locked)
+        {
+            if (!_running || string.IsNullOrEmpty(vehicleId)) return false;
+            string realOwner = PassengerSync.OwnerOf(vehicleId);
+            if (string.IsNullOrEmpty(realOwner))
+            {
+                Plugin.Logger.LogInfo($"[LockBtn] host lock set on '{vehicleId}' refused — owner unknown here (fleet not synced yet?).");
+                return false;
+            }
+            if (realOwner != MPConfig.PlayerId && !GrantSync.IsGranted(realOwner, MPConfig.PlayerId))
+            {
+                Plugin.Logger.LogInfo($"[LockBtn] host lock set on '{vehicleId}' refused — not the owner and no key.");
+                return false;
+            }
             PassengerSync.SetLock(vehicleId, locked);
             Broadcast(MessageEnvelope.Create(MessageType.VehicleLockSet, MPConfig.PlayerId,
-                new VehicleLockPayload { OwnerId = MPConfig.PlayerId, VehicleId = vehicleId, Locked = locked }));
+                new VehicleLockPayload { OwnerId = realOwner, VehicleId = vehicleId, Locked = locked }));
+            return true;
         }
 
         private static MPLink? PeerForPlayer(string pid)
