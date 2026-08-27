@@ -109,7 +109,7 @@ namespace BigAmbitionsMP
                         // silence (review MAJOR-3): say so every launch and name the one-step redo, so a
                         // wrong pick stays recoverable instead of frozen forever. The redo is safe by
                         // construction — CopyTree only ever ADDS files that are not already present.
-                        if (rec.Via == "rank" || rec.Via == "mtime")
+                        if (rec.Via.Length > 0 && rec.Via != "walk")
                             Plugin.Logger.LogWarning($"[MPSave] carry-forward: this store was carried from '{Path.GetFileName(rec.Source)}' by the '{rec.Via}' fallback ({rec.Candidates} candidate(s)), NOT by the version walk. If those are the wrong saves, delete '{recPath}' and relaunch to re-run the search — nothing is deleted either way.");
                         return;
                     }
@@ -207,24 +207,7 @@ namespace BigAmbitionsMP
         {
             via = ""; candidates = 0;
 
-            // 1 ── our own breadcrumb
-            try
-            {
-                string want = ReadPointer(mpRoot);
-                if (want.Length > 0 && !string.Equals(want, current, StringComparison.OrdinalIgnoreCase))
-                {
-                    string cand = Path.Combine(mpRoot, want);
-                    if (Directory.Exists(cand) && HasSessionDirs(cand))
-                    {
-                        via = "pointer";
-                        Plugin.Logger.LogWarning($"[MPSave] CARRY-FORWARD: source '{want}' named by our own store pointer.");
-                        return cand;
-                    }
-                }
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] carry-forward: store pointer unreadable ({ex.Message}) — continuing with the version rules."); }
-
-            // 2 ── vanilla's walk
+            // 1 ── vanilla's walk
             try
             {
                 for (int num = NativeVersionInt() - 1; num > 0; num--)
@@ -238,6 +221,37 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogWarning($"[MPSave] carry-forward: the native version walk is unavailable ({ex.Message}) — falling back to the folder names on disk.");
             }
+
+            // 2 ── our own breadcrumb. BELOW the walk (review 2026-08-26): it records the folder we LAST
+            //      USED, not the newest one, so above the walk it could DOWNGRADE the choice — opt into a
+            //      previous-version beta to play with a friend, and that launch rewrites the pointer to the
+            //      older store; jump forward two versions and the pointer wins over a walk that would have
+            //      found the right one. Its real job is surviving a RENAME, which is exactly when the walk
+            //      finds nothing — so it belongs here, not first.
+            try
+            {
+                string want = ReadPointer(mpRoot);
+                // A pointer naming anything but a plain folder is refused: it is read from disk, and
+                // Path.Combine happily accepts an absolute path or "..\\.." and would resolve outside the
+                // store (review MINOR). The mod never writes such a value; a corrupted or hand-edited file
+                // could.
+                if (want.IndexOfAny(new[] { '/', '\\', ':' }) >= 0 || want == ".." )
+                {
+                    Plugin.Logger.LogWarning($"[MPSave] carry-forward: store pointer names a path, not a folder ('{want}') — ignored.");
+                    want = "";
+                }
+                if (want.Length > 0 && !string.Equals(want, current, StringComparison.OrdinalIgnoreCase))
+                {
+                    string cand = Path.Combine(mpRoot, want);
+                    if (Directory.Exists(cand) && HasSessionDirs(cand))
+                    {
+                        via = "pointer";
+                        Plugin.Logger.LogWarning($"[MPSave] CARRY-FORWARD: source '{want}' named by our own store pointer.");
+                        return cand;
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] carry-forward: store pointer unreadable ({ex.Message}) — continuing with the version rules."); }
 
             // 3 / 4 ── whatever is actually on disk
             string best = null, bestName = ""; int bMaj = -1, bMin = -1;

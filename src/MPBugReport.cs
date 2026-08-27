@@ -1335,7 +1335,13 @@ namespace BigAmbitionsMP
             WriteAscii(stream, $"Content-Disposition: form-data; name=\"{name}\"; filename=\"{Path.GetFileName(path)}\"\r\n");
             WriteAscii(stream, "Content-Type: application/octet-stream\r\n\r\n");
             string ext = Path.GetExtension(path);
-            if (ext.Equals(".log", StringComparison.OrdinalIgnoreCase) || ext.Equals(".txt", StringComparison.OrdinalIgnoreCase))
+            // .md and .json added 2026-08-26: this loose-file path is the FALLBACK used when the zip
+            // build fails, and it was redacting only .log/.txt — so report.md, config-redacted.json and
+            // every saves/**/*.json went up raw. The zip path already covers all four extensions, and
+            // the README now states that IPs, account names and Steam IDs are stripped; that claim has
+            // to hold on BOTH upload paths.
+            if (ext.Equals(".log", StringComparison.OrdinalIgnoreCase) || ext.Equals(".txt", StringComparison.OrdinalIgnoreCase)
+             || ext.Equals(".md", StringComparison.OrdinalIgnoreCase)  || ext.Equals(".json", StringComparison.OrdinalIgnoreCase))
             {
                 // Redact IPv4 addresses from TEXT uploads so the host's public IP is never published to Discord
                 //   (the local report folder keeps the un-redacted originals). Maintainer decision 2026-06-16.
@@ -1370,8 +1376,19 @@ namespace BigAmbitionsMP
         // the same player must read the same in the log and in the folder tree, or a multi-player bundle
         // becomes unreadable. This is a PSEUDONYM, not a secret — the id space is small enough to brute
         // force — but it stops the account number being published, which is what was asked for.
+        // WIDENED 2026-08-26 after review: the first version matched only "steam-<id>", so it caught the
+        // config line and the save-store folder names and MISSED every raw id — and the raw ones are on
+        // the STEAM-INVITE path, the join method the README recommends. Six sites logged the number with
+        // no prefix: MPSteamPresence "[SteamJoin] queued join -> {hostId}" (x3), MPClient "Connecting via
+        // Steam relay to {hostSteamId}", SteamTransports "relay listener up (id ...)", and MPCanvasUI's
+        // "[Steam] client valid: ... id={SteamId}".
+        //
+        // Anchored on 7656119 — the SteamID64 individual-account prefix — rather than a bare \d{17}, so an
+        // unrelated 17-digit run is never mangled. Any steam-/steam: prefix is PRESERVED and only the
+        // digits are replaced: "steam-<id>" reads "steam-p<alias>", a bare id reads "p<alias>".
+        // Case-insensitive, which the first version was not.
         private static readonly System.Text.RegularExpressions.Regex _steamId =
-            new System.Text.RegularExpressions.Regex(@"steam-(\d{17})", System.Text.RegularExpressions.RegexOptions.Compiled);
+            new System.Text.RegularExpressions.Regex(@"(?i)\b(?:steam[-:])?(7656119\d{10})\b", System.Text.RegularExpressions.RegexOptions.Compiled);
 
         /// <summary>FNV-1a, written out rather than using string.GetHashCode(): the framework's string
         /// hash is not contractually stable across processes, and an alias that changes between two
@@ -1382,21 +1399,21 @@ namespace BigAmbitionsMP
             {
                 uint h = 2166136261u;
                 foreach (char c in id) { h ^= c; h *= 16777619u; }
-                return "steam-p" + h.ToString("x8");
+                return h.ToString("x8");
             }
         }
 
         internal static string RedactSensitive(string s)
         {
             if (string.IsNullOrEmpty(s)) return s;
-            s = _steamId.Replace(s, m => SteamAlias(m.Groups[1].Value));
+            s = _steamId.Replace(s, m => m.Value.Replace(m.Groups[1].Value, "p" + SteamAlias(m.Groups[1].Value)));
             return _userPath.Replace(_ipv4.Replace(s, "[redacted-ip]"), "$1[user]");
         }
 
         /// <summary>Zip ENTRY NAMES carry steam-&lt;id&gt; too (the save-store folders); only file
         /// CONTENTS were being redacted, so the ids were published in the archive's directory listing.</summary>
         internal static string RedactEntryName(string rel)
-            => string.IsNullOrEmpty(rel) ? rel : _steamId.Replace(rel, m => SteamAlias(m.Groups[1].Value));
+            => string.IsNullOrEmpty(rel) ? rel : _steamId.Replace(rel, m => m.Value.Replace(m.Groups[1].Value, "p" + SteamAlias(m.Groups[1].Value)));
 
         private static void WriteAscii(Stream stream, string value) => WriteBytes(stream, Encoding.ASCII.GetBytes(value));
 

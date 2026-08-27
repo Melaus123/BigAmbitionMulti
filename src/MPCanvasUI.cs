@@ -618,6 +618,15 @@ namespace BigAmbitionsMP
             // the throw escapes to Unity. The banner path above already knew this ("the canvas must
             // survive a dead Harmony"); the normal path never got the same treatment.
             //
+            // WHAT THIS DOES AND DOES NOT RESCUE (review 2026-08-26 — the list above describes the OLD
+            // failure, not what building early restores). Saved: the canvas, the Multiplayer button, the
+            // lobby and the settings panel, because uGUI click handlers run from Unity's EventSystem, not
+            // from this Update. Still lost if something below throws: everything driven FROM here —
+            // TickGameLoadDetect, the crash-report takeover, the phone button, loiter and hub. The first
+            // native touch below is EnsureVersionCached, which is why its own call is isolated behind a
+            // NoInlining helper in MPSaveManager. This block buys a working menu and a visible failure,
+            // not a working mod.
+            //
             // It deliberately does NOT return after building: the work below must keep running from
             // frame 1 (EnsureVersionCached's contract, documented at its call site — the poll thread
             // depends on that cache existing before it ever handles an uploaded save).

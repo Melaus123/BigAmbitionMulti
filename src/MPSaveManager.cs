@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 
 namespace BigAmbitionsMP
 {
@@ -176,11 +177,24 @@ namespace BigAmbitionsMP
             if (_spVersionCache != null) return;
             try
             {
-                var p = SaveGamePathHelper.CurrentVersionFolderPath()?.ToString();
+                var p = NativeCurrentVersionFolderPath();
                 if (!string.IsNullOrEmpty(p)) _spVersionCache = p;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] EnsureVersionCached: {ex.Message}"); }
         }
+
+        /// <summary>The one native touch, isolated (review 2026-08-26). A compile-time binding to a
+        /// member a future build removes throws at JIT/prepare time in the ENCLOSING frame, so the
+        /// try/catch above — in the SAME method as the call — could not catch it: EnsureVersionCached
+        /// would fail to start, and it is called unguarded from MPCanvasUI.Update, so that Update would
+        /// abort every frame and take the phone button, the hub, the loiter button and the crash-report
+        /// takeover with it. NoInlining puts the throw at THIS call site, inside the caller's try. Same
+        /// remedy as MPStoreCarryForward's helpers — and this is the member those sit one call BELOW:
+        /// CurrentVersionFolderPath resolves through GetSaveGameFolderName -> GetEarlyAccessVersionString,
+        /// the Early-Access-named member most likely to be retired at 1.0.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static string NativeCurrentVersionFolderPath()
+            => SaveGamePathHelper.CurrentVersionFolderPath()?.ToString() ?? "";
 
         /// <summary>The version folder the SP menu scans, e.g. ".../SaveGames/EA 0.10".
         /// Returns the cached value; only resolves via IL2CPP if not yet cached (which
@@ -436,8 +450,13 @@ namespace BigAmbitionsMP
         public static string MpSessionFolder(string sessionName)
         {
             string s = Sanitize(sessionName);
-            if (StoreFormat() == 1) return Path.Combine(MpVersionFolder(), s);
-            return Path.Combine(MpVersionFolder(), ResolvePidFolder(s), s);
+            // Guard the empty root, as every sibling reader here does. Without it Path.Combine("", s)
+            // yields a RELATIVE path and the MP store resolves against the process working directory
+            // (binding audit 2026-08-26).
+            string root = MpVersionFolder();
+            if (string.IsNullOrEmpty(root)) return "";
+            if (StoreFormat() == 1) return Path.Combine(root, s);
+            return Path.Combine(root, ResolvePidFolder(s), s);
         }
 
         /// <summary>Per-player character folder inside a session (where their .hsg
