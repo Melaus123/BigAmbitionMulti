@@ -1338,8 +1338,8 @@ namespace BigAmbitionsMP
             // .md and .json added 2026-08-26: this loose-file path is the FALLBACK used when the zip
             // build fails, and it was redacting only .log/.txt — so report.md, config-redacted.json and
             // every saves/**/*.json went up raw. The zip path already covers all four extensions, and
-            // the README now states that IPs, account names and Steam IDs are stripped; that claim has
-            // to hold on BOTH upload paths.
+            // IPs, account names and Steam IDs must be stripped on BOTH upload paths, not just the zip
+            // one — a fallback that quietly publishes more than the normal path is the worst shape.
             if (ext.Equals(".log", StringComparison.OrdinalIgnoreCase) || ext.Equals(".txt", StringComparison.OrdinalIgnoreCase)
              || ext.Equals(".md", StringComparison.OrdinalIgnoreCase)  || ext.Equals(".json", StringComparison.OrdinalIgnoreCase))
             {
@@ -1378,7 +1378,7 @@ namespace BigAmbitionsMP
         // force — but it stops the account number being published, which is what was asked for.
         // WIDENED 2026-08-26 after review: the first version matched only "steam-<id>", so it caught the
         // config line and the save-store folder names and MISSED every raw id — and the raw ones are on
-        // the STEAM-INVITE path, the join method the README recommends. Six sites logged the number with
+        // the STEAM-INVITE path, which is how most players join. Six sites logged the number with
         // no prefix: MPSteamPresence "[SteamJoin] queued join -> {hostId}" (x3), MPClient "Connecting via
         // Steam relay to {hostSteamId}", SteamTransports "relay listener up (id ...)", and MPCanvasUI's
         // "[Steam] client valid: ... id={SteamId}".
