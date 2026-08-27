@@ -210,7 +210,8 @@ namespace BigAmbitionsMP
                 }
                 table[reg.Address] = fresh;
 
-                // DIAG:INVESTIGATION(econ-verify) — presence visibility: one line per seed whose entry
+                // DIAG:FIELD (promoted from INVESTIGATION 2026-08-26, user ruling: these ship) — presence
+                // visibility: one line per seed whose entry
                 // count CHANGED (re-pushes with an unchanged schedule stay silent).
                 try
                 {
@@ -251,7 +252,7 @@ namespace BigAmbitionsMP
         /// <summary>Idempotency ledger — every forwarded EntryId is processed at most once per session.</summary>
         private static readonly HashSet<string> _processedForwards = new();
 
-        // DIAG:INVESTIGATION(econ-verify 2026-07-07) — running tally of adopted forwarded orders per
+        // DIAG:FIELD (promoted 2026-08-26) — running tally of adopted forwarded orders per
         // business, drained into the [EconProbe] daily-revenue line so the books attribute what came
         // from helper-hosted sales. Retire with the EconProbe once the loop is trusted.
         private static readonly Dictionary<string, (int orders, float revenue)> _adoptedTally = new();
@@ -406,12 +407,14 @@ namespace BigAmbitionsMP
         }
     }
 
-    // DIAG:INVESTIGATION(econ-verify 2026-07-07) — the user cannot see the books; this names the money
+    // DIAG:FIELD (promoted 2026-08-26) — the user cannot see the books; this names the money
     // truth at the exact moment it becomes money. BusinessHelper.ProcessDailyOrders is where a player
     // business's completed orders (live, forwarded, and simulated alike) turn into an order-history
     // entry + a ChangeMoneySafe revenue deposit, then clear. One line per business per daily processing:
     // customers, revenue, what portion arrived via forwarded helper-hosted orders, and the item tally.
-    // Observe-only; retire once the economic loop is trusted.
+    // Observe-only. PERMANENT (user ruling 2026-08-26): the economic loop is the newest and least-tested
+    // system in the mod, and without these lines a "my money is wrong" report arrives with nothing to
+    // explain it. They are change-gated, so they cost a line only when something actually moves.
     [HarmonyPatch]
     public static class Probe_DailyRevenue
     {

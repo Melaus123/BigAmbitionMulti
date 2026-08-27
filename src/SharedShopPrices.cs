@@ -163,7 +163,12 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogInfo($"{Tag} price edit from '{p.PlayerId}' but they hold no Business grant from me — ignored.");
                     return;
                 }
-                if (p.Price < 0f || p.Price > 10000f) { Plugin.Logger.LogWarning($"{Tag} price edit from '{p.PlayerId}': {p.Price} out of range — ignored."); return; }
+                // IsSaneMoney FIRST (audit 2026-08-26): `p.Price < 0f || p.Price > 10000f` is FALSE for
+                // NaN — both comparisons are — so a NaN rode straight into retailPrices below. The
+                // project already owns the right predicate and the ordinary price channel uses it
+                // (MPServer.cs:1769); this one did not. Newtonsoft accepts NaN/Infinity tokens by default.
+                if (!MPServer.IsSaneMoney(p.Price) || p.Price < 0f || p.Price > 10000f)
+                { Plugin.Logger.LogWarning($"{Tag} price edit from '{p.PlayerId}': {p.Price} out of range — ignored."); return; }
                 var reg = GameStatePatcher.FindRegistration(p.AddressKey);
                 if (reg == null) return;
                 if (!MergerFlip.TrulyMine(reg)) return;                       // only the real owner applies

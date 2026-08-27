@@ -1293,7 +1293,7 @@ namespace BigAmbitionsMP
                         string rel = file.StartsWith(dir, StringComparison.OrdinalIgnoreCase)
                                    ? file.Substring(dir.Length).TrimStart('\\', '/').Replace('\\', '/')
                                    : Path.GetFileName(file);
-                        var entry = zip.CreateEntry(rel, System.IO.Compression.CompressionLevel.Optimal);
+                        var entry = zip.CreateEntry(RedactEntryName(rel), System.IO.Compression.CompressionLevel.Optimal);
                         using var es = entry.Open();
                         string ext = Path.GetExtension(file);
                         bool text = ext.Equals(".log", StringComparison.OrdinalIgnoreCase) || ext.Equals(".txt", StringComparison.OrdinalIgnoreCase)
@@ -1359,8 +1359,44 @@ namespace BigAmbitionsMP
         // itself (8.3 short forms included) is replaced, everything after it is preserved.
         private static readonly System.Text.RegularExpressions.Regex _userPath =
             new System.Text.RegularExpressions.Regex(@"(?i)([A-Z]:[\\/]+Users[\\/]+)([^\\/\r\n""']+)", System.Text.RegularExpressions.RegexOptions.Compiled);
+        // A player's SteamID64 identifies their Steam account and can be looked up, and it reached
+        // uploads three ways: MPConfig logs "Stable id: steam-<id>" into Player.log at every startup,
+        // peer-log requests ship each connected player's whole Player.log, and the save-store folders
+        // inside the bundle are NAMED steam-<id>. User ruling 2026-08-26: strip them — the raw number
+        // has no diagnostic value.
+        //
+        // Replaced with a STABLE ALIAS rather than a fixed placeholder, deliberately: the folders must
+        // stay distinct (two players collapsing to one name would collide as duplicate zip entries) and
+        // the same player must read the same in the log and in the folder tree, or a multi-player bundle
+        // becomes unreadable. This is a PSEUDONYM, not a secret — the id space is small enough to brute
+        // force — but it stops the account number being published, which is what was asked for.
+        private static readonly System.Text.RegularExpressions.Regex _steamId =
+            new System.Text.RegularExpressions.Regex(@"steam-(\d{17})", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        /// <summary>FNV-1a, written out rather than using string.GetHashCode(): the framework's string
+        /// hash is not contractually stable across processes, and an alias that changes between two
+        /// files of the SAME bundle would defeat the point.</summary>
+        private static string SteamAlias(string id)
+        {
+            unchecked
+            {
+                uint h = 2166136261u;
+                foreach (char c in id) { h ^= c; h *= 16777619u; }
+                return "steam-p" + h.ToString("x8");
+            }
+        }
+
         internal static string RedactSensitive(string s)
-            => string.IsNullOrEmpty(s) ? s : _userPath.Replace(_ipv4.Replace(s, "[redacted-ip]"), "$1[user]");
+        {
+            if (string.IsNullOrEmpty(s)) return s;
+            s = _steamId.Replace(s, m => SteamAlias(m.Groups[1].Value));
+            return _userPath.Replace(_ipv4.Replace(s, "[redacted-ip]"), "$1[user]");
+        }
+
+        /// <summary>Zip ENTRY NAMES carry steam-&lt;id&gt; too (the save-store folders); only file
+        /// CONTENTS were being redacted, so the ids were published in the archive's directory listing.</summary>
+        internal static string RedactEntryName(string rel)
+            => string.IsNullOrEmpty(rel) ? rel : _steamId.Replace(rel, m => SteamAlias(m.Groups[1].Value));
 
         private static void WriteAscii(Stream stream, string value) => WriteBytes(stream, Encoding.ASCII.GetBytes(value));
 

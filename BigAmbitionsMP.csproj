@@ -10,10 +10,14 @@
     <RootNamespace>BigAmbitionsMP</RootNamespace>
   </PropertyGroup>
 
-  <!-- Build configs.  The shipped mod is built Release (or Debug) and does NOT
-       define BAMP_DEV, so the test/diagnostic scaffolding (MPPerf, MPLoadProfiler,
-       MPAudit) is inert — nothing runs on a player's machine.  (MPAutopilot removed.)
-       Build `-c Dev` to turn that scaffolding back on for local testing. -->
+  <!-- Build configs.  The shipped mod is built Release (or Debug) and does NOT define BAMP_DEV.
+       CORRECTED 2026-08-26 (release audit): the old wording here claimed MPPerf / MPLoadProfiler /
+       MPAudit are all "inert — nothing runs on a player's machine". Only MPLoadProfiler is gated
+       (Enabled=false outside Dev). MPPerf is Enabled=true on purpose — it is why bug reports carry
+       perf data — and MPAudit has NO gate at all: it hashes the business table plus up to 40 interiors
+       every 30s on every player. Both are deliberate; the comment was not, and a maintainer reading it
+       at release time would skip the diagnostics sweep. (MPAutopilot removed.)
+       Build `-c Dev` to turn the dev-only scaffolding back on for local testing. -->
   <PropertyGroup>
     <Configurations>Debug;Release;Dev</Configurations>
   </PropertyGroup>

@@ -48,11 +48,18 @@ namespace BigAmbitionsMP
             // of world, and only a single-player sample can separate them. The one-shot
             // ROWSET-INPUTS/GATES dump is what matters here; the periodic line stays MP-only.
             bool mp = MPServer.IsRunning || MPClient.IsConnected;
-            if (!mp) { try { if (SaveGameManager.Current != null) LogRowSetInputs("SP"); } catch { } return; }
+            // Interval gate FIRST (audit 2026-08-26). The SP branch used to sit ABOVE it, so
+            // LogRowSetInputs("SP") — two ItemsGetter.GetByName lookups plus a string build and compare —
+            // ran EVERY FRAME for anyone playing single-player with the mod installed. Logging was
+            // change-gated so there was no spam, but it was unbounded-frequency work in a path no player
+            // opted into. The SP sample itself stays (round-102c): it is still the only way to separate
+            // "our join path did this" from "the game does this anyway".
+            float nowT = Time.unscaledTime;
+            if (_nextAt > 0f && nowT < _nextAt) return;
+            if (!mp) { _nextAt = nowT + IntervalSeconds; try { if (SaveGameManager.Current != null) LogRowSetInputs("SP"); } catch { } return; }
             try
             {
-                float now = Time.unscaledTime;
-                if (_nextAt > 0f && now < _nextAt) return;
+                float now = nowT;
                 _nextAt = now + IntervalSeconds;
 
                 var gi = SaveGameManager.Current;

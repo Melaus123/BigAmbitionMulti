@@ -30,3 +30,4 @@ desktop.ini
 # Dev-only (2026-08-24 ruling: GitHub holds only files the mod needs to function)
 /tools/StoreMigrationHarness/
 /tools/sync-test-rig.ps1
+/tools/unit-tests/

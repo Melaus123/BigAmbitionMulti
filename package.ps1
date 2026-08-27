@@ -76,6 +76,9 @@ Copy-Item (Join-Path $outDir "LiteNetLib.dll")        (Join-Path $modDir "Depend
 # Workshop upload panel auto-picks the first top-level png/jpg as the thumbnail.
 Copy-Item (Join-Path $root "assets\BAMP_ChatIcon.png") (Join-Path $modDir "assets")
 Copy-Item (Join-Path $root "assets\BAMP_HubIcon.png")  (Join-Path $modDir "assets")
+# 2026-08-26: the Loitering button (MPCanvasUI.cs:1317) loads this by name; without it every player
+# got the fallback dark tile with a letter "L" while the dev deploy looked correct.
+Copy-Item (Join-Path $root "assets\BAMP_LoiterIcon.png") (Join-Path $modDir "assets")
 Copy-Item (Join-Path $root "assets\preview.png")       $modDir
 # MIT requires the bundled Harmony / LiteNetLib license notices to travel with them.
 Copy-Item (Join-Path $root "THIRD-PARTY-NOTICES.txt")  $modDir

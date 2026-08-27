@@ -189,7 +189,32 @@ namespace BigAmbitionsMP
         private static readonly string[] _difficulties = { "Easy", "Normal", "Hard" };
 
         // ── Game settings editor ──────────────────────────────────────────────
-        private GameVariablesDto _hostSettings = MPServer.Preset("Normal");
+        // Audit 2026-08-26: this was `= MPServer.Preset("Normal")`, a FIELD INITIALIZER — so the call
+        // ran inside the component CONSTRUCTOR, i.e. inside AddComponent<MPCanvasUI>() at Plugin.cs:253,
+        // which sits OUTSIDE the try that opens at :263. MPServer.Preset binds DifficultySetting and 13
+        // of its fields; if a game update retires any of them, the throw kills the mod load before any
+        // UI exists at all. Resolved lazily and guarded instead. The lobby reassigns this whenever a
+        // difficulty is picked (SetDifficulty), so nothing downstream changes.
+        private GameVariablesDto? _hostSettingsBacking;
+        private GameVariablesDto _hostSettings
+        {
+            get => _hostSettingsBacking ??= ResolveDefaultPreset();
+            set => _hostSettingsBacking = value;
+        }
+
+        /// <summary>NoInlining so a runtime-absent DifficultySetting member throws HERE, in this
+        /// method's own frame where the try catches it — not in whatever caller touched the
+        /// property.</summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static GameVariablesDto ResolveDefaultPreset()
+        {
+            try { return MPServer.Preset("Normal"); }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError($"[MenuUI] the default difficulty preset is unavailable ({ex.Message}) — falling back to empty defaults; pick a difficulty in the lobby before hosting.");
+                return new GameVariablesDto();
+            }
+        }
         private GameObject?   _settingsPanelGO;
         private Image?        _settingsContentImg;   // content bg — rounded with the menu sprite on first open
         private bool          _settingsHidLobby;      // remembers we hid the lobby behind the settings modal
@@ -584,6 +609,24 @@ namespace BigAmbitionsMP
                 if (!_fatalDismissed) EnsureFatalBanner();
                 return;
             }
+            // ── Build the canvas FIRST (1.0 audit 2026-08-26) ─────────────────────────────────
+            // This block used to sit at the BOTTOM of Update, below ~215 lines that reach into game
+            // types. A binding those lines resolve at JIT/prepare time throws BEFORE the enclosing
+            // method's first statement, so any one of them failing on a future game build aborted
+            // Update at that line EVERY frame and BuildCanvas was never reached: no Multiplayer button,
+            // no lobby, no phone button, no bug-report takeover — and no line in our own log, because
+            // the throw escapes to Unity. The banner path above already knew this ("the canvas must
+            // survive a dead Harmony"); the normal path never got the same treatment.
+            //
+            // It deliberately does NOT return after building: the work below must keep running from
+            // frame 1 (EnsureVersionCached's contract, documented at its call site — the poll thread
+            // depends on that cache existing before it ever handles an uploaded save).
+            if (!_built && ++_initDelay >= 30)
+            {
+                try   { BuildCanvas(); _built = true; Plugin.Logger.LogInfo("[UI] Canvas built OK."); }
+                catch (Exception ex) { _built = true; Plugin.Logger.LogError($"[UI] Build failed: {ex}"); }
+            }
+
             TickUiScale();   // round-176: keep the canvas scale tracking resolution + the game's UI Zoom
 
             // Resolve + cache the save version folder on the MAIN thread, unconditionally
@@ -800,15 +843,8 @@ namespace BigAmbitionsMP
             //  either the game itself or our Harmony patch bodies.)
             MPPerf.FrameTick(Time.unscaledDeltaTime);
 
-            if (!_built)
-            {
-                if (++_initDelay < 30) return;
-                try   { BuildCanvas(); _built = true; Plugin.Logger.LogInfo("[UI] Canvas built OK."); }
-                catch (Exception ex) { _built = true; Plugin.Logger.LogError($"[UI] Build failed: {ex}"); }
-                return;
-            }
-
-            if (_canvasGO == null) return;
+            // (The build moved to the top of Update — see the 1.0 audit note there.)
+            if (!_built || _canvasGO == null) return;
             TickCrashReportPopup();
 
             // The MP window is an IN-GAME widget: auto-shown when a game is live,
@@ -3182,6 +3218,15 @@ namespace BigAmbitionsMP
                 TrafficSync.Reset();
                 ParkedVehicleSync.Reset();
                 MPRegisterSync.Reset();   // duty posts die with the scene
+                // Audit 2026-08-26: this Reset EXISTED, said "reset state on host shutdown / new game
+                // start", and was called by NOTHING — so OwnerOpenByAddress (owner-open truth, keyed by
+                // ADDRESS) survived into the next session, BEAT the real schedule check in
+                // Patch_IsBusinessOpen_OwnerTruth, and was re-published as authoritative by
+                // BusinessSync.ReadInfo. Clearing is FAIL-SAFE: an absent entry falls through to the
+                // game's own check (MPPatches.cs:3561) and the 30s re-assert refills the table. NOT
+                // clearing is fail-WRONG. Unlike GrantSync below, nothing here is a durable restored
+                // store — every field is a send-side cache or re-asserted sync data.
+                BusinessSync.Reset();
                 MPFreezeProbe.Reset();    // freeze-episode state dies with the scene
                 MPHousingMorale.Reset();  // morale-reconcile log state dies with the scene
                 PassengerSync.Reset();    // passenger seats/locks die with the scene

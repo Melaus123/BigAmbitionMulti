@@ -951,21 +951,15 @@ namespace BigAmbitionsMP
                 return !(MPClient.IsClientInWorld && !MPServer.IsRunning && TrafficSync.ClientTrafficSuppressionEnabled);
             }
         }
-
-        // ── Patch: GameManager.ClickSleep ─────────────────────────────────────
-        // ClickSleep is the public handler for the in-game "sleep" button.
-        // We allow the sleep to START (character enters bed) but suppress the
-        // fast-forward until all players have also clicked sleep.
-
-        [HarmonyPatch(typeof(GameManager), "ClickSleep")]
-        [HarmonyPrefix]
-        public static bool Prefix_ClickSleep()
-        {
-            // In the multiplayer time model there are no time skips.  Sleeping is
-            // still allowed (the character can lie down) but the fast-forward is
-            // rejected by the world-clock monitor.  Nothing to intercept here.
-            return true;
-        }
+        // ── (removed 2026-08-26) Patch_ClickSleep ─────────────────────────
+        // Deleted by the patch-target audit. Broken two ways and inert a third: GameManager has NO
+        // ClickSleep (the real member is UI.ItemPanel.ItemPanelUI.ClickSleep); the attribute sat on a
+        // method of the OUTER MPPatches class, which carries no class-level [HarmonyPatch], so
+        // Plugin.cs:292 skipped it and the patch never applied; and the body was `return true;`, a
+        // no-op. It was a trap: adding a class-level attribute here — or moving to PatchAll — would
+        // have made Harmony throw on the missing target and count toward MpDisabledByPatchFailure.
+        // Sleeping needs no patch: the MP time model has no time skips and the fast-forward is
+        // refused by the world-clock monitor.
 
         // ── Backlog #3 — parked-vehicle sync ──────────────────────────────────
         // Helpers.ParkingSimulator is the static pool for all world parked

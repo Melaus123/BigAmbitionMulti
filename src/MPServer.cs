@@ -718,6 +718,13 @@ namespace BigAmbitionsMP
             // will never arrive once the transport stops; complete its carry-forward first.
             try { MPSaveCoordinator.FlushCarryBackstopsNow("server stop"); } catch { }
             _running = false;
+            // Audit 2026-08-26: pending merger proposals live ONLY here and are cleared only by an
+            // answer or a withdrawal — they were on none of the three teardown paths. Meanwhile each
+            // player's own copy IS cleared on every return to the main menu, and both the accept/decline
+            // and the withdraw buttons are gated on that copy. So one unanswered proposal + a trip to
+            // the menu left the host holding a record neither player could resolve, and both guards
+            // return SILENTLY: that pair could never merge again until the process restarted.
+            _mergerPendingByTarget.Clear();
             MPNet.RemoveMappingAsync();   // best-effort UPnP cleanup (harmless if it can't run)
             _transport?.Stop();
             _transport = null;
@@ -758,6 +765,7 @@ namespace BigAmbitionsMP
             GrantSync.ResetStore();   // fresh world — no grants; flush any store left by a previously loaded
                                       // session (the scene reset no longer wipes the store, 2026-06-30)
             MergerSync.ResetStore();  // fresh world — no merger (same session-boundary lifecycle)
+            _mergerPendingByTarget.Clear();   // and no proposals carried in from the previous world (audit 2026-08-26)
             ResetWallet();            // fresh world — no shared wallet (slice 4)
             MPSaveCoordinator.ConsumeDevHostLoadAs("new game");   // round-285: a fresh world has no member slots to impersonate
 
