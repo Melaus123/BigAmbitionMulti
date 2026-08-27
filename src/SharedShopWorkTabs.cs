@@ -138,6 +138,9 @@ namespace BigAmbitionsMP
             _mkPickerOpen = false; _mkPicker = null; _mkPickerIndex = -1; _mkWantAddr = "";
             _mkPickerRegs.Clear(); _mkPickerShared.Clear(); _mkReseeding = false;
             _mkPickerDirty = false; _mkPickerLive = false; _mkAgencyAddr.Clear();
+            _mkCellDefault.Clear();   // audit 2026-08-26: cleared only by ClearMarketingCall, so a stale
+                                      // instance-id → colour entry could restore the wrong default to a
+                                      // recycled dropdown cell in the next session
             _dcLastSentSig = ""; _dcNextAllowedSend = 0f; _dcSendTries = 0;
             _dcWindowDepth = 0; _dcInsertActive = false; _dcTenancyRaised = false; _dcInsertReg = null; _dcInsertAddr = "";
             _dcHiddenLocal.Clear();
@@ -299,7 +302,13 @@ namespace BigAmbitionsMP
                 else if (_logged.Add("boxeslabel")) Plugin.Logger.LogWarning($"{Tag} inventory render: boxesLabel field not found — box count stays as the game drew it.");
             }
             catch { }
-            try { if (inv.sellAllButton != null) inv.sellAllButton.interactable = false; } catch { }   // ruling 29
+            // Ruling 29. NOTE (audit 2026-08-26): this is a ONE-WAY write — we never re-enable it. That
+            // is safe ONLY because native WhInventory.RefreshData re-enables the button on the player's
+            // OWN warehouse, and the patch above lets native run there. It is a dependency on the game's
+            // behaviour, not a guarantee of ours: if that native re-enable ever stops, this leaves the
+            // helper's own Sell All dead for the session. Every other greying in this feature writes
+            // BOTH states on every render for exactly that reason.
+            try { if (inv.sellAllButton != null) inv.sellAllButton.interactable = false; } catch { }
             try
             {
                 var sc = inv.productsScrollerController;

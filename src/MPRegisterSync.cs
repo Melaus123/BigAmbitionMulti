@@ -50,6 +50,13 @@ namespace BigAmbitionsMP
         public static void Reset()
         {
             _injectedOwner.Clear(); _poolByOwner.Clear(); _benchGrace.Clear();   // shared-shop slice 3: bench bookkeeping dies with the scene (the records go with _injectedStaff below)
+            // Audit 2026-08-26: the hidden-body registry survived the world. The sweep resolves a station
+            // by WORLD POSITION within 2.5 m, and the city layout is identical in every save — so a
+            // leftover entry from session A re-targets a real station in session B and can hold a
+            // stand-in renderer-disabled, re-asserted every frame, for the rest of the session. The
+            // real-employee guard stops a genuine hire being hidden but does not tell a personal-duty
+            // stand-in from an employee-post one.
+            _hideBodyAt.Clear(); _hidden.Clear(); _hiddenTpc.Clear(); _hideMissLogged.Clear();
             // Remove the synthetic duty NPCs we injected from the live game first,
             // so a scene-exit/disconnect autosave can't write them into a save (they
             // are runtime-only and would otherwise orphan — they live in gi.Employee-

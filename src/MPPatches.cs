@@ -6353,6 +6353,12 @@ namespace BigAmbitionsMP
         [HarmonyLib.HarmonyPatch(typeof(Player.Sound.Radio.LoudSpeakersManager), "LateUpdate")]
         public static class Patch_LoudSpeakers_FailureLatch
         {
+            /// <summary>Audit 2026-08-26: both fields are per-PROCESS but the thing they protect — a
+            /// disabled native component — dies with the scene. So in a second session the retry storm
+            /// returned with no latch to stop it, and worse, the `else if (!_latched)` below suppressed
+            /// even the warning, making the second occurrence SILENT. Re-armed per scene.</summary>
+            internal static void ResetForScene() { _fails = 0; _latched = false; }
+
             private static int _fails;
             private static bool _latched;
 

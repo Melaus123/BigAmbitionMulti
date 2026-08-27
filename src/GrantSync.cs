@@ -61,6 +61,13 @@ namespace BigAmbitionsMP
             _enterable = new HashSet<string>();
             _helperBiz = new HashSet<string>();
             _sharedManage = new HashSet<string>();   // shared-shop management set dies with the scene like the others
+            // Audit 2026-08-26: _otherOwned was the ONE set written by the same client handler
+            // (MPClient.cs:1763-1766) that this reset did not clear. Latent rather than live — its only
+            // consumer, MergerFlip.OwnedByAnother, is reached from a Tick that early-returns for
+            // non-members, and membership arrives on the SAME host broadcast pass that refreshes this
+            // set. But that consumer drives a destructive local write (reg.RentedByPlayer = false on
+            // your own building), so the asymmetry is one line away from mattering.
+            _otherOwned = new HashSet<string>();
         }
 
         /// <summary>HOST, session boundary only (fresh new-game world, or clear-before-apply at manifest
