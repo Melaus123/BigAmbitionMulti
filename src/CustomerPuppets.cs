@@ -59,6 +59,11 @@ namespace BigAmbitionsMP
             public int fill = -1;
             public GameObject? heldGo;
             public CustomerPuppetLookPayload? look;   // round-44: the customer's appearance — survives handoffs
+            // 1.0 port: MotionTime support, cached per controller exactly like the native
+            // _motionTimeParamCheckedOn/_hasMotionTimeParam pair (ThirdPersonCharacter.cs:420-423) —
+            // a look apply may swap the controller, which re-triggers the check.
+            public RuntimeAnimatorController? motionTimeCheckedOn;
+            public bool hasMotionTime;
         }
         private static readonly Dictionary<string, Puppet> _puppets = new();
 
@@ -255,6 +260,7 @@ namespace BigAmbitionsMP
             if (follow && !_followerHere)
             {
                 _followerHere = true;
+                _rigDiagLogged = false;   // one rig-diagnostic line per follow session (P-PUPPET-RIG)
                 try { IndoorCustomerSpawner.DisableCustomersSpawn(); } catch { }
                 // Round-43 SMOOTH HANDOFF (losing side): swap each native customer for a puppet AT ITS
                 // POSITION — the new simulator adopts the same entries in place, so its stream picks
@@ -1149,7 +1155,7 @@ namespace BigAmbitionsMP
                     tr.rotation = Quaternion.Slerp(tr.rotation, Quaternion.Euler(0f, pup.yaw, 0f), 10f * Time.deltaTime);
                     speed = 0f;
                 }
-                try { pup.anim?.SetFloat(BaseHuman.Forward, Mathf.Clamp01(speed / 3f)); } catch { }
+                try { DriveLocomotion(pup, speed); } catch { }
 
                 if (pup.leaving && (dist < 0.6f || now > pup.leaveAt)) dead.Add(kv.Key);
             }
@@ -1161,6 +1167,91 @@ namespace BigAmbitionsMP
                     try { if (pup.go != null) UnityEngine.Object.Destroy(pup.go); } catch { }
                     _puppets.Remove(k);
                 }
+            }
+        }
+
+        private static bool _rigDiagLogged;
+
+        /// <summary>1.0 port fix (2026-08-29): drive the puppet's animator the way 1.0 drives its own
+        /// characters. 0.11 walked a humanoid off ONE signal — the Forward float — and that is all this
+        /// code used to send. 1.0 rebuilt the drive around THREE (ThirdPersonCharacter.cs:387-445):
+        /// an IsMoving bool that gates the idle→walk transition (NEW — BaseHuman.cs:42), the surviving
+        /// Forward float smoothed at ForwardTransitionSpeed, and a MotionTime walk-cycle clock the
+        /// SCRIPT winds forward every frame (skipped for controllers without the parameter — native
+        /// caches HasParameter per controller; mirrored per puppet). Setting only Forward still
+        /// compiled and still ran — the controller just never left idle, which is exactly the
+        /// frozen-glider field report (F-2026-08-29-BQ). Walking/animation speeds are read LIVE from
+        /// GlobalReferences, the same source the native properties wrap.</summary>
+        private static void DriveLocomotion(Puppet pup, float speed)
+        {
+            var anim = pup.anim;
+            if (anim == null) return;
+            // Review S2 (2026-08-29): the THIRD native signal — BoredAnimations (idle fidgets) is
+            // toggled by the locomotion itself (ThirdPersonCharacter.cs:389-399: on while standing,
+            // off while walking; Start() disables it initially). Puppets never run Start (tpc is
+            // disabled before its first frame), so the component keeps its unknown PREFAB state
+            // forever unless driven. State-driven every frame here → the prefab's baked state is
+            // irrelevant, and idle puppets fidget exactly like native customers. Purely local —
+            // nothing travels.
+            var bored = pup.tpc != null ? pup.tpc.boredAnimations : null;
+            if (speed <= 0.01f)
+            {
+                anim.SetBool(BaseHuman.IsMoving, false);
+                if (bored != null && !bored.enabled) bored.enabled = true;
+                return;
+            }
+            if (bored != null && bored.enabled) bored.enabled = false;
+
+            float fwd = Mathf.Min(speed, 6f);
+            if (anim.GetBool(BaseHuman.IsMoving))
+                fwd = Mathf.MoveTowards(anim.GetFloat(BaseHuman.Forward), fwd, BaseHuman.ForwardTransitionSpeed * Time.deltaTime);
+            anim.SetFloat(BaseHuman.Forward, fwd);
+            anim.SetBool(BaseHuman.IsMoving, true);
+
+            if (!ReferenceEquals(pup.motionTimeCheckedOn, anim.runtimeAnimatorController))
+            {
+                pup.motionTimeCheckedOn = anim.runtimeAnimatorController;
+                pup.hasMotionTime = false;
+                try
+                {
+                    foreach (var prm in anim.parameters)
+                        if (prm.nameHash == BaseHuman.MotionTime) { pup.hasMotionTime = true; break; }
+                }
+                catch { }
+                // P-PUPPET-RIG: one line per follow session. If puppets ever freeze again, this says
+                // whether the rig even carries the script-wound walk clock — evidence with the report.
+                if (!_rigDiagLogged)
+                {
+                    _rigDiagLogged = true;
+                    // Review S2: also report the fidget component — its prefab-baked state was
+                    // undecidable from the decompile; this line settles it per rig, in the field.
+                    string boredNote = "no BoredAnimations";
+                    try
+                    {
+                        var b = pup.tpc != null ? pup.tpc.boredAnimations : null;
+                        if (b != null) boredNote = $"BoredAnimations prefab-state={(b.enabled ? "ENABLED" : "disabled")} (now driven)";
+                    }
+                    catch { }
+                    Plugin.Logger.LogInfo($"[Customers] puppet rig: MotionTime "
+                        + (pup.hasMotionTime ? "PRESENT (walk cycle is script-wound)" : "ABSENT (controller runs its own cycle)")
+                        + $" — controller '{pup.motionTimeCheckedOn?.name}'; {boredNote}.");
+                }
+            }
+            if (pup.hasMotionTime)
+            {
+                var gr = InstanceBehavior<GlobalReferences>.Instance;
+                if (gr == null) return;
+                float animSpeed;
+                if (fwd < gr.walkingSpeedWalkFast)
+                    animSpeed = Mathf.Lerp(gr.animationSpeedWalk, gr.animationSpeedWalkFast,
+                                           Mathf.InverseLerp(gr.walkingSpeedWalk, gr.walkingSpeedWalkFast, fwd));
+                else if (fwd < gr.walkingSpeedJog)
+                    animSpeed = Mathf.Lerp(gr.animationSpeedWalkFast, gr.animationSpeedJog,
+                                           Mathf.InverseLerp(gr.walkingSpeedWalkFast, gr.walkingSpeedJog, fwd));
+                else
+                    animSpeed = Mathf.Lerp(gr.animationSpeedJog, gr.animationSpeedRun,
+                                           Mathf.InverseLerp(gr.walkingSpeedJog, gr.walkingSpeedRun, fwd));
+                anim.SetFloat(BaseHuman.MotionTime, anim.GetFloat(BaseHuman.MotionTime) + Time.deltaTime * animSpeed);
             }
         }
 

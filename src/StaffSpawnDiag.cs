@@ -59,7 +59,7 @@ namespace BigAmbitionsMP
                             foreach (var st in root.GetComponentsInChildren<EmployeeStationController>(true))
                             { if (st == null) continue; stations++; if (st.employee != null || st.employeeInstance != null) assigned++; }
                         }
-                        Count(__instance.indoorItemContainer);
+                        Count(__instance.IndoorItemContainer);   // 1.0 port: property — Hamptons redirect
                         Count(__instance.currentLayout);
                     }
                     catch { stations = -1; }

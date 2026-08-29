@@ -483,11 +483,19 @@ namespace BigAmbitionsMP
                 if (!HousingFridge.GuestRoute(__instance, out var addr, out var hid)) return true;
                 var acc = SaveGameManager.Current?.accessoriesData;
                 if (acc == null) return true;
-                bool head = __instance.CanStore(acc.headAccessoryCargoInstance);   // native picks head first (:281)
-                var ci = head ? acc.headAccessoryCargoInstance : acc.handAccessoryCargoInstance;
+                // 1.0 PORT (sweep-2 backlog): the phone is now a WEARABLE accessory and native's pick
+                // chain is head → hand → phone (:320-321 in the 1.0 decompile). Mirroring only
+                // head→hand let a phone-only guest FALL THROUGH to the native path, which filed the
+                // phone into the local REPLICA wardrobe — really gone from the guest, never reaching
+                // the owner. Same order, all three slots, each vetted by the station's own CanStore.
+                string slot; CargoInstance? ci;
+                if (__instance.CanStore(acc.headAccessoryCargoInstance)) { slot = "wornHead"; ci = acc.headAccessoryCargoInstance; }
+                else if (__instance.CanStore(acc.handAccessoryCargoInstance)) { slot = "wornHand"; ci = acc.handAccessoryCargoInstance; }
+                else if (__instance.CanStore(acc.phoneAccessoryCargoInstance)) { slot = "wornPhone"; ci = acc.phoneAccessoryCargoInstance; }
+                else return true;                                        // nothing storable — native shows its own refusal
                 if (ci == null || string.IsNullOrEmpty(ci.itemName)) return true;
                 BuildingStorageSync.RequestPut(addr, hid, ci.itemName, ci.amount > 0 ? ci.amount : 1, ci.paid,
-                                               ci.pricePerUnit, head ? "wornHead" : "wornHand");
+                                               ci.pricePerUnit, slot);
                 return false;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] holder worn-store route: {ex.Message}"); return true; }

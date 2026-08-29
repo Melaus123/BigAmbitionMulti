@@ -239,9 +239,22 @@ namespace BigAmbitionsMP
                         {
                             var bm = InstanceBehavior<BuildingManager>.Instance;
                             if (bm != null && bm.buildingRegistration == reg && bm.allItemControllers != null)
+                            {
+                                ItemController? gone = null;
                                 foreach (var ic in bm.allItemControllers)
-                                    if (ic != null && ic.ItemInstance?.id == p.ItemInstanceId)
-                                    { try { UnityEngine.Object.Destroy(ic.gameObject); } catch { } break; }
+                                    if (ic != null && ic.ItemInstance?.id == p.ItemInstanceId) { gone = ic; break; }
+                                if (gone != null)
+                                {
+                                    // Sweep-3 crash fix (2026-08-29): the game never removes a destroyed
+                                    // controller from allItemControllers itself (ItemController.OnDestroy
+                                    // doesn't), and 1.0 added UNGUARDED sweeps over the list that throw on
+                                    // a dead entry (OnPlacementModeEnd → ForceUpdateNavMesh; two loops
+                                    // inside CancelPlacementMode; HamptonsHouse.HideItems). Every native
+                                    // removal path removes explicitly before destroying — so do we.
+                                    try { bm.allItemControllers.Remove(gone); } catch { }
+                                    try { UnityEngine.Object.Destroy(gone.gameObject); } catch { }
+                                }
+                            }
                         }
                         catch { }
                         Plugin.Logger.LogInfo($"[PickupGate] conveyed grab at '{p.AddressKey}': '{p.ItemName}' removed (taker '{p.TakerPid}', round-269).");
@@ -2963,7 +2976,9 @@ namespace BigAmbitionsMP
                 // player shop on BOTH machines (user + logs 2026-07-04: "AI-staffed 1 station(s)").
                 try { if (bm.buildingRegistration.RentedByPlayer || IsAnyPlayerBusiness(bm.buildingRegistration)) return; } catch { }
                 var stations = new System.Collections.Generic.List<EmployeeStationController>(
-                    bm.indoorItemContainer.GetComponentsInChildren<EmployeeStationController>(true));
+                    // 1.0 port (sweep-2 #3): the raw field is WRONG inside Hamptons houses — the game's own
+                    // property redirects to hamptonsHouse.itemsContainer there. Read what the game reads.
+                    bm.IndoorItemContainer.GetComponentsInChildren<EmployeeStationController>(true));
                 if (bm.currentLayout != null)
                     stations.AddRange(bm.currentLayout.GetComponentsInChildren<EmployeeStationController>(true));
                 int staffed = 0, skipped = 0, failed = 0;
@@ -3167,7 +3182,7 @@ namespace BigAmbitionsMP
                                             {
                                                 kid.parentItemController = null;
                                                 kid.parentAttachmentPoint = null;
-                                                kid.transform.SetParent(bm.indoorItemContainer, true);
+                                                kid.transform.SetParent(bm.IndoorItemContainer, true);   // 1.0 port: property — Hamptons redirect
                                                 rescued++;
                                             }
                                             catch { }
@@ -3179,6 +3194,11 @@ namespace BigAmbitionsMP
                                 }
                                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] child rescue for '{id}': {ex.Message}"); }
                                 killedControllers.Add(ic);
+                                // Sweep-3 crash fix (2026-08-29): same reason as the conveyed-grab site —
+                                // a destroyed controller left in allItemControllers feeds 1.0's unguarded
+                                // sweeps. (This loop iterates a FindObjectsOfType array, so removing from
+                                // the manager's list here is safe.)
+                                try { InstanceBehavior<BuildingManager>.Instance?.allItemControllers?.Remove(ic); } catch { }
                                 UnityEngine.Object.Destroy(ic.gameObject);
                                 destroyed++;
                             }
@@ -3852,11 +3872,65 @@ namespace BigAmbitionsMP
 
         // ── Business sync (Phase 1) ───────────────────────────────────────────
 
+        // ── Field 20260829-222154: fresh-join ordering race ──────────────────
+        // The first 0.2.1 field report: a joining player's business snapshot (885 rows) arrived
+        // while their world still had ZERO registrations (generation not finished), applied 0/885
+        // as a silent per-row no-op, and the vacuous verify below printed "100% ✓". The player
+        // walked an empty city until the audit self-heal re-sent minutes later. A snapshot that
+        // arrives before the world exists is HELD here (latest wins) and re-applied from
+        // TickHeldBusinessSnapshot (MPCanvasUI.Update) once MPWorldReady says the world settled —
+        // the same gate + retry contract every other join-time action already follows.
+        private static BusinessSnapshotPayload? _heldBizSnapshot;
+        private static readonly List<BusinessInfo> _heldBizDeltas = new();   // review S1: deltas held with it, replayed AFTER
+
+        internal static void TickHeldBusinessSnapshot()
+        {
+            var held = _heldBizSnapshot;
+            if (held == null)
+            {
+                // Deltas can be held with NO snapshot pending (world merely unsettled) — drain them
+                // at settle so they are never stranded (review S1).
+                if (_heldBizDeltas.Count > 0 && MPWorldReady.AssertSettledFor("held-business-deltas"))
+                    DrainHeldBizDeltas();
+                return;
+            }
+            if (!MPWorldReady.AssertSettledFor("held-business-snapshot")) return;
+            _heldBizSnapshot = null;
+            Plugin.Logger.LogInfo($"[Patcher] world settled — applying the HELD business snapshot ({held.Businesses.Count} buildings).");
+            ApplyBusinessSnapshot(held);   // re-enters; the gate passes now (re-holds if readiness flickers)
+        }
+
+        /// <summary>Review S1: replay held business changes in arrival order. MAIN THREAD only.</summary>
+        private static void DrainHeldBizDeltas()
+        {
+            if (_heldBizDeltas.Count == 0) return;
+            var drain = new List<BusinessInfo>(_heldBizDeltas);
+            _heldBizDeltas.Clear();
+            int applied = 0;
+            foreach (var info in drain)
+                try { if (info != null && ApplyBusinessInfoLocal(info)) applied++; } catch { }
+            _mapFilterDirtyAt = UnityEngine.Time.unscaledTime;
+            Plugin.Logger.LogInfo($"[Patcher] {applied}/{drain.Count} held business change(s) replayed after the snapshot.");
+        }
+
+        /// <summary>Session teardown: a snapshot/deltas held from session A must never apply into session B.</summary>
+        internal static void ResetHeldBusinessSnapshot() { _heldBizSnapshot = null; _heldBizDeltas.Clear(); }
+
         public static void ApplyBusinessSnapshot(BusinessSnapshotPayload payload)
         {
             MPLoadProfiler.Mark($"CLIENT ApplyBusinessSnapshot QUEUED ({payload.Businesses.Count} buildings)");
             RunOnMainThread(() =>
             {
+                // Field 20260829-222154 (checked HERE, on the main thread, at apply time): an
+                // unsettled world means every row below would no-op against nothing. Hold instead.
+                if (!MPWorldReady.IsSettled)
+                {
+                    _heldBizSnapshot = payload;
+                    int regsNow = -1; try { regsNow = SaveGameManager.Current?.BuildingRegistrations?.Count ?? -1; } catch { }
+                    Plugin.Logger.LogWarning($"[Patcher] business snapshot ({payload.Businesses.Count} buildings) HELD — "
+                        + $"world not settled yet (regs={regsNow}, quiesce={MPClient.IsJoinQuiescing}). It applies when the world is ready.");
+                    return;
+                }
                 long _profT0 = MPLoadProfiler.NowMs;
                 // ── BEFORE-apply per-type count (Phase 1b investigation) ────
                 LogClientTypeBreakdown("ApplyBusinessSnapshot.BEFORE");
@@ -4295,8 +4369,14 @@ namespace BigAmbitionsMP
                 string sample = mismatchExamples.Count > 0 ? $" examples=[{string.Join(" | ", mismatchExamples)}]" : "";
                 Plugin.Logger.LogInfo($"[Patcher] Match check (AFTER apply): matched={matched} mismatchBiz={mismatchBiz} addrNotInPayload={missingOnClient}{sample}");
 
-                if (mismatchBiz == 0 && missingOnClient == 0)
-                    Plugin.Logger.LogInfo("[Patcher] Client now mirrors host's snapshot 100% ✓");
+                // Field 20260829-222154: the old predicate passed VACUOUSLY on an empty world —
+                // zero registrations compared means zero mismatches, and "100% ✓" printed while
+                // 0/885 rows had actually landed. Success requires having COMPARED something.
+                if (matched > 0 && mismatchBiz == 0 && missingOnClient == 0)
+                    Plugin.Logger.LogInfo($"[Patcher] Client now mirrors host's snapshot 100% ✓ ({matched} registration(s) verified)");
+                else if (matched == 0 && mismatchBiz == 0 && missingOnClient == 0)
+                    Plugin.Logger.LogWarning("[Patcher] Post-apply verify compared ZERO registrations — the local world is empty; "
+                        + "nothing was verified and nothing was applied. (The snapshot should have been HELD; if this prints, the hold gate leaked.)");
                 else
                     Plugin.Logger.LogWarning($"[Patcher] Post-apply state does NOT match host — {mismatchBiz} mismatch(es), {missingOnClient} not-in-payload.");
             }
@@ -4349,6 +4429,17 @@ namespace BigAmbitionsMP
         {
             RunOnMainThread(() =>
             {
+                // Review S1 (2026-08-29): a delta that applies DURING the settle window gets
+                // overwritten by the OLDER held snapshot when it lands. Hold deltas under the same
+                // conditions and replay them AFTER the snapshot, in arrival order. (Residual,
+                // accepted: a delta older than a SUPERSEDING second snapshot re-applies after it —
+                // its content is almost always already inside that snapshot; the audit covers.)
+                if (!MPWorldReady.IsSettled || _heldBizSnapshot != null)
+                {
+                    _heldBizDeltas.Add(info);
+                    Plugin.Logger.LogInfo($"[Patcher] business change for '{info.AddressKey}' HELD behind the pending snapshot ({_heldBizDeltas.Count} queued).");
+                    return;
+                }
                 if (ApplyBusinessInfoLocal(info))
                 {
                     Plugin.Logger.LogInfo($"[Patcher] Business change applied: {info.AddressKey} = '{info.BusinessName}'");
@@ -4466,6 +4557,13 @@ namespace BigAmbitionsMP
                 if (!receiverOwnsThis)
                 {
                     // Tier A — name, type, closed.
+                    // 1.0 PORT (sweep-2 S4): BuildingContext now CACHES BusinessType, refreshed only by
+                    // GlobalEvents.onBuildingRegistrationChange (BuildingManager.cs:292 →
+                    // RegenerateFieldsOnRegistrationChange). A bare businessTypeName write leaves a
+                    // receiver standing inside the building on the OLD type until re-entry — same
+                    // "field written, nothing notified" class as ROUND-122 below. Detect the change
+                    // here, notify below.
+                    bool typeChanged = !string.Equals(reg.businessTypeName ?? "", info.BusinessTypeName ?? "", StringComparison.Ordinal);
                     reg.BusinessName        = info.BusinessName;
                     reg.businessTypeName    = info.BusinessTypeName;
                     // ROUND-122: the open/closed flag needs the game NOTIFIED, not just the field written.
@@ -4490,6 +4588,16 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogInfo($"[Patcher] '{info.AddressKey}' is now {(info.TemporarilyClosed ? "CLOSED" : "OPEN")} — "
                             + "notified the game (open-state event + registration change + shopper schedule rebuild).");
                         try { SharedShopVisibility.RefreshOpenStateIfPageOpen(info.AddressKey); } catch { }   // an open BizMan page follows the switch at once
+                    }
+                    else if (typeChanged)
+                    {
+                        // 1.0 PORT (sweep-2 S4): the closed-flip block above already rings this bell;
+                        // ring it for a type-only change too, so the cached BuildingContext.BusinessType
+                        // regenerates and the shopper schedule matches the new type. The open-state
+                        // GameEvent is deliberately NOT fired — open/closed did not change.
+                        try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
+                        try { AI.Customers.CustomerEntries.CustomerEntriesHelper.UpdateCustomerEntriesForPlayerBusiness(reg, TimeHelper.GetDayOfWeek()); } catch { }
+                        Plugin.Logger.LogInfo($"[Patcher] '{info.AddressKey}' business TYPE changed → registration-change event + shopper schedule rebuild (1.0 caches BusinessType on BuildingContext).");
                     }
                     // Producer guard (RED ROC 2026-07-13): writing the type directly bypasses
                     // native setup, whose ResetBuildingSpecific sizes Warehouse.vehicleSlots —

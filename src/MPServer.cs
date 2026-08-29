@@ -1394,6 +1394,18 @@ namespace BigAmbitionsMP
                         GameStatePatcher.EnqueueOnMainThread(() => HostRouteSharedSalesHistory(sh, senderPid));
                     break;
                 }
+                case MessageType.RivalStaffReq:   // AI-staff slice (2026-08-29): host answers from its authoritative list
+                {
+                    var rq = env.GetPayload<RivalStaffReqPayload>();
+                    if (rq != null) GameStatePatcher.EnqueueOnMainThread(() => RivalStaffSync.HostAnswerStaffReq(rq, senderPid));
+                    break;
+                }
+                case MessageType.PoachClaim:      // AI-staff slice: the hire is arbitrated here
+                {
+                    var pc = env.GetPayload<PoachClaimPayload>();
+                    if (pc != null) GameStatePatcher.EnqueueOnMainThread(() => RivalStaffSync.HostHandlePoachClaim(pc, senderPid));
+                    break;
+                }
 
                 case MessageType.SharedWorkInfo:
                 {
@@ -5049,7 +5061,7 @@ namespace BigAmbitionsMP
             => pid == MPConfig.PlayerId ? MPConfig.StableId
              : StableIdByPlayer.TryGetValue(pid, out var s) ? (s ?? "") : "";
 
-        private static void SendToPid(string pid, MessageEnvelope env)
+        internal static void SendToPid(string pid, MessageEnvelope env)   // internal since the AI-staff slice (RivalStaffSync answers requesters directly)
         {
             foreach (var peer in _clients.Keys)
                 if (_peerNames.TryGetValue(peer.Id, out var p) && p == pid) { Send(peer, env); return; }

@@ -767,6 +767,7 @@ namespace BigAmbitionsMP
             MPNetStats.Tick();           // T0 (throughput audit): per-type bytes/s report every 30 s
             GameStatePatcher.TickMapFilterDebounce();   // v9 MIN-2: one map refresh after a delta burst goes quiet
             BusinessSync.TickOwnerBusinessPublish();   // round-190: one owner-business publish at settle (carries logo files; host adopts + re-broadcasts)
+            GameStatePatcher.TickHeldBusinessSnapshot();   // field 20260829-222154: a snapshot that arrived before the world existed applies at settle
             MPPerf.End("Pre.D", _sub);
             _sub = MPPerf.Begin();
             MPFreezeProbe.Tick();        // [MoveFreeze] symptom probe: input-without-motion detector (claim-4 backstop)
@@ -3310,6 +3311,8 @@ namespace BigAmbitionsMP
                                                        // not reach a different world, and the have-authoritative flag
                                                        // must not suppress demand computation in the NEXT session
                 GameStatePatcher.ResetVehicleIdHealth();   // round-109 net: timer + heal counter are per-session
+                GameStatePatcher.ResetHeldBusinessSnapshot();   // field 20260829-222154: a held snapshot must not cross sessions
+                RivalStaffSync.Reset();                         // AI-staff slice: pending poach claims + window state die with the session
                 _appearanceSig = ""; _appearanceNextAt = 0f;
                 _blackOverlayCanvas = null;     // re-scan on fresh game load (#6)
                 _blackOverlayFindTimer = 0f;

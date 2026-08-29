@@ -189,6 +189,12 @@ namespace BigAmbitionsMP
             {
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;   // single player — vanilla
                 if (__instance == null) return true;
+                // 1.0 PORT (sweep-2 S5): native now HEAD-GUARDS the click — holding a mop means the
+                // click does nothing at all (no walk, no put-away; putting the mop back moved to the
+                // item panel → static ReturnMopToStation, which is not ownership-gated and therefore
+                // already works for a helper untouched). Returning true here hands a mop-holding
+                // helper to that same native guard — exact owner parity (ruling 28).
+                if (Helpers.PlayerHelper.IsHoldingAMop) return true;
                 // Owners keep the native path untouched; only a granted helper is redirected.
                 if (!HousingFurniture.LocalHelperHere()) return true;
 
@@ -208,16 +214,11 @@ namespace BigAmbitionsMP
                         }
                         if (PlayerHelper.IsHoldingItem)
                         {
-                            var held = PlayerHelper.ItemInHands;
-                            if ((object?)held == null || !held.HasTag(TagRef.Itemtag.ismop))
-                            {
-                                Notifications.ShowError("notification_need_empty_hands_to_interact");
-                                return;
-                            }
-                            // Already holding the mop → put it away, same as the owner's flow.  StopCleaning is
-                            // private; reflect rather than re-implement its MopController bookkeeping.
-                            try { AccessTools.Method(typeof(CleaningStationController), "StopCleaning")?.Invoke(__instance, null); }
-                            catch (Exception sx) { Plugin.Logger.LogWarning($"[Cleaning] StopCleaning: {sx.Message}"); }
+                            // 1.0 PORT (sweep-2 S5): a held MOP can no longer reach this arrival body —
+                            // the head guard in the Prefix (and in native) swallows the click first — so
+                            // ANY item in hand is an error, exactly the 1.0 native body. The 0.11-era
+                            // put-away-via-StopCleaning branch is gone with the flow that owned it.
+                            Notifications.ShowError("notification_need_empty_hands_to_interact");
                             return;
                         }
 

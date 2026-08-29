@@ -1359,7 +1359,7 @@ namespace BigAmbitionsMP
             if (res.Ctx == "producer") { ReducePutSourceByAmount(res); return; }
             // The worn case is Ctx-tagged rather than name-inferred so it can never be confused
             // with a truck stack of the same item (round-12 A).
-            if (res.Ctx == "wornHead" || res.Ctx == "wornHand") { UnequipWornAfterStore(res); return; }
+            if (res.Ctx == "wornHead" || res.Ctx == "wornHand" || res.Ctx == "wornPhone") { UnequipWornAfterStore(res); return; }   // wornPhone: 1.0 phone accessory (sweep-2 backlog find)
             // "wholeput" (parity 2026-08-26): the deposit moved a bag/sealed INSTANCE whole —
             // the source must leave whole too. The plain consume's sealed-skip would leave a
             // deposited sealed box ON the truck (duplication), and its box-contents branch
@@ -1494,7 +1494,9 @@ namespace BigAmbitionsMP
             try
             {
                 var acc = SaveGameManager.Current?.accessoriesData;
-                var ci = res.Ctx == "wornHead" ? acc?.headAccessoryCargoInstance : acc?.handAccessoryCargoInstance;
+                var ci = res.Ctx == "wornHead" ? acc?.headAccessoryCargoInstance
+                       : res.Ctx == "wornPhone" ? acc?.phoneAccessoryCargoInstance   // 1.0: phones are wearable
+                       : acc?.handAccessoryCargoInstance;
                 if (ci == null || ci.itemName != res.ItemName) return;   // changed in the request→confirm window — leave it
                 PlayerHelper.PlayerController.UnEquipAccessory(ci);
             }

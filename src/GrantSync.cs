@@ -236,7 +236,14 @@ namespace BigAmbitionsMP
         // pushes the set (PermissionBuildingAccess); the CanEnterBuilding patch consults this.
         private static HashSet<string> _enterable = new();
         public static void SetEnterableBuildings(IEnumerable<string> addressKeys)
-            => _enterable = addressKeys != null ? new HashSet<string>(addressKeys) : new HashSet<string>();
+        {
+            var next = addressKeys != null ? new HashSet<string>(addressKeys) : new HashSet<string>();
+            bool changed = !next.SetEquals(_enterable);
+            _enterable = next;
+            // Hamptons guest access (2026-08-29): the plot barrier is CACHED collider state — a
+            // grant arriving/leaving must repaint it now, not on the next native refresh.
+            if (changed) HamptonsAccess.RefreshAllBlockers();
+        }
         public static bool CanEnterGranted(string addressKey)
             => !string.IsNullOrEmpty(addressKey) && _enterable.Contains(addressKey);
 

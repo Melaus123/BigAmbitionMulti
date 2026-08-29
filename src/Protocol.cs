@@ -197,6 +197,10 @@ namespace BigAmbitionsMP
         StorageRes            = 196,     // Owner → Host → accessor: the verdict (Ok, Reason, owner-truth echoes per ctx policy, nested contents for sealed-box ops).
         TrunkDetailReq        = 197,     // Accessor → Host → vehicle owner (v17, F-2026-08-25-I proposal 2): "send me the FULL cargo detail of this trunk" — fired when the borrower OPENS the storage panel (and again when the fleet manifest moves while it is open). Event-driven, no steady-state cost; the 4-field broadcast manifest stays the fallback row source.
         TrunkDetailRes        = 198,     // Owner → Host → accessor: every cargo instance with real paid/price AND nested contents (THE codec) — the borrower's panel renders the native card shapes the owner sees (sealed contents label, bundle tooltip) and every stack past the manifest's 24-instance cap. Display-only on the receiver: rows feed the panel, never game state (Gameplay lane is correct — no Bulk-written state is touched).
+        RivalStaffReq         = 199,     // Client → Host (AI-staff slice, user-approved 2026-08-29, on-demand per ruling-25 pattern): "send me this AI business's staff" — fired when the poach window opens on a client (field 20260830-042803: those lists were empty on every joiner since 0.11 — aiEmployees is generated at world-gen, which clients suppress, and no snapshot ever carried it).
+        RivalStaffRes         = 200,     // Host → the ONE requester (and the claimant inside PoachResult): the business's aiEmployees as small rows (id, skill, value, hours-demand, negotiation flags). A row's PERSON is rebuilt deterministically from the id on the receiver (native GetEmployeeInstance seeds from id), so identical hireable people appear on every machine. v1 deliberately EXCLUDES poachedEmployees rows (they reference full EmployeeInstances clients don't hold). Receiver OVERWRITES its local list — clients can locally invent random staff via EstimatedWeeklyIncomeHelper's fallback generator, and those inventions must not survive.
+        PoachClaim            = 201,     // Client → Host: "my rival salary negotiation for employee X at AI business Y was ACCEPTED" — the hire must be claimed host-side so two players cannot poach the same person. The client's native AcceptOffer is deferred until the verdict.
+        PoachResult           = 202,     // Host → the claimant: Ok (the host removed the employee and generated the replacement natively) or not (already gone), plus the business's rows AFTER the claim — the claimant's locally-generated replacement is overwritten by host truth.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -937,6 +941,46 @@ namespace BigAmbitionsMP
         public List<CargoDetailInfo> Rows { get; set; } = new();
     }
 
+    // ── AI-staff on-demand + routed poach (types 199-202, user-approved 2026-08-29) ──────────────
+
+    /// <summary>One AI-business staff member — exactly the serialized fields of the native
+    /// AiBusinessEmployeeData. The person (name, gender, age, wage, secondary skill, demands) is
+    /// regenerated deterministically from Id on the receiver, so no generated data travels.</summary>
+    public class RivalStaffRow
+    {
+        public string Id          { get; set; } = "";
+        public string Skill       { get; set; } = "";   // primarySkillName
+        public float  SkillValue  { get; set; }          // host truth — replacements roll a smaller range
+        public string HoursDemand { get; set; } = "";   // hoursPerWeekDemandName
+        public bool   NegotiationFinished { get; set; }
+        public int    ReenableAtDay      { get; set; }
+    }
+
+    public class RivalStaffReqPayload
+    {
+        public string AddressKey { get; set; } = "";
+    }
+
+    public class RivalStaffResPayload
+    {
+        public string AddressKey { get; set; } = "";
+        public List<RivalStaffRow> Rows { get; set; } = new();
+    }
+
+    public class PoachClaimPayload
+    {
+        public string AddressKey { get; set; } = "";
+        public string EmployeeId { get; set; } = "";
+    }
+
+    public class PoachResultPayload
+    {
+        public string AddressKey { get; set; } = "";
+        public string EmployeeId { get; set; } = "";
+        public bool   Ok         { get; set; }
+        public List<RivalStaffRow> Rows { get; set; } = new();   // host truth AFTER the claim
+    }
+
     /// <summary>One player business's staff roster (round-30 WS3). The synced work shifts
     /// (BusinessSync ScheduleDayInfo.WorkShifts) already carry the REAL employee ids per station+hour;
     /// the only thing other machines lack is the employee RECORDS those ids point to. Receivers inject a
@@ -1321,7 +1365,11 @@ namespace BigAmbitionsMP
         //      A v18 peer omits the key; name-keyed Newtonsoft then leaves the C# initializer 0.75,
         //      so the peer would silently use ITS OWN sell-back rate rather than the host's. That is
         //      a real divergence, so the freeze rule applies: wire-visible change => version bump.
-        public const int Version = 19;
+        // v20 (2026-08-29): storage ctx vocabulary grew "wornPhone" (the 1.0 phone accessory can be
+        //      stored in item holders; the guest route + unequip-on-confirm now carry it). A v19 peer
+        //      never sends the literal and would treat it as an unknown ctx on receive — mixed
+        //      sessions refuse at Hello per the freeze rule.
+        public const int Version = 20;
     }
 
     /// <summary>Sent by client on connect.</summary>

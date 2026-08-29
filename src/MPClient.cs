@@ -966,6 +966,18 @@ namespace BigAmbitionsMP
                     if (tr != null) GameStatePatcher.EnqueueOnMainThread(() => StorageSync.OnTrunkDetail(tr));
                     break;
                 }
+                case MessageType.RivalStaffRes:    // AI staff I asked for (poach window open)
+                {
+                    var rs = env.GetPayload<RivalStaffResPayload>();
+                    if (rs != null) GameStatePatcher.EnqueueOnMainThread(() => RivalStaffSync.OnStaffRes(rs));
+                    break;
+                }
+                case MessageType.PoachResult:      // the verdict on my deferred rival hire
+                {
+                    var pr = env.GetPayload<PoachResultPayload>();
+                    if (pr != null) GameStatePatcher.EnqueueOnMainThread(() => RivalStaffSync.OnPoachResult(pr));
+                    break;
+                }
 
                 case MessageType.HelperOrderForward:   // host forwarded a helper-hosted sale — I'm the building owner
                 {

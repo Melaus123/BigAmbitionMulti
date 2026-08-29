@@ -327,6 +327,51 @@ namespace BigAmbitionsMP
     /// Creates and manages a capsule + name-label for each remote player.
     /// All public methods must be called on the Unity main thread.
     /// </summary>
+    /// <summary>Sweep-3 mis#5 (user-approved 2026-08-29, parity ruling): the locked-gate error toast
+    /// is only ever about YOUR OWN body. Host-side remote avatars are player-layer + SOLID collider
+    /// (Gley raycast requirement), so 1.0's Hamptons fence triggers toast the HOST about someone
+    /// else's movement — clients never see this (their remotes carry no collider) and single-player
+    /// cannot. A remote body at a LOCKED gate is skipped entirely (native would only toast); an
+    /// UNLOCKED door still swings for remote bodies, matching what that player sees on their own
+    /// machine.</summary>
+    [HarmonyLib.HarmonyPatch(typeof(FenceDoor), nameof(FenceDoor.HandleTriggerEnter))]
+    public static class Patch_FenceDoor_LockedToast_OwnBodyOnly
+    {
+        static bool Prefix(FenceDoor __instance, Collider other, bool ignoreLockedCondition)
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;   // single player — native
+                if (ignoreLockedCondition) return true;                              // caller bypasses the lock anyway
+                if (!RemotePlayerManager.IsRemoteAvatarCollider(other)) return true; // local body / NPC — native
+                if (!__instance.IsLocked()) return true;                             // unlocked — let it swing
+                return false;   // locked + someone else's body → suppress (the toast was the only effect)
+            }
+            catch { return true; }
+        }
+    }
+
+    /// <summary>Sweep-3 follow-up (user-approved 2026-08-29): same family as the fence toast — 1.0's
+    /// cinema/theater TicketEntryBlocker keys its OnCollisionEnter on the player LAYER and then
+    /// resets the LOCAL player's navigation + shows a ticket error. On the host, another player's
+    /// solid stand-in bumping the barrier hijacked the HOST's own walking. A remote body's bump is
+    /// skipped entirely; the barrier still physically exists (stand-ins are transform-driven and
+    /// never pushed by it anyway), and the local player's own bumps stay native.</summary>
+    [HarmonyLib.HarmonyPatch(typeof(Buildings.Retail.Businesses.CinemaTheater.TicketEntryBlocker), "OnCollisionEnter")]
+    public static class Patch_TicketBlocker_OwnBodyOnly
+    {
+        static bool Prefix(Collision other)
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;   // single player — native
+                if (other != null && RemotePlayerManager.IsRemoteAvatarCollider(other.collider)) return false;
+            }
+            catch { }
+            return true;
+        }
+    }
+
     public static class RemotePlayerManager
     {
         private static readonly Dictionary<string, GameObject> _players = new();
@@ -334,6 +379,22 @@ namespace BigAmbitionsMP
         /// <summary>Returns a snapshot of currently tracked remote player IDs.</summary>
         public static IReadOnlyList<string> GetRemotePlayerIds() =>
             new List<string>(_players.Keys);
+
+        /// <summary>Sweep-3 mis#5: true when this collider belongs to a remote player's stand-in
+        /// body (the host gives those bodies a solid player-layer capsule for Gley's raycasts, so
+        /// native player-triggers fire for them). Registry check, not name matching.</summary>
+        internal static bool IsRemoteAvatarCollider(Collider? c)
+        {
+            try
+            {
+                if (c == null || _players.Count == 0) return false;
+                var t = c.transform;
+                foreach (var go in _players.Values)
+                    if (go != null && t.IsChildOf(go.transform)) return true;   // IsChildOf(self) is true
+            }
+            catch { }
+            return false;
+        }
 
         /// <summary>Transforms of every tracked remote player (for traffic anchoring).</summary>
         public static List<Transform> GetRemotePlayerTransforms()
@@ -751,7 +812,7 @@ namespace BigAmbitionsMP
                     foreach (var kv in _players)
                     {
                         if (kv.Value == null) continue;
-                        var ac = kv.Value.GetComponentInChildren<Collider>();   // the root capsule
+                        var ac = kv.Value.GetComponentInChildren<Collider>();   // the BAMP_Body capsule (child holder since 2026-08-29)
                         if (ac == null) continue;
                         for (int i = 0; i < vehCols.Count; i++)
                             if (vehCols[i] != null) UnityEngine.Physics.IgnoreCollision(ac, vehCols[i], true);
@@ -1540,7 +1601,20 @@ namespace BigAmbitionsMP
                     if (localChar != null) playerLayer = localChar.layer;
                     root.layer = playerLayer;
 
-                    var col = root.AddComponent<CapsuleCollider>();
+                    // Sweep-3 follow-up (user-approved 2026-08-29): the capsule lives on a CHILD
+                    // holder, not the root. Native player colliders sit on children of the tagged
+                    // player object, and 1.0 code assumes that shape — LocationHappinessTrigger
+                    // dereferences other.transform.parent with no null guard, which NREs on a
+                    // parentless root-mounted collider. The holder keeps the player LAYER (Gley
+                    // raycasts and layer checks unchanged) and stays UNTAGGED, so parent-tag-gated
+                    // zones treat remote bodies as scenery — exactly what client machines already
+                    // do (their remotes carry no collider at all). The kinematic Rigidbody stays on
+                    // the root; the child collider compounds onto it natively.
+                    var bodyGo = new GameObject("BAMP_Body");
+                    bodyGo.transform.SetParent(root.transform, false);
+                    bodyGo.layer = playerLayer;
+
+                    var col = bodyGo.AddComponent<CapsuleCollider>();
                     col.height   = 1.65f;                       // match the real client capsule (was 1.8)
                     col.radius   = 0.25f;                       // match the real client capsule (was 0.4 — needlessly large)
                     col.center   = new Vector3(0f, 0.825f, 0f); // half-height (was 0.9 for the taller capsule)

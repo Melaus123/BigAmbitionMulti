@@ -4241,14 +4241,24 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    var regs = AccessTools.Field(typeof(CandidateCellView), "_buildingRegistrations")
-                                          ?.GetValue(__instance) as System.Collections.Generic.List<BuildingRegistration>;
-                    if (regs == null || regs.Count == 0) return;
+                    // 1.0 PORT (sweep-2 #2): SetData now assigns _buildingRegistrations from a STATIC
+                    // cache (BusinessOptionsByEmployeeSetup) that hands every row the SAME list
+                    // instance.  RemoveAll on that shared list poisoned the cache: the next cache hit
+                    // saw removed==0 (this postfix early-returns) while the native options still held
+                    // the partner names — a misaligned dropdown where a pick lands on the WRONG
+                    // business (AssignBusiness indexes _buildingRegistrations[index-1]).  Filter a
+                    // COPY and point the row's field at the copy; the cache is never touched.
+                    var shared = AccessTools.Field(typeof(CandidateCellView), "_buildingRegistrations")
+                                            ?.GetValue(__instance) as System.Collections.Generic.List<BuildingRegistration>;
+                    if (shared == null || shared.Count == 0) return;
                     var emp = AccessTools.Field(typeof(CandidateCellView), "_employeeInstance")
                                          ?.GetValue(__instance) as Entities.EmployeeInstance;
+                    var regs = new System.Collections.Generic.List<BuildingRegistration>(shared);
                     int removed = regs.RemoveAll(r => GameStatePatcher.IsForeignPlayerBusiness(r)
                                                    && (emp == null || r.Address != emp.assignedAddress));
                     if (removed == 0) return;
+                    AccessTools.Field(typeof(CandidateCellView), "_buildingRegistrations")
+                              ?.SetValue(__instance, regs);   // the row now reads OUR filtered copy
                     var opts = new System.Collections.Generic.List<string> { VehicleStoragePanel.Localize("common_unassigned") };
                     foreach (var r in regs)
                     {
@@ -5042,11 +5052,14 @@ namespace BigAmbitionsMP
         }
 
         // ── Patch: GameManager.RunMidNightAutoSave ────────────────────────────
-        // The game's midnight autosave (fired at in-game 23:00 from RunMainGameTick)
-        // calls SaveGameManager.Save(MidnightSave) and — unlike the periodic
-        // CheckAutoSave — is NOT gated by GameManager.preventAutoSave, so the mod's
-        // SuppressNativeAutosave does not cover it.  Left alone, in an MP session it
-        // writes a vanilla "Recover Midnight.hsg" into the SINGLE-PLAYER folder every
+        // The game's midnight autosave (fired at in-game 23:00 from RunMainGameTick).
+        // 0.11 saved directly, ungated; 1.0 CHANGED THIS (sweep-2 S7, 2026-08-29): the
+        // body now honours GameManager.preventAutoSave, deferring via
+        // PendingMidnightAutoSave, which SetPreventAutoSave(false) drains later. None
+        // of that machinery runs in MP — this Prefix returns false before the native
+        // body, so no pending flag is ever set; single player runs the new native flow
+        // untouched. Left alone in an MP session, the native save would still write a
+        // vanilla "Recover Midnight.hsg" into the SINGLE-PLAYER folder every
         // in-game day.  In MP we replace it with a HOST-COORDINATED recover checkpoint
         // so it behaves like every other save (paired across machines, loadable):
         //   HOST   → MidnightRecoverSave() → HostSaveNow("midnight") → '<base>-recover'
@@ -5056,8 +5069,9 @@ namespace BigAmbitionsMP
         //   CLIENT → do NOTHING; it saves only on the host's SaveNow, so a client can
         //            never make an orphan recover save the host didn't coordinate (the
         //            old per-machine path produced 505 client vs 72 host).
-        //   OFFLINE FORK / single player (neither IsRunning nor IsConnected) → let the
-        //            native midnight save run unchanged.
+        //   OFFLINE FORK / single player (not hosting, not in an MP world — review S3: the client
+        //            leg gates on IsClientInWorld so a 23:00 reconnect blip cannot leak a native
+        //            Recover Midnight.hsg into the SP folder) → native midnight save runs unchanged.
         [HarmonyPatch(typeof(GameManager), "RunMidNightAutoSave")]
         public static class Patch_GameManager_RunMidNightAutoSave_RedirectInMp
         {
@@ -5072,7 +5086,11 @@ namespace BigAmbitionsMP
                         GameStatePatcher.EnqueueOnMainThread(() => MPSaveCoordinator.MidnightRecoverSave());
                         return false;
                     }
-                    if (MPClient.IsConnected)
+                    // Review S3 (2026-08-29): IsClientInWorld, not IsConnected — this suppresses a
+                    // NATIVE pass over the loaded MP world (a stray Recover Midnight.hsg in the SP
+                    // folder), so a reconnect blip at 23:00 must not hand it back to native
+                    // (MPClient.cs:93-99 doctrine). Classified from the 48-gate list.
+                    if (MPClient.IsClientInWorld)
                         return false;   // pure client: never self-saves the recover point (the host coordinates it)
                 }
                 catch { }
@@ -6126,8 +6144,17 @@ namespace BigAmbitionsMP
         // and credits completion via the native diploma fields + event.  The
         // StudyActivity never starts — this Prefix swallows it at the single
         // funnel every activity passes through.
+        //
+        // 1.0 PORT (sweep-2 #1, 2026-08-29): THE FUNNEL MOVED.  0.11's type
+        // overload forwarded to Show(IPlayerActivity, EntityController) — the
+        // overload this used to patch.  1.0 added a PRIVATE
+        // Show(IPlayerActivity, bool allowUsingVehicle) and points BOTH public
+        // overloads at it (PlayerActivityUI.cs:193-205), so the school door
+        // (an IPlayerActivityType call) bypassed the old target entirely —
+        // while the patch still bound and 390/390 stayed green.  Retargeted to
+        // the private overload, which is the single funnel again.
         [HarmonyPatch(typeof(PlayerActivity.PlayerActivityUI), "Show",
-            new Type[] { typeof(PlayerActivity.IPlayerActivity), typeof(EntityController) })]
+            new Type[] { typeof(PlayerActivity.IPlayerActivity), typeof(bool) })]
         public static class Patch_TrainingDoor_HonoraryDegree
         {
             static bool Prefix(PlayerActivity.IPlayerActivity playerActivity)

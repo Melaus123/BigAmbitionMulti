@@ -818,8 +818,10 @@ namespace BigAmbitionsMP
                 if (__result) return;                                     // native already said yes
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                 if (__instance == null || !MPRegisterSync.HasSyntheticNear(__instance.transform.position)) return;
-                var bm = InstanceBehavior<BuildingManager>.Instance;
-                if (bm == null || bm.buildingRegistration == null || !bm.buildingRegistration.HasValidAddress) return;
+                // 1.0 PORT (sweep-2 S6): the native gate now reads the STATION'S own BuildingContext,
+                // not the global BuildingManager (they diverge inside Hamptons houses) — mirror it.
+                var ctx = __instance.BuildingContext;
+                if (ctx?.Registration == null || !ctx.Registration.HasValidAddress) return;
                 if (!__instance.gameObject.activeInHierarchy) return;
                 if (_updating(__instance)) return;
                 try { if (__instance.Item == null || !__instance.Item.assignable) return; } catch { return; }
