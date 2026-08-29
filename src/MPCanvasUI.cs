@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -735,6 +735,7 @@ namespace BigAmbitionsMP
             MPContentFingerprint.EnsureCached();   // MAIN THREAD: compute once, well before any connect (crash 2026-07-27)
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
             TickCrashHeartbeat();    // task #5: stamp the session marker with where-we-are (~30s)
+            PlacementWatch.Tick();   // P-PLACEMENT-STRAND: a session-long placement mode is the bug; say so on a cadence
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)
             MPPerf.End("Pre.A", _sub);
             _sub = MPPerf.Begin(); MPRegisterSync.TickDuty(); MPPerf.End("RegDuty", _sub);   // mirror the native Work activity into register duty (1s self-throttle; contains the 5s employee-duty scan + staff evaluator)
@@ -7106,6 +7107,26 @@ namespace BigAmbitionsMP
                             () => _hostSettings.ImporterUrgentFeeMultiplier, v => _hostSettings.ImporterUrgentFeeMultiplier = v, 0.05f, 0f, 5f, "0.00");
             SettingsNumRow (ct, ref y, "Export x", "Multiplier on revenue earned from exporting goods.",
                             () => _hostSettings.ExportMultiplier, v => _hostSettings.ExportMultiplier = v, 0.05f, 0f, 5f, "0.00");
+            // NEW IN GAME 1.0 (row added 2026-08-29, wording user-approved). 1.0 added
+            // sellingMultiplier to DifficultySetting and GameVariables, replacing a hardcoded 0.8.
+            // It is LIVE here: editing ANY row in this window calls MarkCustom(), which sets
+            // Difficulty = "Custom", and under Custom ItemHelper.GetSellingMultiplier reads
+            // gv.sellingMultiplier directly (ItemHelper.cs:85) rather than a preset asset -
+            // GetDifficultySettings(Custom) returns null, so there is no preset to fall back to.
+            // Without this row the host shipped whatever the LAST PRESET carried while claiming a
+            // custom game; the value was synced but not choosable.
+            // MINIMUM IS 0.05, NOT 0 (2026-08-29). The game honours this value only while it is
+            // STRICTLY POSITIVE (ItemHelper.cs:85, `sellingMultiplier > 0f`), and under Custom there
+            // is no preset to fall through to - GetDifficultySettings(Custom) returns null
+            // (DifficultySetting.cs:79-82) - so a host who picked 0.00 would silently get NORMAL's
+            // 0.75 instead. A row that offers a value the game discards is the same defect as the
+            // dead "Bank interest rate" row removed a few lines above. Every selectable value here
+            // is one the game will actually use.
+            // (The game's own asset range is [Range(0.1f, 1f)]; the max is left at 5 to match every
+            // sibling row, and above 1.0 you are paid more than an item is worth - deliberate
+            // sandbox headroom, not a bug.)
+            SettingsNumRow (ct, ref y, "Sell-back x", "How much you get back when selling items, as a share of their value. 0.75 = 75% back.",
+                            () => _hostSettings.SellingMultiplier, v => _hostSettings.SellingMultiplier = v, 0.05f, 0.05f, 5f, "0.00");
             SettingsBoolRow(ct, ref y, "No wholesale/import limits", "Removes per-order quantity caps on wholesale and imports.",
                             () => _hostSettings.DisableWholesaleAndImportLimits, v => _hostSettings.DisableWholesaleAndImportLimits = v);
             SettingsBoolRow(ct, ref y, "All importer products", "Every product is importable from the start of the game.",

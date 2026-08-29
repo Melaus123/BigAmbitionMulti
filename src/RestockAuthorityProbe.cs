@@ -33,19 +33,35 @@ namespace BigAmbitionsMP
                 System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
               | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.DeclaredOnly);
 
+        private static int _logs;
+        private static int _nullLogs;
+
         [HarmonyPriority(Priority.Last)]
         static void Prefix(BuildingRegistration registration)
         {
             try
             {
-                string role = MPServer.IsRunning ? "HOST"
-                            : (MPClient.IsConnected ? "CLIENT" : "single-player");
+                // MP-only and throttled (review 2026-08-29). The question this probe exists to answer
+                // is a multiplayer/merger authority question; single-player has no second machine and
+                // no flip, so a line per in-game hour spent indoors there is pure noise. The cap
+                // matches every other logger added this round.
+                // IsClientInWorld, NOT IsConnected (2026-08-29). MPClient.cs:93-99 states the rule: "Suppressions of native world-mutating passes, SHIELDS OVER MOD-CREATED STATE, and replica protections must gate on THIS instead of IsConnected." IsConnected goes false the instant a link drops, while the MP world - and every ghost in it - is still loaded.
+                // For this probe specifically: a disconnected-but-still-in-world client STILL runs the
+                // veil and STILL makes a restock decision, so gating on IsConnected would blind the
+                // probe on exactly the machine whose decision is hardest to reason about.
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                string role = MPServer.IsRunning ? "HOST" : "CLIENT";
 
+                // Null FIRST, and it does not spend budget: the 40-line cap exists to bound the
+                // interesting decisions, and a null registration is not one of them. (Charging it
+                // could exhaust the budget on no-ops before either target case ever occurred.)
                 if (registration == null)
                 {
-                    Plugin.Logger.LogInfo($"[PROBE] restock ({role}): registration NULL — native will no-op.");
+                    if (_nullLogs++ < 2)
+                        Plugin.Logger.LogInfo($"[PROBE] restock ({role}): registration NULL — native will no-op.");
                     return;
                 }
+                if (_logs++ >= 40) return;
 
                 string key = "";
                 try { key = GameStateReader.AddressKey(registration); } catch { }

@@ -63,7 +63,7 @@ namespace BigAmbitionsMP
             AlignBakedFlag(drain);
             if (drain == DrainPercent && rest == RestPercent && morale == MoralePercent) return;
             DrainPercent = drain; RestPercent = rest; MoralePercent = morale;
-            Plugin.Logger.LogInfo($"[Needs] tuning ({source}): drain={drain}% rest={rest}% moraleTempo={morale}% (buffs ×{BuffDurationFactor:0.#}, sad roll {morale}% of native).");
+            Plugin.Logger.LogInfo($"[Needs] tuning ({source}): drain={drain}% rest={rest}% moraleTempo={morale}% (buffs ×{BuffDurationFactor:0.#}, before each modifier's own maxHoursDuration cap — see the [Morale] table).");
         }
 
         /// <summary>Round-236 (field 20260802-231834 "the host is the only person who's hungry",
@@ -173,14 +173,25 @@ namespace BigAmbitionsMP
                 {
                     var dict = AccessTools.Field(typeof(Helpers.HappinessHelper), "Modifiers")?.GetValue(null) as System.Collections.IDictionary;
                     if (dict == null) return;
-                    var sb = new System.Text.StringBuilder("[Morale] modifier table (name=amount/hours[/once]): ");
+                    // maxHoursDuration is NEW IN GAME 1.0 (HappinessModifier.cs:15, absent from 0.11)
+                    // and it CAPS this dial. Every write of hoursLeft now goes through
+                    // HappinessHelper.GetCappedHoursDuration -> Mathf.Min(hoursDuration,
+                    // modifier.maxHoursDuration), uncapped only when maxHoursDuration <= 0. So at a
+                    // 10% morale setting - a 10x stretch - any modifier with a positive cap is being
+                    // silently clamped, and WITHOUT this column a field log cannot show which ones.
+                    // The values live in ScriptableObject assets, so reading is not an option: the
+                    // only way to learn them is to print them from a running game. That is the whole
+                    // reason this dump exists, and it was missing the one field that now decides the
+                    // outcome. Printed as "cap:Nh" and omitted entirely when uncapped.
+                    var sb = new System.Text.StringBuilder("[Morale] modifier table (name=amount/hours[cap:Nh][/once]): ");
                     foreach (System.Collections.DictionaryEntry e in dict)
                     {
                         var a = e.Value; if (a == null) continue;
                         int amount = Convert.ToInt32(AccessTools.Field(a.GetType(), "amount")?.GetValue(a) ?? 0);
                         int hrs    = Convert.ToInt32(AccessTools.Field(a.GetType(), "hoursDuration")?.GetValue(a) ?? -1);
                         bool once  = Convert.ToBoolean(AccessTools.Field(a.GetType(), "oneTimeOnly")?.GetValue(a) ?? false);
-                        sb.Append($"{e.Key}={amount:+0;-0}/{hrs}h{(once ? "/once" : "")}  ");
+                        int cap    = Convert.ToInt32(AccessTools.Field(a.GetType(), "maxHoursDuration")?.GetValue(a) ?? -1);
+                        sb.Append($"{e.Key}={amount:+0;-0}/{hrs}h{(cap > 0 ? $"cap:{cap}h" : "")}{(once ? "/once" : "")}  ");
                     }
                     Plugin.Logger.LogInfo(sb.ToString());
                 }

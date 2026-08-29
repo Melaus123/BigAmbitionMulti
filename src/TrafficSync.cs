@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using UnityEngine;
 using Helpers;
 using GleyTrafficSystem;
@@ -92,6 +92,7 @@ namespace BigAmbitionsMP
         private static float _hostBroadcastTimer;
         private static float _lightBroadcastTimer;
         private static bool  _clientTrafficKilled;
+        private static int   _nonGhostHailLogs;   // throttles the declined-hail line in OnLocalTaxiHailed
 
         // model name → traffic-car prefab, built once from Gley's VehiclePool.
         private static Dictionary<string, GameObject>? _trafficPrefabs;
@@ -1252,8 +1253,38 @@ namespace BigAmbitionsMP
                 if (taxiGo == null) return;
                 if (MPServer.IsRunning) return;          // host: game already stopped its real taxi
                 if (!MPClient.IsConnected) return;
-                int index = ResolveTaxiIndex(taxiGo);
-                if (index >= 0) MPClient.SendTaxiHail(index);
+
+                // GHOST-ONLY (2026-08-29, field-proven). This used to call ResolveTaxiIndex, which
+                // falls back to the object's own VehicleComponent.GetIndex() when it is not a ghost.
+                // That fallback is the HOST path - and this method has already returned on the host
+                // two lines up, so on the only machine that reaches here it is always WRONG: it
+                // yields an index into the CLIENT's local Gley pool, which names an unrelated slot
+                // on the host.
+                //
+                // Field evidence (2026-08-29): a client hailed a 1.0 private driver - a car it had
+                // summoned LOCALLY via TrafficManager.LoadVehicle, so not a ghost - and the host
+                // logged "HostStopTaxi: no taxi with index 18." twice. Harmless only by luck: had a
+                // real taxi occupied host slot 18, the host would have force-stopped a stranger's
+                // cab for 18 seconds.
+                //
+                // A pool index is meaningful across machines ONLY for a ghost, because ghosts are
+                // keyed by the host's index. Anything else is a locally-spawned vehicle the host
+                // does not know about, and there is nothing for the host to stop. So: resolve from
+                // _ghosts alone, and say so when we decline.
+                int index = -1;
+                foreach (var kv in _ghosts)
+                    if (kv.Value.Go == taxiGo) { index = kv.Key; break; }
+
+                if (index < 0)
+                {
+                    if (_nonGhostHailLogs++ < 6)
+                        Plugin.Logger.LogInfo(
+                            $"[TrafficSync] hail on '{taxiGo.name}' is NOT a host-mirrored ghost - "
+                          + "not sending. It is a locally-spawned vehicle (e.g. a 1.0 private driver), "
+                          + "so the host has nothing to stop and its pool index means nothing there.");
+                    return;
+                }
+                MPClient.SendTaxiHail(index);
             }
             catch (Exception ex)
             {
@@ -1325,18 +1356,21 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Resolves a clicked taxi GameObject to its Gley pool index.</summary>
-        private static int ResolveTaxiIndex(GameObject go)
-        {
-            // Client: the clicked taxi is one of our ghosts — keyed by pool index.
-            foreach (var kv in _ghosts)
-                if (kv.Value.Go == go) return kv.Key;
-            // Host: a real traffic taxi — read its Gley pool index.
-            var vcComp = VehicleManager.FindComponentByName(go, "VehicleComponent");
-            var vc = vcComp != null ? vcComp as VehicleComponent : null;
-            return vc != null ? vc.GetIndex() : -1;
-        }
+        // ResolveTaxiIndex DELETED 2026-08-29. It resolved a hail to a pool index by trying the
+        // ghost table first and then falling back to the object's OWN VehicleComponent.GetIndex().
+        // Its single caller (OnLocalTaxiHailed) returns on the host before reaching it, so that
+        // fallback could only ever run on a CLIENT - where a self-reported index names a slot in the
+        // client's own pool and means nothing to the host. Field-proven wrong on 2026-08-29
+        // ("HostStopTaxi: no taxi with index 18" x2 after a client hailed a locally-summoned private
+        // driver). OnLocalTaxiHailed now resolves from _ghosts inline. Deleted rather than left
+        // unused: a helper that looks like the obvious way to answer "which vehicle is this?" is a
+        // trap sitting in the file, and the next reader would reach for it.
 
-        /// <summary>Finds a live traffic taxi's TaxiController by Gley pool index.</summary>
+        /// <summary>Finds a live traffic taxi's TaxiController by Gley pool index.
+        /// HOST-SIDE ONLY. Note this returns null for anything that is not a TaxiController -
+        /// a 1.0 PrivateDriverVehicle is a SIBLING of TaxiController (both EntityController+ITaxi,
+        /// neither derives from the other), so a private driver never resolves here. That is
+        /// correct: private drivers are summoned locally and are not host-mirrored.</summary>
         private static TaxiController? FindTaxiByIndex(int index)
         {
             var arr = GetVehiclePool();

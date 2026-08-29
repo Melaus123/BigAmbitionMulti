@@ -1298,12 +1298,29 @@ namespace BigAmbitionsMP
         // A v17 peer would drop the fields silently and render zeros; the freeze rule (design doc §8) makes
         // ANY wire-visible change a version bump — refuse mixed sessions outright.
         //
-        //  19  GAME 1.0 PORT (2026-08-29). DifficultyInfo gains SellingMultiplier — a difficulty value
-        //      1.0 added to BOTH DifficultySetting and GameVariables (default 0.75, replacing a
-        //      hardcoded 0.8) that drives ItemHelper.GetSellingMultiplier, i.e. sell-back prices.
-        //      A v18 peer omits it, deserializes 0.0 and would sell everything back for nothing —
-        //      exactly the silent-divergence case the freeze rule exists to refuse. Bumped rather
-        //      than defaulted, per that rule: wire-visible change => hard version gate.
+        //  19  GAME 1.0 PORT (2026-08-29). GameVariablesDto gains SellingMultiplier: 1.0 added
+        //      sellingMultiplier to BOTH DifficultySetting and GameVariables (GameVariables.cs:53,
+        //      default 0.75f), and it drives ItemHelper.GetSellingMultiplier, i.e. every sell-back
+        //      price in the game.
+        //
+        //      THIS ENTRY WAS WRITTEN, THEN WITHDRAWN, THEN RESTORED ON THE SAME DAY. The withdrawal
+        //      is recorded because the mistake is instructive and cheap to repeat:
+        //        * WRONG REASON FOR WITHDRAWING: "the game honours gv.sellingMultiplier only under
+        //          Difficulty.Custom (ItemHelper.cs:85), and the mod never sends Custom." The first
+        //          half is true. The second half came from reading MPServer.Preset(), which clamps
+        //          to Easy/Normal/Hard because it builds PRESETS - not from reading the path that
+        //          actually ships the host's settings.
+        //        * WHAT IS TRUE: MPCanvasUI.MarkCustom() sets _hostSettings.Difficulty = "Custom"
+        //          the moment the host hand-edits ANY row, and _hostSettings is the very DTO passed
+        //          to MPServer.StartNewGame. So the mod sends Custom routinely, and under Custom the
+        //          gate is satisfied for free: gv.sellingMultiplier defaults to 0.75f, which is > 0f.
+        //          The field is not inert; it is LIVE on every custom-difficulty session.
+        //      Lesson, and the reason this is written out rather than deleted: a helper that clamps
+        //      a value tells you nothing about what the real caller sends. Read the send path.
+        //
+        //      A v18 peer omits the key; name-keyed Newtonsoft then leaves the C# initializer 0.75,
+        //      so the peer would silently use ITS OWN sell-back rate rather than the host's. That is
+        //      a real divergence, so the freeze rule applies: wire-visible change => version bump.
         public const int Version = 19;
     }
 
@@ -1556,6 +1573,15 @@ namespace BigAmbitionsMP
         public float  EmployeeHourlySalaryMultiplier   { get; set; } = 1f;
         public float  BankInterestMultiplier           { get; set; } = 1f;
         public bool   TutorialEnabled                  { get; set; } = false;  // MP: no story quests
+        /// <summary>DEAD SINCE GAME 1.0. The banking overhaul removed the flat rate from BOTH
+        /// DifficultySetting and GameVariables, so the host now always sends 0f and the client no
+        /// longer applies it — 0f whenever the difficulty ASSET resolves (MPServer.cs:3682); on the
+        /// EA-fallback branch (MPServer.cs:3703-3709) and on MPCanvasUI's empty-DTO catch it keeps this
+        /// property's initializer, -0.5f. ("Always sends 0f" was too strong.) The FIELD stays on the wire so the DTO shape (and therefore the
+        /// protocol version) is unchanged — but note the MEANING changed under a constant version:
+        /// a released-0.2.0 peer that got past the game-name gate would apply gv.bankInterestRate = 0.
+        /// The version gate normally refuses such a peer; this is recorded because "shape unchanged"
+        /// is not by itself proof that an old peer is safe.</summary>
         public float  BankInterestRate                 { get; set; } = -0.5f;
         public float  RivalsDifficultyMultiplier       { get; set; } = 1f;
         public bool   DisableVehicleDamage             { get; set; } = false;
@@ -1567,10 +1593,10 @@ namespace BigAmbitionsMP
         public bool   DisableWholesaleAndImportLimits  { get; set; } = false;
         public bool   AllProductsAvailableFromImporters{ get; set; } = false;
         public float  ExportMultiplier                 { get; set; } = 0.65f;
-        /// <summary>NEW IN GAME 1.0 (2026-08-29). Sell-back price multiplier
-        /// (ItemHelper.GetSellingMultiplier), on both DifficultySetting and GameVariables,
-        /// replacing a hardcoded 0.8. Additive field — an older peer simply omits it and
-        /// takes the 0.75 default, which is the game's own default.</summary>
+        /// <summary>NEW IN GAME 1.0. Sell-back price multiplier (ItemHelper.GetSellingMultiplier),
+        /// on both DifficultySetting and GameVariables, replacing a hardcoded 0.8. LIVE whenever the
+        /// host has hand-edited any setting, because that flips the session to Difficulty.Custom and
+        /// the game then reads gv.sellingMultiplier directly. Default 0.75 is the game's own.</summary>
         public float  SellingMultiplier                { get; set; } = 0.75f;
 
         // ── Needs & morale tempo (2026-07-20, additive — old peers ignore) ──

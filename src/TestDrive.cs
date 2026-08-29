@@ -505,7 +505,7 @@ namespace BigAmbitionsMP
                                     {
                                         found = true;
                                         // Same native entry the passenger-follow uses (PassengerRide): the
-                                        // full door flow — interior load, staffing, positioning — force=true.
+                                        // full door flow — interior load, staffing, positioning. (1.0 dropped the force arg.)
                                         bool ok = bm.EnterBuilding(c.building, false, false, 0, -1);   // 1.0 dropped 'force'
                                         Plugin.Logger.LogInfo($"[TestDrive] enterbuilding '{addr}' → {(ok ? "OK" : "REFUSED by native")}.");
                                         break;

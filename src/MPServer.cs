@@ -3685,7 +3685,7 @@ namespace BigAmbitionsMP
                     dto.WholesaleUrgentFeeMultiplier    = ds.wholesaleUrgentFeeMultiplier;
                     dto.ImporterUrgentFeeMultiplier     = ds.importerUrgentFeeMultiplier;
                     dto.ExportMultiplier                = ds.exportMultiplier;
-                    dto.SellingMultiplier               = ds.sellingMultiplier;   // 1.0-new
+                    dto.SellingMultiplier               = ds.sellingMultiplier;   // 1.0-new; LIVE under Custom
                     // NOT ds.tutorialEnabled — MP keeps the tutorial off (story quests don't sync).
                     Plugin.Logger.LogInfo($"[Server] Difficulty preset '{dto.Difficulty}' from game asset: cash={dto.StartingMoney} rivals×{dto.RivalsDifficultyMultiplier:0.00}.");
                     return dto;
@@ -3758,7 +3758,7 @@ namespace BigAmbitionsMP
                 gv.disableWholesaleAndImportLimits   = dto.DisableWholesaleAndImportLimits;
                 gv.allProductsAvailableFromImporters = dto.AllProductsAvailableFromImporters;
                 gv.exportMultiplier                  = dto.ExportMultiplier;
-                gv.sellingMultiplier                 = dto.SellingMultiplier;   // 1.0-new
+                gv.sellingMultiplier                 = dto.SellingMultiplier;   // 1.0-new; LIVE under Custom
 
                 // difficulty is an enum FIELD on EA 0.11 (was property-shaped under
                 // interop) — property-or-field reflection keeps the type-name independence.

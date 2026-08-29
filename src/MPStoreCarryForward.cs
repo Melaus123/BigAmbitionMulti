@@ -200,8 +200,10 @@ namespace BigAmbitionsMP
         ///
         ///  1. POINTER — our own breadcrumb naming the folder we last used. Composes no name and calls
         ///     no game API, so it survives any renaming 1.0 invents. Absent on a first upgrade.
-        ///  2. WALK — vanilla's rule (SaveGameCompatibilityHelper.cs:7-19): count the version int down
-        ///     and compose "EA 0.{n}". Correct for as long as that naming holds.
+        ///  2. WALK — vanilla's rule, RE-READ FOR 1.0 (SaveGameCompatibilityHelper.cs:8-21): ask the
+        ///     game for its own previous-version LIST (GameVersion.GetPreviousVersionsString) and walk
+        ///     it newest-first. The old description here — "count the version int down and compose
+        ///     'EA 0.{n}'" — was 0.11's algorithm and no longer exists; 1.0 composes nothing.
         ///  3. RANK — parse the version NUMBER out of each sibling folder's name and take the highest.
         ///     Historical folders keep their old names whatever 1.0 renames the CURRENT one, so this is
         ///     deterministic and needs no prior state. This is the general case.

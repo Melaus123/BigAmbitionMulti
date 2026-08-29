@@ -190,8 +190,10 @@ namespace BigAmbitionsMP
         /// abort every frame and take the phone button, the hub, the loiter button and the crash-report
         /// takeover with it. NoInlining puts the throw at THIS call site, inside the caller's try. Same
         /// remedy as MPStoreCarryForward's helpers — and this is the member those sit one call BELOW:
-        /// CurrentVersionFolderPath resolves through GetSaveGameFolderName -> GetEarlyAccessVersionString,
-        /// the Early-Access-named member most likely to be retired at 1.0.</summary>
+        /// CurrentVersionFolderPath resolves through GetSaveGameFolderName -> GetVersionString ->
+        /// GetVersionByBuildNumber (1.0 GameVersion.cs:125-152). It USED to route through
+        /// GetEarlyAccessVersionString, the Early-Access-named member we predicted would be retired at
+        /// 1.0 - it was, and this isolation is why that cost nothing.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
         private static string NativeCurrentVersionFolderPath()
             => SaveGamePathHelper.CurrentVersionFolderPath()?.ToString() ?? "";

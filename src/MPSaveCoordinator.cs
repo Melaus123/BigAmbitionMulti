@@ -523,7 +523,10 @@ namespace BigAmbitionsMP
             string? why = null;
             try { if (UI.InteriorDesigner.InteriorDesignerUI.IsOpen) why = "the Interior Designer is open"; } catch { }
             if (why == null) try { if (CasinoBoatManager.IsOnCasinoBoat) why = "the player is on the casino boat"; } catch { }
-            if (why == null) try { if (PlacementActive()) why = "an item is being placed"; } catch { }
+            // Name the culprit (2026-08-29). "an item is being placed" cost a real investigation:
+            // the player did not know they were in placement mode and the message could not tell
+            // them which item, or for how long. PlacementWatch.Describe() answers both.
+            if (why == null) try { if (PlacementActive()) why = $"an item is being placed: {PlacementWatch.Describe()}"; } catch { why = "an item is being placed"; }
             if (why == null) try
             {
                 if (PlayerActivity.PlayerActivityUI.IsPanelOpen && BuildingManager.IsInsideBuilding

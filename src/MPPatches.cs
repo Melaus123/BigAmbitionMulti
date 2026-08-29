@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using HarmonyLib;
 using Buildings;
 using Helpers;
@@ -649,19 +649,28 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── Private driver hail (NEW IN GAME 1.0, 2026-08-29) ─────────────────────────────
-        // 1.0's Onyx private driver is a SECOND door onto the same machinery: PrivateDriverVehicle
-        // implements ITaxi and rides the shared TaxiSystem.TravelTo/TravelCoroutine, so the ride,
-        // the time skip and the arrival were already covered. The HAIL was not — this patch above
-        // binds TaxiController.OnClickToUseTaxi by name, and the driver's entry point is
-        // OnClickToSetDestination (Helpers/PrivateDriverVehicle.cs:228). Without this, a client
-        // commandeering a driver never sends SendTaxiHail and the host keeps simulating that
-        // vehicle: exactly the desync the taxi hook exists to prevent, on a new door.
+        // ── Private driver hail (NEW IN GAME 1.0; comment rewritten 2026-08-29 after field proof) ──
+        // 1.0's Onyx private driver is a SECOND door onto the shared TaxiSystem machinery:
+        // PrivateDriverVehicle implements ITaxi and rides TravelTo/TravelCoroutine, so the ride, the
+        // time skip and the arrival were already covered. Its click entry point is
+        // OnClickToSetDestination (Helpers/PrivateDriverVehicle.cs:228), which this patch hooks.
         //
-        // The summoned car is a REAL Gley traffic vehicle (PrivateDriverHelpers.SummonPrivateDriver-
-        // Vehicle -> TrafficManager.LoadVehicle), and _vehicle = GetComponent<VehicleComponent>() sits
-        // on the SAME GameObject — so ResolveTaxiIndex's existing VehicleComponent lookup resolves the
-        // pool index unchanged. No new plumbing, no new message type.
+        // WHAT THIS PATCH ACTUALLY DOES TODAY: nothing, by design, and that is the correct outcome.
+        // TrafficSync.OnLocalTaxiHailed now resolves the hail from the GHOST TABLE ONLY, and a
+        // private driver can never be a ghost: ghosts are cloned from Gley pool prefabs, whereas
+        // PrivateDriverVehicle is AddComponent'd onto a car the CLIENT summons locally
+        // (PrivateDriverHelpers.cs:126/168). So every private-driver click takes the "not a
+        // host-mirrored ghost - not sending" branch and logs there.
+        //
+        // THE ORIGINAL COMMENT HERE WAS WRONG and is recorded rather than deleted. It claimed the
+        // existing VehicleComponent lookup "resolves the pool index unchanged" and that without this
+        // patch "the host keeps simulating that vehicle". Both false: the index resolved was the
+        // CLIENT's own pool slot, meaningless on the host (field: "HostStopTaxi: no taxi with index
+        // 18" x2), and the host never simulated the car because the client created it.
+        //
+        // KEPT, not deleted: this is the correct door if private drivers ever become host-mirrored,
+        // and until then it is a cheap probe that names the declined hail. It cannot misfire - the
+        // decision now lives in one place, in TrafficSync, for every door onto that path.
         [HarmonyPatch]
         public static class Patch_PrivateDriverVehicle_OnClickToSetDestination
         {
@@ -1049,6 +1058,30 @@ namespace BigAmbitionsMP
         [HarmonyPatch]
         public static class Patch_GenerateParkedVehicles
         {
+            // TICK AUDIT: ParkingLaneGenerator.OnNewHour (1.0 :627) subscribes to GlobalEvents.onNewHour
+            // and, when a business's open/closed state FLIPS, queues itself onto
+            // ParkingSimulator.parkingQueueWorker.
+            // CORRECTION (2026-08-29): an earlier version of this note called it "1.0-new, no such
+            // declaration in 0.11". That was true of the METHOD NAME ONLY. 0.11 did exactly the same
+            // thing as an ANONYMOUS DELEGATE (0.11 ParkingLaneGenerator.cs:233-240, same
+            // IsBusinessOpen / _lastOpeningState / AddWork(this) body), and its queue body already
+            // ran both bracketing calls (CleanupParkedVehicles :404, DestroyBlockingParkedVehicles
+            // :412). So none of this is new; it is a PRE-EXISTING reliance found during the 1.0 audit.
+            // Note the irony: the sibling comment on the parking shield below warns that "a name
+            // surviving a version tells you nothing about what its BODY still does" - and here the
+            // inverse fired, a name APPEARING was read as behaviour appearing. That work regenerates
+            // the lane via GenerateParkedVehicles(chanceOfFreeSpot, ...) - which is RNG-driven and
+            // would therefore diverge if it ran independently on each machine.
+            // CLASSIFIED: the RNG-DIVERGENCE half needs no action, and the reason is this very
+            // patch — OnNewHour only ENQUEUES, and the queue's work reaches GenerateParkedVehicles,
+            // which the prefix below already suppresses on a client (outside job-truck lanes).
+            // NARROWED 2026-08-29 (review): that is NOT the whole work item. The same queue body
+            // also runs CleanupParkedVehicles() before it and DestroyBlockingParkedVehicles() after
+            // it (ParkingLaneGenerator.cs:888-903), and NEITHER is covered by this prefix. So on a
+            // client the lane still EMPTIES on an open/closed flip and relies on ParkedVehicleSync
+            // to refill it from the host's snapshot. That is believed fine — the host is the source
+            // of parked cars anyway — but it is a reliance, not a no-op, and saying "no action
+            // needed" flatly would have hidden it.
             static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
                 => VehicleManager.FindAllMethodsByName("GenerateParkedVehicles");
 
@@ -2740,7 +2773,7 @@ namespace BigAmbitionsMP
         // host’s lists CANNOT contain a client’s contract, plan or offer. Suppressing prevented no
         // double-run whatsoever; it stranded the CLIENT’s own feature:
         //   • a client’s food delivery never arrives and is never charged — and because
-        //     FoodDeliveryDialog.cs:43 gates on GetContracts().Count > 0, the stuck contract then
+        //     FoodDeliveryDialog.cs:44 gates on GetContracts().Count > 0, the stuck contract then
         //     BLOCKS every later order that client tries to place;
         //   • the client’s delivery gig board decays to empty and never refills (offers expire in
         //     GetOffer, refill only happens in the suppressed RunHourly);
@@ -2769,7 +2802,7 @@ namespace BigAmbitionsMP
         //   GetSupervisedStores()  (PricingManagerPlan.cs:384-400) sweeps ALL of
         //     SaveGameManager.Current.BuildingRegistrations and keeps every reg where
         //   IsSupervisedStore -> PricingManagerHelper.IsManageableBusiness(reg)
-        //     (PricingManagerHelper.cs:54-60 -- RentedByPlayer && retailPrices != null
+        //     (PricingManagerHelper.cs:54-61 -- RentedByPlayer && retailPrices != null
         //      && HasTag(generatesrevenue))   AND   reg.Neighborhood == supervisedNeighborhood.
         // A plan supervises a whole NEIGHBOURHOOD and takes everything in it that looks like mine.
         //
@@ -2782,9 +2815,23 @@ namespace BigAmbitionsMP
         // their prices. The hazard needs no grant; it exists with none.
         //
         // This is the same class of native own-assets sweep the mod already filters, so it gets the
-        // same mechanism. Veil handles the merger; this handles everything else. Both are needed:
-        // under a merger the veil makes RentedByPlayer false, so IsManageableBusiness already
-        // returns false and this postfix is a no-op -- the two do not fight.
+        // same mechanism: GameStatePatcher.HideFromOwnAssetLists, which is the MERGER-AWARE variant
+        // (GameStatePatcher.cs:2318-2329, "Use for DISPLAY/PICKER filtering only").
+        //
+        // WHY THE MERGER-AWARE ONE AND NOT IsForeignPlayerBusiness (which this used at first):
+        // IsManageableBusiness has THREE callers in 1.0 and only ONE of them is veiled -
+        //   PricingManagerPlan.cs:404   IsSupervisedStore  -> reached from RunHourly  (VEILED)
+        //   PricingManagerPlanUI.cs:81  GetSelectableNeighborhoods                    (NOT veiled)
+        //   PricingManagersPlanList.cs:277 GetOwnedBusinessCount                      (NOT veiled)
+        // The two UI callers run with the merger flip ACTIVE, where RentedByPlayer is deliberately
+        // true so partners can co-manage. IsForeignPlayerBusiness ignores the flip and would have
+        // stripped exactly the shops a merger exists to share - a feature-breaking false positive in
+        // the UI. HideFromOwnAssetLists returns false for a flipped shop, so the merger keeps working
+        // and a plain foreign shop is still excluded.
+        //
+        // Inside the veiled RunHourly path this postfix is a genuine no-op: the veil has already set
+        // RentedByPlayer false, so IsManageableBusiness short-circuits (PricingManagerHelper.cs:56)
+        // and the `if (!__result) return;` below fires first. The two do not fight.
         [HarmonyPatch]
         public static class Patch_PricingManager_IsManageableBusiness_NotAnotherPlayers
         {
@@ -2799,10 +2846,11 @@ namespace BigAmbitionsMP
             static void Postfix(BuildingRegistration registration, ref bool __result)
             {
                 if (!__result) return;                                   // already excluded
-                if (!MPServer.IsRunning && !MPClient.IsConnected) return; // single-player: native
+                // IsClientInWorld, NOT IsConnected (2026-08-29). MPClient.cs:93-99 states the rule: "Suppressions of native world-mutating passes, SHIELDS OVER MOD-CREATED STATE, and replica protections must gate on THIS instead of IsConnected." IsConnected goes false the instant a link drops, while the MP world - and every ghost in it - is still loaded.
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return; // single-player: native
                 try
                 {
-                    if (!GameStatePatcher.IsForeignPlayerBusiness(registration)) return;
+                    if (!GameStatePatcher.HideFromOwnAssetLists(registration)) return;
                     __result = false;
                     if (_logs++ < 8)
                         Plugin.Logger.LogInfo(
@@ -3066,6 +3114,12 @@ namespace BigAmbitionsMP
                 ("Helpers.EmployeeHelper",          "WorkDaily"),
                 ("Helpers.ParkingSimulator",        "RunDaily"),
                 ("Helpers.BusinessHelper",          "RunDaily"),
+                // NOT part of the NewDay chain above — listed here for proximity to its sibling.
+                // 1.0-new. Veiled above for AUTHORITY; contained here for CRASHES - the two are
+                // orthogonal and it wants both. It runs inside the GlobalEvents.onNewHour multicast
+                // (BuildingManager.cs:285-291), which this wall cannot wrap as a whole, so an
+                // uncontained throw here kills every onNewHour subscriber after it.
+                ("Helpers.BusinessHelper",          "RestockCurrentBusinessIfNeeded"),
                 ("Helpers.CompetitionHelper",       "RunDaily"),
                 ("Helpers.ProductMarketHelper",     "RunDaily"),
                 ("AdManager",                       "RunDaily"),
@@ -5493,7 +5547,14 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── Patch: VehicleParkingHelper trigger callbacks — skip on GHOSTS (2026-06-25).
+        // ── Patch: VehicleParkingHelper ghost shield (2026-06-25; list trimmed to Update 2026-08-29).
+        // NOTE ON THE HEADER BELOW: it was written when this class bound the TRIGGER callbacks, and
+        // that premise no longer applies to anything it binds — after the trim it patches Update
+        // alone, which IS gated by Behaviour.enabled. Kept anyway, because the sibling Start-skip's
+        // `enabled = false` only covers a ghost that was ALREADY stripped when Start ran; a vehicle
+        // stripped AFTER Start keeps running Update with a live `enabled`. That is the case Update
+        // still guards. (Also: Update dereferencing _carController on its first line is NOT a 1.0
+        // change — 0.11's VehicleParkingHelper.cs:93-95 did the same.)
         // The Start-skip above disables the component on ghosts, but Unity still delivers collider
         // TRIGGER callbacks regardless of Behaviour.enabled, and they deref the same stripped
         // CarController → an UNHANDLED NullReferenceException per ghost-vs-parking-trigger contact
@@ -5509,11 +5570,24 @@ namespace BigAmbitionsMP
                 // gone; spot selection moved to a POLLED path whose Update() derefs _carController on
                 // its very first line (`if (_carController.controlledByPlayer)`) — unguarded, so a
                 // ghost NREs every frame there instead. "Update" is therefore in the list now.
-                // The loop skips names that do not resolve, so this stays correct on BOTH versions —
-                // and because the class still bound OnTriggerExit, the gap reported as neither
-                // "failed" nor "dead": it degraded in total silence. That is why the list is explicit.
+                // The loop skips names that do not resolve. (It no longer buys 0.11 compatibility —
+                // this assembly now has hard 1.0-only bindings, e.g. ItemHelper.ClearPriceCaches and the
+                // 5-arg EnterBuilding. The tolerant style is still worth keeping for the NEXT update.)
+                // The list is written out EXPLICITLY because when OnTriggerEnter vanished in 1.0 the
+                // class still bound OnTriggerExit, so the gap reported as neither "failed" nor "dead":
+                // it degraded in total silence. That is why the list is explicit.
+                // LIST TRIMMED 2026-08-29 after reading 1.0's VehicleParkingHelper end to end
+                // instead of guessing from method NAMES. What the four-name list actually was:
+                //   "OnTriggerStay"  - never existed in EITHER version. Pure fiction.
+                //   "OnTriggerEnter" - existed in 0.11 (:33), deleted in 1.0.
+                //   "OnTriggerExit"  - exists (1.0 :99) but its body now touches only `other` and
+                //                      `availableAutoParkSpot`. It no longer dereferences
+                //                      _carController, so patching it protected NOTHING.
+                //   "Update"         - the only real one: 1.0 :176 opens with
+                //                      `if (_carController.controlledByPlayer)`, unguarded.
+                // A name surviving a version tells you nothing about what its BODY still does.
                 var t = typeof(VehicleParkingHelper);
-                foreach (var name in new[] { "Update", "OnTriggerEnter", "OnTriggerExit", "OnTriggerStay" })
+                foreach (var name in new[] { "Update" })
                 {
                     var m = t.GetMethod(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                     if (m != null) yield return m;
@@ -5522,6 +5596,13 @@ namespace BigAmbitionsMP
 
             static bool Prefix(VehicleParkingHelper __instance)
             {
+                // MP GATE: this is a PER-FRAME prefix and GetComponentInParent walks the hierarchy
+                // every call, so single-player - which has no ghosts to shield - should pay nothing.
+                // IsClientInWorld, NOT IsConnected (2026-08-29). MPClient.cs:93-99 states the rule: "Suppressions of native world-mutating passes, SHIELDS OVER MOD-CREATED STATE, and replica protections must gate on THIS instead of IsConnected." IsConnected goes false the instant a link drops, while the MP world - and every ghost in it - is still loaded.
+                // Concretely here: MPServer.Stop() ("Stop hosting" while staying in the world) despawns
+                // NO ghosts, so a host who stops hosting keeps every remote-vehicle ghost with
+                // IsRunning false and IsConnected false. IsClientInWorld covers that and the drop window.
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
                 try { return __instance.GetComponentInParent<CarController>() != null; }   // ghost (no CarController) → skip
                 catch { return true; }
             }

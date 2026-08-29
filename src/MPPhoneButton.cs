@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.UI;
@@ -491,16 +491,36 @@ namespace BigAmbitionsMP
                 var container = smartphoneRoot.Find("Container");
                 if (container == null)
                 {
+                    // Must be an ANCESTOR OF THE BUTTON GRID (review 2026-08-29). GetComponentsInChildren
+                    // includes the root itself and returns in hierarchy order, so "first CollapsibleWindow"
+                    // could pick the phone ROOT, or the radio sub-window, and then the grow would resize
+                    // the wrong object. The phone body is by definition the window the app buttons live
+                    // inside, so test exactly that. Only if nothing qualifies do we take a first match.
+                    // TAKE THE INNERMOST QUALIFYING ANCESTOR, not the first (fix 2026-08-29).
+                    // GetComponentsInChildren walks PARENTS BEFORE CHILDREN and includes the root, and
+                    // the phone ROOT is itself an ancestor of the button grid - so "first match + break"
+                    // would happily select the root, which is exactly the outcome the ancestor test was
+                    // added to prevent. It only ever excluded SIBLING sub-windows (the radio panel).
+                    // Keep overwriting and let the deepest qualifying ancestor win: that is the phone
+                    // body, because the app buttons live inside it by construction.
+                    Transform? loose = null;
                     foreach (var c in smartphoneRoot.GetComponentsInChildren(typeof(Component), true))
                     {
                         var cc = c as Component;
                         if (cc == null) continue;
                         if (cc.GetType().Name != "CollapsibleWindow") continue;
                         if (cc.transform as RectTransform == null) continue;
-                        container = cc.transform;
-                        Plugin.Logger.LogInfo($"[PhoneBtn] 'Container' not found by name - using the CollapsibleWindow transform '{container.name}' instead.");
-                        break;
+                        if (buttons.IsChildOf(cc.transform) && cc.transform != buttons)
+                            container = cc.transform;          // no break - deeper matches overwrite
+                        else if (loose == null) loose = cc.transform;
                     }
+                    if (container == null && loose != null)
+                    {
+                        container = loose;
+                        Plugin.Logger.LogWarning("[PhoneBtn] no CollapsibleWindow is an ancestor of the app-button grid - falling back to the first one found; the grow may target the wrong object.");
+                    }
+                    if (container != null)
+                        Plugin.Logger.LogInfo($"[PhoneBtn] 'Container' not found by name - using the CollapsibleWindow transform '{container.name}' instead.");
                 }
                 var crt = container != null ? container as RectTransform : null;
                 if (crt == null)
