@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 
@@ -184,10 +185,15 @@ namespace BigAmbitionsMP
         // FindPreviousStore's try, and the ladder below is actually reached instead of the whole method
         // failing before its first line (review MAJOR-1).
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static int NativeVersionInt() => MainMenuController.currentVersion.version;
-
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        private static string NativeVersionFolderName(int n) => GameVersion.GetEarlyAccessVersionString(n);
+        private static List<string> NativePreviousVersionNames()
+        {
+            // 1.0 REPLACED the version-int walk (GetEarlyAccessVersionString is gone): the game
+            // now derives its save-folder name from a data table keyed by buildNumber, and
+            // GetPreviousVersionsString() returns the previous SAVE-FOLDER names (oldest first)
+            // from that same table — so this walk speaks whatever naming the game invents next.
+            var l = GameVersion.GetCurrent()?.GetPreviousVersionsString();
+            return l ?? new List<string>();
+        }
 
         /// <summary>Name the store to carry forward, by four rules in DESCENDING trust. Every rule only
         /// ever NAMES a folder — nothing in here writes, moves or deletes anything.
@@ -210,9 +216,10 @@ namespace BigAmbitionsMP
             // 1 ── vanilla's walk
             try
             {
-                for (int num = NativeVersionInt() - 1; num > 0; num--)
+                var prevNames = NativePreviousVersionNames();
+                for (int i = prevNames.Count - 1; i >= 0; i--)   // newest previous version first
                 {
-                    string cand = Path.Combine(mpRoot, NativeVersionFolderName(num));
+                    string cand = Path.Combine(mpRoot, prevNames[i]);
                     if (string.Equals(Path.GetFileName(cand), current, StringComparison.OrdinalIgnoreCase)) continue;
                     if (Directory.Exists(cand) && HasSessionDirs(cand)) { via = "walk"; return cand; }
                 }

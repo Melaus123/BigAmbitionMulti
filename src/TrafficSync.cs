@@ -1,4 +1,4 @@
-using System.Reflection;
+﻿using System.Reflection;
 using UnityEngine;
 using Helpers;
 using GleyTrafficSystem;
@@ -778,6 +778,23 @@ namespace BigAmbitionsMP
         // ── Client: traffic-ghost spawning (from Gley's own prefab pool) ──────
 
         private static bool _prefabMapDiagLogged;
+
+        /// <summary>Gives out a pooled traffic prefab by model name, for callers that need a
+        /// REAL prefab reference a ghost does not carry. Returns null until the pool is built.
+        /// Added 2026-08-29 for the 1.0 end-of-taxi-ride path (see TaxiRideEndFix).</summary>
+        internal static GameObject? PooledPrefab(string model)
+        {
+            try
+            {
+                BuildPrefabMap();
+                if (_trafficPrefabs == null || string.IsNullOrEmpty(model)) return null;
+                if (_trafficPrefabs.TryGetValue(model, out var go)) return go;
+                foreach (var kv in _trafficPrefabs)
+                    if (string.Equals(kv.Key, model, StringComparison.OrdinalIgnoreCase)) return kv.Value;
+                return null;
+            }
+            catch { return null; }
+        }
 
         /// <summary>Builds the model→prefab map from Gley's VehiclePool (once).</summary>
         private static void BuildPrefabMap()

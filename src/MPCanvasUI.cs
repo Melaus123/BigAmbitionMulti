@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -701,8 +701,9 @@ namespace BigAmbitionsMP
             if (Input.GetKeyDown(KeyCode.F9))
             {
                 Plugin.Logger.LogInfo("[DevCheat] F9 — taxi-destination map (dev travel).");
-                try { InstanceBehavior<CityManager>.Instance.cityMap.ToggleTaxiMode(isOn: true); }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[DevCheat] F9: {ex.Message}"); }
+                // 1.0: ToggleTaxiMode is gone; SetTaxiMode(ITaxi) needs a live taxi, which this
+                // no-cab cheat doesn't have. Disabled rather than half-ported.
+                Plugin.Logger.LogWarning("[DevCheat] F9 dev travel is unavailable on game 1.0 (native taxi-map API changed).");
             }
             // F7: dev weather toggle — forces a local rain transition through the
             // SAME apply path the weather sync uses, so the whole loop (host F7 →
@@ -2060,7 +2061,7 @@ namespace BigAmbitionsMP
                     return;
                 }
                 var act = _trainPending;
-                var settings = MPReflect.Get(act.GetType(), act, "_diplomaSettings") as DiplomaSettings;
+                var settings = MPReflect.Get(act.GetType(), act, "_diplomaData") as DiplomaData;   // 1.0: DiplomaSettings became DiplomaData
                 var diploma  = MPReflect.Get(act.GetType(), act, "_diploma") as Diploma;
                 if (settings == null || diploma == null) { _trainPending = null; return; }
                 // Prerequisite gate: an advanced course can't be taken until its
@@ -2075,13 +2076,13 @@ namespace BigAmbitionsMP
                         $"Requires the {settings.requiredDiploma} course first."); } catch { }
                     _trainPending = null; return;
                 }
-                int remaining = settings.RequiredHours * 60 - diploma.minutesStudied;
+                int remaining = settings.requiredMinutes - diploma.minutesStudied;   // 1.0: minutes are stored directly
                 if (remaining <= 0)
                 {
                     try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Info, "Course already completed."); } catch { }
                     _trainPending = null; return;
                 }
-                int cost = Mathf.CeilToInt(remaining / 60f * settings.PricePerHour);
+                int cost = Mathf.CeilToInt(remaining / 60f * settings.pricePerHour);
                 string course = diploma.name.ToString();
 
                 if (!ReferenceEquals(_trainShownFor, act))
@@ -2128,7 +2129,7 @@ namespace BigAmbitionsMP
                     { "diplomaName", course },
                     { "hours",   (remaining / 60).ToString() },
                     { "minutes", (remaining % 60).ToString() },
-                    { "taxDeductibleName", "businesstype_school" },
+                    { "taxDeductibleName", "ba:businesstype_school" },   // 1.0 added the "ba:" prefix (StudyActivity.cs:202 SetTaxDeductibleName); 0.11 had none. Consumer TaxHelper.cs:285 uses this string verbatim as the deduction bucket key, so the old value filed tuition into an orphan bucket with no localization — silently, no exception.
                 };
                 bool paid = false;
                 try
@@ -2140,7 +2141,7 @@ namespace BigAmbitionsMP
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Train] charge: {ex.Message}"); }
                 if (paid)
                 {
-                    diploma.minutesStudied = settings.RequiredHours * 60;
+                    diploma.minutesStudied = settings.requiredMinutes;   // 1.0: minutes stored directly
                     diploma.completed = true;
                     try { GameEvent.Invoke("ba:gameevent_diplomagranted"); } catch { }
                     try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Success, $"Honorary degree purchased — {course}"); } catch { }
@@ -7090,8 +7091,11 @@ namespace BigAmbitionsMP
                             () => _hostSettings.EmployeeHourlySalaryMultiplier, v => _hostSettings.EmployeeHourlySalaryMultiplier = v, 0.05f, 0f, 5f, "0.00");
             SettingsNumRow (ct, ref y, "Bank interest x", "Multiplier applied to bank interest amounts.",
                             () => _hostSettings.BankInterestMultiplier, v => _hostSettings.BankInterestMultiplier = v, 0.05f, 0f, 5f, "0.00");
-            SettingsNumRow (ct, ref y, "Bank interest rate", "Base bank rate. Negative means you pay to hold a balance.",
-                            () => _hostSettings.BankInterestRate, v => _hostSettings.BankInterestRate = v, 0.05f, -2f, 2f, "0.00");
+            // "Bank interest rate" row REMOVED for game 1.0 (2026-08-29): the banking overhaul deleted
+            // the flat base rate from BOTH DifficultySetting and GameVariables, so the host now sends 0
+            // and the client no longer applies it — the dial drove nothing. A labelled, tooltipped
+            // control that does nothing is a defect, not design. The "Bank interest x" MULTIPLIER row
+            // above is unaffected: it still exists in 1.0, is still synced, and still works.
             SettingsNumRow (ct, ref y, "Rival difficulty x", "Strength of AI rival companies. Higher = tougher rivals.",
                             () => _hostSettings.RivalsDifficultyMultiplier, v => _hostSettings.RivalsDifficultyMultiplier = v, 0.05f, 0f, 5f, "0.00");
             SettingsNumRow (ct, ref y, "Customer promotion x", "Effectiveness of marketing at attracting customers.",
@@ -7125,7 +7129,9 @@ namespace BigAmbitionsMP
             SettingsNumRow (ct, ref y, "Rest speed %", "How fast energy recovers while resting (bed/bench/car), as % of normal.",
                             () => _hostSettings.RestSpeedPercent, v => _hostSettings.RestSpeedPercent = (int)v,
                             10f, 10f, 1000f, "0");
-            SettingsNumRow (ct, ref y, "Morale multiplier %", "Speed of morale pressure as % of normal. Lower = positive effects last longer AND sad periods are rarer (10% = buffs last 10x, sad periods 10x rarer).",
+            // Wording corrected for game 1.0 (2026-08-29): the sad-period half of this setting no
+            // longer exists — 1.0 deleted that subsystem outright — so the tooltip no longer promises it.
+            SettingsNumRow (ct, ref y, "Morale multiplier %", "How long positive morale effects last, as % of normal. Lower = they last longer (10% = buffs last 10x).",
                             () => _hostSettings.MoraleTempoPercent, v => _hostSettings.MoraleTempoPercent = (int)v,
                             1f, 1f, 100f, "0");
             if (!loadMode) {

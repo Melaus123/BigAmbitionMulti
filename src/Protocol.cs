@@ -1297,7 +1297,14 @@ namespace BigAmbitionsMP
         //       "rename" / "logo" / "uniform" / "uniformimport".
         // A v17 peer would drop the fields silently and render zeros; the freeze rule (design doc §8) makes
         // ANY wire-visible change a version bump — refuse mixed sessions outright.
-        public const int Version = 18;
+        //
+        //  19  GAME 1.0 PORT (2026-08-29). DifficultyInfo gains SellingMultiplier — a difficulty value
+        //      1.0 added to BOTH DifficultySetting and GameVariables (default 0.75, replacing a
+        //      hardcoded 0.8) that drives ItemHelper.GetSellingMultiplier, i.e. sell-back prices.
+        //      A v18 peer omits it, deserializes 0.0 and would sell everything back for nothing —
+        //      exactly the silent-divergence case the freeze rule exists to refuse. Bumped rather
+        //      than defaulted, per that rule: wire-visible change => hard version gate.
+        public const int Version = 19;
     }
 
     /// <summary>Sent by client on connect.</summary>
@@ -1560,14 +1567,20 @@ namespace BigAmbitionsMP
         public bool   DisableWholesaleAndImportLimits  { get; set; } = false;
         public bool   AllProductsAvailableFromImporters{ get; set; } = false;
         public float  ExportMultiplier                 { get; set; } = 0.65f;
+        /// <summary>NEW IN GAME 1.0 (2026-08-29). Sell-back price multiplier
+        /// (ItemHelper.GetSellingMultiplier), on both DifficultySetting and GameVariables,
+        /// replacing a hardcoded 0.8. Additive field — an older peer simply omits it and
+        /// takes the 0.75 default, which is the game's own default.</summary>
+        public float  SellingMultiplier                { get; set; } = 0.75f;
 
         // ── Needs & morale tempo (2026-07-20, additive — old peers ignore) ──
         // Single-percent controls, "% of native"; 0 = the respective system off.
         public int NeedsDrainPercent             { get; set; } = 10;    // energy+hunger drain; 0 drives native DisableEnergy
         public int RestSpeedPercent              { get; set; } = 300;   // energy regen while resting
-        /// <summary>ONE dial for morale pressure, "% of native speed" (min 1):
-        /// buff durations scale INVERSELY (10% → positives last 10×) and the
-        /// sad-period roll scales directly (10% → 0.1%/hour at zero morale).</summary>
+        /// <summary>Morale-buff duration dial, "% of native speed" (min 1): buff durations
+        /// scale INVERSELY (10% → positives last 10×). Game 1.0 deleted the sad-period
+        /// subsystem, so the second half of this dial's original job (scaling the sad-period
+        /// roll) no longer exists; the wire field and its meaning for buffs are unchanged.</summary>
         public int MoraleTempoPercent            { get; set; } = 10;
     }
 

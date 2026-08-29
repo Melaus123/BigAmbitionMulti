@@ -77,7 +77,11 @@ namespace BigAmbitionsMP
         // overloads — the name-only patch failed "Ambiguous match" and the wallet bypass guard was
         // silently NOT applied. The (float, Address) overload is the one that writes Money directly;
         // the other two funnel into it.
-        [HarmonyPatch(typeof(Helpers.RealEstateHelper), "SellBuildingForCompat", typeof(float), typeof(Address))]
+        // 1.0 retyped the price parameter float -> double (2026-08-29). The old typeof(float) still
+        // BOUND, because .NET's default binder widens float->double when only one candidate matches —
+        // but that is leniency, not a contract, and would turn ambiguous the moment another overload
+        // appears. Declared exactly now. The pre/postfix only snapshot Money, so behaviour is unchanged.
+        [HarmonyPatch(typeof(Helpers.RealEstateHelper), "SellBuildingForCompat", typeof(double), typeof(Address))]
         public static class Patch_RealEstateHelper_SellForCompat_WalletForward
         {
             static void Prefix(out float __state) => __state = MoneyNow();

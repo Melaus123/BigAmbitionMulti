@@ -3203,7 +3203,7 @@ namespace BigAmbitionsMP
                             var ii = kv.Value;
                             if (ii == null) continue;
                             if (!fullRebuild && liveById.ContainsKey(kv.Key)) continue;   // untouched
-                            try { bm.InstantiateSingleInstance(ii, false); spawned++; }
+                            try { bm.InstantiateSingleInstance(ii, null, false); spawned++; }   // 1.0: (instance, container, onlyVisual)
                             catch (Exception ex) { failed++; if (failed <= 3) Plugin.Logger.LogWarning($"[Patcher] InstantiateSingleInstance id={ii.id}: {ex.Message}"); }
                         }
                     }
@@ -4178,7 +4178,7 @@ namespace BigAmbitionsMP
                     if (gi?.realEstate == null) return;
                     float refund = 0f;
                     foreach (var re in gi.realEstate)
-                        if (GameStateReader.AddressKey(re.address) == addressKey) refund += re.purchasePrice;
+                        if (GameStateReader.AddressKey(re.address) == addressKey) refund += (float)re.purchasePrice;   // 1.0: double now
                     int removed = gi.realEstate.RemoveAll(x => GameStateReader.AddressKey(x.address) == addressKey);
                     if (removed > 0)
                     {

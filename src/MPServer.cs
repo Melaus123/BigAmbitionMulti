@@ -3679,12 +3679,13 @@ namespace BigAmbitionsMP
                     dto.MarketPriceMultiplier           = ds.marketPriceMultiplier;
                     dto.EmployeeHourlySalaryMultiplier  = ds.employeeHourlySalaryMultiplier;
                     dto.BankInterestMultiplier          = ds.bankInterestMultiplier;
-                    dto.BankInterestRate                = ds.bankInterestRate;
+                    dto.BankInterestRate                = 0f;   // 1.0 banking overhaul removed the flat rate (BankSettings assets x the multiplier now); wire field kept for shape
                     dto.RivalsDifficultyMultiplier      = ds.rivalsDifficultyMultiplier;
                     dto.BaseCustomerPromotionMultiplier = ds.baseCustomerPromotionMultiplier;
                     dto.WholesaleUrgentFeeMultiplier    = ds.wholesaleUrgentFeeMultiplier;
                     dto.ImporterUrgentFeeMultiplier     = ds.importerUrgentFeeMultiplier;
                     dto.ExportMultiplier                = ds.exportMultiplier;
+                    dto.SellingMultiplier               = ds.sellingMultiplier;   // 1.0-new
                     // NOT ds.tutorialEnabled — MP keeps the tutorial off (story quests don't sync).
                     Plugin.Logger.LogInfo($"[Server] Difficulty preset '{dto.Difficulty}' from game asset: cash={dto.StartingMoney} rivals×{dto.RivalsDifficultyMultiplier:0.00}.");
                     return dto;
@@ -3746,7 +3747,7 @@ namespace BigAmbitionsMP
                 gv.employeeHourlySalaryMultiplier    = dto.EmployeeHourlySalaryMultiplier;
                 gv.bankInterestMultiplier            = dto.BankInterestMultiplier;
                 gv.tutorialEnabled                   = dto.TutorialEnabled;
-                gv.bankInterestRate                  = dto.BankInterestRate;
+                // gv.bankInterestRate — removed by the 1.0 banking overhaul; the multiplier above carries difficulty
                 gv.rivalsDifficultyMultiplier        = dto.RivalsDifficultyMultiplier;
                 gv.disableVehicleDamage              = dto.DisableVehicleDamage;
                 gv.disableVehicleFuel                = dto.DisableVehicleFuel;
@@ -3757,6 +3758,7 @@ namespace BigAmbitionsMP
                 gv.disableWholesaleAndImportLimits   = dto.DisableWholesaleAndImportLimits;
                 gv.allProductsAvailableFromImporters = dto.AllProductsAvailableFromImporters;
                 gv.exportMultiplier                  = dto.ExportMultiplier;
+                gv.sellingMultiplier                 = dto.SellingMultiplier;   // 1.0-new
 
                 // difficulty is an enum FIELD on EA 0.11 (was property-shaped under
                 // interop) — property-or-field reflection keeps the type-name independence.

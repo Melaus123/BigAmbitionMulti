@@ -792,7 +792,7 @@ namespace BigAmbitionsMP
     {
         static void Postfix(CurrentBuildingUI __instance)
         {
-            try { if (__instance?.ownerActions != null && (HousingFurniture.LocalGuestHere() || HousingFurniture.LocalHelperHere())) __instance.ownerActions.gameObject.SetActive(true); }
+            try { if (__instance?.ownerActions != null && (HousingFurniture.LocalGuestHere() || HousingFurniture.LocalHelperHere())) foreach (var go in __instance.ownerActions) { if (go != null) go.SetActive(true); } }   // 1.0: ownerActions is GameObject[]
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] ungate design: {ex.Message}"); }
         }
     }

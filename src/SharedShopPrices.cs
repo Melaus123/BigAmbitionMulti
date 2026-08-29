@@ -424,7 +424,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    var field = __instance != null ? __instance.retailPrice : null;
+                    var field = __instance != null ? __instance.retailPrice?.tmpInputField : null;   // 1.0: retailPrice is the game's InputField wrapper now
                     if (field == null) return;
                     field.onValueChanged.AddListener(delegate (string _)
                     {

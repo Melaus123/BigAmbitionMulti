@@ -786,7 +786,7 @@ namespace BigAmbitionsMP
                 var target = ResolveBuilding(_goalAddr);
                 if (target == null) { Plugin.Logger.LogWarning($"[PassFollow] goal Enter: can't resolve '{_goalAddr}' — dropping."); _goal = FollowGoal.None; return; }
                 SoftUnpin();
-                bm.EnterBuilding(target, false, false, 0, -1, true);   // keep the goal until we confirm inside next tick
+                bm.EnterBuilding(target, false, false, 0, -1);   // 1.0 dropped 'force'; keep the goal until we confirm inside next tick
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] TickFollowGoal: {ex.Message}"); }
         }

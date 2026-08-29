@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using HarmonyLib;
 using Buildings;
 using Helpers;
@@ -646,6 +646,41 @@ namespace BigAmbitionsMP
                         TrafficSync.OnLocalTaxiHailed(__instance.gameObject);
                 }
                 catch { /* never let a taxi click break the game */ }
+            }
+        }
+
+        // ── Private driver hail (NEW IN GAME 1.0, 2026-08-29) ─────────────────────────────
+        // 1.0's Onyx private driver is a SECOND door onto the same machinery: PrivateDriverVehicle
+        // implements ITaxi and rides the shared TaxiSystem.TravelTo/TravelCoroutine, so the ride,
+        // the time skip and the arrival were already covered. The HAIL was not — this patch above
+        // binds TaxiController.OnClickToUseTaxi by name, and the driver's entry point is
+        // OnClickToSetDestination (Helpers/PrivateDriverVehicle.cs:228). Without this, a client
+        // commandeering a driver never sends SendTaxiHail and the host keeps simulating that
+        // vehicle: exactly the desync the taxi hook exists to prevent, on a new door.
+        //
+        // The summoned car is a REAL Gley traffic vehicle (PrivateDriverHelpers.SummonPrivateDriver-
+        // Vehicle -> TrafficManager.LoadVehicle), and _vehicle = GetComponent<VehicleComponent>() sits
+        // on the SAME GameObject — so ResolveTaxiIndex's existing VehicleComponent lookup resolves the
+        // pool index unchanged. No new plumbing, no new message type.
+        [HarmonyPatch]
+        public static class Patch_PrivateDriverVehicle_OnClickToSetDestination
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var t = VehicleManager.FindGameType("Helpers.PrivateDriverVehicle");
+                return t?.GetMethod("OnClickToSetDestination",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            }
+
+            static void Postfix(UnityEngine.Component __instance)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    if (__instance != null)
+                        TrafficSync.OnLocalTaxiHailed(__instance.gameObject);
+                }
+                catch { /* never let a driver click break the game */ }
             }
         }
 
@@ -2683,6 +2718,103 @@ namespace BigAmbitionsMP
             }
         }
 
+        // NOTE (2026-08-29): 1.0's new RestockCurrentBusinessIfNeeded is handled by the MERGER
+        // AUTHORITY VEIL above, not by a client-side skip. See the Steps entry for the reasoning —
+        // the veil already expresses "run on the real owner's machine only", which is exactly what
+        // this pass needs, and a client-side skip got it wrong in both directions.
+
+        // ── REMOVED 2026-08-29: the three "new 1.0 hourly tick" client suppressions ───────────
+        // Added, deployed and field-run 2026-08-29, then REVERTED the same day after an Opus review
+        // plus a confirming grep. The reasoning that put them here was wrong, so it is recorded here
+        // rather than deleted — the next person to see these three ticks will have the same idea.
+        //
+        // THE CLAIM WAS: FoodDeliveryHelper.RunHourly, PricingManagerHelper.RunHourly and
+        // FoodDeliveryJobHelper.RunHourly mutate HOST-OWNED save state, so a client running them
+        // would double-charge, double-deliver, and roll its own world into the shared save.
+        //
+        // WHAT IS ACTUALLY TRUE: all three operate on PER-MACHINE save state this mod never syncs.
+        //   FoodDeliveryHelper    → SaveGameManager.Current.FoodDeliveryContracts  (0 refs in src/)
+        //   PricingManagerHelper  → SaveGameManager.Current.pricingManagerPlans    (0 refs in src/)
+        //   FoodDeliveryJobHelper → SaveGameManager.Current.foodDeliveryOffers      (0 refs in src/)
+        // Saves are PER-PLAYER (MPSaveCoordinator.cs:29 — "<stableId>/save.hsg per player"), so the
+        // host’s lists CANNOT contain a client’s contract, plan or offer. Suppressing prevented no
+        // double-run whatsoever; it stranded the CLIENT’s own feature:
+        //   • a client’s food delivery never arrives and is never charged — and because
+        //     FoodDeliveryDialog.cs:43 gates on GetContracts().Count > 0, the stuck contract then
+        //     BLOCKS every later order that client tries to place;
+        //   • the client’s delivery gig board decays to empty and never refills (offers expire in
+        //     GetOffer, refill only happens in the suppressed RunHourly);
+        //   • a client’s pricing-manager employee silently does nothing — prices never reapply.
+        //
+        // THE TEST THAT SHOULD HAVE BEEN APPLIED, AND NOW IS: before suppressing a tick on clients,
+        // NAME THE SYNC CHANNEL THAT CARRIES ITS RESULT TO THEM. Every other suppression in this
+        // file has one. These three had none — and "no sync channel" is the signature of per-player
+        // state, not of a host-authoritative pass. Structurally identical ticks are deliberately
+        // NOT suppressed for exactly this reason: RecruitmentHelper.RunHourly (RNG candidates into
+        // saved state), ContactsHelper.RunHourly, GamePromptHelper.RunHourly.
+        //
+        // THE REAL HAZARD IS THE OPPOSITE ONE, and it is handled elsewhere: a HOST whose pricing
+        // plan sees a merger-flipped partner shop as its own (PricingManagerHelper.IsManageableBusiness
+        // gates on registration.RentedByPlayer — precisely the flag the merger flip falsifies) and
+        // rewrites that shop’s retailPrices. That is an AUTHORITY problem, not a client problem, so
+        // PricingManagerHelper.RunHourly is now an entry in Patch_MergerAuthorityVeil.Steps above.
+        // The other two move no partner-owned state and need nothing.
+        //
+        // All three remain in Patch_GameTickChain_ContainThrows.Steps — crash containment is
+        // orthogonal to authority and is still wanted.
+
+        // -- Pricing manager: never manage ANOTHER PLAYER'S shop (2026-08-29) -----------------
+        // The merger veil entry above covers the MERGER case. It is not enough, because the merger
+        // was the wrong frame: a pricing plan does not manage buildings anyone picked. Read it:
+        //   GetSupervisedStores()  (PricingManagerPlan.cs:384-400) sweeps ALL of
+        //     SaveGameManager.Current.BuildingRegistrations and keeps every reg where
+        //   IsSupervisedStore -> PricingManagerHelper.IsManageableBusiness(reg)
+        //     (PricingManagerHelper.cs:54-60 -- RentedByPlayer && retailPrices != null
+        //      && HasTag(generatesrevenue))   AND   reg.Neighborhood == supervisedNeighborhood.
+        // A plan supervises a whole NEIGHBOURHOOD and takes everything in it that looks like mine.
+        //
+        // And on EVERY machine another player's business sits in the local list with
+        // RentedByPlayer == true -- that is exactly what GameStatePatcher.IsForeignPlayerBusiness
+        // keys on (:2306-2316), and why HideFromOwnAssetLists has to exist at all for native
+        // "my assets" sweeps. So WITHOUT a merger -- ordinary multiplayer, with or without any
+        // permission grant -- a partner's shop in my neighbourhood is RentedByPlayer=true and is
+        // NOT in MergerFlip._flipped, so the veil never touches it and my pricing manager rewrites
+        // their prices. The hazard needs no grant; it exists with none.
+        //
+        // This is the same class of native own-assets sweep the mod already filters, so it gets the
+        // same mechanism. Veil handles the merger; this handles everything else. Both are needed:
+        // under a merger the veil makes RentedByPlayer false, so IsManageableBusiness already
+        // returns false and this postfix is a no-op -- the two do not fight.
+        [HarmonyPatch]
+        public static class Patch_PricingManager_IsManageableBusiness_NotAnotherPlayers
+        {
+            static System.Reflection.MethodBase? TargetMethod() =>
+                VehicleManager.FindGameType("Buildings.Office.Headquarters.PricingManagerHelper")
+                    ?.GetMethod("IsManageableBusiness",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                      | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.DeclaredOnly);
+
+            static int _logs;
+
+            static void Postfix(BuildingRegistration registration, ref bool __result)
+            {
+                if (!__result) return;                                   // already excluded
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return; // single-player: native
+                try
+                {
+                    if (!GameStatePatcher.IsForeignPlayerBusiness(registration)) return;
+                    __result = false;
+                    if (_logs++ < 8)
+                        Plugin.Logger.LogInfo(
+                            $"[PricingMgr] excluded '{registration.BusinessName}' @ "
+                          + $"{GameStateReader.AddressKey(registration)} -- it belongs to player "
+                          + $"'{registration.businessOwnerRivalId}', not to this machine. A pricing plan "
+                          + "sweeps its whole neighbourhood, so without this it would reprice their shop.");
+                }
+                catch { /* a diagnostic must never change the answer it is reporting on */ }
+            }
+        }
+
         // Host-authoritative AI economy (2026-06-19, bucket 2): the daily AI city-economy — new/closed AI
         // businesses, residential/warehouse rent-availability swaps, and per-neighborhood market demand — must
         // run on ONE machine, or each client evolves a different city. Suppress it on clients; the host's results
@@ -2865,6 +2997,25 @@ namespace BigAmbitionsMP
                 ("Helpers.TaxHelper",               "GenerateTaxes"),
                 ("Helpers.FinancialSummaryHelper",  "CreateFinancialSummary"),  // (:24) drives NetWorth accumulation
                 ("BusinessSimulatorHelper",         "RunHourly"),               // away-from-shop revenue engine
+                // NEW IN GAME 1.0 (2026-08-29): BuildingManager.RunCurrentBuildingHourly ->
+                // BusinessHelper.RestockCurrentBusinessIfNeeded restocks the shop the local player is
+                // STANDING IN — the one building BusinessSimulatorHelper.RunHourly deliberately skips
+                // (BusinessSimulatorHelper.cs:32). It gates on registration.RentedByPlayer, which is
+                // precisely the flag the flip falsifies, so it belongs here: veiled, it fires on the
+                // real owner's machine and nowhere else. (A client-side skip was tried first and was
+                // WRONG in both directions — it left the HOST free to restock a partner's shop, and it
+                // stopped a client's OWN shop restocking while they stood in it, which no other pass
+                // covers. The veil gets both right with no new gate.)
+                ("Helpers.BusinessHelper",          "RestockCurrentBusinessIfNeeded"),
+                // NEW IN GAME 1.0 (added to the veil 2026-08-29, replacing a wrong client skip):
+                // the pricing-manager employee reapplies managed retail prices hourly and gates on
+                // registration.RentedByPlayer (PricingManagerHelper.IsManageableBusiness) — the exact
+                // flag the merger flip falsifies. Unveiled, a HOST’s plan would rewrite a partner’s
+                // flipped shop’s prices. Veiled, it sees native ownership and touches only its own.
+                // NOTE: this does NOT stop a client running it for their own shops — the plan list
+                // (SaveGameManager.Current.pricingManagerPlans) is per-player and unsynced, so each
+                // machine must run its own. Authority, not suppression.
+                ("Buildings.Office.Headquarters.PricingManagerHelper", "RunHourly"),
                 ("BusinessSimulatorHelper",         "OnTimeMachineEnd"),
                 ("Entities.ImportPartnership",      "DoDeliveries"),            // (:175/:249) import purchases + deliveries
                 ("Buildings.BuildingTypes.Shared.Dirtiness.BuildingCleanlinessHelper", "RunHourly"),   // dirt sim (:34)
@@ -2906,7 +3057,9 @@ namespace BigAmbitionsMP
             {
                 // ── NewDay chain, in call order ──
                 ("Helpers.PlayerHelper",            "IncreasePlayerAge"),
-                ("Helpers.FinancialSummaryHelper",  "SetMoneyBeforeMidnight"),
+                // ("Helpers.FinancialSummaryHelper", "SetMoneyBeforeMidnight") — DELETED in game 1.0
+                //   (method gone AND NewDay no longer calls it). Nothing left to contain; the entry
+                //   only produced a boot-time "UNPROTECTED" LogError. Removed 2026-08-29.
                 ("UI.Notification.NotificationsListUI", "CleanOldNotifications"),
                 ("Helpers.RealEstateHelper",        "RunDaily"),
                 ("Helpers.EmployeeHelper",          "PayDailyWages"),
@@ -2936,9 +3089,16 @@ namespace BigAmbitionsMP
                 ("Buildings.BuildingTypes.Shared.Dirtiness.BuildingCleanlinessHelper", "RunHourly"),
                 ("Buildings.BuildingTypes.Special.FurnitureStore.FurnitureDeliveryHelper", "RunHourly"),
                 ("Vehicles.VehicleDeliveryHelper",  "RunHourly"),
+                // NEW IN GAME 1.0 (2026-08-29) — GameManager.cs :617, :641, :644. The wall silently
+                // shrank relative to the chain when 1.0 added these; an unwrapped throw in any of
+                // them aborts every hourly step after it.
+                ("Buildings.Office.Headquarters.PricingManagerHelper",          "RunHourly"),
+                ("Buildings.BuildingTypes.Special.FoodDelivery.FoodDeliveryHelper", "RunHourly"),
+                ("Player.FoodDeliveryJob.FoodDeliveryJobHelper",                "RunHourly"),
                 ("BigAmbitions.Rivals.RivalsHelper","RunHourly"),
                 ("Extensions.GamePromptHelper",     "RunHourly"),
-                ("Helpers.BankHelper",              "RunHourly"),
+                // ("Helpers.BankHelper", "RunHourly") — the whole TYPE is gone in game 1.0 (banking
+                //   overhaul). Nothing left to contain; removed 2026-08-29 (was a boot LogError).
                 ("Entities.ContactsHelper",         "RunHourly"),
             };
 
@@ -2988,7 +3148,7 @@ namespace BigAmbitionsMP
             static bool Prefix()
             {
                 if (!MPClient.IsClientInWorld) return true;
-                ItemHelper.ClearLmpCache();
+                ItemHelper.ClearPriceCaches();   // 1.0 renamed ClearLmpCache
                 Plugin.Logger.LogInfo("[Suppress] ProductMarketHelper.RunDaily skipped on client (host-authoritative market events; LMP cache cleared).");
                 return false;
             }
@@ -4308,9 +4468,10 @@ namespace BigAmbitionsMP
                         if (GameStatePatcher.HideFromOwnAssetLists(reg)) foreign++; else own++;
                     }
                     if (foreign == 0) return;   // native count was already correct
-                    var lbl = AccessTools.Field(typeof(UI.Smartphone.Apps.Persona.CharacterInfo), "totalBusinesses")?.GetValue(__instance);
-                    var prop = lbl?.GetType().GetProperty("Arguments");
-                    if (lbl != null && prop != null) prop.SetValue(lbl, new { amount = own });
+                    // 1.0 rebuilt this screen: the label is a plain TMP_Text named 'totalBusinessesLabel'
+                    // (was a TextLocalizationComponent 'totalBusinesses' with an Arguments property).
+                    var lbl = AccessTools.Field(typeof(UI.Smartphone.Apps.Persona.CharacterInfo), "totalBusinessesLabel")?.GetValue(__instance) as TMPro.TMP_Text;
+                    if (lbl != null) lbl.SetText(own.ToString());
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Economics] character count: {ex.Message}"); }
             }
@@ -5344,8 +5505,15 @@ namespace BigAmbitionsMP
         {
             static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
             {
+                // 1.0 REWROTE auto-parking (2026-08-29): OnTriggerEnter and CarOverlapsInSpot are
+                // gone; spot selection moved to a POLLED path whose Update() derefs _carController on
+                // its very first line (`if (_carController.controlledByPlayer)`) — unguarded, so a
+                // ghost NREs every frame there instead. "Update" is therefore in the list now.
+                // The loop skips names that do not resolve, so this stays correct on BOTH versions —
+                // and because the class still bound OnTriggerExit, the gap reported as neither
+                // "failed" nor "dead": it degraded in total silence. That is why the list is explicit.
                 var t = typeof(VehicleParkingHelper);
-                foreach (var name in new[] { "OnTriggerEnter", "OnTriggerExit", "OnTriggerStay" })
+                foreach (var name in new[] { "Update", "OnTriggerEnter", "OnTriggerExit", "OnTriggerStay" })
                 {
                     var m = t.GetMethod(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                     if (m != null) yield return m;

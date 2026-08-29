@@ -208,7 +208,7 @@ namespace BigAmbitionsMP
                 var entries = BillboardAdSync.SnapshotPartners();
                 if (entries.Count == 0) return;
                 var cycles  = AccessTools.Field(typeof(AdManager), "_adCycles").GetValue(__instance)
-                                  as Dictionary<Entities.MarketingTypeName, List<AdManager.AdSettings>>;
+                                  as Dictionary<Entities.MarketingTypeName, List<AdSettings>>;   // 1.0: AdSettings is top-level now
                 var weights = AccessTools.Field(typeof(AdManager), "_adWeights").GetValue(__instance)
                                   as Dictionary<Entities.MarketingTypeName, List<float>>;
                 if (cycles == null || weights == null) return;
@@ -217,7 +217,7 @@ namespace BigAmbitionsMP
                 {
                     var key = (Entities.MarketingTypeName)type;
                     if (!cycles.TryGetValue(key, out var pool) || !weights.TryGetValue(key, out var w)) continue;
-                    pool.Add(new AdManager.AdSettings { businessName = name, isPlayerAd = true });
+                    pool.Add(new AdSettings { businessName = name, isPlayerAd = true });
                     w.Add(__instance.playerWeight);
                     added++;
                 }

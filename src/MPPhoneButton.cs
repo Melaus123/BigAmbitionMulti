@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.UI;
@@ -162,12 +162,55 @@ namespace BigAmbitionsMP
             var ui = arr[0] as Component;
             if (ui == null) return;
 
-            var buttons = ui.transform.Find("Container/Phone/AppButtons");
-            if (buttons == null) { Plugin.Logger.LogWarning("[PhoneBtn] AppButtons not found under Smartphone."); return; }
+            // ── Container resolution (REWRITTEN 2026-08-29 after game 1.0) ───────────────────
+            // This used to be ui.transform.Find("Container/Phone/AppButtons") — a fixed route
+            // through the SCENE HIERARCHY. Game 1.0 rebuilt the phone around the new
+            // Player.HUD.SmartphoneUI.SmartPhoneFrame (equippable phone cases that swap the frame
+            // sprite AND rewrite offsetMin/offsetMax), the route stopped resolving, and BOTH app
+            // icons plus the height growth vanished — announced only by 53 repetitions of
+            // "[PhoneBtn] AppButtons not found under Smartphone." in a log nobody grepped for
+            // warnings. Nothing failed to compile: the C# API did not change at all.
+            //
+            // Bind to the SERIALIZED FIELD the game itself uses instead. SmartphoneUI.Awake does
+            // appButtonTemplate.ResetTemplate() then appButtonTemplate.CreateElement() per app, so
+            // the template’s PARENT is by definition the app-button container — whatever the
+            // hierarchy is called this week. The field is identical in 0.11 and 1.0 (both
+            // declare it as a private SerializeField Transform named appButtonTemplate),
+            // which is exactly why it is
+            // a better anchor than a path: it is the thing the game cannot rename without also
+            // rewriting its own Awake.
+            Transform? buttons = null;
+            GameObject? src = null;
+            try
+            {
+                var fTemplate = t.GetField("appButtonTemplate",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                  | System.Reflection.BindingFlags.Public);
+                var tmpl = fTemplate?.GetValue(ui) as Transform;
+                if (tmpl != null) { buttons = tmpl.parent; src = tmpl.gameObject; }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[PhoneBtn] appButtonTemplate read: {ex.Message}"); }
+
+            if (buttons == null)
+            {
+                // Fallback: the pre-1.0 hierarchy path. Kept so a future layout that restores the
+                // old names still works, and so this degrades to the OLD behaviour, never worse.
+                buttons = ui.transform.Find("Container/Phone/AppButtons");
+                if (buttons != null)
+                    Plugin.Logger.LogInfo("[PhoneBtn] appButtonTemplate unavailable — fell back to the Container/Phone/AppButtons path.");
+            }
+            if (buttons == null)
+            {
+                Plugin.Logger.LogWarning("[PhoneBtn] app-button container not found: SmartphoneUI.appButtonTemplate did not resolve AND the legacy hierarchy path is gone. Phone icons will not appear.");
+                return;
+            }
             if (buttons.Find(ButtonName) != null) { _injected = true; return; }   // already there (re-entry)
 
-            var template = buttons.Find("AppButtonTemplate");
-            var src = template != null ? template.gameObject : buttons.GetChild(0).gameObject;
+            if (src == null)
+            {
+                var template = buttons.Find("AppButtonTemplate");
+                src = template != null ? template.gameObject : buttons.GetChild(0).gameObject;
+            }
 
             var go = UnityEngine.Object.Instantiate(src, buttons);
             go.name = ButtonName;
@@ -440,9 +483,31 @@ namespace BigAmbitionsMP
         {
             try
             {
+                // Same lesson as the app-button container above (2026-08-29): "Container" is a
+                // hierarchy NAME, and game 1.0 rebuilt this phone. Try the name first (cheap, and
+                // correct whenever it still exists), then fall back to the thing that actually
+                // identifies this object regardless of naming: it is the transform carrying the
+                // CollapsibleWindow component, which the code below already reaches for by type.
                 var container = smartphoneRoot.Find("Container");
+                if (container == null)
+                {
+                    foreach (var c in smartphoneRoot.GetComponentsInChildren(typeof(Component), true))
+                    {
+                        var cc = c as Component;
+                        if (cc == null) continue;
+                        if (cc.GetType().Name != "CollapsibleWindow") continue;
+                        if (cc.transform as RectTransform == null) continue;
+                        container = cc.transform;
+                        Plugin.Logger.LogInfo($"[PhoneBtn] 'Container' not found by name - using the CollapsibleWindow transform '{container.name}' instead.");
+                        break;
+                    }
+                }
                 var crt = container != null ? container as RectTransform : null;
-                if (crt == null) return false;
+                if (crt == null)
+                {
+                    Plugin.Logger.LogWarning("[PhoneBtn] phone body not found (no 'Container' child and no CollapsibleWindow) - icons will still inject, but the phone will not grow a row.");
+                    return false;
+                }
                 float liveH = crt.rect.height;
 
                 // CollapsibleWindow stores POSITIONS, not sizes (dump-confirmed:

@@ -146,20 +146,17 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── Sad-period odds: probabilistic veto on the trigger — native rolls its
-        // 1%/hour, we pass SadChancePercent% of the triggers through.  Also
-        // covers the console command (harmless).  ─────────────────────────────
-        [HarmonyPatch(typeof(Helpers.HappinessHelper), "TriggerSadPeriod")]
-        public static class Patch_TriggerSadPeriod_ChanceScale
-        {
-            static bool Prefix()
-            {
-                if (!InMp || MoralePercent >= 100) return true;
-                if (UnityEngine.Random.Range(0f, 100f) < MoralePercent) return true;
-                Plugin.Logger.LogInfo($"[Needs] sad-period trigger vetoed (morale tempo {MoralePercent}% of native).");
-                return false;
-            }
-        }
+        // ── Sad-period odds: REMOVED for game 1.0 (2026-08-29). ───────────────
+        // 1.0 deleted the entire sad-period subsystem — TriggerSadPeriod, UpdateSadPeriods,
+        // CurrentSadPeriod, and the SadPeriod/SadPeriodType types are all gone from the game.
+        // The patch class that vetoed the trigger is therefore deleted, not repaired: there is
+        // nothing left to veto, and a string-literal target the compiler cannot check made it
+        // the one class that failed at startup on 1.0 ("Undefined target method").
+        //
+        // MoralePercent still does real work — it drives BuffDurationFactor in
+        // Patch_AddModifier_PositiveDurationScale above — but its scope is now HALF what the
+        // name implies: positive happiness-buff duration only, no sad-period tempo. The host
+        // setting's label/tooltip should be revisited if that distinction matters to players.
 
         // ── One-time morale table dump: the amounts/durations live in game data
         // assets (invisible to the decompile) — print them once per game run so

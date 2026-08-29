@@ -40,7 +40,7 @@ namespace BigAmbitionsMP
                         int slot = Traverse.Create(__instance).Field("doorID").GetValue<int>() + 1;
                         bool canEnter = false, blocked = false, whFull = false, slotUsed = false, entranceBlocked = false;
                         try { canEnter = Helpers.BuildingHelper.CanEnterBuilding(cbc.building.Address); } catch { }
-                        try { blocked = BuildingManager.IsBuildingBlockedByAnyService(cbc); } catch { }
+                        try { blocked = BuildingManager.IsBuildingBlockedByAnyService(cbc.building.Address); } catch { }   // 1.0: takes an Address
                         try { whFull = Traverse.Create(typeof(BuildingManager)).Method("IsWarehouseFull", cbc).GetValue<bool>(); } catch { }
                         try { slotUsed = Helpers.BuildingHelper.VehicleSlotIsUsed(cbc, slot); } catch { }
                         try { entranceBlocked = Helpers.BuildingHelper.IsAnyCarBlockingTheEntrance(carController, slot, cbc.building); } catch { }
