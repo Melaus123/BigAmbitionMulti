@@ -840,7 +840,7 @@ namespace BigAmbitionsMP
             {
                 if (__result) return;                                     // native already said yes
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
-                if (__instance == null || !MPRegisterSync.HasSyntheticNear(__instance.transform.position)) return;
+                if (__instance == null || !MPRegisterSync.HasSyntheticFor(__instance)) return;   // field 150521: identity-matched, no cross-building borrow
                 // 1.0 PORT (sweep-2 S6): the native gate now reads the STATION'S own BuildingContext,
                 // not the global BuildingManager (they diverge inside Hamptons houses) — mirror it.
                 var ctx = __instance.BuildingContext;

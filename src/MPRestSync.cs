@@ -676,6 +676,32 @@ namespace BigAmbitionsMP
                                             _foreignWarnNext = nowT + 60f;
                                             Plugin.Logger.LogWarning(
                                                 $"[Rest] FOREIGN BLOCKER HELD (round-90, log-only): {string.Join(", ", overdue)} outside any activity — building exits silently dead and WASD frozen while it persists. No action taken.");
+                                            // PROBE-START: P-ENTRY-BAIL (wedge census — rides the 60s-throttled watchdog WARN above)
+                                            // Field 150521: a held PurchaseUI + an unmanned till is the "stuck in the
+                                            // supermarket" signature (the self-checkout queue joined, nobody to serve).
+                                            // One census line pairs the wedge with the staffing state of the building
+                                            // the player is actually inside — same two station sources [StaffSpawn]
+                                            // walks. Log-only.
+                                            try
+                                            {
+                                                var bmP = InstanceBehavior<BuildingManager>.Instance;
+                                                var regP = bmP?.buildingRegistration;
+                                                if (regP != null && BuildingManager.IsInsideBuilding)
+                                                {
+                                                    int stationsP = 0, mannedP = 0;
+                                                    void CountP(Transform root)
+                                                    {
+                                                        if (root == null) return;
+                                                        foreach (var stP in root.GetComponentsInChildren<EmployeeStationController>(true))
+                                                        { if (stP == null) continue; stationsP++; try { if (stP.employeeInstance != null) mannedP++; } catch { } }
+                                                    }
+                                                    try { CountP(bmP!.IndoorItemContainer); CountP(bmP.currentLayout); } catch { }
+                                                    bool ownedP = false; try { ownedP = bmP!.IsPlayerOwnedBusiness; } catch { }
+                                                    Plugin.Logger.LogWarning($"[PROBE] EntryBail/wedge census: inside='{GameStateReader.AddressKey(regP)}' playerOwned={ownedP} stations={stationsP} (incl. inactive) manned={mannedP} — pairs the held blocker above with the staffing state of this building.");
+                                                }
+                                            }
+                                            catch { }
+                                            // PROBE-END: P-ENTRY-BAIL (wedge census)
                                         }
                                     }
 

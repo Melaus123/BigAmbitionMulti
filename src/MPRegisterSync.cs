@@ -151,6 +151,56 @@ namespace BigAmbitionsMP
             return RegKey(id, c != null ? c.transform.position : Vector3.zero);
         }
 
+        /// <summary>Field 20260830-150521: POSITION IS NOT IDENTITY ACROSS BUILDINGS.
+        /// Same-template interiors mount on identical world coordinates, so a REMEMBERED
+        /// position sits within metres of stations in a DIFFERENT building whenever that
+        /// other interior is the loaded one (127/127 staffing-sweep invocations in that
+        /// bundle bound cross-building; a hairdresser's remembered till matched a BANK's).
+        /// Registry records are keyed by the station's ItemInstance id since item 7 —
+        /// resolving the LIVE object must use the SAME identity, so this is the one
+        /// resolver every record→live-station lookup goes through.  Legacy position-keyed
+        /// records (no instance id on the wire) fall back to nearest-position but only
+        /// accept a station whose BUILDING matches the record's.</summary>
+        private static EmployeeStationController? FindStationByRegKey(UnityEngine.Object[]? stations,
+            string regKey, Vector3 recordPos, string recordAddr)
+        {
+            if (stations == null || string.IsNullOrEmpty(regKey)) return null;
+            if (regKey.StartsWith("sid:", StringComparison.Ordinal))
+            {
+                string want = regKey.Substring(4);   // bare-id compare — no per-station string mint
+                foreach (var o in stations)
+                {
+                    var c = o as EmployeeStationController;
+                    if (c == null || !IsLiveStation(c)) continue;
+                    string cid = ""; try { cid = c.ItemInstance?.id ?? ""; } catch { }
+                    if (cid.Length > 0 && cid == want) return c;
+                }
+                return null;
+            }
+            var near = NearestStationIn(stations, recordPos, 2.5f);
+            return near != null && StationAddr(near) == recordAddr ? near : null;
+        }
+
+        /// <summary>Review F11: the station registry keeps stations from toggled-INACTIVE
+        /// layouts (pooled interiors are disabled, not destroyed), and an inactive station's
+        /// lazily-created BuildingContext answers with the building the player is in NOW —
+        /// which would defeat the address gate. "Live" = active in the scene.</summary>
+        private static bool IsLiveStation(EmployeeStationController? c)
+        {
+            try { return c != null && c.gameObject.activeInHierarchy; } catch { return false; }
+        }
+
+        /// <summary>The building a LIVE station actually sits in ("" when unresolvable).</summary>
+        private static string StationAddr(EmployeeStationController? st)
+        {
+            try
+            {
+                var r = st?.BuildingContext?.Registration;
+                return r == null ? "" : GameStateReader.AddressKey(r);
+            }
+            catch { return ""; }
+        }
+
         /// <summary>Sweep batch 11 (2026-08-18): the building that CONTAINS a station, resolved
         /// from the station's stable instance id (reliable since item 7).  Duty toggles used to
         /// trust the entry-hook shop context, and entry paths that skip the hook (hand-vehicle
@@ -266,7 +316,7 @@ namespace BigAmbitionsMP
                 var stationObjs = GetStationsCached();
                 foreach (var kv in _hideBodyAt)
                 {
-                    var reg = NearestStationIn(stationObjs, kv.Value.pos, 2.5f);   // item 7: keys no longer parse to positions
+                    var reg = FindStationByRegKey(stationObjs, kv.Key, kv.Value.pos, kv.Value.addr);   // field 150521: identity-first (position matched other buildings' tills)
                     var emp = reg?.employee;
                     var tpc = emp?.employeeTpc;
                     if (tpc == null)
@@ -347,12 +397,18 @@ namespace BigAmbitionsMP
         /// <summary>Round-137 - after the in-place item apply copies a changed drawn queue, rebuild the LIVE
         /// line (the interior is only loaded when the local player is inside; elsewhere the next interior load
         /// rebuilds from the repaired data anyway).  Uses the game's own SetCustomAnchors -> SetUpWaitingLine.</summary>
-        internal static void RebuildDrawnQueueAt(Vector3 pos, System.Collections.Generic.List<SerializableVector3> customPositions)
+        internal static void RebuildDrawnQueueAt(Vector3 pos, string? stationId, System.Collections.Generic.List<SerializableVector3> customPositions)
         {
             try
             {
                 var stations = GetStationsCached();   // round-186: registry, never a scene walk
-                var st = NearestStationIn(stations, pos, 2.5f);
+                // Field 150521: the applied ItemInstance's id IS the station identity — prefer it.
+                // Review F12: the LIVE controller may not carry its id yet (ItemInstance is
+                // assigned post-construction), so a failed id-match falls back to nearest-position
+                // — safe here because the queue apply only runs for the interior the local player
+                // is inside, so the fallback cannot cross buildings.
+                var st = (string.IsNullOrEmpty(stationId) ? null : FindStationByRegKey(stations, "sid:" + stationId, pos, ""))
+                    ?? NearestStationIn(stations, pos, 2.5f);
                 var wl = (st as EmployeeStations.IWaitingLineHolder)?.GetWaitingLine();
                 if (wl == null) return;
                 var anchors = new System.Collections.Generic.List<Vector3>();
@@ -381,7 +437,11 @@ namespace BigAmbitionsMP
             try
             {
                 var stations = GetStationsCached();   // round-186: registry, never a scene walk
-                var st = NearestStationIn(stations, pos, 2.5f);
+                // Field 150521 + review F12: identity-first with the same positional fallback
+                // as RebuildDrawnQueueAt above (same same-interior-by-construction rationale).
+                string ownId = ""; try { ownId = owner?.id ?? ""; } catch { }
+                var st = (string.IsNullOrEmpty(ownId) ? null : FindStationByRegKey(stations, "sid:" + ownId, pos, ""))
+                    ?? NearestStationIn(stations, pos, 2.5f);
                 var wl = (st as EmployeeStations.IWaitingLineHolder)?.GetWaitingLine();
                 if (wl == null) return;   // interior not loaded here — the nulled data rebuilds the line natively on next load
                 try { wl.creator?.Reset(); } catch { }
@@ -392,17 +452,8 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[QueueSync] clear: {ex.Message}"); }
         }
 
-        /// <summary>Inverse of Key() — the sweep needs a position to find the till again.</summary>
-        private static Vector3 ParseKey(string k)
-        {
-            try
-            {
-                var parts = k.Split(':');
-                if (parts.Length != 3) return Vector3.zero;
-                return new Vector3(float.Parse(parts[0]), float.Parse(parts[1]), float.Parse(parts[2]));
-            }
-            catch { return Vector3.zero; }
-        }
+        // (ParseKey removed 2026-08-31: dead since item 7 — keys no longer parse to positions
+        //  and every record→live-station lookup goes through FindStationByRegKey.)
 
         /// <summary>Round-119: the rounded-position key of the till THIS player is personally working
         /// ("" = not on personal duty).  Position keys are the identifier that has been verified to match
@@ -476,7 +527,11 @@ namespace BigAmbitionsMP
                     k = ""; e = default;
                     string pk = Key(pos);
                     foreach (var kv in _cashiers)
-                        if (kv.Value.playerId == p.PlayerId && Key(kv.Value.pos) == pk) { k = kv.Key; e = kv.Value; break; }
+                        if (kv.Value.playerId == p.PlayerId && Key(kv.Value.pos) == pk
+                            // Field 150521: same player + same rounded position can exist in TWO buildings
+                            // (same-template interiors share coordinates) — the address must agree too.
+                            && (string.IsNullOrEmpty(p.Address) || string.IsNullOrEmpty(kv.Value.address) || kv.Value.address == p.Address))
+                        { k = kv.Key; e = kv.Value; break; }
                 }
                 if (!string.IsNullOrEmpty(k) && e.playerId == p.PlayerId)
                 {
@@ -639,21 +694,36 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Register] duty: {ex.Message}"); }
         }
 
-        /// <summary>Is the register at this world position staffed by another
-        /// player?  The duty map's ONE consumer-facing question — gates the
-        /// self-checkout routing and the queue guard.</summary>
-        public static bool IsStaffedByOtherPlayer(Vector3 registerPos)
-            => TryFindCashierByPos(registerPos, out var e) && e.playerId != MPConfig.PlayerId;
+        /// <summary>Is this register staffed by another player?  The duty map's ONE
+        /// consumer-facing question — gates the self-checkout routing and the queue
+        /// guard.  Field 150521: takes the STATION (identity), not its position.</summary>
+        public static bool IsStaffedByOtherPlayer(EmployeeStationController? station)
+            => TryFindCashierForStation(station, out var e) && e.playerId != MPConfig.PlayerId;
 
-        /// <summary>Item 7: position-probe lookup against the (now id-keyed) duty map —
-        /// callers that only hold a world position match on the stored position value.</summary>
-        private static bool TryFindCashierByPos(Vector3 pos,
+        /// <summary>Field 150521 identity rule: match a LIVE station against the duty map by
+        /// the station's own registry key (same derivation both sides — item 7); a legacy
+        /// position-keyed entry must also name this station's building, because same-template
+        /// interiors in other buildings share these coordinates ("" address = sender never
+        /// knew it — accepted, cannot be disproved).</summary>
+        private static bool TryFindCashierForStation(EmployeeStationController? st,
             out (string playerId, Vector3 pos, bool employee, string address, string stationId) e)
         {
-            string pk = Key(pos);
-            if (_cashiers.TryGetValue(pk, out e)) return true;   // position-keyed entry (no instance id)
-            foreach (var v in _cashiers.Values)
-                if (Key(v.pos) == pk) { e = v; return true; }
+            e = default;
+            if (st == null) return false;
+            // Review F2: the direct hit is identity-safe ONLY for a real "sid:" key — a station
+            // without an ItemInstance keys by rounded POSITION, and position keys collide across
+            // buildings (the very defect this change removes). Position matches must always go
+            // through the address-gated loop below.
+            string liveKey = RegKeyForStation(st);
+            if (liveKey.StartsWith("sid:", StringComparison.Ordinal) && _cashiers.TryGetValue(liveKey, out e)) return true;
+            string pk = Key(st.transform.position);
+            string addr = StationAddr(st);
+            foreach (var kv in _cashiers)
+            {
+                if (kv.Key.StartsWith("sid:", StringComparison.Ordinal)) continue;   // id-keyed — handled above
+                var v = kv.Value;
+                if (Key(v.pos) == pk && (string.IsNullOrEmpty(v.address) || v.address == addr)) { e = v; return true; }
+            }
             e = default; return false;
         }
 
@@ -1223,19 +1293,33 @@ namespace BigAmbitionsMP
         private static float _nextEvalAt;
 
         /// <summary>Is this station under EMPLOYEE duty (used by the staffing
-        /// gate override — personal duty must never force the gate).</summary>
-        public static bool IsEmployeeDutyStation(Vector3 pos)
-            => TryFindCashierByPos(pos, out var e) && e.employee;
+        /// gate override — personal duty must never force the gate).  Field 150521:
+        /// takes the station, matched by identity via TryFindCashierForStation.</summary>
+        public static bool IsEmployeeDutyStation(EmployeeStationController? station)
+            => TryFindCashierForStation(station, out var e) && e.employee;
 
-        /// <summary>Round-144 - true when this position is a till WE staffed with a stand-in.  Scope guard
-        /// for the ShouldUpdateEmployee ownership bypass (BusinessPatches): only OUR stations get it.</summary>
-        internal static bool HasSyntheticNear(Vector3 pos)
+        /// <summary>Round-144 / field 150521 - true when THIS station is a till WE staffed with a
+        /// stand-in.  Scope guard for the ShouldUpdateEmployee ownership bypass (BusinessPatches):
+        /// only OUR stations get it.  Identity-first (was a bare position compare, which let a
+        /// same-coordinate station in a DIFFERENT building borrow the bypass); legacy position-
+        /// keyed records must also name this station's building.</summary>
+        internal static bool HasSyntheticFor(EmployeeStationController? st)
         {
             try
             {
-                string k = Key(pos);
-                foreach (var v in _synthetics.Values)
-                    if (Key(v.pos) == k) return true;
+                if (st == null) return false;
+                // Review F2: direct hit only for "sid:" keys — see TryFindCashierForStation.
+                string liveKey = RegKeyForStation(st);
+                if (liveKey.StartsWith("sid:", StringComparison.Ordinal) && _synthetics.ContainsKey(liveKey)) return true;
+                string pk = Key(st.transform.position);
+                string addr = StationAddr(st);
+                foreach (var kv in _synthetics)
+                {
+                    if (kv.Key.StartsWith("sid:", StringComparison.Ordinal)) continue;   // id-keyed — handled above
+                    // Exact address required (no empty tolerance): safe because TryStaffSynthetic
+                    // refuses an empty addressKey, so every record carries one.
+                    if (Key(kv.Value.pos) == pk && kv.Value.addressKey == addr) return true;
+                }
             }
             catch { }
             return false;
@@ -2489,8 +2573,23 @@ namespace BigAmbitionsMP
                     if ((kv.Value.pos - me).sqrMagnitude > NearRadius2) continue;   // its interior can't be the loaded one
                     // Round-30 (WS2): any EmployeeStationController counts — the old CashRegisterController-
                     // only search was the visitor-side twin of the owner-side checkout whitelist.
-                    var st = NearestStationIn(stations, kv.Value.pos, 2f);
-                    if (st == null) continue;                    // interior not loaded here
+                    // Field 150521: resolve by IDENTITY, not distance — the old NearestStationIn(pos, 2m)
+                    // here drove ANOTHER building's registers whenever a same-coordinate interior was loaded.
+                    var st = FindStationByRegKey(stations, kv.Key, kv.Value.pos, kv.Value.addressKey);
+                    if (st == null)
+                    {
+                        // Review F3 (ship-probes-with-fixes): the OLD positional bind logged an
+                        // "invoking" line even when it drove the WRONG building — after the
+                        // identity fix, silence here would make "fix works" and "resolver finds
+                        // nothing" identical in a field log. Near-only (radius gate above), 60s/record.
+                        float nowR = Time.unscaledTime;
+                        if (!_resolveMissNextAt.TryGetValue(kv.Key, out var tR) || nowR >= tR)
+                        {
+                            _resolveMissNextAt[kv.Key] = nowR + 60f;
+                            Plugin.Logger.LogInfo($"[SynthStaff] record '{kv.Key}' (home '{kv.Value.addressKey}') resolved NO live station this pass — interior not loaded here, or the loaded station lacks its instance id.");
+                        }
+                        continue;
+                    }
                     if (st.employeeInstance != null) continue;   // already staffed
                     Plugin.Logger.LogInfo($"[SynthStaff] invoking UpdateEmployee(false) on station at '{kv.Key}'.");
                     st.UpdateEmployee(false);
@@ -2556,6 +2655,10 @@ namespace BigAmbitionsMP
             }
         }
 
+        // Review F3 fix-diagnostic (permanent, not a probe): throttle for the sweep's
+        // resolution-miss line above.
+        private static readonly Dictionary<string, float> _resolveMissNextAt = new();
+
         // PROBE-START: P-SEAT-DECLINE (state: per-station throttle + id shortener)
         private static readonly Dictionary<string, float> _seatDeclineNextAt = new();
         private static string ShortIdP(string? s) => string.IsNullOrEmpty(s) ? "<none>" : (s!.Length > 12 ? s.Substring(0, 12) : s!);
@@ -2569,7 +2672,7 @@ namespace BigAmbitionsMP
                 foreach (var o in stations)
                 {
                     var c = o as EmployeeStationController;
-                    if (c == null) continue;
+                    if (c == null || !IsLiveStation(c)) continue;   // review F11: never resolve to a pooled-inactive station
                     float d2 = (c.transform.position - from).sqrMagnitude;
                     if (d2 < bestD2) { bestD2 = d2; best = c; }
                 }

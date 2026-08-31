@@ -5567,7 +5567,7 @@ namespace BigAmbitionsMP
                     // Round-30 (WS3): the override now also admits ANY station inside a shop we hold a synced
                     // staff roster for — the injected real-id records + the synced shifts let the game's own
                     // engine staff every station, not just duty-broadcast tills.
-                    bool duty = MPRegisterSync.IsEmployeeDutyStation(__instance.transform.position);
+                    bool duty = MPRegisterSync.IsEmployeeDutyStation(__instance);   // field 150521: identity-matched
                     bool roster = !duty && MPRegisterSync.HasRosterFor(MPRegisterSync.CurrentShopAddress);
                     if (!duty && !roster) return;
                     bool unstaffed = false;
@@ -5682,7 +5682,7 @@ namespace BigAmbitionsMP
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                 try
                 {
-                    if (!MPRegisterSync.IsEmployeeDutyStation(__instance.transform.position)) return;
+                    if (!MPRegisterSync.IsEmployeeDutyStation(__instance)) return;
                     Plugin.Logger.LogInfo(__result == null
                         ? "[StaffEval] GetEmployeeWorkShift → null"
                         : $"[StaffEval] GetEmployeeWorkShift → shift(emp='{__result.employeeId}' station='{__result.itemInstanceId}' {__result.startingHour}-{__result.endingHour})");
@@ -6161,7 +6161,7 @@ namespace BigAmbitionsMP
                     string owner = MPRegisterSync.CurrentShopOwner;
                     if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return true;
                     if (!MPRestSync.AllPlayers().Contains(owner)) return true;          // AI shops native
-                    if (!MPRegisterSync.IsStaffedByOtherPlayer(__instance.transform.position))
+                    if (!MPRegisterSync.IsStaffedByOtherPlayer(__instance))   // field 150521: identity-matched
                     {
                         // Decline path (the "no employees" field bug): a real
                         // player's shop, but no one on duty at THIS register — fall
@@ -6238,7 +6238,7 @@ namespace BigAmbitionsMP
                     if (myShop) return;                                          // my own shop → native
                     // Another player actively working THIS register → the Interact prefix routes to
                     // self-checkout; CanOrder must stay native so the customer path engages.
-                    if (MPRegisterSync.IsStaffedByOtherPlayer(__instance.transform.position)) return;
+                    if (MPRegisterSync.IsStaffedByOtherPlayer(__instance)) return;   // field 150521: identity-matched
                     bool staffed = false;
                     try { staffed = __instance.employeeInstance != null; } catch { }
                     if (staffed) return;                                         // a real cashier mans it (AI via synced shift, or synthetic) — allow

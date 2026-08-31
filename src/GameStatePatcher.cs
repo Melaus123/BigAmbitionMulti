@@ -1718,7 +1718,7 @@ namespace BigAmbitionsMP
                             {
                                 prevLive.customPositions = incQ;
                                 MPRegisterSync.RebuildDrawnQueueAt(
-                                    new UnityEngine.Vector3(ii.position.x, ii.position.y, ii.position.z), incQ);
+                                    new UnityEngine.Vector3(ii.position.x, ii.position.y, ii.position.z), ii.id, incQ);
                             }
                         }
                         else if (prevLive.customPositions != null && prevLive.customPositions.Count > 0)

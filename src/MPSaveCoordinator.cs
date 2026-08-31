@@ -999,7 +999,7 @@ namespace BigAmbitionsMP
                 File.WriteAllBytes(dest, raw);
                 // Round-275: land the sidecar with the save — a meta-less copy cannot be
                 // dated by ReadSaveDay (the scanner), which blinded the day validation.
-                try { if (!string.IsNullOrEmpty(data.MetaJson)) File.WriteAllText(dest + ".meta", data.MetaJson); } catch { }
+                WriteMetaSidecar(dest, data.MetaJson);
                 LogHsgWrite(data.SessionName, data.Slot.StableId, raw.Length, $"host stored {data.Slot.DisplayName}'s upload");
                 Plugin.Logger.LogInfo($"[MPSave] Stored '{data.Slot.DisplayName}' .hsg ({raw.Length}B) → {dir}");
                 DiagWrite($"HostHandleSaveData wrote .hsg ({raw.Length}B), merging slot");
@@ -1267,7 +1267,7 @@ namespace BigAmbitionsMP
                 File.WriteAllBytes(Path.Combine(folder, SaveFileName + ".hsg"), raw);
                 // Round-275b: land the served sidecar too — a meta-less local copy is
                 // undatable by the save scanner (client catalog read day 0; round-262 fired).
-                try { if (!string.IsNullOrEmpty(p.MetaJson)) File.WriteAllText(Path.Combine(folder, SaveFileName + ".hsg.meta"), p.MetaJson); } catch { }
+                WriteMetaSidecar(Path.Combine(folder, SaveFileName + ".hsg"), p.MetaJson);
                 LogHsgWrite(session, MPConfig.StableId, raw.Length, "client received own copy for load");
                 Plugin.Logger.LogInfo($"[MPSave] Received .hsg ({raw.Length}B) for session '{session}' — loading.");
                 ClearClientDisconnectMarker();   // host resolved our join (incl. any validated disconnect save) — offer consumed
@@ -1751,6 +1751,24 @@ namespace BigAmbitionsMP
             return "";
         }
 
+        /// <summary>Review F5 (2026-08-31): every mirrored .hsg write must leave the sidecar
+        /// CONSISTENT — write it when the payload carries one, DELETE any leftover when it
+        /// does not. The .hsg writes beside these are unconditional while the sidecar write
+        /// was conditional, so a payload without MetaJson left the PREVIOUS sidecar sitting
+        /// beside the NEW save — and the report tool's day column (meta-first since F4) would
+        /// then trust the stale sidecar and blame the manifest in print. One shared helper so
+        /// the five mirror sites cannot drift apart.</summary>
+        private static void WriteMetaSidecar(string hsgPath, string? metaJson)
+        {
+            try
+            {
+                string mp = hsgPath + ".meta";
+                if (!string.IsNullOrEmpty(metaJson)) File.WriteAllText(mp, metaJson);
+                else if (File.Exists(mp)) File.Delete(mp);
+            }
+            catch { }
+        }
+
         /// <summary>Read a stored .hsg from the host's session folder, gzipped, for
         /// shipping to its owner (v9: raw bytes — the attachment frame, no base64).
         /// Null if absent.</summary>
@@ -2038,7 +2056,7 @@ namespace BigAmbitionsMP
                         File.WriteAllBytes(Path.Combine(dir, name + ".hsg"), raw);
                         // Round-275b: the sidecar rides the mirror — a handoff host serving from
                         // this mirrored store needs datable copies for its own day validation.
-                        try { if (!string.IsNullOrEmpty(p.MetaJson)) File.WriteAllText(Path.Combine(dir, name + ".hsg.meta"), p.MetaJson); } catch { }
+                        WriteMetaSidecar(Path.Combine(dir, name + ".hsg"), p.MetaJson);
                         LogHsgWrite(session, p.StableId, raw.Length, "store mirror");
                         // v9 (review B2): the file is WRITTEN — confirm delivery. The host's
                         // skip memory records only on this ack, so a piece lost on the paced
@@ -3012,7 +3030,7 @@ namespace BigAmbitionsMP
                 // Round-275: stage the sidecar too — ReadSaveDay goes through the game's
                 // save scanner, which cannot see a meta-less .hsg (actualDay always read 0,
                 // so the restore feature rejected every save past day 2).
-                try { if (!string.IsNullOrEmpty(p.MetaJson)) File.WriteAllText(Path.Combine(stageDir, name + ".hsg.meta"), p.MetaJson); } catch { }
+                WriteMetaSidecar(Path.Combine(stageDir, name + ".hsg"), p.MetaJson);
                 LogHsgWrite(stageSession, stable, raw.Length, "staged for day validation");
 
                 int actualDay = ReadSaveDay(MPSaveManager.MpSessionFolder(stageSession), stable);
@@ -3038,7 +3056,7 @@ namespace BigAmbitionsMP
                     }
                     catch { }
                     File.WriteAllBytes(Path.Combine(dstDir, name + ".hsg"), raw);
-                    try { if (!string.IsNullOrEmpty(p.MetaJson)) File.WriteAllText(Path.Combine(dstDir, name + ".hsg.meta"), p.MetaJson); } catch { }
+                    WriteMetaSidecar(Path.Combine(dstDir, name + ".hsg"), p.MetaJson);
                     LogHsgWrite(session, stable, raw.Length, $"accepted disconnect save (day {actualDay} vs stored {storedDay})");
                     MergeSlot(session, new MpSlot
                     {

@@ -714,11 +714,27 @@ namespace BigAmbitionsMP
                 long budget = SaveAttachBudgetBytes;
                 string savesDir = Path.Combine(dir, "saves");
 
-                // The anomaly reference: each member's day in the ACTIVE session's manifest.
+                // The anomaly reference: each member's day in the ACTIVE session. Day source
+                // is the game's own .hsg.meta sidecar — written by the SAME native Save() call
+                // as the .hsg, so it cannot lag the file it sits beside. The mod's manifest
+                // slot is the fallback only: field 150521 proved manifest days can run days
+                // behind the files (client '-auto' listed 24, the .hsg held 26), which both
+                // corrupted this column and minted false ANOMALY attachments.
                 var activeManifest = MPSaveManager.ReadManifest(session);
                 var activeDays = new Dictionary<string, int>();
                 if (activeManifest?.Slots != null)
                     foreach (var s in activeManifest.Slots) activeDays[s.StableId] = s.Day;
+                string activeFolder = "";
+                try { activeFolder = MPSaveManager.MpSessionFolder(session); } catch { }
+                var activeDayFromMeta = new HashSet<string>();   // review F6: provenance of each reference day
+                if (!string.IsNullOrEmpty(activeFolder) && Directory.Exists(activeFolder))
+                    foreach (var md in Directory.GetDirectories(activeFolder))
+                    {
+                        string sid = Path.GetFileName(md);
+                        if (!sid.StartsWith("guid-") && !sid.StartsWith("steam-")) continue;
+                        int d = MetaDay(NewestHsgIn(md, out _));
+                        if (d >= 0) { activeDays[sid] = d; activeDayFromMeta.Add(sid); }
+                    }
 
                 foreach (var s in MPSaveCoordinator.LineageSessions(session))
                 {
@@ -741,15 +757,12 @@ namespace BigAmbitionsMP
                     {
                         string stable = Path.GetFileName(memberDir);
                         if (!stable.StartsWith("guid-") && !stable.StartsWith("steam-")) continue;   // character folders only
-                        string? hsg = null; DateTime newest = DateTime.MinValue;
-                        foreach (var f in Directory.GetFiles(memberDir, "*.hsg"))
-                        {
-                            DateTime w; try { w = File.GetLastWriteTimeUtc(f); } catch { continue; }
-                            if (w > newest) { newest = w; hsg = f; }
-                        }
+                        string? hsg = NewestHsgIn(memberDir, out DateTime newest);
                         if (hsg == null) continue;
                         var slot = manifest?.Slots?.Find(x => x.StableId == stable);
-                        int day = slot?.Day ?? -1;
+                        int manifestDay = slot?.Day ?? -1;
+                        int metaDay = MetaDay(hsg);
+                        int day = metaDay >= 0 ? metaDay : manifestDay;
                         string who = !string.IsNullOrEmpty(slot?.DisplayName) ? slot!.DisplayName : stable;
                         long bytes = 0; try { bytes = new FileInfo(hsg).Length; } catch { }
 
@@ -758,10 +771,27 @@ namespace BigAmbitionsMP
                         if (isActive || anomaly)
                         {
                             string dest = Path.Combine(savesDir, isActive ? s : "anomaly-" + s, stable, Path.GetFileName(hsg));
-                            if (AttachSaveFile(hsg, dest, budget)) { budget -= bytes; attachNote = anomaly ? "ANOMALY-ATTACHED" : "yes"; }
+                            if (AttachSaveFile(hsg, dest, budget))
+                            {
+                                budget -= bytes; attachNote = anomaly ? "ANOMALY-ATTACHED" : "yes";
+                                // Review F4: the day column is sidecar-dated — ship the sidecar beside its
+                                // save (~1KB, not counted against the budget) so the column is auditable
+                                // and the attached copy stays loadable through the native save scanner.
+                                try { string mp = hsg + ".meta"; if (File.Exists(mp)) AttachSaveFile(mp, dest + ".meta", long.MaxValue); } catch { }
+                            }
                             else attachNote = "over size budget";
                         }
-                        sb.AppendLine($"| {s} | {who} | {(day >= 0 ? day.ToString(CultureInfo.InvariantCulture) : "?")} | {bytes:N0} | {newest:yyyy-MM-dd HH:mm:ss} | {attachNote} |");
+                        // Review F6: the anomaly compare is only trustworthy when BOTH days come from
+                        // the same source — flag mixed sidecar-vs-manifest rows so a mixed-source
+                        // ANOMALY flag is never read as a proven rollback.
+                        if (anomaly && (metaDay >= 0) != activeDayFromMeta.Contains(stable))
+                            attachNote += " (mixed day sources)";
+                        // A manifest that disagrees with the sidecar is itself a defect worth
+                        // seeing in every bundle — keep it visible instead of silently healing it.
+                        string dayCell = day >= 0 ? day.ToString(CultureInfo.InvariantCulture) : "?";
+                        if (metaDay >= 0 && manifestDay >= 0 && metaDay != manifestDay)
+                            dayCell += $" (manifest says {manifestDay})";
+                        sb.AppendLine($"| {s} | {who} | {dayCell} | {bytes:N0} | {newest:yyyy-MM-dd HH:mm:ss} | {attachNote} |");
                     }
                 }
                 sb.AppendLine();
@@ -769,6 +799,44 @@ namespace BigAmbitionsMP
                 File.WriteAllText(Path.Combine(dir, "save-store.md"), sb.ToString());
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] save store attach: {ex.Message}"); }
+        }
+
+        /// <summary>Newest .hsg in one member folder (path + UTC write time). Shared by the
+        /// active-day pre-pass and the row scan so the two can never pick different files.</summary>
+        private static string? NewestHsgIn(string memberDir, out DateTime newestUtc)
+        {
+            newestUtc = DateTime.MinValue; string? best = null;
+            try
+            {
+                foreach (var f in Directory.GetFiles(memberDir, "*.hsg"))
+                {
+                    DateTime w; try { w = File.GetLastWriteTimeUtc(f); } catch { continue; }
+                    if (w > newestUtc) { newestUtc = w; best = f; }
+                }
+            }
+            catch { }
+            return best;
+        }
+
+        /// <summary>In-game day from the game's own .hsg.meta sidecar, -1 when absent or
+        /// unreadable. Native Save() snapshots day = Current.Day in the SAME call that
+        /// produces the .hsg (SaveGameManager.cs:230-242), so the DAY VALUE cannot lag the
+        /// save the way the mod's manifest slot can. Review F13 caveat: the two FILES are
+        /// not written atomically (.hsg compression is threaded, the sidecar is written
+        /// synchronously right after) — never build file-time-based rules on this pair.
+        /// The mirror pipeline ships the sidecar with every copy (round-275) and deletes
+        /// leftovers when a payload has none (review F5).</summary>
+        private static int MetaDay(string? hsgPath)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(hsgPath)) return -1;
+                string mp = hsgPath + ".meta";
+                if (!File.Exists(mp)) return -1;
+                var tok = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(mp))["day"];
+                return tok == null ? -1 : (int)tok;
+            }
+            catch { return -1; }
         }
 
         /// <summary>Copy one save file under the budget. Share-tolerant read (the .hsg may
