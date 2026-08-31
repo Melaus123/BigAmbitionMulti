@@ -803,6 +803,29 @@ namespace BigAmbitionsMP
     /// postfix re-evaluates the native expression with ONLY the ownership term removed - every other check
     /// kept (active, not-mid-update, assignable, valid address, not in placement mode) - and everything
     /// downstream (shift lookup, availability, employee body spawn) stays native.</summary>
+    /// <summary>Field 20260830-150521: native OnNewHour schedules UpdateEmployee via a
+    /// one-frame-delayed lambda that CAPTURES the station reference; the mod's interior
+    /// re-applies destroy+recreate stations in exactly that window, so the lambda can run
+    /// on a husk — and native ShouldUpdateEmployee's FIRST read (base.gameObject, :433)
+    /// throws an NRE on a destroyed component (two confirmed stacks in the field log).
+    /// A call on a husk can never be meaningful — skip it. Unity's overloaded == on the
+    /// component reference is the liveness check (fake-null for destroyed objects; a plain
+    /// C# null never reaches a Harmony instance prefix). SP keeps native behavior.</summary>
+    [HarmonyPatch(typeof(EmployeeStationController), nameof(EmployeeStationController.UpdateEmployee))]
+    public static class Patch_UpdateEmployee_SkipDestroyedStation
+    {
+        static bool Prefix(EmployeeStationController __instance)
+        {
+            if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;   // SP → native
+            if (__instance == null)   // UnityEngine.Object.== : destroyed husk
+            {
+                Plugin.Logger.LogInfo("[SynthStaff] UpdateEmployee on a DESTROYED station skipped (delayed native callback outlived an interior rebuild).");
+                return false;
+            }
+            return true;
+        }
+    }
+
     [HarmonyPatch(typeof(EmployeeStationController), "ShouldUpdateEmployee")]
     public static class Patch_ShouldUpdateEmployee_SyntheticStations
     {

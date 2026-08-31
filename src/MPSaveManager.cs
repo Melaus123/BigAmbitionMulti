@@ -272,6 +272,12 @@ namespace BigAmbitionsMP
         public static void ClearActivePlaythrough() { _activePid = ""; _activeBase = ""; }
         /// <summary>Round-222: the live world's folder id, for wire senders ("" between sessions).</summary>
         public static string ActivePlaythrough => _activePid;
+        /// <summary>The session BASE name pinned from the host — set at JOIN (world handoff)
+        /// and refreshed by every SaveNow broadcast (round-217); "" until the first pin, or
+        /// when a fresh world pinned id-only ("base named at first save"). A client's live
+        /// read of the host's current session name; feeds the truthful save-box pre-fill
+        /// (user-approved design 2026-08-31, field 20260830-205553).</summary>
+        public static string ActiveBaseName => _activeBase;
 
         /// <summary>Round-218: forget every name→folder pin. Called when the world
         /// context changes (load / new world / join / session end) — a session name

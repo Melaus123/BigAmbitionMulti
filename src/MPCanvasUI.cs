@@ -4115,9 +4115,12 @@ namespace BigAmbitionsMP
             // (Version folder is cached unconditionally at the top of Update so the
             //  poll thread never calls IL2CPP via MpCharacterFolder.)
 
-            // The host-coordinated save replaces the native one (which would write
-            // to the single-player folder, uncoordinated + visible in the SP menu).
-            MPSaveCoordinator.SuppressNativeAutosave();
+            // Native autosave suppression moved to Patch_GameManager_CheckAutoSave_
+            // SuppressInMp (field 20260830-205553) — the per-frame preventAutoSave
+            // hold broke 1.0's quicksave hotkey. The patch gates on IsRunning ||
+            // IsClientInWorld (doctrine + review F2), which covers `inMp` above and
+            // the drop windows; IsInGame() is implicit (CheckAutoSave only runs from
+            // the in-game GameManager).
 
             // Client side: ship a just-finished local save to the host.
             MPSaveCoordinator.TickPendingUploads();
@@ -7459,10 +7462,11 @@ namespace BigAmbitionsMP
 
                 if (Input.GetMouseButtonDown(0) || Input.GetKeyDown(KeyCode.Return))
                 {
-                    MPClient.SessionEnded = false;                  // lifts the freeze clamp
+                    MPClient.SessionEnded = false;                  // lifts the freeze clamp — AND the CheckAutoSave
+                                                                    // suppression patch (its gate reads SessionEnded), so
+                                                                    // SP autosave resumes here with no sticky flag to clear
                     MPClient.InMpGame     = false;                  // committed to the offline solo fork → native time allowed
                     GameStateReader.SetNativePause(false);          // lift the true pause too
-                    MPSaveCoordinator.AllowNativeAutosave();        // the suppress flag is sticky — re-enable SP autosave
                     _startupScreenGO.SetActive(false);
                     _startupScreenWasShown = false;
                     Plugin.Logger.LogInfo("[UI] Host-loss notice dismissed — continuing OFFLINE (single-player fork; MP session unaffected).");

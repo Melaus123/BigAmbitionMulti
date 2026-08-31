@@ -5098,6 +5098,46 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: GameManager.CheckAutoSave ──────────────────────────────────
+        // Native SP-folder autosave suppression, moved OFF the preventAutoSave flag
+        // (field 20260830-205553, bug-class member 5): the mod used to hold
+        // GameManager.preventAutoSave=true every frame of an MP session, which was
+        // safe in 0.11 — but 1.0 gave that SAME FLAG a new consumer, the quicksave
+        // hotkey (GameManager.cs:911 `if (preventAutoSave) ShowError("notification_
+        // cant_save")`), so every MP quicksave press showed "cannot save at this
+        // time" and never reached MiniMenu.SaveGame (where our MenuSave reroute
+        // lives). This prefix suppresses the native autosave DIRECTLY and gives the
+        // flag back to its native owners (placement mode, blocking activities) —
+        // quicksave now flows: key → MiniMenu.SaveGame → MenuSave reroute →
+        // coordinated MP save, and during placement/activities it shows the native
+        // refusal exactly as single player does.
+        // GATE (review F2, corrected same day): IsClientInWorld, NOT IsConnected —
+        // this suppresses a native pass over the loaded MP world (MPClient.cs:93-99
+        // doctrine). The poll thread clears _connected a frame BEFORE the host-loss
+        // notice arms SessionEnded (and a voluntary leave never arms it), so an
+        // IsConnected gate left windows where native autosave could write the MP
+        // character into the single-player folder. IsClientInWorld stays true
+        // through drops (InMpGame is sticky) and goes false at the offline-fork
+        // commit (InMpGame=false), so suppression still self-lifts there —
+        // replacing the old sticky-flag AllowNativeAutosave call.
+        // The midnight autosave needs nothing here: RunMidNightAutoSave is already
+        // fully replaced in MP by its own prefix above, so its preventAutoSave
+        // deferral latch can never set in a session.
+        [HarmonyPatch(typeof(GameManager), "CheckAutoSave")]
+        public static class Patch_GameManager_CheckAutoSave_SuppressInMp
+        {
+            static bool Prefix()
+            {
+                try
+                {
+                    if (MPServer.IsRunning || MPClient.IsClientInWorld)
+                        return false;   // MP world loaded (incl. dropped-link + host-loss limbo): the coordinated save replaces native autosave
+                }
+                catch { }
+                return true;            // single player / committed offline fork — native autosave runs
+            }
+        }
+
         // ── In-game pause menu (UI.MiniMenu.MiniMenu) ─────────────────────────
         // The Escape pause menu's "Save" and "Save and Exit to Desktop" buttons
         // call SaveGameManager into the SINGLE-PLAYER folder.  In an MP session
@@ -5147,6 +5187,39 @@ namespace BigAmbitionsMP
             internal static System.Reflection.MethodBase? Method(string name)
                 => Resolve()?.GetMethod(name,
                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+
+            /// <summary>The exact text our menu-open refresh last wrote into the save box
+            /// (null = we haven't seeded it). At save-click, a box that still MATCHES this
+            /// is UNEDITED — the player's intent is "save", not "rename" — so the save
+            /// runs under the CURRENT session even if the base changed between open and
+            /// click (review F2: the box is a display cache; commitments read live).</summary>
+            internal static string? LastSeededBoxText;
+
+            private static bool _panelMissLogged;
+
+            /// <summary>TRUE when the pause-menu panel is on screen (public field
+            /// `panel`, a UI Image — MiniMenu.cs:29). Fails CLOSED (false): wrongly
+            /// closing runs UIs.CloseActiveUis (placement/time-machine cancel), while
+            /// wrongly not-closing just leaves the menu open after a save. A resolve
+            /// MISS is logged once (review F4): fail-closed here also means every
+            /// menu save is treated as a quicksave — renames silently stop working —
+            /// so a future game update renaming the field must be visible in the log.</summary>
+            internal static bool IsPanelOpen(object miniMenu)
+            {
+                try
+                {
+                    var f = Resolve()?.GetField("panel",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    if (f == null)
+                    {
+                        if (!_panelMissLogged) { _panelMissLogged = true; Plugin.Logger.LogWarning("[MenuSave] MiniMenu.panel not found — panel-open checks fail closed (menu saves will behave like quicksaves; renames unavailable). Game update likely moved the field."); }
+                        return false;
+                    }
+                    return f.GetValue(miniMenu) is UnityEngine.Component comp
+                           && comp != null && comp.gameObject.activeSelf;
+                }
+                catch { return false; }
+            }
 
             /// <summary>Close the pause menu — Toggle(bool show=false), the same
             /// call the original SaveGame() makes after a successful save.</summary>
@@ -5198,6 +5271,61 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuSave] read save name: {ex.Message}"); return ""; }
             }
+
+            /// <summary>Write the save box (mirror of GetSaveName: property-first, field
+            /// fallback, then the TMP text property). Truthful pre-fill design — the box
+            /// shows the CURRENT session base when the menu opens.</summary>
+            internal static void SetSaveName(object miniMenu, string text)
+            {
+                try
+                {
+                    var t = Resolve();
+                    if (t == null) return;
+                    const System.Reflection.BindingFlags BF =
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                    object? input = t.GetProperty("saveGameName", BF)?.GetValue(miniMenu)
+                                 ?? t.GetField("saveGameName", BF)?.GetValue(miniMenu);
+                    if (input == null) { Plugin.Logger.LogWarning("[MenuSave] saveGameName not found on MiniMenu (box refresh skipped)."); return; }
+                    var textProp = input.GetType().GetProperty("text",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    textProp?.SetValue(input, text ?? "");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuSave] write save name: {ex.Message}"); }
+            }
+        }
+
+        // ── Truthful save-box pre-fill (user-approved design 2026-08-31) ──────
+        // The box natively seeds ONCE at world load from the machine's LOCAL
+        // remembered name (MiniMenu.Start) — a per-machine fossil in MP, and the
+        // root of field 20260830-205553's accidental rename: a routine save click
+        // carried a stale name and renamed the shared session for everyone.
+        // Refresh the box with the CURRENT session base every time the menu
+        // OPENS: an unedited box = a plain save of the current session; an edited
+        // box = a deliberate rename, legitimate from ANY player (user ruling).
+        // A never-saved host world shows a BLANK box until its first save mints
+        // the date-stamp default (which then shows; user-allowed); a client
+        // before its first pin is blank too — an empty name saves the current
+        // session. Single-player: gate false, box untouched.
+        [HarmonyPatch]
+        public static class Patch_MiniMenu_Toggle_SeedSessionName
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+                => MiniMenuUtil.Resolve()?.GetMethod("Toggle",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
+                    null, new Type[] { typeof(bool) }, null);   // Toggle() no-arg overload exists too — bind the bool one
+
+            static void Postfix(object __instance, bool show)
+            {
+                try
+                {
+                    if (!show) return;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                    string seed = MPSaveCoordinator.CurrentSessionBaseForDisplay();
+                    MiniMenuUtil.SetSaveName(__instance, seed);
+                    MiniMenuUtil.LastSeededBoxText = seed;   // the unedited-box reference for the save prefixes (review F2)
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuSave] box refresh: {ex.Message}"); }
+            }
         }
 
         // ── In-game MP window input suppression ───────────────────────────────
@@ -5243,9 +5371,33 @@ namespace BigAmbitionsMP
                 try
                 {
                     string name = MiniMenuUtil.GetSaveName(__instance);
+                    if (!MiniMenuUtil.IsPanelOpen(__instance))
+                    {
+                        // QUICKSAVE (the 1.0 hotkey calls SaveGame() with the menu never
+                        // shown): no box was presented, so no rename intent can exist —
+                        // ignore the fossil box text; an empty name saves the CURRENT
+                        // session (truthful-name design, user-approved 2026-08-31).
+                        name = "";
+                        Plugin.Logger.LogInfo("[MenuSave] quicksave (panel closed) → saving the current session (box text ignored).");
+                    }
+                    else if (MiniMenuUtil.LastSeededBoxText != null && name == MiniMenuUtil.LastSeededBoxText)
+                    {
+                        // UNEDITED box (still exactly what our menu-open refresh wrote): intent is
+                        // "save", not "rename" — empty ⇒ the CURRENT session, even if the base
+                        // changed between open and click (review F2). Any edit falls through and
+                        // is honored as a deliberate rename (user ruling 2026-08-31).
+                        name = "";
+                    }
                     Plugin.Logger.LogInfo($"[MenuSave] Save '{name}' → coordinated MP save (skipping SP save).");
                     MPSaveCoordinator.MenuSave(exiting: false, saveName: name);
-                    MiniMenuUtil.Close(__instance);   // mirror the original's menu-close UX
+                    // Review F3 (field 20260830-205553): close ONLY when the panel is
+                    // actually open — native ExecuteSave gates its Toggle(false) on
+                    // panel.gameObject.activeSelf (MiniMenu.cs:90). The QUICKSAVE key
+                    // calls SaveGame() with the menu CLOSED, and an unconditional
+                    // Toggle(false) runs UIs.CloseActiveUis: cancels placement mode,
+                    // the time machine, and open cargo/activity panels on every press.
+                    if (MiniMenuUtil.IsPanelOpen(__instance))
+                        MiniMenuUtil.Close(__instance);   // mirror the original's menu-close UX
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuSave] SaveGame: {ex.Message}"); }
                 return false;   // skip the single-player save
@@ -5264,6 +5416,8 @@ namespace BigAmbitionsMP
                 try
                 {
                     string name = MiniMenuUtil.GetSaveName(__instance);
+                    if (MiniMenuUtil.LastSeededBoxText != null && name == MiniMenuUtil.LastSeededBoxText)
+                        name = "";   // unedited box ⇒ save-and-exit under the CURRENT session (review F2, same rule as Save)
                     Plugin.Logger.LogInfo($"[MenuSave] Save & Exit '{name}' → coordinated MP save, then quit (no SP save).");
                     MPSaveCoordinator.MenuSave(exiting: true, saveName: name);
                     MiniMenuUtil.QuitToDesktop(__instance);

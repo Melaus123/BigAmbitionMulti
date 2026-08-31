@@ -326,6 +326,15 @@ namespace BigAmbitionsMP
             // session name (so "mp 1" makes a session "mp 1", and re-saving with the
             // same name overwrites it — normal named-save behaviour).  Empty ⇒ keep
             // the active session (or the default).
+            // RENAMES ARE LEGITIMATE FROM ANY PLAYER (user ruling 2026-08-31). The
+            // field-20260830-205553 hijack was the box's PRE-FILL, not the rename:
+            // it seeded once at world load from the machine's own remembered name (a
+            // per-machine fossil), so a routine save click smuggled a rename nobody
+            // chose. Fixed upstream (truthful-name design): the box now refreshes
+            // with the CURRENT session base at every menu open, quicksave passes ""
+            // (save-current; no box was shown, so no rename intent), and
+            // PerformLocalSave restores Current.SaveGameName to the session base.
+            // Names arriving here are therefore intentional.
             string session = SanitizeSession(saveName);
             if (!string.IsNullOrEmpty(session)) ActiveSessionName = session;
 
@@ -2281,6 +2290,15 @@ namespace BigAmbitionsMP
                 // ~a frame after Save returns) — repoint portrait reads at the
                 // freshest rotation folder.
                 if (ok) PortraitFolder = folder;
+                // DO NOT "fix" Current.SaveGameName here (review F1, 2026-08-31): native Save's
+                // default: branch sets it to the FILE name we pass ("save"), and the portrait
+                // system DEPENDS on that — the portrait is written as "save portrait.jpg"
+                // (GetCharacterPortraitPath from Current, SaveGameManager.cs:202) and our
+                // portrait-path patch rebuilds that same filename from saveGame.SaveGameName.
+                // Restoring the session base here made the two disagree and silently broke MP
+                // portraits. The save box never reads this mid-session (it is seeded by the
+                // Toggle refresh patch from the mod's own session truth), so the stale value
+                // is harmless where it is.
 
                 // CRITICAL: the game serializes the GameInstance on a BACKGROUND thread.
                 // If anything mutates the gi while that thread is reading it, the managed
@@ -2372,6 +2390,24 @@ namespace BigAmbitionsMP
                 MPSaveManager.SetActivePlaythrough(_activePlaythroughId, StripAutoSuffix(session));
                 MPSaveManager.NoteSessionPid(StripAutoSuffix(session), _activePlaythroughId);
             }
+        }
+
+        /// <summary>The session base name the pause-menu save box should SHOW on this
+        /// machine (truthful pre-fill, user-approved 2026-08-31): host — the active
+        /// session's base; client — the base pinned from the host (at join and on every
+        /// SaveNow); "" when no truth is known yet (a never-saved host world stays blank
+        /// until its first save mints the date-stamp default; a client before its first
+        /// pin stays blank too — an empty name saves the current session). StripToBase,
+        /// not StripAutoSuffix: display must also shed compound/legacy suffixes like
+        /// '-auto-recover' and '-cp-' (review F10).</summary>
+        internal static string CurrentSessionBaseForDisplay()
+        {
+            try
+            {
+                if (MPServer.IsRunning) return MPSaveManager.StripToBase(ActiveSessionName);
+                return MPSaveManager.StripToBase(MPSaveManager.ActiveBaseName);
+            }
+            catch { return ""; }
         }
 
         /// <summary>Strip a trailing automatic-save suffix ('-auto' / '-auto-N' / '-disconnect' /
@@ -3081,26 +3117,14 @@ namespace BigAmbitionsMP
         }
 
         // ── Native autosave suppression ─────────────────────────────────────────
-
-        /// <summary>While in an MP session, stop the game's built-in autosave from
-        /// firing into the single-player folder — the host-coordinated save
-        /// replaces it.  Idempotent; call from a per-frame tick on the main
-        /// thread.</summary>
-        public static void SuppressNativeAutosave()
-        {
-            try { GameManager.preventAutoSave = true; }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] SuppressNativeAutosave: {ex.Message}"); }
-        }
-
-        /// <summary>Re-enable the game's native autosave.  The suppress flag is
-        /// STICKY (nothing in the game resets it mid-world) — required when a
-        /// host-loss turns the MP world into an offline single-player fork, or
-        /// the fork would silently never autosave.</summary>
-        public static void AllowNativeAutosave()
-        {
-            try { GameManager.preventAutoSave = false; }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] AllowNativeAutosave: {ex.Message}"); }
-        }
+        // RETIRED 2026-08-30 (field 20260830-205553): SuppressNativeAutosave/
+        // AllowNativeAutosave held GameManager.preventAutoSave=true every frame of
+        // an MP session. Game 1.0 gave that flag a new consumer — the quicksave
+        // hotkey errors "cannot save at this time" on it — so every MP quicksave
+        // was refused. Native autosave is now suppressed directly by
+        // Patch_GameManager_CheckAutoSave_SuppressInMp (MPPatches), whose gate
+        // covers the host-loss limbo (SessionEnded) and self-lifts on the offline
+        // fork; preventAutoSave belongs to its native owners again.
 
         /// <summary>Coordinated-autosave interval.  Uses the host's control if set
         /// (MPConfig.AutosaveMinutes); otherwise mirrors the player's SP "minutes

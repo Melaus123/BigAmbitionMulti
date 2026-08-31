@@ -2494,10 +2494,72 @@ namespace BigAmbitionsMP
                     if (st.employeeInstance != null) continue;   // already staffed
                     Plugin.Logger.LogInfo($"[SynthStaff] invoking UpdateEmployee(false) on station at '{kv.Key}'.");
                     st.UpdateEmployee(false);
+                    // PROBE-START: P-SEAT-DECLINE (field 20260830-150521: the invoke above returns
+                    // silently while the till stays unstaffed — every 5s for minutes. WHICH native
+                    // gate refuses? Candidates, in the native decline order (EmployeeStationController
+                    // .UpdateEmployee :330-345): building availability (BuildingManager.isOpen /
+                    // temporarilyClosed / work-critical requirements), missing item requirements, the
+                    // shift lookup (shifts match on workShift.itemInstanceId == the loaded station's
+                    // ItemInstance.id — host↔client id drift orphans every shift), employee record
+                    // missing, employee unavailable. Log-only; 30s throttle per station; fires ONLY
+                    // when the seat attempt failed; self-clears when a seat succeeds.)
+                    try
+                    {
+                        if (st.employeeInstance == null)
+                        {
+                            float nowP = Time.unscaledTime;
+                            if (!_seatDeclineNextAt.TryGetValue(kv.Key, out var tP) || nowP >= tP)
+                            {
+                                _seatDeclineNextAt[kv.Key] = nowP + 30f;
+                                var regP = st.BuildingContext?.Registration;
+                                bool isOpenP = false; try { isOpenP = InstanceBehavior<BuildingManager>.Instance.isOpen; } catch { }
+                                bool tmpClosedP = false; try { tmpClosedP = regP != null && regP.temporarilyClosed; } catch { }
+                                bool workCritP = false; try { workCritP = regP != null && Helpers.BusinessHelper.AreWorkCriticalRequirementsMet(regP); } catch { }
+                                bool missingReqP = true; try { missingReqP = ItemHelper.HasAnyMissingRequirements(st.ItemInstance); } catch { }
+                                string stationIdP = ""; try { stationIdP = st.ItemInstance?.id ?? ""; } catch { }
+                                int shiftsTodayP = 0, forThisStationP = 0, coveringNowP = 0; string dayIdsP = "";
+                                try
+                                {
+                                    int hourP = TimeHelper.CurrentHour;
+                                    // Mirror the native day selection EXACTLY (GetEmployeeWorkShift :378 does
+                                    // day→index→cast, not a direct compare — measure the layer native reads).
+                                    var wantDayP = (BigAmbitions.DayNightCycle.DayOfWeekOrdered)TimeHelper.GetDayOfWeekIndex(TimeHelper.GetDayOfWeek());
+                                    var dayRowP = regP?.scheduleDays?.Find(x => x != null && x.day == wantDayP);
+                                    if (dayRowP?.workShifts != null)
+                                    {
+                                        shiftsTodayP = dayRowP.workShifts.Count;
+                                        var idsP = new HashSet<string>();
+                                        foreach (var wsP in dayRowP.workShifts)
+                                        {
+                                            if (wsP == null) continue;
+                                            idsP.Add(ShortIdP(wsP.itemInstanceId));
+                                            if (wsP.itemInstanceId == stationIdP)
+                                            {
+                                                forThisStationP++;
+                                                if (wsP.startingHour <= hourP && wsP.endingHour > hourP && !string.IsNullOrEmpty(wsP.employeeId)) coveringNowP++;
+                                            }
+                                        }
+                                        int nP = 0;
+                                        foreach (var sP in idsP) { if (nP++ >= 4) { dayIdsP += ",…"; break; } dayIdsP += (nP > 1 ? "," : "") + sP; }
+                                    }
+                                }
+                                catch { }
+                                Plugin.Logger.LogWarning($"[PROBE] SeatDecline '{kv.Key}': isOpen={isOpenP} tmpClosed={tmpClosedP} workCritOK={workCritP} missingItemReq={missingReqP} | stationItem='{ShortIdP(stationIdP)}' shiftsToday={shiftsTodayP} forThisStation={forThisStationP} coveringThisHour={coveringNowP} dayShiftItemIds=[{dayIdsP}] | seat still empty after invoke.");
+                            }
+                        }
+                        else _seatDeclineNextAt.Remove(kv.Key);
+                    }
+                    catch (Exception pex) { Plugin.Logger.LogWarning($"[PROBE] SeatDecline: {pex.Message}"); }
+                    // PROBE-END: P-SEAT-DECLINE
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] evaluator: {ex.Message}"); }
             }
         }
+
+        // PROBE-START: P-SEAT-DECLINE (state: per-station throttle + id shortener)
+        private static readonly Dictionary<string, float> _seatDeclineNextAt = new();
+        private static string ShortIdP(string? s) => string.IsNullOrEmpty(s) ? "<none>" : (s!.Length > 12 ? s.Substring(0, 12) : s!);
+        // PROBE-END: P-SEAT-DECLINE (state)
 
         private static EmployeeStationController? NearestStationIn(UnityEngine.Object[]? stations, Vector3 from, float maxDist)
         {
