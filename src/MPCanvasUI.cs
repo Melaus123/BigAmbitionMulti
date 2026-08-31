@@ -3968,13 +3968,36 @@ namespace BigAmbitionsMP
                     ? pc.Character.transform.eulerAngles.y
                     : 0f;
 
+                // Field 20260830-170644: the building tag must come from the game's own authority,
+                // not the mod's shop-context note. The old source (CurrentShopAddress) is cleared
+                // at exit START, while the native exit teleports the body to the street only AFTER
+                // its fade — so for ~0.3s we broadcast "" (outdoors) with interior-island
+                // coordinates, and the receiver's round-87 mask ("outdoors ⇒ street coords")
+                // showed the avatar inside any same-island interior ("host sees me exiting from
+                // HIS building"). BuildingManager.building clears only AFTER the street teleport
+                // (ResetIndoors, BuildingManager.cs:1455), so deriving the tag from
+                // IsInsideBuilding guarantees the first "" ships with street coordinates.
+                // (Entry side: the tag now flips at load start, before the body arrives — the
+                // receiver hides the avatar early, which is benign and closes the mirror-image
+                // entry-side pop as well.)
+                string bldgTag = "";
+                try
+                {
+                    if (BuildingManager.IsInsideBuilding)
+                    {
+                        var breg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                        if (breg != null) bldgTag = GameStateReader.AddressKey(breg);
+                    }
+                }
+                catch { }
+
                 var payload = new PlayerPositionPayload
                 {
                     PlayerId = MPConfig.PlayerId,
                     X = pos.x, Y = pos.y, Z = pos.z,
                     RotY = rotY,
                     T = Time.unscaledTime,
-                    Bldg = MPRegisterSync.CurrentShopAddress   // "" outdoors; cross-interior mask
+                    Bldg = bldgTag   // "" outdoors; cross-interior mask
                 };
                 RemotePlayerManager.ReadLocalAnimState(payload);
                 MPHandIk.FillPayload(payload);   // hand-IK mirror while pushing

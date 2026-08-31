@@ -374,12 +374,18 @@ namespace BigAmbitionsMP
                     + $"Multiplayer is disabled this session; the on-screen banner names the culprit. Root: {root}");
             }
 
+            // Field 20260830-170644: the exit notification rides the game's own completion
+            // event now (fires after the street teleport, and on every real exit path) —
+            // see MPPatches.ExitBuildingNotifier for the two defects the old prefix had.
+            try { MPPatches.ExitBuildingNotifier.Install(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Plugin] exit notifier: {ex.Message}"); }
+
             Plugin.Logger.LogInfo($"{MyPluginInfo.DISPLAY_NAME} (BigAmbitionsMP) v{MyPluginInfo.PLUGIN_VERSION} ({MyPluginInfo.BuildTag}) loaded. Canvas UI active.");
             return Task.CompletedTask;
         }
 
         public override Task OnUnloadAsync()
         {
+            try { MPPatches.ExitBuildingNotifier.Uninstall(); } catch { }
             try { MPBugReport.MarkCleanShutdown(); } catch { }
             try { _harmony?.UnpatchAll(_harmony.Id); } catch { }
             try { MPServer.Stop(); } catch { }

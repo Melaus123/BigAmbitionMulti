@@ -870,30 +870,49 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── Patch: BuildingManager.ExitFromBuilding (Phase 2 unsubscribe) ─────
-        // Fires when the player leaves a building (either on foot via the exit
-        // zone or via "exit to street").  We capture the registration BEFORE
-        // the method runs so the address is still valid, then send
-        // PlayerExitedBuilding to the host so it drops us from the building's
-        // subscriber set.
-        [HarmonyPatch(typeof(BuildingManager), nameof(BuildingManager.ExitFromBuilding))]
-        public static class Patch_ExitFromBuilding_InteriorSync
+        // ── Exit notification via the game's own completion event (field 20260830-170644) ──
+        // This replaced a PREFIX on BuildingManager.ExitFromBuilding, which announced the exit
+        // at exit START. Two defects: (a) a REFUSED exit ("warehouse gate is blocked" →
+        // yield break) had already cleared the shop context and told the host we left — while
+        // we never did; (b) building→building transitions (the enter coroutine calls
+        // ExitFromBuildingCoroutine DIRECTLY, bypassing ExitFromBuilding) never fired the
+        // prefix at all, leaving the host's interior-subscriber set stale on A→B moves.
+        // GlobalEvents.onExitBuilding is the game's own completion signal: it fires AFTER the
+        // street teleport + ResetIndoors, on every real exit path — door exits, drive-outs,
+        // Hamptons, and A→B transitions (BuildingManager.cs:1458 and :1517). Subscribed once
+        // at mod load (Plugin.OnLoadAsync), removed at unload.
+        public static class ExitBuildingNotifier
         {
-            static void Prefix(BuildingManager __instance)
+            private static bool _installed;
+            private static readonly Action<Address> _handler = OnExitedBuilding;
+
+            public static void Install()
+            {
+                if (_installed) return;
+                _installed = true;
+                GlobalEvents.onExitBuilding = (Action<Address>)Delegate.Combine(GlobalEvents.onExitBuilding, _handler);
+                Plugin.Logger.LogInfo("[Patch] exit notifier subscribed to GlobalEvents.onExitBuilding.");
+            }
+
+            public static void Uninstall()
+            {
+                if (!_installed) return;
+                _installed = false;
+                GlobalEvents.onExitBuilding = (Action<Address>?)Delegate.Remove(GlobalEvents.onExitBuilding, _handler);
+            }
+
+            private static void OnExitedBuilding(Address address)
             {
                 try
                 {
                     MPRegisterSync.SetCurrentShop("", "");   // left the building — RemoteSale context gone
                     if (!MPClient.IsConnected) return;
-                    if (__instance == null) return;
-                    var reg = __instance.buildingRegistration;
-                    if (reg == null) return;
-                    var addr = GameStateReader.AddressKey(reg);
+                    var addr = GameStateReader.AddressKey(address);
                     if (string.IsNullOrEmpty(addr)) return;
                     InteriorSync.NotifyLocalBuildingExit(addr);
                     MPClient.SendPlayerExitedBuilding(addr);
                 }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] ExitFromBuilding_InteriorSync prefix: {ex.Message}"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] exit notify: {ex.Message}"); }
             }
         }
         // ── Backlog #7 traffic-kill blockers ─────────────────────────────────
