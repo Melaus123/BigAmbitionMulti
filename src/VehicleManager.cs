@@ -1205,6 +1205,15 @@ namespace BigAmbitionsMP
             }
             catch { }
 
+            // PROBE-START: P-GHOST-DESTROY (attach the destroy witness — AFTER the strip so it survives it)
+            try
+            {
+                var mk = go.AddComponent<GhostDestroyMarker>();
+                mk.VehicleId = e.VehicleId; mk.TypeName = e.TypeName; mk.OwnerId = ownerId ?? "";
+            }
+            catch { }
+            // PROBE-END: P-GHOST-DESTROY
+
             int ownedAfterStrip = SafeCount(() => VehicleHelper.AllPlayerVehicles?.Count ?? -1);
             Plugin.Logger.LogInfo(
                 $"[Vehicle] Ghost '{e.TypeName}' for '{ownerId}': AllPlayerVehicles " +
@@ -1761,6 +1770,10 @@ namespace BigAmbitionsMP
             if (_remoteVehicles.TryGetValue(vehicleId, out var rv))
             {
                 ExitIfLocallyDriven(rv.Go, vehicleId);
+                // PROBE-START: P-GHOST-DESTROY (mark mod-initiated destruction — only when a live
+                // object will actually consume the mark in OnDestroy)
+                try { if (rv.Go != null) GhostDestroyMarker.Expected.Add(vehicleId); } catch { }
+                // PROBE-END: P-GHOST-DESTROY
                 if (rv.Go != null) { try { UnityEngine.Object.Destroy(rv.Go); } catch { } }
                 _remoteVehicles.Remove(vehicleId);
                 Plugin.Logger.LogInfo($"[Vehicle] Despawned ghost '{vehicleId}'");
@@ -1798,7 +1811,7 @@ namespace BigAmbitionsMP
         /// <summary>Despawns every ghost vehicle (disconnect / scene unload).</summary>
         public static void DespawnAll() => DespawnAll(skipDriven: false);
 
-        public static void DespawnAll(bool skipDriven)
+        public static void DespawnAll(bool skipDriven, string reason = "scene/session teardown")
         {
             List<string> kept = null;
             foreach (var kv in _remoteVehicles)
@@ -1810,7 +1823,14 @@ namespace BigAmbitionsMP
                         continue;
                     }
                     ExitIfLocallyDriven(kv.Value.Go, kv.Key);
+                    // PROBE-START: P-GHOST-DESTROY (mark mod-initiated destruction)
+                    try { GhostDestroyMarker.Expected.Add(kv.Key); } catch { }
+                    // PROBE-END: P-GHOST-DESTROY
                     try { UnityEngine.Object.Destroy(kv.Value.Go); } catch { }
+                    // Field 20260830-170317 (user-approved): this sweep used to destroy SILENTLY —
+                    // the grant-flap churn (7 respawns of one van) was invisible in field logs
+                    // because only DespawnByVehicleId spoke. One line per ghost, sweep-paced.
+                    Plugin.Logger.LogInfo($"[Vehicle] Despawned ghost '{kv.Key}' (sweep: {reason}).");
                 }
             if (kept == null)
             {
@@ -2289,7 +2309,7 @@ namespace BigAmbitionsMP
                 if (sig == _lastGrantorSig) return;
                 _lastGrantorSig = sig;
                 Plugin.Logger.LogInfo($"[Drive] granted-by set changed → respawning ghosts (drivable owners: '{sig}').");
-                DespawnAll(skipDriven: true);   // re-sync from the next fleet broadcast; a ghost being DRIVEN survives until drive end (round-231)
+                DespawnAll(skipDriven: true, reason: "grant change");   // re-sync from the next fleet broadcast; a ghost being DRIVEN survives until drive end (round-231)
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Drive] OnGrantsChanged: {ex.Message}"); }
         }

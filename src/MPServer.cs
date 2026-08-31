@@ -4727,11 +4727,37 @@ namespace BigAmbitionsMP
         /// survive (which is all the enforcement checks ever need).</summary>
         private static void RebuildRuntimeGrants()
         {
+            // Field 20260830-170317: this used to CLEAR and re-add only pairs resolvable to online
+            // stable ids AT THIS INSTANT. During roster churn (a peer mid-handshake has a live name
+            // but no learned stable id yet) a valid grant blinked off for one rebuild and back on
+            // the next — and every blink flipped GrantorSig, whose consumer destroys and respawns
+            // EVERY ghost vehicle (the bundle's host logged 'eXe.'↔'' seven times; the partner's
+            // vans visibly vanished and reappeared). A grant may be dropped by a real DISCONNECT
+            // or a store REVOCATION — never by a resolution blink. So: carry over prior runtime
+            // grants whose parties are both still CONNECTED but not currently RESOLVABLE; fully
+            // resolvable pairs always take the store's verdict (including revocation), and a
+            // departed pid still drops immediately.
+            var prev = GrantSync.SnapshotRuntime();
             GrantSync.ClearRuntime();
             var pidOf = OnlinePidByStable();
+            int unresolvableStore = 0;
             foreach (var e in GrantSync.AllStoreEntries())
+            {
                 if (pidOf.TryGetValue(e.Owner, out var ownerPid) && pidOf.TryGetValue(e.Grantee, out var granteePid))
                     GrantSync.SetGrant(e.Kind, ownerPid, granteePid, true);
+                else unresolvableStore++;
+            }
+            var connected = new HashSet<string>(_peerNames.Values) { MPConfig.PlayerId };
+            var resolvable = new HashSet<string>(pidOf.Values);
+            int carried = 0;
+            foreach (var (kind, ownerPid, granteePid) in prev)
+                if (connected.Contains(ownerPid) && connected.Contains(granteePid)
+                    && (!resolvable.Contains(ownerPid) || !resolvable.Contains(granteePid)))
+                { GrantSync.SetGrant(kind, ownerPid, granteePid, true); carried++; }
+            // Ship-probes-with-fixes: if churn persists in a future bundle, these two counters name
+            // which mapping blinked (store side unresolvable vs runtime carry) without a new round trip.
+            if (carried > 0 || unresolvableStore > 0)
+                Plugin.Logger.LogInfo($"[Server] grant rebuild: carried {carried} runtime grant(s) across a resolution gap; {unresolvableStore} store entr(ies) unresolvable this pass (offline or mid-handshake).");
         }
 
         /// <summary>HOST: build an owner's grantee list (incl. OFFLINE grantees) for the Permissions UI.</summary>

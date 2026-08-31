@@ -136,6 +136,18 @@ namespace BigAmbitionsMP
         /// <summary>HOST: clear the runtime table for all kinds (before a rebuild from the store).</summary>
         public static void ClearRuntime() { foreach (var k in AllKinds) _grants[k].Clear(); }   // (the host rebuilds from here on every roster change — the shared-manage set is re-pushed right after, so it is NOT cleared here)
 
+        /// <summary>Field 20260830-170317: the full runtime table as flat entries, taken BEFORE a
+        /// rebuild so grants held by mid-handshake peers can be carried over instead of blinking
+        /// off for one rebuild (see MPServer.RebuildRuntimeGrants for the why).</summary>
+        public static List<(GrantKind kind, string ownerPid, string granteePid)> SnapshotRuntime()
+        {
+            var list = new List<(GrantKind, string, string)>();
+            foreach (var k in AllKinds)
+                foreach (var kv in Runtime(k))
+                    foreach (var g in kv.Value) list.Add((k, kv.Key, g));
+            return list;
+        }
+
         // ── Runtime: join replay (full set — see ANTIPATTERNS Class 4) ────────
         /// <summary>HOST: build the full runtime grant table (all kinds) for a connecting peer.</summary>
         public static PermissionSnapshotPayload BuildSnapshot()
