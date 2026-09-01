@@ -5869,6 +5869,63 @@ namespace BigAmbitionsMP
             private static readonly System.Collections.Generic.List<(string name, int amount, float price)> _pendingPriced = new();
             private static bool _pendingTicket;
 
+            /// <summary>Review-family #3: release the hairdresser queue panel + its navigation
+            /// blocker (only PurchaseUI.Close clears both; the null playerCustomer makes the
+            /// resulting OnOrderCancel a safe no-op).</summary>
+            private static void CloseHairPanel()
+            {
+                try { InstanceBehavior<UI.UIs>.Instance.playerHUD.purchaseUI.Close(); } catch { }
+            }
+
+            /// <summary>One-frame deferral for the shape-C appearance commit — ChangeHair assigns
+            /// _newCharacterAppearance on the line AFTER the invoke that reached our prefix, so a
+            /// synchronous commit would apply the PREVIOUS haircut (null on a first cut). Hosted on
+            /// the chair itself (a scene MonoBehaviour that outlives the panel close).</summary>
+            private static System.Collections.IEnumerator InvokeHairCommitNextFrame(Action commit)
+            {
+                yield return null;
+                try { commit(); } catch (Exception cex) { Plugin.Logger.LogWarning($"[MPSale] hair commit: {cex.Message}"); }
+            }
+
+            /// <summary>Review-family #4: intake for the cinema/theater TICKET KIOSK — a
+            /// PurchaseUI-driven Producer (not a station) whose private OnPlaceOrder would Pay
+            /// into the replica. Interacted with in place, so no walk-up — straight to the
+            /// service beat; the Beat's PurchaseUI-open cancel check applies as at a booth.</summary>
+            internal static void IntakeExternalTicketOrder(UnityEngine.Vector3 pos,
+                System.Collections.Generic.List<BigAmbitions.Items.CargoInstance> cargo, string owner)
+            {
+                try
+                {
+                    string act0 = "none";
+                    try { act0 = MPRestSync.CurrentActivityName() ?? "none"; } catch { }
+                    float total = 0f;
+                    var desc = new System.Text.StringBuilder();
+                    _pendingItems.Clear(); _pendingPriced.Clear();
+                    _pendingTicket = true;
+                    if (cargo != null)
+                        foreach (var c in cargo)
+                        {
+                            if (c == null) continue;
+                            float price = MPRegisterSync.GetShopPrice(c.itemName);
+                            if (price < 0f) price = (float)c.pricePerUnit;
+                            total += c.amount * price;
+                            if (desc.Length < 160) desc.Append($"{c.itemName} x{c.amount}, ");
+                            _pendingItems.Add(new SaleItem { ItemName = c.itemName ?? "", Amount = c.amount });
+                            _pendingPriced.Add((c.itemName ?? "", c.amount, price));
+                        }
+                    _pendingTotal = total;
+                    _pendingDesc = desc.ToString().TrimEnd(' ', ',');
+                    _pendingOwner = owner;
+                    _pendingAddress = MPRegisterSync.CurrentShopAddress;
+                    _pendingAct0 = act0;
+                    _registerPos = pos;
+                    _walkAgent = null;
+                    BeginBeat();
+                    Plugin.Logger.LogInfo($"[MPSale] kiosk ticket order taken (${total:F2}) — ringing up...");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSale] kiosk intake: {ex.Message}"); }
+            }
+
             static bool Prefix(EmployeeStationController __instance,
                                System.Collections.Generic.List<BigAmbitions.Items.CargoInstance> orderedCargoInstances)
             {
@@ -5893,7 +5950,41 @@ namespace BigAmbitionsMP
                             fees.Add(("ba:itemname_haircuttingfee", 1, ItemHelper.GetPriceOnCurrentBusiness("ba:itemname_haircuttingfee")));
                         if (hc.hasPlayerHairColorChanged || hc.hasPlayerEyebrowColorChanged || hc.hasPlayerBeardColorChanged)
                             fees.Add(("ba:itemname_hairchemicalfee", 1, ItemHelper.GetPriceOnCurrentBusiness("ba:itemname_hairchemicalfee")));
-                        if (fees.Count == 0) return false;   // nothing changed — nothing to charge, nothing to queue
+                        if (fees.Count == 0) { CloseHairPanel(); return false; }   // nothing changed — release the queue panel, charge nothing
+
+                        // Review-family #7a: native consumes one hair-care product per service and
+                        // ABORTS UNPAID when the shop has none (HairdresserStylistEmployee:171-175 →
+                        // StopServingPlayer:258-264, its own notification). Mirror: the replica's
+                        // item cargo is synced, so check it; on none — native's own notification,
+                        // panel closed, nothing charged, and the preview simply never commits.
+                        bool haveProduct = false;
+                        try
+                        {
+                            var regH = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                            if (regH?.itemInstances != null)
+                                foreach (var kvH in regH.itemInstances)
+                                {
+                                    var cargoH = kvH.Value?.cargoInstances;
+                                    if (cargoH == null) continue;
+                                    foreach (var cH in cargoH)
+                                        if (cH != null && cH.itemName == "ba:itemname_haircareproduct" && cH.amount > 0) { haveProduct = true; break; }
+                                    if (haveProduct) break;
+                                }
+                        }
+                        catch { }
+                        if (!haveProduct)
+                        {
+                            try
+                            {
+                                UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, "notification_no_items_available",
+                                    new System.Collections.Generic.Dictionary<string, string> { { "itemname", "ba:itemname_haircareproduct" } });
+                            }
+                            catch { }
+                            CloseHairPanel();
+                            Plugin.Logger.LogInfo("[MPSale] service refused — no hair-care product in the shop (mirrors native StopServingPlayer; nothing charged).");
+                            return false;
+                        }
+
                         float svcTotal = 0f; var svcSale = new RemoteSalePayload
                         { BuyerId = MPConfig.PlayerId, OwnerId = owner, Address = MPRegisterSync.CurrentShopAddress };
                         var svcDesc = new System.Text.StringBuilder();
@@ -5903,12 +5994,32 @@ namespace BigAmbitionsMP
                             svcSale.Items.Add(new SaleItem { ItemName = f.name, Amount = f.amount });
                             svcDesc.Append($"{f.name} x{f.amount}, ");
                         }
+                        // #7a: ship the consumed product too — the OWNER's machine (stock truth)
+                        // decrements it via the normal RemoteSale stock path.
+                        svcSale.Items.Add(new SaleItem { ItemName = "ba:itemname_haircareproduct", Amount = 1 });
                         svcSale.Total = svcTotal;
                         svcSale.Desc  = svcDesc.ToString().TrimEnd(' ', ',');
                         MPHub.ApplyMoneyDelta(-svcTotal, $"Services at {MPRegisterSync.CurrentShopAddress}");
                         if (MPServer.IsRunning) MPServer.HandleRemoteSale(svcSale, MPConfig.PlayerId);
                         else MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.RemoteSale, MPConfig.PlayerId, svcSale));
-                        Plugin.Logger.LogInfo($"[MPSale] service purchase finalized: total=${svcTotal:F2} owner='{owner}' items='{svcSale.Desc}' (family shape C — no queue, look kept).");
+
+                        // Review-family #2 (gating): the chair UI only PREVIEWS on a mannequin; the
+                        // real appearance commit is onHairChangeAction — handed to the chair in
+                        // ChangeHair, fired natively ONLY at the stylist's serve-finish
+                        // (HairdresserStylistEmployee:210), which we skip. Fire it ourselves,
+                        // DEFERRED ONE FRAME: ChangeHair assigns _newCharacterAppearance on the line
+                        // AFTER the invoke that reached us, so a synchronous call here would commit
+                        // the PREVIOUS haircut (null on a first-ever cut — appearance wipe).
+                        var commit = hc.onHairChangeAction;
+                        if (commit != null)
+                            hc.StartCoroutine(InvokeHairCommitNextFrame(commit));
+                        else Plugin.Logger.LogWarning("[MPSale] no hair-commit callback on the chair — charged, but the look may not apply (report this).");
+
+                        // Review-family #3 (gating): the queue label sets PurchaseUI.IsPanelOpen and
+                        // a navigation blocker that only PurchaseUI.Close clears (native clears it
+                        // at serve-finish). Close it or the buyer is stuck behind a phantom panel.
+                        CloseHairPanel();
+                        Plugin.Logger.LogInfo($"[MPSale] service purchase finalized: total=${svcTotal:F2} owner='{owner}' items='{svcSale.Desc}' + haircareproduct x1 (family shape C — commit deferred one frame, panel closed).");
                     }
                     catch (Exception hx) { Plugin.Logger.LogWarning($"[MPSale] service checkout: {hx.Message}"); }
                     return false;
@@ -6155,31 +6266,48 @@ namespace BigAmbitionsMP
                     // were converted above (round-211b).
                     try
                     {
-                        if (_pendingTicket)
+                        // Review-family #10: delivery is ADDITIVE — a mixed order (ticket + goods)
+                        // delivers both halves; each line routes by its own isticket tag.
+                        var goodsLines = new System.Collections.Generic.List<(string name, int amount, float price)>();
+                        bool anyTicket = false;
+                        foreach (var itD in _pendingPriced)
                         {
+                            bool isTicket = false;
+                            try
+                            {
+                                var itT2 = BigAmbitions.Items.ItemsGetter.GetByName(itD.name);
+                                isTicket = itT2 != null && itT2.HasTag(BigAmbitions.Tags.TagRef.Itemtag.isticket);
+                            }
+                            catch { }
+                            if (isTicket) anyTicket = true; else goodsLines.Add(itD);
+                        }
+                        if (anyTicket || _pendingTicket)
+                        {
+                            // Shape B: mirror native Order.Pay's buyer half exactly (Order.cs:54-58) —
+                            // the flag + blocker refresh, never Pay itself (Pay books revenue into
+                            // the local REPLICA registration).
                             SaveGameManager.Current.hasCinemaTheaterTicket = true;
                             try { Buildings.Retail.Businesses.CinemaTheater.TicketEntryBlocker.UpdateBlockers(); } catch { }
                             Plugin.Logger.LogInfo("[MPSale] ticket delivered — entry flag set (family shape B).");
                         }
-                        else
+                        bool usingVeh = false; try { usingVeh = Helpers.PlayerHelper.IsUsingVehicle; } catch { }
+                        if (!usingVeh && Helpers.PlayerHelper.ItemInstanceInHands == null && goodsLines.Count > 0)
                         {
-                            bool usingVeh = false; try { usingVeh = Helpers.PlayerHelper.IsUsingVehicle; } catch { }
-                            if (!usingVeh && Helpers.PlayerHelper.ItemInstanceInHands == null && _pendingPriced.Count > 0)
+                            var chD = Helpers.PlayerHelper.PlayerController?.Character;
+                            if (chD != null)
                             {
-                                var chD = Helpers.PlayerHelper.PlayerController?.Character;
-                                if (chD != null)
-                                {
-                                    FullServiceEmployee.SetPaperbag(chD);
-                                    var bag = Helpers.PlayerHelper.ItemInstanceInHands;
-                                    if (bag?.cargoInstances != null)
-                                    {
-                                        foreach (var itD in _pendingPriced)
-                                            bag.cargoInstances.Add(new BigAmbitions.Items.CargoInstance(itD.name, itD.amount, itD.price, paid: true));
-                                        try { bag.OnItemsInCargoUpdated()?.Invoke(); } catch { }
-                                        Plugin.Logger.LogInfo($"[MPSale] order delivered: paper bag with {_pendingPriced.Count} item line(s) (family shape A).");
-                                    }
-                                    else Plugin.Logger.LogWarning("[MPSale] SetPaperbag yielded no bag — buyer charged but goods NOT delivered; report this.");
-                                }
+                                // Review-family #1: SetPaperbag is the VISUAL half only (prefab +
+                                // SetHandContent — it never writes CharacterData.itemInHands). Native
+                                // always pairs it with the DATA half (FullServiceEmployee
+                                // .UpdatePlayerPurchase:274-285): a fresh bag ItemInstance, cargo
+                                // added, assigned through PlayerHelper.ItemInstanceInHands (whose
+                                // setter wires the item panel + cargo callbacks). Mirror BOTH halves.
+                                FullServiceEmployee.SetPaperbag(chD);
+                                var bagInst = new BigAmbitions.Items.ItemInstance(BigAmbitions.Items.ItemsGetter.GetRandomBag());
+                                foreach (var itD in goodsLines)
+                                    bagInst.AddToCargo(new BigAmbitions.Items.CargoInstance(itD.name, itD.amount, itD.price, paid: true));
+                                Helpers.PlayerHelper.ItemInstanceInHands = bagInst;
+                                Plugin.Logger.LogInfo($"[MPSale] order delivered: paper bag with {goodsLines.Count} item line(s) (family shape A).");
                             }
                         }
                     }
@@ -6197,6 +6325,26 @@ namespace BigAmbitionsMP
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSale] completion: {ex}"); }
+            }
+        }
+
+        // ── Review-family #4: fifth family member — the cinema/theater TICKET KIOSK.
+        // Its OnPlaceOrder is a PRIVATE method on a Producer (not a station), wired directly
+        // as the PurchaseUI callback, ending in order.Pay(replica) — buyer charged, revenue
+        // into the buyer's copy, owner uncredited. Route it through the same pending machine
+        // as the booth (shape B: ticket flag + blocker refresh at the beat).
+        [HarmonyPatch(typeof(Controllers.TicketKioskController), "OnPlaceOrder")]
+        public static class Patch_TicketKiosk_MPOrder
+        {
+            static bool Prefix(Controllers.TicketKioskController __instance,
+                               System.Collections.Generic.List<BigAmbitions.Items.CargoInstance> orderedCargoInstances)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
+                string owner = MPRegisterSync.CurrentShopOwner;
+                if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return true;
+                if (!MPRestSync.AllPlayers().Contains(owner)) return true;   // AI cinemas fully native
+                Patch_MPOrderFinalizer.IntakeExternalTicketOrder(__instance.transform.position, orderedCargoInstances, owner);
+                return false;
             }
         }
 
@@ -6248,7 +6396,7 @@ namespace BigAmbitionsMP
                 catch { }
             }
 
-            static void Postfix()
+            static void Postfix(Controllers.PlayerItemPurchaser __instance)
             {
                 if (!_armed) return;
                 _armed = false;
@@ -6273,6 +6421,14 @@ namespace BigAmbitionsMP
                         desc.Append($"{kv.Key} x{added}, ");
                     }
                     if (sale.Items.Count == 0) return;   // grab refused / nothing paid — nothing to mirror
+                    // Review-family #7b: a merge into an existing paid line rewrites pricePerUnit
+                    // to a weighted AVERAGE — the post-merge diff price ≠ what the buyer was
+                    // actually charged. The purchaser's own TotalPrice IS the exact charge for
+                    // this grab (one item line per grab); use it when the diff is a single line.
+                    if (sale.Items.Count == 1)
+                    {
+                        try { float tp = __instance.TotalPrice; if (tp > 0f) total = tp; } catch { }
+                    }
                     sale.Total = total;
                     sale.Desc  = desc.ToString().TrimEnd(' ', ',');
                     if (MPServer.IsRunning) MPServer.HandleRemoteSale(sale, MPConfig.PlayerId);
@@ -6366,6 +6522,11 @@ namespace BigAmbitionsMP
             static bool Prefix(Controllers.CashRegisterController __instance, ref bool __result)
             {
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
+                // Review-family #5: a TICKET BOOTH inherits this Interact but must NEVER be
+                // rerouted to self-checkout — with someone on duty at the booth the reroute
+                // called InteractAsSelfService, which is a no-op with empty hands = silent
+                // dead click; the booth's own CanOrder → ticket UI is the real flow.
+                if (__instance is Controllers.TicketBoothController) return true;
                 try
                 {
                     string owner = MPRegisterSync.CurrentShopOwner;

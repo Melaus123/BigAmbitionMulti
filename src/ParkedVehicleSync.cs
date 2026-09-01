@@ -161,6 +161,12 @@ namespace BigAmbitionsMP
         /// <summary>Client-side count of spawned parked ghosts — load diagnostics.</summary>
         public static int ClientGhostCount => _clientGhosts.Count;
 
+        /// <summary>Cars the LAST full snapshot actually sent (within radius of some player) —
+        /// the near-players figure the perf meter pairs with the citywide tracked count, so the
+        /// two scopes can never again be read as one number (field 20260830-173306: a citywide
+        /// ~2400 was mistaken for a leak against the client's ~30-70 view-radius ghosts).</summary>
+        public static int LastSentCount { get; private set; }
+
         /// <summary>Round-205: true once the FIRST parked snapshot has been applied this
         /// session — the client world-ready gate waits on this (receipt, not count: a
         /// player in a parked-car desert legitimately applies zero ghosts).</summary>
@@ -337,6 +343,7 @@ namespace BigAmbitionsMP
                 _pendingRemoves.Clear();
                 _diffTimer = 0f;
 
+                LastSentCount = snap.Cars.Count;
                 Plugin.Logger.LogInfo(
                     $"[ParkedSync] HOST full snapshot: sent {snap.Cars.Count}/{_hostTracked.Count} car(s) " +
                     $"within {HostSendRadius}m of {centers.Count} player(s).");

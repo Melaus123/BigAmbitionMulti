@@ -182,8 +182,13 @@ namespace BigAmbitionsMP
                 try
                 {
                     int remotes = RemotePlayerManager.GetRemotePlayerIds().Count;
+                    // Field 20260830-173306: 'parked=' was read as a leak because it counts the
+                    // CITYWIDE host-tracked pool (~2400, normal) while the client line's
+                    // parkedGhosts counts view-radius ghosts (~30-70). Named by scope now:
+                    // parkedCity = tracked citywide, parkedNear = last full snapshot's sent count
+                    // (the figure actually comparable to a client's parkedGhosts).
                     if (MPServer.IsRunning)
-                        sb.Append($" | ent parked={ParkedVehicleSync.HostTrackedCount} traffic={TrafficSync.HostTrafficCount()} remotes={remotes} clients={MPServer.ConnectedCount}");
+                        sb.Append($" | ent parkedCity={ParkedVehicleSync.HostTrackedCount} parkedNear={ParkedVehicleSync.LastSentCount} traffic={TrafficSync.HostTrafficCount()} remotes={remotes} clients={MPServer.ConnectedCount}");
                     else if (MPClient.IsConnected)
                         sb.Append($" | ent parkedGhosts={ParkedVehicleSync.ClientGhostCount} trafficGhosts={TrafficSync.ClientTrafficGhostCount} remotes={remotes}");
                 }

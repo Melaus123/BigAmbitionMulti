@@ -1,4 +1,5 @@
 using System;
+using Buildings.BuildingTypes.Shared.Dirtiness;   // GetCleanliness extension (BuildingCleanlinessHelper)
 using HarmonyLib;
 using Helpers;
 using UI.Notification;
@@ -58,7 +59,19 @@ namespace BigAmbitionsMP
         ///     mop just did.
         ///   • NO BOOKKEEPING — no baseline dictionary, no per-session reset, no drift between them.
         /// Sending at STOP rather than per swing is deliberate: only the resting value matters, and the mop loop
-        /// re-reads the registration each swing, so anything restored mid-run is simply re-cleaned.</summary>
+        /// re-reads the registration each swing, so anything restored mid-run is simply re-cleaned.
+        ///
+        /// RACE FIX (field 20260830-181203, approved 2026-08-31): the mop loop only exits once every
+        /// affected cell is ≤0.1 — i.e. the mop CLEANS TO ZERO by design — but StopCleaning (and this
+        /// report) fires after a 0.1–0.9s cosmetic WaitForSeconds. The owner's 2s absolute dirt band can
+        /// land in that gap and RESTORE the helper's local copies to the owner's still-dirty values, so a
+        /// live read here reported dirt the helper had just mopped away — the "mop stroke eaten" symptom.
+        /// So this reports Dirtiness = 0 for every affected cell: that is what the mop actually achieved
+        /// the moment the loop finished. Documented trade: a mop action INTERRUPTED mid-loop (player walked
+        /// off / mode change) also reports its affected cells as zero even though the last swings never
+        /// landed — rare, self-corrects on the next visit, and strictly better than the race eating
+        /// completed work. P-MOP-EATEN measure: raceRestored counts affected cells whose LIVE value was
+        /// >0.1 at report time — each one is a band restore that would have been mis-reported before.</summary>
         public static void ReportCleanedCells()
         {
             try
@@ -92,19 +105,24 @@ namespace BigAmbitionsMP
                 }
 
                 var payload = new DirtEditPayload { AddressKey = addr, SenderId = MPConfig.PlayerId };
+                int raceRestored = 0;   // [PROBE:P-MOP-EATEN] live>0.1 at report = band restore in the pause window
                 foreach (var c in cells)
                 {
                     if (c == null || payload.Spots.Count >= MaxSpotsPerMessage) continue;
                     int idx = c.DirtSpot;
                     if (idx < 0 || idx >= spots.Count || spots[idx] == null) continue;
                     var s = spots[idx];
-                    payload.Spots.Add(new DirtSpotDeltaInfo { Index = idx, X = s.x, Z = s.z, Dirtiness = s.dirtiness });
+                    if (s.dirtiness > 0.1f) raceRestored++;
+                    // Report ZERO, not the live value — the mop loop cleans to zero before the cosmetic
+                    // pause, and the live value may already be a mid-pause band restore (comment above).
+                    payload.Spots.Add(new DirtSpotDeltaInfo { Index = idx, X = s.x, Z = s.z, Dirtiness = 0f });
                 }
                 if (payload.Spots.Count == 0) return;
 
                 if (MPServer.IsRunning) MPServer.HandleBuildingDirtEdit(payload, MPConfig.PlayerId);
                 else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BuildingDirtEdit, MPConfig.PlayerId, payload));
-                Plugin.Logger.LogInfo($"[Cleaning] helper cleaned {payload.Spots.Count} cell(s) in '{addr}' — reported to the owner.");
+                Plugin.Logger.LogInfo($"[Cleaning] helper cleaned {payload.Spots.Count} cell(s) in '{addr}' — reported to the owner (as zero)."
+                    + (raceRestored > 0 ? $" [PROBE:P-MOP-EATEN] {raceRestored} cell(s) had been band-restored during the stop pause." : ""));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Cleaning] ReportCleanedCells: {ex.Message}"); }
         }
@@ -207,6 +225,52 @@ namespace BigAmbitionsMP
     public static class Patch_MopController_StopCleaning_Report
     {
         static void Postfix() { HelperCleaning.ReportCleanedCells(); }
+    }
+
+    /// <summary>Field 20260830-181203 #2 (approved 2026-08-31): the HUD cleanliness meter is PINNED at
+    /// 100% for anyone the game doesn't consider the owner — ItemPanelUI.RefreshMetaCleanliness
+    /// (:952-961) defaults maintenanceValue to 100 and reads the registration only when
+    /// IsPlayerOwnedBusiness. A granted helper mopping a partner's shop stares at a full meter no
+    /// matter how dirty the floor is; the dirt DATA under it is fine (the dirt band syncs to players
+    /// inside) — only the meter lies. Prefix: in MP, inside a session player's business that is not
+    /// our own, feed the meter the local replica's real cleanliness through the private
+    /// SetMaintenanceValue and skip the native body. AI venues and single player stay native.</summary>
+    [HarmonyPatch(typeof(UI.ItemPanel.ItemPanelUI), nameof(UI.ItemPanel.ItemPanelUI.RefreshMetaCleanliness))]
+    public static class Patch_CleanlinessMeter_Unpin
+    {
+        private static readonly System.Reflection.MethodInfo? SetMaintenance =
+            AccessTools.Method(typeof(UI.ItemPanel.ItemPanelUI), "SetMaintenanceValue");
+        private static float _lastLogged = -1f;   // P-CLEAN-METER is changed-only: refresh fires per mop swing
+
+        static bool Prefix(UI.ItemPanel.ItemPanelUI __instance)
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                var reg = bm?.buildingRegistration;
+                if (reg == null || bm!.IsPlayerOwnedBusiness) return true;      // owner: native path is already live
+                if (!GameStatePatcher.IsAnyPlayerBusiness(reg)) return true;    // AI venue: native 100% pin stands
+                if (SetMaintenance == null)
+                {
+                    Plugin.Logger.LogWarning("[Cleaning] ItemPanelUI.SetMaintenanceValue did not resolve — cleanliness meter stays native.");
+                    return true;
+                }
+                float value = reg.GetCleanliness();
+                SetMaintenance.Invoke(__instance, new object[] { value });
+                if (Math.Abs(value - _lastLogged) >= 1f)
+                {
+                    _lastLogged = value;
+                    Plugin.Logger.LogInfo($"[PROBE:P-CLEAN-METER] meter fed live cleanliness {value:F0}% in '{GameStateReader.AddressKey(reg)}' (native would pin 100%).");
+                }
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[Cleaning] meter unpin: {ex.Message}");
+                return true;
+            }
+        }
     }
 
     /// <summary>Gate 2 (see HelperCleaning): the mop only listens for floor clicks when the building reads as

@@ -3703,6 +3703,16 @@ namespace BigAmbitionsMP
                 foreach (var s in items)
                 {
                     if (s == null || s.Amount <= 0) continue;
+                    // Review-family #6: services and tickets (haircut fees, cover charges,
+                    // cinema tickets) are not shelf goods — decrementing finds nothing and the
+                    // "SHORT" branch would raise a false stock alarm on BOTH machines for every
+                    // such sale. Only RetailProduct lines touch stock.
+                    try
+                    {
+                        var itS = BigAmbitions.Items.ItemsGetter.GetByName(s.ItemName);
+                        if (itS == null || (itS.type & BigAmbitions.Items.ItemType.RetailProduct) == 0) continue;
+                    }
+                    catch { continue; }
                     int remaining = s.Amount;
                     foreach (var kv in reg.itemInstances)
                     {
