@@ -61,26 +61,111 @@ namespace BigAmbitionsMP
         /// Sending at STOP rather than per swing is deliberate: only the resting value matters, and the mop loop
         /// re-reads the registration each swing, so anything restored mid-run is simply re-cleaned.
         ///
-        /// RACE FIX (field 20260830-181203, approved 2026-08-31): the mop loop only exits once every
-        /// affected cell is ≤0.1 — i.e. the mop CLEANS TO ZERO by design — but StopCleaning (and this
-        /// report) fires after a 0.1–0.9s cosmetic WaitForSeconds. The owner's 2s absolute dirt band can
-        /// land in that gap and RESTORE the helper's local copies to the owner's still-dirty values, so a
-        /// live read here reported dirt the helper had just mopped away — the "mop stroke eaten" symptom.
-        /// So this reports Dirtiness = 0 for every affected cell: that is what the mop actually achieved
-        /// the moment the loop finished. Documented trade: a mop action INTERRUPTED mid-loop (player walked
-        /// off / mode change) also reports its affected cells as zero even though the last swings never
-        /// landed — rare, self-corrects on the next visit, and strictly better than the race eating
-        /// completed work. P-MOP-EATEN measure: raceRestored counts affected cells whose LIVE value was
-        /// >0.1 at report time — each one is a band restore that would have been mis-reported before.</summary>
-        public static void ReportCleanedCells()
+        /// RACE FIX (field 20260830-181203, approved 2026-08-31; trade paragraph corrected per
+        /// review-dirt-recheck-2026-09-01 #3): the mop loop only exits once every affected cell is
+        /// ≤0.1 — i.e. the mop CLEANS TO ZERO by design — but StopCleaning (and this report) fires
+        /// after a 0.1–1.0s cosmetic WaitForSeconds (1f - time%1f; the full 1.0s is reachable —
+        /// clicking an already-clean tile skips the loop entirely and still reports). The owner's 2s
+        /// absolute dirt band can land in that gap and RESTORE the helper's local copies to the
+        /// owner's still-dirty values, so a live read here reported dirt the helper had just mopped
+        /// away — the "mop stroke eaten" symptom. So this reports Dirtiness = 0 for every affected
+        /// cell: that is what the mop achieved the moment the loop finished.
+        /// THE REAL TRADE (the review traced every StopCleaning caller — walk-off and mode-change
+        /// interrupts CANNOT fire this report): OVERLAPPING STROKES. AffectedCells is one static
+        /// list, StopCleaning's StopCoroutine("FloorCellClick") is a no-op against the
+        /// IEnumerator-started coroutine, and nothing gates a second floor click — so an earlier
+        /// stroke's StopCleaning could report a click-spammed SECOND stroke's still-dirty cells as
+        /// zero. GUARDED (approved 2026-09-01, review #1): the SAME-STROKE GATE below — a report
+        /// fires only for a stroke whose cells were OBSERVED to reach ≤0.1 at a loop boundary
+        /// (the MoveNext latch, sampled BEFORE the pause where the band restore lives), each
+        /// stroke reports at most once, and a stroke abandoned finished-but-unreported by a new
+        /// click is flushed at that click (its cells are still in the list, pre-clear).
+        /// Plus the SAME-REGISTRATION GUARD (review #2): the mop writes through the CONTROLLER's
+        /// cached BuildingContext.Registration, not necessarily the building the player stands
+        /// in — the report now requires reference equality and reads the mop's own registration.</summary>
+        // ── Same-stroke gate state ───────────────────────────────────────────────────────────
+        private static int _strokeSeq;          // bumped by every floor click (new stroke)
+        private static int _cleanLatchSeq = -1; // stroke whose cells were seen all ≤0.1 at a loop boundary
+        private static int _reportedSeq = -1;   // stroke that has already been reported
+        private static float _dropLogAt;
+        // Both hooks are private-member patches a game update can silently unbind. The gate is
+        // ALL-OR-NOTHING: with either hook dead it stands down entirely and StopCleaning reports
+        // unconditionally — the pre-guard behavior with its documented overlap trade — instead
+        // of a half-alive gate silently dropping every report.
+        internal static bool ClickHookOk, LatchHookOk;
+        private static readonly System.Reflection.FieldInfo? AffectedCellsField =
+            AccessTools.Field(typeof(MopController), "AffectedCells");
+
+        internal static System.Collections.Generic.List<DirtSpotObject>? AffectedCellsList()
+            => AffectedCellsField?.GetValue(null) as System.Collections.Generic.List<DirtSpotObject>;
+
+        internal static void OnStrokeStart(MopController mop)
+        {
+            // Flush a FINISHED but unreported stroke before the native click clears the list —
+            // without this, a click landing in the previous stroke's cosmetic pause would eat
+            // that stroke's completed cleaning (the exact symptom the report-zero fix targets).
+            if (_cleanLatchSeq == _strokeSeq && _strokeSeq != _reportedSeq)
+                ReportCleanedCells(mop);
+            _strokeSeq++;
+            _lastMopReg = mop?.BuildingContext?.Registration;   // the lattice the new stroke writes to
+        }
+
+        internal static void OnLoopBoundary()
+        {
+            var cells = AffectedCellsList();
+            if (cells == null || cells.Count == 0) return;
+            var reg = _lastMopReg;
+            var spots = reg?.dirtSpots;
+            if (spots == null) return;
+            foreach (var c in cells)
+            {
+                if (c == null) continue;
+                int idx = c.DirtSpot;
+                if (idx < 0 || idx >= spots.Count || spots[idx] == null) continue;
+                if (spots[idx].dirtiness > 0.1f) return;   // stroke not finished yet
+            }
+            _cleanLatchSeq = _strokeSeq;
+        }
+
+        private static BuildingRegistration? _lastMopReg;   // the registration the active mop writes to
+
+        internal static void OnMopStopCleaning(MopController mop)
+        {
+            if (ClickHookOk && LatchHookOk)
+            {
+                if (_strokeSeq == _reportedSeq) return;   // this stroke already reported (flush or earlier stop)
+                if (_cleanLatchSeq != _strokeSeq)
+                {
+                    // A StopCleaning fired while the CURRENT stroke had not been observed finished —
+                    // an overlapped earlier stroke's stop. The finishing stroke reports later.
+                    if (UnityEngine.Time.unscaledTime >= _dropLogAt)
+                    {
+                        _dropLogAt = UnityEngine.Time.unscaledTime + 5f;
+                        Plugin.Logger.LogInfo("[Cleaning] stop-report dropped — current stroke not observed finished (overlapping strokes); the finishing stroke reports.");
+                    }
+                    return;
+                }
+            }
+            ReportCleanedCells(mop);
+        }
+
+        public static void ReportCleanedCells(MopController mop)
         {
             try
             {
                 if (!MPClient.IsClientInWorld && !MPServer.IsRunning) return;
                 if (!HousingFurniture.LocalHelperHere()) return;   // owners need no forward; only a granted helper
 
-                var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
-                var spots = reg?.dirtSpots;
+                // Review #2: the mop writes through ITS controller's cached registration — read
+                // the same one, and refuse to report when it is not the building we stand in.
+                var reg = mop?.BuildingContext?.Registration;
+                var here = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                if (reg == null || !ReferenceEquals(reg, here))
+                {
+                    Plugin.Logger.LogWarning("[Cleaning] mop's registration is not the building we stand in — report skipped (stale BuildingContext).");
+                    return;
+                }
+                var spots = reg.dirtSpots;
                 if (spots == null || spots.Count == 0) return;
                 string addr = GameStateReader.AddressKey(reg);
                 if (string.IsNullOrEmpty(addr)) return;
@@ -88,8 +173,7 @@ namespace BigAmbitionsMP
                 // AffectedCells is private static on MopController — the authoritative list of what the last
                 // mop action touched.  Cleared at the start of every action, so it is never stale in a way that
                 // matters: re-reporting the same already-clean cells is a no-op at the receiver.
-                var cells = AccessTools.Field(typeof(MopController), "AffectedCells")?.GetValue(null)
-                            as System.Collections.Generic.IEnumerable<DirtSpotObject>;
+                var cells = AffectedCellsList();
                 if (cells == null)
                 {
                     // Reflection on a private field is the one part of this that a game update can break
@@ -105,14 +189,16 @@ namespace BigAmbitionsMP
                 }
 
                 var payload = new DirtEditPayload { AddressKey = addr, SenderId = MPConfig.PlayerId };
-                int raceRestored = 0;   // [PROBE:P-MOP-EATEN] live>0.1 at report = band restore in the pause window
+                // [PROBE:P-MOP-EATEN] observation only — non-zero at report time can be a band
+                // restore OR an overlapping stroke's untouched cells (review #4: never assert which).
+                int nonZero = 0; float nonZeroMax = 0f, nonZeroSum = 0f;
                 foreach (var c in cells)
                 {
                     if (c == null || payload.Spots.Count >= MaxSpotsPerMessage) continue;
                     int idx = c.DirtSpot;
                     if (idx < 0 || idx >= spots.Count || spots[idx] == null) continue;
                     var s = spots[idx];
-                    if (s.dirtiness > 0.1f) raceRestored++;
+                    if (s.dirtiness > 0.1f) { nonZero++; nonZeroSum += s.dirtiness; if (s.dirtiness > nonZeroMax) nonZeroMax = s.dirtiness; }
                     // Report ZERO, not the live value — the mop loop cleans to zero before the cosmetic
                     // pause, and the live value may already be a mid-pause band restore (comment above).
                     payload.Spots.Add(new DirtSpotDeltaInfo { Index = idx, X = s.x, Z = s.z, Dirtiness = 0f });
@@ -121,8 +207,9 @@ namespace BigAmbitionsMP
 
                 if (MPServer.IsRunning) MPServer.HandleBuildingDirtEdit(payload, MPConfig.PlayerId);
                 else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BuildingDirtEdit, MPConfig.PlayerId, payload));
+                _reportedSeq = _strokeSeq;   // same-stroke gate: one report per stroke
                 Plugin.Logger.LogInfo($"[Cleaning] helper cleaned {payload.Spots.Count} cell(s) in '{addr}' — reported to the owner (as zero)."
-                    + (raceRestored > 0 ? $" [PROBE:P-MOP-EATEN] {raceRestored} cell(s) had been band-restored during the stop pause." : ""));
+                    + (nonZero > 0 ? $" [PROBE:P-MOP-EATEN] {nonZero} of {payload.Spots.Count} reported cell(s) were non-zero at report time (max {nonZeroMax:F0}, sum {nonZeroSum:F0}) — zeroed anyway." : ""));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Cleaning] ReportCleanedCells: {ex.Message}"); }
         }
@@ -217,14 +304,55 @@ namespace BigAmbitionsMP
         }
     }
 
-    /// <summary>Round-112 B2 trigger: a mop action just finished, so report the cells it cleaned.  StopCleaning
-    /// is public and is the last thing MopController.FloorCellClick calls, which makes it both a compile-time
-    /// safe patch target and the exact moment the resting values are final.  It also runs if the action ends
-    /// early (mop put away mid-clean), so a partial clean is still reported.</summary>
+    /// <summary>Round-112 B2 trigger: a mop action finished, so report the cells it cleaned. StopCleaning is
+    /// public and compile-time safe. Since 2026-09-01 (review #1) the report is same-stroke-gated: it fires
+    /// only for a stroke observed finished at a loop boundary — a put-away/overlap StopCleaning with the
+    /// current stroke unfinished is dropped (that state was never final), and each stroke reports once.</summary>
     [HarmonyPatch(typeof(MopController), nameof(MopController.StopCleaning))]
     public static class Patch_MopController_StopCleaning_Report
     {
-        static void Postfix() { HelperCleaning.ReportCleanedCells(); }
+        static void Postfix(MopController __instance) { HelperCleaning.OnMopStopCleaning(__instance); }
+    }
+
+    /// <summary>Same-stroke gate, half 1 (review #1): every floor click is a new stroke. The PREFIX flushes a
+    /// finished-but-unreported previous stroke BEFORE the native body clears the shared static AffectedCells
+    /// (a click landing in the previous stroke's cosmetic pause would otherwise eat its completed cleaning),
+    /// then advances the stroke counter. OnFloorCellClick is private — TargetMethods yields nothing on a
+    /// resolution miss (never the player-visible patch-degraded notice) and leaves ClickHookOk false, which
+    /// stands the whole gate down (see the state block).</summary>
+    [HarmonyPatch]
+    public static class Patch_MopController_FloorClick_Stroke
+    {
+        static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+        {
+            var m = AccessTools.Method(typeof(MopController), "OnFloorCellClick");
+            if (m == null) Plugin.Logger.LogWarning("[Cleaning] MopController.OnFloorCellClick did not resolve — same-stroke gate stands down (unconditional reports, pre-guard trade).");
+            else { HelperCleaning.ClickHookOk = true; yield return m; }
+        }
+        static void Prefix(MopController __instance)  { HelperCleaning.OnStrokeStart(__instance); }
+    }
+
+    /// <summary>Same-stroke gate, half 2 (review #1): the latch. The FloorCellClick coroutine yields every
+    /// 0.3s swing and once more entering the ≤1.0s cosmetic pause; at each boundary, if every affected cell
+    /// is ≤0.1 the CURRENT stroke is marked finished. Sampled at the loop boundary — BEFORE the pause where
+    /// the owner's 2s band restore lands — so the race cannot un-finish a stroke, while an overlapped stale
+    /// StopCleaning finds the newest stroke unlatched and is dropped. Iterator MoveNext resolved defensively.</summary>
+    [HarmonyPatch]
+    public static class Patch_MopController_FloorClick_Latch
+    {
+        static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+        {
+            System.Reflection.MethodBase? mv = null;
+            try
+            {
+                var iter = AccessTools.Method(typeof(MopController), "FloorCellClick");
+                if (iter != null) mv = AccessTools.EnumeratorMoveNext(iter);
+            }
+            catch { }
+            if (mv == null) Plugin.Logger.LogWarning("[Cleaning] FloorCellClick MoveNext did not resolve — same-stroke gate stands down (unconditional reports, pre-guard trade).");
+            else { HelperCleaning.LatchHookOk = true; yield return mv; }
+        }
+        static void Postfix() { HelperCleaning.OnLoopBoundary(); }
     }
 
     /// <summary>Field 20260830-181203 #2 (approved 2026-08-31): the HUD cleanliness meter is PINNED at

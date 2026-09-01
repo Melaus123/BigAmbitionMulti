@@ -2019,12 +2019,18 @@ namespace BigAmbitionsMP
                         try { _lastAppliedSig.Remove(payload.AddressKey); } catch { }
                         // Review m1: repaint the decals if the local player is standing in this very
                         // building (otherwise the game repaints on entry / its own hourly tick).
+                        // Recheck #7: also refresh the HUD cleanliness meter — the unpin patch feeds
+                        // it live values, but only when something CALLS RefreshMetaCleanliness; a
+                        // synced dirt change would otherwise sit invisible until the next mop swing.
                         try
                         {
                             var bm = InstanceBehavior<BuildingManager>.Instance;
                             if (bm?.buildingRegistration != null
                                 && GameStateReader.AddressKey(bm.buildingRegistration) == payload.AddressKey)
+                            {
                                 bm.UpdateDirtinessInCurrentBuilding();
+                                try { InstanceBehavior<UI.UIs>.Instance?.playerHUD?.itemPanelUI?.RefreshMetaCleanliness(); } catch { }
+                            }
                         }
                         catch { }
                         Plugin.Logger.LogInfo($"[Patcher] DirtSync '{payload.AddressKey}': {payload.Spots.Count} dirty spot(s) sent, {touched} value(s) updated{(mismatched > 0 ? $", {mismatched} index/coord MISMATCH(ES) skipped" : "")} (v10).");
@@ -3703,16 +3709,21 @@ namespace BigAmbitionsMP
                 foreach (var s in items)
                 {
                     if (s == null || s.Amount <= 0) continue;
-                    // Review-family #6: services and tickets (haircut fees, cover charges,
-                    // cinema tickets) are not shelf goods — decrementing finds nothing and the
-                    // "SHORT" branch would raise a false stock alarm on BOTH machines for every
-                    // such sale. Only RetailProduct lines touch stock.
+                    // Review-family #6 + recheck A-1 (decoupled): the DECREMENT runs for every
+                    // line — an unknown/service item simply finds no cargo, which is harmless,
+                    // and a consumable that IS stocked (hair-care product) decrements no matter
+                    // how its asset data types it. Only the SHORT *alarm* is typing-gated:
+                    // services/tickets/fees are not shelf goods, so "found none" is expected
+                    // there, not a shortfall. The typing bit lives in asset data we cannot read
+                    // from source (ItemType is [Flags], RetailProduct=2), so the alarm errs
+                    // quiet for unknowns while the subtraction stays unconditional.
+                    bool shelfGood = false;
                     try
                     {
                         var itS = BigAmbitions.Items.ItemsGetter.GetByName(s.ItemName);
-                        if (itS == null || (itS.type & BigAmbitions.Items.ItemType.RetailProduct) == 0) continue;
+                        shelfGood = itS != null && (itS.type & BigAmbitions.Items.ItemType.RetailProduct) != 0;
                     }
-                    catch { continue; }
+                    catch { }
                     int remaining = s.Amount;
                     foreach (var kv in reg.itemInstances)
                     {
@@ -3730,10 +3741,12 @@ namespace BigAmbitionsMP
                         if (remaining <= 0) break;
                     }
                     int sold = s.Amount - remaining;
-                    Plugin.Logger.LogInfo(
-                        $"[Stock] '{addressKey}': -{sold} {s.ItemName} (sold to {buyerId})" +
-                        (remaining > 0 ? $" — SHORT by {remaining} (stock didn't cover the sale)." : "."));
-                    if (remaining > 0)
+                    bool alarm = remaining > 0 && shelfGood;
+                    if (sold > 0 || alarm)
+                        Plugin.Logger.LogInfo(
+                            $"[Stock] '{addressKey}': -{sold} {s.ItemName} (sold to {buyerId})" +
+                            (alarm ? $" — SHORT by {remaining} (stock didn't cover the sale)." : "."));
+                    if (alarm)
                         shortfall.Append($"{s.ItemName} x{remaining}, ");
                 }
             }

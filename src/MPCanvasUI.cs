@@ -3568,7 +3568,7 @@ namespace BigAmbitionsMP
                 _startupHoldElapsed = 0f;
                 MPLoadProfiler.Mark(
                     $"HOST fully loaded → world-ready (overlayGone={overlayGone}, carsReady={carsReady}, " +
-                    $"parked={_carParkedCached}, traffic={_carTrafficCached}, fallback={fallback}, elapsed {_pendingFreezeElapsed:F1}s)");
+                    $"parkedCity={_carParkedCached}, traffic={_carTrafficCached}, fallback={fallback}, elapsed {_pendingFreezeElapsed:F1}s)");
                 MPServer.SeedHostName();   // host name in the map before any rivals/business snapshot
                 MPServer.MarkWorldReady(MPConfig.PlayerId, hostSelf: true);
             }
@@ -3608,7 +3608,7 @@ namespace BigAmbitionsMP
             if (now < _hostReadyDiagNext) return;
             _hostReadyDiagNext = now + 1f;
             MPLoadProfiler.Mark(
-                $"HOST loading… overlayGone={overlayGone} parked={_carParkedCached}/{CARS_PARKED_MIN} " +
+                $"HOST loading… overlayGone={overlayGone} parkedCity={_carParkedCached}/{CARS_PARKED_MIN} " +
                 $"traffic={_carTrafficCached}/{CARS_TRAFFIC_MIN} carsReady={carsReady} elapsed={_pendingFreezeElapsed:F1}s");
         }
 

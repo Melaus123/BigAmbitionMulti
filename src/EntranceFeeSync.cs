@@ -24,7 +24,7 @@ namespace BigAmbitionsMP
     /// the tagged, amount-equal charge within a short window and sends the RemoteSale.</summary>
     public static class EntranceFeeSync
     {
-        private static string _stashAddr = "", _stashOwner = "", _stashFeeItem = "";
+        private static string _stashAddr = "", _stashOwner = "", _stashFeeItem = "", _stashBizName = "";
         private static float _stashFee;
         private static float _stashAt = -999f;
         private const float StashWindowSeconds = 120f;   // door dialog can sit open a while
@@ -37,6 +37,12 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                    // Recheck B-1: EVERY fee computation tears up the note first. Without this, a
+                    // DECLINED dialog at a session player's venue left a live stash, and a
+                    // same-amount fee paid at an ordinary AI venue within the window was mirrored
+                    // to the stashed player — money created, credited to someone who sold nothing.
+                    // The latest computation is always the venue the player is actually facing.
+                    _stashOwner = ""; _stashAt = -999f;
                     if (__result <= 0f) return;
                     if (!GameStatePatcher.IsAnyPlayerBusiness(__instance)) return;   // AI venue → fully native
                     string addr = GameStateReader.AddressKey(__instance);
@@ -56,6 +62,7 @@ namespace BigAmbitionsMP
                     _stashOwner = __instance.businessOwnerRivalId ?? "";
                     _stashFee = __result;
                     _stashAt = UnityEngine.Time.unscaledTime;
+                    _stashBizName = __instance.BusinessName ?? "";   // B-1 guard 2: the charge's TransactionInfo carries this
                     _stashFeeItem = "";
                     try { _stashFeeItem = Helpers.BusinessTypeHelper.GetEntranceFeeNameForBusinessType(Helpers.BusinessTypeHelper.GetData(__instance.businessTypeName)) ?? ""; } catch { }
                 }
@@ -97,6 +104,18 @@ namespace BigAmbitionsMP
                     if (UnityEngine.Time.unscaledTime - _stashAt > StashWindowSeconds) return;
                     float paid = -__0;                                            // the door passes a negative amount
                     if (paid <= 0f || Math.Abs(paid - _stashFee) > 0.01f) return; // must match the stashed fee exactly
+                    // Recheck B-1 guard 2: both charge sites build the TransactionInfo with
+                    // {businessName} — require it to name the stashed venue, so even a stash the
+                    // clear above somehow missed can never credit across venues.
+                    try
+                    {
+                        if (__1.Data == null || !__1.Data.TryGetValue("businessName", out var bn) || bn != _stashBizName)
+                        {
+                            Plugin.Logger.LogInfo($"[EntranceFee] tagged charge did not name the stashed venue ('{_stashBizName}') — not mirrored.");
+                            return;
+                        }
+                    }
+                    catch { return; }
                     var sale = new RemoteSalePayload
                     {
                         BuyerId = MPConfig.PlayerId,

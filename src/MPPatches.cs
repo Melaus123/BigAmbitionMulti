@@ -5880,7 +5880,8 @@ namespace BigAmbitionsMP
             /// <summary>One-frame deferral for the shape-C appearance commit — ChangeHair assigns
             /// _newCharacterAppearance on the line AFTER the invoke that reached our prefix, so a
             /// synchronous commit would apply the PREVIOUS haircut (null on a first cut). Hosted on
-            /// the chair itself (a scene MonoBehaviour that outlives the panel close).</summary>
+            /// MPCanvasUI.Instance (persistent, DontDestroyOnLoad) — a chair-hosted coroutine dies
+            /// silently if the interior apply respawns the chair in that one frame (recheck A-3).</summary>
             private static System.Collections.IEnumerator InvokeHairCommitNextFrame(Action commit)
             {
                 yield return null;
@@ -5934,13 +5935,16 @@ namespace BigAmbitionsMP
                 if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return true;
                 if (!MPRestSync.AllPlayers().Contains(owner)) return true;   // AI shops fully native
 
-                // ── Family shape C: SERVICES (hairdresser) — no PurchaseUI, no walk-up (the
+                // ── Family shape C: SERVICES (hairdresser) — no PurchaseUI walk-up (the
                 // buyer sits in the chair), no goods. The services are computed INSIDE the
                 // method being swallowed, from the chair's public changed-flags — so compute
                 // them here, charge, credit the owner, and skip the native queue (whose serve
-                // would Pay into the buyer's REPLICA registration). The new look was already
-                // applied by the chair UI and persists simply by not being reverted; the
-                // appearance sync carries it to other machines.
+                // would Pay into the buyer's REPLICA registration). The chair UI only PREVIEWS
+                // on a mannequin — the real look is committed by the deferred onHairChangeAction
+                // below; the appearance sync then carries it to other machines.
+                // Recheck A-2: the panel close lives in a FINALLY — every exit (no changes, no
+                // product, success, throw) must release the queue panel or the buyer is stuck
+                // charged-and-wedged behind it.
                 if (__instance is Controllers.HairdresserChairController hc)
                 {
                     try
@@ -5950,7 +5954,7 @@ namespace BigAmbitionsMP
                             fees.Add(("ba:itemname_haircuttingfee", 1, ItemHelper.GetPriceOnCurrentBusiness("ba:itemname_haircuttingfee")));
                         if (hc.hasPlayerHairColorChanged || hc.hasPlayerEyebrowColorChanged || hc.hasPlayerBeardColorChanged)
                             fees.Add(("ba:itemname_hairchemicalfee", 1, ItemHelper.GetPriceOnCurrentBusiness("ba:itemname_hairchemicalfee")));
-                        if (fees.Count == 0) { CloseHairPanel(); return false; }   // nothing changed — release the queue panel, charge nothing
+                        if (fees.Count == 0) return false;   // nothing changed — charge nothing (finally releases the panel)
 
                         // Review-family #7a: native consumes one hair-care product per service and
                         // ABORTS UNPAID when the shop has none (HairdresserStylistEmployee:171-175 →
@@ -5980,9 +5984,8 @@ namespace BigAmbitionsMP
                                     new System.Collections.Generic.Dictionary<string, string> { { "itemname", "ba:itemname_haircareproduct" } });
                             }
                             catch { }
-                            CloseHairPanel();
                             Plugin.Logger.LogInfo("[MPSale] service refused — no hair-care product in the shop (mirrors native StopServingPlayer; nothing charged).");
-                            return false;
+                            return false;   // finally releases the panel
                         }
 
                         float svcTotal = 0f; var svcSale = new RemoteSalePayload
@@ -6012,16 +6015,26 @@ namespace BigAmbitionsMP
                         // the PREVIOUS haircut (null on a first-ever cut — appearance wipe).
                         var commit = hc.onHairChangeAction;
                         if (commit != null)
-                            hc.StartCoroutine(InvokeHairCommitNextFrame(commit));
+                        {
+                            // Recheck A-3: host the one-frame deferral on the mod's PERSISTENT
+                            // UI object, not the chair — the interior apply destroys/respawns
+                            // ItemControllers on any diff, and a coroutine dies with its host
+                            // WITHOUT raising: charged, look silently never applied.
+                            var host = (UnityEngine.MonoBehaviour?)MPCanvasUI.Instance ?? hc;
+                            host.StartCoroutine(InvokeHairCommitNextFrame(commit));
+                        }
                         else Plugin.Logger.LogWarning("[MPSale] no hair-commit callback on the chair — charged, but the look may not apply (report this).");
 
-                        // Review-family #3 (gating): the queue label sets PurchaseUI.IsPanelOpen and
-                        // a navigation blocker that only PurchaseUI.Close clears (native clears it
-                        // at serve-finish). Close it or the buyer is stuck behind a phantom panel.
-                        CloseHairPanel();
                         Plugin.Logger.LogInfo($"[MPSale] service purchase finalized: total=${svcTotal:F2} owner='{owner}' items='{svcSale.Desc}' + haircareproduct x1 (family shape C — commit deferred one frame, panel closed).");
                     }
                     catch (Exception hx) { Plugin.Logger.LogWarning($"[MPSale] service checkout: {hx.Message}"); }
+                    finally
+                    {
+                        // Review-family #3 + recheck A-2: the queue label sets PurchaseUI.IsPanelOpen
+                        // and a navigation blocker only PurchaseUI.Close clears — EVERY exit path
+                        // must close it, including a throw between the debit and the finalize.
+                        CloseHairPanel();
+                    }
                     return false;
                 }
 
