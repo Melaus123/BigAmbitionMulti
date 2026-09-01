@@ -109,6 +109,16 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Cleaning] ReportCleanedCells: {ex.Message}"); }
         }
 
+        // (SameLatticeCell REMOVED 2026-08-31, review-mopping #3/#4/#5: the tolerant match was
+        //  approved on a truncation-divergence theory the review REFUTED by decoding both
+        //  bundle saves — the two machines' lattices were IDENTICAL, 225/225 labels matching
+        //  at the same index; the "8 skipped" were already-clean cells. Interiors are one
+        //  cached prefab instance per building size, so (int)position is deterministic across
+        //  machines. The tolerance also weakened the load-bearing stacked-storeys X/Z guard
+        //  at the band site and could pre-empt the exact fallback scan onto a real neighbour.
+        //  Exact equality restored at both call sites; the noCell counter re-opens the
+        //  question if a future bundle ever shows a nonzero count.)
+
         /// <summary>MAIN THREAD.  Apply a helper's cleaning to the local (owner's) registration copy.  Only
         /// ever lowers a value: a cleaning report that tried to raise dirtiness would be either a desync or a
         /// tampered client, and either way the owner's own simulation is the authority on getting dirtier.
@@ -129,29 +139,61 @@ namespace BigAmbitionsMP
                     return;
                 }
 
-                int applied = 0, skipped = 0;
+                // Field 181203: the two skip causes were one counter, and they mean OPPOSITE
+                // things — "not a reduction" is benign overlap re-reporting, while "no such
+                // cell" is LATTICE MEMBERSHIP DIVERGENCE (the bundle's first batch: 8 of 9
+                // cells nonexistent here; those cells stay dirty on this side and the dirt
+                // band then re-dirties them on the mopper's side — their cleaning visibly
+                // un-does itself). Counted apart so the next bundle quantifies the divergence.
+                int applied = 0, noCell = 0, noReduction = 0;
+                var repaint = new System.Collections.Generic.List<int>();
                 foreach (var d in p.Spots)
                 {
                     if (d == null) continue;
                     int idx = d.Index;
-                    // Trust the index only if it names the same cell; otherwise fall back to an X/Z lookup so
-                    // a lattice built in a different order still lands on the right tile.
+                    // Trust the index only if it names the same cell EXACTLY; otherwise fall back to an
+                    // X/Z lookup so a lattice built in a different order still lands on the right tile.
+                    // (Exact on purpose — review-mopping #3: measured lattices are identical across
+                    // machines; a tolerant match could only ever hit a real neighbouring tile.)
                     if (idx < 0 || idx >= spots.Count || spots[idx] == null || spots[idx].x != d.X || spots[idx].z != d.Z)
                     {
                         idx = -1;
                         for (int i = 0; i < spots.Count; i++)
                             if (spots[i] != null && spots[i].x == d.X && spots[i].z == d.Z) { idx = i; break; }
-                        if (idx < 0) { skipped++; continue; }
+                        if (idx < 0) { noCell++; continue; }
                     }
                     float want = Mathf.Clamp(d.Dirtiness, 0f, 100f);
-                    if (want >= spots[idx].dirtiness) { skipped++; continue; }   // never dirtier via this channel
+                    if (want >= spots[idx].dirtiness) { noReduction++; continue; }   // never dirtier via this channel
                     spots[idx].dirtiness = want;
+                    repaint.Add(idx);
                     applied++;
                 }
 
+                // Field 181203 fix (user-approved): the write above is DATA only — repaint the
+                // decals when the local player is standing in this very building, or the host
+                // watches the helper mop and sees nothing change until re-entry (round-122
+                // "value arrived and nothing reacted" class). Native per-spot repaint; a
+                // handful of cells per mop stop, so per-cell calls are cheap.
                 if (applied > 0)
+                {
+                    try
+                    {
+                        var bm = InstanceBehavior<BuildingManager>.Instance;
+                        if (bm?.buildingRegistration != null && BuildingManager.IsInsideBuilding
+                            && GameStateReader.AddressKey(bm.buildingRegistration) == p.AddressKey)
+                            foreach (var idx in repaint)
+                                try { bm.UpdateDirtinessInSpecificSpot(idx); } catch { }   // review-mopping #10: one bad index must not abandon the rest
+                    }
+                    catch (Exception rex) { Plugin.Logger.LogWarning($"[Cleaning] repaint: {rex.Message}"); }
+                }
+
+                // Review-mopping #7: log ALL batches (an all-already-clean batch was silent — the
+                // very reading that settles the counter question could never appear). #8: state
+                // the observation, not a cause.
+                if (applied > 0 || noCell > 0 || noReduction > 0)
                     Plugin.Logger.LogInfo($"[Cleaning] applied {applied} cleaned cell(s) from '{p.SenderId}' for '{p.AddressKey}'"
-                        + (skipped > 0 ? $" ({skipped} skipped — unmatched or not a reduction)." : "."));
+                        + (noCell > 0 ? $" ({noCell} cell(s) with no matching cell here)" : "")
+                        + (noReduction > 0 ? $" ({noReduction} already clean)." : "."));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Cleaning] Apply: {ex.Message}"); }
         }

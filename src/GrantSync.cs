@@ -234,6 +234,16 @@ namespace BigAmbitionsMP
         public static string NameOf(string stable)
             => (!string.IsNullOrEmpty(stable) && _nameByStable.TryGetValue(stable, out var n)) ? n : "";
 
+        /// <summary>Every player display name the grant system knows (restored with the manifest,
+        /// so valid on a continue-alone host with an empty roster) — one leg of the
+        /// known-world-player test (hollow-heal review #2).</summary>
+        public static List<string> AllKnownNames()
+        {
+            var list = new List<string>();
+            try { foreach (var v in _nameByStable.Values) if (!string.IsNullOrEmpty(v)) list.Add(v); } catch { }
+            return list;
+        }
+
         // ── Local player's OWN grantee list (for the Permissions UI; incl. offline) ──
         private static List<OwnGrantEntry> _myGrantees = new();
 

@@ -1715,6 +1715,11 @@ namespace BigAmbitionsMP
         /// baskets, …) are prefab clones parented there; receivers clone a
         /// scene template into their avatar's HandContent.</summary>
         public string Held { get; set; } = "";
+        /// <summary>Field 181203: the sender is mopping. The mop's visual hangs under the
+        /// character's HAND BONE (BaseHuman.AddHandObject), NOT the HandContent node the
+        /// Held capture watches — so it needs its own flag; the receiver mirrors it with
+        /// the game's own hand-object API + the CleaningIdle stance.</summary>
+        public bool Mop { get; set; }
         /// <summary>The held prop's LOCAL transform under HandContent —
         /// [px,py,pz, ex,ey,ez] (position + euler).  Mirrored from the
         /// holder's machine so the remote prop sits exactly where theirs does

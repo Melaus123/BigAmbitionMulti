@@ -382,6 +382,10 @@ namespace BigAmbitionsMP
                             Plugin.Logger.LogInfo($"[Takeover] '{addr}' already has {items} item(s) — owner furnished it; blueprint cleared, heal disarmed (round-204d).");
                             continue;
                         }
+                        // Review-mopping #17 (visibility): pair the destructive furnish with the
+                        // SHARED known-world-player verdict the layout heal uses, so a field log
+                        // shows provenance the moment this branch ever fires on a wrong target.
+                        try { Plugin.Logger.LogInfo($"[Takeover] furnish candidate '{addr}': owner '{pid}' knownWorldPlayer={GameStatePatcher.IsKnownWorldPlayerId(pid)} items={items}."); } catch { }
                         if (HostFurnishClaimedShop(reg, addr))
                         {
                             InteriorSync.SendSnapshotToPlayer(addr, pid, forceItemAuthority: true);

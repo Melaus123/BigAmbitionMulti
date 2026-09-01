@@ -473,6 +473,7 @@ namespace BigAmbitionsMP
             // toggles the Model/Capsule CHILDREN, so the two never fight.  Local
             // building changes re-evaluate within one packet (~100 ms).
             ApplyHeldProp(go, p.PlayerId, p.Held ?? "");
+            ApplyMopState(go, p.PlayerId, p.Mop);   // field 181203: mop + stance ride their own flag
             // Mirror the holder's exact prop placement (baskets hang off-axis).
             if (p.HeldT != null && p.HeldT.Count >= 6
                 && _heldProps.TryGetValue(p.PlayerId, out var heldGo) && heldGo != null)
@@ -598,6 +599,14 @@ namespace BigAmbitionsMP
                 UnityEngine.Object.Destroy(go);
             _players.Remove(playerId);
             _appearances.Remove(playerId);
+            // Review-mopping #9: per-player state must die with the per-player avatar, or a
+            // player who disconnects mid-mop and returns still mopping gets no mop (the change
+            // gate sees no change). Same gap exists for _heldApplied/_heldProps/_remoteBuildings
+            // (pre-existing pattern) — cleared here too while we are at it.
+            _mopApplied.Remove(playerId);
+            _heldApplied.Remove(playerId);
+            _heldProps.Remove(playerId);
+            _remoteBuildings.Remove(playerId);
             VehicleManager.DespawnAllOwnedBy(playerId);
             Plugin.Logger.LogInfo($"[RemotePlayer] Removed '{playerId}'");
         }
@@ -611,6 +620,7 @@ namespace BigAmbitionsMP
             _appearances.Clear();
             _remoteBuildings.Clear();   // interior-mask state dies with the avatars
             _heldApplied.Clear();       // held-prop state too
+            _mopApplied.Clear();        // mop state dies with the avatars (field 181203)
             _heldProps.Clear();
             _heldTemplates.Clear();     // scene templates died with the scene
             _localHandContent = null;
@@ -1040,6 +1050,11 @@ namespace BigAmbitionsMP
                 // ship the actual model-local Z (0 when not pushing; the clone mirrors it smoothly).
                 try { p.MlZ = anim.transform.localPosition.z; } catch { }
 
+                // Field 181203: mopping — the mop's visual hangs under the hand BONE
+                // (BaseHuman.AddHandObject), invisible to the HandContent scan below, so it
+                // rides its own flag (5 mop holds in the bundle, zero Held captures).
+                try { p.Mop = Helpers.PlayerHelper.IsHoldingAMop; } catch { }
+
                 // Held prop (HandContent skeleton node) — first active child's
                 // cleaned name rides the payload; "" = empty hands.
                 try
@@ -1115,6 +1130,86 @@ namespace BigAmbitionsMP
             if (i >= 0) n = n.Substring(0, i);
             return n.Trim();
         }
+
+        // ── Mop sync (field 20260830-181203; REBUILT per review-mopping #1/#2) ─────────
+        private static readonly Dictionary<string, bool> _mopApplied = new();
+
+        /// <summary>Mirror the sender's mopping state onto their avatar. Review #1: remote
+        /// avatars are STRIPPED MODEL CLONES — no ThirdPersonCharacter/BaseHuman components —
+        /// so the native AddHandObject/RemoveHandObject pair cannot run on them (the first
+        /// build silently no-opped). This build uses the same technique as the held-prop
+        /// sync: find the hand BONE by name (learned once from the LOCAL character's rig,
+        /// which always has one), parent a stripped clone of the game's own mop hand-object
+        /// prefab under it, and set the CleaningIdle stance bool directly on the avatar's
+        /// Animator (the SetBool(PermanentAnimationType) extension works on any Animator).
+        /// Review #2: state is recorded as applied ONLY after the work succeeds, so a miss
+        /// retries on the next packet instead of being silently absorbed forever.</summary>
+        private static void ApplyMopState(GameObject avatar, string playerId, bool mopping)
+        {
+            try
+            {
+                _mopApplied.TryGetValue(playerId, out var cur);
+                if (cur == mopping) return;
+
+                if (!mopping)
+                {
+                    // Teardown is unconditional-best-effort: drop the prop if present, clear the stance.
+                    _mopApplied[playerId] = false;
+                    try
+                    {
+                        var old = FindDeep(avatar.transform, "BAMP_MopProp");
+                        if (old != null) UnityEngine.Object.Destroy(old.gameObject);
+                    }
+                    catch { }
+                    try
+                    {
+                        var anim0 = avatar.GetComponentInChildren<Animator>(true);
+                        if (anim0 != null) anim0.SetBool(BigAmbitions.Characters.PermanentAnimationType.CleaningIdle, state: false);
+                    }
+                    catch { }
+                    Plugin.Logger.LogInfo($"[Carry] '{playerId}' put the mop away — prop removed, stance cleared (field 181203).");
+                    return;
+                }
+
+                // Hand bone name: read once from the LOCAL character's own rig (BaseHuman.rightHand
+                // is inspector-assigned; the avatar clone carries the same skeleton names).
+                if (string.IsNullOrEmpty(_handBoneName))
+                {
+                    try { _handBoneName = Helpers.PlayerHelper.PlayerController?.Character?.rightHand?.name ?? ""; } catch { }
+                    if (string.IsNullOrEmpty(_handBoneName)) { Plugin.Logger.LogWarning("[Carry] mop: local rig's hand bone unresolved — retrying next packet."); return; }
+                }
+                var bone = FindDeep(avatar.transform, _handBoneName);
+                var anim = avatar.GetComponentInChildren<Animator>(true);
+                if (bone == null || anim == null)
+                {
+                    Plugin.Logger.LogWarning($"[Carry] mop: avatar of '{playerId}' has no '{_handBoneName}' bone or no Animator — retrying next packet.");
+                    return;   // NOT recorded as applied — retries (review #2)
+                }
+                string prefabName = "";
+                try { prefabName = BaseHuman.GetHandObjectNameFromPermanentAnimationType(BigAmbitions.Characters.PermanentAnimationType.CleaningIdle) ?? ""; } catch { }
+                GameObject? prop = null;
+                if (prefabName.Length > 0)
+                {
+                    try { prop = Helpers.PrefabHelper.CreatePrefab(prefabName); } catch { }
+                }
+                if (prop == null)
+                {
+                    Plugin.Logger.LogWarning($"[Carry] mop: hand-object prefab '{prefabName}' did not spawn — retrying next packet.");
+                    return;
+                }
+                StripToVisual(prop);
+                prop.name = "BAMP_MopProp";
+                prop.transform.SetParent(bone, false);
+                prop.transform.localPosition = Vector3.zero;
+                prop.transform.localRotation = Quaternion.identity;
+                prop.SetActive(true);
+                try { anim.SetBool(BigAmbitions.Characters.PermanentAnimationType.CleaningIdle, state: true); } catch { }
+                _mopApplied[playerId] = true;   // only after the work landed (review #2)
+                Plugin.Logger.LogInfo($"[Carry] '{playerId}' took a mop — prop attached to '{_handBoneName}', stance set (field 181203).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Carry] mop state: {ex.Message}"); }
+        }
+        private static string _handBoneName = "";
 
         private static Transform? FindDeep(Transform root, string name)
         {

@@ -2006,7 +2006,7 @@ namespace BigAmbitionsMP
                         float v = 0f;
                         if (byIndex.TryGetValue(i, out var sent))
                         {
-                            if (sent.X != ds.x || sent.Z != ds.z) { mismatched++; continue; }   // lattice order divergence — don't guess
+                            if (sent.X != ds.x || sent.Z != ds.z) { mismatched++; continue; }   // lattice order divergence — don't guess (exact restored, review-mopping #4: this guard is load-bearing for stacked storeys and this channel SETS absolutely)
                             v = sent.Dirtiness;
                         }
                         if (ds.dirtiness != v) { ds.dirtiness = v; touched++; }
@@ -2384,6 +2384,47 @@ namespace BigAmbitionsMP
         // re-arrives every sync — one line carries the signal, repeats would bury it).
         private static readonly HashSet<string> _tenancyConflictLogged = new();
         public static void ResetTenancyConflictLog() { try { _tenancyConflictLogged.Clear(); } catch { } }
+
+        /// <summary>Review hollow-heal #2 / review-mopping #17: is this owner id a PLAYER this
+        /// WORLD has ever known — independent of the LIVE roster (which is empty on a
+        /// continue-alone host)? Shared by the hollow-layout heal and the takeover furnish
+        /// sweep's provenance log, so the two can never disagree about who is a player.</summary>
+        public static bool IsKnownWorldPlayerId(string? ownerId)
+        {
+            if (string.IsNullOrEmpty(ownerId)) return false;
+            try { if (IsSessionPlayerRivalId(ownerId)) return true; } catch { }
+            try { if (KnownWorldPlayerNames().Contains(ownerId!)) return true; } catch { }
+            return false;
+        }
+
+        /// <summary>All player names this world has known: base-lineage manifest slot names
+        /// (auto suffixes stripped — StripToBase, the F10 lesson — with the raw name as
+        /// fallback) + the grant system's manifest-restored name cache. A failed manifest
+        /// read logs its reason (review-mopping #18).</summary>
+        public static HashSet<string> KnownWorldPlayerNames()
+        {
+            var set = new HashSet<string>(StringComparer.Ordinal);
+            try
+            {
+                string sess = MPSaveCoordinator.ActiveSessionName ?? "";
+                if (!string.IsNullOrEmpty(sess))
+                {
+                    string baseName = "";
+                    try { baseName = MPSaveManager.StripToBase(sess); } catch { }
+                    var m = (!string.IsNullOrEmpty(baseName) ? MPSaveManager.ReadManifest(baseName) : null)
+                            ?? MPSaveManager.ReadManifest(sess);
+                    if (m?.Slots != null)
+                        foreach (var s in m.Slots)
+                        {
+                            if (!string.IsNullOrEmpty(s?.DisplayName)) set.Add(s!.DisplayName);
+                            if (!string.IsNullOrEmpty(s?.CharacterName)) set.Add(s!.CharacterName);
+                        }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] known-player manifest read: {ex.Message}"); }
+            try { foreach (var n in GrantSync.AllKnownNames()) set.Add(n); } catch { }
+            return set;
+        }
 
         /// <summary>True if this rival-owner id actually belongs to a session MP player (our own id,
         /// a roster client, or any session player) — i.e. a "rival" that is really another player, NOT a
@@ -3430,6 +3471,110 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] ghost strip: {ex.Message}"); }
             return removed;
+        }
+
+        /// <summary>Field 20260830-175635 (user-approved): HOSTING FROM A CLIENT MIRROR EXPOSES
+        /// HOLLOW AI SHOPS. A client's world data gets a business's interior Layout only for
+        /// shops that client physically visited (the 885-business snapshot carries name/type but
+        /// no layout; the interior snapshot writes it on entry). When that player later HOSTS the
+        /// world (handoff / continue-without-host), every unvisited AI business is a bare shell —
+        /// Layout null ⇒ no interior ⇒ no stations ⇒ no staff/food ("food-delivery pickups are
+        /// empty"). Natively Layout is assigned exactly ONCE, at rival business creation
+        /// (CompetitionHelper.StartNewCompetitorBusiness:710) — an existing business never heals.
+        ///
+        /// The heal is exact, not approximate: each AI business NAME maps to ONE AiBusinessDefault
+        /// asset carrying ONE layout (the creation-time randomness is in choosing the brand, and
+        /// the name survives in every mirror), so GetBusinessDefault(BusinessName).buildingLayout
+        /// reconstructs the very layout the original world had. Same source the game's own EA05
+        /// save-compat fixer uses. Host-only, once per world-ready; session players' businesses
+        /// are explicitly excluded (a mirror marks them with a translated rival id, and their
+        /// interiors are design-based, fed by their owner's machine — never layout-based).</summary>
+        public static void HealHollowAiLayouts(string when)
+        {
+            if (!MPServer.IsRunning) return;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return;
+                // Review #9 + review-mopping #19: warm the defaults cache under its own guard
+                // and CHECK the result — an Addressables failure or an empty label aborts the
+                // sweep BEFORE any partial healing, with a named reason.
+                AiBusinessDefault[]? defs = null;
+                try { defs = Helpers.CompetitionHelper.GetAllBusinessDefaults(); }
+                catch (Exception wex) { Plugin.Logger.LogWarning($"[Patcher] hollow-AI-layout heal: business defaults unavailable ({wex.Message}) — sweep skipped."); return; }
+                if (defs == null || defs.Length == 0)
+                {
+                    Plugin.Logger.LogWarning("[Patcher] hollow-AI-layout heal: business-defaults cache came back EMPTY — sweep skipped (modded/partial install?).");
+                    return;
+                }
+                // Review #1/#2 + review-mopping #17/#18: the roster-based IsAnyPlayerBusiness
+                // legs are empty on a continue-alone host, and a mirror stamps PLAYER names
+                // into businessOwnerRivalId — the shared known-world-player set covers it, and
+                // an EMPTY set is warned loudly (it reads identically to "no player shops"
+                // otherwise, leaving the protection silently absent).
+                var knownPlayers = KnownWorldPlayerNames();
+                if (knownPlayers.Count == 0)
+                    Plugin.Logger.LogWarning("[Patcher] hollow-AI-layout heal: ZERO known player names resolved — the player-shop exclusion is running blind this load (manifest unreadable or empty?).");
+
+                int healed = 0, misses = 0, playerSkipped = 0; string missExample = "";
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    try   // review #9: one bad registration must never abandon the sweep
+                    {
+                        if (reg == null) continue;
+                        if (!string.IsNullOrEmpty(reg.Layout)) continue;
+                        string biz = reg.businessTypeName ?? "";
+                        if (biz.Length == 0 || biz == "ba:businesstype_empty") continue;
+                        // Review #6: factories are layout-less AND nameless by design — not a miss.
+                        if (string.IsNullOrEmpty(reg.BusinessName)) continue;
+                        if (reg.RentedByPlayer || IsAnyPlayerBusiness(reg)) continue;
+                        if (reg.AvailableForRent) continue;   // review #8: on the rental market — do not deepen a contradictory state
+                        string owner = reg.businessOwnerRivalId ?? "";
+                        if (owner.Length == 0) continue;      // ownerless oddity — not an AI shop
+                        // Review #1/#2: a session player's shop must be untouchable even with an
+                        // empty roster — a mis-stamp here arms MPTakeover's per-join furnish, which
+                        // would force-push AI furniture over the owner's real interior.
+                        if (knownPlayers.Contains(owner)) { playerSkipped++; continue; }
+                        // Review #1: a registration holding real items is not hollow — never risk
+                        // stacking a layout on furniture.
+                        int items = 0; try { items = reg.itemInstances?.Count ?? 0; } catch { }
+                        if (items > 0) continue;
+                        var def = Helpers.CompetitionHelper.GetBusinessDefault(reg.BusinessName);
+                        // Review #7: the matched default must belong to THIS business type —
+                        // the EA010 legacy rename can cross-link names across types.
+                        if (def == null || string.IsNullOrEmpty(def.buildingLayout) || def.businessTypeName != biz)
+                        {
+                            misses++;
+                            if (missExample.Length == 0) missExample = $"'{reg.BusinessName}' ({biz})";
+                            continue;
+                        }
+                        // Review #3: stamp ONLY a layout that exists for this building's size —
+                        // a bad stamp does not degrade to an empty shop, it EJECTS the player on
+                        // entry (same guard the takeover furnish uses, MPTakeover:333).
+                        object? set = null;
+                        try
+                        {
+                            set = BusinessLayoutSets.BusinessLayoutSetHelper.GetOrLoadBusinessLayoutSet(
+                                biz, new Blueprints.BuildingSizeInfo(reg.BuildingCached), def.buildingLayout.ToLower(), warnIfNotFound: false);
+                        }
+                        catch { }
+                        if (set == null)
+                        {
+                            misses++;
+                            if (missExample.Length == 0) missExample = $"'{reg.BusinessName}' ({biz} — no layout set for this building size)";
+                            continue;
+                        }
+                        reg.Layout = def.buildingLayout;
+                        healed++;
+                        if (healed <= 5)
+                            Plugin.Logger.LogInfo($"[Patcher] hollow AI business healed: '{GameStateReader.AddressKey(reg)}' '{reg.BusinessName}' ({biz}) ← layout '{def.buildingLayout}'.");
+                    }
+                    catch { }
+                }
+                if (healed > 0 || misses > 0 || playerSkipped > 0)
+                    Plugin.Logger.LogInfo($"[Patcher] hollow-AI-layout heal ({when}): {healed} healed{(healed > 5 ? " (first 5 detailed)" : "")}, {misses} left as-is (no usable default{(misses > 0 ? $"; e.g. {missExample}" : "")}), {playerSkipped} skipped as known-player-owned ({knownPlayers.Count} known name(s)). A non-zero heal count means this world was hosted from a client mirror at some point.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] hollow-AI-layout heal: {ex.Message}"); }
         }
 
         /// <summary>Round-68 — heal a STALE ActiveVehicleId at world-ready (already-poisoned saves in

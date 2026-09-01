@@ -5812,17 +5812,30 @@ namespace BigAmbitionsMP
         [HarmonyPatch]
         public static class Patch_MPOrderFinalizer
         {
-            static System.Reflection.MethodBase? TargetMethod()
+            // Family sweep 2026-08-31 (07-bug-classes): OnPlaceOrder OVERRIDES dispatch PAST a
+            // patch on the CashRegister-declared method — tickets (TicketBoothController) and
+            // haircuts (HairdresserChairController) ran NATIVE on the replica: the buyer paid
+            // locally and the revenue booked into the buyer's COPY of the business (owner never
+            // credited). All three declared methods are intercepted now; the delivery half is
+            // per purchase SHAPE (see the Beat completion + the Service branch in the prefix).
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
             {
-                try
+                var owners = new[] { typeof(Controllers.CashRegisterController),
+                                     typeof(Controllers.TicketBoothController),
+                                     typeof(Controllers.HairdresserChairController) };
+                foreach (var t in owners)
                 {
-                    foreach (var m in typeof(Controllers.CashRegisterController).GetMethods(
-                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
-                        if (m.Name == "OnPlaceOrder" && m.DeclaringType == typeof(Controllers.CashRegisterController))
-                            return m;
+                    System.Reflection.MethodBase? m = null;
+                    try
+                    {
+                        foreach (var mm in t.GetMethods(
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                            if (mm.Name == "OnPlaceOrder" && mm.DeclaringType == t) { m = mm; break; }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSale] target {t.Name}: {ex.Message}"); }
+                    if (m != null) yield return m;
+                    else Plugin.Logger.LogWarning($"[MPSale] no declared OnPlaceOrder on {t.Name} — that shape stays native (watch for family recurrence).");
                 }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSale] target: {ex.Message}"); }
-                return null;
             }
 
             // ── Service moment (user, 2026-06-12): native purchases have a
@@ -5850,14 +5863,57 @@ namespace BigAmbitionsMP
             private static UnityEngine.AI.NavMeshAgent? _walkAgent;
             private static bool _agentWasEnabled;
             private static readonly System.Collections.Generic.List<SaleItem> _pendingItems = new();
+            // Family sweep 2026-08-31: delivery is per-SHAPE — the pending order also carries
+            // resolved per-unit prices (SaleItem has none) for the shape-A bag mint, and a
+            // ticket marker for shape B.
+            private static readonly System.Collections.Generic.List<(string name, int amount, float price)> _pendingPriced = new();
+            private static bool _pendingTicket;
 
-            static bool Prefix(Controllers.CashRegisterController __instance,
+            static bool Prefix(EmployeeStationController __instance,
                                System.Collections.Generic.List<BigAmbitions.Items.CargoInstance> orderedCargoInstances)
             {
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
                 string owner = MPRegisterSync.CurrentShopOwner;
                 if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return true;
                 if (!MPRestSync.AllPlayers().Contains(owner)) return true;   // AI shops fully native
+
+                // ── Family shape C: SERVICES (hairdresser) — no PurchaseUI, no walk-up (the
+                // buyer sits in the chair), no goods. The services are computed INSIDE the
+                // method being swallowed, from the chair's public changed-flags — so compute
+                // them here, charge, credit the owner, and skip the native queue (whose serve
+                // would Pay into the buyer's REPLICA registration). The new look was already
+                // applied by the chair UI and persists simply by not being reverted; the
+                // appearance sync carries it to other machines.
+                if (__instance is Controllers.HairdresserChairController hc)
+                {
+                    try
+                    {
+                        var fees = new System.Collections.Generic.List<(string name, int amount, float price)>();
+                        if (hc.hasPlayerHairVariantChanged || hc.hasPlayerEyebrowVariantChanged || hc.hasPlayerBeardVariantChanged)
+                            fees.Add(("ba:itemname_haircuttingfee", 1, ItemHelper.GetPriceOnCurrentBusiness("ba:itemname_haircuttingfee")));
+                        if (hc.hasPlayerHairColorChanged || hc.hasPlayerEyebrowColorChanged || hc.hasPlayerBeardColorChanged)
+                            fees.Add(("ba:itemname_hairchemicalfee", 1, ItemHelper.GetPriceOnCurrentBusiness("ba:itemname_hairchemicalfee")));
+                        if (fees.Count == 0) return false;   // nothing changed — nothing to charge, nothing to queue
+                        float svcTotal = 0f; var svcSale = new RemoteSalePayload
+                        { BuyerId = MPConfig.PlayerId, OwnerId = owner, Address = MPRegisterSync.CurrentShopAddress };
+                        var svcDesc = new System.Text.StringBuilder();
+                        foreach (var f in fees)
+                        {
+                            svcTotal += f.amount * f.price;
+                            svcSale.Items.Add(new SaleItem { ItemName = f.name, Amount = f.amount });
+                            svcDesc.Append($"{f.name} x{f.amount}, ");
+                        }
+                        svcSale.Total = svcTotal;
+                        svcSale.Desc  = svcDesc.ToString().TrimEnd(' ', ',');
+                        MPHub.ApplyMoneyDelta(-svcTotal, $"Services at {MPRegisterSync.CurrentShopAddress}");
+                        if (MPServer.IsRunning) MPServer.HandleRemoteSale(svcSale, MPConfig.PlayerId);
+                        else MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.RemoteSale, MPConfig.PlayerId, svcSale));
+                        Plugin.Logger.LogInfo($"[MPSale] service purchase finalized: total=${svcTotal:F2} owner='{owner}' items='{svcSale.Desc}' (family shape C — no queue, look kept).");
+                    }
+                    catch (Exception hx) { Plugin.Logger.LogWarning($"[MPSale] service checkout: {hx.Message}"); }
+                    return false;
+                }
+
                 try
                 {
                     string act0 = "none";
@@ -5866,6 +5922,8 @@ namespace BigAmbitionsMP
                     float total = 0f;
                     var desc = new System.Text.StringBuilder();
                     _pendingItems.Clear();
+                    _pendingPriced.Clear();
+                    _pendingTicket = __instance is Controllers.TicketBoothController;
                     if (orderedCargoInstances != null)
                         for (int i = 0; i < orderedCargoInstances.Count; i++)
                         {
@@ -5876,6 +5934,14 @@ namespace BigAmbitionsMP
                             total += c.amount * price;
                             if (desc.Length < 160) desc.Append($"{c.itemName} x{c.amount}, ");
                             _pendingItems.Add(new SaleItem { ItemName = c.itemName ?? "", Amount = c.amount });
+                            _pendingPriced.Add((c.itemName ?? "", c.amount, price));
+                            // Belt for shape B: a ticket item sold anywhere is ticket-shaped.
+                            try
+                            {
+                                var itT = BigAmbitions.Items.ItemsGetter.GetByName(c.itemName);
+                                if (itT != null && itT.HasTag(BigAmbitions.Tags.TagRef.Itemtag.isticket)) _pendingTicket = true;
+                            }
+                            catch { }
                         }
 
                     _pendingTotal   = total;
@@ -6077,6 +6143,48 @@ namespace BigAmbitionsMP
                     }
                     catch (Exception cx) { Plugin.Logger.LogWarning($"[MPSale] bag conversion: {cx.Message}"); }
 
+                    // ── Family delivery, per shape (07-bug-classes sweep 2026-08-31) ──
+                    // Shape B (tickets): native Order.Pay's buyer-side delivery is a save flag +
+                    // blocker refresh (Order.cs:56) — mirror exactly that, never Pay itself (Pay
+                    // books revenue into the local REPLICA registration).
+                    // Shape A (orders — restaurants/fast food/bar drinks): the buyer's hands are
+                    // EMPTY by native requirement and the goods exist only in the order — mirror
+                    // native MakeFullServiceSelfPurchase's delivery half: mint the paper bag and
+                    // fill it with the ordered items, already PAID (native bags drinks too).
+                    // Vehicle checkouts need nothing (cargo already possessed); basket checkouts
+                    // were converted above (round-211b).
+                    try
+                    {
+                        if (_pendingTicket)
+                        {
+                            SaveGameManager.Current.hasCinemaTheaterTicket = true;
+                            try { Buildings.Retail.Businesses.CinemaTheater.TicketEntryBlocker.UpdateBlockers(); } catch { }
+                            Plugin.Logger.LogInfo("[MPSale] ticket delivered — entry flag set (family shape B).");
+                        }
+                        else
+                        {
+                            bool usingVeh = false; try { usingVeh = Helpers.PlayerHelper.IsUsingVehicle; } catch { }
+                            if (!usingVeh && Helpers.PlayerHelper.ItemInstanceInHands == null && _pendingPriced.Count > 0)
+                            {
+                                var chD = Helpers.PlayerHelper.PlayerController?.Character;
+                                if (chD != null)
+                                {
+                                    FullServiceEmployee.SetPaperbag(chD);
+                                    var bag = Helpers.PlayerHelper.ItemInstanceInHands;
+                                    if (bag?.cargoInstances != null)
+                                    {
+                                        foreach (var itD in _pendingPriced)
+                                            bag.cargoInstances.Add(new BigAmbitions.Items.CargoInstance(itD.name, itD.amount, itD.price, paid: true));
+                                        try { bag.OnItemsInCargoUpdated()?.Invoke(); } catch { }
+                                        Plugin.Logger.LogInfo($"[MPSale] order delivered: paper bag with {_pendingPriced.Count} item line(s) (family shape A).");
+                                    }
+                                    else Plugin.Logger.LogWarning("[MPSale] SetPaperbag yielded no bag — buyer charged but goods NOT delivered; report this.");
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception dvx) { Plugin.Logger.LogWarning($"[MPSale] delivery: {dvx.Message}"); }
+
                     string act1 = "none";
                     try { act1 = MPRestSync.CurrentActivityName() ?? "none"; } catch { }
                     Plugin.Logger.LogInfo(
@@ -6089,6 +6197,89 @@ namespace BigAmbitionsMP
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSale] completion: {ex}"); }
+            }
+        }
+
+        // ── Family shape D (07-bug-classes sweep 2026-08-31): GYM shelf grabs ──
+        // PlayerItemPurchaser.GrabItem's Gym branch charges the buyer IMMEDIATELY at grab
+        // (ChangeMoneySafe, cargo paid:true) — no register visit, so the MPSale finalizer
+        // never fires. In another SESSION PLAYER's gym (replicas DO get purchaser-enabled
+        // display shelves — GameStatePatcher:1488 is not business-type-gated) the buyer paid
+        // and the owner was never credited. Mirror the OWNER's half only: diff the paid
+        // cargo the grab added into the buyer's hands and send RemoteSale (the buyer's
+        // charge and the goods are already native and correct).
+        [HarmonyPatch(typeof(Controllers.PlayerItemPurchaser), nameof(Controllers.PlayerItemPurchaser.GrabItem))]
+        public static class Patch_GymGrab_OwnerCredit
+        {
+            private static bool _armed;
+            private static readonly System.Collections.Generic.Dictionary<string, (int amount, float price)> _before = new();
+
+            private static void SnapshotPaidHands(System.Collections.Generic.Dictionary<string, (int amount, float price)> into)
+            {
+                into.Clear();
+                try
+                {
+                    var cargo = Helpers.PlayerHelper.ItemInstanceInHands?.cargoInstances;
+                    if (cargo == null) return;
+                    foreach (var c in cargo)
+                    {
+                        if (c == null || !c.paid || string.IsNullOrEmpty(c.itemName)) continue;
+                        into.TryGetValue(c.itemName, out var cur);
+                        into[c.itemName] = (cur.amount + c.amount, (float)c.pricePerUnit);
+                    }
+                }
+                catch { }
+            }
+
+            static void Prefix()
+            {
+                _armed = false;
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                    string owner = MPRegisterSync.CurrentShopOwner;
+                    if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return;
+                    if (!MPRestSync.AllPlayers().Contains(owner)) return;
+                    var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                    if (Helpers.BusinessTypeHelper.GetData(reg)?.customerType != CustomerType.Gym) return;
+                    SnapshotPaidHands(_before);
+                    _armed = true;
+                }
+                catch { }
+            }
+
+            static void Postfix()
+            {
+                if (!_armed) return;
+                _armed = false;
+                try
+                {
+                    var after = new System.Collections.Generic.Dictionary<string, (int amount, float price)>();
+                    SnapshotPaidHands(after);
+                    var sale = new RemoteSalePayload
+                    {
+                        BuyerId = MPConfig.PlayerId,
+                        OwnerId = MPRegisterSync.CurrentShopOwner,
+                        Address = MPRegisterSync.CurrentShopAddress,
+                    };
+                    float total = 0f; var desc = new System.Text.StringBuilder();
+                    foreach (var kv in after)
+                    {
+                        _before.TryGetValue(kv.Key, out var was);
+                        int added = kv.Value.amount - was.amount;
+                        if (added <= 0) continue;
+                        sale.Items.Add(new SaleItem { ItemName = kv.Key, Amount = added });
+                        total += added * kv.Value.price;
+                        desc.Append($"{kv.Key} x{added}, ");
+                    }
+                    if (sale.Items.Count == 0) return;   // grab refused / nothing paid — nothing to mirror
+                    sale.Total = total;
+                    sale.Desc  = desc.ToString().TrimEnd(' ', ',');
+                    if (MPServer.IsRunning) MPServer.HandleRemoteSale(sale, MPConfig.PlayerId);
+                    else MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.RemoteSale, MPConfig.PlayerId, sale));
+                    Plugin.Logger.LogInfo($"[MPSale] gym grab mirrored to the owner: total=${total:F2} items='{sale.Desc}' (family shape D — buyer charge was native).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSale] gym grab mirror: {ex.Message}"); }
             }
         }
 
