@@ -90,8 +90,10 @@ namespace BigAmbitionsMP
 
         /// <summary>Units on hand, as the OWNER counted them, for the shared surface currently on screen.
         /// Scoped to that one screen and that one address: everywhere else the native count is untouched.</summary>
+        // 1.0 update 2026-09-01 added a 5th parameter (bool includeBoxItemInstances = true); the old 4-type
+        // shape no longer resolves ("Undefined target method", field 20260901-132829) and the patch went dead.
         [HarmonyPatch(typeof(BuildingHelper), nameof(BuildingHelper.CountTotalResourcesInStock),
-                      typeof(BuildingRegistration), typeof(string), typeof(bool), typeof(bool))]
+                      typeof(BuildingRegistration), typeof(string), typeof(bool), typeof(bool), typeof(bool))]
         public static class Patch_CountTotalResourcesInStock_OwnerFigure
         {
             static void Postfix(BuildingRegistration buildingRegistration, string itemName, ref int __result)

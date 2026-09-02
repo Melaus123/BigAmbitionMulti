@@ -3692,6 +3692,16 @@ namespace BigAmbitionsMP
                     if (TimeSync.ManualPaused || TimeSync.IsStartupHeld) return;
                     __instance.SetSoundSnapshot(false, transitionTime);
                     Plugin.Logger.LogInfo("[Sfx] menu-close ambience restore (MP suppresses the pause pipeline vanilla used for this).");
+                    // Bug 235855 leg B (user-approved 2026-09-01). Two roles: (1) a second-chance clear of the
+                    // speaker pause flag a placement armed (also covers a leg-A miss when CancelPlacementMode
+                    // threw); (2) the one menu arm that still exists in MP — an un-pause evaluated while
+                    // FullMenu.IsOpen (a sanctioned unpause or a LocalFiles song reload with the menu up).
+                    // Opening a menu does NOT arm it in MP: FullMenu's own gameSpeed.SetPause(true)
+                    // (FullMenu:240) is suppressed above. Callers of this hook (1.0 update 2026-09-01):
+                    // FullMenu :218 IsOpen=show → :232, MiniMenu :251 → :252, Feedback :87-89 — each writes
+                    // IsOpen BEFORE calling, so the live re-read inside SetPause sees the menu closed. Runs
+                    // last so it can never cost the restore line above.
+                    MPRadioSync.ReconcileSpeakerPause("menu close");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Sfx] menu-close restore: {ex.Message}"); }
             }
@@ -7066,6 +7076,7 @@ namespace BigAmbitionsMP
                         sb.Append($"bldgStation={(reg != null ? reg.GetBusinessRadioStation().ToString() : "?")} ");
                     }
                     catch { sb.Append("bldgStation=ERR "); }
+                    sb.Append(MPRadioSync.SpeakerFlagsForDiag()).Append(' ');   // 235855: the two press gates
                     foreach (RadioStation st in Enum.GetValues(typeof(RadioStation)))
                     {
                         try

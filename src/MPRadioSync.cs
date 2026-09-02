@@ -172,5 +172,124 @@ namespace BigAmbitionsMP
             if (station < 0 || volume < -900f) return;
             Apply(new RadioStatePayload { AddressKey = addressKey, Station = station, Volume = volume }, "interior snapshot");
         }
+
+        // ── Bug 235855 (2026-09-01, user-approved legs A+B): the speaker manager's stuck pause flag ──
+        // Line numbers: 1.0 update of 2026-09-01 (decompile mono-1.0-update0901, LoudSpeakersManager.cs;
+        // the older hotfix tree is STALE for this class). SetPause (:164) computes `_isPaused = pause ||
+        // IsInPlacementMode || FullMenu.IsOpen || CityMap.IsOpen` (:171) and is re-run only by
+        // GlobalEvents.onPause and by the placement start/end handler — which feeds the flag back into
+        // itself (SetPause(_isPaused), :189), so once TRUE it can never fall on its own. Vanilla clears it
+        // because leaving placement mode un-pauses the game and that un-pause dispatches onPause(false).
+        // In MP the entry-side pause is suppressed (Patch_GSC_SetPause_Suppress), so GameSpeedController.Set
+        // sees paused false→false and never dispatches: the flag sticks, PlayNextStation (:330) refuses
+        // every press, and since the update LateUpdate (:93) also refuses to start the next song — the shop
+        // radio goes silent for everyone in the building when the current track ends. Field 235855: host
+        // 7/7 and client 25/25 presses dead after a placement, recovered only by a manual pause cycle or a
+        // city-map close — the two paths that still fire onPause(false). This delivers the ONE call
+        // vanilla's un-pause delivered, at the points MP suppresses it: placement end (leg A, below; the
+        // throw path is covered from PlacementBlockerGuard's repair finalizer) and menu close (leg B,
+        // Patch_Sfx_MenuCloseRestore). SetPause(false) on the update arms _pendingPlay (no direct UnPause).
+        // A genuinely paused game — manual pause, startup hold, or the game's own flag read live — is
+        // left alone, exactly like vanilla's wasPausedBeforePlacementMode branch; its eventual un-pause
+        // runs Set→SetPauseState→onPause(false) (paused=false is never suppressed) and clears the flag.
+        private static System.Reflection.FieldInfo? _fSpeakerPaused, _fSpeakerInit, _fSpeakerAudio;
+        private static System.Reflection.MethodInfo? _mSpeakerSetPause;
+        private static bool _speakerReflectWarned;
+        private static int _speakerClears, _speakerRefusals;   // separate: a refusal streak must not eat the success window
+
+        private static void EnsureSpeakerReflection()
+        {
+            var t = typeof(Player.Sound.Radio.LoudSpeakersManager);
+            _fSpeakerPaused   ??= AccessTools.Field(t, "_isPaused");
+            _fSpeakerInit     ??= AccessTools.Field(t, "_speakersInitialized");
+            _fSpeakerAudio    ??= AccessTools.Field(t, "audioSource");
+            _mSpeakerSetPause ??= AccessTools.Method(t, "SetPause", new[] { typeof(bool) });
+        }
+
+        /// <summary>Diagnostic read for the RadioDiag press line — the two gates PlayNextStation checks.
+        /// A press that changes nothing now names its own reason in the log.</summary>
+        internal static string SpeakerFlagsForDiag()
+        {
+            try
+            {
+                EnsureSpeakerReflection();
+                var mgr = InstanceBehavior<Player.Sound.Radio.LoudSpeakersManager>.Instance;
+                if (mgr == null) return "speakers=none";
+                string p = _fSpeakerPaused?.GetValue(mgr)?.ToString() ?? "?";
+                string i = _fSpeakerInit?.GetValue(mgr)?.ToString() ?? "?";
+                return $"speakerPaused={p} speakersInit={i}";
+            }
+            catch (Exception ex) { return $"speakers=ERR({ex.GetType().Name})"; }
+        }
+
+        /// <summary>Deliver the speaker un-pause vanilla's game un-pause would have delivered. No-op
+        /// outside MP, while genuinely paused, before the manager has an audio source, or when the
+        /// flag is already clear. SetPause(false) itself re-reads placement/menu/map state live, so it
+        /// can only clear the flag when none of them is open.</summary>
+        internal static void ReconcileSpeakerPause(string reason)
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.InMpGame) return;        // vanilla gets its own onPause(false)
+                if (TimeSync.ManualPaused || TimeSync.IsStartupHeld) return;   // genuinely paused (mod intent)
+                bool nativePaused;
+                try { nativePaused = UI.UIs.Instance?.gameSpeed?.Paused ?? false; }
+                catch { nativePaused = true; }                                  // unreadable (pre-load) → fail CLOSED
+                if (nativePaused) return;                                       // genuinely paused (game's flag)
+                var mgr = InstanceBehavior<Player.Sound.Radio.LoudSpeakersManager>.Instance;
+                if (mgr == null) return;
+                EnsureSpeakerReflection();
+                if (_mSpeakerSetPause == null || _fSpeakerPaused == null)
+                {
+                    if (!_speakerReflectWarned)
+                    {
+                        _speakerReflectWarned = true;
+                        Plugin.Logger.LogWarning("[Radio] LoudSpeakersManager.SetPause/_isPaused did not resolve — speaker un-pause mirror stands down (next-station stays dead after a placement in MP).");
+                    }
+                    return;
+                }
+                // SetPause logs a Unity error when its audio source is null (pre-init) — skip, don't spam.
+                if (_fSpeakerAudio != null)
+                {
+                    var ao = _fSpeakerAudio.GetValue(mgr);
+                    if (ao == null || (ao is UnityEngine.Object uo && uo == null)) return;
+                }
+                bool before = (bool)_fSpeakerPaused.GetValue(mgr);
+                if (!before) return;                                            // nothing to reconcile
+                _mSpeakerSetPause.Invoke(mgr, new object[] { false });
+                bool after = (bool)_fSpeakerPaused.GetValue(mgr);
+                if (!after)
+                {
+                    _speakerClears++;
+                    if (_speakerClears <= 5 || _speakerClears % 25 == 0)
+                        Plugin.Logger.LogInfo($"[Radio] speaker pause flag cleared on {reason} (#{_speakerClears}) — MP suppresses the native un-pause vanilla used for this.");
+                }
+                else
+                {
+                    // A refusal repeats on every placement end / menu close until the standing gate drops — same limiter.
+                    _speakerRefusals++;
+                    if (_speakerRefusals <= 5 || _speakerRefusals % 25 == 0)
+                        Plugin.Logger.LogInfo($"[Radio] speaker pause flag STILL set after {reason} (#{_speakerRefusals}) — placement={BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode} fullMenu={UI.Smartphone.FullMenu.IsOpen} cityMap={CityMap.IsOpen}.");
+                }
+            }
+            catch (Exception ex)
+            {
+                // A reflection invoke wraps the real error (round-39 lesson, GameStateReader) — surface the inner one.
+                var inner = (ex as System.Reflection.TargetInvocationException)?.InnerException ?? ex;
+                Plugin.Logger.LogWarning($"[Radio] speaker pause reconcile ({reason}): {inner.GetType().Name}: {inner.Message}");
+            }
+        }
+
+        /// <summary>Leg A — placement end. A postfix runs after StopPlacingItem (IsInPlacementMode is
+        /// false again), after the native placement-end handler re-armed the flag, and after the
+        /// un-pause MP turned into a no-op — the exact point vanilla's onPause(false) arrived. A postfix
+        /// is skipped when the original throws; that path is covered from the repair finalizer in
+        /// PlacementBlockerGuard (review MAJOR-2), which runs the same reconcile after its teardown.</summary>
+        [HarmonyPatch(typeof(Buildings.Indoors.InteriorDesign.PlacementHelper),
+                      nameof(Buildings.Indoors.InteriorDesign.PlacementHelper.CancelPlacementMode))]
+        public static class Patch_PlacementEnd_SpeakerUnpause
+        {
+            static void Postfix() => ReconcileSpeakerPause("placement end");
+        }
     }
 }

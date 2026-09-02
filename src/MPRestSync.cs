@@ -512,14 +512,53 @@ namespace BigAmbitionsMP
                     _durProps[t] = member;
                     Plugin.Logger.LogInfo($"[Rest] duration field for {t.Name}: {(member != null ? member.Name : "NOT FOUND")}");
                 }
-                if (member == null) return;
-                int total = Convert.ToInt32(MPReflect.Get(member, target) ?? 0);
-                int delta = (int)Math.Ceiling(need - rem);
-                MPReflect.Set(member, target, total + delta);
+                if (member != null)
+                {
+                    int total = Convert.ToInt32(MPReflect.Get(member, target) ?? 0);
+                    int delta = (int)Math.Ceiling(need - rem);
+                    MPReflect.Set(member, target, total + delta);
+                }
+                PushFinishTime(target, t, goalMinutes);   // 1.0 update: the clock-based finish must move too
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] EnsureActivityCovers: {ex.Message}"); }
         }
         private static readonly Dictionary<Type, System.Reflection.MemberInfo?> _durProps = new();
+
+        // 1.0 update 2026-09-01 (field 20260901-192731, user-approved): Rest/Sleep/Work/Study now ALSO finish
+        // when a private `Timestamp _finishTime`, captured at start, falls into the past — Perform() checks
+        // IsInThePast() on every game-minute change (PlayerActivityUI.OnActivityRunning :314-323; Rest :208,
+        // Sleep :133, Work :129, Study :163 on the update decompile). Extending the minutes int above no longer
+        // covers a skip: our fast clock ran past the ORIGINAL finish time, the game stood the player up, the
+        // vote dropped, the skip stopped, the bench re-offered, the player re-sat — every ~3 s on both machines.
+        // So the finish time is pushed to the goal as well. Field NOT FOUND (pre-update shape) → the minutes
+        // path alone governs, exactly as before. A null value is the game's own "no clock finish" (Rest while
+        // watching a show) and is left alone. Timestamp.GetTotalMinutes = (Day*24+Hour)*60+Minute — the same
+        // basis as NowMinutes()/goalMinutes, and the (float totalMinutes) constructor splits it back.
+        private static readonly Dictionary<Type, System.Reflection.FieldInfo?> _finishFields = new();
+        private static object? _lastFinishPushedAct;
+        private static void PushFinishTime(object act, Type t, double goalMinutes)
+        {
+            try
+            {
+                if (!_finishFields.TryGetValue(t, out var f))
+                {
+                    f = HarmonyLib.AccessTools.Field(t, "_finishTime");
+                    _finishFields[t] = f;
+                    Plugin.Logger.LogInfo($"[Rest] finish-time field for {t.Name}: {(f != null ? f.Name : "NOT FOUND (pre-update shape — the minutes field alone governs)")}");
+                }
+                if (f == null) return;
+                var cur = f.GetValue(act) as BigAmbitions.DayNightCycle.Timestamp;
+                if (cur == null) return;                                   // no clock finish on this activity (Rest watching a show)
+                if (cur.GetTotalMinutes() >= goalMinutes) return;          // already covers the goal
+                f.SetValue(act, new BigAmbitions.DayNightCycle.Timestamp((float)goalMinutes));
+                if (!ReferenceEquals(_lastFinishPushedAct, act))
+                {
+                    _lastFinishPushedAct = act;                            // first push per sit only
+                    Plugin.Logger.LogInfo($"[Rest] {t.Name} finish time pushed to {Fmt(goalMinutes)} (1.0-update clock-based finish).");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] PushFinishTime: {ex.Message}"); }
+        }
 
         /// <summary>All session player names (for the who-voted checklist).</summary>
         public static IReadOnlyList<string> AllPlayers()

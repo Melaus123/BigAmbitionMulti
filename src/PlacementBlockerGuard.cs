@@ -177,6 +177,12 @@ namespace BigAmbitionsMP
             catch (Exception e) { Plugin.Logger.LogWarning($"[Placement] UnsetNavigationBlocker during repair: {e.Message}"); }
 
             try { PlacementWatch.NoteEnd("native cancel THREW — teardown completed by the mod"); } catch { }
+            // Bug 235855 review MAJOR-2 (user-approved 2026-09-01): a Harmony postfix is skipped when the
+            // original throws, so leg A (MPRadioSync.Patch_PlacementEnd_SpeakerUnpause) never runs on this
+            // path and the speaker pause flag stays armed. StopPlacingItem has run above (IsInPlacementMode
+            // false), so the same reconcile clears it here. Part of the GUARD, not the probe — survives
+            // P-PLACEMENT-STRAND cleanup with the rest of this finalizer.
+            try { MPRadioSync.ReconcileSpeakerPause("placement end (native cancel threw)"); } catch { }
             return null;   // swallow: re-throwing would abandon the teardown just performed
         }
     }
