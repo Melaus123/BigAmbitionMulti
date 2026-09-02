@@ -2779,6 +2779,11 @@ namespace BigAmbitionsMP
         public string ItemName       { get; set; } = "";
         public float  Price          { get; set; }
         public float  WholesalePrice { get; set; }
+        // Recheck B1 (2026-09-01): the helper's machine never ran the native price-acceptability
+        // check (it lives behind the owner gate), so every forwarded item was booked at any price.
+        // The helper now answers it with the live customer's own tolerance; the owner refuses
+        // (does not deduct or book) items marked false — native's returned-item outcome.
+        public bool   Acceptable     { get; set; } = true;
     }
 
     /// <summary>Round-39f (Phase 3 slice-2 step-2) — a customer order PAID on a helper's machine,

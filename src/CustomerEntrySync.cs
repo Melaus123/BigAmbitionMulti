@@ -252,6 +252,17 @@ namespace BigAmbitionsMP
         /// <summary>Idempotency ledger — every forwarded EntryId is processed at most once per session.</summary>
         private static readonly HashSet<string> _processedForwards = new();
 
+        // Recheck B1 (helper side): live citizen per order, recorded at Customer.Init so the forward
+        // at Order.Pay can judge price acceptability without a scene sweep. Weak-keyed — orders die
+        // with their customers.
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Order, AI.Citizens.CitizenData> _citizenByOrder = new();
+        internal static void RecordCitizen(Order order, AI.Citizens.CitizenData citizen)
+        {
+            try { _citizenByOrder.Remove(order); _citizenByOrder.Add(order, citizen); } catch { }
+        }
+        internal static AI.Citizens.CitizenData? CitizenFor(Order? order)
+            => order != null && _citizenByOrder.TryGetValue(order, out var c) ? c : null;
+
         // DIAG:FIELD (promoted 2026-08-26) — running tally of adopted forwarded orders per
         // business, drained into the [EconProbe] daily-revenue line so the books attribute what came
         // from helper-hosted sales. Retire with the EconProbe once the loop is trusted.
@@ -268,8 +279,9 @@ namespace BigAmbitionsMP
         /// source entry (my table is the single-writer ledger: already-completed = my machine spawned or
         /// served that customer → reject, my side counts it), deduct the sold items + a paper bag from
         /// REAL stock (a forwarded sale must drain shelves like a live one, or revenue is minted from
-        /// nothing), record the order in reg.unprocessedCompletedOrders (the hourly calculator subtracts
-        /// it from the simulated quota — native anti-double-count), and re-sync.</summary>
+        /// nothing), PRICE each item from the owner's own table (the helper's copy carries none — see the
+        /// field note in the loop), record the order in reg.unprocessedCompletedOrders (the hourly
+        /// calculator subtracts it from the simulated quota — native anti-double-count), and re-sync.</summary>
         internal static void OwnerAdoptForwardedOrder(HelperOrderPayload p)
         {
             try
@@ -291,20 +303,39 @@ namespace BigAmbitionsMP
                 // Claim. Completed on MY table = my spawner consumed that customer (I'm inside; my live
                 // body will/did complete it natively) — reject so it counts exactly once.
                 bool claimed = false, known = false;
+                CustomerEntry? claimedEntry = null;
                 var table = Table();
-                if (table != null && table.TryGetValue(reg.Address, out var entries) && entries != null)
+                List<CustomerEntry>? entries = null;
+                if (table != null && table.TryGetValue(reg.Address, out entries) && entries != null)
                     foreach (var e in entries)
                     {
                         if (e == null || !_ownerIds.TryGetValue(e, out var id) || id != p.EntryId) continue;
                         known = true;
                         if (e.completed) { _processedForwards.Add(p.EntryId); }
-                        else             { e.completed = true; claimed = true; }
+                        else             { e.completed = true; claimed = true; claimedEntry = e; }
                         break;
                     }
                 if (known && !claimed)
                 {
                     Plugin.Logger.LogInfo($"[Business] forwarded order {p.EntryId} rejected — entry already consumed on the owner's machine (counts natively).");
                     return;
+                }
+                // Recheck B2 (double-book): the owner's hourly abstract simulator processes every entry
+                // of the hour with NO completed filter (RetailBusinessSimulator.ProcessAllCustomersFromThisHour
+                // :171-186, ProcessCustomer :207+), so a claimed-but-listed entry was booked AGAIN at the
+                // hour-end tick whenever the owner stood outside. Retire the claimed entry from the live
+                // list: the adopted Order below (timestamp now) still feeds the daily quota subtraction.
+                int leftThisHour = -1;
+                if (claimedEntry != null && entries != null)
+                {
+                    try
+                    {
+                        entries.Remove(claimedEntry);
+                        int hourNow = SaveGameManager.Current.Hour;
+                        leftThisHour = 0;
+                        foreach (var e in entries) if (e != null && e.spawnTime != null && e.spawnTime.Hour == hourNow && !e.completed) leftThisHour++;
+                    }
+                    catch (Exception rx) { Plugin.Logger.LogWarning($"[Business] retire claimed entry: {rx.Message}"); }
                 }
                 // Unknown id = the schedule rotated since the helper's copy; adopt anyway (the order
                 // still displaces the sim quota) — logged for the audit trail.
@@ -313,18 +344,36 @@ namespace BigAmbitionsMP
                 // dropped from the sale (the shop can't sell what it doesn't have).
                 var o = new Order { completed = true, timestamp = TimeHelper.Now() };
                 try { o.cleanliness = Buildings.BuildingTypes.Shared.Dirtiness.BuildingCleanlinessHelper.GetCleanliness(reg); } catch { }
-                int sold = 0, dropped = 0;
+                // Field 20260831-224923 (approved 2026-09-01): the helper's copy of the order carries
+                // NO prices — native FullServiceEmployee.CheckConditions (:175-185) writes
+                // orderEntry.price only when IsPlayerOwnedBusiness on the serving machine, which a
+                // helper's replica never is, so every forwarded item arrived at $0 and the owner
+                // booked nothing for 87 sales in one day. The OWNER's price table is the truth
+                // anyway (a helper's synced copy can lag a re-price), so price here from it, and
+                // take the cost basis from the shelf slot the unit is actually deducted from.
+                // The forwarded Price is kept only as an audit figure in the log line below.
+                int sold = 0, dropped = 0, refused = 0;
+                float forwardedTotal = 0f, repricedTotal = 0f;
                 if (p.Items != null)
                     foreach (var it in p.Items)
                     {
                         if (it == null || string.IsNullOrEmpty(it.ItemName)) continue;
-                        if (DeductDisplayStock(reg, it.ItemName))
+                        // Recheck B1: the helper judged this item too expensive for that customer —
+                        // native returns it to the shelf unsold (ReturnUnacceptablePriceItems), so it
+                        // is neither deducted nor booked here.
+                        if (!it.Acceptable) { refused++; continue; }
+                        if (DeductDisplayStock(reg, it.ItemName, out float slotWholesale))
                         {
+                            float ownerPrice;
+                            try { ownerPrice = ItemHelper.GetPrice(it.ItemName, reg); }   // owner's retailPrices, market default on a miss
+                            catch { ownerPrice = it.Price; }
+                            if (ownerPrice <= 0f) ownerPrice = it.Price;   // never price BELOW what the helper saw (a $0 table miss)
+                            forwardedTotal += it.Price; repricedTotal += ownerPrice;
                             o.entries.Add(new OrderEntry
                             {
                                 itemName       = it.ItemName,
-                                price          = it.Price,
-                                wholesalePrice = it.WholesalePrice,
+                                price          = ownerPrice,
+                                wholesalePrice = slotWholesale > 0f ? slotWholesale : it.WholesalePrice,
                                 available      = true,
                                 paid           = true,
                             });
@@ -335,7 +384,9 @@ namespace BigAmbitionsMP
                 if (sold == 0)
                 {
                     _processedForwards.Add(p.EntryId);
-                    Plugin.Logger.LogInfo($"[Business] forwarded order {p.EntryId} had no coverable items (stock raced away) — dropped.");
+                    Plugin.Logger.LogInfo(refused > 0 && dropped == 0
+                        ? $"[Business] forwarded order {p.EntryId}: every item priced too high for that customer — left without buying (entry consumed, nothing booked)."
+                        : $"[Business] forwarded order {p.EntryId} had no coverable items (stock raced away{(refused > 0 ? $", {refused} refused on price" : "")}) — dropped.");
                     return;
                 }
 
@@ -370,7 +421,8 @@ namespace BigAmbitionsMP
                 _adoptedTally[p.AddressKey] = (tally.orders + 1, tally.revenue + orderRevenue);
                 BuildingStorageSync.OwnerBusinessTail(reg);
                 InteriorSync.PushOwnedBuildingNow(p.AddressKey);
-                Plugin.Logger.LogInfo($"[Business] adopted helper-served order {p.EntryId} from '{p.PlayerId}' @'{p.AddressKey}': {sold} item(s){(bagged ? " +bag" : "")}{(dropped > 0 ? $" ({dropped} out-of-stock dropped)" : "")}{(known ? "" : " (entry unknown — schedule rotated)")}.");
+                Plugin.Logger.LogInfo($"[Business] adopted helper-served order {p.EntryId} from '{p.PlayerId}' @'{p.AddressKey}': {sold} item(s) ${repricedTotal:F2} (forwarded at ${forwardedTotal:F2}){(bagged ? " +bag" : "")}{(refused > 0 ? $" ({refused} refused on price)" : "")}{(dropped > 0 ? $" ({dropped} out-of-stock dropped)" : "")}{(known ? "" : " (entry unknown — schedule rotated)")}."
+                    + (claimedEntry != null ? $" [PROBE:P-HELPER-DOUBLEBOOK] entry retired from the live table; {leftThisHour} unserved left this hour." : (known ? "" : " [PROBE:P-HELPER-DOUBLEBOOK] entry unknown — nothing to retire; quota relies on the adopted order's timestamp.")));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] adopt forwarded order: {ex.Message}"); }
         }
@@ -381,8 +433,9 @@ namespace BigAmbitionsMP
         /// <summary>Reduce ONE unit of <paramref name="itemName"/> from a display (showcase-shelf) stock
         /// slot — what a live customer's grab does physically. Display-only on purpose: customers never
         /// shop from storage.</summary>
-        private static bool DeductDisplayStock(BuildingRegistration reg, string itemName)
+        private static bool DeductDisplayStock(BuildingRegistration reg, string itemName, out float slotWholesale)
         {
+            slotWholesale = 0f;
             try
             {
                 if (reg.itemInstances == null) return false;
@@ -397,6 +450,7 @@ namespace BigAmbitionsMP
                         var s = slots[i];
                         if (s == null || s.itemName != itemName || s.amount <= 0) continue;
                         s.amount--;
+                        slotWholesale = (float)s.pricePerUnit;   // the owner's real cost basis for this unit
                         try { ii.OnItemsInCargoUpdated()?.Invoke(); } catch { }
                         return true;
                     }

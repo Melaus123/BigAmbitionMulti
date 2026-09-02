@@ -1234,6 +1234,12 @@ namespace BigAmbitionsMP
                                     changedDesignUuids.Add(uuid);
                             }
                             _lastDesignSer[payload.AddressKey] = newDSer;
+                            // Field 20260831-223144 (approved 2026-09-01): native renders walls at ENTRY from
+                            // BuildingRegistration._interiorLookup, a LAZY cache regenerated only when
+                            // empty or when native writers call this explicitly. Every mod write to
+                            // interiorDesigns left it stale, so the OWNER's next entry drew the OLD paint
+                            // and their exit serialized it back over the data — the field revert.
+                            try { reg.GenerateInteriorDesignerLookup(); } catch (Exception lx) { Plugin.Logger.LogWarning($"[Patcher] design lookup regen: {lx.Message}"); }
                         }
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] interiorDesigns apply: {ex.Message}"); }
@@ -2662,6 +2668,10 @@ namespace BigAmbitionsMP
                             if (!dSer.TryGetValue(d.UUID, out var prev) || prev != ser) changedDesignUuids.Add(d.UUID);
                             dSer[d.UUID] = ser;   // baseline merges per UUID — never replaced wholesale
                         }
+                        // Field 20260831-223144: refresh the native lazy design lookup (see the
+                        // snapshot path) — the in-place replace above leaves it pointing at the OLD
+                        // SerializedInteriorDesign objects otherwise.
+                        try { reg.GenerateInteriorDesignerLookup(); } catch (Exception lx) { Plugin.Logger.LogWarning($"[Patcher] design lookup regen: {lx.Message}"); }
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] delta designs apply: {ex.Message}"); }
@@ -3694,6 +3704,15 @@ namespace BigAmbitionsMP
         /// owner's local shelf VISUAL (box models) may lag until the next
         /// interior refresh — data and sync are correct immediately.
         /// </summary>
+        // Recheck-remedies B-1 (approved 2026-09-01): the SHORT alarm is EVIDENCE-BASED, not typing-
+        // based. Whether an item is a shelf good lives in asset data we cannot read; instead we
+        // remember, per building, every item name that has ever had cargo here (any slot, any
+        // amount, incl. 0 — a sold-out slot the loop removes still counts). Services, tickets and
+        // fees never have cargo → never alarm; a real good that has been on a shelf alarms even
+        // after it sold out entirely. The log line is UNCONDITIONAL (the previous gate hid a real
+        // oversell of an unknown-typed item).
+        private static readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.HashSet<string>> _knownStockedItems = new();
+
         public static string ApplySaleStockDecrement(string addressKey, System.Collections.Generic.List<SaleItem>? items, string buyerId)
         {
             var shortfall = new System.Text.StringBuilder();
@@ -3717,35 +3736,32 @@ namespace BigAmbitionsMP
                     // there, not a shortfall. The typing bit lives in asset data we cannot read
                     // from source (ItemType is [Flags], RetailProduct=2), so the alarm errs
                     // quiet for unknowns while the subtraction stays unconditional.
-                    bool shelfGood = false;
-                    try
-                    {
-                        var itS = BigAmbitions.Items.ItemsGetter.GetByName(s.ItemName);
-                        shelfGood = itS != null && (itS.type & BigAmbitions.Items.ItemType.RetailProduct) != 0;
-                    }
-                    catch { }
+                    if (!_knownStockedItems.TryGetValue(addressKey, out var known)) _knownStockedItems[addressKey] = known = new System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal);
+                    bool seenCargo = false;
                     int remaining = s.Amount;
                     foreach (var kv in reg.itemInstances)
                     {
                         var cargo = kv.Value?.cargoInstances;
                         if (cargo == null) continue;
-                        for (int i = cargo.Count - 1; i >= 0 && remaining > 0; i--)
+                        for (int i = cargo.Count - 1; i >= 0; i--)
                         {
                             var c = cargo[i];
                             if (c == null || c.itemName != s.ItemName) continue;
+                            seenCargo = true;                       // evidence: this building stocks this item
+                            if (remaining <= 0) continue;
                             int dec = System.Math.Min(c.amount, remaining);
                             c.amount -= dec;
                             remaining -= dec;
                             if (c.amount <= 0) cargo.RemoveAt(i);
                         }
-                        if (remaining <= 0) break;
                     }
+                    if (seenCargo) known.Add(s.ItemName);
                     int sold = s.Amount - remaining;
-                    bool alarm = remaining > 0 && shelfGood;
-                    if (sold > 0 || alarm)
-                        Plugin.Logger.LogInfo(
-                            $"[Stock] '{addressKey}': -{sold} {s.ItemName} (sold to {buyerId})" +
-                            (alarm ? $" — SHORT by {remaining} (stock didn't cover the sale)." : "."));
+                    bool alarm = remaining > 0 && known.Contains(s.ItemName);   // evidence-based: ever stocked here
+                    Plugin.Logger.LogInfo(
+                        $"[Stock] '{addressKey}': -{sold} {s.ItemName} (sold to {buyerId})" +
+                        (alarm ? $" — SHORT by {remaining} (stock didn't cover the sale)."
+                               : (remaining > 0 ? $" — {remaining} not on any shelf here (never stocked: service/ticket/fee, or unknown item) — no alarm." : ".")));
                     if (alarm)
                         shortfall.Append($"{s.ItemName} x{remaining}, ");
                 }

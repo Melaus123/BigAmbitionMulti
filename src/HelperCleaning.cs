@@ -92,7 +92,14 @@ namespace BigAmbitionsMP
         // ALL-OR-NOTHING: with either hook dead it stands down entirely and StopCleaning reports
         // unconditionally — the pre-guard behavior with its documented overlap trade — instead
         // of a half-alive gate silently dropping every report.
+        // Recheck C-1 (2026-09-01): armed by EXECUTION, not resolution — TargetMethods can find a
+        // method that Harmony then fails to apply (Plugin's per-class catch continues), and a
+        // found-but-unapplied click hook froze _strokeSeq → every report after the first died in
+        // the dedup return below, silently. Each flag now flips the first time its hook body
+        // actually runs; both fire during the very first stroke (click prefix, then swing
+        // boundaries), so a healthy install arms before the first StopCleaning.
         internal static bool ClickHookOk, LatchHookOk;
+        private static int _dedupSkips;   // review C-1: the early return is counted, never silent
         private static readonly System.Reflection.FieldInfo? AffectedCellsField =
             AccessTools.Field(typeof(MopController), "AffectedCells");
 
@@ -101,6 +108,7 @@ namespace BigAmbitionsMP
 
         internal static void OnStrokeStart(MopController mop)
         {
+            ClickHookOk = true;   // proof of application (review C-1)
             // Flush a FINISHED but unreported stroke before the native click clears the list —
             // without this, a click landing in the previous stroke's cosmetic pause would eat
             // that stroke's completed cleaning (the exact symptom the report-zero fix targets).
@@ -112,6 +120,7 @@ namespace BigAmbitionsMP
 
         internal static void OnLoopBoundary()
         {
+            LatchHookOk = true;   // proof of application (review C-1)
             var cells = AffectedCellsList();
             if (cells == null || cells.Count == 0) return;
             var reg = _lastMopReg;
@@ -133,7 +142,15 @@ namespace BigAmbitionsMP
         {
             if (ClickHookOk && LatchHookOk)
             {
-                if (_strokeSeq == _reportedSeq) return;   // this stroke already reported (flush or earlier stop)
+                if (_strokeSeq == _reportedSeq)
+                {
+                    // This stroke already reported (a click-time flush, or an earlier StopCleaning of
+                    // the same stroke). Counted: a runaway count here would mean the counter froze.
+                    _dedupSkips++;
+                    if (_dedupSkips == 1 || _dedupSkips % 50 == 0)
+                        Plugin.Logger.LogInfo($"[Cleaning] stop-report already sent for stroke #{_strokeSeq} — dedup skip #{_dedupSkips}.");
+                    return;
+                }
                 if (_cleanLatchSeq != _strokeSeq)
                 {
                     // A StopCleaning fired while the CURRENT stroke had not been observed finished —
@@ -318,8 +335,8 @@ namespace BigAmbitionsMP
     /// finished-but-unreported previous stroke BEFORE the native body clears the shared static AffectedCells
     /// (a click landing in the previous stroke's cosmetic pause would otherwise eat its completed cleaning),
     /// then advances the stroke counter. OnFloorCellClick is private — TargetMethods yields nothing on a
-    /// resolution miss (never the player-visible patch-degraded notice) and leaves ClickHookOk false, which
-    /// stands the whole gate down (see the state block).</summary>
+    /// resolution miss (never the player-visible patch-degraded notice); ClickHookOk arms only when the
+    /// prefix actually executes, so a found-but-unapplied hook also stands the gate down (review C-1).</summary>
     [HarmonyPatch]
     public static class Patch_MopController_FloorClick_Stroke
     {
@@ -327,7 +344,7 @@ namespace BigAmbitionsMP
         {
             var m = AccessTools.Method(typeof(MopController), "OnFloorCellClick");
             if (m == null) Plugin.Logger.LogWarning("[Cleaning] MopController.OnFloorCellClick did not resolve — same-stroke gate stands down (unconditional reports, pre-guard trade).");
-            else { HelperCleaning.ClickHookOk = true; yield return m; }
+            else yield return m;   // the flag arms when the prefix first RUNS (review C-1), not here
         }
         static void Prefix(MopController __instance)  { HelperCleaning.OnStrokeStart(__instance); }
     }
@@ -350,7 +367,7 @@ namespace BigAmbitionsMP
             }
             catch { }
             if (mv == null) Plugin.Logger.LogWarning("[Cleaning] FloorCellClick MoveNext did not resolve — same-stroke gate stands down (unconditional reports, pre-guard trade).");
-            else { HelperCleaning.LatchHookOk = true; yield return mv; }
+            else yield return mv;   // the flag arms when the postfix first RUNS (review C-1), not here
         }
         static void Postfix() { HelperCleaning.OnLoopBoundary(); }
     }

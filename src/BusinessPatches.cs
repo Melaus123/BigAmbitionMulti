@@ -196,17 +196,36 @@ namespace BigAmbitionsMP
                 if (string.IsNullOrEmpty(entryId) || _sent.Contains(entryId)) return;
 
                 var payload = new HelperOrderPayload { AddressKey = addr, PlayerId = MPConfig.PlayerId, EntryId = entryId! };
+                // Recheck B1: native prices AND judges acceptability inside the owner gate
+                // (FullServiceEmployee.CheckConditions :175-185), so on this helper machine every
+                // entry arrives priced 0 and un-judged. Judge it HERE with the live customer's own
+                // tolerance against this machine's synced price table (the owner re-prices on adopt
+                // from its authoritative table; the price sent is an audit figure). No live citizen
+                // known (a stray) → a random neighborhood citizen, exactly what the native abstract
+                // simulators use (OfficeBusinessSimulator :45, RetailBusinessSimulator :209).
+                var regH = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                var citizen = CustomerEntrySync.CitizenFor(__instance);
+                if (citizen == null && regH != null)
+                {
+                    try { citizen = AI.Citizens.CitizenHelper.CreateRandomCitizenDataNonAlloc(regH.Neighborhood); } catch { }
+                }
+                int refused = 0;
                 foreach (var e in __instance.entries)
                 {
                     if (e == null || !e.paid || string.IsNullOrEmpty(e.itemName)) continue;
-                    payload.Items.Add(new OrderEntryInfo { ItemName = e.itemName, Price = e.price, WholesalePrice = e.wholesalePrice });
+                    float price = e.price;
+                    try { if (price <= 0f && regH != null) price = ItemHelper.GetPrice(e.itemName, regH); } catch { }
+                    bool acceptable = true;
+                    try { if (citizen != null) acceptable = citizen.IsPriceAcceptable(e.itemName, price); } catch { }
+                    if (!acceptable) refused++;
+                    payload.Items.Add(new OrderEntryInfo { ItemName = e.itemName, Price = price, WholesalePrice = e.wholesalePrice, Acceptable = acceptable });
                 }
                 if (payload.Items.Count == 0) return;   // empty basket — nothing real happened
                 _sent.Add(entryId!);
 
                 if (MPServer.IsRunning) MPServer.HandleHelperOrder(payload, MPConfig.PlayerId);
                 else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.HelperOrderForward, MPConfig.PlayerId, payload));
-                Plugin.Logger.LogInfo($"[Business] forwarded helper-served order {entryId} ({payload.Items.Count} item(s)) @'{addr}' → owner.");
+                Plugin.Logger.LogInfo($"[Business] forwarded helper-served order {entryId} ({payload.Items.Count} item(s){(refused > 0 ? $", {refused} priced too high for this customer" : "")}{(citizen == null ? ", no citizen — unjudged" : "")}) @'{addr}' → owner.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] order forward: {ex.Message}"); }
         }
@@ -224,6 +243,13 @@ namespace BigAmbitionsMP
     {
         static void Prefix()    { HousingFurniture.Enter(includeHelper: true); }
         static void Finalizer() { HousingFurniture.Exit(); }
+        // Recheck B1: remember which live citizen owns which order, so the forward at Order.Pay can
+        // run the price-acceptability check the owner gate hid from this machine (registry, not a
+        // scene sweep — design principle 3).
+        static void Postfix(Customer __instance)
+        {
+            try { if (__instance != null && __instance.order != null && __instance.citizenData != null) CustomerEntrySync.RecordCitizen(__instance.order, __instance.citizenData); } catch { }
+        }
     }
 
     // (register-npc investigation CLOSED 2026-07-07: the [StaffProbe] run showed exactly ONE
