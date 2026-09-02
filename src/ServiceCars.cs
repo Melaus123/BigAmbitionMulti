@@ -299,9 +299,11 @@ namespace BigAmbitionsMP
                     if (!instantRemove) return;
                     if (!MPServer.IsRunning && !MPClient.InMpGame) return;
                     if (!TaxiSystem.IsTraveling) return;   // only the arrival hand-off; an explicit "remove" elsewhere stays native
-                    // Review MINOR-6: during a FRIEND's ride (cityMap.Taxi is a GhostTaxi) the game's no-waypoint
-                    // fallback dismisses the RIDER's own driver — that is not the arrival hand-off; stay native.
-                    try { if (InstanceBehavior<CityManager>.Instance?.cityMap?.Taxi is GhostTaxi) return; } catch { }
+                    // Review MINOR-6 / #2 MINOR-1: during a FRIEND's ride the game's no-waypoint fallback dismisses the
+                    // RIDER's own driver — not the arrival hand-off; stay native. cityMap.Taxi is already null by then
+                    // (TravelCoroutine closes the map right after DriveAway), so the test is the mod's own flag, set at
+                    // boarding by GhostTaxi.DriveAway and cleared once the travel ends.
+                    if (FriendRideActive) return;
                     var pdv = Player.HUD.SmartphoneUI.SmartphonePrivateDriverUI.CurrentVehicle;
                     var origin = pdv != null ? pdv.GetComponent<VehicleComponent>() : null;
                     if (origin == null)
@@ -564,11 +566,12 @@ namespace BigAmbitionsMP
                     {
                         var vcA = e.Go.GetComponent<VehicleComponent>();
                         var target = _fTargetWaypoint?.GetValue(pdv) as Waypoint;
+                        // Review #2 MAJOR-3: STICKY — a second stop on an already-stopped car finds no target and must
+                        // not erase the snapshot the first stop took; Resume is the only consumer and clearer.
                         if (target != null && vcA != null && vcA.presetPath != null && vcA.presetPath.Count > 0)
                         { e.SavedTarget = target; e.SavedPath = new List<int>(vcA.presetPath); }
-                        else { e.SavedTarget = null; e.SavedPath = null; }
                     }
-                    catch { e.SavedTarget = null; e.SavedPath = null; }
+                    catch { }
                     pdv.RequestVehicleStop(hail: true, hardStop: true);
                 }
                 else
@@ -709,6 +712,7 @@ namespace BigAmbitionsMP
                 if (t == null || pc == null) return;
                 var taxi = t.GetComponent<GhostTaxi>();
                 if (taxi == null) { Plugin.Logger.LogWarning($"[Service] ghost '{vid}' has no GhostTaxi — ride not offered."); return; }
+                if (_rideVid == vid) return;                                        // review #2 MAJOR-3: a repeat click on the same car is a no-op
                 if (_rideVid != "" && _rideVid != vid) EndRide("switched cars");   // review MINOR-4: the first car resumes now, not after 60 s
                 _rideTaxi = taxi;
                 SendStop(vid, owner);
@@ -788,11 +792,19 @@ namespace BigAmbitionsMP
         }
 
         // ── tick ────────────────────────────────────────────────────────────────────────────────────
+        // Review #2 MINOR-1: true from a friend-ride boarding (GhostTaxi.DriveAway, before the map closes) until the
+        // travel coroutine has ended; read by the arrival guard. Frame-stamped so the same-frame tick cannot clear it
+        // before TaxiSystem has stored its coroutine.
+        internal static bool FriendRideActive { get; private set; }
+        private static int _friendRideFrame;
+        internal static void MarkFriendRideBoarded() { FriendRideActive = true; _friendRideFrame = Time.frameCount; }
+
         internal static void Tick()
         {
             try
             {
-                if (!MPServer.IsRunning && !MPClient.InMpGame) { if (_local.Count > 0) _local.Clear(); _rideVid = ""; return; }
+                if (!MPServer.IsRunning && !MPClient.InMpGame) { if (_local.Count > 0) _local.Clear(); _rideVid = ""; FriendRideActive = false; return; }
+                if (FriendRideActive && !TaxiSystem.IsTraveling && Time.frameCount > _friendRideFrame + 1) FriendRideActive = false;
                 float now = Time.unscaledTime;
                 if (now >= _nextPrune) { _nextPrune = now + 1f; if (_local.Count > 0) Prune("pool recycled"); }
                 if (now >= _nextClientPrune) { _nextClientPrune = now + 1f; if (!MPServer.IsRunning) PruneParkedClientCars(now); }
@@ -815,7 +827,7 @@ namespace BigAmbitionsMP
     {
         public string Vid = "", OwnerId = "", TypeName = "";
 
-        public void DriveAway() { try { ServiceCars.SendResume(Vid, OwnerId); } catch { } }
+        public void DriveAway() { try { ServiceCars.MarkFriendRideBoarded(); ServiceCars.SendResume(Vid, OwnerId); } catch { } }
 
         public VehicleComponent GetVehiclePrefab()
         {

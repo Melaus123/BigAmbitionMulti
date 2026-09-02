@@ -440,7 +440,7 @@ namespace BigAmbitionsMP
         public static void DestroyAllRemotePlayers()
         {
             foreach (var kv in _players)
-                if (kv.Value != null) UnityEngine.Object.Destroy(kv.Value);
+                if (kv.Value != null) { TrafficSync.NotifyCollidersRemoved(kv.Value); UnityEngine.Object.Destroy(kv.Value); }   // review #2 MAJOR-4
             _players.Clear();
             Plugin.Logger.LogInfo("[RemotePlayer] Destroyed all remote players (kill-switch).");
         }
@@ -610,7 +610,12 @@ namespace BigAmbitionsMP
         public static void Remove(string playerId)
         {
             if (_players.TryGetValue(playerId, out var go) && go != null)
+            {
+                // Review #2 MAJOR-4: the avatar's solid capsule sits on the Player layer the host's traffic brakes for;
+                // destroyed inside a sensor without this call, the car would hold its brake on a dead collider.
+                TrafficSync.NotifyCollidersRemoved(go);
                 UnityEngine.Object.Destroy(go);
+            }
             _players.Remove(playerId);
             _appearances.Remove(playerId);
             // Review-mopping #9: per-player state must die with the per-player avatar, or a
@@ -629,7 +634,7 @@ namespace BigAmbitionsMP
         public static void RemoveAll()
         {
             foreach (var kv in _players)
-                if (kv.Value != null) UnityEngine.Object.Destroy(kv.Value);
+                if (kv.Value != null) { TrafficSync.NotifyCollidersRemoved(kv.Value); UnityEngine.Object.Destroy(kv.Value); }   // review #2 MAJOR-4
             _players.Clear();
             _appearances.Clear();
             _remoteBuildings.Clear();   // interior-mask state dies with the avatars
@@ -1177,7 +1182,7 @@ namespace BigAmbitionsMP
                     try
                     {
                         var old = FindDeep(avatar.transform, "BAMP_MopProp");
-                        if (old != null) UnityEngine.Object.Destroy(old.gameObject);
+                        if (old != null) { TrafficSync.NotifyCollidersRemoved(old.gameObject); UnityEngine.Object.Destroy(old.gameObject); }   // review #2 MAJOR-4
                     }
                     catch { }
                     try

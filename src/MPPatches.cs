@@ -1049,13 +1049,26 @@ namespace BigAmbitionsMP
         // ghost, service look-alike, fleet ghost) carries ModGhostMarker; these prefixes drop such contacts. MP only.
         internal static bool IsModGhostContact(UnityEngine.Component? c)
         {
-            try { return c != null && (MPServer.IsRunning || MPClient.InMpGame) && c.GetComponentInParent<ModGhostMarker>() != null; }
+            try
+            {
+                if (c == null || (!MPServer.IsRunning && !MPClient.InMpGame)) return false;
+                if (c.GetComponentInParent<ModGhostMarker>() == null) return false;
+                // Review #2 MAJOR-1 (2026-09-02): a granted proxy (a friend's car the LOCAL player holds a key to and is
+                // driving) is a real car with the marker on its root; while driven its root sits on the Vehicles layer
+                // (VehicleController.EnterVehicle :338) — exactly what these triggers key on. The local player's own
+                // selected vehicle is never a "ghost contact": the native comparison against selectedVehicle must run.
+                var vc = c.GetComponentInParent<VehicleController>();
+                if (vc != null && InstanceBehavior<GameManager>.Instance != null && vc == InstanceBehavior<GameManager>.Instance.selectedVehicle) return false;
+                return true;
+            }
             catch { return false; }
         }
         [HarmonyPatch(typeof(Parking.UndergroundParking.UndergroundParkingEntrance), "OnTriggerEnter")]
         public static class Patch_UndergroundParkingEntrance_IgnoreGhosts { static bool Prefix(UnityEngine.Collider other) => !IsModGhostContact(other); }
         [HarmonyPatch(typeof(Parking.UndergroundParking.ParkingElevator), "OnTriggerEnter")]
         public static class Patch_ParkingElevator_IgnoreGhosts { static bool Prefix(UnityEngine.Collider other) => !IsModGhostContact(other); }
+        [HarmonyPatch(typeof(Parking.UndergroundParking.ParkingElevator), "OnTriggerExit")]   // review #2 MINOR-3: the exit hides the overlay for a player on foot
+        public static class Patch_ParkingElevator_Exit_IgnoreGhosts { static bool Prefix(UnityEngine.Collider other) => !IsModGhostContact(other); }
         [HarmonyPatch(typeof(CityHamptonsHouseController), "OnCollisionEnter")]
         public static class Patch_HamptonsHouse_IgnoreGhosts { static bool Prefix(UnityEngine.Collision other) => !IsModGhostContact(other?.collider); }
         [HarmonyPatch(typeof(Controllers.TurnstileBarrier), "OnTriggerEnter")]
@@ -4105,52 +4118,13 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── Complaint message builder NRE shield (RED ROC reports, 2026-07-09) ────────────────────
-        // Complaint.GetComplaintMessageData picks a NON-SPECIAL rival to name in the message
-        // (FindSuitableRival(...).rivalName — no null check). In the reporters' world the rival
-        // roster had collapsed to just the two players (the rent-vs-deed conflation degraded rival
-        // attribution, and session players register as SPECIAL rivals) → FindSuitableRival returned
-        // null → an NRE EVERY HOUR that aborted EmployeeHelper.RunHourly mid-loop — every employee
-        // sorted after the thrower did no hourly work ("my office staff are not working"). The root
-        // is fixed (692e320 + repair sweep), but already-degraded saves can't regrow erased landlords,
-        // so the complaint path must survive a rival-poor world: swallow the NRE and substitute a
-        // neutral rival name.
-        // 1.0 update 2026-09-01 (update-impact review C-3): Complaint.FindSuitableRival lost its unconditional
-        // fallback and now draws from GetAllRivalData behind a defeated/suitability filter, so a null is a NORMAL
-        // outcome in ordinary worlds — and the base message builder still dereferences it. This shield is
-        // therefore the regular path, not a degraded-save rescue: logged at info, no longer a warning.
-        // SINGLE PLAYER (review #3 MAJOR-3, user-ruled 2026-09-02): the SP pass-through below is DELIBERATE — project
-        // rule "guards pass through outside MP". Since the update that means the game's own NRE can still abort
-        // EmployeeHelper.RunHourly mid-loop in single player with the mod loaded; that is the game's bug and we
-        // leave vanilla behaviour alone there.
-        [HarmonyPatch(typeof(AI.Employees.Complaint), nameof(AI.Employees.Complaint.GetComplaintMessageData))]
-        public static class Patch_Complaint_MessageData_RivalPoorShield
-        {
-            private static int _shielded;
-
-            static Exception? Finalizer(Exception __exception, Entities.EmployeeInstance employeeInstance,
-                                        ref System.Collections.Generic.Dictionary<string, string> __result)
-            {
-                if (__exception == null) return null;
-                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return __exception;   // SP: vanilla behavior
-                string biz = "the company";
-                try
-                {
-                    var reg = Helpers.BuildingHelper.GetBuildingRegistration(employeeInstance?.assignedAddress);
-                    if (reg != null && !string.IsNullOrEmpty(reg.BusinessName)) biz = reg.BusinessName;
-                }
-                catch { }
-                __result = new System.Collections.Generic.Dictionary<string, string>
-                {
-                    { "businessName", biz },
-                    { "rivalName", "another company" }
-                };
-                _shielded++;
-                if (_shielded <= 3 || _shielded % 100 == 0)
-                    Plugin.Logger.LogInfo($"[Guard] Complaint.GetComplaintMessageData threw ({__exception.GetType().Name}) — no suitable rival (normal since the 1.0 update removed the game's fallback); substituted 'another company' (#{_shielded}).");
-                return null;
-            }
-        }
+        // ── Complaint message builder NRE shield — RETIRED 2026-09-02 (game Build 3674) ─────────────
+        // Patch_Complaint_MessageData_RivalPoorShield (2026-07-09) swallowed the NRE from
+        // Complaint.GetComplaintMessageData dereferencing a null rival in rival-poor worlds. The 2026-09-02 game
+        // update removed that method: Complaint.GetComplaintMessage now adds "rivalName" only when a rival was
+        // found and returns a dedicated "_no_rival" message type + hasRival flag (AI.Employees/Complaint.cs,
+        // Build 3674). The native bug is fixed at its source, so the shield is gone rather than retargeted —
+        // it would otherwise fail to bind on every launch and raise the player-visible "hook failed" notice.
 
         // ── Rival-poor shield #2 (2026-07-09 audit): GetRandomRivalForBuilding ────────────────────
         // Same class as the complaint NRE: `GetNonSpecialRivals().GetRandom().id` with no empty-list
@@ -5058,8 +5032,9 @@ namespace BigAmbitionsMP
                     // Round-62: a NULL/undefined address is the NATIVE state of a hired-but-
                     // unassigned employee — vanilla lets them complain ("the company" message;
                     // e.g. new hires demanding training). The old blanket skip silenced exactly
-                    // those. The rival-poor NRE this guard originally masked is now properly
-                    // shielded at Complaint.GetComplaintMessageData (2026-07-09).
+                    // those. The rival-poor NRE this guard originally masked was shielded at
+                    // Complaint.GetComplaintMessageData (2026-07-09) until game Build 3674 (2026-09-02)
+                    // fixed it natively (no-rival message types); the shield is retired.
                     var addr = __instance.assignedAddress;
                     if (addr == null || string.IsNullOrEmpty(addr.streetName)) return true;   // idle/unassigned — native handles
 

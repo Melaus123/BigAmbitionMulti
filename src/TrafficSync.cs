@@ -100,14 +100,22 @@ namespace BigAmbitionsMP
         /// StopInDistance forever. The game calls Manager.TriggerColliderRemovedEvent before every such teardown
         /// (PedestrianPool, PlayerController, VehicleParkingHelper, …) — so does every ghost destroy path now.
         /// No-op for cars not sensing the collider.</summary>
-        internal static void NotifyCollidersRemoved(GameObject? go)
+        internal static void NotifyCollidersRemoved(GameObject? go, Collider[]? cachedSolids = null)
         {
             if (go == null) return;
             try
             {
-                if (TrafficManager.Instance == null) return;
+                // Review #2 MINOR-2: TrafficManager.Instance lazily CREATES a manager — test without touching the getter.
+                if (!TrafficManager.HasInstance || !TrafficManager.IsInitialized) return;
+                // Review #2 MINOR-6: only solids can sit in an obstacle list (a trigger qualifies only with the
+                // AiVehicleHalt tag) — use the spawn-time cache when the caller has one, else a solids-only walk.
+                if (cachedSolids != null)
+                {
+                    foreach (var c in cachedSolids) if (c != null) { try { Manager.TriggerColliderRemovedEvent(c); } catch { } }
+                    return;
+                }
                 foreach (var c in go.GetComponentsInChildren<Collider>(true))
-                    if (c != null) { try { Manager.TriggerColliderRemovedEvent(c); } catch { } }
+                    if (c != null && (!c.isTrigger || c.CompareTag("AiVehicleHalt"))) { try { Manager.TriggerColliderRemovedEvent(c); } catch { } }
             }
             catch { }
         }
@@ -175,6 +183,8 @@ namespace BigAmbitionsMP
             // doesn't keep spawning traffic at the previous session's location.
             _hasOutsidePos = false;
             if (_ghostAnchorGO != null) _ghostAnchorGO.transform.position = Vector3.zero;
+            // Review #2 MINOR-4: the game's density request and the budget log memory are per world.
+            GameDensityRequest = -1; _lastBudgetLogged = -1; _lastAreasLogged = -1;
         }
 
         /// <summary>Role-based step — called each frame in-game.</summary>
@@ -756,7 +766,7 @@ namespace BigAmbitionsMP
                             continue;                                  // out of view — don't spawn
                         if (isGhost && sq > GhostCullRadius * GhostCullRadius)
                         {
-                            try { NotifyCollidersRemoved(g!.Go); UnityEngine.Object.Destroy(g!.Go); } catch { }
+                            try { NotifyCollidersRemoved(g!.Go, g.Solids); UnityEngine.Object.Destroy(g!.Go); } catch { }
                             _ghosts.Remove(car.Index);
                             continue;                                  // left view — release
                         }
@@ -772,7 +782,7 @@ namespace BigAmbitionsMP
                     if (g != null && g.Go != null
                         && (g.Model != car.Model || Vector3.Distance(g.Go.transform.position, pos) > SnapDistance))
                     {
-                        try { NotifyCollidersRemoved(g.Go); UnityEngine.Object.Destroy(g.Go); } catch { }
+                        try { NotifyCollidersRemoved(g.Go, g.Solids); UnityEngine.Object.Destroy(g.Go); } catch { }
                         g = null;
                     }
 
@@ -818,7 +828,7 @@ namespace BigAmbitionsMP
                 {
                     if (_ghosts[k].Go != null)
                     {
-                        try { NotifyCollidersRemoved(_ghosts[k].Go); UnityEngine.Object.Destroy(_ghosts[k].Go); } catch { }
+                        try { NotifyCollidersRemoved(_ghosts[k].Go, _ghosts[k].Solids); UnityEngine.Object.Destroy(_ghosts[k].Go); } catch { }
                     }
                     _ghosts.Remove(k);
                 }
@@ -965,14 +975,16 @@ namespace BigAmbitionsMP
         // "Vehicles" when it is in playerLayers, else the lowest playerLayers bit that collides with AiVehicles.
         // -1 = nothing qualifies → callers leave prefab layers alone. Logged once with names.
         private static int _serviceLayer = -2;
+        private static float _serviceLayerRetryAt;
         internal static int ServiceColliderLayer()
         {
             if (_serviceLayer != -2) return _serviceLayer;
+            if (Time.unscaledTime < _serviceLayerRetryAt) return -1;   // review #2 MINOR-7: a failed load retries every 5 s, not per contact
             int chosen = -1;
             try
             {
                 var ls = Resources.Load<LayerSetup>("LayerSetupData");
-                if (ls == null) return -1;                            // not loadable yet — retry on the next call
+                if (ls == null) { _serviceLayerRetryAt = Time.unscaledTime + 5f; return -1; }   // not loadable yet
                 int mask = (int)ls.playerLayers, ai = LayerHelper.AiVehiclesLayerIndex, veh = LayerHelper.VehiclesLayerIndex;
                 bool Collides(int l) => ai < 0 || !Physics.GetIgnoreLayerCollision(ai, l);
                 // Review MAJOR-1 (2026-09-02): the fallback is BOUNDED — never a character / UI / raycast-ignore
@@ -1185,7 +1197,7 @@ namespace BigAmbitionsMP
         public static void DespawnAllGhosts()
         {
             foreach (var g in _ghosts.Values)
-                if (g.Go != null) { try { NotifyCollidersRemoved(g.Go); UnityEngine.Object.Destroy(g.Go); } catch { } }
+                if (g.Go != null) { try { NotifyCollidersRemoved(g.Go, g.Solids); UnityEngine.Object.Destroy(g.Go); } catch { } }
             _ghosts.Clear();
         }
 
@@ -1372,11 +1384,19 @@ namespace BigAmbitionsMP
                     {
                         int areas = CountPlayerAreas(arr);
                         int budget = GameDensityRequest * Math.Max(1, areas);
+                        // Review #2 MAJOR-2: never ask for more cars than the pool holds minus a reserve for service
+                        // cars (a summon + an arrival car per player) — otherwise ambient traffic spends the very slots
+                        // the pool bump reserves and a summon would yank an active car (Gley's by-name fallback).
+                        int poolCount = 0; try { poolCount = tm.trafficVehicles?.GetVehicleList()?.Count ?? 0; } catch { }
+                        int reserve = 2 * arr.Length;
+                        int cap = poolCount > reserve ? poolCount - reserve : poolCount;
+                        bool capped = poolCount > 0 && budget > cap;
+                        if (capped) budget = cap;
                         try { dm.UpdateMaxCars(budget); } catch { }
                         if (budget != _lastBudgetLogged || areas != _lastAreasLogged)
                         {
                             _lastBudgetLogged = budget; _lastAreasLogged = areas;
-                            Plugin.Logger.LogInfo($"[TrafficSync] traffic budget: the game asks {GameDensityRequest}; {areas} player area(s) (radius {AreaRadius():F0} m) → maxCars {budget}.");
+                            Plugin.Logger.LogInfo($"[TrafficSync] traffic budget: the game asks {GameDensityRequest}; {areas} player area(s) (radius {AreaRadius():F0} m) → maxCars {budget}{(capped ? $" (capped by the pool: {poolCount} slots − {reserve} reserved)" : "")}.");
                         }
                     }
                 }
