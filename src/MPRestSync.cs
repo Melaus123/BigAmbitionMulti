@@ -458,14 +458,26 @@ namespace BigAmbitionsMP
         /// Uses the activity cached by the last seated-poll (no scene walks).</summary>
         public static int RemainingActivityMinutes()
         {
+            return TryRemainingActivityMinutes(out int rem) ? rem : 0;
+        }
+
+        /// <summary>Review MINOR-4 (2026-09-01): false = the game could not answer (on the 1.0 update
+        /// Sleep/Work/Study read `_finishTime` with no null check until Start, so the call THROWS while the
+        /// activity is NotStarted). Callers that extend durations must treat false as UNKNOWN, never as 0 —
+        /// "0 remaining" made EnsureActivityCovers add the whole need to the minutes int every tick.</summary>
+        public static bool TryRemainingActivityMinutes(out int rem)
+        {
+            rem = 0;
             try
             {
                 var act = _curAct;
-                if (act == null) return 0;
+                if (act == null) return true;
                 var m = act.GetType().GetMethod("GetRemainingMinutesForTimeMachine");
-                return m != null ? Math.Max(0, Convert.ToInt32(m.Invoke(act, null))) : 0;
+                if (m == null) return true;
+                rem = Math.Max(0, Convert.ToInt32(m.Invoke(act, null)));
+                return true;
             }
-            catch { return 0; }
+            catch { return false; }
         }
 
         /// <summary>Make sure the activity itself lasts at least until the goal,
@@ -480,8 +492,19 @@ namespace BigAmbitionsMP
             {
                 var act = _curAct;
                 if (act == null) return;
+                // Review MINOR-4 (2026-09-01): nothing to extend before the activity has started — its
+                // duration is re-derived at Start, and on the 1.0 update the remaining-minutes read throws
+                // there (see TryRemainingActivityMinutes). The seated tick re-runs this every 0.5 s, so the
+                // extension lands on the first tick after Start.
+                if (ActivityState == (int)PlayerActivityState.NotStarted) return;
                 double need = goalMinutes - NowMinutes();
-                int rem = RemainingActivityMinutes();
+                if (!TryRemainingActivityMinutes(out int rem))
+                {
+                    _remUnknown++;
+                    if (_remUnknown <= 5 || _remUnknown % 100 == 0)
+                        Plugin.Logger.LogInfo($"[Rest] remaining-minutes read failed for {act.GetType().Name} (state {ActivityState}) — extension skipped this tick (#{_remUnknown}); UNKNOWN is not zero.");
+                    return;
+                }
                 if (need <= rem + 1) return;
 
                 // Mono: GetType() already yields the concrete activity class
@@ -523,10 +546,11 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] EnsureActivityCovers: {ex.Message}"); }
         }
         private static readonly Dictionary<Type, System.Reflection.MemberInfo?> _durProps = new();
+        private static int _remUnknown;   // review MINOR-4: counted, rate-limited
 
         // 1.0 update 2026-09-01 (field 20260901-192731, user-approved): Rest/Sleep/Work/Study now ALSO finish
         // when a private `Timestamp _finishTime`, captured at start, falls into the past — Perform() checks
-        // IsInThePast() on every game-minute change (PlayerActivityUI.OnActivityRunning :314-323; Rest :208,
+        // IsInThePast() on every game-minute change (PlayerActivityUI.OnActivityRunning :316-326, Perform at :323; Rest :208,
         // Sleep :133, Work :129, Study :163 on the update decompile). Extending the minutes int above no longer
         // covers a skip: our fast clock ran past the ORIGINAL finish time, the game stood the player up, the
         // vote dropped, the skip stopped, the bench re-offered, the player re-sat — every ~3 s on both machines.
@@ -544,11 +568,21 @@ namespace BigAmbitionsMP
                 {
                     f = HarmonyLib.AccessTools.Field(t, "_finishTime");
                     _finishFields[t] = f;
-                    Plugin.Logger.LogInfo($"[Rest] finish-time field for {t.Name}: {(f != null ? f.Name : "NOT FOUND (pre-update shape — the minutes field alone governs)")}");
+                    // Review MINOR-1: seven activity types (Hygiene/Entertain/Workout/Swimming/Golf/Tennis/Paid) never
+                    // had this field on ANY build — "not found" is the normal shape there, not a version signal.
+                    Plugin.Logger.LogInfo($"[Rest] finish-time field for {t.Name}: {(f != null ? f.Name : "none (no clock finish on this type — the minutes field governs)")}");
                 }
                 if (f == null) return;
-                var cur = f.GetValue(act) as BigAmbitions.DayNightCycle.Timestamp;
-                if (cur == null) return;                                   // no clock finish on this activity (Rest watching a show)
+                object? raw = f.GetValue(act);
+                if (raw == null) return;                                   // no clock finish right now (Rest watching a show)
+                if (raw is not BigAmbitions.DayNightCycle.Timestamp cur)
+                {
+                    // Review MINOR-3: a wrong type must not look like "nothing to do" — that silence would bring
+                    // the 3-second stand-up loop back with a log that says the fix is armed.
+                    if (_finishTypeWarned.Add(t))
+                        Plugin.Logger.LogWarning($"[Rest] {t.Name}._finishTime is a {raw.GetType().Name}, not a Timestamp — clock-finish push stands down for this type (stand-ups during a skip would return).");
+                    return;
+                }
                 if (cur.GetTotalMinutes() >= goalMinutes) return;          // already covers the goal
                 f.SetValue(act, new BigAmbitions.DayNightCycle.Timestamp((float)goalMinutes));
                 if (!ReferenceEquals(_lastFinishPushedAct, act))
@@ -557,8 +591,16 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Rest] {t.Name} finish time pushed to {Fmt(goalMinutes)} (1.0-update clock-based finish).");
                 }
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] PushFinishTime: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                // Review MINOR-2: this runs from the 0.5 s seated tick — a persistent failure must not flood the log.
+                _pushFailures++;
+                if (_pushFailures <= 5 || _pushFailures % 100 == 0)
+                    Plugin.Logger.LogWarning($"[Rest] PushFinishTime (#{_pushFailures}): {ex.GetType().Name}: {ex.Message}");
+            }
         }
+        private static readonly HashSet<Type> _finishTypeWarned = new();   // review MINOR-3: once per type
+        private static int _pushFailures;                                   // review MINOR-2: counted, rate-limited
 
         /// <summary>All session player names (for the who-voted checklist).</summary>
         public static IReadOnlyList<string> AllPlayers()

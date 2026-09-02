@@ -1925,7 +1925,11 @@ namespace BigAmbitionsMP
             if (_renderDcFigures)
             {
                 _renderDcFigures = false;
-                RepaintDeliveryFigures(page);
+                // Update-impact review B-1 (2026-09-01): the only bare branch of the four renders here — on the
+                // shipped 0.2.1 + updated game its dead CountTotalResourcesInStock memberref escaped MPCanvasUI.Update
+                // and skipped the rest of that frame's mod tick. Same net as the marketing branch above.
+                try { RepaintDeliveryFigures(page); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} deliveries figures: {ex.Message}"); }
             }
             if (Time.unscaledTime >= _nextScan)
             {

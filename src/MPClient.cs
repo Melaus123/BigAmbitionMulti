@@ -217,6 +217,7 @@ namespace BigAmbitionsMP
                 // computing this touches Unity asset loading (crash 2026-07-27).
                 Content  = MPContentFingerprint.Cached,
                 Mods     = MPContentFingerprint.CachedMods,  // round-253: host diffs + informs on mismatch
+                GameBuild = MPContentFingerprint.GameBuildId,   // 2026-09-01: game BUILD identity — host refuses a mismatch
                 // Round-281: "I have the InteriorCargoSync handler."  A literal true is the whole
                 // point — the flag's meaning is "this build contains the receiver", which is a
                 // compile-time fact about the assembly being sent, not a runtime setting.
@@ -271,6 +272,12 @@ namespace BigAmbitionsMP
                     else if (tag == "BAMP:kicked") why = "KICKED by host";
                     else if (tag == "BAMP:banned") why = "Banned until host re-hosts";
                     else if (tag == "BAMP:identity") why = "Join refused — player identity invalid or already connected";
+                    else if (tag.StartsWith("BAMP:build"))
+                    {
+                        // 2026-09-01 (user-approved wording): same game version folder, different game build.
+                        why = "Join refused — game build mismatch. The host's game and yours are different builds. Update Big Ambitions on both machines, then rejoin.";
+                        Plugin.Logger.LogInfo($"[Client] game build mismatch: host {tag.Substring("BAMP:build:".Length)} vs mine {MPContentFingerprint.GameBuildId}.");
+                    }
                     else if (tag.StartsWith("BAMP:version"))
                     {
                         // Tag carries the host's "mod|game" versions so we can name both sides.

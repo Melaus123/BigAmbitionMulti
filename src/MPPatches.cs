@@ -3053,7 +3053,7 @@ namespace BigAmbitionsMP
             private static readonly (string type, string method)[] Steps =
             {
                 ("Helpers.MarketingHelper",         "RunDaily"),                // charges daily marketing spend
-                ("Helpers.BusinessHelper",          "RunDaily"),                // rent (:43), licensing (:76), daily orders/NetWorth (:107)
+                ("Helpers.BusinessHelper",          "RunDaily"),                // rent (:43), licensing (:76), daily orders (:107; the NetWorth accumulator was removed by the 1.0 update 2026-09-01)
                 ("Helpers.BusinessHelper",          "RunHourly"),               // job board (:308), security (:330), todo gen (:499)
                 ("Buildings.Retail.Businesses.CinemaTheater.LicensingFeesHelper", "PayLicensingFees"),
                 ("Buildings.Retail.Businesses.CinemaTheater.LicensingFeesHelper", "ShowUnpaidFeesNotifications"),   // (:106)
@@ -3548,6 +3548,62 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: FullMenu.Update — keep the phone's own clock/date live while the world runs (field 20260901-202027) ──
+        // FullMenu paints timeLabel/dateLabel ONCE in Toggle(show:true) (:187) — vanilla pauses the world while the
+        // menu is open, so a snapshot is exact there. MP keeps the world running ("nothing pauses outside the vote"),
+        // so the menu clock froze at the moment it opened — glaring behind a running skip. Same family as the
+        // round-27 ambience restore: a native screen built around the menu pause, left stale by our suppression.
+        // Refresh the time label when the game minute changes and the date label when the day changes, with the
+        // game's own calls (GetCurrentFormattedTime exists on both builds; SetCurrentFormattedTime is update-only).
+        // dateLabel is a Localizor TextLocalizationComponent (assembly not referenced) → its Arguments property is
+        // set by reflection with the same anonymous shape the game builds at open. User-approved 2026-09-01.
+        [HarmonyPatch(typeof(UI.Smartphone.FullMenu), "Update")]
+        public static class Patch_FullMenu_Update_LiveClock
+        {
+            private static System.Reflection.FieldInfo? _fTime, _fDate;
+            private static System.Reflection.PropertyInfo? _pArgs;
+            private static bool _resolved, _warned;
+            private static int _lastMinute = -1, _lastDay = -1;
+
+            static void Postfix(UI.Smartphone.FullMenu __instance)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.InMpGame) return;
+                    if (!UI.Smartphone.FullMenu.IsOpen) { _lastMinute = -1; _lastDay = -1; return; }   // re-paint on the next open
+                    var gi = SaveGameManager.Current;
+                    if (gi == null) return;
+                    if (!_resolved)
+                    {
+                        _resolved = true;
+                        _fTime = AccessTools.Field(typeof(UI.Smartphone.FullMenu), "timeLabel");
+                        _fDate = AccessTools.Field(typeof(UI.Smartphone.FullMenu), "dateLabel");
+                        Plugin.Logger.LogInfo($"[Clock] FullMenu live clock: timeLabel={(_fTime != null ? "ok" : "NOT FOUND")} dateLabel={(_fDate != null ? "ok" : "NOT FOUND")}.");
+                    }
+                    int minute = gi.Hour * 60 + (int)gi.Minute;
+                    if (minute != _lastMinute && _fTime?.GetValue(__instance) is TMPro.TMP_Text tl)
+                    {
+                        tl.text = TimeHelper.GetCurrentFormattedTime();
+                        _lastMinute = minute;
+                    }
+                    if (gi.Day != _lastDay)
+                    {
+                        var dl = _fDate?.GetValue(__instance);
+                        if (dl != null)
+                        {
+                            _pArgs ??= dl.GetType().GetProperty("Arguments");
+                            _pArgs?.SetValue(dl, new { DayOfWeek = "common_" + TimeHelper.GetDayOfWeek(), CurrentNumberDay = gi.Day });
+                        }
+                        _lastDay = gi.Day;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (!_warned) { _warned = true; Plugin.Logger.LogWarning($"[Clock] FullMenu live clock: {ex.GetType().Name}: {ex.Message}"); }
+                }
+            }
+        }
+
         // ── Patch: PlayerActivityUI.HidePanel — the vanilla time-skip panel NEVER shows ──
         // Rest v5 (user-designed 2026-06-22): the vanilla PlayerActivityUI is a DEAD UI in MP — it must
         // never be visible under ANY condition; our dock (MPCanvasUI.TickRestUI) replaces it for EVERY
@@ -4000,6 +4056,10 @@ namespace BigAmbitionsMP
         // is fixed (692e320 + repair sweep), but already-degraded saves can't regrow erased landlords,
         // so the complaint path must survive a rival-poor world: swallow the NRE and substitute a
         // neutral rival name.
+        // 1.0 update 2026-09-01 (update-impact review C-3): Complaint.FindSuitableRival lost its unconditional
+        // fallback and now draws from GetAllRivalData behind a defeated/suitability filter, so a null is a NORMAL
+        // outcome in ordinary worlds — and the base message builder still dereferences it. This shield is
+        // therefore the regular path, not a degraded-save rescue: logged at info, no longer a warning.
         [HarmonyPatch(typeof(AI.Employees.Complaint), nameof(AI.Employees.Complaint.GetComplaintMessageData))]
         public static class Patch_Complaint_MessageData_RivalPoorShield
         {
@@ -4024,7 +4084,7 @@ namespace BigAmbitionsMP
                 };
                 _shielded++;
                 if (_shielded <= 3 || _shielded % 100 == 0)
-                    Plugin.Logger.LogWarning($"[Guard] Complaint.GetComplaintMessageData threw ({__exception.GetType().Name}) — rival-poor world? Substituted neutral names (#{_shielded}).");
+                    Plugin.Logger.LogInfo($"[Guard] Complaint.GetComplaintMessageData threw ({__exception.GetType().Name}) — no suitable rival (normal since the 1.0 update removed the game's fallback); substituted 'another company' (#{_shielded}).");
                 return null;
             }
         }
@@ -4541,8 +4601,9 @@ namespace BigAmbitionsMP
 
         /// <summary>Character page: the business count enumerates all rented regs.
         /// Recompute own-only and re-stamp the label.  The weekly-profit figure
-        /// self-heals as veiled summaries accumulate; NetWorth is native and may
-        /// still include partner assets (known, unpatched).</summary>
+        /// self-heals as veiled summaries accumulate. NetWorth was removed by the 1.0 update
+        /// (2026-09-01); the loan cap now reads own-only GetPersonalWealth().WealthBeforeLoans, so the
+        /// former partner-asset leak is closed (update-impact review C-5).</summary>
         [HarmonyPatch(typeof(UI.Smartphone.Apps.Persona.CharacterInfo), "OnEnable")]
         public static class Patch_CharacterInfo_OwnBusinessCount
         {

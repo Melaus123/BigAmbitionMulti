@@ -33,6 +33,22 @@ namespace BigAmbitionsMP
         /// every off-thread caller reads this.</summary>
         public static string Cached => _cached;
 
+        /// <summary>Identity of the game BUILD: the main game assembly's module version id ("N" format).
+        /// It changes on every game compile — unlike the version folder ("1.0") and the content name hashes,
+        /// which the 2026-09-01 Steam update left untouched while changing the save schema. Pure assembly
+        /// metadata (no Unity API) — safe on any thread; computed once. "" if unreadable (gate then skips).</summary>
+        public static string GameBuildId
+        {
+            get
+            {
+                if (_gameBuild != null) return _gameBuild;
+                try { _gameBuild = typeof(GameManager).Assembly.ManifestModule.ModuleVersionId.ToString("N"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Content] game build id unreadable: {ex.Message}"); _gameBuild = ""; }
+                return _gameBuild;
+            }
+        }
+        private static volatile string? _gameBuild;
+
         /// <summary>MAIN THREAD ONLY. Idempotent and cheap after the first successful pass —
         /// called every frame from the UI tick so the value is ready before any connect.</summary>
         public static void EnsureCached()

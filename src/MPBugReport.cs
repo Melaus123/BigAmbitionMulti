@@ -461,6 +461,7 @@ namespace BigAmbitionsMP
             // mod (Voogle Route, missing companion DLL) was only inferable from exception text;
             // every report should answer "what else is running?" at a glance.)
             sb.AppendLine($"GameVersion: {Blank(Application.version)}");
+            sb.AppendLine($"GameBuild: {Blank(MPContentFingerprint.GameBuildId)}");   // 2026-09-01: the build id the join gate compares
             // Round-102: GameVersion is coarse — two installs a month apart both report the same
             // string while carrying different item/business data (our own rig did exactly that,
             // and it read as a mod bug for four rounds). This fingerprint makes "these two players

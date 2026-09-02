@@ -1442,6 +1442,12 @@ namespace BigAmbitionsMP
         /// report's InstalledMods line). The host diffs it against its own and INFORMS both
         /// sides on a mismatch — never refuses. Empty from older builds.</summary>
         public string Mods     { get; set; } = "";
+        /// <summary>2026-09-01 (update-impact review): identity of the game BUILD — the main game assembly's
+        /// module id. `Game` is only the version-folder name ("1.0") and `Content` hashes item/business NAMES,
+        /// so a code-only Steam patch moved neither while the 2026-09-01 update changed the save schema
+        /// (NetWorth removed, midnightBankBalances added, TodoTask.priorityOffset, TodoTaskType +2). The host
+        /// refuses a mismatch. Empty from older builds (they fail the protocol check first anyway).</summary>
+        public string GameBuild { get; set; } = "";
         // Phase 3 rejoin offer: set when the client holds a pending DISCONNECT save (un-uploaded progress
         // from its last leave). The host may request it (LoadDataPayload.AwaitClientDisconnectUpload) and,
         // after validating the uploaded save's ACTUAL day, restore it instead of the host's older copy.

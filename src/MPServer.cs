@@ -2223,10 +2223,26 @@ namespace BigAmbitionsMP
         private static bool ValidateHelloVersion(MPLink peer, HelloPayload hello)
         {
             string hostGame = MPSaveManager.GameVersionNameCached();
+            string hostBuild = MPContentFingerprint.GameBuildId;
             // Game-version check is skipped when either side is unknown (empty) so a
             // not-yet-cached host can't wrongly reject; the protocol number always gates.
             bool protocolOk = hello.Protocol == ProtocolInfo.Version;
             bool gameOk = string.IsNullOrEmpty(hello.Game) || string.IsNullOrEmpty(hostGame) || hello.Game == hostGame;
+            // 2026-09-01 (update-impact review, user-approved): `Game` is the save-folder name ("1.0") and the
+            // content fingerprint hashes item/business NAMES — the 2026-09-01 Steam update moved neither while
+            // changing the save schema. The game build id moves on every game compile; a mismatch is refused so
+            // an updated host and a not-yet-updated joiner cannot trade a save neither writes the same way.
+            bool buildOk = string.IsNullOrEmpty(hello.GameBuild) || string.IsNullOrEmpty(hostBuild) || hello.GameBuild == hostBuild;
+            if (protocolOk && gameOk && !buildOk)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[Server] Hello from '{hello.PlayerId}' refused — game BUILD mismatch " +
+                    $"(joiner build {hello.GameBuild} vs host {hostBuild}; both report game '{hostGame}', mod {hello.Version}/p{hello.Protocol}).");
+                try { peer.Disconnect(System.Text.Encoding.UTF8.GetBytes($"BAMP:build:{hostBuild}")); } catch { }
+                // Round-215 lesson: tell the HOST too, or they only see "friend never appeared".
+                try { MPCanvasUI.PostLobbyNotice($"{hello.PlayerId} can't join — game build mismatch. Update Big Ambitions on both machines, then rejoin."); } catch { }
+                return false;
+            }
             if (protocolOk && gameOk)
             {
                 // Round-102: `Game` is only the version-FOLDER name, so two installs a month
