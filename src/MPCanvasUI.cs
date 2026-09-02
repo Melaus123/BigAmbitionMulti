@@ -1286,7 +1286,10 @@ namespace BigAmbitionsMP
                 // own CityMapCam composes) so the icon never floats over the map/menus.
                 bool nativeFullscreen = false;
                 try { nativeFullscreen = UI.Smartphone.FullMenu.IsOpen || UI.MiniMenu.MiniMenu.IsOpen || CityMap.IsOpen || Scenes.MainMenu.Options.IsVisible; } catch { }
-                bool show = IsInGame() && (MPServer.IsRunning || MPClient.IsConnected) && !nativeFullscreen;
+                // Field 20260901-213253 (user-approved 2026-09-02): while seated the dock owns the vote and this
+                // button's click was silently ignored — a visible control the code ignores. Hide it instead.
+                bool show = IsInGame() && (MPServer.IsRunning || MPClient.IsConnected) && !nativeFullscreen
+                            && !MPRestSync.SeatedForUi;
                 if (_loiterBtn == null)
                 {
                     if (!show || _canvasGO == null || _loiterBuildFailed) return;

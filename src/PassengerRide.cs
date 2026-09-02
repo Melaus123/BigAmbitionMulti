@@ -64,6 +64,43 @@ namespace BigAmbitionsMP
     /// in-car "Ride" CTA lands. Driven once per frame from MPCanvasUI.Update. See
     /// docs/PASSENGER-SYSTEM.md.
     /// </summary>
+    // ── Field 20260901-213253 (user-approved 2026-09-02): a pinned PASSENGER's car sleep ─────────────────
+    // PassengerHud.OnSleep starts the game's SleepActivity with no entity. SleepActivity's one-frame start check
+    // (SleepActivity.cs :110-125) asks VehicleHelper.IsInsideMotorVehicle(), which reads ActiveVehicleId — never set
+    // for a rider, by design (StartPin leaves the two driver-only lines alone) — gets false, falls to
+    // ExistsRoute(null) and throws (client log :17941). The activity then sits in MovingTowardsActivity forever:
+    // the dock's AvatarInActivity gate never opens and the rider has no skip control ("can't wait in friend's
+    // car"). Answer YES for exactly that decision: MP, rider pinned, and the game's CURRENT activity is a
+    // SleepActivity still in MovingTowardsActivity — read live from the game's own objects, so the gate closes the
+    // moment the game moves it to Started. The 10 other native callers of IsInsideMotorVehicle see the override
+    // only inside that window. From there the game runs its own start branch (Started, sleep nav blocker, energy
+    // regen, ForceTimeMachine → our consensus hook) exactly as it does for the driver.
+    [HarmonyPatch(typeof(Helpers.VehicleHelper), nameof(Helpers.VehicleHelper.IsInsideMotorVehicle))]
+    public static class Patch_IsInsideMotorVehicle_RiderSleepStart
+    {
+        private static int _answered;
+        static void Postfix(ref bool __result)
+        {
+            try
+            {
+                if (__result) return;
+                if (!MPServer.IsRunning && !MPClient.InMpGame) return;
+                if (!PassengerRide.IsSeated) return;
+                var ui = UI.UIs.Instance?.playerActivityUI;
+                if (ui?.GetCurrentActivity is not PlayerActivity.SleepActivity sleep) return;
+                if (sleep.GetState() != PlayerActivityState.MovingTowardsActivity) return;
+                __result = true;
+                _answered++;
+                if (_answered <= 5 || _answered % 50 == 0)
+                    Plugin.Logger.LogInfo($"[Ride] in-vehicle answered YES for a pinned passenger's sleep start (#{_answered}) — the game's own start branch runs instead of ExistsRoute(null).");
+            }
+            catch (System.Exception ex)
+            {
+                if (_answered == 0) Plugin.Logger.LogWarning($"[Ride] rider sleep-start answer: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+    }
+
     internal static class PassengerRide
     {
         // ── local ride ────────────────────────────────────────────────────────

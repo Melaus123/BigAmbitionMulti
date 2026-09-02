@@ -109,7 +109,10 @@ namespace BigAmbitionsMP
             try
             {
                 var env = VehicleManager.SleepEnvironmentFor(PassengerSync.LocalRidingVehicleId);
-                if (env != null) PlayerActivityUI.Show(env);   // null entity: Car sleep is null-safe
+                // No entity: the car sleep branch only tolerates that when the game already sees the player
+                // inside a motor vehicle — for a rider that is arranged by Patch_IsInsideMotorVehicle_RiderSleepStart
+                // (PassengerRide.cs; field 20260901-213253), otherwise the start throws in ExistsRoute(null).
+                if (env != null) PlayerActivityUI.Show(env);
                 else { Plugin.Logger.LogWarning("[PassengerHud] no sleep environment for the ridden vehicle."); Toast("Can't sleep here."); }
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[PassengerHud] sleep: {ex.Message}"); }
