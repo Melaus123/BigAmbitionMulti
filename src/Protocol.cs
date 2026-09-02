@@ -1665,7 +1665,7 @@ namespace BigAmbitionsMP
 
         // ── Needs & morale tempo (2026-07-20, additive — old peers ignore) ──
         // Single-percent controls, "% of native"; 0 = the respective system off.
-        public int NeedsDrainPercent             { get; set; } = 10;    // energy+hunger drain; 0 drives native DisableEnergy
+        public int NeedsDrainPercent             { get; set; } = 40;    // energy+hunger drain; 0 drives native DisableEnergy (default 10 -> 40, user 2026-09-02)
         public int RestSpeedPercent              { get; set; } = 300;   // energy regen while resting
         /// <summary>Morale-buff duration dial, "% of native speed" (min 1): buff durations
         /// scale INVERSELY (10% → positives last 10×). Game 1.0 deleted the sad-period

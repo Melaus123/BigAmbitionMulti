@@ -9,7 +9,7 @@ namespace BigAmbitionsMP
     /// in real time than single-player (no pause-thinking, no personal sleep-skip
     /// fast-forwarding debuffs away).  Four host-set single-percent controls
     /// compensate, each "% of native", each with 0/low = gentler:
-    ///   • DrainPercent  (default 10)  — energy spend, hunger follows natively
+    ///   • DrainPercent  (default 40; was 10 until 2026-09-02)  — energy spend, hunger follows natively
     ///     at 1.5×.  0 drives native disableEnergy (exact native "off": bar
     ///     hidden, NoEat sad-period excluded) — no separate toggle needed.
     ///   • RestPercent   (default 300) — energy regen while resting (bed/bench/
@@ -31,7 +31,7 @@ namespace BigAmbitionsMP
     /// gates on an MP session).</summary>
     public static class MPNeedsTuning
     {
-        public static int DrainPercent  = 10;
+        public static int DrainPercent  = 40;   // user 2026-09-02: 10 was the conservative start; 40 is the default now
         public static int RestPercent   = 300;
         public static int MoralePercent = 10;   // min 1 (0 would mean infinite buffs)
 

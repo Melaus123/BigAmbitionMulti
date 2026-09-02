@@ -7177,7 +7177,7 @@ namespace BigAmbitionsMP
             // Needs & morale tempo (2026-07-20): single-percent controls replace the
             // old energy on/off (0 = off, no redundant toggle).  MP's clock never
             // pauses, so native rates feel much faster in real time — defaults
-            // compensate (drain 10%, rest 300%, buffs 300%, sad periods 25%).
+            // compensate (drain 40% since 2026-09-02 - was 10%, rest 300%, buffs 300%, sad periods 25%).
             SettingsNumRow (ct, ref y, "Needs drain %", "Energy & hunger drain speed as % of normal. 0 = off entirely (no sleep/food needs).",
                             () => _hostSettings.NeedsDrainPercent, v => { _hostSettings.NeedsDrainPercent = (int)v; _hostSettings.DisableEnergy = (int)v == 0; },
                             1f, 0f, 100f, "0");
