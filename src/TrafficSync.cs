@@ -30,7 +30,16 @@ namespace BigAmbitionsMP
         private static float _lightsFullSentAt = -999f;
         private const float GhostLerp         = 14f;    // client ghost chase rate
         private const float TaxiStopDuration  = 18f;    // how long a hailed taxi stays stopped
-        private const int   CarsPerPlayer     = 24;     // traffic budget scaled by player count
+        // VANILLA TRAFFIC (user ruling 2026-09-02: "whatever traffic they are supposed to see, they see, regardless of
+        // whether someone else is nearby"). The game sets its own count — TimeOfDayController.UpdateTrafficDensity:
+        // round(curve(time, rain) × neighbourhood percentage) → Manager.SetTrafficDensity(n). The host records that
+        // request (Patch_TM_SetTrafficDensity_ClientZero) and feeds Gley n × (distinct player AREAS): alone = exactly
+        // the game's number; players within one despawn radius of each other share ONE area (the June "24 per player"
+        // rule doubled the cars when two players stood together — F-2026-09-02-AD). Remote players in a different
+        // neighbourhood get the host's neighbourhood value (the game has no position-based neighbourhood lookup).
+        internal static int   GameDensityRequest = -1;   // last host-side SetTrafficDensity(n) seen; -1 = none yet
+        private  static int   _lastBudgetLogged  = -1, _lastAreasLogged = -1;
+        private const  float  AreaRadiusFallback = 150f;
 
         // Host: taxis stopped for a client hail → unscaled time to auto-resume them.
         private static readonly Dictionary<int, float> _taxiResumeAt = new();
@@ -51,6 +60,7 @@ namespace BigAmbitionsMP
             public Vector3       Velocity;
             public float         TargetAt;            // CLIENT unscaled time TargetPos arrived
             public float         HostT;               // HOST sample time of TargetPos (packet stamp)
+            public Collider[]?   Solids;              // MINOR-7 (2026-09-02): non-trigger colliders cached at spawn (shove belt)
             public Rigidbody?    Body;                // cached ROOT rigidbody — driven via MovePosition so the
                                                       //   kinematic ghost acts as a solid obstacle (2026-06-16)
 #if BAMP_DEV
@@ -85,6 +95,23 @@ namespace BigAmbitionsMP
         /// <summary>Client-side count of spawned traffic ghosts — perf correlation.</summary>
         public static int ClientTrafficGhostCount => _ghosts.Count;
 
+        /// <summary>Review BLOCKER-2 (2026-09-02): Unity raises no OnTriggerExit for a collider destroyed inside a
+        /// trigger, so a Gley car braking for a ghost would keep that dead collider in its obstacle list and hold
+        /// StopInDistance forever. The game calls Manager.TriggerColliderRemovedEvent before every such teardown
+        /// (PedestrianPool, PlayerController, VehicleParkingHelper, …) — so does every ghost destroy path now.
+        /// No-op for cars not sensing the collider.</summary>
+        internal static void NotifyCollidersRemoved(GameObject? go)
+        {
+            if (go == null) return;
+            try
+            {
+                if (TrafficManager.Instance == null) return;
+                foreach (var c in go.GetComponentsInChildren<Collider>(true))
+                    if (c != null) { try { Manager.TriggerColliderRemovedEvent(c); } catch { } }
+            }
+            catch { }
+        }
+
         /// <summary>Solid colliders of every traffic ghost (2026-09-02, ServiceCars shove belt): a client's locally
         /// spawned private-driver / arrival car must not be shoved by the host's kinematic traffic mirrors.</summary>
         public static List<Collider> AllTrafficGhostColliders()
@@ -94,9 +121,8 @@ namespace BigAmbitionsMP
             {
                 foreach (var g in _ghosts.Values)
                 {
-                    if (g?.Go == null) continue;
-                    foreach (var c in g.Go.GetComponentsInChildren<Collider>(true))
-                        if (c != null && !c.isTrigger) result.Add(c);
+                    if (g?.Go == null || g.Solids == null) continue;   // MINOR-7: cached at spawn, no per-call hierarchy walk
+                    foreach (var c in g.Solids) if (c != null) result.Add(c);
                 }
             }
             catch { }
@@ -203,6 +229,13 @@ namespace BigAmbitionsMP
                 }
                 else if (MPClient.IsConnected)
                 {
+                    // Client sim at zero density (field 2026-09-02): Gley recycles a car once it is far from EVERY
+                    // anchor it knows (DriveJob.RemoveVehicle: readyToRemove = no camera within distanceToRemove);
+                    // a client's traffic brain only knew the client's own camera, so the departing origin car was
+                    // recycled the moment its owner teleported away — while the host stood next to it. Feed the same
+                    // anchors the host feeds (local player, ride anchor, every remote avatar); the density budget line
+                    // inside is host-only, the client's density stays 0 (SuppressLocalTraffic re-asserts it after).
+                    if (ClientServiceSimEnabled && Time.timeSinceLevelLoad > 5f) UpdateTrafficAnchors();
                     if (Time.timeSinceLevelLoad > 5f)
                         SuppressLocalTraffic();
                     TickGhosts();
@@ -723,7 +756,7 @@ namespace BigAmbitionsMP
                             continue;                                  // out of view — don't spawn
                         if (isGhost && sq > GhostCullRadius * GhostCullRadius)
                         {
-                            try { UnityEngine.Object.Destroy(g!.Go); } catch { }
+                            try { NotifyCollidersRemoved(g!.Go); UnityEngine.Object.Destroy(g!.Go); } catch { }
                             _ghosts.Remove(car.Index);
                             continue;                                  // left view — release
                         }
@@ -739,7 +772,7 @@ namespace BigAmbitionsMP
                     if (g != null && g.Go != null
                         && (g.Model != car.Model || Vector3.Distance(g.Go.transform.position, pos) > SnapDistance))
                     {
-                        try { UnityEngine.Object.Destroy(g.Go); } catch { }
+                        try { NotifyCollidersRemoved(g.Go); UnityEngine.Object.Destroy(g.Go); } catch { }
                         g = null;
                     }
 
@@ -749,6 +782,7 @@ namespace BigAmbitionsMP
                         if (go == null) { _ghosts.Remove(car.Index); continue; }
                         g = new TrafficGhost { Go = go, Model = car.Model, TargetPos = pos, TargetRot = rot, TargetAt = Time.unscaledTime, HostT = snap.T };
                         g.Body = go.GetComponent<Rigidbody>();   // ROOT rb only (a child rb would teleport just that part)
+                        try { var all = go.GetComponentsInChildren<Collider>(true); var sol = new List<Collider>(all.Length); foreach (var c in all) if (c != null && !c.isTrigger) sol.Add(c); g.Solids = sol.ToArray(); } catch { }
                         _ghosts[car.Index] = g;
                     }
                     else
@@ -784,7 +818,7 @@ namespace BigAmbitionsMP
                 {
                     if (_ghosts[k].Go != null)
                     {
-                        try { UnityEngine.Object.Destroy(_ghosts[k].Go); } catch { }
+                        try { NotifyCollidersRemoved(_ghosts[k].Go); UnityEngine.Object.Destroy(_ghosts[k].Go); } catch { }
                     }
                     _ghosts.Remove(k);
                 }
@@ -913,7 +947,73 @@ namespace BigAmbitionsMP
             if (prefab == null)
                 return VehicleManager.SpawnVisualGhost(model, pos, rot);   // fallback: UNKNOWN model with the pool up (e.g. Taxi)
             // A2 (2026-09-02): the clone routine is shared with the service-car look-alike (ServiceCars.TrySpawnLookalike).
-            return CloneStrippedPrefab(prefab, model, pos, rot) ?? VehicleManager.SpawnVisualGhost(model, pos, rot);
+            var body = CloneStrippedPrefab(prefab, model, pos, rot);
+            if (body == null) return VehicleManager.SpawnVisualGhost(model, pos, rot);
+            // Client sim at zero density (2026-09-02): a ghost's colliders move to the layer Gley brakes for
+            // (ServiceColliderLayer — resolved from the traffic system's own LayerSetup; NOT PlayerVehicles, which
+            // measured as neither sensed nor collidable, H-SVC-113). On the traffic layer a stripped ghost reaches the
+            // unguarded VehicleComponent.cs:366 deref (the June NRE class); on playerLayers the car takes the safe
+            // branch, brakes and waits, exactly as for a player's car. Same relayer the A2 look-alike uses.
+            if (ClientServiceSimEnabled) RelayerCollidersToServiceLayer(body);
+            return body;
+        }
+
+        // ── the layer Gley's sensors treat as "player" (H-SVC-113, field 2026-09-02) ─────────────────────
+        // MEASURED on the rig: PlayerVehicles is NOT in LayerSetupData.playerLayers and never exchanges collision or
+        // trigger events with AiVehicles — so bodies placed there were invisible to traffic (no braking, drive-through).
+        // The layer traffic brakes for is project data; read it from Gley's own LayerSetup at first use: prefer
+        // "Vehicles" when it is in playerLayers, else the lowest playerLayers bit that collides with AiVehicles.
+        // -1 = nothing qualifies → callers leave prefab layers alone. Logged once with names.
+        private static int _serviceLayer = -2;
+        internal static int ServiceColliderLayer()
+        {
+            if (_serviceLayer != -2) return _serviceLayer;
+            int chosen = -1;
+            try
+            {
+                var ls = Resources.Load<LayerSetup>("LayerSetupData");
+                if (ls == null) return -1;                            // not loadable yet — retry on the next call
+                int mask = (int)ls.playerLayers, ai = LayerHelper.AiVehiclesLayerIndex, veh = LayerHelper.VehiclesLayerIndex;
+                bool Collides(int l) => ai < 0 || !Physics.GetIgnoreLayerCollision(ai, l);
+                // Review MAJOR-1 (2026-09-02): the fallback is BOUNDED — never a character / UI / raycast-ignore
+                // layer, never PlayerVehicles (measured: not sensed, no AiVehicles contact). Vehicles first; else the
+                // lowest remaining playerLayers bit that collides with AiVehicles; else -1 and the service cars run
+                // without sensing (logged as a warning; the look-alike then falls back to the player body).
+                var excluded = new System.Collections.Generic.HashSet<int> { LayerHelper.PlayerLayerIndex, LayerHelper.HumanLayerIndex,
+                    LayerHelper.PlayerVehiclesLayerIndex, LayerHelper.UiLayerIndex, LayerHelper.IgnoreRaycastLayerIndex, LayerHelper.DefaultLayerIndex };
+                var names = new System.Collections.Generic.List<string>();
+                for (int i = 0; i < 32; i++) if ((mask & (1 << i)) != 0) names.Add($"{LayerMask.LayerToName(i)}({i}){(Collides(i) ? "" : "×noAi")}{(excluded.Contains(i) ? "×excluded" : "")}");
+                if (veh >= 0 && (mask & (1 << veh)) != 0 && Collides(veh)) chosen = veh;
+                else for (int i = 0; i < 32 && chosen < 0; i++) if ((mask & (1 << i)) != 0 && Collides(i) && !excluded.Contains(i)) chosen = i;
+                _serviceLayer = chosen;
+                int pv = LayerHelper.PlayerVehiclesLayerIndex;
+                string hits = chosen >= 0
+                    ? $"; chosen×Vehicles collide={(veh >= 0 && !Physics.GetIgnoreLayerCollision(chosen, veh))}, chosen×PlayerVehicles collide={(pv >= 0 && !Physics.GetIgnoreLayerCollision(chosen, pv))}"
+                    : "";
+                if (chosen >= 0)
+                    Plugin.Logger.LogInfo($"[TrafficSync] service collider layer: {LayerMask.LayerToName(chosen)}({chosen}) — LayerSetup.playerLayers = [{string.Join(", ", names)}], AiVehicles={ai}, PlayerVehicles={pv}{hits}.");
+                else
+                    Plugin.Logger.LogWarning($"[TrafficSync] service collider layer: NONE qualifies — LayerSetup.playerLayers = [{string.Join(", ", names)}]; ghosts keep prefab layers, service cars drive WITHOUT sensing traffic, look-alikes fall back to the player body.");
+            }
+            catch (Exception ex) { _serviceLayer = -1; Plugin.Logger.LogWarning($"[TrafficSync] service collider layer: {ex.Message} — prefab layers kept."); }
+            return _serviceLayer;
+        }
+
+        private static int _relayerLogged;
+        internal static int RelayerCollidersToServiceLayer(GameObject go)
+        {
+            try
+            {
+                int layer = ServiceColliderLayer();
+                if (layer < 0) return 0;
+                go.layer = layer;
+                int n = 0;
+                foreach (var c in go.GetComponentsInChildren<Collider>(true))
+                    if (c != null && c.gameObject.layer != layer) { c.gameObject.layer = layer; n++; }
+                if (_relayerLogged++ < 2) Plugin.Logger.LogInfo($"[TrafficSync] traffic ghost '{go.name}': {n} collider object(s) moved to layer '{LayerMask.LayerToName(layer)}' (client sim: the branch Gley brakes for).");
+                return n;
+            }
+            catch (Exception ex) { if (_relayerLogged++ < 2) Plugin.Logger.LogWarning($"[TrafficSync] ghost relayer: {ex.Message}"); return 0; }
         }
 
         /// <summary>Clones a Gley traffic prefab into a pure visual prop: instantiated INACTIVE, Gley AI / audio /
@@ -1004,6 +1104,7 @@ namespace BigAmbitionsMP
                 }
             }
             catch { }
+            try { go.AddComponent<ModGhostMarker>(); } catch { }   // review MAJOR-1(b): native layer-keyed triggers ignore mod ghosts
             go.SetActive(true);   // activate ONLY now — surviving components wake on a pure visual prop
             return go;
         }
@@ -1084,7 +1185,7 @@ namespace BigAmbitionsMP
         public static void DespawnAllGhosts()
         {
             foreach (var g in _ghosts.Values)
-                if (g.Go != null) { try { UnityEngine.Object.Destroy(g.Go); } catch { } }
+                if (g.Go != null) { try { NotifyCollidersRemoved(g.Go); UnityEngine.Object.Destroy(g.Go); } catch { } }
             _ghosts.Clear();
         }
 
@@ -1169,6 +1270,29 @@ namespace BigAmbitionsMP
             return false;
         }
 
+        /// <summary>The game's own despawn radius — two anchors closer than this share the cars around them, so
+        /// they count as ONE area for the budget. Falls back to 150 m when the traffic component is not readable.</summary>
+        private static float AreaRadius()
+        {
+            try { var tc = TrafficComponent.Instance; if (tc != null && tc.distanceToRemove > 1f) return Mathf.Clamp(tc.distanceToRemove, 80f, 400f); } catch { }
+            return AreaRadiusFallback;
+        }
+        /// <summary>Greedy clustering of the fed anchors: an anchor within AreaRadius of an existing area joins it.</summary>
+        private static int CountPlayerAreas(Transform[] anchors)
+        {
+            if (anchors == null || anchors.Length == 0) return 0;
+            float r2 = AreaRadius(); r2 *= r2;
+            var centres = new List<Vector3>(anchors.Length);
+            foreach (var a in anchors)
+            {
+                if (a == null) continue;
+                var p = a.position; bool joined = false;
+                for (int i = 0; i < centres.Count && !joined; i++) if ((centres[i] - p).sqrMagnitude <= r2) joined = true;
+                if (!joined) centres.Add(p);
+            }
+            return centres.Count;
+        }
+
         private static void UpdateTrafficAnchors()
         {
             try
@@ -1241,9 +1365,20 @@ namespace BigAmbitionsMP
                     try { dm.UpdateCameraPositions(arr); }
                     catch (Exception e)
                     { if (!_anchorDiagLogged) Plugin.Logger.LogWarning($"[TrafficSync] UpdateCameraPositions: {e.Message}"); }
-                    // Scale the traffic budget with player count — one player's
-                    // worth of cars spread over N areas looks sparse.
-                    try { dm.UpdateMaxCars(CarsPerPlayer * arr.Length); } catch { }
+                    // HOST only (a client's ambient density is pinned to 0): budget = the game's own request ×
+                    // distinct player areas — see the VANILLA TRAFFIC note at the top. Before the game's first
+                    // request the Initialize value stands (clamped to the authored pool by ServiceCars).
+                    if (MPServer.IsRunning && GameDensityRequest >= 0)
+                    {
+                        int areas = CountPlayerAreas(arr);
+                        int budget = GameDensityRequest * Math.Max(1, areas);
+                        try { dm.UpdateMaxCars(budget); } catch { }
+                        if (budget != _lastBudgetLogged || areas != _lastAreasLogged)
+                        {
+                            _lastBudgetLogged = budget; _lastAreasLogged = areas;
+                            Plugin.Logger.LogInfo($"[TrafficSync] traffic budget: the game asks {GameDensityRequest}; {areas} player area(s) (radius {AreaRadius():F0} m) → maxCars {budget}.");
+                        }
+                    }
                 }
 
                 if (!_anchorDiagLogged)
@@ -1257,7 +1392,7 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo(
                         $"[TrafficSync] Traffic anchors active: {arr.Length} fed of {anchors.Count} player(s); " +
                         $"densityManager={(dm != null ? "ok" : "NULL")}; " +
-                        $"maxCars={CarsPerPlayer * arr.Length}; nativeRadii: {nativeR}.");
+                        $"budget=game request × player areas (request so far {GameDensityRequest}); nativeRadii: {nativeR}.");
                 }
             }
             catch (Exception ex)
@@ -1640,6 +1775,30 @@ namespace BigAmbitionsMP
             var tm = TrafficManager.Instance;
             if (tm == null) return;
 
+            if (ClientServiceSimEnabled)
+            {
+                // Client sim at zero ambient density (2026-09-02): the traffic brain stays ON so the client's own
+                // service cars drive natively. Ambient traffic never spawns: every density request is clamped to 0
+                // (MPPatches.Patch_TM_SetTrafficDensity_ClientZero) and re-asserted here (a trivial assignment); the
+                // per-tick clear below removes whatever spawned in the pre-zero window and is a no-op afterwards.
+                // Lights: Patch_IM_UpdateIntersections_ClientSkip. Sensors: NREShield runs them for service cars only.
+                if (!tm.enabled)
+                {
+                    tm.enabled = true;
+                    Plugin.Logger.LogInfo("[TrafficSync] client traffic brain ON at zero ambient density — the client's own service cars drive natively; ambient traffic stays the host's.");
+                }
+                // MINOR-7 (review 2026-09-02): the density re-assert and the ambient sweep run on a 1 s beat
+                // (first pass immediately), not every frame — the density clamp patch is the event-driven source.
+                float nowSim = Time.unscaledTime;
+                if (nowSim >= _nextClientSimBeat)
+                {
+                    _nextClientSimBeat = nowSim + 1f;
+                    try { tm.SetTrafficDensity(0); } catch { }
+                    try { ClearClientTrafficExceptServiceCars(tm); } catch { }
+                }
+                return;
+            }
+
             // Kill the client's local Gley traffic — the client renders host-synced ghosts instead.
             // ClearTraffic is host-scoped again (Patch_TM_ClearTraffic no longer no-ops the client), so
             // it actually runs here now (the previous direct-deactivation workaround is gone). Re-assert
@@ -1702,6 +1861,16 @@ namespace BigAmbitionsMP
         // is what prevents BuildingManager.DelayedEnterBuildingActions from
         // firing on the client.
         public static bool ClientTrafficSuppressionEnabled { get; set; } = true;
+
+        /// <summary>Client sim at ZERO ambient density (user-approved 2026-09-02; design: .modding/03-systems/
+        /// private-driver-mp.md "Client sim at zero ambient density"). True = Gley keeps running on a pure client so
+        /// the client's OWN service cars (private driver, arrival cars) drive natively — approach, stop, lights,
+        /// braking for host traffic ghosts, drive-off, recycle — while ambient traffic can never spawn (density
+        /// clamped to 0), local light phases never advance, sensors run only for service cars, and traffic ghosts
+        /// sit on the layer Gley brakes for (ServiceColliderLayer — "Vehicles" on the tested data; NOT PlayerVehicles,
+        /// H-SVC-113). False = the previous dead-sim behaviour (parked service cars).</summary>
+        public static bool ClientServiceSimEnabled { get; set; } = true;
+        private static float _nextClientSimBeat;
 
         public static void ToggleClientTrafficSuppression()
         {

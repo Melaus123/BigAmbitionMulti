@@ -28,6 +28,7 @@ namespace BigAmbitionsMP
             public string     ColorName = "";
             public float      StopUntil;                            // owner side: auto-resume deadline (0 = not stopped by a rider)
             public bool       SavedValid; public float SavedValue; public SpecialDriveActionTypes SavedAction;
+            public Waypoint?  SavedTarget; public List<int>? SavedPath;   // owner side: an APPROACHING driver's route, restored after a rider's stop (user, 2026-09-02)
         }
         private static readonly Dictionary<string, Entry> _local = new();
         private static int _seq;
@@ -63,6 +64,28 @@ namespace BigAmbitionsMP
             try { return go.GetComponent<Helpers.PrivateDriverVehicle>() != null; } catch { return false; }
         }
 
+        // ── world-load traffic batch = vanilla (review MAJOR-2, user ruling "vanilla traffic" 2026-09-02) ─────────
+        // DensityManager.Initialize runs LoadInitialVehicles for maxNrOfVehicles attempts — the Initialize CAP, which
+        // the bump raised (30 → 59). Clamp that first batch to the authored pool total so a world starts with exactly
+        // the cars vanilla starts with; the game's own SetTrafficDensity takes over from there. MP only.
+        [HarmonyPatch(typeof(DensityManager), nameof(DensityManager.Initialize))]
+        public static class Patch_DensityManager_Initialize_VanillaBatch
+        {
+            static void Prefix(ref int maxNrOfVehicles)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.InMpGame) return;
+                    if (AuthoredPoolTotal > 0 && maxNrOfVehicles > AuthoredPoolTotal)
+                    {
+                        Plugin.Logger.LogInfo($"[Service] world-load traffic batch clamped {maxNrOfVehicles} → {AuthoredPoolTotal} (the authored pool; vanilla start).");
+                        maxNrOfVehicles = AuthoredPoolTotal;
+                    }
+                }
+                catch { }
+            }
+        }
+
         // ── stuck-car rescue exemption (verified 2026-09-02, F-2026-09-02-V; user-approved) ────────────────────
         // The game's AiCarRescueCheck (a component on every pool car, ticked by a plain MonoBehaviour every 0.1 s —
         // so alive on clients too) removes any car that is not the phone's CurrentVehicle and sits still > 20 s
@@ -73,7 +96,10 @@ namespace BigAmbitionsMP
         internal static bool RescueExempt(GameObject go)
         {
             if (go == null || (!MPServer.IsRunning && !MPClient.InMpGame)) return false;
-            if (!MPServer.IsRunning) return IsClientKept(go);              // pure client: every service car is parked by design
+            // Pure client: with the sim OFF every service car is parked by design (exempt); with the sim ON the
+            // native rule applies as on the host — only a car stopped for a rider (review MINOR-5: parity, and a
+            // permanently-braking car must not read as "parked on purpose").
+            if (!MPServer.IsRunning && !TrafficSync.ClientServiceSimEnabled) return IsClientKept(go);
             foreach (var e in _local.Values)
                 if (e.Go == go) return e.StopUntil > Time.unscaledTime;    // host: only while a rider is walking up
             return false;
@@ -95,11 +121,11 @@ namespace BigAmbitionsMP
         }
 
         // ── client side: parked service cars (user-approved 2026-09-02) ─────────────────────────────────────
-        // A pure client's traffic brain is off (TrafficSync.SuppressLocalTraffic + the Update/FixedUpdate skip),
-        // so a service car the game released — the origin after the owner's ride, a friend's arrival car —
-        // never drives away and Gley never recycles it. It now survives the client's traffic clear as a PARKED
-        // car (no vanish in front of anyone) and is removed here once no player, local or remote, is within
-        // ClientParkedKeepRadius. Never the waiting driver (SmartphonePrivateDriverUI.CurrentVehicle), never a car
+        // With TrafficSync.ClientServiceSimEnabled OFF a pure client's traffic brain is off, so a service car the
+        // game released — the origin after the owner's ride, a friend's arrival car — never drives away and Gley
+        // never recycles it. It survives the client's traffic clear as a PARKED car (no vanish in front of anyone)
+        // and is removed here once no player, local or remote, is within ClientParkedKeepRadius. With the flag ON
+        // (default since 2026-09-02) such cars drive away and Gley recycles them; this prune is then the belt. Never the waiting driver (SmartphonePrivateDriverUI.CurrentVehicle), never a car
         // a rider is walking to (StopUntil). Positions are read live at the moment of the decision. Parity
         // (approach drive, drive-off) on clients is a separate design — see the 2026-09-02 brainstorm.
         internal const float ClientParkedKeepRadius = 150f;
@@ -140,15 +166,17 @@ namespace BigAmbitionsMP
         /// The prefab is resolved exactly as the summoner's machine resolved it (PrivateDriverHelpers.GetAiVehiclePrefab
         /// from the vehicle type), cloned through TrafficSync's traffic-ghost routine (inactive instantiate, Gley
         /// components stripped, kinematic), painted with the two native calls SetupVehicle makes, and its colliders
-        /// moved to the player-vehicles layer: Gley classifies a sensed collider by LAYER (VehicleComponent.OnTriggerEnter
-        /// → playerLayers branch, no traffic index involved) and the mod's click ray lists that layer — the same
-        /// layer the player-body ghost sits on, so braking and clicking are unchanged by the body swap.</summary>
+        /// moved to the layer Gley brakes for (TrafficSync.ServiceColliderLayer, resolved from LayerSetupData.playerLayers;
+        /// H-SVC-113 measured 2026-09-02 that PlayerVehicles is NOT that layer): Gley classifies a sensed collider by
+        /// LAYER (VehicleComponent.OnTriggerEnter → playerLayers branch, no traffic index involved) and the mod's click
+        /// ray includes that layer, so braking and clicking work for the swapped body.</summary>
         internal static GameObject? TrySpawnLookalike(string ownerId, VehicleEntry e, Vector3 pos, Quaternion rot)
         {
             try
             {
                 var vt = Vehicles.VehicleTypes.VehicleTypeHelper.GetVehicleType(e.TypeName);
                 if (vt == null) { Fallback(e, "unknown vehicle type"); return null; }
+                if (TrafficSync.ServiceColliderLayer() < 0) { Fallback(e, "no layer the traffic system brakes for (review MAJOR-1)"); return null; }
                 var ai = Helpers.PrivateDriverHelpers.GetAiVehiclePrefab(vt);   // the very asset the owner's car was loaded from
                 if (ai == null) { Fallback(e, "no AI prefab for the type"); return null; }
                 var go = TrafficSync.CloneStrippedPrefab(ai.gameObject, ai.gameObject.name, pos, rot);
@@ -167,16 +195,10 @@ namespace BigAmbitionsMP
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Service] look-alike paint '{e.VehicleId}': {ex.Message}"); }
-                int layer = Helpers.LayerHelper.PlayerVehiclesLayerIndex;
-                int relayered = 0;
-                if (layer >= 0)
-                {
-                    go.layer = layer;
-                    foreach (var c in go.GetComponentsInChildren<Collider>(true))
-                        if (c != null && c.gameObject.layer != layer) { c.gameObject.layer = layer; relayered++; }
-                }
+                int layer = TrafficSync.ServiceColliderLayer();   // H-SVC-113: the layer Gley's sensors treat as "player" (NOT PlayerVehicles)
+                int relayered = TrafficSync.RelayerCollidersToServiceLayer(go);
                 if (_lookalikeLogged.Add(e.TypeName))
-                    Plugin.Logger.LogInfo($"[Service] mirror style: traffic look-alike '{ai.gameObject.name}' for {e.TypeName} (paint={paint}, driver figure={(driver ? "yes" : "no")}, {relayered} collider object(s) moved to the player-vehicles layer).");
+                    Plugin.Logger.LogInfo($"[Service] mirror style: traffic look-alike '{ai.gameObject.name}' for {e.TypeName} (paint={paint}, driver figure={(driver ? "yes" : "no")}, {relayered} collider object(s) moved to layer '{(layer >= 0 ? LayerMask.LayerToName(layer) : "unchanged")}').");
                 return go;
             }
             catch (Exception ex) { Fallback(e, $"{ex.GetType().Name}: {ex.Message}"); return null; }
@@ -277,6 +299,9 @@ namespace BigAmbitionsMP
                     if (!instantRemove) return;
                     if (!MPServer.IsRunning && !MPClient.InMpGame) return;
                     if (!TaxiSystem.IsTraveling) return;   // only the arrival hand-off; an explicit "remove" elsewhere stays native
+                    // Review MINOR-6: during a FRIEND's ride (cityMap.Taxi is a GhostTaxi) the game's no-waypoint
+                    // fallback dismisses the RIDER's own driver — that is not the arrival hand-off; stay native.
+                    try { if (InstanceBehavior<CityManager>.Instance?.cityMap?.Taxi is GhostTaxi) return; } catch { }
                     var pdv = Player.HUD.SmartphoneUI.SmartphonePrivateDriverUI.CurrentVehicle;
                     var origin = pdv != null ? pdv.GetComponent<VehicleComponent>() : null;
                     if (origin == null)
@@ -312,12 +337,76 @@ namespace BigAmbitionsMP
         }
 
         // ── pool helpers (2026-09-02) ─────────────────────────────────────────────────────────────────────
-        /// <summary>Exactly Gley TrafficManager.LoadVehicle's choice, read live: a FREE slot with the same prefab
-        /// reference, else the FIRST slot whose prefab NAME matches (free or not); null when the model has no slot.</summary>
+        // ── friends ride free (review BLOCKER-1, user ruling 2026-09-02) ──────────────────────────────────────
+        // TaxiSystem.GetPrice waives the fare for exactly one type (PrivateDriverVehicle); a GhostTaxi ride would be
+        // billed distance × 0.15, shown on the map button, and silently refused when the rider is short. MP only —
+        // single player never has a GhostTaxi, so the guard passes through by construction.
+        [HarmonyPatch(typeof(TaxiSystem), nameof(TaxiSystem.GetPrice))]
+        public static class Patch_TaxiSystem_GetPrice_ServiceFree
+        {
+            private static int _logs;
+            static bool Prefix(ref float __result)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.InMpGame) return true;
+                    if (!(InstanceBehavior<CityManager>.Instance?.cityMap?.Taxi is GhostTaxi)) return true;
+                    __result = 0f;
+                    if (_logs++ < 3) Plugin.Logger.LogInfo("[Service] friend ride: fare waived (the owner's contract already paid for the driver).");
+                    return false;
+                }
+                catch { return true; }
+            }
+        }
+
+        // ── pool identity (H-SVC-114, field 2026-09-02) ───────────────────────────────────────────────────
+        // Gley LoadVehicle matches a FREE slot by prefab REFERENCE first and only then falls back to the FIRST slot of
+        // that prefab NAME regardless of state. The private-driver prefab comes from PrefabHelper.LoadPrefab — a
+        // separate object from the VehiclePool's serialized reference — so the reference search never matches and the
+        // by-name fallback always returns the lowest slot: the departing origin at the arrival hand-off (client log:
+        // 3 slots, 2 free, origin picked). Substitute the pool's own reference so Gley's first search takes any FREE
+        // slot of the model; the by-name fallback still applies only when every slot is busy. MP only.
+        internal static GameObject? PoolReferenceFor(GameObject? prefab)
+        {
+            if (prefab == null) return null;
+            var list = TrafficManager.Instance?.trafficVehicles?.GetVehicleList();
+            if (list == null) return null;
+            GameObject? byName = null;
+            for (int i = 0; i < list.Count; i++)
+            {
+                var v = list[i];
+                if (v == null || v.prefab == null) continue;
+                if (v.prefab == prefab) return null;                       // exact reference present — nothing to do
+                if (byName == null && v.prefab.name == prefab.name) byName = v.prefab;
+            }
+            return byName;
+        }
+        [HarmonyPatch(typeof(TrafficManager), nameof(TrafficManager.LoadVehicle))]
+        public static class Patch_LoadVehicle_PoolReference
+        {
+            private static int _logs;
+            static void Prefix(ref GameObject vehiclePrefab)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.InMpGame) return;
+                    var sub = PoolReferenceFor(vehiclePrefab);
+                    if (sub == null) return;
+                    if (_logs++ < 5) Plugin.Logger.LogInfo($"[Service] LoadVehicle('{vehiclePrefab.name}'): the requested prefab is not the pool's own reference — substituting it so a FREE slot of the model is taken (H-SVC-114).");
+                    vehiclePrefab = sub;
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>Exactly Gley TrafficManager.LoadVehicle's choice, read live — after the same reference substitution
+        /// Patch_LoadVehicle_PoolReference applies: a FREE slot with the same prefab reference, else the FIRST slot
+        /// whose prefab NAME matches (free or not); null when the model has no slot.</summary>
         private static VehicleComponent? PredictDestinationSlot(GameObject? prefab, out string how)
         {
             how = "none";
             if (prefab == null) return null;
+            var sub = PoolReferenceFor(prefab); if (sub != null) prefab = sub;
             var list = TrafficManager.Instance?.trafficVehicles?.GetVehicleList();
             if (list == null) return null;
             for (int i = 0; i < list.Count; i++)
@@ -391,6 +480,8 @@ namespace BigAmbitionsMP
         // The postfix logs the census — authored → effective per model — one line per world load, MP only.
         internal const int PoolMinSlots = 3;
         private static readonly Dictionary<string, int> _authoredSlots = new();
+        private static readonly Dictionary<CarType, int> _authoredByType = new();   // to restore the asset after the pool is built
+        internal static int AuthoredPoolTotal;                                       // vanilla cap = sum of authored slots
         [HarmonyPatch(typeof(TrafficManager), nameof(TrafficManager.Initialize))]
         public static class Patch_TrafficPool_CensusAndBump
         {
@@ -398,7 +489,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    _authoredSlots.Clear();
+                    _authoredSlots.Clear(); _authoredByType.Clear(); AuthoredPoolTotal = 0;
                     if (vehiclePool == null || vehiclePool.trafficCars == null) return;
                     if (!MPServer.IsRunning && !MPClient.InMpGame) return;   // single player: authored pool, untouched
                     int delta = 0; var bumped = new List<string>();
@@ -407,6 +498,7 @@ namespace BigAmbitionsMP
                         if (ct == null || !ct.canBeAiDriven || ct.nrOfVehicles <= 0) continue;
                         string name = ct.vehiclePrefab != null ? ct.vehiclePrefab.name : (ct.name ?? "?");
                         if (!_authoredSlots.ContainsKey(name)) _authoredSlots[name] = ct.nrOfVehicles;
+                        _authoredByType[ct] = ct.nrOfVehicles; AuthoredPoolTotal += ct.nrOfVehicles;
                         if (ct.nrOfVehicles < PoolMinSlots)
                         {
                             bumped.Add($"{name} {ct.nrOfVehicles}→{PoolMinSlots}");
@@ -428,6 +520,13 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (!MPServer.IsRunning && !MPClient.InMpGame) return;
+                    // Review MAJOR-2 (2026-09-02): the VehiclePool is a process-lifetime asset and the game re-reads
+                    // GetNumberOfVehicles() at every world load — restore the authored counts now that the pool is
+                    // built, so a later single-player world (and ParkingSimulator's pool sizing) sees vanilla data.
+                    // The running world keeps its bumped slots; the next MP load bumps again from the authored values.
+                    int restored = 0;
+                    foreach (var kv in _authoredByType) { if (kv.Key != null && kv.Key.nrOfVehicles != kv.Value) { kv.Key.nrOfVehicles = kv.Value; restored++; } }
+                    if (restored > 0) Plugin.Logger.LogInfo($"[Service] traffic pool asset restored to authored counts ({restored} model(s)) — the running world keeps its bumped slots.");
                     var list = __instance?.trafficVehicles?.GetVehicleList();
                     if (list == null) return;
                     var now = new SortedDictionary<string, int>(StringComparer.Ordinal);
@@ -447,13 +546,31 @@ namespace BigAmbitionsMP
         }
 
         // ── owner side: stop / resume for a rider ────────────────────────────────────────────────────
+        private static readonly System.Reflection.FieldInfo? _fTargetWaypoint  = AccessTools.Field(typeof(Helpers.PrivateDriverVehicle), "_targetWaypoint");
+        private static readonly System.Reflection.FieldInfo? _fLastDriveAction = AccessTools.Field(typeof(Helpers.PrivateDriverVehicle), "_lastDriveAction");
+        private static readonly System.Reflection.FieldInfo? _fLastActionValue = AccessTools.Field(typeof(Helpers.PrivateDriverVehicle), "_lastActionValue");
         internal static void OwnerStop(ServiceCarPayload p)
         {
             try
             {
                 if (p == null || !_local.TryGetValue(p.VehicleId, out var e) || e.Go == null) return;
                 var pdv = e.Go.GetComponent<Helpers.PrivateDriverVehicle>();
-                if (pdv != null) pdv.RequestVehicleStop(hail: true, hardStop: true);
+                if (pdv != null)
+                {
+                    // User ruling 2026-09-02: a rider's hail must not cost the owner the approach. The native stop
+                    // (RequestVehicleStop) forgets the destination and CLEARS the route list in place, so snapshot
+                    // both first — only while the driver is actually approaching (a destination is set).
+                    try
+                    {
+                        var vcA = e.Go.GetComponent<VehicleComponent>();
+                        var target = _fTargetWaypoint?.GetValue(pdv) as Waypoint;
+                        if (target != null && vcA != null && vcA.presetPath != null && vcA.presetPath.Count > 0)
+                        { e.SavedTarget = target; e.SavedPath = new List<int>(vcA.presetPath); }
+                        else { e.SavedTarget = null; e.SavedPath = null; }
+                    }
+                    catch { e.SavedTarget = null; e.SavedPath = null; }
+                    pdv.RequestVehicleStop(hail: true, hardStop: true);
+                }
                 else
                 {
                     var vc = e.Go.GetComponent<VehicleComponent>();
@@ -484,7 +601,46 @@ namespace BigAmbitionsMP
             e.StopUntil = 0f;
             if (e.Go == null) return;
             var pdv = e.Go.GetComponent<Helpers.PrivateDriverVehicle>();
-            if (pdv != null) pdv.DriveAway();
+            if (pdv != null)
+            {
+                // User ruling 2026-09-02 (field run 3): a rider who did NOT call the car must never send it away. A
+                // driver still on duty for its owner — waiting (empty preset path) or approaching (routed) — keeps
+                // waiting; only the owner's own boarding releases it (native DriveAway). Live read of the game's own
+                // state: presetPath == null means the car was already released and is plain traffic with a leftover
+                // component (the origin after a hand-off) — that one resumes. Calling DriveAway on an on-duty driver
+                // also fought PrivateDriverVehicle.Update, which re-applies StopInPoint to the CurrentVehicle every
+                // frame — the "moved a little, then stopped again" the host saw.
+                var vc = e.Go.GetComponent<VehicleComponent>();
+                bool onDuty = vc != null && vc.presetPath != null;
+                if (onDuty)
+                {
+                    // An APPROACHING driver gets its route and destination back (user, 2026-09-02): the car has not
+                    // moved since the stop, so the remaining route is valid from where it stands; Gley's next waypoint
+                    // request pops already-passed entries and targets presetPath[0] (DrivingAI.WaypointRequested).
+                    // The drive action/value the native stop captured (_lastDriveAction/_lastActionValue) is what
+                    // DriveAway itself replays — the same three calls, minus nulling the route.
+                    if (e.SavedTarget != null && e.SavedPath != null && e.SavedPath.Count > 0)
+                    {
+                        try
+                        {
+                            vc!.presetPath = new List<int>(e.SavedPath);
+                            pdv.SetTargetWaypoint(e.SavedTarget);
+                            var action = _fLastDriveAction != null ? (SpecialDriveActionTypes)_fLastDriveAction.GetValue(pdv) : SpecialDriveActionTypes.Continue;
+                            float value = _fLastActionValue != null ? (float)_fLastActionValue.GetValue(pdv) : 0f;
+                            TrafficManager.Instance.ForceSetVehicleActiveAction(vc, action);
+                            AIEvents.TriggerChangeDrivingStateEvent(vc.GetIndex(), action, value);
+                            TrafficManager.Instance.VehicleUpdateWaypoint(vc);
+                            Plugin.Logger.LogInfo($"[Service] '{e.Vid}' resumes its approach to its owner ({e.SavedPath.Count} waypoint(s) left) — {why}.");
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Service] '{e.Vid}' approach restore: {ex.Message} — it waits where it stands."); }
+                        e.SavedTarget = null; e.SavedPath = null;
+                        return;
+                    }
+                    Plugin.Logger.LogInfo($"[Service] '{e.Vid}' stays waiting for its owner — {why} (a rider does not release the driver).");
+                    return;
+                }
+                pdv.DriveAway();
+            }
             else if (e.SavedValid)
             {
                 var vc = e.Go.GetComponent<VehicleComponent>();
@@ -495,6 +651,13 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Host: a rider's stop/resume arrived — handle it if the host owns the car, else forward to the owner.</summary>
+        /// <summary>SVC_&lt;owner&gt;_&lt;n&gt; → owner ("" when the id is not in that shape).</summary>
+        internal static string OwnerFromServiceId(string? vid)
+        {
+            if (string.IsNullOrEmpty(vid) || !vid!.StartsWith("SVC_")) return "";
+            int last = vid.LastIndexOf('_');
+            return last > 4 ? vid.Substring(4, last - 4) : "";
+        }
         internal static void HostRoute(MessageType type, ServiceCarPayload p, string senderPid)
         {
             try
@@ -502,14 +665,21 @@ namespace BigAmbitionsMP
                 if (p == null || string.IsNullOrEmpty(p.VehicleId)) return;
                 if (string.IsNullOrEmpty(p.PlayerId)) p.PlayerId = senderPid ?? "";
                 bool stop = type == MessageType.ServiceCarStop;
-                if (_local.ContainsKey(p.VehicleId))
+                // Review MINOR-1: this runs on the network poll thread — no dictionary reads here. The owner is in
+                // the id by construction (SVC_<owner>_<n>); everything else happens on the main thread.
+                string owner = OwnerFromServiceId(p.VehicleId);
+                string vid = p.VehicleId, from = senderPid ?? "";
+                GameStatePatcher.EnqueueOnMainThread(() =>
                 {
-                    GameStatePatcher.EnqueueOnMainThread(() => { if (stop) OwnerStop(p); else OwnerResume(p); });
-                    return;
-                }
-                string owner = VehicleManager.OwnerIdFor(p.VehicleId);
-                if (string.IsNullOrEmpty(owner)) { Plugin.Logger.LogInfo($"[Service] {type} for unknown car '{p.VehicleId}' from '{senderPid}' — dropped."); return; }
-                MPServer.SendToPlayer(owner, MessageEnvelope.Create(type, senderPid ?? "", p));
+                    try
+                    {
+                        if (_local.ContainsKey(vid)) { if (stop) OwnerStop(p); else OwnerResume(p); return; }
+                        if (string.IsNullOrEmpty(owner)) owner = VehicleManager.OwnerIdFor(vid);
+                        if (string.IsNullOrEmpty(owner)) { Plugin.Logger.LogInfo($"[Service] {type} for unknown car '{vid}' from '{from}' — dropped."); return; }
+                        MPServer.SendToPlayer(owner, MessageEnvelope.Create(type, from, p));
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Service] host route (main): {ex.Message}"); }
+                });
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Service] host route: {ex.Message}"); }
         }
@@ -529,6 +699,7 @@ namespace BigAmbitionsMP
         private static bool   _mapWasOpen;
         private static GhostTaxi? _rideTaxi;
 
+        private static Vector3 _rideGoal, _rideGoalCarPos;   // review MINOR-4: re-aim the walk when the car moves
         internal static void RideFromGhost(string vid, string owner)
         {
             try
@@ -536,12 +707,15 @@ namespace BigAmbitionsMP
                 var t = VehicleManager.GhostTransform(vid);
                 var pc = Helpers.PlayerHelper.PlayerController;
                 if (t == null || pc == null) return;
-                _rideTaxi = t.GetComponent<GhostTaxi>();
-                if (_rideTaxi == null) { Plugin.Logger.LogWarning($"[Service] ghost '{vid}' has no GhostTaxi — ride not offered."); return; }
+                var taxi = t.GetComponent<GhostTaxi>();
+                if (taxi == null) { Plugin.Logger.LogWarning($"[Service] ghost '{vid}' has no GhostTaxi — ride not offered."); return; }
+                if (_rideVid != "" && _rideVid != vid) EndRide("switched cars");   // review MINOR-4: the first car resumes now, not after 60 s
+                _rideTaxi = taxi;
                 SendStop(vid, owner);
                 _rideVid = vid; _rideOwner = owner; _rideDeadline = Time.unscaledTime + 15f; _mapWasOpen = false;
                 Vector3 spot = VehicleManager.LoadingSpotFor(vid);
                 if (spot == Vector3.zero) spot = t.position + t.right * 2.5f;
+                _rideGoal = spot; _rideGoalCarPos = t.position;
                 pc.SetGoal(spot, new UnityEngine.Events.UnityAction(() => { }));
                 VehicleManager.ClearGhostHighlight(vid);
                 Plugin.Logger.LogInfo($"[Service] riding '{vid}' ({owner}'s driver): stop requested, walking over.");
@@ -563,6 +737,16 @@ namespace BigAmbitionsMP
                 if (mapOpen) { _mapWasOpen = true; return; }
                 if (_mapWasOpen) { EndRide("map closed without travelling"); return; }   // cancelled → resume the owner's car
                 bool arrived = Vector3.Distance(ch.transform.position, t.position) < 4f;
+                // Review MINOR-4: the car may still be rolling while the stop request makes its round trip — re-aim
+                // the walk whenever the car has moved more than 2 m from where the goal was set (live read).
+                if (!arrived && (t.position - _rideGoalCarPos).sqrMagnitude > 4f)
+                {
+                    var pc2 = Helpers.PlayerHelper.PlayerController;
+                    Vector3 spot2 = VehicleManager.LoadingSpotFor(_rideVid);
+                    if (spot2 == Vector3.zero) spot2 = t.position + t.right * 2.5f;
+                    _rideGoal = spot2; _rideGoalCarPos = t.position;
+                    try { pc2?.SetGoal(spot2, new UnityEngine.Events.UnityAction(() => { })); } catch { }
+                }
                 if (!arrived && Time.unscaledTime < _rideDeadline) return;
                 if (!arrived) { EndRide("could not reach the car"); return; }
                 cityMap?.SetTaxiMode(_rideTaxi);   // the game's own taxi map; TravelTo reads cityMap.Taxi
@@ -592,6 +776,9 @@ namespace BigAmbitionsMP
                     foreach (var c in e.Go.GetComponentsInChildren<Collider>(true))
                     {
                         if (c == null) continue;
+                        // Client sim (2026-09-02): the car's SENSOR trigger must still see ghosts — IgnoreCollision
+                        // mutes trigger events for the pair too — so only the solid colliders are paired (no shove).
+                        if (TrafficSync.ClientServiceSimEnabled && c.isTrigger) continue;
                         for (int i = 0; i < ghostCols.Count; i++)
                             if (ghostCols[i] != null) Physics.IgnoreCollision(c, ghostCols[i], true);
                     }
@@ -616,6 +803,10 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Service] tick: {ex.Message}"); }
         }
     }
+
+    /// <summary>Marks every mod ghost body (traffic ghost, service look-alike, fleet ghost) so native layer-keyed
+    /// triggers can ignore it (review MAJOR-1(b), 2026-09-02; MPPatches.IsModGhostContact).</summary>
+    public sealed class ModGhostMarker : MonoBehaviour { }
 
     /// <summary>The ride hook on a mirrored service ghost: the game's own ITaxi contract, minus the fare.
     /// DriveAway (fired natively at boarding) resumes the owner's car; arrival loads a plain pool car of the same

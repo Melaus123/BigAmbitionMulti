@@ -1010,9 +1010,65 @@ namespace BigAmbitionsMP
             static bool Prefix()
             {
                 if (UnityEngine.Time.timeSinceLevelLoad <= 5f) return true;     // let the pool init first
-                // false = skip Gley's update (no spawn, no sim) on a pure client while suppression is on.
-                return !(MPClient.IsClientInWorld && !MPServer.IsRunning && TrafficSync.ClientTrafficSuppressionEnabled);
+                // false = skip Gley's update (no spawn, no sim) on a pure client while suppression is on — UNLESS
+                // the client sim runs at zero ambient density (2026-09-02: ClientServiceSimEnabled), where Gley must
+                // tick so the client's own service cars drive; ambient spawning is prevented by the density clamp.
+                return !(MPClient.IsClientInWorld && !MPServer.IsRunning && TrafficSync.ClientTrafficSuppressionEnabled
+                         && !TrafficSync.ClientServiceSimEnabled);
             }
+        }
+
+        /// <summary>Client sim at zero ambient density (2026-09-02): every density request on a pure client becomes 0.
+        /// Gley's DensityManager adds cars only while current &lt; max and its initial load loops to max, so 0 means
+        /// no ambient car ever spawns locally; the client's service cars are loaded explicitly (LoadVehicle) and
+        /// are unaffected. The game re-requests density on time-of-day / neighbourhood changes — this is the source.</summary>
+        [HarmonyPatch(typeof(TrafficManager), nameof(TrafficManager.SetTrafficDensity))]
+        public static class Patch_TM_SetTrafficDensity_ClientZero
+        {
+            private static int _logs;
+            static void Prefix(ref int nrOfCars)
+            {
+                try
+                {
+                    // HOST: remember the game's own number — the anchor feed multiplies it by distinct player areas
+                    // (vanilla traffic, user ruling 2026-09-02). The mod's own re-assert calls pass 0 on clients only.
+                    if (MPServer.IsRunning) { TrafficSync.GameDensityRequest = Math.Max(0, nrOfCars); return; }
+                    if (!(MPClient.IsClientInWorld && !MPServer.IsRunning) || !TrafficSync.ClientServiceSimEnabled) return;
+                    if (nrOfCars != 0 && _logs++ < 3) Plugin.Logger.LogInfo($"[TrafficSync] client density request {nrOfCars} → 0 (ambient traffic is the host's; only service cars drive here).");
+                    nrOfCars = 0;
+                }
+                catch { }
+            }
+        }
+
+        // ── Review MAJOR-1(b) (2026-09-02): native triggers keyed on the "Vehicles" layer ignore mod ghosts ──
+        // UndergroundParkingEntrance / ParkingElevator / CityHamptonsHouseController / TurnstileBarrier react to any
+        // collider on LayerHelper.VehiclesLayerIndex and then compare its VehicleController with the player's
+        // selectedVehicle — for a ghost (no controller) the comparison degenerates and, with the local player on foot,
+        // fires EnterParking / the elevator overlay / the Business Management screen. Every mod ghost body (traffic
+        // ghost, service look-alike, fleet ghost) carries ModGhostMarker; these prefixes drop such contacts. MP only.
+        internal static bool IsModGhostContact(UnityEngine.Component? c)
+        {
+            try { return c != null && (MPServer.IsRunning || MPClient.InMpGame) && c.GetComponentInParent<ModGhostMarker>() != null; }
+            catch { return false; }
+        }
+        [HarmonyPatch(typeof(Parking.UndergroundParking.UndergroundParkingEntrance), "OnTriggerEnter")]
+        public static class Patch_UndergroundParkingEntrance_IgnoreGhosts { static bool Prefix(UnityEngine.Collider other) => !IsModGhostContact(other); }
+        [HarmonyPatch(typeof(Parking.UndergroundParking.ParkingElevator), "OnTriggerEnter")]
+        public static class Patch_ParkingElevator_IgnoreGhosts { static bool Prefix(UnityEngine.Collider other) => !IsModGhostContact(other); }
+        [HarmonyPatch(typeof(CityHamptonsHouseController), "OnCollisionEnter")]
+        public static class Patch_HamptonsHouse_IgnoreGhosts { static bool Prefix(UnityEngine.Collision other) => !IsModGhostContact(other?.collider); }
+        [HarmonyPatch(typeof(Controllers.TurnstileBarrier), "OnTriggerEnter")]
+        public static class Patch_Turnstile_Enter_IgnoreGhosts { static bool Prefix(UnityEngine.Collider other) => !IsModGhostContact(other); }
+        [HarmonyPatch(typeof(Controllers.TurnstileBarrier), "OnTriggerExit")]
+        public static class Patch_Turnstile_Exit_IgnoreGhosts { static bool Prefix(UnityEngine.Collider other) => !IsModGhostContact(other); }
+
+        /// <summary>Client sim at zero ambient density (2026-09-02): the client paints the HOST's light states
+        /// (TrafficSync.ApplyTrafficLights → Waypoint.stop), so Gley's local phase timer must never advance there.</summary>
+        [HarmonyPatch(typeof(IntersectionManager), nameof(IntersectionManager.UpdateIntersections))]
+        public static class Patch_IM_UpdateIntersections_ClientSkip
+        {
+            static bool Prefix() => !(MPClient.IsClientInWorld && !MPServer.IsRunning && TrafficSync.ClientTrafficSuppressionEnabled);   // false = skip on a pure client (MINOR-2: honours the F11 vanilla toggle)
         }
         // ── (removed 2026-08-26) Patch_ClickSleep ─────────────────────────
         // Deleted by the patch-target audit. Broken two ways and inert a third: GameManager has NO
@@ -4006,9 +4062,15 @@ namespace BigAmbitionsMP
             // catches it after the full stack unwind (~7,500×/session in the physics path). The HOST keeps
             // the real handler (its live traffic needs the sensors) and relies on the Finalizer for the
             // low-volume real-traffic-vs-remote-vehicle-ghost contacts.
-            static bool Prefix()
+            static bool Prefix(VehicleComponent __instance)
             {
-                return !(MPClient.IsClientInWorld && !MPServer.IsRunning);   // false = skip original (client only)
+                if (!(MPClient.IsClientInWorld && !MPServer.IsRunning)) return true;   // host / single player: real handler
+                // Client sim at zero ambient density (2026-09-02): the client's OWN service cars need their sensors —
+                // they brake for traffic ghosts through the playerLayers branch (ghosts are relayered at spawn).
+                // Every other client car is a pre-clear transient and stays skipped: the June class stays closed.
+                if (TrafficSync.ClientServiceSimEnabled && TrafficSync.ServiceColliderLayer() >= 0
+                    && __instance != null && ServiceCars.IsClientKept(__instance.gameObject)) return true;   // no sensed layer → keep the shield (ghosts stay on AiVehicles)
+                return false;
             }
 
             private static int _swallowed;

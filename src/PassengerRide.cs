@@ -215,11 +215,16 @@ namespace BigAmbitionsMP
         // passenger pick is IDENTICAL to the owner's car-hover (same layers, solid-only). Built once.
         private static int PickMask()
         {
-            if (_pickMask != 0) return _pickMask;
-            _pickMask = LayerMask.GetMask("InteractiveItems", "InteractiveItemsOutlined", "Buildings",
-                                          "BuildingsOutlined", "Vehicles", "PlayerVehicles", "Ground");
-            if (_pickMask == 0) _pickMask = ~0;   // layer names not found — fall back to everything
-            return _pickMask;
+            if (_pickMask == 0)
+            {
+                _pickMask = LayerMask.GetMask("InteractiveItems", "InteractiveItemsOutlined", "Buildings",
+                                              "BuildingsOutlined", "Vehicles", "PlayerVehicles", "Ground");
+                if (_pickMask == 0) _pickMask = ~0;   // layer names not found — fall back to everything
+            }
+            // H-SVC-113 (2026-09-02): service look-alikes sit on the layer Gley brakes for (resolved from the traffic
+            // system's own LayerSetup, usually already in the list above); include it so they stay clickable either way.
+            int svc = TrafficSync.ServiceColliderLayer();
+            return svc >= 0 ? _pickMask | (1 << svc) : _pickMask;
         }
 
         private static void TickHoverHighlight()
@@ -311,6 +316,10 @@ namespace BigAmbitionsMP
             if (Time.frameCount == _routedClickFrame) return;   // this click is already decided
             _routedClickFrame = Time.frameCount;
             Plugin.Logger.LogInfo($"[Ride] ghost click '{vid}' via {via}.");
+            // H-SVC-112 (field 2026-09-02): a SERVICE car (private driver / arrival car) is ridable by anyone — no lock,
+            // no key. Service ids never receive a lock message and would read LOCKED by default; ordinary cars keep
+            // the lock/grant rule below untouched (this branch is keyed on the service flag alone).
+            if (VehicleManager.IsServiceGhost(vid)) { HandleUnlockedClick(vid); return; }
             // A granted player holds a "key": the lock doesn't apply to them (ride + cargo).
             if (PassengerSync.IsLocked(vid) && !GrantSync.IsGranted(VehicleManager.OwnerIdFor(vid), MPConfig.PlayerId))
                 PassengerHud.Toast("Vehicle locked.");
@@ -404,19 +413,20 @@ namespace BigAmbitionsMP
         {
             string owner = VehicleManager.OwnerIdFor(vid);
 
+            // 2026-09-02: a mirrored private-driver / arrival car rides like a taxi without a fare — stop it, walk over,
+            // open the game's destination map (.modding/03-systems/private-driver-mp.md C). Never boarded/borrowed.
+            // Review MINOR-3: decided BEFORE the item-in-hands branch — a driver is never a container.
+            if (VehicleManager.IsServiceGhost(vid))
+            {
+                if (VehicleHelper.GetCurrentVehicle() == null) ServiceCars.RideFromGhost(vid, owner);
+                return;
+            }
+
             // Holding an item on foot → walk to the vehicle's cargo-loading spot (the same place the owner
             // goes) and deposit on arrival — mirrors VehicleController.MoveAndAddHeldItemToStorage. Cars AND carts.
             if (VehicleHelper.GetCurrentVehicle() == null && PlayerHelper.ItemInstanceInHands != null)
             {
                 WalkAndDeposit(vid, owner);
-                return;
-            }
-
-            // 2026-09-02: a mirrored private-driver / arrival car rides like a taxi without a fare — stop it, walk over,
-            // open the game's destination map (.modding/03-systems/private-driver-mp.md C). Never boarded/borrowed.
-            if (VehicleManager.IsServiceGhost(vid))
-            {
-                if (VehicleHelper.GetCurrentVehicle() == null) ServiceCars.RideFromGhost(vid, owner);
                 return;
             }
 

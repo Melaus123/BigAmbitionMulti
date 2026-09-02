@@ -1086,8 +1086,8 @@ namespace BigAmbitionsMP
             catch { }
             // A2 (user-approved 2026-09-02): a SERVICE car (private driver / arrival car) is mirrored as a look-alike of the
             // traffic prefab the owner's machine actually drives — same model, the owner's paint, whatever driver figure the
-            // prefab carries — with its colliders on the player-vehicles layer (the layer the host's traffic sensors brake
-            // for, exactly like the player-body ghost below). Any failure falls through to that proven body, so the mirror
+            // prefab carries — with its colliders on the layer the host's traffic sensors brake for (resolved from Gley's
+            // own LayerSetup; NOT PlayerVehicles, H-SVC-113). Any failure falls through to the player body, so the mirror
             // always appears; ServiceCars.MirrorStyle is the one-line switch back to the player body.
             if (e.Service && ServiceCars.MirrorStyle == ServiceCars.GhostStyle.TrafficLookalike)
             {
@@ -1246,6 +1246,7 @@ namespace BigAmbitionsMP
         /// dev hierarchy dump, owner label, the ride hook for a service car, and the tracking record.</summary>
         private static RemoteVehicle FinishGhost(GameObject go, string ownerId, VehicleEntry e, Vector3 pos, Quaternion rot, Transform? loadingPos)
         {
+            try { if (go.GetComponent<ModGhostMarker>() == null) go.AddComponent<ModGhostMarker>(); } catch { }   // review MAJOR-1(b)
 #if BAMP_DEV
             VehicleHierarchyProbe.DumpOnce(go, e.TypeName);   // DIAG:DEVTOOL — passenger door/seat discovery (once per type)
 #endif
@@ -1811,7 +1812,7 @@ namespace BigAmbitionsMP
                 // object will actually consume the mark in OnDestroy)
                 try { if (rv.Go != null) GhostDestroyMarker.Expected.Add(vehicleId); } catch { }
                 // PROBE-END: P-GHOST-DESTROY
-                if (rv.Go != null) { try { UnityEngine.Object.Destroy(rv.Go); } catch { } }
+                if (rv.Go != null) { try { TrafficSync.NotifyCollidersRemoved(rv.Go); UnityEngine.Object.Destroy(rv.Go); } catch { } }   // review BLOCKER-2
                 _remoteVehicles.Remove(vehicleId);
                 Plugin.Logger.LogInfo($"[Vehicle] Despawned ghost '{vehicleId}'");
             }
@@ -1863,7 +1864,7 @@ namespace BigAmbitionsMP
                     // PROBE-START: P-GHOST-DESTROY (mark mod-initiated destruction)
                     try { GhostDestroyMarker.Expected.Add(kv.Key); } catch { }
                     // PROBE-END: P-GHOST-DESTROY
-                    try { UnityEngine.Object.Destroy(kv.Value.Go); } catch { }
+                    try { TrafficSync.NotifyCollidersRemoved(kv.Value.Go); UnityEngine.Object.Destroy(kv.Value.Go); } catch { }   // review BLOCKER-2
                     // Field 20260830-170317 (user-approved): this sweep used to destroy SILENTLY —
                     // the grant-flap churn (7 respawns of one van) was invisible in field logs
                     // because only DespawnByVehicleId spoke. One line per ghost, sweep-paced.
