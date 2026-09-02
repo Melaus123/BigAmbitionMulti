@@ -2,9 +2,9 @@ using UnityEngine;
 
 namespace BigAmbitionsMP
 {
-    // PROBE-START: P-GHOST-DESTROY (this whole file is the probe; also delete the three
-    // sentinel-bracketed blocks in VehicleManager — the marker attach in SpawnRemoteVehicle
-    // and the Expected.Add lines in DespawnByVehicleId / DespawnAll)
+    // PROBE-START: P-GHOST-DESTROY (this whole file is the probe; also delete the four
+    // sentinel-bracketed blocks in VehicleManager — the two marker attaches in SpawnRemoteVehicle
+    // (player body + A2 look-alike) and the Expected.Add lines in DespawnByVehicleId / DespawnAll)
     /// <summary>Field 20260830-170317 (user-approved 2026-08-31): the CLIENT's ghost vehicles
     /// were destroyed and fleet-respawned several times (Micinox's van 3x, a handtruck 4x)
     /// with only ONE grant-change line in that log — so something OTHER than the mod's two

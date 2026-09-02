@@ -201,6 +201,8 @@ namespace BigAmbitionsMP
         RivalStaffRes         = 200,     // Host → the ONE requester (and the claimant inside PoachResult): the business's aiEmployees as small rows (id, skill, value, hours-demand, negotiation flags). A row's PERSON is rebuilt deterministically from the id on the receiver (native GetEmployeeInstance seeds from id), so identical hireable people appear on every machine. v1 deliberately EXCLUDES poachedEmployees rows (they reference full EmployeeInstances clients don't hold). Receiver OVERWRITES its local list — clients can locally invent random staff via EstimatedWeeklyIncomeHelper's fallback generator, and those inventions must not survive.
         PoachClaim            = 201,     // Client → Host: "my rival salary negotiation for employee X at AI business Y was ACCEPTED" — the hire must be claimed host-side so two players cannot poach the same person. The client's native AcceptOffer is deferred until the verdict.
         PoachResult           = 202,     // Host → the claimant: Ok (the host removed the employee and generated the replacement natively) or not (already gone), plus the business's rows AFTER the claim — the claimant's locally-generated replacement is overwritten by host truth.
+        ServiceCarStop        = 203,     // Rider → Host → service-car OWNER (2026-09-02): "stop your private driver / handed-off car so I can catch up and ride it" (host relays; the owner's machine owns that car's Gley AI). Auto-resumes after 60 s on the owner's side.
+        ServiceCarResume      = 204,     // Rider → Host → OWNER: the rider boarded (native DriveAway on our GhostTaxi) or cancelled the map — resume the car's previous driving state.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -906,6 +908,14 @@ namespace BigAmbitionsMP
     /// <summary>v17 (F-2026-08-25-I proposal 2): a borrower asks the vehicle owner for the FULL
     /// cargo detail of one trunk — fired on panel open and on manifest movement while open.
     /// Routed exactly like StorageOp's vehicle branch: host resolves the owner (ruling 38).</summary>
+    /// <summary>ServiceCarStop / ServiceCarResume (2026-09-02): VehicleId is the service car's synthetic id
+    /// (SVC_<owner>_<n>); PlayerId is the requesting rider. The host routes to the owner named by its ghost table.</summary>
+    public class ServiceCarPayload
+    {
+        public string VehicleId { get; set; } = "";
+        public string PlayerId  { get; set; } = "";
+    }
+
     public class TrunkDetailReqPayload
     {
         public string VehicleId { get; set; } = "";   // REAL id (no BAMP_ prefix)
@@ -1818,6 +1828,11 @@ namespace BigAmbitionsMP
         /// Receivers keep the ghost parked there; absence from the payload now
         /// unambiguously means SOLD.</summary>
         public bool Dormant { get; set; }
+        /// <summary>Private-driver / arrival SERVICE car (2026-09-02, .modding/03-systems/private-driver-mp.md): a Gley
+        /// car this owner's machine spawned for a ride — mirrored so others see it and the host's traffic brakes for
+        /// it. Receivers spawn the normal player-vehicle ghost but never depict the owner inside it, never count it as
+        /// in-use, label it "<owner>'s driver", and attach the GhostTaxi ride hook. Always Driving (volatile pose).</summary>
+        public bool Service { get; set; }
     }
 
     /// <summary>

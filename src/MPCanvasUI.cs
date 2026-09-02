@@ -749,6 +749,7 @@ namespace BigAmbitionsMP
             MPPerf.End("Pre.B", _sub);
             _sub = MPPerf.Begin();
             PassengerRide.Update();      // passenger ride: click-to-board → pin-to-seat → exit + remote riders
+            ServiceCars.Tick();          // 2026-09-02: private-driver mirrors — prune, owner auto-resume, rider walk → map
             PassengerHud.Tick();         // passenger's in-ride "Exit Vehicle" panel
             VehicleStoragePanel.Tick();  // non-owner shared-storage panel (refresh on cargo change / auto-close)
             TimeSync.TickStartupHold();  // round-36: had NO caller (dead since inception) — the hold's timeScale re-clamp

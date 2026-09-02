@@ -1962,6 +1962,14 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.ServiceCarStop:     // 2026-09-02: rider asks the service car's OWNER to stop it
+                case MessageType.ServiceCarResume:   // …or to resume it (boarded / cancelled)
+                {
+                    var sp = env.GetPayload<ServiceCarPayload>();
+                    if (sp != null) ServiceCars.HostRoute(env.Type, sp, senderPid);
+                    break;
+                }
+
                 case MessageType.TrunkDetailReq:   // v17: borrower wants a trunk's full cargo detail
                 {
                     var tq = env.GetPayload<TrunkDetailReqPayload>();

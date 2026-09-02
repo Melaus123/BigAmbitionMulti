@@ -85,6 +85,24 @@ namespace BigAmbitionsMP
         /// <summary>Client-side count of spawned traffic ghosts — perf correlation.</summary>
         public static int ClientTrafficGhostCount => _ghosts.Count;
 
+        /// <summary>Solid colliders of every traffic ghost (2026-09-02, ServiceCars shove belt): a client's locally
+        /// spawned private-driver / arrival car must not be shoved by the host's kinematic traffic mirrors.</summary>
+        public static List<Collider> AllTrafficGhostColliders()
+        {
+            var result = new List<Collider>();
+            try
+            {
+                foreach (var g in _ghosts.Values)
+                {
+                    if (g?.Go == null) continue;
+                    foreach (var c in g.Go.GetComponentsInChildren<Collider>(true))
+                        if (c != null && !c.isTrigger) result.Add(c);
+                }
+            }
+            catch { }
+            return result;
+        }
+
         // A networked position jump bigger than this is a reused pool slot or a
         // teleport — snap the ghost rather than sliding it across the screen.
         private const float SnapDistance = 12f;
@@ -300,6 +318,7 @@ namespace BigAmbitionsMP
                     if (vc == null) continue;
                     var go = vc.gameObject;
                     if (go == null || !go.activeInHierarchy) continue;
+                    if (ServiceCars.IsLocalServiceCar(go)) continue;   // 2026-09-02: mirrored ONCE, as a service ghost — never also as traffic
 
                     var t = vc.transform;
                     var pos = t.position;
@@ -893,7 +912,16 @@ namespace BigAmbitionsMP
             _trafficPrefabs?.TryGetValue(model, out prefab);
             if (prefab == null)
                 return VehicleManager.SpawnVisualGhost(model, pos, rot);   // fallback: UNKNOWN model with the pool up (e.g. Taxi)
+            // A2 (2026-09-02): the clone routine is shared with the service-car look-alike (ServiceCars.TrySpawnLookalike).
+            return CloneStrippedPrefab(prefab, model, pos, rot) ?? VehicleManager.SpawnVisualGhost(model, pos, rot);
+        }
 
+        /// <summary>Clones a Gley traffic prefab into a pure visual prop: instantiated INACTIVE, Gley AI / audio /
+        /// LOD components stripped, cameras stripped, every rigidbody kinematic, then activated. Null when Unity's
+        /// Instantiate itself fails (the caller chooses the fallback). Shared by the traffic ghosts and, since A2
+        /// (2026-09-02), the service-car look-alike mirror (ServiceCars.TrySpawnLookalike).</summary>
+        internal static GameObject? CloneStrippedPrefab(GameObject prefab, string model, Vector3 pos, Quaternion rot)
+        {
             GameObject go;
             // Instantiate INACTIVE (field NREs 2026-07-16: AiCarRescueCheck.OnEnable
             // threw ×30 inside Instantiate — clone components wake up BEFORE the
@@ -909,7 +937,7 @@ namespace BigAmbitionsMP
             catch (Exception ex)
             {
                 Plugin.Logger.LogWarning($"[TrafficSync] Instantiate '{model}': {ex.Message}");
-                return VehicleManager.SpawnVisualGhost(model, pos, rot);    // fallback
+                return null;    // the caller picks the fallback
             }
             finally
             {
@@ -1618,25 +1646,53 @@ namespace BigAmbitionsMP
             // whenever the manager is live OR any car is still active: the census (2026-06-16) showed the
             // game can re-enable the manager mid-session and a one-shot disable stranded ~20 cars. Cheap
             // pool scan, early-out once clean. Ghosts unaffected (cloned from the cached prefab map).
+            // Client service cars (user-approved 2026-09-02): the mod's own private-driver / arrival cars
+            // (ServiceCars registry, or any car carrying the game's PrivateDriverVehicle) are NOT ambient
+            // traffic — they stay; ServiceCars retires them by distance because the dead sim never recycles
+            // them. The clear below is Gley ClearTraffic's own rule (active + no preset path) minus those cars.
             bool anyActive = false;
             try
             {
                 var list = tm.trafficVehicles?.GetVehicleList();
                 if (list != null)
                     for (int i = 0; i < list.Count && !anyActive; i++)
-                        if (list[i] is Component c && c.gameObject.activeSelf) anyActive = true;
+                        if (list[i] is Component c && c.gameObject.activeSelf && !ServiceCars.IsClientKept(c.gameObject)) anyActive = true;
             }
             catch { }
 
             if (tm.enabled || anyActive)
             {
-                try { tm.ClearTraffic(); } catch { }
+                try { ClearClientTrafficExceptServiceCars(tm); } catch { }
                 tm.enabled = false;                  // stops Update/FixedUpdate → no sim, no spawn
                 if (!_clientTrafficKilled)
                 {
                     _clientTrafficKilled = true;
                     Plugin.Logger.LogInfo("[TrafficSync] Local traffic killed (ClearTraffic + manager disabled).");
                 }
+            }
+        }
+
+        private static int _clientKeptLogged = -1;
+        /// <summary>Gley ClearTraffic's own rule (every ACTIVE pool car without a preset path), minus the mod's
+        /// service cars — a client-summoned private driver, its destination car, a friend's arrival car
+        /// (ServiceCars.IsClientKept). Same removal call Gley uses (RemoveVehicle → DisableVehicle).</summary>
+        private static void ClearClientTrafficExceptServiceCars(TrafficManager tm)
+        {
+            var list = tm.trafficVehicles?.GetVehicleList();
+            if (list == null) return;
+            int kept = 0, removed = 0;
+            for (int i = 0; i < list.Count; i++)
+            {
+                var v = list[i];
+                if (v == null || !v.gameObject.activeSelf) continue;
+                if (v.presetPath != null) continue;                       // native ClearTraffic spares a routed car
+                if (ServiceCars.IsClientKept(v.gameObject)) { kept++; continue; }
+                try { tm.RemoveVehicle(v.gameObject); removed++; } catch { }
+            }
+            if (kept != _clientKeptLogged)
+            {
+                _clientKeptLogged = kept;
+                Plugin.Logger.LogInfo($"[TrafficSync] client traffic clear: {removed} ambient car(s) removed, {kept} service car(s) kept parked (the client's traffic brain is off — ServiceCars retires them by distance).");
             }
         }
 

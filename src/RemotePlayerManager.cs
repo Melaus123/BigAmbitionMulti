@@ -375,6 +375,20 @@ namespace BigAmbitionsMP
     public static class RemotePlayerManager
     {
         private static readonly Dictionary<string, GameObject> _players = new();
+        /// <summary>True when the local player or any remote avatar is within <paramref name="radius"/> of a point
+        /// (ServiceCars' parked-car prune on clients, 2026-09-02). Live transforms, no cache.</summary>
+        internal static bool AnyPlayerWithin(Vector3 point, float radius)
+        {
+            float r2 = radius * radius;
+            try { if ((Helpers.PlayerHelper.GetPosition() - point).sqrMagnitude <= r2) return true; } catch { }
+            foreach (var kv in _players)
+            {
+                var go = kv.Value;
+                if (go == null) continue;
+                try { if ((go.transform.position - point).sqrMagnitude <= r2) return true; } catch { }
+            }
+            return false;
+        }
 
         /// <summary>Returns a snapshot of currently tracked remote player IDs.</summary>
         public static IReadOnlyList<string> GetRemotePlayerIds() =>
@@ -794,6 +808,11 @@ namespace BigAmbitionsMP
                             if (ghostCols[i] != null) UnityEngine.Physics.IgnoreCollision(playerCols[pi], ghostCols[i], true);
                     }
                 }
+
+                // (1b) CLIENTS: a locally spawned SERVICE car (private driver / arrival car) must not be shoved by
+                //      the host's kinematic traffic mirrors (2026-09-02, .modding/03-systems/private-driver-mp.md B).
+                //      Pair-scoped like (1): the car still collides with everything else.
+                if (!MPServer.IsRunning) ServiceCars.IgnoreTrafficGhostCollisions();
 
                 // (2) HOST only: remote avatars must not shove ANY vehicle (the host's real cars are
                 //     dynamic + drivable; avatars carry a SOLID collider for Gley detection).

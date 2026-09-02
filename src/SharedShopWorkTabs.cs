@@ -1898,10 +1898,14 @@ namespace BigAmbitionsMP
                     bool listChanged = _dcListChanged; _dcListChanged = false;
                     // A full rebuild re-enters our prefix (same tab → no re-request; the window inserts the
                     // carried rows); the targeted path re-renders only the open contract.
-                    RepaintDeliveries(del, listChanged, _dcByAddr.TryGetValue(_openAddr, out var lcarried) ? lcarried : null);
+                    // Review #3 MAJOR-1 (2026-09-02): same net as the other branches — a JIT-time signature break
+                    // in a native call inside cannot be caught INSIDE the callee, only here.
+                    try { RepaintDeliveries(del, listChanged, _dcByAddr.TryGetValue(_openAddr, out var lcarried) ? lcarried : null); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} deliveries render: {ex.Message}"); }
                 }
             }
-            DrainWarehouseLogoQueue();   // a warehouse logo waiting on the shared render rig
+            try { DrainWarehouseLogoQueue(); }   // a warehouse logo waiting on the shared render rig (review #3 MAJOR-1: netted)
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} logo queue: {ex.Message}"); }
             if (_renderSettings)
             {
                 var st = page.GetComponentInChildren<BizManSettings>(true);
@@ -1925,9 +1929,10 @@ namespace BigAmbitionsMP
             if (_renderDcFigures)
             {
                 _renderDcFigures = false;
-                // Update-impact review B-1 (2026-09-01): the only bare branch of the four renders here — on the
-                // shipped 0.2.1 + updated game its dead CountTotalResourcesInStock memberref escaped MPCanvasUI.Update
-                // and skipped the rest of that frame's mod tick. Same net as the marketing branch above.
+                // Update-impact review B-1 (2026-09-01): on the shipped 0.2.1 + updated game this call's dead
+                // CountTotalResourcesInStock memberref escaped MPCanvasUI.Update and skipped the rest of that frame's
+                // mod tick. Review #3 MAJOR-1 (2026-09-02): it was NOT the only bare call in Tick — RepaintDeliveries
+                // and DrainWarehouseLogoQueue above are netted the same way now.
                 try { RepaintDeliveryFigures(page); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} deliveries figures: {ex.Message}"); }
             }

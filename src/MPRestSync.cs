@@ -496,7 +496,14 @@ namespace BigAmbitionsMP
                 // duration is re-derived at Start, and on the 1.0 update the remaining-minutes read throws
                 // there (see TryRemainingActivityMinutes). The seated tick re-runs this every 0.5 s, so the
                 // extension lands on the first tick after Start.
-                if (ActivityState == (int)PlayerActivityState.NotStarted) return;
+                // Review #4 (2026-09-02): read the LIVE state — the cached ActivityState is up to 0.5 s old, which
+                // during an active skip is up to ~12 game-minutes, enough for a short sleep to expire unextended.
+                try
+                {
+                    var sm = act.GetType().GetMethod("GetState");
+                    if (sm != null && Convert.ToInt32(sm.Invoke(act, null)) == (int)PlayerActivityState.NotStarted) return;
+                }
+                catch { if (ActivityState == (int)PlayerActivityState.NotStarted) return; }
                 double need = goalMinutes - NowMinutes();
                 if (!TryRemainingActivityMinutes(out int rem))
                 {

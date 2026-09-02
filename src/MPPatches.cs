@@ -3555,13 +3555,14 @@ namespace BigAmbitionsMP
         // round-27 ambience restore: a native screen built around the menu pause, left stale by our suppression.
         // Refresh the time label when the game minute changes and the date label when the day changes, with the
         // game's own calls (GetCurrentFormattedTime exists on both builds; SetCurrentFormattedTime is update-only).
-        // dateLabel is a Localizor TextLocalizationComponent (assembly not referenced) → its Arguments property is
-        // set by reflection with the same anonymous shape the game builds at open. User-approved 2026-09-01.
+        // dateLabel is a Localizor TextLocalizationComponent (HGPlugins IS referenced — review #3 MAJOR-4 corrected
+        // an earlier "not referenced" comment); its Arguments property is set through the TYPED component with the
+        // same anonymous shape the game builds at open, so a future rename breaks the build instead of silently
+        // no-op'ing. User-approved 2026-09-01.
         [HarmonyPatch(typeof(UI.Smartphone.FullMenu), "Update")]
         public static class Patch_FullMenu_Update_LiveClock
         {
             private static System.Reflection.FieldInfo? _fTime, _fDate;
-            private static System.Reflection.PropertyInfo? _pArgs;
             private static bool _resolved, _warned;
             private static int _lastMinute = -1, _lastDay = -1;
 
@@ -3588,12 +3589,8 @@ namespace BigAmbitionsMP
                     }
                     if (gi.Day != _lastDay)
                     {
-                        var dl = _fDate?.GetValue(__instance);
-                        if (dl != null)
-                        {
-                            _pArgs ??= dl.GetType().GetProperty("Arguments");
-                            _pArgs?.SetValue(dl, new { DayOfWeek = "common_" + TimeHelper.GetDayOfWeek(), CurrentNumberDay = gi.Day });
-                        }
+                        if (_fDate?.GetValue(__instance) is Localizor.LanguageChangeEvent.TextLocalizationComponent dl)
+                            dl.Arguments = new { DayOfWeek = "common_" + TimeHelper.GetDayOfWeek(), CurrentNumberDay = gi.Day };
                         _lastDay = gi.Day;
                     }
                 }
@@ -4060,6 +4057,10 @@ namespace BigAmbitionsMP
         // fallback and now draws from GetAllRivalData behind a defeated/suitability filter, so a null is a NORMAL
         // outcome in ordinary worlds — and the base message builder still dereferences it. This shield is
         // therefore the regular path, not a degraded-save rescue: logged at info, no longer a warning.
+        // SINGLE PLAYER (review #3 MAJOR-3, user-ruled 2026-09-02): the SP pass-through below is DELIBERATE — project
+        // rule "guards pass through outside MP". Since the update that means the game's own NRE can still abort
+        // EmployeeHelper.RunHourly mid-loop in single player with the mod loaded; that is the game's bug and we
+        // leave vanilla behaviour alone there.
         [HarmonyPatch(typeof(AI.Employees.Complaint), nameof(AI.Employees.Complaint.GetComplaintMessageData))]
         public static class Patch_Complaint_MessageData_RivalPoorShield
         {
@@ -4601,9 +4602,11 @@ namespace BigAmbitionsMP
 
         /// <summary>Character page: the business count enumerates all rented regs.
         /// Recompute own-only and re-stamp the label.  The weekly-profit figure
-        /// self-heals as veiled summaries accumulate. NetWorth was removed by the 1.0 update
-        /// (2026-09-01); the loan cap now reads own-only GetPersonalWealth().WealthBeforeLoans, so the
-        /// former partner-asset leak is closed (update-impact review C-5).</summary>
+        /// self-heals as veiled summaries accumulate. The wealth figures on THIS page come from
+        /// PlayerHelper.GetPersonalWealth (unchanged by the 1.0 update): own Money, investments, loans and this
+        /// save's VehicleInstances / playerBoats / realEstate — lists the mod never writes (a ghost vehicle is a
+        /// GameObject, never a VehicleInstance record). The old NetWorth field fed the BANK LOAN CAP, not this page;
+        /// the update removed it (review #3 MAJOR-2 corrected an earlier comment that conflated the two).</summary>
         [HarmonyPatch(typeof(UI.Smartphone.Apps.Persona.CharacterInfo), "OnEnable")]
         public static class Patch_CharacterInfo_OwnBusinessCount
         {

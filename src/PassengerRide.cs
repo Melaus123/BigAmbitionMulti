@@ -73,12 +73,15 @@ namespace BigAmbitionsMP
     // car"). Answer YES for exactly that decision: MP, rider pinned, and the game's CURRENT activity is a
     // SleepActivity still in MovingTowardsActivity — read live from the game's own objects, so the gate closes the
     // moment the game moves it to Started. The 10 other native callers of IsInsideMotorVehicle see the override
-    // only inside that window. From there the game runs its own start branch (Started, sleep nav blocker, energy
-    // regen, ForceTimeMachine → our consensus hook) exactly as it does for the driver.
+    // only inside that window. From there the game runs Started + the sleep nav blocker. NOT the energy lines:
+    // SleepActivity keeps RemoveEnergySpender / SetCurrentEnergyRegen / the multiplier / ForceTimeMachine behind
+    // `if (_entityController != null)` (:82-106 on the update), and a rider's entity is null by construction —
+    // RiderSleepEnergy below supplies those three energy lines (review #4 MAJOR, 2026-09-02).
     [HarmonyPatch(typeof(Helpers.VehicleHelper), nameof(Helpers.VehicleHelper.IsInsideMotorVehicle))]
     public static class Patch_IsInsideMotorVehicle_RiderSleepStart
     {
         private static int _answered;
+        private static bool _warned;   // review #4 MINOR: the old `_answered == 0` test never limited (the counter moved after the throw site)
         static void Postfix(ref bool __result)
         {
             try
@@ -96,7 +99,48 @@ namespace BigAmbitionsMP
             }
             catch (System.Exception ex)
             {
-                if (_answered == 0) Plugin.Logger.LogWarning($"[Ride] rider sleep-start answer: {ex.GetType().Name}: {ex.Message}");
+                if (!_warned) { _warned = true; Plugin.Logger.LogWarning($"[Ride] rider sleep-start answer: {ex.GetType().Name}: {ex.Message}"); }
+            }
+        }
+    }
+
+    /// <summary>Review #4 MAJOR (2026-09-02): a pinned passenger's car sleep reaches Started but the game's energy
+    /// lines sit behind its `_entityController != null` check, so the energy bar never moved while the happiness
+    /// bonus and the "energy increased" event still fired. Apply the same three lines once per sleep instance the
+    /// moment it is Started/Running; SleepActivity.Finish resets the regen to None unconditionally (:154-156), so
+    /// nothing is left behind. Values read from the activity's own SleepEnvironment (the Car config).</summary>
+    internal static class RiderSleepEnergy
+    {
+        private static object? _appliedFor;
+        private static System.Reflection.FieldInfo? _fEnv;
+        private static System.Reflection.MethodInfo? _mSetRegen, _mRemoveSpender;
+        private static bool _warned;
+
+        internal static void Tick()
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.InMpGame) return;
+                if (!PassengerRide.IsSeated) { _appliedFor = null; return; }
+                var ui = UI.UIs.Instance?.playerActivityUI;
+                if (ui?.GetCurrentActivity is not PlayerActivity.SleepActivity sleep) { _appliedFor = null; return; }
+                if (ReferenceEquals(_appliedFor, sleep)) return;
+                var st = sleep.GetState();
+                if (st != PlayerActivityState.Started && st != PlayerActivityState.Running) return;
+                _fEnv ??= AccessTools.Field(typeof(PlayerActivity.SleepActivity), "_sleepEnvironment");
+                var env = _fEnv?.GetValue(sleep) as PlayerActivity.SleepEnvironment;
+                if (env == null) { _appliedFor = sleep; return; }
+                _mRemoveSpender ??= AccessTools.Method(typeof(EnergyHelper), "RemoveEnergySpender", new[] { typeof(string) });
+                _mSetRegen      ??= AccessTools.Method(typeof(EnergyHelper), "SetCurrentEnergyRegen");
+                _mRemoveSpender?.Invoke(null, new object[] { "move" });
+                _mSetRegen?.Invoke(null, new object[] { env.EnergyRegen });
+                EnergyHelper.energyRegenMultiplier = EnergyHelper.DefaultEnergyRegenMultiplier;
+                _appliedFor = sleep;
+                Plugin.Logger.LogInfo($"[Ride] rider sleep energy armed: regen={env.EnergyRegen} (the game's own lines are skipped for an entity-less sleep).");
+            }
+            catch (System.Exception ex)
+            {
+                if (!_warned) { _warned = true; Plugin.Logger.LogWarning($"[Ride] rider sleep energy: {ex.GetType().Name}: {ex.Message}"); }
             }
         }
     }
@@ -148,6 +192,7 @@ namespace BigAmbitionsMP
             {
                 TickHoverHighlight();   // cursor over an unlocked ghost → outline + board on click
                 TickLocalRide();
+                RiderSleepEnergy.Tick();   // review #4 MAJOR: energy regen for a rider's car sleep
                 TickDeposit();          // walk-to-deposit: deposit on arrival (proximity/timeout poll)
                 TickRemoteRiders();
             }
@@ -364,6 +409,14 @@ namespace BigAmbitionsMP
             if (VehicleHelper.GetCurrentVehicle() == null && PlayerHelper.ItemInstanceInHands != null)
             {
                 WalkAndDeposit(vid, owner);
+                return;
+            }
+
+            // 2026-09-02: a mirrored private-driver / arrival car rides like a taxi without a fare — stop it, walk over,
+            // open the game's destination map (.modding/03-systems/private-driver-mp.md C). Never boarded/borrowed.
+            if (VehicleManager.IsServiceGhost(vid))
+            {
+                if (VehicleHelper.GetCurrentVehicle() == null) ServiceCars.RideFromGhost(vid, owner);
                 return;
             }
 

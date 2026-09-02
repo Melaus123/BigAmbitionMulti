@@ -956,6 +956,18 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.ServiceCarStop:     // 2026-09-02: host forwarded a rider's stop/resume — I own that service car
+                case MessageType.ServiceCarResume:
+                {
+                    var sp = env.GetPayload<ServiceCarPayload>();
+                    if (sp != null)
+                    {
+                        bool stop = env.Type == MessageType.ServiceCarStop;
+                        GameStatePatcher.EnqueueOnMainThread(() => { if (stop) ServiceCars.OwnerStop(sp); else ServiceCars.OwnerResume(sp); });
+                    }
+                    break;
+                }
+
                 case MessageType.TrunkDetailReq:   // v17: host forwarded a borrower's detail ask — I'm the vehicle owner
                 {
                     var tq = env.GetPayload<TrunkDetailReqPayload>();

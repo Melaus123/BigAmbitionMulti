@@ -165,6 +165,7 @@ namespace BigAmbitionsMP
             public string      AppliedCargo = "";   // manifest|carried sig the ghost was built with
             public Transform   LoadingPos;          // vehicleLoadingPosition (cargo-load spot), captured pre-strip
             public bool        OwnerUsing;          // fleet e.Driving — the OWNER is driving/pushing it RIGHT NOW (in-use arbitration)
+            public bool        Service;             // 2026-09-02: a mirrored private-driver / arrival car (see ServiceCars) — not boardable, not borrowable, GhostTaxi-ridable
         }
         private const float MaxVehicleExtrapolateSeconds = 0.3f;
         private const float VehicleSnapDistance          = 15f;
@@ -575,6 +576,7 @@ namespace BigAmbitionsMP
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] dormant fleet pass: {ex.Message}"); }
 
                 CurrentOpenDriven = openDriven;
+                ServiceCars.AppendFleetEntries(fleet);   // 2026-09-02: private-driver / arrival cars ride the same broadcast
                 return fleet;
             }
             catch (Exception ex)
@@ -784,7 +786,7 @@ namespace BigAmbitionsMP
                     rv.TargetRot = rot;
                     rv.TargetAt  = Time.unscaledTime;
                     rv.SenderT   = p.T;
-                    rv.OwnerUsing = e.Driving;   // in-use arbitration (see the run-9 note above)
+                    rv.OwnerUsing = e.Driving && !e.Service;   // in-use arbitration (see the run-9 note above); a service car is never "in use" by its owner
 
                     // Keep a drivable (granted) proxy fueled from the owner's car so it isn't stuck at 0%.
                     // Skipped while WE drive it (controlledByPlayer) so local consumption isn't clobbered.
@@ -924,7 +926,7 @@ namespace BigAmbitionsMP
                 Vector3 rideOff = Vector3.zero;
                 foreach (var e in p.Vehicles)
                 {
-                    if (!e.Driving) continue;
+                    if (!e.Driving || e.Service) continue;   // a service car drives itself — the owner is not inside it
                     if (IsOpenVehicle(e.TypeName))
                     {
                         if (_openVehicleLogged.Add(e.TypeName))
@@ -1082,6 +1084,22 @@ namespace BigAmbitionsMP
                 }
             }
             catch { }
+            // A2 (user-approved 2026-09-02): a SERVICE car (private driver / arrival car) is mirrored as a look-alike of the
+            // traffic prefab the owner's machine actually drives — same model, the owner's paint, whatever driver figure the
+            // prefab carries — with its colliders on the player-vehicles layer (the layer the host's traffic sensors brake
+            // for, exactly like the player-body ghost below). Any failure falls through to that proven body, so the mirror
+            // always appears; ServiceCars.MirrorStyle is the one-line switch back to the player body.
+            if (e.Service && ServiceCars.MirrorStyle == ServiceCars.GhostStyle.TrafficLookalike)
+            {
+                var lgo = ServiceCars.TrySpawnLookalike(ownerId, e, pos, rot);
+                if (lgo != null)
+                {
+                    // PROBE-START: P-GHOST-DESTROY (the destroy witness, same as the player body below)
+                    try { var lmk = lgo.AddComponent<GhostDestroyMarker>(); lmk.VehicleId = e.VehicleId; lmk.TypeName = e.TypeName; lmk.OwnerId = ownerId ?? ""; } catch { }
+                    // PROBE-END: P-GHOST-DESTROY
+                    return FinishGhost(lgo, ownerId, e, pos, rot, null);
+                }
+            }
             VehicleInstance inst;
             try
             {
@@ -1133,7 +1151,8 @@ namespace BigAmbitionsMP
             // game's enter/drive flow works (GetCurrentVehicle scanning AllPlayerVehicles is exactly what NRE'd
             // when we unregistered it). It's still off the save (above) + off our fleet broadcast (ReadLocalFleet
             // skips BAMP_ ids), so the borrower takes no charges and never re-broadcasts it as their own.
-            bool drivable = !string.IsNullOrEmpty(ownerId) && GrantSync.IsGranted(ownerId, MPConfig.PlayerId);
+            bool drivable = !string.IsNullOrEmpty(ownerId) && GrantSync.IsGranted(ownerId, MPConfig.PlayerId)
+                            && !e.Service;   // 2026-09-02: a service mirror is never drivable, whatever keys its owner grants
 
             // De-register from the player vehicle system — but NOT a drivable (granted) proxy.
             if (!drivable) { try { VehicleHelper.UnregisterPlayerVehicle(vc); } catch { } }
@@ -1220,10 +1239,23 @@ namespace BigAmbitionsMP
                 $"{ownedBefore}→{ownedAfterSpawn}→{ownedAfterStrip}, poi='{poiName}', " +
                 $"{killed} gameplay component(s) destroyed.");
 
+            return FinishGhost(go, ownerId, e, pos, rot, loadingPos);
+        }
+
+        /// <summary>The common tail of every ghost spawn (player body or, since A2 2026-09-02, the service look-alike):
+        /// dev hierarchy dump, owner label, the ride hook for a service car, and the tracking record.</summary>
+        private static RemoteVehicle FinishGhost(GameObject go, string ownerId, VehicleEntry e, Vector3 pos, Quaternion rot, Transform? loadingPos)
+        {
 #if BAMP_DEV
             VehicleHierarchyProbe.DumpOnce(go, e.TypeName);   // DIAG:DEVTOOL — passenger door/seat discovery (once per type)
 #endif
-            var label = CreateOwnerLabel(go, ownerId);
+            var label = CreateOwnerLabel(go, ownerId, e.Service ? "'s driver" : "'s car");
+            if (e.Service)
+            {
+                // 2026-09-02: a mirrored service car is ridable like a taxi (no fare) — the ride hook lives on the ghost.
+                try { var gt = go.AddComponent<GhostTaxi>(); gt.Vid = e.VehicleId; gt.OwnerId = ownerId; gt.TypeName = e.TypeName; }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Service] GhostTaxi attach '{e.VehicleId}': {ex.Message}"); }
+            }
             return new RemoteVehicle
             {
                 OwnerId    = ownerId,
@@ -1233,6 +1265,7 @@ namespace BigAmbitionsMP
                 Label      = label,
                 TargetPos  = pos,
                 TargetRot  = rot,
+                Service    = e.Service,
             };
         }
 
@@ -1441,7 +1474,11 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Creates a world-space owner-name label above a ghost vehicle.</summary>
-        private static Transform? CreateOwnerLabel(GameObject vehicle, string ownerId)
+        /// <summary>True when this ghost is a mirrored private-driver / arrival car (2026-09-02).</summary>
+        public static bool IsServiceGhost(string vid)
+            => _remoteVehicles.TryGetValue(vid, out var rv) && rv != null && rv.Service;
+
+        private static Transform? CreateOwnerLabel(GameObject vehicle, string ownerId, string suffix = "'s car")
         {
             try
             {
@@ -1458,7 +1495,7 @@ namespace BigAmbitionsMP
                 rt.localScale = new Vector3(0.01f, 0.01f, 0.01f);
 
                 var tmp = labelGO.AddComponent<TextMeshProUGUI>();
-                tmp.text      = MPNames.Resolve(ownerId) + "'s car";
+                tmp.text      = MPNames.Resolve(ownerId) + suffix;
                 tmp.fontSize  = 42f;
                 tmp.alignment = TextAlignmentOptions.Center;
                 tmp.color     = new Color(1f, 0.85f, 0.4f);
