@@ -185,6 +185,7 @@ namespace BigAmbitionsMP
             if (_ghostAnchorGO != null) _ghostAnchorGO.transform.position = Vector3.zero;
             // Review #2 MINOR-4: the game's density request and the budget log memory are per world.
             GameDensityRequest = -1; _lastBudgetLogged = -1; _lastAreasLogged = -1;
+            ClientGameDensityRequest = -1; SelfDensityCall = false; _pendingHandBack = false; _handBackWarned = false; _anchorIsGhost = false;
         }
 
         /// <summary>Role-based step — called each frame in-game.</summary>
@@ -1305,12 +1306,123 @@ namespace BigAmbitionsMP
             return centres.Count;
         }
 
-        private static void UpdateTrafficAnchors()
+        // H-SVC-116 round 3: the reconnect-window belt and the offline hand-back retry. They cannot live in Tick():
+        // MPCanvasUI.TickPositionSync returns BEFORE TrafficSync.Tick() whenever the machine is neither hosting nor
+        // connected — exactly the window they exist for — so TickPositionSync calls THIS from its early-return block.
+        private static bool _pendingHandBack;
+        private static bool _handBackWarned;
+        private static bool _anchorIsGhost;   // review r4 #2: the hand-back had to feed the parked ghost anchor — promote to the live character as soon as it is feedable
+
+        /// <summary>Per frame while NOT hosting and NOT connected (MPCanvasUI.TickPositionSync early-return block).
+        /// Reconnect window (InMpGame still true): keep Gley's camera list pointed at live transforms. Offline fork
+        /// (InMpGame false) with a hand-back still pending: retry until a feed lands (design principle 4 — retries are
+        /// recurrence-covered). Nothing else; the connected tick owns everything while a link is up.</summary>
+        internal static void TickDisconnected()
         {
             try
             {
+                if (MPServer.IsRunning || MPClient.IsConnected) return;
+                if (Time.timeSinceLevelLoad <= 5f) return;
+                if (!TrafficManager.HasInstance || !TrafficManager.IsInitialized) return;
+                if (MPClient.InMpGame)
+                {
+                    if (ClientServiceSimEnabled) UpdateTrafficAnchors();      // the belt (was unreachable inside Tick)
+                    return;
+                }
+                if (_pendingHandBack) { HandBackToVanilla("offline fork retry"); return; }   // clears _pendingHandBack once a feed lands
+                if (_anchorIsGhost)
+                {
+                    // Review r4 #2: the offline fork was handed back on the parked ghost anchor; nothing else would ever move it.
+                    // Promote to the live character the first frame it is feedable (vanilla parity: one camera that follows the player).
+                    var live = PlayerHelper.PlayerController?.Character?.transform;
+                    if (live != null && AnchorFeedable(live))
+                    {
+                        try { TrafficManager.Instance.UpdateCamera(new[] { live }); _anchorIsGhost = false; Plugin.Logger.LogInfo("[TrafficSync] offline fork: anchor promoted from the parked ghost to the live player."); }
+                        catch (Exception e) { Plugin.Logger.LogWarning($"[TrafficSync] ghost → live promotion: {e.Message}"); }
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TrafficSync] TickDisconnected: {ex.Message}"); }
+        }
+
+        /// <summary>H-SVC-116 (bundle 20260902-210235): the client's anchor feed lives in Tick's IsConnected branch, so it
+        /// stops the instant the host is lost — while the same disconnect handler destroys every remote avatar. Gley
+        /// (TrafficManager.activeCameras + PositionValidator.activeCameras) kept the destroyed transforms and, once the
+        /// offline switch lifted the density clamp, threw two NullReferenceExceptions per frame. Called from the
+        /// disconnect handler right after the avatars are removed: re-feed Gley from the live registry (now local-only).
+        /// Cheap and idempotent — a repeated fire (drop + in-place reconnect) is a no-op. No-op without a live manager or
+        /// a local character (menu / mid-load).</summary>
+        internal static void RefeedAnchors(string why)
+        {
+            try
+            {
+                if (!TrafficManager.HasInstance || !TrafficManager.IsInitialized) return;   // review MINOR-2: never lazily create a manager
+                if (PlayerHelper.PlayerController?.Character == null) { Plugin.Logger.LogInfo($"[TrafficSync] anchor re-feed skipped ({why}): no local character."); return; }
+                if (UpdateTrafficAnchors()) Plugin.Logger.LogInfo($"[TrafficSync] anchors → local only ({why}).");
+                else Plugin.Logger.LogWarning($"[TrafficSync] anchor re-feed not confirmed ({why}): no feedable local anchor and no parked outside position — Gley may still hold its previous camera list; TickDisconnected keeps trying while the world is loaded.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TrafficSync] RefeedAnchors({why}): {ex.Message}"); }
+        }
+
+        /// <summary>H-SVC-116: the player chose to continue OFFLINE after a host loss (MPClient.InMpGame is already false,
+        /// so the zero-density clamp no longer applies). The offline copy is single player: give Gley the game's own last
+        /// density request back and a local-only anchor list, in one step, so vanilla traffic resumes and no dead
+        /// reference remains. Lights and sensors follow IsClientInWorld on their own patches.</summary>
+        internal static void HandBackToVanilla(string why)
+        {
+            try
+            {
+                if (MPClient.IsConnected) return;                                   // review r2 #7: a live link means the clamp still rules
+                if (!TrafficManager.HasInstance || !TrafficManager.IsInitialized) return;
                 var tm = TrafficManager.Instance;
-                if (tm == null) return;
+                bool insideNow = false; try { insideNow = BuildingManager.IsInsideBuilding; } catch { }
+                if (!insideNow) tm.enabled = true;                                  // review r2 #5 / r4 #3: re-enable only outdoors — indoors (or fast-forward) the GAME pauses Gley itself once the link is gone (Patch_TM_SetPause blocks SetPause only while hosting/connected)
+                // Review r2 #4: feed the LIVE character transform — vanilla parity (the game's single camera follows the
+                // player indoors too) — never the pinned ghost anchor UpdateTrafficAnchors uses inside a building, because
+                // nothing refreshes Gley's camera list in the offline fork (the game never calls UpdateCamera after start).
+                bool fed = false;
+                var t = PlayerHelper.PlayerController?.Character?.transform;
+                if (t != null && AnchorFeedable(t))
+                {
+                    try { tm.UpdateCamera(new[] { t }); fed = true; }
+                    catch (Exception e) { Plugin.Logger.LogWarning($"[TrafficSync] hand-back UpdateCamera: {e.Message}"); }
+                }
+                int density = ClientGameDensityRequest;
+                // Review r2 #3: never raise the density while Gley may still hold the previous camera list.
+                bool usedGhost = false;
+                if (!fed && _hasOutsidePos)
+                {
+                    // Review r2 #5: the parked ghost anchor is live, mod-owned and on-grid — better than a dead list.
+                    var ga = GetOrCreateGhostAnchor(); ga.position = _lastOutsidePos;
+                    if (AnchorFeedable(ga)) { try { tm.UpdateCamera(new[] { ga }); fed = true; usedGhost = true; } catch { } }
+                }
+                if (!fed)
+                {
+                    // Design principle 4: a refused hand-back is retried every frame by TickDisconnected until a feed
+                    // lands — the game re-requests density on its own once the clamp is lifted, so Gley must never be
+                    // left holding a dead list. One warning per episode, not per frame.
+                    _pendingHandBack = true;
+                    if (!_handBackWarned) { _handBackWarned = true; Plugin.Logger.LogWarning($"[TrafficSync] traffic hand-back ({why}) not confirmed: no feedable local anchor yet — retrying every frame until one lands."); }
+                    return;
+                }
+                _pendingHandBack = false; _handBackWarned = false; _anchorIsGhost = usedGhost;   // review r4 #2: TickDisconnected promotes a ghost anchor to the live player
+                if (density >= 0)
+                {
+                    SelfDensityCall = true;                                         // review r2 #8: our own write, never recorded as the game's request
+                    try { tm.SetTrafficDensity(density); } catch { } finally { SelfDensityCall = false; }
+                }
+                Plugin.Logger.LogInfo($"[TrafficSync] traffic handed back to vanilla ({why}): density {(density >= 0 ? density.ToString() : "unchanged — no game request recorded")}, anchor → local player.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TrafficSync] HandBackToVanilla({why}): {ex.Message}"); }
+        }
+
+        private static bool UpdateTrafficAnchors()
+        {
+            try
+            {
+                if (!TrafficManager.HasInstance || !TrafficManager.IsInitialized) return false;   // review r2 #1: never lazily create a manager; Gley's UpdateCamera no-ops when !initialized
+                var tm = TrafficManager.Instance;
+                if (tm == null) return false;
                 var dm = tm.densityManager;
 
                 var anchors = new List<Transform>();
@@ -1356,25 +1468,32 @@ namespace BigAmbitionsMP
                 }
                 foreach (var t in RemotePlayerManager.GetRemotePlayerTransforms())
                     if (t != null) anchors.Add(t);
-                if (anchors.Count == 0) return;
+                if (anchors.Count == 0) return false;
 
                 // Round-199: single choke point — every anchor (local, ghost, ride,
                 // remote) is validated against the live grid before Gley sees it.
                 var feed = new List<Transform>(anchors.Count);
                 foreach (var a in anchors)
                     if (AnchorFeedable(a)) feed.Add(a);
-                if (feed.Count == 0) return;
+                if (feed.Count == 0)
+                {
+                    // Review r2 #5: a refused feed must never leave Gley holding a DEAD list — fall back to the ghost anchor
+                    // parked at the last known outside position (live, mod-owned, on-grid) when we have one.
+                    if (_hasOutsidePos && !MPServer.IsRunning && !MPClient.IsConnected) { var ga = GetOrCreateGhostAnchor(); ga.position = _lastOutsidePos; if (AnchorFeedable(ga)) feed.Add(ga); }   // review r3 #5: disconnected only — a host's or a connected client's feed keeps its previous behaviour
+                    if (feed.Count == 0) return false;
+                }
                 var arr = feed.ToArray();
 
                 // Feed every player to both anchor APIs — UpdateCamera drives the
                 // active-grid squares (where traffic spawns), UpdateCameraPositions
                 // the density manager.
-                try { tm.UpdateCamera(arr); }
+                bool fed = false;
+                try { tm.UpdateCamera(arr); fed = true; }
                 catch (Exception e)
                 { if (!_anchorDiagLogged) Plugin.Logger.LogWarning($"[TrafficSync] UpdateCamera: {e.Message}"); }
                 if (dm != null)
                 {
-                    try { dm.UpdateCameraPositions(arr); }
+                    try { dm.UpdateCameraPositions(arr); }   // review r3 #4: this leg refreshes only PositionValidator's list — TrafficManager.activeCameras (the array Update reads) is replaced by the UpdateCamera leg alone, so only that leg sets `fed`
                     catch (Exception e)
                     { if (!_anchorDiagLogged) Plugin.Logger.LogWarning($"[TrafficSync] UpdateCameraPositions: {e.Message}"); }
                     // HOST only (a client's ambient density is pinned to 0): budget = the game's own request ×
@@ -1414,10 +1533,12 @@ namespace BigAmbitionsMP
                         $"densityManager={(dm != null ? "ok" : "NULL")}; " +
                         $"budget=game request × player areas (request so far {GameDensityRequest}); nativeRadii: {nativeR}.");
                 }
+                return fed;
             }
             catch (Exception ex)
             {
                 Plugin.Logger.LogWarning($"[TrafficSync] UpdateTrafficAnchors: {ex.Message}");
+                return false;
             }
         }
 
@@ -1813,7 +1934,7 @@ namespace BigAmbitionsMP
                 if (nowSim >= _nextClientSimBeat)
                 {
                     _nextClientSimBeat = nowSim + 1f;
-                    try { tm.SetTrafficDensity(0); } catch { }
+                    SelfDensityCall = true; try { tm.SetTrafficDensity(0); } catch { } finally { SelfDensityCall = false; }   // H-SVC-116: our own 0 is not the game's request
                     try { ClearClientTrafficExceptServiceCars(tm); } catch { }
                 }
                 return;
@@ -1890,6 +2011,12 @@ namespace BigAmbitionsMP
         /// sit on the layer Gley brakes for (ServiceColliderLayer — "Vehicles" on the tested data; NOT PlayerVehicles,
         /// H-SVC-113). False = the previous dead-sim behaviour (parked service cars).</summary>
         public static bool ClientServiceSimEnabled { get; set; } = true;
+        /// <summary>H-SVC-116: the game's own last density request seen on a CLIENT (the number the clamp prefix zeroed),
+        /// -1 = none yet. Restored when the player continues offline after a host loss (HandBackToVanilla).</summary>
+        internal static int  ClientGameDensityRequest = -1;
+        /// <summary>H-SVC-116: true only around the mod's OWN SetTrafficDensity(0) re-assert, so the clamp prefix never
+        /// records that 0 as the game's request.</summary>
+        internal static bool SelfDensityCall;
         private static float _nextClientSimBeat;
 
         public static void ToggleClientTrafficSuppression()

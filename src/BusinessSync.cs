@@ -898,7 +898,7 @@ namespace BigAmbitionsMP
                 if (!MPServer.IsRunning) return 0f;                              // clients have nothing to contribute
                 string bizOwner = reg.businessOwnerRivalId?.ToString() ?? "";
                 if (string.IsNullOrEmpty(bizOwner) || reg.RentedByPlayer) return 0f;
-                if (GameStatePatcher.IsSessionPlayerId(bizOwner)) return 0f;     // player-run: not takeover-able via this path
+                if (GameStatePatcher.IsSessionPlayerRivalId(bizOwner)) return 0f;   // player-run (roster OR live list — review r4 #5: the narrower live-only test published an absent owner's shop as an AI valuation): not takeover-able via this path
                 return (float)Math.Round(Helpers.CompetitionHelper.CalculateAiOwnedValuation(reg));
             }
             catch { return 0f; }

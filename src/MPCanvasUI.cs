@@ -2143,7 +2143,7 @@ namespace BigAmbitionsMP
                 {
                     paid = GameManager.ChangeMoneySafe(-cost,
                         new TransactionInfo("ba:transaction_tuitionfee", data, isTaxDeductible: true),
-                        null, null, force: false);
+                        null, null, force: false, showNotification: true);   // H-TRAIN-1 (bundle 20260903-142107): the GAME's own insufficient-money notice — the silent decline read as "Accept does nothing"
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Train] charge: {ex.Message}"); }
                 if (paid)
@@ -3312,6 +3312,7 @@ namespace BigAmbitionsMP
                 Patch_ReportBugButton_ModTakeover.ResetForScene();   // round-209: re-arm the recycle retry per world
                 CustomerPuppets.Reset();  // round-41: puppet bodies + authority table die with the scene
                 MPStockSync.Reset();      // per-shop stock digests die with the session
+                ShopValuation.Reset();    // H-BIZ-1: owner-answered estimates die with the session
                 GameStatePatcher.ResetDemandState();   // round-102 statics are per-session: a held market payload must
                                                        // not reach a different world, and the have-authoritative flag
                                                        // must not suppress demand computation in the NEXT session
@@ -3377,6 +3378,7 @@ namespace BigAmbitionsMP
                 // the menu the player is free to host/join again.
                 MPClient.SessionEnded = false;
                 MPClient.InMpGame    = false;   // left the MP game world → native time allowed again (SP/menu)
+                MPClient.OfflineFork = false;   // H-BIZ-1 r3: the offline fork ends with the scene
 
                 // Leaving the game scene ends the MP session (exit to main menu).
                 // Tear the network down so the next Host/Join starts clean — a
@@ -3912,6 +3914,7 @@ namespace BigAmbitionsMP
             // 100ms+ spikes into SP (perf log 2026-06-14).  One gate covers it all.
             if (!MPServer.IsRunning && !MPClient.IsConnected)
             {
+                TrafficSync.TickDisconnected();   // H-SVC-116 r4: the reconnect-window belt + the offline hand-back retry. THIS is the first return without a link (review r3 #1: the r3 call sat behind it, unreachable).
                 if (_loiterTip != null && _loiterTip.activeSelf) _loiterTip.SetActive(false);
                 if (_loiterBtn != null && _loiterBtn.activeSelf) _loiterBtn.SetActive(false);   // review N2: no dead raycast zone after a mid-world disconnect
                 return;
@@ -7494,6 +7497,8 @@ namespace BigAmbitionsMP
                                                                     // suppression patch (its gate reads SessionEnded), so
                                                                     // SP autosave resumes here with no sticky flag to clear
                     MPClient.InMpGame     = false;                  // committed to the offline solo fork → native time allowed
+                    MPClient.OfflineFork  = true;                   // H-BIZ-1 r3: this world stays an (offline) MP world for the registration shields
+                    try { TrafficSync.HandBackToVanilla("offline fork"); } catch { }   // H-SVC-116: after InMpGame=false so the clamp is already off
                     GameStateReader.SetNativePause(false);          // lift the true pause too
                     _startupScreenGO.SetActive(false);
                     _startupScreenWasShown = false;

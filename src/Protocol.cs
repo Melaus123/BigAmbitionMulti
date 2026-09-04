@@ -203,6 +203,7 @@ namespace BigAmbitionsMP
         PoachResult           = 202,     // Host → the claimant: Ok (the host removed the employee and generated the replacement natively) or not (already gone), plus the business's rows AFTER the claim — the claimant's locally-generated replacement is overwritten by host truth.
         ServiceCarStop        = 203,     // Rider → Host → service-car OWNER (2026-09-02): "stop your private driver / handed-off car so I can catch up and ride it" (host relays; the owner's machine owns that car's Gley AI). Auto-resumes after 60 s on the owner's side.
         ServiceCarResume      = 204,     // Rider → Host → OWNER: the rider boarded (native DriveAway on our GhostTaxi) or cancelled the map — resume the car's previous driving state.
+        ShopValuation         = 205,     // H-BIZ-1 (2026-09-03, user option A): "request": viewer → Host → the shop's OWNER when the BizMan page of another PLAYER's shop opens; "answer": owner → Host → exactly ONE viewer (ToPid) carrying the game's own closure figure for that shop (interior items' selling prices + vehicles at the address + deposit — BizManPresentation.OnTerminateContractConfirm's formula). No grant gate: the native page shows an estimate to anyone. Small, on demand, never broadcast.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -370,6 +371,19 @@ namespace BigAmbitionsMP
         public List<StockInfo>        SoldLastWeek { get; set; } = new();  // v18 7b-2: units sold in the last 7 days per deliveries-tab row — native sums the shop's own orderHistory, which a replica does not have
         public List<CampaignInfo>     Campaigns { get; set; } = new();     // v18 7c: the shop's marketing campaigns; both Marketing-tab readouts DERIVE from this list, so carrying it is enough
         public SettingsInfo?          Settings  { get; set; }             // v18 7d: the Settings tab's name + logo settings
+    }
+
+    /// <summary>H-BIZ-1: on-demand estimate of another PLAYER's shop, computed by its owner with the game's own closure
+    /// formula. "request" (viewer → host → owner) / "answer" (owner → host → the one viewer that asked, ToPid).</summary>
+    public class ShopValuationPayload
+    {
+        public string PlayerId   { get; set; } = "";   // sender (SenderIs-validated at the host)
+        public string Action     { get; set; } = "";   // "request" | "answer"
+        public string AddressKey { get; set; } = "";
+        public string ToPid      { get; set; } = "";   // answer target — the viewer that asked
+        public float  Value      { get; set; }         // items' selling prices + vehicles at the address + deposit
+        public int    Items      { get; set; }         // breakdown, log only
+        public int    Vehicles   { get; set; }
     }
 
     /// <summary>v18 7b — one wholesale delivery contract, carried whole. Identity on the wire is
@@ -1379,7 +1393,9 @@ namespace BigAmbitionsMP
         //      stored in item holders; the guest route + unequip-on-confirm now carry it). A v19 peer
         //      never sends the literal and would treat it as an unknown ctx on receive — mixed
         //      sessions refuse at Hello per the freeze rule.
-        public const int Version = 20;
+        // v21 (2026-09-03): new message ShopValuation=205 (H-BIZ-1). A v20 peer drops it as "Unknown message type"
+        //      and would show $0 on a friend's shop page; mixed sessions refuse at Hello per the freeze rule.
+        public const int Version = 21;
     }
 
     /// <summary>Sent by client on connect.</summary>

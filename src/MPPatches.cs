@@ -1035,6 +1035,7 @@ namespace BigAmbitionsMP
                     if (MPServer.IsRunning) { TrafficSync.GameDensityRequest = Math.Max(0, nrOfCars); return; }
                     if (!(MPClient.IsClientInWorld && !MPServer.IsRunning) || !TrafficSync.ClientServiceSimEnabled) return;
                     if (nrOfCars != 0 && _logs++ < 3) Plugin.Logger.LogInfo($"[TrafficSync] client density request {nrOfCars} → 0 (ambient traffic is the host's; only service cars drive here).");
+                    if (!TrafficSync.SelfDensityCall) TrafficSync.ClientGameDensityRequest = Math.Max(0, nrOfCars);   // H-SVC-116: the game's own number, kept for the offline hand-back
                     nrOfCars = 0;
                 }
                 catch { }
@@ -6940,6 +6941,68 @@ namespace BigAmbitionsMP
         {
             private static int _n;
             private static int _o;
+            private static float _nextProbeLog;
+
+            // H-BIZ-1 (bundle 20260903-130650, user option A, 2026-09-03) — RESTRUCTURE per the bandaid ceiling: in MP the
+            // native body is replaced by the same formula written null-safe. Native never meets a registration without a
+            // Layout (every AI business gets one at creation; a player's own shop never reaches SetAiOwned), but in MP
+            // another PLAYER's shop is shown through the AI-owned page (design-based, no Layout) and on a client every
+            // unvisited AI business is a hollow mirror with seeded dailyIncomes — the native path then dies in
+            // GetLayoutPath(null) (NullReferenceException; round-204's InvalidOperationException shield never saw it).
+            //   • another player's shop → the OWNER's on-demand closure figure (ShopValuation), 0 until it arrives;
+            //   • income term = 0 when dailyIncomes is null/empty (native's own zero-income shape);
+            //   • layout term = 0 when Layout is null/empty or the building is unresolvable, else the native lookup.
+            // A host's AI shop with complete data computes exactly the native number. Single player: native, untouched.
+            static bool Prefix(BuildingRegistration registration, ref float __result)
+            {
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return true;   // review r4 #1: the offline fork keeps the shield
+                try
+                {
+                    __result = 0f;
+                    if (registration == null) return false;
+                    string addr = GameStateReader.AddressKey(registration);
+                    if (GameStatePatcher.IsSessionPlayerRivalId(registration.businessOwnerRivalId))   // review #1: the RUNNER stamp only — IsAnyPlayerBusiness also matches the DEED ledger, which priced an AI-run business in a player-bought building at $0 (a $1 takeover on the host)
+                    {
+                        __result = ShopValuation.KnownValue(addr);
+                        return false;
+                    }
+                    var data = BuildingTypeHelper.GetData(registration);
+                    if (data == null || !data.HasTag(BigAmbitions.Tags.TagRef.Buildingtypetag.calculateaiownedvaluation)) return false;
+                    float income = 0f;
+                    var inc = registration.dailyIncomes;
+                    if (inc != null && inc.Count > 0)
+                    {
+                        double sum = 0; foreach (var f in inc) sum += f;
+                        float avg = (float)(sum / inc.Count);
+                        income = UnityEngine.Mathf.Max(avg * (float)SaveGameManager.Current.gameVariables.daysPerYear * 3f, 0f);
+                    }
+                    float layout = 0f;
+                    string layoutName = ""; try { layoutName = registration.Layout ?? ""; } catch { }
+                    if (layoutName.Length > 0)
+                    {
+                        var building = BuildingHelper.GetBuilding(registration.Address);
+                        if (building != null)
+                            layout = BusinessLayoutSets.BusinessLayoutSetHelper.GetOrLoadBusinessLayoutSet(
+                                         registration.businessTypeName, new Blueprints.BuildingSizeInfo(building), layoutName, warnIfNotFound: false)
+                                     ?.GetValuation() ?? 0f;
+                    }
+                    __result = income + layout;
+                    if (layoutName.Length == 0 && UnityEngine.Time.unscaledTime >= _nextProbeLog)
+                    {
+                        _nextProbeLog = UnityEngine.Time.unscaledTime + 30f;
+                        Plugin.Logger.LogInfo($"[EconShield] valuation fallback '{addr}': owner='{registration.businessOwnerRivalId}' incomes={inc?.Count ?? 0} layout=<null> → income-only ${__result:F0} (H-BIZ-1 probe; on clients the host-synced figure replaces it).");
+                    }
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    __result = 0f;
+                    if (_n++ < 3) Plugin.Logger.LogWarning($"[EconShield] valuation prefix failed for '{GameStateReader.AddressKey(registration)}': {ex.Message} — showing $0.");
+                    return false;
+                }
+            }
+            // Round-255: on CLIENTS the host-synced valuation is the primary source whenever one is present (republished
+            // on every daily roll) — display and referee agree. Player-run businesses never appear in the dict.
             static void Postfix(BuildingRegistration registration, ref float __result)
             {
                 try
@@ -6947,6 +7010,7 @@ namespace BigAmbitionsMP
                     if (MPServer.IsRunning || !MPClient.IsClientInWorld) return;   // clients only; host stays authoritative
                     string addr = GameStateReader.AddressKey(registration);
                     if (string.IsNullOrEmpty(addr)) return;
+                    if (GameStatePatcher.IsSessionPlayerRivalId(registration.businessOwnerRivalId)) return;   // review r4 #5: never let a stale synced number override the player-shop leg
                     if (!BusinessSync.AiValuationByAddress.TryGetValue(addr, out float synced) || synced <= 0f) return;
                     if (_o++ < 3 || _o % 50 == 0)
                         Plugin.Logger.LogInfo($"[EconShield] AI valuation for '{addr}': host-synced ${synced:F0} replaces local ${__result:F0} (stale-income display fix, round-255).");
@@ -6954,41 +7018,13 @@ namespace BigAmbitionsMP
                 }
                 catch { }
             }
+            // Last resort only: with the Prefix replacing the body in MP nothing native can throw here; a throw from the
+            // Prefix/Postfix themselves is contained to $0 instead of aborting the page.
             static Exception? Finalizer(BuildingRegistration registration, ref float __result, Exception __exception)
             {
                 if (__exception == null) return null;
-                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return __exception;
-                if (!(__exception is InvalidOperationException)) return __exception;
-                try
-                {
-                    // Round-204b: the SYNCED host valuation is the primary source — the
-                    // rig test proved the layout-set data is ALSO absent client-side
-                    // (fallback bottomed at $0 and the client bought a business for
-                    // free). Layout-only remains a last resort for the pre-first-sync
-                    // window; the host arbitrates every actual offer, so a wrong display
-                    // can no longer authorize a sale.
-                    string addr = GameStateReader.AddressKey(registration);
-                    if (!string.IsNullOrEmpty(addr) && BusinessSync.AiValuationByAddress.TryGetValue(addr, out float synced) && synced > 0f)
-                    {
-                        __result = synced;
-                    }
-                    else
-                    {
-                        float layout = 0f;
-                        try
-                        {
-                            var building = BuildingHelper.GetBuilding(registration.Address);
-                            layout = BusinessLayoutSets.BusinessLayoutSetHelper.GetOrLoadBusinessLayoutSet(
-                                         registration.businessTypeName, new Blueprints.BuildingSizeInfo(building), registration.Layout)
-                                     ?.GetValuation() ?? 0f;
-                        }
-                        catch { }
-                        __result = layout;
-                    }
-                    if (_n++ < 3 || _n % 50 == 0)
-                        Plugin.Logger.LogInfo($"[EconShield] AI valuation for '{addr}': dailyIncomes empty on this machine (host-simulated) — using {__result:F0} ({(BusinessSync.AiValuationByAddress.ContainsKey(addr ?? "") ? "host-synced" : "layout fallback")}, round-204b).");
-                }
-                catch { __result = 0f; }
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return __exception;
+                try { __result = 0f; Plugin.Logger.LogWarning($"[EconShield] valuation threw for '{GameStateReader.AddressKey(registration)}': {__exception.GetType().Name}: {__exception.Message} — contained to $0."); } catch { }
                 return null;
             }
         }

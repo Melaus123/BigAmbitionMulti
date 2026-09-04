@@ -577,6 +577,7 @@ namespace BigAmbitionsMP
                     SetButtonsCalling(__instance.transform, "TerminateContract", interactable: !other);
                     SetButtonsCalling(__instance.transform, "SendBuyBuildingOffer", interactable: !other);
                     if (other && __instance.showEmployeesButton != null) __instance.showEmployeesButton.SetActive(false);
+                    if (other && !SharedShopSchedule.IsSharedShop(reg, AddrOf(reg))) ShopValuation.Request(AddrOf(reg));   // H-BIZ-1 (review #5): a SHARED shop shows the "mine" view (tenancy raised for OnEnable) — nothing to fill
                     // (the buy-offer box is re-shown by the "make an offer" button later; its Send button is greyed
                     //  even while inactive — GetComponentsInChildren(true) — and the method is hard-blocked below)
                 }

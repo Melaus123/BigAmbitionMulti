@@ -1394,6 +1394,13 @@ namespace BigAmbitionsMP
                         GameStatePatcher.EnqueueOnMainThread(() => HostRouteSharedSalesHistory(sh, senderPid));
                     break;
                 }
+                case MessageType.ShopValuation:   // H-BIZ-1: "request" → the shop's owner; "answer" → the one viewer that asked
+                {
+                    var sv = env.GetPayload<ShopValuationPayload>();
+                    if (sv != null && SenderIs(sv.PlayerId, senderPid, MessageType.ShopValuation))
+                        GameStatePatcher.EnqueueOnMainThread(() => HostRouteShopValuation(sv, senderPid));
+                    break;
+                }
                 case MessageType.RivalStaffReq:   // AI-staff slice (2026-08-29): host answers from its authoritative list
                 {
                     var rq = env.GetPayload<RivalStaffReqPayload>();
@@ -5398,6 +5405,35 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedSalesHistory: {ex.Message}"); }
+        }
+
+        /// <summary>H-BIZ-1: "request" → the address's OWNER (answered here when the host owns it); "answer" → the ONE
+        /// viewer that asked (ToPid), never a broadcast. No grant gate — the native page shows an estimate to anyone —
+        /// but only the ledger owner may answer, and the snapshot rate bucket applies. An absent owner (ledger holds a
+        /// stable id, no peer) simply never answers; the viewer keeps $0.</summary>
+        public static void HostRouteShopValuation(ShopValuationPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(senderPid)) return;
+                if (!SharedRateOk(senderPid, "valuation", snapshotBucket: p.Action == "answer")) return;   // review #7: viewer requests ride the edit bucket, owner answers the snapshot bucket
+                string ownerPid = SharedShopOwnerPid(p.AddressKey);
+                if (ownerPid.Length == 0) return;                                   // unowned / AI-run: the host-synced AI valuation covers it
+                if (p.Action == "request")
+                {
+                    if (ownerPid == senderPid) return;
+                    if (ownerPid == MPConfig.PlayerId) ShopValuation.Handle(p);
+                    else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.ShopValuation, "host", p));
+                }
+                else if (p.Action == "answer")
+                {
+                    if (senderPid != ownerPid) { Plugin.Logger.LogWarning($"[Valuation] answer for '{p.AddressKey}' from non-owner '{senderPid}' — dropped."); return; }
+                    if (string.IsNullOrEmpty(p.ToPid)) return;
+                    if (p.ToPid == MPConfig.PlayerId) ShopValuation.Handle(p);
+                    else SendToPid(p.ToPid, MessageEnvelope.Create(MessageType.ShopValuation, "host", p));
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Valuation] HostRouteShopValuation: {ex.Message}"); }
         }
 
         /// <summary>Shared-shop slice 6: "request" → the building's owner; "snapshot" → the ONE helper that

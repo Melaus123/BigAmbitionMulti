@@ -89,6 +89,11 @@ namespace BigAmbitionsMP
         /// Cleared ONLY on full exit-to-menu (scene unload) and the offline-fork dismiss, so a genuine solo
         /// fork (host gone for good) still gets native time. NOT cleared on a mere disconnect.</summary>
         public static volatile bool InMpGame;
+        /// <summary>H-BIZ-1 r3 (review r4 #1): TRUE while this loaded world is the OFFLINE FORK of an MP world (host lost, the player
+        /// chose to continue). InMpGame is deliberately false there (native time allowed), but the world still carries player stamps
+        /// and hollow mirrors, so the MP-only shields that make such registrations safe must keep running. Set at the dismissal,
+        /// cleared with InMpGame at scene exit.</summary>
+        public static volatile bool OfflineFork;
 
         /// <summary>Round-56 — the "reconnect-window suppression lapse" fix (the Westi poach case,
         /// generalized): TRUE while this machine is a CLIENT with an MP world loaded, INCLUDING the
@@ -307,6 +312,7 @@ namespace BigAmbitionsMP
             GameStatePatcher.EnqueueOnMainThread(() =>
             {
                 RemotePlayerManager.RemoveAll();
+                try { TrafficSync.RefeedAnchors("host lost"); } catch { }   // H-SVC-116: the avatars just died — never leave Gley holding them
                 TimeSync.EndStartupHold();
                 // Shared-shop management (permission feature): the link is gone, so no shop is shared with this
                 // player any more — an open page on one rebuilds itself (ruling 5). A reconnect re-pushes the set.
@@ -545,6 +551,13 @@ namespace BigAmbitionsMP
                     // "request" reaches the owner; "snapshot" reaches the one editor that asked.
                     var sh = env.GetPayload<SharedSalesHistoryPayload>();
                     if (sh != null) GameStatePatcher.EnqueueOnMainThread(() => SharedShopPrices.HandleSalesHistory(sh));
+                    break;
+                }
+                case MessageType.ShopValuation:
+                {
+                    // H-BIZ-1: "request" reaches the owner; "answer" reaches the one viewer that asked.
+                    var sv = env.GetPayload<ShopValuationPayload>();
+                    if (sv != null) GameStatePatcher.EnqueueOnMainThread(() => ShopValuation.Handle(sv));
                     break;
                 }
 
