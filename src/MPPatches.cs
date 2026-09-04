@@ -1403,12 +1403,14 @@ namespace BigAmbitionsMP
         // two lambdas (<Start>b__1_0 and <Start>b__1_1) on a building-Address
         // event (per cpp2il's Delegate.Combine call).  The exit coroutine
         // fires that event during shutdown of the building scene.  The
-        // _1_1 lambda calls DoPlay() (per its CalledBy attribute) — DoPlay
-        // dereferences something null on the client and throws.
+        // _1_1 lambda checks this.isActiveAndEnabled — on a DESTROYED AiCarMusic
+        // (a stripped ghost that was later Destroy()ed while still subscribed)
+        // that call throws.
         //
-        // Patch_AiCarMusic_StartB_NoOpOnClient prefixes the lambda and
-        // skips it entirely when MPClient.IsConnected.  On the host the
-        // lambda runs normally so AI-car music keeps working.
+        // 2026-09-04: hosts throw this too (field stacks from two hosts, role=host),
+        // so the prefix gates on the SESSION, not the client role — MPClient.IsConnected
+        // is true only on a connected client.  Single player is untouched, so AI-car
+        // music keeps working there.
         //
         // (2026-06-10: the companion exit-kick bandaid was RETIRED — its root
         //  cause, client-side Player-layer ghost colliders, is long removed
@@ -1463,7 +1465,7 @@ namespace BigAmbitionsMP
             private static int _aiCarSuppressCount = 0;
             static bool Prefix(System.Reflection.MethodBase __originalMethod)
             {
-                if (!MPClient.IsConnected) return true;   // host: run as normal
+                if (!MPServer.IsRunning && !MPClient.InMpGame) return true;   // single player: run as normal
                 _aiCarSuppressCount++;
                 if (_aiCarSuppressCount == 1 || _aiCarSuppressCount % 500 == 0)
                 {

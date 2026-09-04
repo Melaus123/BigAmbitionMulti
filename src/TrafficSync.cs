@@ -1070,9 +1070,15 @@ namespace BigAmbitionsMP
                 // AudioSource while EngineSoundComponent was still attached was REFUSED every time
                 // ("Can't remove AudioSource because EngineSoundComponent depends on it" — 5,855× in one
                 // client session). Remove every other kill-listed component FIRST, the AudioSource LAST.
-                Component? audio = null;
+                var audios = new System.Collections.Generic.List<Component>();
                 var others = new System.Collections.Generic.List<Component>();
-                var comps = go.GetComponents(typeof(Component));
+                // Field 2026-09-04 (host black screen on building enter/exit): AiCarMusic and its AudioSource
+                // sit on a CHILD object, 'AiCarMusicPlayer', on every AI-drivable prefab. A root-only
+                // GetComponents never saw them, so the clone kept a radio whose Start() subscribes to
+                // GlobalEvents.onEnterBuilding/onExitBuilding and never unsubscribes; destroying the ghost
+                // later left a dead subscriber that threw inside BuildingManager's enter/exit coroutine.
+                // Walk the whole hierarchy so the kill list applies to children too.
+                var comps = go.GetComponentsInChildren(typeof(Component), true);
                 for (int i = 0; i < comps.Length; i++)
                 {
                     var c = comps[i];
@@ -1090,11 +1096,11 @@ namespace BigAmbitionsMP
                     if (System.Array.IndexOf(_killTrafficComponents, cn) < 0) continue;
 
                     // Taxi keeps a (disabled) VehicleComponent that may require the AudioSource — leave it inert.
-                    if (cn == "AudioSource") { if (!isTaxi) audio = c; continue; }
+                    if (cn == "AudioSource") { if (!isTaxi) audios.Add(c); continue; }
                     others.Add(c);
                 }
                 foreach (var c in others) if (c != null) UnityEngine.Object.DestroyImmediate(c);
-                if (audio != null) UnityEngine.Object.DestroyImmediate(audio);
+                foreach (var c in audios) if (c != null) UnityEngine.Object.DestroyImmediate(c);
             }
             catch (Exception ex)
             {
