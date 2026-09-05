@@ -315,6 +315,14 @@ namespace BigAmbitionsMP
         {
             try
             {
+                // 2026-09-05 colours: the permanent slot table rides the manifest, seeded before any join can assign.
+                PlayerColours.HostSeed(m.ColourSlots ?? new Dictionary<string, int>());
+                PlayerColours.Learn(MPConfig.PlayerId, PlayerColours.HostAssign(MPConfig.StableId));   // the host keeps its own slot across the load
+                // colours r3 (review r2 MAJOR-1): anyone who said Hello in the LOBBY was assigned against the pre-load table; re-assign
+                // every known player against the seeded one so lobby joiners keep a persisted, non-duplicated slot.
+                foreach (var kv in StableIdByPlayer.OrderBy(k => k.Value, StringComparer.Ordinal))   // colours r4 (review r3 MINOR-1): deterministic slot order for unseeded lobby joiners
+                    if (!string.IsNullOrEmpty(kv.Key) && !string.IsNullOrEmpty(kv.Value))
+                        PlayerColours.Learn(kv.Key, PlayerColours.HostAssign(kv.Value));
                 var reverse = new Dictionary<string, string>();   // stableId → playerId
                 foreach (var kv in StableIdByPlayer) reverse[kv.Value] = kv.Key;
 
@@ -653,6 +661,8 @@ namespace BigAmbitionsMP
             // Reset lobby state for a fresh session
             IsInLobby = true;
             LobbyReset(MPConfig.PlayerId); // host is always the first player
+            PlayerColours.ResetHost();   // colours r2 (MINOR-3): a new hosted world starts with an empty slot table; a LOADED world is re-seeded from its manifest by RestoreOwnershipFromManifest
+            PlayerColours.ResetSession();   // 2026-09-05 colours: the session slot map dies with the session, like the roster below
             GameStatePatcher.ClientPlayerRoster.Clear();   // review r9 #6: a fresh session starts with an empty roster (it refills from PlayerProfiles and rides the rivals snapshot). Here, not in Stop(): a machine that was a GUEST in the previous world never ran Stop(), and its roster would ship that world's members to this world's clients.
             MPClient.OfflineFork = false;   // H-FORK-1 r2 (review #4): a fresh hosted session is never an offline fork
             EnforceStartingCash = true;
@@ -665,6 +675,7 @@ namespace BigAmbitionsMP
             _peerBuild.Clear();       // round-281: per-peer build records die with the session, like _peerNames
             StableIdByPlayer.Clear();
             StableIdByPlayer[MPConfig.PlayerId] = MPConfig.StableId; // host's own
+            PlayerColours.Learn(MPConfig.PlayerId, PlayerColours.HostAssign(MPConfig.StableId));   // 2026-09-05 colours: the host holds a permanent slot too
             MPLog.BeginSession(System.Guid.NewGuid().ToString("N").Substring(0, 8), "host");
             _clients.Clear();         // stale peers from a torn-down session
             BuildingOwners.Clear();   // per-session state — a new game must not inherit
@@ -714,6 +725,7 @@ namespace BigAmbitionsMP
             // Initiator forensics: clients see our Stop as RemoteConnectionClose
             // with no clue who pulled the plug — name the caller here so the
             // load-start kick (2026-06-12, cause unresolved) is attributable.
+            try { PlayerColours.ResetSession(); PlayerColours.ResetHost(); } catch { }   // colours r3 (review r2 MINOR-2): the host's maps die with the session, like the client's on disconnect
             if (_running)
                 Plugin.Logger.LogWarning($"[Server] STOP called ({_clients.Count} client(s) will see RemoteConnectionClose) from: {Environment.StackTrace}");
             // Round-184: a save made moments ago may still be waiting on member uploads — those
@@ -748,6 +760,7 @@ namespace BigAmbitionsMP
             ClearV9SessionMaps();   // v9 review MIN-5: mirror memory, join baselines, applying latches die with every (re)arm
             lock (_joinBaselineDone) _joinBaselineDone.Clear();   // round-276: baseline latches die with the session
             _expectedLoadGen.Clear(); _parkedBaselineGen.Clear(); _firedLoadGen.Clear(); _markedInGame.Clear();   // round-284: load-ticket state too (the counter itself never resets — a reissued gen could match a stale echo)
+            try { PlayerColours.ResetSession(); } catch { }   // colours r4 (review r3 MINOR-2): a Hello handled during teardown cannot leave an orphan picker row
         }
 
         /// <summary>Host clicked "Start New Game" in the lobby.</summary>
@@ -1581,6 +1594,7 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogInfo($"[Server] PlayerProfile from peer={peer.Id}: PlayerId='{p.PlayerId}' CharacterName='{p.CharacterName}'.  Re-broadcasting roster.");
                         // Forward to all so every client (including the sender) sees the
                         // updated mapping.  Pure byte-forward — always safe.
+                        p.ColourSlot = PlayerColours.SlotOf(p.PlayerId);   // 2026-09-05 colours: the host names the sender's slot on the way out
                         Broadcast(MessageEnvelope.Create(MessageType.PlayerProfile, "host", p));
 
                         // Everything below — populating gi.rivalStates, decoding the
@@ -2412,6 +2426,7 @@ namespace BigAmbitionsMP
             if (!string.IsNullOrEmpty(hello.StableId))
             {
                 StableIdByPlayer[hello.PlayerId] = hello.StableId;
+                PlayerColours.Learn(hello.PlayerId, PlayerColours.HostAssign(hello.StableId));   // 2026-09-05 colours: permanent slot, assigned at first connection
                 // Round-224: a CashSync that arrived BEFORE this mapping filed under the
                 // display name — re-key it now or it stays invisible to every stable-id
                 // lookup forever (the on-change gate never re-sends an unchanged wallet).
@@ -2444,6 +2459,7 @@ namespace BigAmbitionsMP
                 if (!string.IsNullOrEmpty(hello.StableId))
                 {
                     StableIdByPlayer[hello.PlayerId] = hello.StableId;
+                    PlayerColours.Learn(hello.PlayerId, PlayerColours.HostAssign(hello.StableId));   // 2026-09-05 colours: permanent slot, assigned at first connection
                 // Round-224: a CashSync that arrived BEFORE this mapping filed under the
                 // display name — re-key it now or it stays invisible to every stable-id
                 // lookup forever (the on-change gate never re-sends an unchanged wallet).
@@ -4893,6 +4909,25 @@ namespace BigAmbitionsMP
                 string ownerPid = (kv.Value == "host") ? MPConfig.PlayerId : kv.Value;
                 if (ownerPid != clientPid) pay.OtherOwnedKeys.Add(kv.Key);
             }
+            // 2026-09-05 colours: name the OWNER of every key this payload carries, so the client can tint each
+            // shared building in that player's colour instead of one teal. Keys with no operator-ledger entry are
+            // skipped — the client keeps the teal for those.
+            void NameOwner(string k)
+            {
+                if (string.IsNullOrEmpty(k) || pay.Owners.ContainsKey(k)) return;
+                if (!BuildingOwners.TryGetValue(k, out var ow) || string.IsNullOrEmpty(ow))
+                {
+                    // colours r2 (review r1 MINOR-14): a building that was BOUGHT but is not in the operator ledger
+                    // still has an owner. BuildingRealEstateOwners is the same ConcurrentDictionary<string,string>
+                    // holding the same values ("host" / a live playerId / a reserved stableId), so no mapping is needed.
+                    if (!BuildingRealEstateOwners.TryGetValue(k, out ow) || string.IsNullOrEmpty(ow)) return;
+                }
+                pay.Owners[k] = (ow == "host") ? MPConfig.PlayerId : ow;
+            }
+            foreach (var k in pay.AddressKeys)       NameOwner(k);
+            foreach (var k in pay.HelperAddressKeys) NameOwner(k);
+            foreach (var k in pay.OtherOwnedKeys)    NameOwner(k);
+            foreach (var k in pay.SharedManageKeys)  NameOwner(k);
             return pay;
         }
 
@@ -4923,6 +4958,7 @@ namespace BigAmbitionsMP
                     if (pr != null) SendBuildingAccessTo(pr, pid);
                 }
                 var own = BuildBuildingAccessFor(MPConfig.PlayerId);
+                PlayerColours.LearnOwners(own.Owners);   // colours r2 (review r1 MAJOR-1): the host learns the owner map too
                 GrantSync.SetEnterableBuildings(own.AddressKeys);
                 GrantSync.SetHelperBusinesses(own.HelperAddressKeys);
                 GrantSync.SetSharedManage(own.SharedManageKeys);   // shared-shop management (permission feature)
@@ -5909,6 +5945,7 @@ namespace BigAmbitionsMP
                 int gender = -1; try { if (gi?.charactersData != null && gi.charactersData.Count > 0) gender = (int)gi.charactersData[0].gender; } catch { }
                 var p = new PlayerProfilePayload { PlayerId = MPConfig.PlayerId, CharacterName = name, PortraitPngBase64 = portrait, AgeInYears = age, Gender = gender };
                 if (!string.IsNullOrEmpty(portrait)) GameStatePatcher.LocalPortraitSent = true;   // image goes over once
+                p.ColourSlot = PlayerColours.SlotOf(MPConfig.PlayerId);   // 2026-09-05 colours
                 Broadcast(MessageEnvelope.Create(MessageType.PlayerProfile, "host", p));
                 Plugin.Logger.LogInfo($"[Server] Broadcast host profile: PlayerId='{MPConfig.PlayerId}' CharacterName='{name}' age={age} portrait={(string.IsNullOrEmpty(portrait) ? "none" : "yes")}.");
             }
@@ -5983,13 +6020,13 @@ namespace BigAmbitionsMP
                 // the special-rival ids to begin with — round-257; the old "sized exactly"
                 // comment here was never true and caused the wave-6 shift bug).
                 if (!string.IsNullOrEmpty(MPConfig.PlayerId) && seen.Add(MPConfig.PlayerId))
-                    snap.Rivals.Add(new RivalInfo { Id = MPConfig.PlayerId, Name = DisplayNameFor(MPConfig.PlayerId), IsPlayer = true });
+                    snap.Rivals.Add(new RivalInfo { Id = MPConfig.PlayerId, Name = DisplayNameFor(MPConfig.PlayerId), IsPlayer = true, ColourSlot = PlayerColours.SlotOf(MPConfig.PlayerId) });   // 2026-09-05 colours
                 // All connected/known peers
                 foreach (var playerId in LobbyPlayers)
                 {
                     if (string.IsNullOrEmpty(playerId)) continue;
                     if (!seen.Add(playerId)) continue;
-                    snap.Rivals.Add(new RivalInfo { Id = playerId, Name = DisplayNameFor(playerId), IsPlayer = true });
+                    snap.Rivals.Add(new RivalInfo { Id = playerId, Name = DisplayNameFor(playerId), IsPlayer = true, ColourSlot = PlayerColours.SlotOf(playerId) });   // 2026-09-05 colours
                 }
                 // Review r7 #4: members who DROPPED are still session players — their buildings are held for reconnect and the
                 // host's roster never forgets them — but LobbyPlayers loses them, so every client's roster forgot a dropped owner
@@ -5999,7 +6036,7 @@ namespace BigAmbitionsMP
                 {
                     var playerId = kv.Key;
                     if (string.IsNullOrEmpty(playerId) || !seen.Add(playerId)) continue;
-                    snap.Rivals.Add(new RivalInfo { Id = playerId, Name = string.IsNullOrEmpty(kv.Value) ? DisplayNameFor(playerId) : kv.Value, IsPlayer = true });
+                    snap.Rivals.Add(new RivalInfo { Id = playerId, Name = string.IsNullOrEmpty(kv.Value) ? DisplayNameFor(playerId) : kv.Value, IsPlayer = true, ColourSlot = PlayerColours.SlotOf(playerId) });   // 2026-09-05 colours
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BuildRivalsSnapshot: {ex.Message}"); }
@@ -6448,6 +6485,7 @@ namespace BigAmbitionsMP
                 RainIntensity = MPWeatherSync.CurrentRainIntensity(),
                 TuneDrain = MPNeedsTuning.DrainPercent, TuneRest = MPNeedsTuning.RestPercent,
                 TuneMorale = MPNeedsTuning.MoralePercent,
+                TunePowerNap = MPNeedsTuning.PowerNapAllowed ? 1 : 0,   // POWERNAP host gate rides the 3s heartbeat
                 Seq = System.Threading.Interlocked.Increment(ref _gtsSeq),   // round-283 freshness stamp
                 // Round-284/F2: pause INTENT rides the heartbeat — a LIVE read at send time of
                 // the same synchronously-flipped fields the F1 join inform reads (never the

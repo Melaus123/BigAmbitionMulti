@@ -505,8 +505,8 @@ namespace BigAmbitionsMP
             static void Finalizer() { ListScope = false; }
         }
 
-        /// <summary>TMP rich-text opener for the shared teal (single colour source: HousingMapCues.SharedColor).</summary>
-        private static readonly string TintTagOpen = "<color=#" + ColorUtility.ToHtmlStringRGB(HousingMapCues.SharedColor) + ">";
+        // 2026-09-05 per-owner colours: the opener is now built PER ROW from that row's owner
+        // (PlayerColours.TagOpen), so two owners' people are told apart. Unknown owner → the old teal.
 
         /// <summary>Row: teal name for the owner's people (a rich-text tag in the label text — see the body comment);
         /// their mass-action checkbox greyed (no mass fire / train / bonus / assign on them).</summary>
@@ -526,7 +526,7 @@ namespace BigAmbitionsMP
                     // orange) — a colour set on the component here was overwritten before the player ever saw it
                     // (probe P-SHAREDSTAFF-LIST, 2026-08-22). Native SetData rebuilds the text from the model on
                     // every (re)bind, so recycled cells never stack tags and own rows need no restore.
-                    if (grant) __instance.employeeName.text = TintTagOpen + __instance.employeeName.text + "</color>";
+                    if (grant) __instance.employeeName.text = PlayerColours.TagOpen(MPRegisterSync.OwnerOfInjected(data.employeeInstance?.id)) + __instance.employeeName.text + "</color>";
                     // Ruling 23: tickable while this row's group is the one being worked on (or nothing is selected
                     // yet). Native never disables this toggle, so writing true is what the game would have left.
                     if (__instance.massActionToggle != null)

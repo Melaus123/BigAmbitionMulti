@@ -401,6 +401,24 @@ namespace BigAmbitionsMP
             catch { return null; }
         }
         public static bool SeatedOnOwnBoat() => Seated && CurrentOwnBoat() != null;
+
+        // ── POWERNAP (user-approved 2026-09-05) ────────────────────────
+        // The nap button is BED-ONLY (not car, not boat): SleepActivity carries a private _sleepEnvironment
+        // (SleepActivity.cs:16) whose SleepEnvironmentType (SleepEnvironment.cs:12) is Bed/Car/Boat
+        // (SleepEnvironmentType.cs:5-7). Read live each tick; anything unexpected → false (fail-safe).
+        private static readonly System.Reflection.FieldInfo? _fSleepEnv =
+            HarmonyLib.AccessTools.Field(typeof(PlayerActivity.SleepActivity), "_sleepEnvironment");
+        internal static bool SeatedInBed()
+        {
+            try
+            {
+                if (!Seated) return false;
+                if (_curAct is not PlayerActivity.SleepActivity sleep || _fSleepEnv == null) return false;
+                var env = _fSleepEnv.GetValue(sleep) as PlayerActivity.SleepEnvironment;
+                return env != null && env.SleepEnvironmentType == PlayerActivity.SleepEnvironmentType.Bed;
+            }
+            catch { return false; }
+        }
         public static void SellCurrentBoat()
         {
             try
@@ -1106,6 +1124,7 @@ namespace BigAmbitionsMP
                 _curActRef = _curAct;   // Mono: object identity replaces pointer identity
                 if (!seated) _buttonsReadStackLogged = false;   // round-266: re-arm the one-shot stack per activity
                 if (!seated) _suppressedActRef = null;   // gone — clear the wedge guard
+                if (!seated) MPNeedsTuning.SetPowerNap(false);   // POWERNAP: leaving the bed (any stand-up route) ends the nap
                 ActivityName = seated ? nm : "";
                 ActivityState = -1;
                 DockButtons.Clear();

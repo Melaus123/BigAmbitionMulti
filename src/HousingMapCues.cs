@@ -107,7 +107,7 @@ namespace BigAmbitionsMP
                 HousingMapCues.SetMember(label, "Prefix", HousingMapCues.SharedWord);
                 HousingMapCues.SetMember(label, "Key", "");
                 if (HousingMapCues.GetMember(label, "TextContainer") is TMP_Text tc)
-                { tc.text = HousingMapCues.SharedWord; tc.color = HousingMapCues.SharedColor; }
+                { tc.text = HousingMapCues.SharedWord; tc.color = PlayerColours.TryColourForAddressKey(GameStateReader.AddressKey(cbc.buildingRegistration), out var c) ? c : HousingMapCues.SharedColor; }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] map-card status: {ex.Message}"); }
         }
@@ -128,7 +128,7 @@ namespace BigAmbitionsMP
                 var poi = __instance.poi;
                 if (poi == null) return;
                 poi.SetPermanent(true);
-                poi.SetIcon(reg.GetPOIIcon(), HousingMapCues.SharedColor);
+                poi.SetIcon(reg.GetPOIIcon(), PlayerColours.TryColourForAddressKey(GameStateReader.AddressKey(reg), out var c) ? c : HousingMapCues.SharedColor);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] shared POI: {ex.Message}"); }
         }
@@ -145,7 +145,7 @@ namespace BigAmbitionsMP
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                 var reg = __instance?._currentCBC?.buildingRegistration;
                 if (!HousingMapCues.IsSharedResidence(reg)) return;
-                __result = new LabelInfo(HousingMapCues.SharedWord, HousingMapCues.SharedColor, localize: false);
+                __result = new LabelInfo(HousingMapCues.SharedWord, PlayerColours.TryColourForAddressKey(GameStateReader.AddressKey(reg), out var c) ? c : HousingMapCues.SharedColor, localize: false);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] guest status label: {ex.Message}"); }
         }
@@ -175,8 +175,9 @@ namespace BigAmbitionsMP
                     if (!HousingMapCues.IsSharedWithMe(cbc.buildingRegistration)) continue;
                     if (cbc.poi == null) cbc.CreatePOI();
                     cbc.poi.SetHidden(false);
-                    cbc.SetHighlight(true, HousingMapCues.SharedColor);
-                    cbc.poi.SetIcon(cbc.buildingRegistration.GetPOIIcon(), HousingMapCues.SharedColor);
+                    Color32 own = PlayerColours.TryColourForAddressKey(GameStateReader.AddressKey(cbc.buildingRegistration), out var c) ? c : HousingMapCues.SharedColor;
+                    cbc.SetHighlight(true, own);
+                    cbc.poi.SetIcon(cbc.buildingRegistration.GetPOIIcon(), own);
                     n++;
                 }
                 if (n > 0) Plugin.Logger.LogInfo($"[Housing] map filter: revealed {n} shared building(s) under 'rented by you'.");

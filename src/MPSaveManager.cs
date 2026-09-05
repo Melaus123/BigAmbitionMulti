@@ -68,6 +68,9 @@ namespace BigAmbitionsMP
         public List<MpGrant> Grants { get; set; } = new();
         /// <summary>Merged-company membership (merger slice 1) — empty/absent = no merger.</summary>
         public List<MpMergerMember> Merger { get; set; } = new();
+        /// <summary>Per-owner colours (2026-09-05): StableId → permanent colour slot. NULL (absent) = manifest
+        /// predates colour slots. Slots are assigned at a player's first connection and never reused.</summary>
+        public Dictionary<string, int>? ColourSlots { get; set; }
         /// <summary>Player-to-player loan ledger (field sweep 2026-08-18) — loans ride the
         /// manifest like grants, so each save slot carries the loans AS OF that moment and
         /// loading an older slot rolls them back with the world (timeline ruling).  NULL
@@ -87,6 +90,7 @@ namespace BigAmbitionsMP
         public int TuneNeedsDrain  { get; set; } = -1;
         public int TuneRestSpeed   { get; set; } = -1;
         public int TuneMoraleTempo { get; set; } = -1;
+        public int TunePowerNap { get; set; } = -1;   // −1 = manifest predates POWERNAP
 
         /// <summary>Handoff (slice 1, 2026-07-23): store provenance. LastHostStableId = who
         /// hosted when this manifest was written (stamped at every save-time metadata write);
@@ -488,6 +492,17 @@ namespace BigAmbitionsMP
             try
             {
                 Directory.CreateDirectory(MpSessionFolder(sessionName));
+                // 2026-09-05 colours: the HOST owns the permanent slot table — stamp it on every manifest it writes.
+                // An empty live table never blanks what the file already carries (a write before the host has seeded).
+                if (MPServer.IsRunning)
+                {
+                    try
+                    {
+                        var slots = PlayerColours.HostSnapshot();
+                        if (slots.Count > 0 || m.ColourSlots == null) m.ColourSlots = slots;
+                    }
+                    catch (Exception cex) { Plugin.Logger.LogWarning($"[MPSave] colour slots: {cex.Message}"); }
+                }
                 var json = Newtonsoft.Json.JsonConvert.SerializeObject(m, Newtonsoft.Json.Formatting.Indented);
                 // Round-274 (user-approved): ATOMIC write — the old in-place truncating write
                 // let a concurrent reader observe a half-written manifest, which ReadManifest

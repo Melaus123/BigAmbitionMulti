@@ -3307,6 +3307,7 @@ namespace BigAmbitionsMP
                 m.TuneNeedsDrain   = MPNeedsTuning.DrainPercent;
                 m.TuneRestSpeed    = MPNeedsTuning.RestPercent;
                 m.TuneMoraleTempo  = MPNeedsTuning.MoralePercent;
+                m.TunePowerNap     = MPNeedsTuning.PowerNapAllowed ? 1 : 0;   // POWERNAP host gate persists with the save
                 // Handoff slice 1/2: store provenance — who hosted when this was written,
                 // and which host-start of the lineage this is.
                 m.LastHostStableId = MPConfig.StableId;

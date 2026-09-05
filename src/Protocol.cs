@@ -859,6 +859,7 @@ namespace BigAmbitionsMP
         // DIRECT Business grants from the operator only. Deliberately separate from HelperAddressKeys, which unions
         // merger membership (merger members help in partner shops); the permission feature never keys on the merger.
         public System.Collections.Generic.List<string> SharedManageKeys { get; set; } = new System.Collections.Generic.List<string>();
+        public Dictionary<string,string> Owners { get; set; } = new();   // 2026-09-05 colours: addressKey -> owner PlayerId for the keys in this payload
     }
 
     /// <summary>Guest → host → building owner: take/put on a home INTERIOR item's cargo (the fridge — the same
@@ -1689,6 +1690,7 @@ namespace BigAmbitionsMP
         /// subsystem, so the second half of this dial's original job (scaling the sad-period
         /// roll) no longer exists; the wire field and its meaning for buffs are unchanged.</summary>
         public int MoraleTempoPercent            { get; set; } = 10;
+        public bool PowerNapAllowed { get; set; } = true;   // 2026-09-05 POWERNAP host gate (additive; old peers ignore)
     }
 
     /// <summary>
@@ -2061,6 +2063,7 @@ namespace BigAmbitionsMP
         public int TuneDrain  { get; set; } = -1;
         public int TuneRest   { get; set; } = -1;
         public int TuneMorale { get; set; } = -1;
+        public int TunePowerNap { get; set; } = -1;   // −1 absent (old host) / 0 off / 1 on
         /// <summary>Round-283 FRESHNESS STAMP (additive; monotonic per host, per session).  The
         /// express lane deliberately breaks ordering BETWEEN lanes, so a clock packet can now
         /// overtake an older one that is still stuck behind bulk — and applying the older one after
@@ -2939,6 +2942,7 @@ namespace BigAmbitionsMP
         public string Name { get; set; } = "";
         /// <summary>True if this entry represents a human player (not an AI rival).</summary>
         public bool   IsPlayer { get; set; }
+        public int ColourSlot { get; set; }   // 2026-09-05 colours: host-assigned permanent slot (0 = unknown)
     }
 
     /// <summary>
@@ -3017,6 +3021,7 @@ namespace BigAmbitionsMP
         /// hasn't arrived yet, the game GENERATES a face — without this it
         /// always generated a default-gender one.</summary>
         public int Gender { get; set; } = -1;
+        public int ColourSlot { get; set; }   // 2026-09-05 colours: host-assigned permanent slot (0 = unknown)
     }
 
     /// <summary>Host → All: trigger a coordinated MP save.  Every player saves

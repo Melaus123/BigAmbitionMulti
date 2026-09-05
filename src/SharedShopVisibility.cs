@@ -387,14 +387,16 @@ namespace BigAmbitionsMP
                     var def = _cardDefaults.GetOrCreateValue(__instance);
                     if (!def.Captured) { def.Name = __instance.businessName.color; def.Type = typeText != null ? typeText.color : Color.white; def.Captured = true; }
                     bool shared = false;
+                    BuildingRegistration reg = null;   // 2026-09-05 colours: hoisted so the owner is still nameable below
                     if (!data.IsRealEstate && data.Address != null)
                     {
-                        BuildingRegistration reg = null;
                         try { reg = BuildingHelper.GetBuildingRegistration(data.Address); } catch { }
                         shared = SharedShopSchedule.IsSharedShop(reg, AddrOf(reg));
                     }
-                    __instance.businessName.color = shared ? Tint : def.Name;
-                    if (typeText != null) typeText.color = shared ? Tint : def.Type;
+                    // 2026-09-05 colours: the shop's runner names the colour; unknown owner keeps the old teal.
+                    Color ownerTint = PlayerColours.TryColourFor(reg?.businessOwnerRivalId?.ToString() ?? "", out var c) ? (Color)c : Tint;
+                    __instance.businessName.color = shared ? ownerTint : def.Name;
+                    if (typeText != null) typeText.color = shared ? ownerTint : def.Type;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} card tint: {ex.Message}"); }
             }
@@ -468,9 +470,13 @@ namespace BigAmbitionsMP
                     if (parent == null || parent.childCount == 0) return;
                     // Object.Instantiate(template, template.parent) appends: the row just built is the last sibling.
                     var row = parent.GetChild(parent.childCount - 1);
+                    // 2026-09-05 colours: the same stamp IsSharedShop reads to decide this row is someone else's
+                    // (reg.businessOwnerRivalId != MPConfig.PlayerId) names whose colour it gets.
+                    string whOwner = ""; try { whOwner = warehouse?.businessOwnerRivalId?.ToString() ?? ""; } catch { }
+                    Color whTint = PlayerColours.TryColourFor(whOwner, out var wc) ? (Color)wc : Tint;
                     int tinted = 0;
                     foreach (var t in row.GetComponentsInChildren<TMPro.TMP_Text>(true))
-                        if (t != null && t.transform.name == "WarehouseName") { t.color = Tint; tinted++; }
+                        if (t != null && t.transform.name == "WarehouseName") { t.color = whTint; tinted++; }
                     if (tinted == 0 && !_warehouseLabelWarned)
                     {
                         _warehouseLabelWarned = true;
@@ -496,7 +502,9 @@ namespace BigAmbitionsMP
             if (HousingMapCues.GetMember(_fTypeLabel?.GetValue(page), "TextContainer") is TMPro.TMP_Text labelText)
             {
                 _defaultTypeLabelColor ??= labelText.color;
-                labelText.color = shared ? Tint : _defaultTypeLabelColor.Value;
+                labelText.color = shared
+                    ? (PlayerColours.TryColourFor(reg?.businessOwnerRivalId?.ToString() ?? "", out var pc) ? (Color)pc : Tint)   // 2026-09-05 colours
+                    : _defaultTypeLabelColor.Value;
             }
             SetButtonsCalling(page.transform, "OpenInEconoView", interactable: !other);
         }

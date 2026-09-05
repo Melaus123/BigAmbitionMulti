@@ -2264,7 +2264,7 @@ namespace BigAmbitionsMP
         // ── agency-call plumbing (ruling 41) ──
         private static bool _mkPickerOpen;                                          // the dialog's business picker is populating
         private static readonly List<BuildingRegistration> _mkPickerRegs = new();   // what we handed it, in order
-        private static readonly HashSet<int> _mkPickerShared = new();               // which of those indexes are shared shops
+        private static readonly Dictionary<int, string> _mkPickerShared = new();    // shared-shop index → its owner's PlayerId (2026-09-05 colours; was a plain index set)
         private static UI.Dialog.MarketingCampaignSettings? _mkPicker;              // the live widget, for the re-seed when data lands
         private static int    _mkPickerIndex = -1;                                  // its current selection
         private static string _mkWantAddr = "";                                     // the shop a call is aimed at (no tab session is open during a call)
@@ -2668,7 +2668,11 @@ namespace BigAmbitionsMP
                     for (int i = 0; i < __result.Count; i++)
                     {
                         _mkPickerRegs.Add(__result[i]);
-                        if (SharedAddrOf(__result[i], out _)) _mkPickerShared.Add(i);
+                        if (SharedAddrOf(__result[i], out _))
+                        {
+                            string ow = ""; try { ow = __result[i]?.businessOwnerRivalId?.ToString() ?? ""; } catch { }
+                            _mkPickerShared[i] = ow;   // 2026-09-05 colours: whose shop this row is
+                        }
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} agency picker list: {ex.Message}"); }
@@ -2707,7 +2711,9 @@ namespace BigAmbitionsMP
                     // scroll it and one of the helper's own shops turns teal (fix-verification MINOR).
                     int cid = __instance.GetInstanceID();
                     if (!_mkCellDefault.TryGetValue(cid, out var def)) { def = __instance.optionText.color; _mkCellDefault[cid] = def; }
-                    __instance.optionText.color = _mkPickerShared.Contains(data.optionId) ? SharedShopVisibility.SharedTint : def;
+                    __instance.optionText.color = _mkPickerShared.TryGetValue(data.optionId, out var mkOwner)
+                        ? (PlayerColours.TryColourFor(mkOwner, out var mkC) ? (Color)mkC : SharedShopVisibility.SharedTint)   // 2026-09-05 colours
+                        : def;
                 }
                 catch { }
             }

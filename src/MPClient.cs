@@ -114,6 +114,8 @@ namespace BigAmbitionsMP
 
         public static void Connect(string hostIp, int port)
         {
+            PlayerColours.ResetSession();   // colours r2 (MINOR-5): a new connection starts with an empty slot map
+            MPNeedsTuning.SetPowerNapAllowed(true, "new connection");   // POWERNAP r2 (review r1 MINOR-4): the host's gate is re-learned from the DTO/heartbeat; never carry a previous host's OFF
             ModMismatchVsHost = "";   // fresh connection, fresh verdict (round-253f)
             // Round-229: unreliable hooks — refuse to join (see MPServer.Start).
             if (ModEntry.MpDisabledByPatchFailure)
@@ -147,6 +149,8 @@ namespace BigAmbitionsMP
         /// path from the Hello onward; the seam hides the transport.</summary>
         public static bool ConnectSteam(ulong hostSteamId)
         {
+            PlayerColours.ResetSession();   // colours r2 (MINOR-5): a new connection starts with an empty slot map
+            MPNeedsTuning.SetPowerNapAllowed(true, "new connection");   // POWERNAP r2 (review r1 MINOR-4): the host's gate is re-learned from the DTO/heartbeat; never carry a previous host's OFF
             // Round-229: unreliable hooks — refuse to join (see MPServer.Start).
             if (ModEntry.MpDisabledByPatchFailure)
             {
@@ -178,6 +182,7 @@ namespace BigAmbitionsMP
             if (_transport is { IsRunning: true })
                 Plugin.Logger.LogWarning($"[Client] DISCONNECT called from: {Environment.StackTrace}");
             _voluntaryDisconnect = true;   // deliberate — never the session-over lock
+            PlayerColours.ResetSession();   // 2026-09-05 colours: the slot map is per session
             ModMismatchVsHost = "";        // round-253f: the verdict dies with the connection
             _transport?.Disconnect();
             _transport = null;
@@ -254,6 +259,7 @@ namespace BigAmbitionsMP
 
         private static void OnDisconnected(string reason, byte[] extra)
         {
+            PlayerColours.ResetSession();   // colours r2 (MINOR-5): an involuntary drop ends the session too - Disconnect() only covers the voluntary path
             Plugin.Logger.LogWarning($"[Client] Disconnected from host: {reason}");
             // Host can attach a HUMAN reason (kick/reject/ban) as disconnect
             // data — "RemoteConnectionClose" told the user nothing (2026-06-11).
@@ -1426,7 +1432,7 @@ namespace BigAmbitionsMP
 
             // Needs/morale tuning rides the heartbeat (loaded-session clients
             // converge too; -1 = older host, keep current values).
-            MPNeedsTuning.SetFromHeartbeat(payload.TuneDrain, payload.TuneRest, payload.TuneMorale);
+            MPNeedsTuning.SetFromHeartbeat(payload.TuneDrain, payload.TuneRest, payload.TuneMorale, payload.TunePowerNap);
 
             // Weather (2026-07-14): align local rain with the host's state — main
             // thread, coalesced (only the newest state matters).  2026-08-18: the
@@ -1532,6 +1538,7 @@ namespace BigAmbitionsMP
             GameStatePatcher.ClientRivalNames[p.PlayerId] = name;
             if (p.AgeInYears > 0) GameStatePatcher.ClientPlayerAges[p.PlayerId] = p.AgeInYears;
                     if (p.Gender >= 0) GameStatePatcher.ClientPlayerGenders[p.PlayerId] = p.Gender;
+            if (p.ColourSlot > 0) PlayerColours.Learn(p.PlayerId, p.ColourSlot);   // 2026-09-05 colours: the host names each player's permanent slot
             Plugin.Logger.LogInfo($"[Client] PlayerProfile: '{p.PlayerId}' → '{name}' age={p.AgeInYears} portrait={(string.IsNullOrEmpty(p.PortraitPngBase64) ? "none" : "yes")}.");
             // Decode the relayed portrait on the main thread (Texture2D create).
             string portraitB64 = p.PortraitPngBase64;
@@ -1809,6 +1816,7 @@ namespace BigAmbitionsMP
                 GrantSync.SetHelperBusinesses(p.HelperAddressKeys);
                 GrantSync.SetSharedManage(p.SharedManageKeys);   // shared-shop management (permission feature): direct grants only
                 GrantSync.SetOtherOwned(p.OtherOwnedKeys);   // merger slice 3 repair source
+                PlayerColours.LearnOwners(p.Owners);   // 2026-09-05 colours: addressKey → owner, so each shared building tints in ITS owner's colour
                 HousingMapCues.RefreshSharedPois();
             });
         }

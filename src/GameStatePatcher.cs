@@ -501,6 +501,7 @@ namespace BigAmbitionsMP
                     {
                         if (string.IsNullOrEmpty(r.Id)) continue;
                         if (r.IsPlayer) ClientPlayerRoster[r.Id] = r.Name ?? r.Id;
+                        if (r.IsPlayer && r.ColourSlot > 0) PlayerColours.Learn(r.Id, r.ColourSlot);   // 2026-09-05 colours
                     }
                     int wsN = payload.WholesaleIds?.Count ?? 0, imN = payload.ImportIds?.Count ?? 0;
                     if (wsN + imN > 0)

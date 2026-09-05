@@ -35,6 +35,26 @@ namespace BigAmbitionsMP
         public static int RestPercent   = 300;
         public static int MoralePercent = 10;   // min 1 (0 would mean infinite buffs)
 
+        // ── POWERNAP (user 2026-09-05): host gate + local toggle. ────────────
+        /// <summary>Host option, default ON; reaches clients like the dials (DTO at create/load, heartbeat TunePowerNap, manifest).</summary>
+        internal static bool PowerNapAllowed { get; private set; } = true;
+        /// <summary>Local toggle: ON while the local player naps in a bed. Cleared when the bed activity ends (MPRestSync) or on a second press.</summary>
+        internal static bool PowerNapOn { get; private set; }
+        public const float PowerNapFactor = 3f;   // user-fixed: ~33 s from empty at drain 40 / rest 300
+        internal static void SetPowerNap(bool on)
+        {
+            if (PowerNapOn == on) return;
+            PowerNapOn = on;
+            try { Plugin.Logger.LogInfo($"[Needs] power nap {(on ? "ON" : "off")}."); } catch { }
+        }
+        internal static void SetPowerNapAllowed(bool allowed, string why)
+        {
+            if (PowerNapAllowed == allowed) return;
+            PowerNapAllowed = allowed;
+            if (!allowed) SetPowerNap(false);
+            try { Plugin.Logger.LogInfo($"[Needs] power nap allowed={allowed} ({why})."); } catch { }
+        }
+
         /// <summary>Derived: multiply positive-buff durations by this (10% → 10×).</summary>
         public static double BuffDurationFactor => 100.0 / Math.Max(1, MoralePercent);
 
@@ -44,11 +64,15 @@ namespace BigAmbitionsMP
         {
             if (dto == null) return;
             Set(dto.NeedsDrainPercent, dto.RestSpeedPercent, dto.MoraleTempoPercent, source);
+            SetPowerNapAllowed(dto.PowerNapAllowed, "settings");   // POWERNAP: host gate rides the settings DTO
         }
 
         /// <summary>Heartbeat-side apply (values -1 = absent on older hosts).</summary>
-        public static void SetFromHeartbeat(int drain, int rest, int morale)
+        public static void SetFromHeartbeat(int drain, int rest, int morale, int powerNap)
         {
+            // POWERNAP: -1 = absent (old host) → ignore; 0 = off; 1 = on. Read BEFORE the drain
+            // early-return so the gate converges even on a host that omits the tuning percents.
+            if (powerNap >= 0) SetPowerNapAllowed(powerNap == 1, "heartbeat");
             if (drain < 0) return;   // older host — keep whatever we have
             Set(drain, rest, morale, "heartbeat");
         }
@@ -163,7 +187,9 @@ namespace BigAmbitionsMP
         {
             static void Prefix(ref float amount)
             {
-                if (InMp && RestPercent != 100) amount *= RestPercent / 100f;
+                if (!InMp) return;
+                if (RestPercent != 100) amount *= RestPercent / 100f;
+                if (PowerNapOn && PowerNapAllowed && amount > 0f && MPRestSync.SeatedInBed()) amount *= PowerNapFactor;   // POWERNAP: local toggle, host-gated, bed only (review r1: never triple a consumable or the limo)
             }
         }
 

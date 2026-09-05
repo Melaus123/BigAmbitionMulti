@@ -651,6 +651,7 @@ namespace BigAmbitionsMP
             if (!MPStoreCarryForward.Busy)       // lean-A ordering: the migrator waits out a pending carry (it would race the copy's renames otherwise)
                 MPStoreMigration.RunIfNeeded();  // store v2 M2: one-time flat→pid migration, first frame the version resolves
             MPRadioSync.Tick();   // round-227: debounced volume-drag flush
+            PlayerColours.Tick();   // 2026-09-05 colours: one repaint + options re-registration per frame, at most
             BillboardAdSync.Tick();   // round-290: own billboard campaigns → peers (diff-triggered + heartbeat)
 #if BAMP_DEV
             TestDrive.Tick();   // round-239 (registered in 04-probes.md): file-drop test command channel — inert until <DataRoot>\testdrive\ exists
@@ -1411,6 +1412,8 @@ namespace BigAmbitionsMP
         private RectTransform? _dockXRT;
         private RectTransform? _tgtM1h, _tgtM15, _tgtP15, _tgtP1h, _tgtP1d, _skipToggleRT;   // _tgtP1d: "+1d" (user-approved 2026-09-05)
         private RectTransform? _dockSellRT;   // BOAT-SELL-DOCK: shown only while sleeping on an owned boat (user-approved 2026-09-05)
+        private RectTransform? _dockNapRT;    // POWERNAP: shown only while lying in a BED and the host allows it (user-approved 2026-09-05)
+        private Image? _dockNapImg;
         private bool _skipCommitNudge;   // a wake target was adjusted without committing → pulse "Request time skip"
         private readonly RectTransform?[] _presetRT = new RectTransform?[4];
         private static readonly int[] PresetHours = { 7, 12, 18, 22 };
@@ -1463,6 +1466,12 @@ namespace BigAmbitionsMP
                 bool show = (inActivity && MPRestSync.AvatarInActivity()) || loiter;
                 _restUiHover = false;   // recomputed below; EVERY early return must leave it false
 
+                // POWERNAP E2 (belt and braces with MPRestSync.UpdateSeated): the nap ends the moment the
+                // local player is no longer in a bed, or the host withdraws the option. Placed ABOVE every
+                // early return below so a hidden dock cannot leave a nap stuck on.
+                if (MPNeedsTuning.PowerNapOn && !(MPNeedsTuning.PowerNapAllowed && MPRestSync.SeatedInBed()))
+                    MPNeedsTuning.SetPowerNap(false);
+
                 // ESCAPE HATCH — independent of any UI existing: movement keys
                 // always stand you up (a half-built dock once trapped a player).
                 // Typed letters are NOT movement (round-194).
@@ -1505,6 +1514,17 @@ namespace BigAmbitionsMP
                 {
                     bool boat = !loiter && MPRestSync.SeatedOnOwnBoat();
                     if (_dockSellRT.gameObject.activeSelf != boat) _dockSellRT.gameObject.SetActive(boat);
+                }
+                // POWERNAP: same slot as Sell — the two can never coincide (a boat is not a bed). Hidden means no
+                // click path at all. ON is shown in the dock's own active colour (the toggle's "voting" green).
+                if (_dockNapRT != null)
+                {
+                    bool nap = !loiter && MPNeedsTuning.PowerNapAllowed && MPRestSync.SeatedInBed();
+                    if (_dockNapRT.gameObject.activeSelf != nap) _dockNapRT.gameObject.SetActive(nap);
+                    if (nap && _dockNapImg != null)
+                        _dockNapImg.color = MPNeedsTuning.PowerNapOn
+                                          ? new Color(0.24f, 0.60f, 0.31f, 1f)    // dock active/pressed colour (skip toggle, voting)
+                                          : new Color(0.24f, 0.27f, 0.37f, 1f);   // nudge-button background
                 }
 
                 // The X is UNCONDITIONAL: it used to mirror the game's
@@ -1631,6 +1651,14 @@ namespace BigAmbitionsMP
                 {
                     Plugin.Logger.LogInfo("[Rest] dock click: sell boat → BoatController.Sell (the game's confirmation follows).");
                     MPRestSync.SellCurrentBoat();
+                    return;
+                }
+                // POWERNAP (user-approved 2026-09-05): local toggle — a second press stops it. No wire traffic:
+                // energy is per-player local state, so there is nothing to arbitrate.
+                if (_dockNapRT != null && _dockNapRT.gameObject.activeSelf && RectHit(_dockNapRT, mp))
+                {
+                    MPNeedsTuning.SetPowerNap(!MPNeedsTuning.PowerNapOn);
+                    Plugin.Logger.LogInfo($"[Rest] dock click: power nap → {(MPNeedsTuning.PowerNapOn ? "ON" : "off")}.");
                     return;
                 }
                 // Every dock interaction logs ONE line: reporters rarely answer follow-ups, so the
@@ -1788,6 +1816,13 @@ namespace BigAmbitionsMP
                 sellL.fontSize = 13;
                 _dockSellRT = sellRT;
                 sellRT.gameObject.SetActive(false);   // TickRestUI shows it only while sleeping on an owned boat
+                // POWERNAP (user-approved 2026-09-05): the SAME slot, size and build as Sell — bed and own-boat
+                // never coincide, so the two never fight for it. Background = the nudge buttons' grey.
+                var (napRT, napL) = MakeDockButton("Power nap", new Vector2(14f, 6f), 184f, new Color(0.24f, 0.27f, 0.37f, 1f), 27f);
+                napL.fontSize = 13;
+                _dockNapRT  = napRT;
+                _dockNapImg = napRT.GetComponent<Image>();
+                napRT.gameObject.SetActive(false);   // TickRestUI shows it only while lying in a bed with the option on
 
                 _dock.SetActive(false);
                 Plugin.Logger.LogInfo("[RestDock] dock built OK.");
@@ -5249,6 +5284,13 @@ namespace BigAmbitionsMP
                     _hostSettings.DisableEnergy      = m.TuneNeedsDrain == 0;
                     Plugin.Logger.LogInfo($"[MenuUI] lobby mirrors save tuning: drain={m.TuneNeedsDrain}% rest={m.TuneRestSpeed}% morale={m.TuneMoraleTempo}% ('{name}').");
                 }
+                // POWERNAP: independent of the tuning percents — a manifest that predates it reads -1 and the
+                // lobby keeps the default (on).
+                if (m != null && m.TunePowerNap >= 0)
+                {
+                    _hostSettings.PowerNapAllowed = m.TunePowerNap == 1;
+                    Plugin.Logger.LogInfo($"[MenuUI] lobby mirrors save power nap: {_hostSettings.PowerNapAllowed} ('{name}').");
+                }
                 // Handoff slice 4: hosting a SHARED world (someone else hosted it last) from a
                 // mirror that hasn't been refreshed in days — if the group played since, a newer
                 // copy exists on another member's machine. Log-only, report-visible (round-58 style).
@@ -7225,6 +7267,10 @@ namespace BigAmbitionsMP
             SettingsNumRow (ct, ref y, "Needs drain %", "Energy & hunger drain speed as % of normal. 0 = off entirely (no sleep/food needs).",
                             () => _hostSettings.NeedsDrainPercent, v => { _hostSettings.NeedsDrainPercent = (int)v; _hostSettings.DisableEnergy = (int)v == 0; },
                             1f, 0f, 100f, "0");
+            // Tooltip: the user-approved 'Power nap' description (2026-09-05, specifics removed on request); the row label and this
+            // text are the only new on-screen strings on this row.
+            SettingsBoolRow(ct, ref y, "Power nap", "Lets players in a bed recover rest faster while napping. Off hides the button for everyone.",
+                            () => _hostSettings.PowerNapAllowed, v => _hostSettings.PowerNapAllowed = v);
             SettingsNumRow (ct, ref y, "Rest speed %", "How fast energy recovers while resting (bed/bench/car), as % of normal.",
                             () => _hostSettings.RestSpeedPercent, v => _hostSettings.RestSpeedPercent = (int)v,
                             10f, 10f, 1000f, "0");
@@ -7365,7 +7411,7 @@ namespace BigAmbitionsMP
             // Hover → tooltip following the cursor
             string? desc = null;
             foreach (var t in _settingsTips)
-                if (RectHit(t.rt, ms)) { desc = t.desc; break; }
+                if (RectHit(t.rt, ms)) { if (!string.IsNullOrEmpty(t.desc)) desc = t.desc; break; }   // POWERNAP: an empty desc must not pop an empty tooltip box
 
             if (_tooltipGO != null && _tooltipTxt != null)
             {
@@ -7851,6 +7897,7 @@ namespace BigAmbitionsMP
                         m.TuneNeedsDrain   = _hostSettings.NeedsDrainPercent;
                         m.TuneRestSpeed    = _hostSettings.RestSpeedPercent;
                         m.TuneMoraleTempo  = _hostSettings.MoraleTempoPercent;
+                        m.TunePowerNap     = _hostSettings.PowerNapAllowed ? 1 : 0;   // POWERNAP
                         MPSaveManager.WriteManifest(name, m);
                         Plugin.Logger.LogInfo($"[MenuUI] save tuning authority updated: drain={m.TuneNeedsDrain}% rest={m.TuneRestSpeed}% morale={m.TuneMoraleTempo}% → '{name}'.");
                     }

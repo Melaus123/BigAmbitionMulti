@@ -243,6 +243,10 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"BigAmbitionsMP loading (official loader, modId='{context.ModId}', root='{context.ModRootPath}')...");
 
             MPConfig.Init(context.ModRootPath);
+            // 2026-09-05 colours: register the game's Mods tab section (no rows known yet at load, so this is a no-op /
+            // removal until a session provides names); every later roster change re-registers it from PlayerColours.Tick.
+            try { PlayerColours.ModId = context.ModId; PlayerColours.RegisterOptions(); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Colours] options registration: {ex.Message}"); }
             MPBugReport.MarkSessionStarted();
             MPBugReport.CachePaths();   // bug-report v2: persistentDataPath is main-thread-only; the peer-log responder runs off-thread
 
