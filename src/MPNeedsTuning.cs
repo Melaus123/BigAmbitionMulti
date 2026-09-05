@@ -103,8 +103,57 @@ namespace BigAmbitionsMP
         {
             static void Prefix(ref float amount)
             {
-                if (InMp && DrainPercent != 100) amount *= DrainPercent / 100f;
+                if (!InMp) return;
+                if (DrainPercent != 100) amount *= DrainPercent / 100f;
+                // NEEDS-MENU-FREEZE (user 2026-09-05): under 10 energy or hunger, nothing drains while a menu is open.
+                // Downward only — GenerateEnergy is untouched. Stateless: decided on every spend, nothing to unstick.
+                if (amount > 0f && MenuFreeze.Active()) amount = 0f;
             }
+        }
+
+        /// <summary>NEEDS-MENU-FREEZE: the menu composite and the threshold test. Menus = the phone/full menu (every phone-icon
+        /// window opens inside it: Topbar.cs:330/:335 → fullMenu.ShowApp), the pause menu, the city map, Options, the interior
+        /// designer, the purchase / vehicle-purchase panels and HUD dialogs (NOT the activity panel: PlayerActivityUI.IsPanelOpen is true for the whole of every activity — review r1) (the same set the game's own
+        /// EnergyHelper.GoToHospitalIsEnabled treats as "busy in a UI", minus vehicles and the subway). NOT vehicles, NOT
+        /// placement mode (play, not menus). Any flag read that throws counts as "not open".</summary>
+        internal static class MenuFreeze
+        {
+            public const float Threshold = 10f;   // 0–100 scale; user-fixed
+            private static bool _lastActive;
+            private static int _logged;
+
+            internal static bool Active()
+            {
+                bool active = false;
+                try
+                {
+                    var cur = SaveGameManager.Current;
+                    if (cur != null && (cur.Energy < Threshold || cur.Hunger < Threshold) && MenuOpen()) active = true;
+                }
+                catch { active = false; }
+                if (SaveGameManager.Current == null) _lastActive = false;   // new session: forget the previous edge
+                if (active != _lastActive)
+                {
+                    _lastActive = active;
+                    if (_logged++ < 20) { try { Plugin.Logger.LogInfo($"[Needs] menu freeze {(active ? "ON" : "off")} (energy {SaveGameManager.Current?.Energy:0.#}, hunger {SaveGameManager.Current?.Hunger:0.#})."); } catch { } }
+                }
+                return active;
+            }
+
+            internal static bool MenuOpen()
+            {
+                if (Flag(() => UI.Smartphone.FullMenu.IsOpen)) return true;
+                if (Flag(() => UI.MiniMenu.MiniMenu.IsOpen)) return true;
+                if (Flag(() => CityMap.IsOpen)) return true;
+                if (Flag(() => OptionsGuard.IsOptionsOpen())) return true;   // live object state, not the sticky Options.IsVisible static (review r1)
+                if (Flag(() => UI.InteriorDesigner.InteriorDesignerUI.IsOpen)) return true;
+                if (Flag(() => UI.Purchase.PurchaseUI.IsPanelOpen)) return true;
+                if (Flag(() => UI.PurchaseVehicle.PurchaseVehicleUI.IsPanelOpen)) return true;
+                if (Flag(() => InstanceBehavior<UI.UIs>.Instance.playerHUD.dialogUI.isPanelOpen)) return true;
+                return false;
+            }
+
+            private static bool Flag(Func<bool> read) { try { return read(); } catch { return false; } }
         }
 
         // ── Rest: regen choke point (bed/bench/car/hospital) — composes with the

@@ -558,6 +558,7 @@ namespace BigAmbitionsMP
             MPRegisterSync.StripOrphanSyntheticEmployees("world-ready");   // clear duty-staff a prior save left behind
             MPRegisterSync.DemoteForeignAssignedStaff("world-ready");      // round-196: interrupted-transfer staff residue
             MPSaveIntegrity.RunSweep("world-ready");   // dangling-reference repair/detect (includes duty-shift repair); summary rides bug reports
+            OptionsGuard.PinClock("world-ready");   // OPTIONS-GUARD: a Game speed set before joining must not outrun the host clock
             GameStatePatcher.SweepLedgerVsRivalBusinesses("world-ready");   // round-50: drop player reservations on AI-rival-run addresses (host-only inside)
             GameStatePatcher.HealHollowAiLayouts("world-ready");   // field 175635: hosting from a client mirror — restore AI-shop layouts from business defaults (host-only inside)
             GameStatePatcher.ReconcileLoadedNeedsFlag();   // round-53: the drain dial owns the save's baked energy on/off after load (host-only inside)
