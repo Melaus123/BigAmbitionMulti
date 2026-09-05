@@ -1479,7 +1479,17 @@ namespace BigAmbitionsMP
                     BuildDock();
                     if (_dock == null) return;
                 }
-                if (_dock!.activeSelf != show) _dock.SetActive(show);
+                if (_dock!.activeSelf != show)
+                {
+                    _dock.SetActive(show);
+                    // RESTDOCK-LOG (bundle 20260903-180322 "rest menu is gone", F-2026-09-05-U): the log could not say whether the
+                    // dock was on screen. One line per flip with every gate value; capped so a flicker cannot flood the log.
+                    if (_dockFlipLogged++ < 200 || _dockFlipLogged % 200 == 0)
+                    {
+                        try { Plugin.Logger.LogInfo($"[RestDock] {(show ? "SHOWN" : "HIDDEN")} (#{_dockFlipLogged}) — {MPRestSync.DescribeDockGate()}"); }
+                        catch { }
+                    }
+                }
                 _restUiHover = false;
                 if (!show) return;
 
@@ -1643,6 +1653,7 @@ namespace BigAmbitionsMP
         }
 
         private bool _dockBuildFailed;
+        private int _dockFlipLogged;   // RESTDOCK-LOG: show/hide lines, capped per process
         private Sprite? _dockSprite;
         // Chat's per-frame contribution to the input-suppression flag (the
         // flag itself is owned by LateUpdate).

@@ -162,17 +162,33 @@ namespace BigAmbitionsMP
         /// state (HasNavigationDisabled && not moving-towards), so once seated it reliably shows.</summary>
         public static bool AvatarInActivity()
         {
+            var g = ReadAvatarGate();
+            return g.uiFound && g.navDisabled && !g.moving;
+        }
+
+        // RESTDOCK-LOG (bundle 20260903-180322, F-2026-09-05-U): the two game flags behind AvatarInActivity, read ONCE
+        // here for both the gate and the dock's show/hide log line. uiFound=false → the activity UI object is missing
+        // (the gate then reads false, as before).
+        private static (bool uiFound, bool navDisabled, bool moving) ReadAvatarGate()
+        {
             try
             {
                 var (ui, uiType) = GetActivityUiCached();
-                if (ui == null || uiType == null) return false;
+                if (ui == null || uiType == null) return (false, false, false);
                 bool navDisabled = (bool)(uiType.GetMethod("HasNavigationDisabled",
                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.Invoke(null, null) ?? false);
                 bool moving = (bool)(uiType.GetProperty("IsMovingTowardsActivity",
                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null) ?? false);
-                return navDisabled && !moving;
+                return (true, navDisabled, moving);
             }
-            catch { return false; }
+            catch { return (false, false, false); }
+        }
+
+        /// <summary>One-line description of everything that gates the seated dock — for the dock's show/hide log line.</summary>
+        public static string DescribeDockGate()
+        {
+            var g = ReadAvatarGate();
+            return $"seated={Seated} seatedForUi={SeatedForUi} loitering={Loitering} uiFound={g.uiFound} navDisabled={g.navDisabled} movingTowards={g.moving} state={ActivityState} activity='{ActivityName}'";
         }
 
         public static string ActivityName { get; private set; } = "";
