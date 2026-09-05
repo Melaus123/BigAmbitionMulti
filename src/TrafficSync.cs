@@ -1329,8 +1329,17 @@ namespace BigAmbitionsMP
                     if (ClientServiceSimEnabled) UpdateTrafficAnchors();      // the belt (was unreachable inside Tick)
                     return;
                 }
-                if (_pendingHandBack) { HandBackToVanilla("offline fork retry"); return; }   // clears _pendingHandBack once a feed lands
-                if (_anchorIsGhost)
+                if (_pendingHandBack)
+                {
+                    // Clears _pendingHandBack once a feed lands. Review r6 #3 / r7 #5: retry only when something CAN be fed — the
+                    // parked ghost (an outside position on record), the live character outdoors, or the live character inside an
+                    // on-grid interior (UpdateTrafficAnchors feeds those too); an off-grid interior with nothing on record waits for
+                    // the door instead of re-running the hand-back every frame for nothing.
+                    var live = PlayerHelper.PlayerController?.Character?.transform;
+                    if (_hasOutsidePos || !BuildingManager.IsInsideBuilding || (live != null && AnchorFeedable(live))) HandBackToVanilla("offline fork retry");
+                    return;
+                }
+                if (_anchorIsGhost && !BuildingManager.IsInsideBuilding)   // review r5 #5: no promotion attempts indoors (an off-grid interior would refuse every frame and log every ~10 s)
                 {
                     // Review r4 #2: the offline fork was handed back on the parked ghost anchor; nothing else would ever move it.
                     // Promote to the live character the first frame it is feedable (vanilla parity: one camera that follows the player).
@@ -1375,8 +1384,6 @@ namespace BigAmbitionsMP
                 if (MPClient.IsConnected) return;                                   // review r2 #7: a live link means the clamp still rules
                 if (!TrafficManager.HasInstance || !TrafficManager.IsInitialized) return;
                 var tm = TrafficManager.Instance;
-                bool insideNow = false; try { insideNow = BuildingManager.IsInsideBuilding; } catch { }
-                if (!insideNow) tm.enabled = true;                                  // review r2 #5 / r4 #3: re-enable only outdoors — indoors (or fast-forward) the GAME pauses Gley itself once the link is gone (Patch_TM_SetPause blocks SetPause only while hosting/connected)
                 // Review r2 #4: feed the LIVE character transform — vanilla parity (the game's single camera follows the
                 // player indoors too) — never the pinned ghost anchor UpdateTrafficAnchors uses inside a building, because
                 // nothing refreshes Gley's camera list in the offline fork (the game never calls UpdateCamera after start).
@@ -1406,12 +1413,19 @@ namespace BigAmbitionsMP
                     return;
                 }
                 _pendingHandBack = false; _handBackWarned = false; _anchorIsGhost = usedGhost;   // review r4 #2: TickDisconnected promotes a ghost anchor to the live player
+                // Review r5 #2/#3: re-enable the manager only AFTER a feed is confirmed (never let it run on the previous camera
+                // list), and only outdoors: while the link was up Patch_TM_SetPause blocked the game's entry-time pause, so indoors the
+                // manager is normally already enabled; if the player entered a building AFTER the drop the game paused Gley itself
+                // and its exit event (VehicleHelper.OnExitBuilding → SetPause(false)) re-enables it — respect that.
+                bool insideNow = false; try { insideNow = BuildingManager.IsInsideBuilding; } catch { }
+                bool fastForward = false; try { fastForward = UnityEngine.Time.timeScale > 1.01f; } catch { }
+                if (!insideNow && !fastForward) tm.enabled = true;   // review r6 #4: the game pauses Gley during fast-forward too (GameSpeedController.ChangeTimeScale → SetPause(FastForward || inside)); its next speed change re-enables
                 if (density >= 0)
                 {
                     SelfDensityCall = true;                                         // review r2 #8: our own write, never recorded as the game's request
-                    try { tm.SetTrafficDensity(density); } catch { } finally { SelfDensityCall = false; }
+                    try { tm.SetTrafficDensity(density); } catch (System.Exception ex) { Plugin.Logger.LogWarning($"[TrafficSync] hand-back ({why}): density restore failed: {ex.Message}"); } finally { SelfDensityCall = false; }   // review r6 #5: never silent
                 }
-                Plugin.Logger.LogInfo($"[TrafficSync] traffic handed back to vanilla ({why}): density {(density >= 0 ? density.ToString() : "unchanged — no game request recorded")}, anchor → local player.");
+                Plugin.Logger.LogInfo($"[TrafficSync] traffic handed back to vanilla ({why}): density {(density >= 0 ? density.ToString() : "unchanged — no game request recorded")}, anchor → {(usedGhost ? "parked ghost (promoted to the player once outdoors)" : "local player")}.");   // review r6 #5: say which anchor
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[TrafficSync] HandBackToVanilla({why}): {ex.Message}"); }
         }

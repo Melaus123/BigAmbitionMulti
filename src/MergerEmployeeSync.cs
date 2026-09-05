@@ -287,6 +287,10 @@ namespace BigAmbitionsMP
                     try { if (p.Demands != null) { inst.demands.Clear(); inst.demands.AddRange(p.Demands); } } catch { }
                     for (int i = gi.EmployeeInstances.Count - 1; i >= 0; i--)
                         if (gi.EmployeeInstances[i]?.id == inst.id) gi.EmployeeInstances.RemoveAt(i);
+                    // H-EMP-2 (review r7 #3): the game's hire step stamps dayHired and rolls the first sick day; a fresh record left at 0
+                    // is marked absent on the first daily pass (nextSickDay <= Day). Rolled after satisfaction is set (the roll reads it).
+                    try { inst.dayHired = SaveGameManager.Current.Day; inst.nextSickDay = Helpers.EmployeeHelper.GetNextSickDay(inst); inst.complaintData?.ResetHoursUntilNextComplaint(); }   // review r8 #1: the game's hire step also grants the complaint grace
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[MergerStaff] H-EMP-2 stamp failed for '{inst.id}': {ex.Message}"); }
                     gi.EmployeeInstances.Add(inst);
                     try { Helpers.EmployeeHelper.EmployeeInstancesDictionary[inst.id] = inst; } catch { }
                     Plugin.Logger.LogInfo($"[MergerStaff] ADOPTED '{inst.characterData?.name}' ({inst.id}) into '{p.AddressKey}' at ${p.Wage:F0}/h (from '{p.PlayerId}').");

@@ -2444,7 +2444,7 @@ namespace BigAmbitionsMP
         /// re-price / re-value / overtake) while leaving them in the world so competition still applies.
         /// NOTE: a disconnected player STAYS in ClientPlayerRoster for the host session (their buildings
         /// are held for reconnect), so this keeps returning true while they're away — the shield does not
-        /// lapse on a drop, only on a full host restart.</summary>
+        /// lapse on a drop, only when a host session STARTS (a fresh process or an in-process re-host — MPServer.Start clears it; review r9/r10).</summary>
         public static bool IsSessionPlayerRivalId(string? owner)
         {
             try

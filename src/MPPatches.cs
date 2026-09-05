@@ -4804,7 +4804,7 @@ namespace BigAmbitionsMP
         {
             static bool Prefix(BuildingRegistration __instance)
             {
-                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return true;   // review r7 #2: holds in the offline fork
                 if (GameStatePatcher.IsAnyPlayerBusiness(__instance))
                 {
                     Plugin.Logger.LogInfo("[EconShield] blocked AI shutdown of another player's business.");
@@ -4822,7 +4822,7 @@ namespace BigAmbitionsMP
         {
             static void Postfix(string rivalId, ref float __result)
             {
-                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return;   // review r6 #1: the offline fork keeps this shield (as the valuation Prefix does) — with the valuation at $0 and no shield, any $1 offer took a friend's replica
                 if (GameStatePatcher.IsSessionPlayerRivalId(rivalId))
                 {
                     __result = float.MaxValue;
@@ -4858,7 +4858,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return true;   // review r6 #1: the offline fork keeps this shield
                     var reg = ___bizManBusiness?.buildingRegistration;
                     if (reg == null) return true;
                     if (!GameStatePatcher.IsAnyPlayerBusiness(reg))
@@ -4889,6 +4889,14 @@ namespace BigAmbitionsMP
                     if (!float.TryParse(___offerAmountInputField?.text, out var amount) || amount <= 0f)
                     {
                         try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, "common_notification_invalid_amount"); } catch { }
+                        return false;
+                    }
+                    if (!MPServer.IsRunning && !MPClient.IsConnected)
+                    {
+                        // Review r7 #1: in the offline fork MPHub.OfferBusiness would book the offer locally (reserving the money)
+                        // and SendHub would drop it silently — the "Offer sent" notice below would be a lie. Same refusal as above.
+                        Plugin.Logger.LogWarning($"[Offers] offer for '{addr}' refused — no host link (offline fork); nothing can be sent.");
+                        try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, "You can't buy out another player's business."); } catch { }
                         return false;
                     }
                     if (MPHub.OfferBusiness(owner, amount, addr, biz))
@@ -4944,7 +4952,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return true;   // review r6 #1: the offline fork keeps this shield
                     if (buildingRegistration == null || !GameStatePatcher.IsAnyPlayerBusiness(buildingRegistration)) return true;
                     string key = GameStateReader.AddressKey(buildingRegistration);
                     if (AuthorizedPlayerBusinessTransfer == key)
@@ -6836,7 +6844,7 @@ namespace BigAmbitionsMP
         {
             static bool Prefix(BuildingManager __instance)
             {
-                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return true;   // review r7 #2: holds in the offline fork
                 try
                 {
                     var reg = __instance.buildingRegistration;
@@ -6853,7 +6861,7 @@ namespace BigAmbitionsMP
         {
             static void Postfix(BuildingRegistration buildingRegistration, ref bool __result)
             {
-                if (!__result || (!MPServer.IsRunning && !MPClient.IsClientInWorld)) return;
+                if (!__result || (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork)) return;   // review r7 #2: holds in the offline fork
                 try
                 {
                     if (GameStatePatcher.IsAnyPlayerBusiness(buildingRegistration))
@@ -6871,7 +6879,7 @@ namespace BigAmbitionsMP
         {
             static void Postfix(BuildingRegistration buildingRegistration, ref bool __result)
             {
-                if (!__result || (!MPServer.IsRunning && !MPClient.IsClientInWorld)) return;
+                if (!__result || (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork)) return;   // review r7 #2: holds in the offline fork
                 try
                 {
                     if (GameStatePatcher.IsAnyPlayerBusiness(buildingRegistration))
@@ -6896,7 +6904,7 @@ namespace BigAmbitionsMP
             private static float _nextLog;
             static bool Prefix(BuildingRegistration buildingRegistration)
             {
-                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return true;   // review r7 #2: the offline fork keeps this shield (the NRE it exists for is reachable there too)
                 try
                 {
                     if (buildingRegistration != null && GameStatePatcher.IsAnyPlayerBusiness(buildingRegistration))

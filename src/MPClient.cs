@@ -199,6 +199,7 @@ namespace BigAmbitionsMP
             ResetClockSyncFreshness();
             HostExpressLane = false;
             ServedLoadGen   = 0;   // round-284: a load ticket is only meaningful to the host that minted it
+            OfflineFork     = false;   // review r5 #6: an in-place reconnect ends the offline fork
 
             // RECONNECT: the host's vote tally + any in-flight skip are gone on its side — clear our stale
             // copy so a leftover SkipActive or phantom vote rows don't wedge the rest dock / world-clock

@@ -653,6 +653,7 @@ namespace BigAmbitionsMP
             // Reset lobby state for a fresh session
             IsInLobby = true;
             LobbyReset(MPConfig.PlayerId); // host is always the first player
+            GameStatePatcher.ClientPlayerRoster.Clear();   // review r9 #6: a fresh session starts with an empty roster (it refills from PlayerProfiles and rides the rivals snapshot). Here, not in Stop(): a machine that was a GUEST in the previous world never ran Stop(), and its roster would ship that world's members to this world's clients.
             EnforceStartingCash = true;
             StartingCashByPlayer.Clear();
             StartingAgeByPlayer.Clear();
@@ -5988,6 +5989,16 @@ namespace BigAmbitionsMP
                     if (string.IsNullOrEmpty(playerId)) continue;
                     if (!seen.Add(playerId)) continue;
                     snap.Rivals.Add(new RivalInfo { Id = playerId, Name = DisplayNameFor(playerId), IsPlayer = true });
+                }
+                // Review r7 #4: members who DROPPED are still session players — their buildings are held for reconnect and the
+                // host's roster never forgets them — but LobbyPlayers loses them, so every client's roster forgot a dropped owner
+                // on its next snapshot and the other-player-shop lock / valuation / takeover shields lapsed there. Ship them too.
+                // (Client consumers: the roster refill and ClientRivalNames take IsPlayer entries; the leaderboard appends one row per roster key other than the local player's — so a dropped member keeps a row there, as on the host; rival caches / UUID queue skip IsPlayer.)
+                foreach (var kv in GameStatePatcher.ClientPlayerRoster)
+                {
+                    var playerId = kv.Key;
+                    if (string.IsNullOrEmpty(playerId) || !seen.Add(playerId)) continue;
+                    snap.Rivals.Add(new RivalInfo { Id = playerId, Name = string.IsNullOrEmpty(kv.Value) ? DisplayNameFor(playerId) : kv.Value, IsPlayer = true });
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BuildRivalsSnapshot: {ex.Message}"); }

@@ -58,7 +58,7 @@ namespace BigAmbitionsMP
                 // The normal case: another SESSION player is stamped as the runner and this machine does not rent it.
                 // (An AI rival's stamp is not a player — AI shop pages keep their native takeover controls.)
                 string stamp = ""; try { stamp = reg.businessOwnerRivalId?.ToString() ?? ""; } catch { }
-                return !string.IsNullOrEmpty(stamp) && stamp != MPConfig.PlayerId && GameStatePatcher.IsSessionPlayerId(stamp);
+                return !string.IsNullOrEmpty(stamp) && stamp != MPConfig.PlayerId && GameStatePatcher.IsSessionPlayerRivalId(stamp);   // review r6 #2: roster-inclusive — the live-only test let the whole lock (incl. the terminate-contract hard stop) lapse while the owner was disconnected
             }
             catch { return false; }
         }

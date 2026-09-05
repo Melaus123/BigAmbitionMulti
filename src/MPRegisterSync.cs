@@ -2360,10 +2360,22 @@ namespace BigAmbitionsMP
                 var promote = new List<string>();
                 foreach (var kv in _injectedStaff)
                     if (kv.Value.addr == addr) promote.Add(kv.Key);
-                foreach (var id in promote) { _injectedStaff.Remove(id); n++; }
+                int stamped = 0;
+                foreach (var id in promote)
+                {
+                    // H-EMP-2 (review r1 #3, verified 2026-09-04): the game's own hire step (EmployeeHelper.HireCandidate) stamps dayHired and
+                    // rolls the first sick day; the factory leaves both at 0, and `nextSickDay <= Day` made the WHOLE inherited staff absent
+                    // on the first daily pass after a purchase. Stamp at the moment a record becomes this player's real staff.
+                    if (_injectedStaff.TryGetValue(id, out var rec) && rec.inst != null)
+                    {
+                        try { rec.inst.dayHired = SaveGameManager.Current.Day; rec.inst.nextSickDay = Helpers.EmployeeHelper.GetNextSickDay(rec.inst); rec.inst.complaintData?.ResetHoursUntilNextComplaint(); stamped++; }   // review r8 #1: + the complaint grace
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] H-EMP-2 stamp failed for '{id}': {ex.Message}"); }   // review r7 #6: a silent failure here IS the defect this fixes
+                    }
+                    _injectedStaff.Remove(id); n++;
+                }
                 lock (_rosterByAddr) { _rosterByAddr.Remove(addr); }
                 _rosterApplied.Remove(addr);
-                if (n > 0) Plugin.Logger.LogInfo($"[StaffRoster] PROMOTED {n} injected record(s) at '{addr}' to real staff (business purchased — round-196).");
+                if (n > 0) Plugin.Logger.LogInfo($"[StaffRoster] PROMOTED {n} injected record(s) at '{addr}' to real staff (business purchased — round-196); stamped hire day + sick-day roll on {stamped} (H-EMP-2).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] promote '{addr}': {ex.Message}"); }
             return n;
@@ -2399,6 +2411,8 @@ namespace BigAmbitionsMP
                     try { if (s.Gender >= 0) inst.characterData.gender = (BigAmbitions.Characters.Gender)s.Gender; } catch { }
                     inst.isAbsent = !s.Available; inst.isReplaced = false;
                     ApplyStaffFidelity(inst, s);
+                    try { inst.dayHired = SaveGameManager.Current.Day; inst.nextSickDay = Helpers.EmployeeHelper.GetNextSickDay(inst); inst.complaintData?.ResetHoursUntilNextComplaint(); }   // H-EMP-2: the game's hire-time stamp (after fidelity — the roll reads satisfaction) + the complaint grace (review r8 #1)
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] H-EMP-2 stamp failed for '{s.Id}' — record kept with an unrolled sick day (absent once at the next daily pass, then re-rolled by the game): {ex.Message}"); }   // review r9 #4: a throw here must not lose this record or the rest of the wire staff
                     gi.EmployeeInstances.Add(inst);
                     try { Helpers.EmployeeHelper.EmployeeInstancesDictionary[inst.id] = inst; } catch { }
                     created++;

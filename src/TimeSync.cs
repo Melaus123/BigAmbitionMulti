@@ -293,10 +293,272 @@ namespace BigAmbitionsMP
         // FIRST clock sync of an MP game load WRITES the clock straight to host
         // time (exactly what loading a save does), unconditionally beyond the
         // dead-band.  All later in-session drift keeps the run-only rule.
-        // (Client-AHEAD at join is structurally impossible — the join clock is
-        // always host-derived via LoadData/StartFreshFromHost — so the snap
-        // firing in either direction is purely defensive.)
+        // (Client-AHEAD at join DOES happen — corrected 2026-09-04: an accepted disconnect save can sit up
+        // to DisconnectDayWindow days ahead of the host's own stored save (MPSaveCoordinator), the host may
+        // restart or roll back, and the legacy "no MP session yet" start loads unrelated single-player saves —
+        // so the backward snap is real, rare and usually 1-2 days. ShiftLocalTimeline handles both directions.)
         private static bool _firstSyncSeen;
+
+        /// <summary>H-EMP-1 / H-SNAP-1 (bug class SKIPPED-PASS DAY DIVERGENCE): the JOIN SNAP writes this client's clock to the host's
+        /// day/hour in ONE jump without the game's daily/hourly passes for the hours in between ("no time passed for you"). The game keeps
+        /// future events as absolute day numbers (some with an hour) in the player's own save and consumes them in those passes, so after a
+        /// jump everything inside the gap fires at once (sick days, deliveries, the headhunter's catch-up loop, a tax due day) or is missed
+        /// forever (recruitment campaigns and insurance offers test for the exact day and hour). ONE rule for every schedule the LOCAL
+        /// player owns (round 4, 2026-09-04 — the day-only shift and its three special-case predicates were wrong by up to a day): an item
+        /// due at hour H keeps its place in the sequence of H-o'clock passes — it moves by the number of H-o'clock passes the jump skipped
+        /// (forward) or will re-live (backward). A day-only field is an item at the hour its pass runs (the daily pass at 00:00; the
+        /// wholesale/import pass at 08:00; an insurance offer at HourToSendOffer). Forward, an item at or before the jump start is overdue
+        /// or already consumed and is left alone (it fires at the next pass, as vanilla would); backward, every item moves (one left where
+        /// it was would turn "future" and fire days late — user ruling 2026-09-04). The headhunter's nextRecruit is a distance-from-now and
+        /// moves by the exact jump in minutes. Taxes move by the midnight crossings (`Day - day` counts them). Injected/synthetic staff
+        /// records are display copies — never touched. Then, forward only, if a tax anniversary fell inside the gap the game's own annual
+        /// assessment runs once (user ruling 2026-09-04). Main thread; once per load, right after the clock write.</summary>
+        private static void ShiftLocalTimeline(int fromDay, float fromHourF, int toDay, float toHourF)
+        {
+            try
+            {
+                int fromHour = (int)fromHourF, toHour = (int)toHourF;
+                int fromMoment = fromDay * 24 + fromHour, toMoment = toDay * 24 + toHour;   // hour-granular positions on the game clock
+                float deltaMinutes = ((toDay * 24f + toHourF) - (fromDay * 24f + fromHourF)) * 60f;
+                if (fromMoment == toMoment && System.Math.Abs(deltaMinutes) < 0.5f) return;   // review r4 #2: a sub-hour jump still moves the minute-granular nextRecruit (every hour-granular shift is 0 then)
+                bool backward = toMoment < fromMoment;
+                int lo = System.Math.Min(fromMoment, toMoment), hi = System.Math.Max(fromMoment, toMoment);
+                int crossings = toDay - fromDay;                                             // midnight passes skipped (+) or re-lived (−)
+                var gi = SaveGameManager.Current;
+                if (gi == null) return;
+                if (backward) Plugin.Logger.LogWarning($"[TimeSync] JOIN SNAP: clock moved BACK {(fromMoment - toMoment)} h (day {fromDay} {fromHour:00}:00 → day {toDay} {toHour:00}:00) — schedules move back with it{(crossings != 0 ? "; the game will OVERWRITE the re-lived days' financial summaries and order history and would bill a tax anniversary inside that span again (known divergence, user ruling 2026-09-04)" : "")} (H-SNAP-1).");
+
+                // The shift for an item due at `hour`: how many `hour`-o'clock passes lie strictly inside the jump (lo, hi].
+                int Skipped(int hour)
+                {
+                    int firstDay = lo / 24 + (hour <= lo % 24 ? 1 : 0);
+                    int lastDay  = hi / 24 - (hour >  hi % 24 ? 1 : 0);
+                    int n = lastDay - firstDay + 1;
+                    return n <= 0 ? 0 : (backward ? -n : n);
+                }
+                // Forward: only what was still AHEAD of the jump start moves (an item at or before it is overdue/consumed). Backward: everything.
+                bool Moves(int day, int hour) => backward || day * 24 + hour > fromMoment;
+                // Apply the shift to a day field; true only if it moved (review r4 #3: the counters are the oracle — count moves, not visits).
+                // Never below day 1 (review r4 #6: TimeHelper.GetDayOfWeek throws on a negative day; a consumed item pushed back stays past anyway).
+                bool Shift(ref int dayField, int hour)
+                {
+                    int d = Skipped(hour);
+                    if (d == 0) return false;
+                    int moved = System.Math.Max(1, dayField + d);   // day 1 is the game's first day; TimeHelper.GetDayOfWeek throws on 0 and negatives (review r5 #3)
+                    if (moved == dayField) return false;
+                    dayField = moved;
+                    return true;
+                }
+
+                int staff = 0, campaigns = 0, offers = 0, headhunters = 0, taxes = 0, vehicles = 0, furniture = 0, food = 0, wholesale = 0, imports = 0, moves = 0, installs = 0;
+                try
+                {
+                    var list = gi.EmployeeInstances;
+                    if (list != null)
+                        foreach (var e in list)
+                        {
+                            if (e == null) continue;
+                            string id = e.id ?? "";
+                            if (id.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix) || MPRegisterSync.IsInjectedStaff(id)) continue;
+                            if (!Moves(e.nextSickDay, 0)) continue;   // consumed by the daily pass at 00:00 (EmployeeHelper.RunDaily: nextSickDay <= Day)
+                            if (Shift(ref e.nextSickDay, 0)) staff++;
+                        }
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[TimeSync] timeline shift (staff): {ex.Message}"); }
+                try
+                {
+                    var list = gi.RecruitmentCampaigns;
+                    if (list != null)
+                        foreach (var c in list)
+                        {
+                            if (c == null || c.finished || c.candidateFindTimes == null) continue;
+                            foreach (var t in c.candidateFindTimes)
+                            {
+                                if (t == null || !Moves(t.Day, t.Hour)) continue;   // exact Day && Hour match (RecruitmentCampaign.CheckForCandidates)
+                                if (Shift(ref t.Day, t.Hour)) campaigns++;
+                            }
+                        }
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[TimeSync] timeline shift (campaigns): {ex.Message}"); }
+                try
+                {
+                    var list = gi.healthInsurancePlanOffers;
+                    if (list != null && list.Count > 0)
+                    {
+                        int sendHour = Helpers.HealthInsuranceHelper.HourToSendOffer;   // the game's fixed offer hour (EmployeeHelper.RunHourly: dayToSendOffer == Day at this hour)
+                        foreach (var o in list)
+                        {
+                            if (o == null || o.negotiationFinished || !Moves(o.dayToSendOffer, sendHour)) continue;
+                            if (Shift(ref o.dayToSendOffer, sendHour)) offers++;
+                        }
+                    }
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[TimeSync] timeline shift (offers): {ex.Message}"); }
+                try
+                {
+                    var list = gi.headhunterPlans;
+                    if (list != null)
+                        foreach (var h in list)
+                        {
+                            if (h == null || !h.isRecruiting || h.nextRecruit == null) continue;
+                            // Unconditional, exact: nextRecruit is a distance-from-now the headhunter catches up on during shifts (often
+                            // already past at the jump); moved by the exact jump it stays past by the same minutes — the vanilla catch-up —
+                            // instead of replaying the whole gap one candidate per 0.25-4.25 h.
+                            h.nextRecruit.AddMinutes(deltaMinutes); if (h.nextRecruit.Day < 1) { h.nextRecruit.Day = 1; h.nextRecruit.Hour = 0; h.nextRecruit.Minute = 0f; } headhunters++;   // review r4 #6: never below day 1
+                        }
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[TimeSync] timeline shift (headhunters): {ex.Message}"); }
+                try
+                {
+                    var t = gi.currentUnpaidTaxes;
+                    if (t != null && crossings != 0)
+                    {
+                        // Both move together: `day` is the master (EnsureCurrentTaxesDueDay rewrites dueDay from it); the days elapsed on
+                        // the bill (`Day - day`, a count of midnight passes) stay what they were, so the grace window and the day-21 warning survive.
+                        t.day += crossings; if (t.dueDay > 0) t.dueDay += crossings; taxes = 1;
+                    }
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[TimeSync] timeline shift (taxes): {ex.Message}"); }
+                // Delivery contracts the local player placed (round 2, user ruling 2026-09-04). All five lists hold this machine's own
+                // contracts only (the mod never replicates them; the shared-shop work tabs borrow a remote list only inside one synchronous
+                // native call, never here). Vehicle/food fire on IsInThePast(day, hour); furniture on day >= && hour >=; wholesale/import
+                // on the exact day at the 08:00 pass.
+                try
+                {
+                    var list = gi.vehicleDeliveryContracts;
+                    if (list != null)
+                        foreach (var c in list)
+                        {
+                            if (c == null || !Moves(c.deliveryDay, c.deliveryHour)) continue;
+                            if (Shift(ref c.deliveryDay, c.deliveryHour)) vehicles++;
+                        }
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[TimeSync] timeline shift (vehicle deliveries): {ex.Message}"); }
+                try
+                {
+                    var list = gi.FurnitureDeliveryContracts;
+                    if (list != null)
+                        foreach (var c in list)
+                        {
+                            if (c == null || !Moves(c.dayOfDelivery, c.hourOfDelivery)) continue;
+                            if (Shift(ref c.dayOfDelivery, c.hourOfDelivery)) furniture++;
+                        }
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[TimeSync] timeline shift (furniture deliveries): {ex.Message}"); }
+                try
+                {
+                    var list = gi.FoodDeliveryContracts;   // null on older saves — nothing to shift then
+                    if (list != null)
+                        foreach (var c in list)
+                        {
+                            if (c == null || !Moves(c.dayOfDelivery, c.hourOfDelivery)) continue;
+                            if (Shift(ref c.dayOfDelivery, c.hourOfDelivery)) food++;
+                        }
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[TimeSync] timeline shift (food deliveries): {ex.Message}"); }
+                try
+                {
+                    var list = gi.DeliveryContracts;
+                    if (list != null)
+                        foreach (var c in list)
+                        {
+                            if (c == null || !c.enabled || !Moves(c.nextDeliveryDay, 8)) continue;
+                            if (Shift(ref c.nextDeliveryDay, 8)) wholesale++;   // keeps its place among the 08:00 passes; the weekday label follows (one off-Monday delivery, then the game's next-Monday rule resumes)
+                        }
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[TimeSync] timeline shift (wholesale deliveries): {ex.Message}"); }
+                try
+                {
+                    var list = gi.importPartnerships;
+                    if (list != null)
+                        foreach (var p in list)
+                        {
+                            if (p == null || !p.isActive || !Moves(p.nextDeliveryDay, 8)) continue;
+                            if (Shift(ref p.nextDeliveryDay, 8)) imports++;
+                        }
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[TimeSync] timeline shift (import partnerships): {ex.Message}"); }
+
+                // Review r4 #1: two more schedules the local player owns — a booked business move (hourly: movingDay <= Day && movingHour <= Hour)
+                // and an interior-installation order (daily pass: dayOfInstallation <= Day). Both `<=`, so nothing is lost or doubled — but left
+                // unshifted, a move booked for days ahead would execute within an hour of joining.
+                try
+                {
+                    var list = gi.movingServiceContracts;
+                    if (list != null)
+                        foreach (var c in list)
+                        {
+                            if (c == null || !Moves(c.movingDay, c.movingHour)) continue;
+                            if (Shift(ref c.movingDay, c.movingHour)) moves++;
+                        }
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[TimeSync] timeline shift (moving contracts): {ex.Message}"); }
+                try
+                {
+                    var list = gi.interiorInstallationFirmContracts;
+                    if (list != null)
+                        foreach (var c in list)
+                        {
+                            if (c == null || !Moves(c.dayOfInstallation, 0)) continue;
+                            if (Shift(ref c.dayOfInstallation, 0)) installs++;
+                        }
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[TimeSync] timeline shift (installation contracts): {ex.Message}"); }
+
+                Plugin.Logger.LogInfo($"[TimeSync] JOIN SNAP: timeline shifted — jump {(toMoment - fromMoment):+0;-0} h = {deltaMinutes:+0.#;-0.#} min ({crossings:+0;-0} midnight pass(es)): staff={staff} campaigns={campaigns} offers={offers} headhunters={headhunters} taxBill={taxes} vehicles={vehicles} furniture={furniture} food={food} wholesale={wholesale} imports={imports} moves={moves} installs={installs} — no time passed for you (H-EMP-1/H-SNAP-1).");
+
+                if (!backward) RunSkippedAnnualAssessment(gi, fromDay, toDay);   // forward only: a rewind across an anniversary is the game's own re-bill (left, ruling 2026-09-04)
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[TimeSync] timeline shift: {ex.Message}"); }
+        }
+
+        /// <summary>H-SNAP-1 (user ruling 2026-09-04): the game bills the year's taxes only on the exact anniversary day
+        /// (TaxHelper.PlayerShouldDoTaxes: Day % daysPerYear == 0), so a jump across it skipped the bill outright. When an anniversary
+        /// fell inside the skipped days and no bill is outstanding, run the game's own assessment now (the same private routine the
+        /// daily pass calls), gated by the game's own sales threshold. Its window is the year ending today, so the bill is never higher
+        /// than the anniversary's would have been and never doubles the next one. Dated today, 20 days to pay — the game's usual.</summary>
+        private static void RunSkippedAnnualAssessment(GameInstance gi, int fromDay, int toDay)
+        {
+            try
+            {
+                int dpy = gi.gameVariables?.daysPerYear ?? 0;
+                if (dpy <= 0) return;
+                if (toDay / dpy <= fromDay / dpy) return;                       // no anniversary inside (fromDay, toDay]
+                int anniversary = (toDay / dpy) * dpy;
+                if (gi.currentUnpaidTaxes != null)
+                {
+                    Plugin.Logger.LogInfo($"[TimeSync] JOIN SNAP: tax anniversary day {anniversary} fell inside the skipped days — assessment NOT run, a bill is still outstanding (the game skips it then too) (H-SNAP-1).");
+                    return;
+                }
+                // The game's own threshold (TaxHelper.PlayerShouldDoTaxes): total sales over the last daysPerYear summaries, by list index.
+                float sales = 0f;
+                var sums = gi.financialSummaries;
+                if (sums != null)
+                {
+                    int start = System.Math.Max(0, sums.Count - dpy);
+                    for (int i = start; i < sums.Count; i++)
+                    {
+                        var st = sums[i]?.businessIncomeStatements;
+                        if (st == null) continue;
+                        foreach (var b in st) if (b != null) sales += b.TotalSales;
+                    }
+                }
+                if (sales < 150000f)
+                {
+                    Plugin.Logger.LogInfo($"[TimeSync] JOIN SNAP: tax anniversary day {anniversary} fell inside the skipped days — assessment NOT run, sales ${sales:N0} below the game's $150,000 threshold (H-SNAP-1).");
+                    return;
+                }
+                var m = HarmonyLib.AccessTools.Method(typeof(Helpers.TaxHelper), "ExecutePlayerTaxesEvent");
+                if (m == null) { Plugin.Logger.LogWarning("[TimeSync] JOIN SNAP: TaxHelper.ExecutePlayerTaxesEvent not found — the skipped annual assessment could not be run (H-SNAP-1)."); return; }
+                m.Invoke(null, null);
+                Plugin.Logger.LogInfo($"[TimeSync] JOIN SNAP: tax anniversary day {anniversary} fell inside the skipped days — the game's annual assessment ran now: bill dated day {toDay}, 20 days to pay (H-SNAP-1).");
+            }
+            catch (System.Exception ex)
+            {
+                var inner = (ex as System.Reflection.TargetInvocationException)?.InnerException ?? ex;   // review r2/r3 #8: name the game's own failure, not the reflection wrapper
+                Plugin.Logger.LogWarning($"[TimeSync] skipped annual assessment: {inner.GetType().Name}: {inner.Message}");
+            }
+        }
 
         /// <summary>
         /// Called when a clock-sync packet arrives.  Calculates drift and schedules correction.
@@ -332,7 +594,9 @@ namespace BigAmbitionsMP
                 AheadHeld        = false;
                 GameStatePatcher.EnqueueOnMainThread(() =>
                 {
+                    var (dayBeforeWrite, hourBeforeWrite) = GameStateReader.GetGameTime();   // H-EMP-1 review r1 #1: live read at the moment of the write — this lambda can land frames after the packet (budgeted drain); a midnight crossing in between would otherwise over-shift by one
                     GameStateReader.SetGameTime(snapDay, snapHour);
+                    ShiftLocalTimeline(dayBeforeWrite, hourBeforeWrite, snapDay, snapHour);   // H-EMP-1/H-SNAP-1: the local player's schedules survive the jump; a skipped tax anniversary is assessed
                     _wroteClock = true;   // authorized write — the anti-skip watchdog re-bases
                     Plugin.Logger.LogInfo($"[TimeSync] JOIN SNAP: clock set to day {snapDay}, {snapHour:0.00}h (drift was {drift:+0.#;-0.#}h) — the gap is NOT simulated (one-time per load).");
                 });

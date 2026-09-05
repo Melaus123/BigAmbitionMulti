@@ -229,7 +229,7 @@ namespace BigAmbitionsMP
                 {
                     string bizOwner = reg.businessOwnerRivalId?.ToString() ?? "";
                     if (string.IsNullOrEmpty(bizOwner)) deny = "no business here";
-                    else if (GameStatePatcher.IsSessionPlayerId(bizOwner)) deny = $"run by player '{bizOwner}'";
+                    else if (GameStatePatcher.IsSessionPlayerRivalId(bizOwner)) deny = $"run by player '{bizOwner}'";   // review r5 #1: roster-inclusive, the same test the valuation Prefix uses — a DISCONNECTED owner's shop with no ledger entry priced at $0 would otherwise clear any offer
                     else if (reg.RentedByPlayer) deny = "the host runs this business";
                     else if (MPServer.BuildingOwners.TryGetValue(req.AddressKey, out var cur)
                              && !string.IsNullOrEmpty(cur) && cur != senderPid) deny = $"ledgered to '{cur}'";
