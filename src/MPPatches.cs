@@ -1461,8 +1461,19 @@ namespace BigAmbitionsMP
             // Log only the first suppression + every 500th to keep the log
             // readable.  The first one proves the patch is live.
             private static int _aiCarSuppressCount = 0;
-            static bool Prefix(System.Reflection.MethodBase __originalMethod)
+            private static int _deadAiCarSkipCount = 0;   // H-EXIT-1
+            static bool Prefix(UnityEngine.MonoBehaviour __instance, System.Reflection.MethodBase __originalMethod)
             {
+                // H-EXIT-1 (bundle 20260904-024801, PR #5): AiCarMusic never unsubscribes its two lambdas and vanilla never destroys a
+                // traffic car — the mod does (stripped look-alikes). A DESTROYED instance's handler would dereference its dead AudioSource /
+                // isActiveAndEnabled inside the game's enter/exit coroutine and kill it before the fade-in (host black screen). Unity's
+                // overloaded == is true for a destroyed component: skip exactly those, on any role; live cars run as vanilla.
+                if (__instance == null)
+                {
+                    if (_deadAiCarSkipCount++ < 20 || _deadAiCarSkipCount % 500 == 0)
+                        Plugin.Logger.LogWarning($"[AiCarMusic] {__originalMethod?.Name} skipped — its car was destroyed (dead subscriber, #{_deadAiCarSkipCount}) (H-EXIT-1).");
+                    return false;
+                }
                 if (!MPClient.IsConnected) return true;   // host: run as normal
                 _aiCarSuppressCount++;
                 if (_aiCarSuppressCount == 1 || _aiCarSuppressCount % 500 == 0)

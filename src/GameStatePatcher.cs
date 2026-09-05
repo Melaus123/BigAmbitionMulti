@@ -2395,7 +2395,7 @@ namespace BigAmbitionsMP
         // Round-50b: double-tenancy conflicts logged once per address per load (the record
         // re-arrives every sync — one line carries the signal, repeats would bury it).
         private static readonly HashSet<string> _tenancyConflictLogged = new();
-        public static void ResetTenancyConflictLog() { try { _tenancyConflictLogged.Clear(); _layoutMirrorLogged = 0; } catch { } }
+        public static void ResetTenancyConflictLog() { try { _tenancyConflictLogged.Clear(); _layoutMirrorLogged = 0; _knownNamesCache = null; } catch { } }
 
         /// <summary>Review hollow-heal #2 / review-mopping #17: is this owner id a PLAYER this
         /// WORLD has ever known — independent of the LIVE roster (which is empty on a
@@ -4790,7 +4790,7 @@ namespace BigAmbitionsMP
                                 if (target == null)
                                 {
                                     if (_layoutMirrorLogged++ < 40) Plugin.Logger.LogInfo($"[Patcher] stale layout '{current}' cleared at '{info.AddressKey}' (host: {(hostLayout ?? "none")}{(playerRun ? ", player-run" : "")}; type {(typeChanged ? "changed" : "unchanged")} → {info.BusinessTypeName}) (H-ENTRY-1).");
-                                    else if (_layoutMirrorLogged == 41) Plugin.Logger.LogInfo("[Patcher] further stale-layout clears not logged this process (H-ENTRY-1).");
+                                    else if (_layoutMirrorLogged == 41) Plugin.Logger.LogInfo("[Patcher] further stale-layout clears not logged this load (H-ENTRY-1).");
                                 }
                                 reg.Layout = target;   // takes are silent — they are the normal mirror
                             }
