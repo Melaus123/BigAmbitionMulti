@@ -917,6 +917,7 @@ namespace BigAmbitionsMP
         public List<CargoNestedInfo> Nested { get; set; } = new();
         public bool   Ok           { get; set; }
         public string Reason       { get; set; } = "";
+        public float  Total        { get; set; }         // itemsell (H-SELL-2): the OWNER-computed sale total of the whole item tree; 0 for every other ctx
     }
 
     /// <summary>v17 (F-2026-08-25-I proposal 2): a borrower asks the vehicle owner for the FULL

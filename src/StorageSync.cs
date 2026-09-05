@@ -112,7 +112,7 @@ namespace BigAmbitionsMP
                 {
                     Container = "building", AddressKey = "a", ItemId = "i", VehicleId = "v",
                     PlayerId = "p", Op = "put", Ctx = "boxreturn", ItemName = "n", Amount = 2,
-                    Paid = false, PricePerUnit = 1.5f, Count = 3, Silent = true, Ok = true, Reason = "r",
+                    Paid = false, PricePerUnit = 1.5f, Count = 3, Silent = true, Ok = true, Reason = "r", Total = 7.25f,
                     Nested = { new CargoNestedInfo { ItemName = "x", Amount = 4, PricePerUnit = 2.5f } },
                 };
                 var renv = MessageEnvelope.Create(MessageType.StorageRes, "p", rp);
@@ -121,7 +121,7 @@ namespace BigAmbitionsMP
                     && rback.ItemId == rp.ItemId && rback.VehicleId == rp.VehicleId && rback.PlayerId == rp.PlayerId
                     && rback.Op == rp.Op && rback.Ctx == rp.Ctx && rback.ItemName == rp.ItemName
                     && rback.Amount == rp.Amount && rback.Paid == rp.Paid && rback.PricePerUnit == rp.PricePerUnit
-                    && rback.Count == rp.Count && rback.Silent == rp.Silent && rback.Ok == rp.Ok && rback.Reason == rp.Reason
+                    && rback.Count == rp.Count && rback.Silent == rp.Silent && rback.Ok == rp.Ok && rback.Reason == rp.Reason && rback.Total == rp.Total
                     && rback.Nested.Count == 1 && rback.Nested[0].ItemName == "x"
                     && rback.Nested[0].Amount == 4 && rback.Nested[0].PricePerUnit == 2.5f;
                 // v17: the trunk-detail payloads are load-bearing display data — same guard.
@@ -464,6 +464,8 @@ namespace BigAmbitionsMP
                                       removeWhole: (ci) => item.RemoveFromCargo(ci));
                 else if (req.Ctx == "stationtake")
                     TakeStock(reg, item, req, res);
+                else if (req.Ctx == "itemsell")
+                    SellWholeItem(reg, item, req, res);   // H-SELL-2: whole item + attached children, owner-priced, owner-removed
                 else if (!string.IsNullOrEmpty(req.Ctx) && req.Ctx != "consume" && req.Ctx != "placereduce" && req.Ctx != "vehicletake")
                 {
                     // Ruling 39 symmetry (2026-08-25 review): the vehicle take refuses unknown
@@ -708,6 +710,119 @@ namespace BigAmbitionsMP
                 res.Ok = true; res.Reason = "";
             }
             // else: slot gone/renamed/empty — res stays !Ok ("gone"); requester's replica was stale.
+        }
+
+        /// <summary>H-SELL-2 (verbal report 2026-09-05; user ruling: selling other players' stock stays ALLOWED, it must never mint
+        /// money). The requester's item popup pressed SELL on a whole building item (a box/pallet with contents and attached
+        /// children). The OWNER prices the tree from its authoritative copy — the same formula as ItemPanelUI.GetTotalSellingPrice
+        /// (GetSellingPrice per item, children recursive) — and removes it through the game's own chokepoint
+        /// (RemoveItemInstanceFromBuilding fires onInstanceRemoved → a loaded ItemController destroys itself). The seller is
+        /// credited ONLY from res.Total on this verdict. Owner outside the building: registration-only removal.</summary>
+        private static void SellWholeItem(BuildingRegistration reg, ItemInstance item, StorageOpPayload req, StorageResPayload res)
+        {
+            try
+            {
+                if (!TreeSellable(reg, item, out string why))
+                {
+                    res.Reason = "unsellable";
+                    Plugin.Logger.LogInfo($"[BStore] itemsell refused for '{item.itemName}' on '{req.AddressKey}': {why} (owner-side eligibility — the seller's replica said otherwise; review r1 MAJOR-1).");
+                    return;
+                }
+                float total = TotalSellingPrice(reg, item);
+                int removed = RemoveItemTree(reg, item);
+                if (removed <= 0) { res.Reason = "gone"; return; }
+                res.Ok = true; res.Reason = ""; res.Count = 1; res.Total = total;
+                try { if (!string.IsNullOrEmpty(item.itemName)) res.ItemName = item.itemName; } catch { }
+                // Review r1 MINOR-4: the native Discard tail (BuildingManager.OnItemChanged via onItemDiscarded) is not reachable when
+                // the owner is elsewhere — mirror the mod's set-stock refreshers + camera coverage instead.
+                try { BusinessHelper.UpdateCustomerCapacity(reg); } catch { }
+                try { if (reg.HasValidAddress) { BusinessHelper.UpdatePromotion(reg); reg.UpdateSecurityLevel(); } } catch { }
+                try { BusinessSecurityHelper.UpdateCamerasCoverage(reg.Address); } catch { }
+                try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
+                Plugin.Logger.LogInfo($"[BStore] owner applied ITEMSELL '{res.ItemName}' ({removed} instance(s) incl. attached) on '{req.AddressKey}' for '{req.PlayerId}' → total ${total:F2} (owner-priced).");
+            }
+            catch (Exception ex) { res.Reason = "error"; Plugin.Logger.LogWarning($"[BStore] itemsell apply: {ex.Message}"); }
+        }
+
+        /// <summary>Owner-side mirror of the popup's own Sell rule (ItemPanelUI.cs:249: not cannotsell, grabbable, every cargo unit
+        /// paid and unsealed), applied to the WHOLE tree — the seller judged it on a replica that can lag the owner (review r1
+        /// MAJOR-1: GetWorth prices unpaid and sealed cargo too).</summary>
+        private static bool TreeSellable(BuildingRegistration reg, ItemInstance item, out string why)
+        {
+            why = "";
+            try
+            {
+                var def = item.ItemCached;
+                if (def != null && def.HasTag(BigAmbitions.Tags.TagRef.Itemtag.cannotsell)) { why = "cannotsell tag"; return false; }
+                if (def != null && !def.canBeGrabbed) { why = "not grabbable"; return false; }
+                if (item.cargoInstances != null)
+                    foreach (var ci in item.cargoInstances)
+                        if (ci != null && (!ci.paid || ci.IsSealed)) { why = ci.IsSealed ? "sealed cargo" : "unpaid cargo"; return false; }
+                if (item.stackedItems != null && reg.itemInstances != null)
+                    foreach (var child in item.stackedItems)
+                        if (child != null && reg.itemInstances.TryGetValue(child.childId, out var ci2) && ci2 != null && !TreeSellable(reg, ci2, out why))
+                            return false;
+                return true;
+            }
+            catch (Exception ex) { why = "check threw: " + ex.Message; return false; }
+        }
+
+        private static float TotalSellingPrice(BuildingRegistration reg, ItemInstance item)
+        {
+            float num = 0f;
+            try { num = item.GetSellingPrice(); } catch { }
+            try
+            {
+                if (item.stackedItems != null && reg.itemInstances != null)
+                    foreach (var child in item.stackedItems)
+                        if (child != null && reg.itemInstances.TryGetValue(child.childId, out var ci) && ci != null)
+                            num += TotalSellingPrice(reg, ci);
+            }
+            catch { }
+            return num;
+        }
+
+        /// <summary>Children first (native DiscardItemWithAttachedItems order), then the item. Mirrors the native Discard path
+        /// WITHOUT touching BuildingManager's CURRENT building (the owner may be elsewhere): a loaded controller is detached from
+        /// its parent and dropped from allItemControllers only when this machine is inside THIS building; the chokepoint's
+        /// onInstanceRemoved destroys the object. Returns the number of instances removed from the registration.</summary>
+        private static int RemoveItemTree(BuildingRegistration reg, ItemInstance item)
+        {
+            int n = 0;
+            try
+            {
+                if (item.stackedItems != null && reg.itemInstances != null)
+                    for (int i = item.stackedItems.Count - 1; i >= 0; i--)
+                    {
+                        var child = item.stackedItems[i];
+                        if (child != null && reg.itemInstances.TryGetValue(child.childId, out var ci) && ci != null)
+                            n += RemoveItemTree(reg, ci);
+                    }
+                bool inside = false;
+                try { inside = BuildingManager.IsInsideBuilding && ReferenceEquals(InstanceBehavior<BuildingManager>.Instance?.buildingRegistration, reg); } catch { }
+                if (inside)
+                {
+                    try
+                    {
+                        var ctrl = ItemHelper.GetItemControllerByID(item.id);
+                        if (ctrl != null)
+                        {
+                            ctrl.RemoveFromParentPlaceableItem(updateWarningIcon: false);
+                            InstanceBehavior<BuildingManager>.Instance.allItemControllers.Remove(ctrl);
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] itemsell controller detach: {ex.Message}"); }
+                }
+                try { item.RemoveFromWorkShifts(item.AddressCached); } catch { }
+                string key = item.id?.ToString() ?? "";
+                if (reg.itemInstances != null && key.Length > 0 && reg.itemInstances.ContainsKey(key))
+                {
+                    reg.RemoveItemInstanceFromBuilding(item);
+                    n++;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] itemsell remove tree: {ex.Message}"); }
+            return n;
         }
 
         /// <summary>Round-47b — helper SELL/DISCARD stacks: remove up to Count identical non-sealed
@@ -968,11 +1083,13 @@ namespace BigAmbitionsMP
         // the bodies below are the owner apply's own helpers; authorization, owner tails,
         // owner-voice logs (gated on _echoReplay) and result-sending are skipped.
         private static bool _echoReplay;   // main-thread scoped flag: shared bodies skip owner tails/logs while set
+        internal static bool SuppressGuestForward;   // H-SELL-2: set while the seller takes down its replica copy at verdict — the guest removal forward (HousingPatches) must not re-send a remove the owner already applied
 
         private static void EchoBuildingReplica(StorageResPayload res)
         {
             try
             {
+                if (res.Ctx == "itemsell") return;   // H-SELL-2: a whole-item sale — its verdict branch in OnTakeResult removes the replica copy; the cargo-shaped echo below would misread it as a loose take
                 if (res.Container != ContainerBuilding || !res.Ok) return;   // structural gates — silent by design
                 if (ReferenceEquals(res, _lastLocalApplyRes)) return;        // host applied THIS very object locally
                 if (res.Op == OpSetStock) return;
@@ -1066,6 +1183,32 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] replica echo: {ex.Message}"); }
         }
 
+        /// <summary>H-SELL-2: the seller's replica copy of a sold item. Only while the seller is STILL inside that building (the
+        /// controller detach needs the loaded interior); otherwise the next interior snapshot heals the replica. Uses the mod's own
+        /// RemoveItemTree (review r1 MINOR-3: the native discard can defer into a HudConfirm and escape the flag asynchronously)
+        /// with the guest removal forward suppressed — the owner already removed the tree.</summary>
+        private static void RemoveSoldReplicaItem(StorageResPayload res)
+        {
+            try
+            {
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                var reg = bm?.buildingRegistration;
+                if (!BuildingManager.IsInsideBuilding || reg == null || GameStateReader.AddressKey(reg) != res.AddressKey)
+                { Plugin.Logger.LogInfo($"[BStore] itemsell: seller no longer inside '{res.AddressKey}' — replica copy left to the next interior sync."); return; }
+                ItemInstance? item = null;
+                if (reg.itemInstances != null)
+                    foreach (var kv in reg.itemInstances)
+                        if (kv.Value != null && (kv.Value.id?.ToString() ?? "") == res.ItemId) { item = kv.Value; break; }
+                if (item == null) { Plugin.Logger.LogInfo($"[BStore] itemsell: replica of '{res.AddressKey}' has no item {res.ItemId} (already synced away)."); return; }
+                int n;
+                SuppressGuestForward = true;
+                try { n = RemoveItemTree(reg, item); }
+                finally { SuppressGuestForward = false; }
+                Plugin.Logger.LogInfo($"[BStore] itemsell: replica copy of {res.ItemId} removed locally ({n} instance(s), forward suppressed).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] itemsell replica removal: {ex.Message}"); }
+        }
+
         private static void OnTakeResult(StorageResPayload res)
         {
             // ── building-only ctx routes (moved verbatim) ──
@@ -1089,6 +1232,32 @@ namespace BigAmbitionsMP
                 }
                 // Native tail for BOTH verdicts (OnConfirmSell :211 / OnDiscardClick :218): any UI
                 // keyed to the cargo event refreshes on the clicker's machine (parity 2026-08-25).
+                try { GameEvent.Invoke("ba:gameevent_itemcargochanged"); } catch { }
+                return;
+            }
+            // H-SELL-2 (2026-09-05): whole-item sale from the item popup in a granted building — credit ONLY now, from the
+            // owner-computed total, then take the replica copy down through the native discard (forward suppressed).
+            if (res.Ctx == "itemsell")
+            {
+                if (!res.Ok)
+                {
+                    PassengerHud.Toast(res.Reason == "unsellable" ? "That can't be sold right now."   // user-approved wording 2026-09-05 (review r1 MAJOR-1/MINOR-7)
+                                     : res.Reason == "denied"     ? "No access."
+                                     :                              "Already gone.");
+                    Plugin.Logger.LogInfo($"[BStore] itemsell refused ({res.Reason}) for {res.ItemId} on '{res.AddressKey}' — nothing credited.");
+                    return;
+                }
+                try
+                {
+                    if (res.Total > 0f)
+                    {
+                        var data = new System.Collections.Generic.Dictionary<string, string> { { "itemSoldInfo", VehicleStoragePanel.Localize(res.ItemName ?? "") } };   // review r1 MINOR-5: the finance record shows the item's name, not its key
+                        GameManager.ChangeMoneySafe(res.Total, new TransactionInfo("ba:transaction_itemsold", data));
+                    }
+                    Plugin.Logger.LogInfo($"[BStore] itemsell confirmed: '{res.ItemName}' ({res.ItemId}) on '{res.AddressKey}' → ${res.Total:F2} credited (owner-priced).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] itemsell credit: {ex.Message}"); }
+                RemoveSoldReplicaItem(res);
                 try { GameEvent.Invoke("ba:gameevent_itemcargochanged"); } catch { }
                 return;
             }

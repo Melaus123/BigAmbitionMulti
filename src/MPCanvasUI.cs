@@ -1408,7 +1408,8 @@ namespace BigAmbitionsMP
         private GameObject? _dock;          private RectTransform? _dockRT;
         private TextMeshProUGUI? _dockTitle, _dockDay, _dockTime, _dockPlayers, _dockSkipLbl;
         private RectTransform? _dockXRT;
-        private RectTransform? _tgtM1h, _tgtM15, _tgtP15, _tgtP1h, _skipToggleRT;
+        private RectTransform? _tgtM1h, _tgtM15, _tgtP15, _tgtP1h, _tgtP1d, _skipToggleRT;   // _tgtP1d: "+1d" (user-approved 2026-09-05)
+        private RectTransform? _dockSellRT;   // BOAT-SELL-DOCK: shown only while sleeping on an owned boat (user-approved 2026-09-05)
         private bool _skipCommitNudge;   // a wake target was adjusted without committing → pulse "Request time skip"
         private readonly RectTransform?[] _presetRT = new RectTransform?[4];
         private static readonly int[] PresetHours = { 7, 12, 18, 22 };
@@ -1497,6 +1498,13 @@ namespace BigAmbitionsMP
 
                 if (_dockTitle != null)
                     _dockTitle.text = loiter ? "Loitering" : NiceActivity(MPRestSync.ActivityName);   // title wording user-approved 2026-08-26
+                // BOAT-SELL-DOCK: the Sell control exists only on the owner's own boat (a SleepActivity on a BoatController the game
+                // marks IsPlayerOwned — read live each tick; never in loitering mode).
+                if (_dockSellRT != null)
+                {
+                    bool boat = !loiter && MPRestSync.SeatedOnOwnBoat();
+                    if (_dockSellRT.gameObject.activeSelf != boat) _dockSellRT.gameObject.SetActive(boat);
+                }
 
                 // The X is UNCONDITIONAL: it used to mirror the game's
                 // per-state cancel-button list, which blinks during activity
@@ -1615,6 +1623,15 @@ namespace BigAmbitionsMP
                         return;
                     }
 
+                // BOAT-SELL-DOCK (user-approved 2026-09-05): the game's SellBoat button lives in the native activity panel the mod
+                // hides — the dock carries it for the owner's own boat only (visibility set in TickRestUI). Sell() shows the game's
+                // own confirmation; on confirm the game finishes the activity and completes the sale on this machine.
+                if (_dockSellRT != null && _dockSellRT.gameObject.activeSelf && RectHit(_dockSellRT, mp))
+                {
+                    Plugin.Logger.LogInfo("[Rest] dock click: sell boat → BoatController.Sell (the game's confirmation follows).");
+                    MPRestSync.SellCurrentBoat();
+                    return;
+                }
                 // Every dock interaction logs ONE line: reporters rarely answer follow-ups, so the
                 // click trail in the log is the interview (Goonie report, 2026-07-09 — a session of
                 // pre-vote preset clicks was completely invisible).
@@ -1623,6 +1640,7 @@ namespace BigAmbitionsMP
                 else if (RectHit(_tgtM15, mp)) step = -15;
                 else if (RectHit(_tgtP15, mp)) step = 15;
                 else if (RectHit(_tgtP1h, mp)) step = 60;
+                else if (RectHit(_tgtP1d, mp)) step = 1440;   // "+1d" (user-approved 2026-09-05); no upper bound exists on the target — only minT
                 if (step != 0)
                 {
                     _skipTarget = Math.Max(minT, (voting ? MPRestSync.LocalGoal : _skipTarget) + step);
@@ -1738,13 +1756,16 @@ namespace BigAmbitionsMP
 
                 // Nudges (grey) and presets (blue) - distinct rounded buttons.
                 float bw = 60f, gap = 8f;
-                float rowW = bw * 4 + gap * 3;
+                float rowW = bw * 4 + gap * 3;                       // presets: four buttons
                 float x0 = CX + (CW - rowW) / 2f;
+                float rowW5 = bw * 5 + gap * 4;                      // nudges: five buttons — "+1d" added (user-approved 2026-09-05)
+                float x0n = CX + (CW - rowW5) / 2f;
                 var nudgeCol = new Color(0.24f, 0.27f, 0.37f, 1f);    // brighter than v8 — vibrancy per mockup
-                (_tgtM1h, _) = MakeDockButton("-1h",  new Vector2(x0,                 68f), bw, nudgeCol, 25f);
-                (_tgtM15, _) = MakeDockButton("-15m", new Vector2(x0 + (bw + gap),     68f), bw, nudgeCol, 25f);
-                (_tgtP15, _) = MakeDockButton("+15m", new Vector2(x0 + (bw + gap) * 2, 68f), bw, nudgeCol, 25f);
-                (_tgtP1h, _) = MakeDockButton("+1h",  new Vector2(x0 + (bw + gap) * 3, 68f), bw, nudgeCol, 25f);
+                (_tgtM1h, _) = MakeDockButton("-1h",  new Vector2(x0n,                 68f), bw, nudgeCol, 25f);
+                (_tgtM15, _) = MakeDockButton("-15m", new Vector2(x0n + (bw + gap),     68f), bw, nudgeCol, 25f);
+                (_tgtP15, _) = MakeDockButton("+15m", new Vector2(x0n + (bw + gap) * 2, 68f), bw, nudgeCol, 25f);
+                (_tgtP1h, _) = MakeDockButton("+1h",  new Vector2(x0n + (bw + gap) * 3, 68f), bw, nudgeCol, 25f);
+                (_tgtP1d, _) = MakeDockButton("+1d",  new Vector2(x0n + (bw + gap) * 4, 68f), bw, nudgeCol, 25f);
                 for (int i = 0; i < PresetHours.Length; i++)
                 {
                     var (prt, plbl) = MakeDockButton($"{PresetHours[i]:D2}:00", new Vector2(x0 + (bw + gap) * i, 38f), bw, new Color(0.17f, 0.30f, 0.49f, 1f), 25f);
@@ -1758,6 +1779,14 @@ namespace BigAmbitionsMP
                 _dockSkipLbl   = tgLbl;
                 _skipToggleImg = tgRT.GetComponent<Image>();
                 _dockSkipLbl.fontSize = 13;
+                // BOAT-SELL-DOCK (layout user-approved 2026-09-05): bottom-left, the toggle's row, the X's red; the label is the game's
+                // own "Sell" string (key itempanelui_sell — the one SleepActivity uses for its hidden SellBoat button).
+                string sellLbl = "Sell";
+                try { var l = VehicleStoragePanel.Localize("itempanelui_sell"); if (!string.IsNullOrEmpty(l) && l != "itempanelui_sell") sellLbl = l; } catch { }
+                var (sellRT, sellL) = MakeDockButton(sellLbl, new Vector2(14f, 6f), 184f, new Color(0.56f, 0.27f, 0.20f, 1f), 27f);
+                sellL.fontSize = 13;
+                _dockSellRT = sellRT;
+                sellRT.gameObject.SetActive(false);   // TickRestUI shows it only while sleeping on an owned boat
 
                 _dock.SetActive(false);
                 Plugin.Logger.LogInfo("[RestDock] dock built OK.");

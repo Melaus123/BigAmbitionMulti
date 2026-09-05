@@ -779,6 +779,7 @@ namespace BigAmbitionsMP
             try
             {
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;   // single-player → native only
+                if (StorageSync.SuppressGuestForward) return;   // H-SELL-2: the seller is taking down its replica copy of an item the owner already removed
                 string addr = GameStateReader.AddressKey(__instance);
                 if (!GrantSync.CanEnterGranted(addr) && !GrantSync.IsHelperBusiness(addr)) return;   // owner / non-guest → native only
                 // Grab audit P1 (ruling 37): NAME the removed id — the chokepoint is the one place

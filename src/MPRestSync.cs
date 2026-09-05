@@ -381,6 +381,37 @@ namespace BigAmbitionsMP
             NavigationBlocker.PaidActivity,
         };
 
+        // ── BOAT-SELL-DOCK (user-approved 2026-09-05) ─────────────────────────────────────────────────────────
+        // The game's SellBoat button (SleepActivity.GetButtons, NotStarted state) lives in the native activity panel the mod hides
+        // in MP, so an owner could never sell a boat in a session. The dock carries it: visible only while the current activity is
+        // a SleepActivity whose entity is a BoatController the game marks IsPlayerOwned (this machine's own save — boats are never
+        // replicated, user decision 2026-09-05). BoatController.Sell() is the game's own: its confirmation dialog, then
+        // PlayerActivityUI.CancelActivity — which calls GetCurrentActivity.Finish() (the full teardown, PlayerActivityUI.cs:462-471),
+        // so it is safe against the started activity the mod's auto-start produces — then ownership + money on this machine only.
+        private static readonly System.Reflection.FieldInfo? _fSleepEntity =
+            HarmonyLib.AccessTools.Field(typeof(PlayerActivity.SleepActivity), "_entityController");
+        private static Boats.BoatController? CurrentOwnBoat()
+        {
+            try
+            {
+                if (_curAct is not PlayerActivity.SleepActivity sleep || _fSleepEntity == null) return null;
+                var boat = _fSleepEntity.GetValue(sleep) as Boats.BoatController;
+                return boat != null && boat.IsPlayerOwned ? boat : null;
+            }
+            catch { return null; }
+        }
+        public static bool SeatedOnOwnBoat() => Seated && CurrentOwnBoat() != null;
+        public static void SellCurrentBoat()
+        {
+            try
+            {
+                var boat = CurrentOwnBoat();
+                if (boat == null) { Plugin.Logger.LogInfo("[Rest] sell boat: no owned boat under the current activity — ignored."); return; }
+                boat.Sell();
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] sell boat: {ex.Message}"); }
+        }
+
         public static void StandUp()
         {
             try

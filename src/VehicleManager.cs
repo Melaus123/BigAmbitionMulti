@@ -1928,6 +1928,20 @@ namespace BigAmbitionsMP
         /// enter to a passenger seat (Phase 2 C).</summary>
         public static bool IsDrivenRemotely(string vid) => !string.IsNullOrEmpty(vid) && _ownedFollowing.ContainsKey(vid);
 
+        /// <summary>H-SELL-1 (2026-09-05): is this VehicleInstance the local copy of ANOTHER player's vehicle (a ghost or a drivable
+        /// granted proxy — ids carry the BAMP_ prefix from SpawnRemoteVehicle; the rig's BAMP_TESTRIG is local)? The sale guards key
+        /// on this. FUTURE (user ruling 2026-09-05): the merger project will allow selling a partner's car — lift it HERE with a
+        /// merger/partner predicate, never by removing the guards.</summary>
+        public static bool IsForeignProxy(VehicleInstance? inst)
+        {
+            try
+            {
+                string id = inst?.id ?? "";
+                return id.StartsWith("BAMP_", StringComparison.Ordinal) && !id.StartsWith("BAMP_TESTRIG", StringComparison.Ordinal);
+            }
+            catch { return false; }
+        }
+
         /// <summary>Per-tick (TickPositionSync): broadcast the pose of a proxy I'm driving; on exit send a
         /// final Released; time out stale follows.</summary>
         public static void TickDriveSync()
