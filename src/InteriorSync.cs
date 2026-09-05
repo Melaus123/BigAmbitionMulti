@@ -1096,11 +1096,15 @@ namespace BigAmbitionsMP
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected)
                 {
+                    try { DesignerSaleRoute.SoldAtClose.Clear(); DesignerSaleRoute.RoutingAddr = ""; } catch { }
                     Plugin.Logger.LogWarning($"[Housing] designer-close delta for '{addressKey}' NOT built — no session to send on; the changes stay in the local diffs for the next forward.");
                     return;
                 }
                 HousingDesign.CommitLocalDesigns(addressKey);   // bug #5: flush live paint → reg BEFORE diffing
                 var p = GameStatePatcher.BuildDesignerCloseDelta(addressKey);
+                // H-SELL-3: the close delta is built — the sold ids have been skipped; the route state can go now (the itemsell
+                // verdicts credit the seller on their own; RemoveSoldReplicaItem finds no replica copy and says so).
+                try { DesignerSaleRoute.SoldAtClose.Clear(); DesignerSaleRoute.RoutingAddr = ""; } catch { }
                 if (p == null) return;   // nothing changed this session
                 p.SenderId = MPConfig.PlayerId;
                 try { p.PlaythroughId = MPSaveCoordinator.ActivePlaythroughId ?? ""; } catch { }

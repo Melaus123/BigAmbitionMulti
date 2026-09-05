@@ -2523,8 +2523,16 @@ namespace BigAmbitionsMP
                 if (hadBaseline)
                 {
                     var removes = new List<InteriorItemOp>();
+                    int soldSkipped = 0;
                     foreach (var k in baseline!.Keys)
-                        if (!newSer.ContainsKey(k)) removes.Add(new InteriorItemOp { Kind = "remove", Id = k });
+                    {
+                        if (newSer.ContainsKey(k)) continue;
+                        // H-SELL-3: an item the designer holds as SOLD in a friend's building is removed by the OWNER itself when the
+                        // close-time itemsell verdict lands — never by this delta (a remove here would race the sale into "gone").
+                        if (DesignerSaleRoute.SkipDeltaRemove(addressKey, k)) { soldSkipped++; continue; }
+                        removes.Add(new InteriorItemOp { Kind = "remove", Id = k });
+                    }
+                    if (soldSkipped > 0) Plugin.Logger.LogInfo($"[Patcher] edit delta for '{addressKey}': {soldSkipped} remove(s) left to the owner-confirmed designer sale (H-SELL-3).");
                     // Stage 2: a DESIGNER CLOSE may legitimately remove a whole session's worth —
                     // bulkRemovesAllowed lifts the action cap to the 500 sanity bound (the receiver
                     // mirrors it via the BulkEdit flag). A 1-3-op action forward keeps the 25 cap.
@@ -2538,7 +2546,7 @@ namespace BigAmbitionsMP
                 }
                 else if (newSer.Count > 0)
                     Plugin.Logger.LogInfo($"[Patcher] edit delta for '{addressKey}': no baseline — seeding with {ops.Count} upsert(s), zero removes (guardrail 1).");
-                if (!string.IsNullOrEmpty(knownRemovedId) && !newSer.ContainsKey(knownRemovedId!))
+                if (!string.IsNullOrEmpty(knownRemovedId) && !newSer.ContainsKey(knownRemovedId!) && !DesignerSaleRoute.SkipDeltaRemove(addressKey, knownRemovedId!))
                 {
                     bool alreadyEmitted = false;
                     for (int i = 0; i < ops.Count; i++)

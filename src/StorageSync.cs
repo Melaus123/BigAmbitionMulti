@@ -1214,7 +1214,7 @@ namespace BigAmbitionsMP
             // ── building-only ctx routes (moved verbatim) ──
             if (res.Ctx == "stacksell" || res.Ctx == "stackdiscard")
             {
-                if (!res.Ok) { PassengerHud.Toast("Already gone."); return; }
+                if (!res.Ok) { PassengerHud.Toast(res.Reason == "locked" ? "Vehicle locked." : res.Reason == "denied" ? "No access." : "Already gone."); return; }   // reason-mapped (H-SELL-3 r5, review r4 C3)
                 if (res.Ctx == "stacksell")
                 {
                     try
@@ -1267,7 +1267,7 @@ namespace BigAmbitionsMP
             // nested-free by design, which is exactly why bundles needed their own route).
             if (res.Ctx == "bundlesell" || res.Ctx == "bundlediscard")
             {
-                if (!res.Ok) { PassengerHud.Toast("Already gone."); return; }
+                if (!res.Ok) { PassengerHud.Toast(res.Reason == "locked" ? "Vehicle locked." : res.Reason == "denied" ? "No access." : "Already gone."); return; }   // reason-mapped (H-SELL-3 r5, review r4 C3)
                 if (res.Ctx == "bundlesell")
                 {
                     try
