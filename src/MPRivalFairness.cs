@@ -146,7 +146,7 @@ namespace BigAmbitionsMP
                 // lingering synthetic (its removal rides an off-duty message a dead link never
                 // delivers). InMpGame is the predicate the time system already holds through that
                 // exact window.
-                if (!MPServer.IsRunning && !MPClient.IsConnected && !MPClient.InMpGame) return true;
+                if (!MPServer.IsRunning && !MPClient.IsConnected && !MPClient.InMpGame && !MPClient.OfflineFork) return true;   // H-FORK-1: holds in the offline fork
                 __result = false;
                 Plugin.Logger.LogInfo("[RivalFair] rival employee-poach suppressed (MP fairness — host-only mechanic).");
                 return false;

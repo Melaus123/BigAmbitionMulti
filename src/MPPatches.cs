@@ -770,7 +770,7 @@ namespace BigAmbitionsMP
                 //  its discriminator shipped as the purchaser-enable fix.)
                 try
                 {
-                    if (MPServer.IsRunning || MPClient.IsConnected)
+                    if (MPServer.IsRunning || MPClient.IsConnected || MPClient.OfflineFork)   // H-FORK-1 r2 (review #1): set the shop context in the offline fork too
                     {
                         var reg = __instance.buildingRegistration;
                         MPRegisterSync.SetCurrentShop(
@@ -1976,7 +1976,7 @@ namespace BigAmbitionsMP
                     // Fire on EITHER role — host needs the same override so the
                     // host's UI shows client character names (not PlayerIds) when
                     // looking up the client's rival entry.
-                    if (!MPClient.IsClientInWorld && !MPServer.IsRunning) return true;
+                    if (!MPClient.IsClientInWorld && !MPServer.IsRunning && !MPClient.OfflineFork) return true;   // H-FORK-1: holds in the offline fork
                     if (string.IsNullOrEmpty(__0))  return true;
                     if (GameStatePatcher.ClientRivalNames.TryGetValue(__0, out var name)
                         && !string.IsNullOrWhiteSpace(name))
@@ -2282,7 +2282,7 @@ namespace BigAmbitionsMP
             long _pc = MPPerf.Begin();   // round-97: full-roster walk inside native passes — patch-cost bracketed
             try
             {
-                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return stripped;   // records only exist in MP anyway
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return stripped;   // records only exist in MP anyway — and they SURVIVE the offline fork (H-FORK-1)
                 var list = SaveGameManager.Current?.EmployeeInstances;
                 if (list == null) return stripped;
                 for (int i = list.Count - 1; i >= 0; i--)
@@ -2357,7 +2357,7 @@ namespace BigAmbitionsMP
                 RestoreModEmployeeRecords(__state, "RunHourly");
                 try
                 {
-                    if ((MPServer.IsRunning || MPClient.IsClientInWorld) && __state != null && __state.Count > 0)
+                    if ((MPServer.IsRunning || MPClient.IsClientInWorld || MPClient.OfflineFork) && __state != null && __state.Count > 0)   // H-FORK-1: holds in the offline fork
                     {
                         var names = new System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal);
                         foreach (var e in __state)
@@ -4141,7 +4141,7 @@ namespace BigAmbitionsMP
             static Exception? Finalizer(Exception __exception, ref string __result)
             {
                 if (__exception == null) return null;
-                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return __exception;   // SP: vanilla behavior
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return __exception;   // SP: vanilla behavior; H-FORK-1: holds in the offline fork
                 __result = "";
                 _shielded++;
                 if (_shielded <= 3 || _shielded % 100 == 0)
@@ -4163,7 +4163,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return;   // H-FORK-1: holds in the offline fork
                     int removed = allModels.RemoveAll(m =>
                         m != null && MPRegisterSync.IsInjectedStaff(m.employeeId)
                                   && !MPRegisterSync.IsInjectedFromMergedPartner(m.employeeId)
@@ -4205,7 +4205,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return;   // H-FORK-1: holds in the offline fork
                     int removed = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.Employees?.RemoveAll(e => IsDutySyntheticId(e?.id)) ?? 0;
                     if (removed > 0 && _n++ < 4)
                         Plugin.Logger.LogInfo($"[StaffRoster] schedule: hid {removed} duty synthetic(s) from the employee list (round-263).");
@@ -4222,7 +4222,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return;   // H-FORK-1: holds in the offline fork
                     __result?.RemoveAll(e => IsDutySyntheticId(e?.id));   // fresh LINQ list — safe to mutate
                 }
                 catch { }
@@ -4237,7 +4237,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return;   // H-FORK-1: holds in the offline fork
                     if (__result == null || __result.Count == 0) return;
                     bool any = false;
                     foreach (var s in __result) if (IsDutySyntheticId(s?.employeeId)) { any = true; break; }
@@ -4274,7 +4274,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return;   // H-FORK-1: holds in the offline fork
                     // QueryInfo is a STRUCT; Address is a class with overloaded operators — use a
                     // pattern match so the null test can't route through an operator surprise.
                     if (__result == null || queryInfo.withAssignedAddress is not null) return;
@@ -4303,7 +4303,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return true;   // H-FORK-1: holds in the offline fork
                     var list = Helpers.EmployeeHelper.GetEmployeeInstances();
                     if (list == null) return true;
                     __result = list
@@ -4723,7 +4723,7 @@ namespace BigAmbitionsMP
                 owner = "";
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return false;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return false;   // H-FORK-1: holds in the offline fork
                     var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
                     if (reg == null || !GameStatePatcher.IsForeignPlayerBusiness(reg)) return false;
                     owner = MPRegisterSync.CurrentShopOwner;
@@ -4896,7 +4896,7 @@ namespace BigAmbitionsMP
                         // Review r7 #1: in the offline fork MPHub.OfferBusiness would book the offer locally (reserving the money)
                         // and SendHub would drop it silently — the "Offer sent" notice below would be a lie. Same refusal as above.
                         Plugin.Logger.LogWarning($"[Offers] offer for '{addr}' refused — no host link (offline fork); nothing can be sent.");
-                        try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, "You can't buy out another player's business."); } catch { }
+                        try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, "The host connection is gone, so offers can't be sent from this offline copy."); } catch { }   // wording approved by the user 2026-09-05 (review r8 #4: the reused line named the wrong reason)
                         return false;
                     }
                     if (MPHub.OfferBusiness(owner, amount, addr, biz))
@@ -5027,7 +5027,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;   // single player — run native
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return true;   // single player — run native; H-FORK-1: holds in the offline fork
                     if (__instance == null) return true;
 
                     // Round-62 (field: "I see other players' staff issues but not my own,
@@ -5092,7 +5092,7 @@ namespace BigAmbitionsMP
         {
             static void Prefix()
             {
-                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return;   // H-FORK-1: holds in the offline fork
                 var states = SaveGameManager.Current?.rivalStates;
                 if (states == null) return;
                 int removed = states.RemoveAll(rs =>
@@ -5647,7 +5647,7 @@ namespace BigAmbitionsMP
             {
                 string owner = MPRegisterSync.CurrentShopOwner;
                 return !string.IsNullOrEmpty(owner) && owner != MPConfig.PlayerId
-                       && MPRestSync.AllPlayers().Contains(owner);
+                       && GameStatePatcher.IsSessionPlayerRivalId(owner);   // H-FORK-1: the live player list is empty offline; the roster survives
             }
 
             // (Probe prefix REMOVED 2026-06-12 — purchase path verified; the
@@ -5659,7 +5659,7 @@ namespace BigAmbitionsMP
                 if (__exception == null) return null;
                 try
                 {
-                    if ((MPServer.IsRunning || MPClient.IsClientInWorld) && InPlayerShop())
+                    if ((MPServer.IsRunning || MPClient.IsClientInWorld || MPClient.OfflineFork) && InPlayerShop())   // H-FORK-1: holds in the offline fork
                     {
                         Plugin.Logger.LogWarning(
                             $"[RegShield] OnPlaceOrder threw in '{MPRegisterSync.CurrentShopOwner}' shop — " +
@@ -5700,7 +5700,7 @@ namespace BigAmbitionsMP
             static void Postfix(EmployeeStationController __instance, ref bool __result)
             {
                 if (__result) return;
-                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return;   // H-FORK-1 r2 (review #3): same gate as its sibling on this method
                 try
                 {
                     // Round-30 (WS3): the override now also admits ANY station inside a shop we hold a synced
@@ -5736,7 +5736,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if ((MPServer.IsRunning || MPClient.IsClientInWorld)
+                    if ((MPServer.IsRunning || MPClient.IsClientInWorld || MPClient.OfflineFork)   // H-FORK-1: holds in the offline fork
                         && __instance != null && MPRegisterSync.IsInjectedStaff(__instance.id))
                         return false;
                 }
@@ -5759,7 +5759,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if ((MPServer.IsRunning || MPClient.IsClientInWorld)
+                    if ((MPServer.IsRunning || MPClient.IsClientInWorld || MPClient.OfflineFork)   // H-FORK-1: holds in the offline fork
                         && __instance != null && MPRegisterSync.IsInjectedStaff(__instance.id))
                         return false;
                 }
@@ -5778,7 +5778,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                    if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return;   // H-FORK-1: holds in the offline fork
                     if (__result <= 0) return;
                     var matches = Helpers.EmployeeHelper.GetEmployeeInstances(new EmployeeInstancesQueryInfo
                     {

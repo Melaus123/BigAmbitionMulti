@@ -101,7 +101,7 @@ namespace BigAmbitionsMP
         {
             if (UnityEngine.Time.unscaledTime < _ctxNextPoll) return;
             _ctxNextPoll = UnityEngine.Time.unscaledTime + 0.5f;
-            if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+            if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return;   // H-FORK-1 r2 (review #1): the shop context must keep tracking in the offline fork — the register-order shield reads it
             try
             {
                 var bm  = InstanceBehavior<BuildingManager>.Instance;

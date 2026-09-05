@@ -654,6 +654,7 @@ namespace BigAmbitionsMP
             IsInLobby = true;
             LobbyReset(MPConfig.PlayerId); // host is always the first player
             GameStatePatcher.ClientPlayerRoster.Clear();   // review r9 #6: a fresh session starts with an empty roster (it refills from PlayerProfiles and rides the rivals snapshot). Here, not in Stop(): a machine that was a GUEST in the previous world never ran Stop(), and its roster would ship that world's members to this world's clients.
+            MPClient.OfflineFork = false;   // H-FORK-1 r2 (review #4): a fresh hosted session is never an offline fork
             EnforceStartingCash = true;
             StartingCashByPlayer.Clear();
             StartingAgeByPlayer.Clear();

@@ -2395,7 +2395,7 @@ namespace BigAmbitionsMP
         // Round-50b: double-tenancy conflicts logged once per address per load (the record
         // re-arrives every sync — one line carries the signal, repeats would bury it).
         private static readonly HashSet<string> _tenancyConflictLogged = new();
-        public static void ResetTenancyConflictLog() { try { _tenancyConflictLogged.Clear(); } catch { } }
+        public static void ResetTenancyConflictLog() { try { _tenancyConflictLogged.Clear(); _layoutMirrorLogged = 0; } catch { } }
 
         /// <summary>Review hollow-heal #2 / review-mopping #17: is this owner id a PLAYER this
         /// WORLD has ever known — independent of the LIVE roster (which is empty on a
@@ -2413,8 +2413,19 @@ namespace BigAmbitionsMP
         /// (auto suffixes stripped — StripToBase, the F10 lesson — with the raw name as
         /// fallback) + the grant system's manifest-restored name cache. A failed manifest
         /// read logs its reason (review-mopping #18).</summary>
+        // H-ENTRY-1 r3 (review r2 #1): the manifest read + JSON parse below ran once per business row at the join snapshot
+        // (~885 rows on one main-thread loop). Memoised per session name for 30 s; the grant names are merged live (in-memory).
+        private static HashSet<string>? _knownNamesCache; private static string _knownNamesSession = ""; private static float _knownNamesAt = -1e9f;
         public static HashSet<string> KnownWorldPlayerNames()
         {
+            string sessNow = MPSaveCoordinator.ActiveSessionName ?? "";
+            float nowT = UnityEngine.Time.realtimeSinceStartup;
+            if (_knownNamesCache != null && _knownNamesSession == sessNow && nowT - _knownNamesAt < 30f)
+            {
+                var live = new HashSet<string>(_knownNamesCache, StringComparer.Ordinal);
+                try { foreach (var n in GrantSync.AllKnownNames()) live.Add(n); } catch { }
+                return live;
+            }
             var set = new HashSet<string>(StringComparer.Ordinal);
             try
             {
@@ -2434,6 +2445,7 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] known-player manifest read: {ex.Message}"); }
+            _knownNamesCache = new HashSet<string>(set, StringComparer.Ordinal); _knownNamesSession = sessNow; _knownNamesAt = nowT;   // manifest-derived names only; grants merged below and on every cached return
             try { foreach (var n in GrantSync.AllKnownNames()) set.Add(n); } catch { }
             return set;
         }
@@ -2828,9 +2840,14 @@ namespace BigAmbitionsMP
                 // has run.  Staffing them the SAME frame the re-load spawns them NREs inside the game's
                 // AssignEmployee (uninitialised item data — Braids and Blowouts, 2026-06-23).  Run on the
                 // building's own MonoBehaviour; ReStaffStationsNow is idempotent (skips already-staffed).
-                // Round-86: gated on layoutChanged — its stated purpose is staffing stations the re-load
-                // above JUST spawned; scheduling it on every apply was pure overhead.
-                try { if (layoutChanged) matched.StartCoroutine(ReStaffAfterInit(matched, addressKey)); }
+                // Round-86 gated this on layoutChanged as overhead; H-ENTRY-1 r2 lifts the gate (see below).
+                // H-ENTRY-1 r2 (review r1 #4): with the layout mirrored at join, `layoutChanged` is false on the entry snapshot, which also
+                // skipped THIS re-staff — but native entry staffing still reaches SetupAiEmployeeStations on only a minority of client entries
+                // (P-ENTRY-BAIL), so it is no longer gated on the layout flag. It still runs only when an apply reaches this point: the
+                // byte-identical re-entry snapshot is skipped upstream (S4-lite) and the no-op gate above returns when nothing changed — so in
+                // practice the FIRST entry per address per session (or an entry whose interior changed). ReStaffStationsNow is idempotent
+                // and refuses player-run shops (round-33 guard); it runs from edit deltas too, which round-33's blank-stamp case could reach.
+                try { matched.StartCoroutine(ReStaffAfterInit(matched, addressKey)); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] schedule re-staff for '{addressKey}': {ex.Message}"); }
 
                 // Round-86: the element walk's FindObjectsOfType scan is the expensive half — run it only
@@ -4690,6 +4707,7 @@ namespace BigAmbitionsMP
 
         // Round-247: capped counter for the own-tenancy runner-stamp guard's log line.
         private static int _ownRunnerGuardLogged;
+        private static int _layoutMirrorLogged;   // H-ENTRY-1: stale-layout clear lines, capped per load (reset in ResetTenancyConflictLog)
 
         private static bool ApplyBusinessInfoLocal(BusinessInfo info)
         {
@@ -4750,6 +4768,35 @@ namespace BigAmbitionsMP
                     bool typeChanged = !string.Equals(reg.businessTypeName ?? "", info.BusinessTypeName ?? "", StringComparison.Ordinal);
                     reg.BusinessName        = info.BusinessName;
                     reg.businessTypeName    = info.BusinessTypeName;
+                    // H-ENTRY-1 (bundle 20260905-170233): a CLIENT mirrors the host's layout-template name. The game nulls it when a
+                    // business ends (BuildingRegistration.Reset) and writes a new one when an AI shop opens; on a client that shutdown
+                    // is suppressed and this record used to carry no Layout, so a dead business's template outlived it and LoadBuilding
+                    // looked it up for the NEW type → "Layout: X wasn't found. Loading city" → back at the door (325 stale names in one
+                    // save). Rule (round 2, review r1): CLIENTS ONLY — on the host an incoming CLIENT record is not layout-authoritative,
+                    // and the host's own replica of a just-bought shop keeps its blueprint as the retry marker for
+                    // MPTakeover.HostHealUnfurnishedShopsFor. A player-run shop's replica must hold null (its interior is its own furniture;
+                    // LoadBuilding skips the template lookup only for null, since the replica is not IsPlayerOwnedBusiness here). Otherwise
+                    // mirror exactly, null included — HealHollowAiLayouts is host-only, so a client has nothing of its own worth keeping.
+                    try
+                    {
+                        if (!MPServer.IsRunning)
+                        {
+                            string? hostLayout = string.IsNullOrEmpty(info.Layout) ? null : info.Layout;
+                            bool playerRun     = info.RentedByPlayer || IsKnownWorldPlayerId(info.BusinessOwnerRivalId);
+                            string? target     = playerRun ? null : hostLayout;
+                            string? current    = reg.Layout;   // RAW: the game's skip is `Layout == null`, so an empty string must be healed to null too (review r2 #2)
+                            if (!string.Equals(current, target, StringComparison.Ordinal))
+                            {
+                                if (target == null)
+                                {
+                                    if (_layoutMirrorLogged++ < 40) Plugin.Logger.LogInfo($"[Patcher] stale layout '{current}' cleared at '{info.AddressKey}' (host: {(hostLayout ?? "none")}{(playerRun ? ", player-run" : "")}; type {(typeChanged ? "changed" : "unchanged")} → {info.BusinessTypeName}) (H-ENTRY-1).");
+                                    else if (_layoutMirrorLogged == 41) Plugin.Logger.LogInfo("[Patcher] further stale-layout clears not logged this process (H-ENTRY-1).");
+                                }
+                                reg.Layout = target;   // takes are silent — they are the normal mirror
+                            }
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] layout mirror at '{info.AddressKey}': {ex.Message}"); }
                     // ROUND-122: the open/closed flag needs the game NOTIFIED, not just the field written.
                     // BuildingRegistration.TemporarilyClose does far more than assign: it fires
                     // "ba:gameevent_changedbusinessopenstate" and GlobalEvents.onBuildingRegistrationChange

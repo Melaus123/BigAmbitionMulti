@@ -842,7 +842,7 @@ namespace BigAmbitionsMP
     {
         static bool Prefix(EmployeeStationController __instance)
         {
-            if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;   // SP → native
+            if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return true;   // SP → native; H-FORK-1: holds in the offline fork
             if (__instance == null)   // UnityEngine.Object.== : destroyed husk
             {
                 Plugin.Logger.LogInfo("[SynthStaff] UpdateEmployee on a DESTROYED station skipped (delayed native callback outlived an interior rebuild).");
@@ -865,7 +865,7 @@ namespace BigAmbitionsMP
             try
             {
                 if (__result) return;                                     // native already said yes
-                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return;   // H-FORK-1: holds in the offline fork
                 if (__instance == null || !MPRegisterSync.HasSyntheticFor(__instance)) return;   // field 150521: identity-matched, no cross-building borrow
                 // 1.0 PORT (sweep-2 S6): the native gate now reads the STATION'S own BuildingContext,
                 // not the global BuildingManager (they diverge inside Hamptons houses) — mirror it.

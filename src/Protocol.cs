@@ -2094,6 +2094,11 @@ namespace BigAmbitionsMP
         public string BusinessName       { get; set; } = "";
         /// <summary>Business type id string (EA 0.11, e.g. "ba:businesstype_giftshop").</summary>
         public string BusinessTypeName   { get; set; } = "";
+        /// <summary>H-ENTRY-1 (bundle 20260905-170233): the game's layout-template name for an AI-run business — null for
+        /// player-run shops and empty buildings (the game nulls it when a business ends). Carried so a client's copy mirrors the
+        /// host's: a stale name on the client made LoadBuilding look up a template that does not exist for the new type and abort
+        /// to the street (325 stale names in one save). (The handshake is exact-version, so a peer without this field never connects; protocol 21 is unreleased.)</summary>
+        public string? Layout            { get; set; }
         public bool   TemporarilyClosed  { get; set; }
         /// <summary>Owner-authoritative open/closed truth: 0 = unknown (AI shop / not provided),
         /// 1 = open, 2 = closed. The machine that RUNS the business (RentedByPlayer) computes the game's
