@@ -5,7 +5,12 @@ configuration, the Dev vs deployed md5, the 'DEV build' marker count, and the li
 changed source file (before = HEAD version, after = working tree). Refuses to build while the game or
 another MSBuild is running. Never commits, never touches records.
 
-Usage (from anywhere):  python C:\\code\\BigAmbitionsMP\\tools\\build_cycle.py [--skip-game-check]
+Usage (from anywhere):  python C:\\code\\BigAmbitionsMP\\tools\\build_cycle.py [--skip-game-check] [--over-release]
+
+RELEASE HOLD (user decision 2026-09-06, after the second dev-build Workshop leak): when the deployed DLL carries
+NO "DEV build" marker, a RELEASE build is sitting in the game folder - which is the folder the user uploads to the
+Steam Workshop from. This script then REFUSES to build (it would overwrite it with the Dev build) unless
+--over-release is passed, which only the manager passes, and only after the user has confirmed the Workshop upload.
 Exit code 0 = all three builds clean AND md5 match AND marker >= 1; 1 otherwise.
 """
 import hashlib, os, re, subprocess, sys
@@ -64,6 +69,11 @@ def main():
         return 1
     if process_running("MSBuild.exe"):
         print("REFUSED: another MSBuild is running (one build at a time on the shared tree).")
+        return 1
+    if os.path.exists(DEPLOYED) and marker_count(DEPLOYED) == 0 and "--over-release" not in sys.argv:
+        print(f"REFUSED: RELEASE HOLD - the deployed DLL ({md5(DEPLOYED)}) has no DEV marker, so a RELEASE build sits in the game"
+              " folder (the Workshop upload source). Building would overwrite it with the Dev build. Pass --over-release ONLY"
+              " after the user has confirmed the Workshop upload (02-project-rules.md: Post-release hold).")
         return 1
 
     files = changed_src_files()
