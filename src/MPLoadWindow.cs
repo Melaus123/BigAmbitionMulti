@@ -253,7 +253,12 @@ namespace BigAmbitionsMP
                         try
                         {
                             string dirO = Path.Combine(v.SessionDir, owner);
-                            if (Directory.Exists(dirO)) jpg = Directory.GetFiles(dirO, "*portrait*.jpg").FirstOrDefault();
+                            if (Directory.Exists(dirO))
+                            {
+                                string preferred = System.IO.Path.Combine(dirO, "save portrait.jpg");
+                                string? pick = System.IO.File.Exists(preferred) ? preferred : Directory.GetFiles(dirO, "*portrait*.jpg").FirstOrDefault();
+                                jpg = pick;   // DISK-JUNK r4: the store's own portrait beats a legacy "New <name> Save Game portrait.jpg" that NTFS order returns first (review F-2026-09-06-E NOTE-5)
+                            }
                         }
                         catch { }
                         if (jpg != null) break;

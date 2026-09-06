@@ -1165,6 +1165,17 @@ namespace BigAmbitionsMP
                 }
             }
 
+            // H-FRESH-1: a LOADED world has no lobby DTO. A manifest that carries the world's start
+            // settings hands them to MPServer BEFORE the load broadcast below, so a first-time joiner
+            // served the fresh-character fallback is born with THIS world's settings, not the Normal
+            // preset. Placed after the own-slot validation so a REFUSED load changes no shared state
+            // (the 2026-08-18 ordering fix above).
+            MPServer.LastStartSettings = m?.StartSettings;   // H-FRESH-1 r2: null when the manifest predates the field → the world-ready backstop derives it from the live world
+            if (m?.StartSettings != null)
+                Plugin.Logger.LogInfo($"[MPSave] start settings restored from the manifest (cash {m.StartSettings.StartingMoney}).");
+            else
+                Plugin.Logger.LogInfo("[MPSave] manifest predates StartSettings — will derive at world-ready.");
+
             // Round-37 FORK SEMANTICS: load FROM the selected variant/checkpoint folder, but CONTINUE the
             // playthrough on its lineage BASE — ongoing saves go to Main/-auto/checkpoints as usual and can
             // never mutate the loaded (frozen) source. Loading is a jump to a recorded moment; the recorded
@@ -1282,6 +1293,7 @@ namespace BigAmbitionsMP
                     lock (_lock) { _activeSessionName = p.SessionName; }
                 Plugin.Logger.LogInfo("[MPSave] Mid-join: no host-stored save — fresh character with host settings.");
                 ClearClientDisconnectMarker();   // host resolved our join — pending disconnect offer consumed
+                EnsurePortraitFolderForWorld("fresh-start");   // DISK-JUNK r2: _activeSessionName was adopted from p.SessionName just above (host sends the stripped base)
                 MPClient.StartFreshFromHost(p.FallbackSettings);
                 return;
             }
@@ -1337,6 +1349,7 @@ namespace BigAmbitionsMP
             MPClient.BeginJoinQuiesce();   // live stream must not touch the load
             string session = p.SessionName;
             lock (_lock) { _activeSessionName = session; }
+            EnsurePortraitFolderForWorld("load-data");   // DISK-JUNK r2: the session is named now; the top bar's portrait write comes at load-finish
             try
             {
                 byte[] raw    = UnGzipBytes(p.GetHsgGzip());
@@ -1438,6 +1451,27 @@ namespace BigAmbitionsMP
         /// (LoadOwnHsg) and after each successful local save (freshest rotation
         /// folder); cleared with the session.  Null → native path passthrough.</summary>
         public static volatile string? PortraitFolder;
+
+        /// <summary>DISK-JUNK (2026-09-05): the game's top bar draws a portrait the moment a fresh MP world goes live, BEFORE the
+        /// first save has set PortraitFolder — so the redirect prefix bailed and the picture landed in the vanilla character folder,
+        /// one orphan per MP character created. Only when the session is already named — never mints; the host's brand-new world is
+        /// named at its first save, so its very first portrait still lands in the vanilla folder (accepted, one per new world).</summary>
+        internal static void EnsurePortraitFolderForWorld(string why)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(PortraitFolder)) return;
+                if (!(MPServer.IsRunning || MPClient.IsClientInWorld)) return;
+                string session;
+                lock (_lock) { session = _activeSessionName ?? ""; }   // r2: NEVER mint a name here — a minted name would create a wrongly named store folder (build flag r1/3)
+                if (string.IsNullOrEmpty(session) || string.IsNullOrEmpty(MPConfig.StableId)) return;
+                string folder = MPSaveManager.MpCharacterFolder(StripAutoSuffix(session), MPConfig.StableId);
+                if (string.IsNullOrEmpty(folder)) return;
+                PortraitFolder = folder;
+                Plugin.Logger.LogInfo($"[MPSave] portrait folder set at world entry ({why}): {folder}");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] portrait folder at world entry: {ex.Message}"); }
+        }
 
 #if BAMP_DEV
         /// <summary>Support-rig forensics (user-approved 2026-08-18): when set, host-load

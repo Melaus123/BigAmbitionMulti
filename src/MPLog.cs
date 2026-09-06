@@ -74,6 +74,7 @@ namespace BigAmbitionsMP
                 }
                 File.WriteAllText(path, sb.ToString());
                 Plugin.Logger.LogInfo($"[Session] ring dump ({_count} lines, reason='{reason}') → {path}");
+                PruneRingDumps(dir, 30);
                 return path;
             }
             catch (Exception ex)
@@ -81,6 +82,23 @@ namespace BigAmbitionsMP
                 try { Plugin.Logger.LogWarning($"[Session] ring dump failed: {ex.Message}"); } catch { }
                 return "";
             }
+        }
+
+        /// <summary>DISK-JUNK (2026-09-05): ring-log snapshots were never deleted (250 files / 25 MB on one machine). Keep the newest
+        /// <paramref name="keep"/> by last-write time; delete the rest. Never touches anything but bamp-ring-*.log in the given folder.</summary>
+        private static void PruneRingDumps(string dir, int keep)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
+                var files = new DirectoryInfo(dir).GetFiles("bamp-ring-*.log");
+                if (files.Length <= keep) return;
+                Array.Sort(files, (a, b) => b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc));
+                int removed = 0;
+                for (int i = keep; i < files.Length; i++) { try { files[i].Delete(); removed++; } catch { } }
+                if (removed > 0) Plugin.Logger.LogInfo($"[Log] pruned {removed} old ring snapshot(s); {keep} kept.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Log] ring snapshot prune: {ex.Message}"); }
         }
 
         private static string LogDir()

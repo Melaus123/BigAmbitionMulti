@@ -722,6 +722,7 @@ namespace BigAmbitionsMP
 
         public static void Stop()
         {
+            LastStartSettings = null;   // H-FRESH-1 r2: a session's start settings die with it — the next world describes its own (review F-2026-09-06-E MAJOR-1)
             // Initiator forensics: clients see our Stop as RemoteConnectionClose
             // with no clue who pulled the plug — name the caller here so the
             // load-start kick (2026-06-12, cause unresolved) is attributable.
@@ -3833,6 +3834,58 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogError($"[Server] BuildGameVariables: {ex.Message}");
             }
             return gv;
+        }
+
+        /// <summary>H-FRESH-1: a LOADED world has no lobby DTO; this describes the live GameVariables so first-time
+        /// joiners are born with the world's own start settings, not the Normal preset.</summary>
+        public static GameVariablesDto DtoFromGameVariables(GameVariables gv)
+        {
+            var dto = new GameVariablesDto();
+            try
+            {
+                dto.StartingAge                       = gv.startingAge;
+                dto.DisableAging                      = gv.disableAging;
+                // BuildGameVariables ORs the drain dial into this flag on the way in; read it back
+                // plainly (the live dials follow below and carry the 0%-drain case themselves).
+                dto.DisableEnergy                     = gv.disableEnergy;
+                dto.DisableHappiness                  = gv.disableHappiness;
+                dto.AllCoursesUnlocked                = gv.allCoursesUnlocked;
+                dto.StartingMoney                     = gv.startingMoney;
+                dto.TaxPercentage                     = gv.taxPercentage;
+                dto.DaysPerYear                       = gv.daysPerYear;
+                dto.MarketPriceMultiplier             = gv.marketPriceMultiplier;
+                dto.EmployeeHourlySalaryMultiplier    = gv.employeeHourlySalaryMultiplier;
+                dto.BankInterestMultiplier            = gv.bankInterestMultiplier;
+                dto.TutorialEnabled                   = gv.tutorialEnabled;
+                // gv.bankInterestRate — not written by BuildGameVariables (1.0 banking overhaul), so nothing to read back
+                dto.RivalsDifficultyMultiplier        = gv.rivalsDifficultyMultiplier;
+                dto.DisableVehicleDamage              = gv.disableVehicleDamage;
+                dto.DisableVehicleFuel                = gv.disableVehicleFuel;
+                dto.AllContactsUnlocked               = gv.allContactsUnlocked;
+                dto.BaseCustomerPromotionMultiplier   = gv.baseCustomerPromotionMultiplier;
+                dto.WholesaleUrgentFeeMultiplier      = gv.wholesaleUrgentFeeMultiplier;
+                dto.ImporterUrgentFeeMultiplier       = gv.importerUrgentFeeMultiplier;
+                dto.DisableWholesaleAndImportLimits   = gv.disableWholesaleAndImportLimits;
+                dto.AllProductsAvailableFromImporters = gv.allProductsAvailableFromImporters;
+                dto.ExportMultiplier                  = gv.exportMultiplier;
+                dto.SellingMultiplier                 = gv.sellingMultiplier;   // 1.0-new; LIVE under Custom
+
+                // difficulty: read back through the SAME property-or-field member BuildGameVariables writes.
+                var diffMember = MPReflect.PropertyOrField(typeof(GameVariables), "difficulty");
+                dto.Difficulty = MPReflect.Get(diffMember, gv)?.ToString() ?? dto.Difficulty;
+
+                // BuildGameVariables pushes the needs dials OUT through MPNeedsTuning.Apply(dto);
+                // the reverse reads the live ones back.
+                dto.NeedsDrainPercent  = MPNeedsTuning.DrainPercent;
+                dto.RestSpeedPercent   = MPNeedsTuning.RestPercent;
+                dto.MoraleTempoPercent = MPNeedsTuning.MoralePercent;
+                dto.PowerNapAllowed    = MPNeedsTuning.PowerNapAllowed;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError($"[Server] DtoFromGameVariables: {ex.Message}");
+            }
+            return dto;
         }
 
         /// <summary>Default multiplayer GameVariables — used for fallback (no-save) paths.</summary>

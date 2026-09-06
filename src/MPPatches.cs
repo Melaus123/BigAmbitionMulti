@@ -2532,6 +2532,18 @@ namespace BigAmbitionsMP
         // (main-menu save list) are separate methods — untouched.  Gated on a
         // live MP session so single player and offline forks keep the native
         // path even if the folder pointer is stale.
+        //
+        // DISK-JUNK r3 (2026-09-05, review F-2026-09-05-CY MINOR-1): the file NAME this getter
+        // returns is FIXED — "save portrait.jpg" — and is NOT derived from saveGame.SaveGameName.
+        // A fresh character's SaveGameName is "New <name> Save Game", so the derived name dropped a
+        // SECOND portrait into the store member folder beside the "save portrait.jpg" the mod's own
+        // saves write (their .hsg base name is MPSaveCoordinator.SaveFileName = "save"; kept private
+        // there, so the literal is repeated here rather than widening it), and the load window's
+        // *portrait*.jpg glob then showed the stale first face.  The store member folder holds exactly
+        // save.hsg / save.hsg.meta / save portrait.jpg: the first portrait IS that file, and every
+        // later save overwrites it in place.  Both READ paths (PortraitGenerator.LoadPlayerPortrait
+        // and GameStatePatcher.cs:430) go through this same 1-arg getter, so they resolve the same
+        // fixed name as the write.
         [HarmonyPatch(typeof(Character.Customization.PortraitGenerator),
                       nameof(Character.Customization.PortraitGenerator.GetCharacterPortraitPath),
                       typeof(GameInstance))]
@@ -2544,8 +2556,7 @@ namespace BigAmbitionsMP
                     if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
                     string? folder = MPSaveCoordinator.PortraitFolder;
                     if (string.IsNullOrEmpty(folder) || saveGame == null) return true;
-                    __result = System.IO.Path.Combine(folder,
-                        Blueprints.FileSystemHelper.MakeValidFilename(saveGame.SaveGameName + " portrait.jpg"));
+                    __result = System.IO.Path.Combine(folder, "save portrait.jpg");   // DISK-JUNK r3: the store folder holds exactly save.hsg / save.hsg.meta / save portrait.jpg — the first portrait IS that file and every later save overwrites it in place (review F-2026-09-05-CY MINOR-1)
                     return false;
                 }
                 catch (Exception ex)

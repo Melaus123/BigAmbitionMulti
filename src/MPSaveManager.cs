@@ -71,6 +71,7 @@ namespace BigAmbitionsMP
         /// <summary>Per-owner colours (2026-09-05): StableId → permanent colour slot. NULL (absent) = manifest
         /// predates colour slots. Slots are assigned at a player's first connection and never reused.</summary>
         public Dictionary<string, int>? ColourSlots { get; set; }
+        public GameVariablesDto? StartSettings { get; set; }   // H-FRESH-1: the world's start settings (null = manifest predates the field)
         /// <summary>Player-to-player loan ledger (field sweep 2026-08-18) — loans ride the
         /// manifest like grants, so each save slot carries the loans AS OF that moment and
         /// loading an older slot rolls them back with the world (timeline ruling).  NULL
@@ -502,6 +503,11 @@ namespace BigAmbitionsMP
                         if (slots.Count > 0 || m.ColourSlots == null) m.ColourSlots = slots;
                     }
                     catch (Exception cex) { Plugin.Logger.LogWarning($"[MPSave] colour slots: {cex.Message}"); }
+                    // H-FRESH-1: the HOST also stamps the world's start settings, so a world that is later
+                    // LOADED can describe itself to a first-time joiner. Never blank a stored value with null
+                    // (a host that loaded a pre-field manifest has nothing to write yet).
+                    try { m.StartSettings = MPServer.LastStartSettings ?? m.StartSettings; }
+                    catch (Exception sex) { Plugin.Logger.LogWarning($"[MPSave] start settings: {sex.Message}"); }
                 }
                 var json = Newtonsoft.Json.JsonConvert.SerializeObject(m, Newtonsoft.Json.Formatting.Indented);
                 // Round-274 (user-approved): ATOMIC write — the old in-place truncating write

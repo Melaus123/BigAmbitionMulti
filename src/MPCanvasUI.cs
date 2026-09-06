@@ -559,9 +559,21 @@ namespace BigAmbitionsMP
             MPRegisterSync.DemoteForeignAssignedStaff("world-ready");      // round-196: interrupted-transfer staff residue
             MPSaveIntegrity.RunSweep("world-ready");   // dangling-reference repair/detect (includes duty-shift repair); summary rides bug reports
             OptionsGuard.PinClock("world-ready");   // OPTIONS-GUARD: a Game speed set before joining must not outrun the host clock
+            MPSaveCoordinator.EnsurePortraitFolderForWorld("world-ready");   // DISK-JUNK backstop: the scene-loaded call bails while the session name is still unknown
             GameStatePatcher.SweepLedgerVsRivalBusinesses("world-ready");   // round-50: drop player reservations on AI-rival-run addresses (host-only inside)
             GameStatePatcher.HealHollowAiLayouts("world-ready");   // field 175635: hosting from a client mirror — restore AI-shop layouts from business defaults (host-only inside)
             GameStatePatcher.ReconcileLoadedNeedsFlag();   // round-53: the drain dial owns the save's baked energy on/off after load (host-only inside)
+            // H-FRESH-1: a host that LOADED a world (or a manifest that predates StartSettings) has no lobby DTO — describe the live world
+            // so a first-time joiner is born with ITS settings, not the Normal preset (bundle 20260906-030014: 10k instead of 100k).
+            try
+            {
+                if (MPServer.IsRunning && MPServer.LastStartSettings == null && SaveGameManager.Current?.gameVariables != null)
+                {
+                    MPServer.LastStartSettings = MPServer.DtoFromGameVariables(SaveGameManager.Current.gameVariables);
+                    Plugin.Logger.LogInfo($"[Server] start settings derived from the loaded world at world-ready (cash {MPServer.LastStartSettings.StartingMoney}, difficulty {MPServer.LastStartSettings.Difficulty}).");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] start settings at world-ready: {ex.Message}"); }
             MPSaveCoordinator.CheckManifestFreshness();    // round-58: stale ownership-ledger detector (host-only inside)
             ApplyFreshSpawnWarp();  // fresh-character joins: designated start, not the prefab spot
             ApplySpawnSidestep();   // fresh games: one navmesh-validated de-stack, placement final
@@ -1494,6 +1506,7 @@ namespace BigAmbitionsMP
                 if (_dock!.activeSelf != show)
                 {
                     _dock.SetActive(show);
+                    if (show && _dockRT != null) _dockRT.anchoredPosition = ClampDockPos(_dockRT.anchoredPosition);   // H-DOCK-1 r2: UI zoom or resolution may have changed since the last open
                     // RESTDOCK-LOG (bundle 20260903-180322 "rest menu is gone", F-2026-09-05-U): the log could not say whether the
                     // dock was on screen. One line per flip with every gate value; capped so a flicker cannot flood the log.
                     if (_dockFlipLogged++ < 200 || _dockFlipLogged % 200 == 0)
@@ -1616,9 +1629,9 @@ namespace BigAmbitionsMP
                 if (Input.GetMouseButtonUp(0)) _dockDragging = false;
                 if (_dockDragging && _dockRT != null)
                 {
-                    Vector2 d = mp - _dockDragLast;
+                    Vector2 d = (mp - _dockDragLast) / UiScale;   // screen px → canvas units (anchoredPosition is canvas units; review F-2026-09-06-E NOTE-4)
                     _dockDragLast = mp;
-                    _dockRT.anchoredPosition += d;
+                    _dockRT.anchoredPosition = ClampDockPos(_dockRT.anchoredPosition + d);   // H-DOCK-1: never off screen
                     _dockSavedPos = _dockRT.anchoredPosition;   // remembered for next open
                     return;
                 }
@@ -1712,6 +1725,16 @@ namespace BigAmbitionsMP
         private Vector2 _dockDragLast;
         private static Vector2? _dockSavedPos;
 
+        /// <summary>H-DOCK-1: keep the rest dock on screen. Pivot/anchor are bottom-centre (0.5, 0), size 700×212: x may roam
+        /// ±(halfScreen − halfDock) (0 on a screen narrower than the dock), y from 0 to screenHeight − dockHeight.</summary>
+        private static Vector2 ClampDockPos(Vector2 p)
+        {
+            float w = Screen.width / UiScale, h = Screen.height / UiScale;
+            float xMax = Mathf.Max(0f, w * 0.5f - 350f);
+            float yMax = Mathf.Max(0f, h - 212f);
+            return new Vector2(Mathf.Clamp(p.x, -xMax, xMax), Mathf.Clamp(p.y, 0f, yMax));
+        }
+
         private void BuildDock()
         {
             try
@@ -1730,7 +1753,12 @@ namespace BigAmbitionsMP
                 if (_dockSprite != null) { try { bg.sprite = _dockSprite; bg.type = Image.Type.Sliced; } catch { } }
 
                 // Restore the last position the player dragged it to.
-                if (_dockSavedPos.HasValue) _dockRT.anchoredPosition = _dockSavedPos.Value;
+                if (_dockSavedPos.HasValue)
+                {
+                    var clamped = ClampDockPos(_dockSavedPos.Value);
+                    if (clamped != _dockSavedPos.Value) Plugin.Logger.LogInfo($"[RestDock] remembered position {_dockSavedPos.Value} was off screen — clamped to {clamped} (H-DOCK-1).");
+                    _dockRT.anchoredPosition = clamped; _dockSavedPos = clamped;
+                }
 
                 // Header band - chat title-bar look; title + red X; DRAG HANDLE.
                 var hdr = MakeGO("Hdr", _dock.transform);
@@ -3301,6 +3329,7 @@ namespace BigAmbitionsMP
             if (inGame && !_wasInGame)
             {
                 Plugin.Logger.LogInfo("[UI] Game scene loaded — player sync active.");
+                MPSaveCoordinator.EnsurePortraitFolderForWorld("scene-loaded");   // DISK-JUNK: switch the portrait redirect on BEFORE the top bar's self-heal draws (Topbar.LoadPortrait runs off the game-loaded callback)
                 // Quiesce ends a few seconds LATER: resuming the stream the
                 // same frame killed the game's load-finish fade (2 GM NREs at
                 // exactly quiesce-OFF; loading screen never faded, 2026-06-11).
@@ -7892,6 +7921,7 @@ namespace BigAmbitionsMP
                 string name = MPServer.ChosenLoadSession;
                 if (!string.IsNullOrEmpty(name))
                 {
+                    MPServer.LastStartSettings = null;   // H-FRESH-1 r2: a LOAD starts from the manifest's own StartSettings (restored in HostLoadSession) or, when the manifest predates the field, from the live world at world-ready — never from the previous world
                     var m = MPSaveManager.ReadManifest(name);
                     if (m != null)
                     {
