@@ -5699,7 +5699,10 @@ namespace BigAmbitionsMP
                     // failed/dropped join.  Say so instead of sitting on a stale
                     // "Connecting…" that looks like a live lobby.
                     string why = MPClient.LastDisconnectReason;
-                    info = $"<color=#FF7070>Not connected{(string.IsNullOrEmpty(why) ? "" : " — " + why)}.  Leave and retry.</color>";
+                    string? friendly = MPClient.FriendlyDisconnectReason;
+                    info = friendly != null
+                        ? $"<color=#FF7070>{friendly}</color>"
+                        : $"<color=#FF7070>Not connected{(string.IsNullOrEmpty(why) ? "" : " — " + why)}.  Leave and retry.</color>";
                 }
                 // Round-93: a transient notice (e.g. overlay-disabled) briefly overrides the info line.
                 if (!string.IsNullOrEmpty(_lobbyNotice) && Time.unscaledTime < _lobbyNoticeUntil)

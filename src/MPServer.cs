@@ -635,6 +635,7 @@ namespace BigAmbitionsMP
 
         public static bool Start(int port)
         {
+            MPClient.LastDisconnectReason = ""; MPClient.FriendlyDisconnectReason = null;   // CONNECT-MSG r1 review (F-2026-09-06-AG MINOR-5): a stale join reason must never show on a failed host bind
             // Round-229: with a SYSTEMIC boot patch failure (>= ModEntry.PatchFailHardBlock
             // classes threw) the game hooks are unreliable — hosting would half-work
             // (lobby up, host's own load bounces, clients sent into a world the host

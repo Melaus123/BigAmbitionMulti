@@ -71,6 +71,33 @@ namespace BigAmbitionsMP
         /// Set in OnDisconnected, cleared on Connect — the lobby UI shows it so a
         /// failed join doesn't sit silently behind an alive-looking lobby window.</summary>
         public static string LastDisconnectReason = "";
+        /// <summary>CONNECT-MSG (bundle 20260906-110216): what the last join attempt was, for the lobby text and the log —
+        /// "ip" or "steam"; the address CLASS only (loopback / private network / public / hostname / steam relay), never the
+        /// address itself, so the redacted bug bundle still says what kind of target it was.</summary>
+        public static string LastConnectPath = "";
+        public static string LastConnectTargetClass = "";
+        public static int LastConnectPort;
+        private static readonly System.Diagnostics.Stopwatch _connectClock = new();
+        /// <summary>Set by OnDisconnected for the no-answer case; the lobby shows it in place of the raw reason. Null otherwise.</summary>
+        public static string? FriendlyDisconnectReason;
+        private static string AddressClass(string host)
+        {
+            try
+            {
+                if (System.Net.IPAddress.TryParse(host, out var ip))
+                {
+                    if (System.Net.IPAddress.IsLoopback(ip)) return "loopback";
+                    var b = ip.GetAddressBytes();
+                    if (b.Length == 4 && (b[0] == 10 || (b[0] == 172 && b[1] >= 16 && b[1] <= 31) || (b[0] == 192 && b[1] == 168) || (b[0] == 169 && b[1] == 254))) return "private network";
+                    return "public";
+                }
+                return "hostname";
+            }
+            catch { return "unknown"; }
+        }
+        /// <summary>CONNECT-MSG: the transport's connect-retry policy, for the connect log line.</summary>
+        private static string DescribeConnectPolicy()
+            => (_transport as LnlClientTransport)?.DescribePolicy() ?? "library defaults";
 
         /// <summary>True after the connection to the host dropped WHILE IN-GAME
         /// (host quit/crash/network).  Freezes the game and shows a "session
@@ -129,6 +156,7 @@ namespace BigAmbitionsMP
             // never run two transports/poll threads at once.
             if (_transport != null) Disconnect();
             LastDisconnectReason = "";
+            FriendlyDisconnectReason = null; LastConnectPath = "ip"; LastConnectTargetClass = AddressClass(hostIp); LastConnectPort = port; _connectClock.Restart();
             SessionEnded = false;
             _voluntaryDisconnect = false;
             _connected = false;
@@ -141,7 +169,7 @@ namespace BigAmbitionsMP
             if (!t.Connect(hostIp, port))
             { Plugin.Logger.LogError($"[Client] transport failed to start toward {hostIp}:{port}."); _transport = null; return; }
 
-            Plugin.Logger.LogInfo($"[Client] Connecting to {hostIp}:{port}...");
+            Plugin.Logger.LogInfo($"[Client] Connecting to {hostIp}:{port} ({LastConnectTargetClass} address, direct IP; connect attempts/delay: {DescribeConnectPolicy()})...");
         }
 
         /// <summary>Connect over Valve's relay network by the host's SteamId
@@ -160,6 +188,7 @@ namespace BigAmbitionsMP
             }
             if (_transport != null) Disconnect();
             LastDisconnectReason = "";
+            FriendlyDisconnectReason = null; LastConnectPath = "steam"; LastConnectTargetClass = "steam relay"; LastConnectPort = 0; _connectClock.Restart();
             SessionEnded = false;
             _voluntaryDisconnect = false;
             _connected = false;
@@ -260,7 +289,9 @@ namespace BigAmbitionsMP
         private static void OnDisconnected(string reason, byte[] extra)
         {
             PlayerColours.ResetSession();   // colours r2 (MINOR-5): an involuntary drop ends the session too - Disconnect() only covers the voluntary path
-            Plugin.Logger.LogWarning($"[Client] Disconnected from host: {reason}");
+            bool wasConnected = _connected;
+            double secs = _connectClock.IsRunning ? _connectClock.Elapsed.TotalSeconds : -1;
+            Plugin.Logger.LogWarning($"[Client] Disconnected from host: {reason} after {secs:0.0}s via {LastConnectPath} ({LastConnectTargetClass}); session was {(wasConnected ? "ESTABLISHED" : "never established")}.");
             // Host can attach a HUMAN reason (kick/reject/ban) as disconnect
             // data — "RemoteConnectionClose" told the user nothing (2026-06-11).
             string why = reason;
@@ -306,6 +337,10 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Client] disconnect-tag read: {ex.Message}"); }
             LastDisconnectReason = why;
+            // CONNECT-MSG: a direct-IP join that nobody answered gets a sentence a player can act on (approved wording 2026-09-06).
+            FriendlyDisconnectReason = (!wasConnected && LastConnectPath == "ip" && reason == "ConnectionFailed")
+                ? $"No host answered at that address. If your friend is on Steam, right-click their name and choose Join Game. Direct IP needs the host's public address and port {LastConnectPort} opened on their router."
+                : null;
             _connected = false;
             // The connection is gone either way — stop the poll loop so
             // IsConnecting goes false (the UI was stuck showing "Connecting…"

@@ -738,6 +738,10 @@ namespace BigAmbitionsMP
 
         public bool IsRunning => _running;
 
+        /// <summary>CONNECT-MSG: the LiteNetLib connect-retry policy actually in force, for the client's connect log line.</summary>
+        internal string DescribePolicy()
+            => _client is null ? "library defaults" : $"{_client.MaxConnectAttempts} attempts x {_client.ReconnectDelay}ms";
+
         public bool Connect(string hostIp, int port)
         {
             _listener = new EventBasedNetListener();
