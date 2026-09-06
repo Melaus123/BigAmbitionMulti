@@ -2187,6 +2187,9 @@ namespace BigAmbitionsMP
         /// 2026-06-12).  Session-player shops are NOT carried here — the live
         /// MPPriceSync channel owns those.</summary>
         public List<RetailPriceInfo> Prices { get; set; } = new();
+
+        /// <summary>H-BIZFLAP-1: the record the sweeps REMEMBER stays intact; the copy that goes on the wire is the one that gets its logo bytes stripped (attach-once). Shallow: the lists are shared, so callers must REPLACE LogoFiles on the copy, never mutate it.</summary>
+        internal BusinessInfo ShallowCopy() => (BusinessInfo)MemberwiseClone();
     }
 
     /// <summary>One day of the week's opening schedule for one building.</summary>

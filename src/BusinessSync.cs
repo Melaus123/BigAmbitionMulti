@@ -491,17 +491,15 @@ namespace BigAmbitionsMP
                     if (reg != null)
                     {
                         var info = ReadInfo(reg);
-                        if (info != null) StripUnchangedLogos(info);   // wave-2: same attach-once rule on the host sweep
                         BusinessInfo? prev = null;
                         bool hadPrev = info != null && _lastSent.TryGetValue(info!.AddressKey, out prev);
                         if (info != null
                             && !(hadPrev && EqualInfo(prev!, info)))
                         {
-                            // PROBE-START: P-BIZ-FLAP — which field makes one address re-broadcast every poll (bundle 20260905-170233: 142× in 4.5 min)
-                            if (hadPrev) ProbeBizFlap(prev!, info);
-                            // PROBE-END: P-BIZ-FLAP
-                            _lastSent[info.AddressKey] = info;
-                            MPServer.BroadcastBusinessChange(info);
+                            _lastSent[info.AddressKey] = info;                 // H-BIZFLAP-1: remember the UNSTRIPPED record - comparing against a stripped one made every attach/strip transition look like a change (3 sends per real change; 142 in 4.5 min under signature churn, bundle 20260905-170233)
+                            var wire = info.ShallowCopy();
+                            StripUnchangedLogos(wire);                          // attach-once applies to the wire copy only
+                            MPServer.BroadcastBusinessChange(wire);
                             _cycleChanges++;
                             // Log only non-trivial changes (something that has a name or
                             // isn't BusinessTypeName.Empty) so we don't spam at startup.
@@ -566,7 +564,6 @@ namespace BigAmbitionsMP
                     if (info == null) continue;
                     info.OwnerPlayerId         = MPConfig.PlayerId;   // it's ours — the host attributes it to us
                     info.BusinessOwnerPlayerId = MPConfig.PlayerId;
-                    StripUnchangedLogos(info);   // wave-2: the 30 s heartbeat stops re-uploading unchanged JPGs
 
                     bool unchanged = _lastSentClient.TryGetValue(info.AddressKey, out var prev) && EqualInfo(prev, info);
                     bool reassertDue = !_lastSentClientAt.TryGetValue(info.AddressKey, out var sentAt) || (now - sentAt) >= ClientReassertSeconds;
@@ -574,7 +571,9 @@ namespace BigAmbitionsMP
 
                     _lastSentClient[info.AddressKey] = info;
                     _lastSentClientAt[info.AddressKey] = now;
-                    MPClient.SendBusinessChange(info);
+                    var wire = info.ShallowCopy();                              // H-BIZFLAP-1: the remembered record stays intact; only the wire copy loses its logo bytes
+                    StripUnchangedLogos(wire);                                  // attach-once applies to the wire copy only
+                    MPClient.SendBusinessChange(wire);
                     if (!unchanged)   // quiet on heartbeat re-asserts
                     {
                         changes++;
@@ -606,9 +605,6 @@ namespace BigAmbitionsMP
             _lastMarketEventsHash = 0;   // re-emit market events to a fresh session / re-host (don't suppress via a stale hash)
             _nextMarketEventsAt   = 0f;
             _lastMarketEventsSentAt = -1000f;   // round-101: first pass of a new session always sends
-            // PROBE-START: P-BIZ-FLAP (reset)
-            _flapSeen.Clear(); _flapLogged = 0;   // review: a re-host in one process must not inherit a spent probe
-            // PROBE-END: P-BIZ-FLAP (reset)
         }
 
         // ── Field reading ─────────────────────────────────────────────────────
@@ -936,54 +932,6 @@ namespace BigAmbitionsMP
             return true;
         }
 
-        // PROBE-START: P-BIZ-FLAP (method) — log-only; remove with the registry entry
-        private static readonly Dictionary<string, (float firstAt, int count, bool logged)> _flapSeen = new();
-        private static int _flapLogged;
-        /// <summary>P-BIZ-FLAP: a record that re-broadcasts ≥ 3 times within 60 s is flapping; name the fields that differ
-        /// between the last sent record and this one (mirrors every comparison in EqualInfo). Once per address, 10 per launch.</summary>
-        private static void ProbeBizFlap(BusinessInfo prev, BusinessInfo cur)
-        {
-            try
-            {
-                float now = UnityEngine.Time.realtimeSinceStartup;
-                if (!_flapSeen.TryGetValue(cur.AddressKey, out var s) || now - s.firstAt > 60f) s = (now, 0, s.logged);
-                s.count++;
-                _flapSeen[cur.AddressKey] = s;
-                if (s.count < 3 || s.logged || _flapLogged >= 10) return;
-                var diff = new List<string>();
-                if (prev.BusinessName != cur.BusinessName) diff.Add($"BusinessName '{prev.BusinessName}'→'{cur.BusinessName}'");
-                if (!PricesEqual(prev.Prices, cur.Prices)) diff.Add($"Prices ({prev.Prices?.Count ?? -1}→{cur.Prices?.Count ?? -1} rows)");
-                if (prev.BusinessTypeName != cur.BusinessTypeName) diff.Add($"BusinessTypeName {prev.BusinessTypeName}→{cur.BusinessTypeName}");
-                if (prev.Layout != cur.Layout) diff.Add($"Layout '{prev.Layout}'→'{cur.Layout}'");
-                if (prev.TemporarilyClosed != cur.TemporarilyClosed) diff.Add($"TemporarilyClosed {prev.TemporarilyClosed}→{cur.TemporarilyClosed}");
-                if (prev.AvailableForRent != cur.AvailableForRent) diff.Add($"AvailableForRent {prev.AvailableForRent}→{cur.AvailableForRent}");
-                if (prev.RentPerDay != cur.RentPerDay) diff.Add($"RentPerDay {prev.RentPerDay}→{cur.RentPerDay}");
-                if (prev.LastDeposit != cur.LastDeposit) diff.Add($"LastDeposit {prev.LastDeposit}→{cur.LastDeposit}");
-                if (prev.BusinessDescription != cur.BusinessDescription) diff.Add("BusinessDescription");
-                if (prev.SignType != cur.SignType) diff.Add($"SignType {prev.SignType}→{cur.SignType}");
-                if (prev.SignLightPacked != cur.SignLightPacked) diff.Add($"SignLightPacked 0x{prev.SignLightPacked:X8}→0x{cur.SignLightPacked:X8}");
-                if (prev.LampPacked != cur.LampPacked) diff.Add($"LampPacked 0x{prev.LampPacked:X8}→0x{cur.LampPacked:X8}");
-                if (prev.LogoShape != cur.LogoShape) diff.Add($"LogoShape '{prev.LogoShape}'→'{cur.LogoShape}'");
-                if (prev.LogoFont != cur.LogoFont) diff.Add($"LogoFont {prev.LogoFont}→{cur.LogoFont}");
-                if (prev.LogoColorPacked != cur.LogoColorPacked) diff.Add("LogoColorPacked");
-                if (prev.FontColorPacked != cur.FontColorPacked) diff.Add("FontColorPacked");
-                if (prev.BackgroundColorPacked != cur.BackgroundColorPacked) diff.Add("BackgroundColorPacked");
-                if (!LogoFilesEqual(prev.LogoFiles, cur.LogoFiles)) diff.Add($"LogoFiles ({prev.LogoFiles?.Count ?? -1}→{cur.LogoFiles?.Count ?? -1})");
-                if (!ScheduleEqual(prev.Schedule, cur.Schedule)) diff.Add("Schedule");
-                if (prev.BuildingOwnerRivalId != cur.BuildingOwnerRivalId) diff.Add($"BuildingOwnerRivalId '{prev.BuildingOwnerRivalId}'→'{cur.BuildingOwnerRivalId}'");
-                if (prev.BusinessOwnerRivalId != cur.BusinessOwnerRivalId) diff.Add($"BusinessOwnerRivalId '{prev.BusinessOwnerRivalId}'→'{cur.BusinessOwnerRivalId}'");
-                if (prev.RentedByPlayer != cur.RentedByPlayer) diff.Add($"RentedByPlayer {prev.RentedByPlayer}→{cur.RentedByPlayer}");
-                // remaining EqualInfo comparisons (read to its end 2026-09-05): OwnerPlayerId, DeedOwnerPlayerId, AiValuation, OwnerOpenState
-                if (prev.OwnerPlayerId != cur.OwnerPlayerId) diff.Add($"OwnerPlayerId '{prev.OwnerPlayerId}'→'{cur.OwnerPlayerId}'");
-                if (prev.DeedOwnerPlayerId != cur.DeedOwnerPlayerId) diff.Add($"DeedOwnerPlayerId '{prev.DeedOwnerPlayerId}'→'{cur.DeedOwnerPlayerId}'");
-                if (prev.AiValuation != cur.AiValuation) diff.Add($"AiValuation {prev.AiValuation}→{cur.AiValuation}");
-                if (prev.OwnerOpenState != cur.OwnerOpenState) diff.Add($"OwnerOpenState {prev.OwnerOpenState}→{cur.OwnerOpenState}");
-                s.logged = true; _flapSeen[cur.AddressKey] = s; _flapLogged++;
-                Plugin.Logger.LogWarning($"[PROBE] BizFlap '{cur.AddressKey}' ('{cur.BusinessName}'): re-sent {s.count}× within 60 s — differing fields: {(diff.Count > 0 ? string.Join("; ", diff) : "NONE (EqualInfo false but every mirrored field equal — a comparison this probe does not mirror)")}");
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[PROBE] BizFlap: {ex.Message}"); }
-        }
-        // PROBE-END: P-BIZ-FLAP (method)
         private static bool EqualInfo(BusinessInfo a, BusinessInfo b)
         {
             return a.BusinessName             == b.BusinessName
@@ -1088,9 +1036,11 @@ namespace BigAmbitionsMP
         // unchanged scan returns the SAME cached list, so it never triggers a rebroadcast.
         // ── Wave-2 (audit T5 — MEASURED: 341.8 KB per 30 s of byte-identical logo re-uploads) ──
         // Steady-state sends carry the logo BYTES only when the on-disk set changed since this
-        // process last attached them. An EMPTY list is safe everywhere: the receive side logs
-        // "no logo files received" once and never wipes (GameStatePatcher:4187), and the host's
-        // adopt diff skips empties. The JOIN snapshot bypasses this (BuildFullSnapshot → ReadInfo
+        // process last attached them. The strip runs on the WIRE COPY only (H-BIZFLAP-1): the
+        // record the sweeps remember keeps its list, so an attach/strip transition is not a
+        // "change". An EMPTY list is safe everywhere: the receive side logs "no logo files
+        // received" once and never wipes (GameStatePatcher ~:5215), and the host's adopt diff
+        // skips empties. The JOIN snapshot bypasses this (BuildFullSnapshot → ReadInfo
         // directly), so a joiner always gets the bytes.
         private static readonly System.Collections.Generic.Dictionary<string, long> _logoAttachedSig = new();
 
