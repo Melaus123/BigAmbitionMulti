@@ -652,6 +652,7 @@ namespace BigAmbitionsMP
                 MPStoreMigration.RunIfNeeded();  // store v2 M2: one-time flat→pid migration, first frame the version resolves
             MPRadioSync.Tick();   // round-227: debounced volume-drag flush
             PlayerColours.Tick();   // 2026-09-05 colours: one repaint + options re-registration per frame, at most
+            PlayerPins.Tick();      // 2026-09-05 colours piece two: the Players map filter + one live pin per remote player
             BillboardAdSync.Tick();   // round-290: own billboard campaigns → peers (diff-triggered + heartbeat)
 #if BAMP_DEV
             TestDrive.Tick();   // round-239 (registered in 04-probes.md): file-drop test command channel — inert until <DataRoot>\testdrive\ exists
@@ -664,7 +665,6 @@ namespace BigAmbitionsMP
                 try
                 {
                     // Reflection: DebugLogManager lives in the IngameDebugConsole plugin assembly,
-            PlayerPins.Tick();      // 2026-09-05 colours piece two: the Players map filter + one live pin per remote player
                     // which the mod doesn't reference — a dev key doesn't earn a csproj reference.
                     var t = HarmonyLib.AccessTools.TypeByName("IngameDebugConsole.DebugLogManager");
                     var dlm = t?.GetProperty("Instance", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null);
