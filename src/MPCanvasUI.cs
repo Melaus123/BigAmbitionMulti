@@ -392,6 +392,34 @@ namespace BigAmbitionsMP
         /// link + read the game-initialized Facepunch SteamClient.  Gates slice 2
         /// (relay transport rides the same client).  Logs once, first heartbeat
         /// where Steam reports valid; silent otherwise.</summary>
+        // H-IDENT-1 r3 (review F-2026-09-06-AJ): the Steam probe rides the 30 s crash heartbeat, so an account change noticed
+        // there could land up to 30 s after Steam turned valid - after a Host/Join click (MAJOR-1) - and nothing stopped it from
+        // switching the identity in the middle of a running session (MAJOR-2). This per-frame check costs one bool until it
+        // has run once: the FIRST frame Steam is valid, and only while no session runs, the stored identity is rechecked
+        // against the live account; in a session the recheck is deferred to the next launch (never switch mid-session).
+        private static bool _identityRechecked;
+        private static void TickIdentityRecheck()
+        {
+            if (_identityRechecked) return;
+            try
+            {
+                if (!Steamworks.SteamClient.IsValid) return;
+                if (MPServer.IsRunning || MPClient.IsClientInWorld || MPClient.IsConnecting)   // r4 (F-2026-09-06-AK): a Join handshake in flight counts as a session too
+                {
+                    _identityRechecked = true;
+                    Plugin.Logger.LogInfo("[Steam] identity recheck deferred to the next launch — Steam became valid while a session was already running (H-IDENT-1).");
+                    return;
+                }
+                _identityRechecked = true;
+                if (MPConfig.OnSteamReady(out string oldName))
+                {
+                    if (Instance != null && Instance._name == oldName) Instance._name = MPConfig.PlayerId;   // the panel showed the old name - repaint
+                    MPLoadWindow.RefreshIfOpen();
+                }
+            }
+            catch (Exception ex) { _identityRechecked = true; Plugin.Logger.LogWarning($"[Steam] identity recheck: {ex.Message}"); }
+        }
+
         private static void TickSteamProbe()
         {
             if (_steamProbed) return;
@@ -750,6 +778,7 @@ namespace BigAmbitionsMP
             long _sub = MPPerf.Begin();
             MPContentFingerprint.EnsureCached();   // MAIN THREAD: compute once, well before any connect (crash 2026-07-27)
             TickThemeCapture();      // frontload native font + rounded sprite (no timing dependency)
+            TickIdentityRecheck();   // H-IDENT-1 r3: per-frame until it has run once (unthrottled, unlike the Steam probe)
             TickCrashHeartbeat();    // task #5: stamp the session marker with where-we-are (~30s)
             PlacementWatch.Tick();   // P-PLACEMENT-STRAND: a session-long placement mode is the bug; say so on a cadence
             MPLifecycle.Tick();      // single-source phase tracker (stage 4: first consumer live)

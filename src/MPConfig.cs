@@ -81,6 +81,14 @@ namespace BigAmbitionsMP
         /// </summary>
         public static string StableId { get; private set; } = "";
 
+        /// <summary>H-IDENT-1: true for this launch when the Steam account differs from the one the stored id was minted
+        /// under (two machines that once shared an account kept ONE identity after switching). Set inside ResolveStableId.</summary>
+        public static bool AccountChanged { get; private set; }
+
+        /// <summary>H-IDENT-1 r2: true once an account switch has been FULLY handled (id switched, name re-detected and
+        /// persisted) - at Init, or later at the Steam probe via OnSteamReady. Keeps the probe from redoing the switch.</summary>
+        private static bool _accountSwitchHandled;
+
         // ── Tiny persisted key-value store (JSON in the mod folder) ───────────
         private static string _cfgPath = "";
         private static Dictionary<string, string> _cfg = new();
@@ -308,15 +316,16 @@ namespace BigAmbitionsMP
                 try { Set("Port", "7777"); } catch { }
             }
 
-            StableId = ResolveStableId();
+            StableId = ResolveStableId(true);
             Plugin.Logger.LogInfo($"[Config] Stable id: {StableId}");
 
             // Resolve the player ID: config override → old BepInEx cfg ("Host"/
             // "Client1" — keeps lobby identity continuity) → Steam name → fallback
             var stored = Get("PlayerId").Trim();
-            if (string.IsNullOrEmpty(stored) || stored == "Player1")
+            if (string.IsNullOrEmpty(stored) || stored == "Player1" || AccountChanged)
             {
-                TryMigrateFromBepInEx(out _, out var oldName);
+                string? oldName = null;
+                if (!AccountChanged) TryMigrateFromBepInEx(out _, out oldName);
                 if (!string.IsNullOrEmpty(oldName))
                 {
                     PlayerId = oldName!;
@@ -326,7 +335,9 @@ namespace BigAmbitionsMP
                 else
                 {
                     PlayerId = DetectPlayerName();
-                    Plugin.Logger.LogInfo($"[Config] Auto-detected player name: {PlayerId}");
+                    Plugin.Logger.LogInfo($"[Config] Auto-detected player name: {PlayerId}{(AccountChanged ? " (Steam account changed — re-detected; H-IDENT-1)" : "")}");
+                    if (AccountChanged) Set("PlayerId", PlayerId);
+                    if (AccountChanged) _accountSwitchHandled = true;   // a switch caught at Init is fully handled here (H-IDENT-1 r2)
                 }
             }
             else
@@ -349,10 +360,8 @@ namespace BigAmbitionsMP
             if (hostIp != null)
                 HostIP = hostIp;
 
-            // Re-resolve the stable id now that we're connecting — Steam is
-            // reliably valid by this point, so an early GUID fallback upgrades
-            // to the permanent SteamID64 (only if nothing was persisted yet).
-            StableId = ResolveStableId();
+            // Re-resolve for consistency only: the persisted id always wins here (a guid- id persists as minted - the old "upgrade" promise never held, review F-2026-09-06-AJ NOTE-7). An ACCOUNT change is never applied here - it runs at Init or on the first frame Steam is valid (MPCanvasUI.TickIdentityRecheck -> OnSteamReady), never mid-session (H-IDENT-1 r3).
+            StableId = ResolveStableId(false);
 
             try
             {
@@ -368,6 +377,28 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogWarning($"[Config] Could not persist PlayerId: {ex.Message}");
             }
+        }
+
+        /// <summary>H-IDENT-1 r2: called once from the mod's Steam probe (MPCanvasUI), the first moment Steam is valid. If the stored
+        /// identity was minted under another account, switch it now and re-detect the display name - BEFORE any Host/Join click, so
+        /// the save list and the name field never show the old identity. Returns true when a switch happened; oldName = the name
+        /// that was showing until now (the caller repaints the panel only if it still shows it).</summary>
+        public static bool OnSteamReady(out string oldName)
+        {
+            oldName = PlayerId;
+            try
+            {
+                if (_accountSwitchHandled) return false;
+                string before = StableId;
+                StableId = ResolveStableId(true);
+                if (!AccountChanged) return false;
+                _accountSwitchHandled = true;
+                PlayerId = DetectPlayerName();
+                Set("PlayerId", PlayerId);
+                Plugin.Logger.LogInfo($"[Config] Steam account changed (detected at Steam probe): id '{before}' → '{StableId}', name '{oldName}' → '{PlayerId}' (H-IDENT-1). If this repeats every launch, the config file could not be written.");
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] OnSteamReady: {ex.Message}"); return false; }
         }
 
         // ── Name resolution ───────────────────────────────────────────────────
@@ -407,12 +438,30 @@ namespace BigAmbitionsMP
         /// orphaned progress).  IMPORTANT for the 0.10→0.11 migration: the old
         /// BepInEx cfg held the id; this fresh store mints a NEW one unless the
         /// migration shim below finds the old value.</summary>
-        private static string ResolveStableId()
+        private static string ResolveStableId(bool allowAccountSwitch)
         {
             // 1. Already established here → reuse verbatim.
             var stored = Get("StableId").Trim();
             if (!string.IsNullOrEmpty(stored))
+            {
+                // H-IDENT-1: the persisted id still wins - EXCEPT when it was minted under a Steam account that is
+                // provably not the one logged in now (a guid- id, or Steam not valid yet, never triggers this; that
+                // guard is what keeps the old guid<->steam flip bug fixed).
+                if (allowAccountSwitch && stored.StartsWith("steam-", StringComparison.Ordinal))
+                {
+                    var now = TryGetSteamId64();
+                    if (now != null && stored != "steam-" + now)
+                    {
+                        string fresh = "steam-" + now;
+                        Set("StableIdPrevious", stored);
+                        Set("StableId", fresh);
+                        AccountChanged = true;
+                        Plugin.Logger.LogWarning($"[Config] Steam account changed: stored id '{stored}' was minted under another account — now '{fresh}' (previous kept as StableIdPrevious; the old identity's saves belong to that account). H-IDENT-1 If this warning repeats every launch, the config file could not be written (F-2026-09-06-AH MINOR-6).");
+                        return fresh;
+                    }
+                }
                 return stored;
+            }
 
             // 1b. Migration shim: lift the id out of THIS INSTALL's old BepInEx
             //     config so 0.10 progress (saves/ownership keyed by stable id)

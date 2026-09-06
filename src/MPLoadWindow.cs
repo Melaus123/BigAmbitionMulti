@@ -168,6 +168,9 @@ namespace BigAmbitionsMP
 
         // ── refresh: feed OUR playthroughs into the native cards ─────────────
 
+        /// <summary>H-IDENT-1 r2: repaint the list after the identity changed under it (Steam probe), but only when open.</summary>
+        internal static void RefreshIfOpen() { try { if (IsOpen) Refresh(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[LoadWin] refresh after identity change: {ex.Message}"); } }
+
         private static void Refresh()
         {
             _cards.Clear(); _rowMap.Clear();
