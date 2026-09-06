@@ -10,15 +10,17 @@ using UI.Guiders;     // DirectionGuiderType, GuidersManager (the indoors-hide r
 
 namespace BigAmbitionsMP
 {
-    /// <summary>PER-OWNER COLOURS, piece two (2026-09-05): a "Players" toggle in the city-map filter panel, and
-    /// one live map pin per OTHER player in that player's slot colour.
+    /// <summary>PER-OWNER COLOURS, pieces two and three (2026-09-05/06): a "Players" SECTION of the city-map filter
+    /// panel — the game's own header line, with its collapse arrow and its select-all box — sitting ABOVE "Status",
+    /// and under it one row per OTHER player, each in that player's slot colour.
     ///
-    /// THE TOGGLE is a real CityMapFilter, created in a POSTFIX of CityMapFilters.InitializeFilters — that method
-    /// starts by wiping every clone of its two templates (ClearClones, :188-191), so anything added earlier or
-    /// once-only would be thrown away. It is moved to the FIRST row under the existing "Status" header (plan
-    /// ruling: no new heading). Its on/off state persists exactly like a native filter, in the save's
-    /// SelectedCitymapFilters list; the game's LoadFilters (:203-213) silently ignores names it does not know, so
-    /// a save that has been touched by this mod still loads correctly without it.
+    /// THE SECTION is a real CityMapFilterCategory, created in a POSTFIX of CityMapFilters.InitializeFilters — that
+    /// method starts by wiping every clone of its two templates (ClearClones, :188-191), so anything added earlier
+    /// or once-only would be thrown away. Each ROW is a real, REGISTERED CityMapFilter (CreateFilter, :372-382), so
+    /// the game persists its tick in the save's SelectedCitymapFilters exactly as it does for its own rows, restores
+    /// it when the map opens (LoadFilters :203-213) and includes it in the panel's toggle-all (:663-680). A saved
+    /// tick for a player who is not here is inert: LoadFilters silently skips a name that has no toggle this session
+    /// (:207), and an offline row hides itself through isAvailable.
     ///
     /// A PIN is a plain CityMap.AddPoi on a mod-owned anchor transform. OUTDOORS the anchor follows the remote
     /// player's avatar; INDOORS it sits on that building's first entrance door — the same trick the game plays
@@ -32,25 +34,27 @@ namespace BigAmbitionsMP
     {
         private const string Tag = "[PlayerPins]";
 
-        /// <summary>The one and only new on-screen string (user-approved 2026-09-05). It is both the filter's
-        /// registry key and its label: CityMapFilter.SetUp does label.Key = filterName (:59) and the game renders
-        /// a localisation key it does not know literally — the same behaviour the mod already relies on.</summary>
+        /// <summary>The one and only new on-screen string (user-approved 2026-09-05; since 2026-09-06 it titles the
+        /// SECTION instead of a filter row). It is written as RAW TEXT through label.SetValue(clearKey: true), so the
+        /// localiser never looks it up; the section's registry key is "bamp_players", which nobody sees.</summary>
         internal const string FilterName = "Players";
 
-        /// <summary>The key CreateLine gave the Status category (CityMapFilters.CreateStatusCategory :217).</summary>
+        /// <summary>The key CreateLine gave the Status category (CityMapFilters.CreateStatusCategory :217). Our own
+        /// section takes its sibling index, so "Players" lands directly above "Status".</summary>
         private const string StatusCategoryKey = "bizman_status";
 
-        /// <summary>The Status category's first NATIVE filter. Fallback anchor for our sibling index, used only if
-        /// the header line and the filter rows turn out not to share a parent (the prefab is not readable).</summary>
+        /// <summary>The Status category's first NATIVE filter. Fallback anchor for our rows' sibling index, used
+        /// only if the header lines and the filter rows turn out not to share a parent (the prefab is not readable).</summary>
         private const string StatusFirstFilter = "buildingresume_rented_by_you";
 
-        // ── The filter ────────────────────────────────────────────────────────
+        // ── The section ───────────────────────────────────────────────────────
 
-        /// <summary>Postfix body: create the "Players" filter and put it first under Status.</summary>
+        /// <summary>Postfix body: create our own "Players" section and put it above Status.</summary>
         internal static void InstallFilter(CityMapFilters filters)
         {
             try
             {
+                if (!(MPServer.IsRunning || MPClient.IsClientInWorld)) { _playersCategory = null; _rows.Clear(); return; }   // r3: no section outside a multiplayer session (F-2026-09-06-X MINOR-4); the predicate is true on a joining client from the transport connect (MPClient.cs:196-199)
                 if (filters == null) return;
 
                 // CreateLine names each header clone after its localisation key (:353-355) and GetCategory
@@ -62,17 +66,13 @@ namespace BigAmbitionsMP
                     return;
                 }
 
-                // Sprite = the icon the game uses for the local player's own map pin; data = null (legal, and the
-                // game's own precedent at :218) so the filter is always available.
-                CityMapFilter f = filters.CreateFilter(FilterName, filters.playerIcon, null, category);
-                if (f == null)
-                {
-                    Plugin.Logger.LogWarning($"{Tag} CreateFilter returned nothing — no '{FilterName}' filter this session.");
-                    return;
-                }
-                PlaceFirstUnderStatus(f, category);
-                _playersRow = f; _statusCategory = category; _rows.Clear(); _trackerPoi = null; Tracked = null;   // piece three: a new CityMapFilters means new rows (the old panel died with its scene)
-                SeedDefaultOn();
+                CityMapFilterCategory cat = filters.CreateLine("bamp_players");   // our own section (private helper, publicized): header + collapse + select-all, registered with the panel
+                if (cat == null) { Plugin.Logger.LogWarning($"{Tag} CreateLine returned nothing — no '{FilterName}' section this session."); return; }
+                try { cat.label.SetValue(FilterName, true); } catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} section title: {ex.Message}"); }
+                try { cat.transform.SetSiblingIndex(category.transform.GetSiblingIndex()); } catch { }   // ABOVE Status (same parent: both are lineEntry clones)
+                _playersCategory = cat;
+                _rows.Clear(); _trackerPoi = null; Tracked = null; _placeLogged = false;   // a new CityMapFilters means a new panel: new rows, and the placement case is logged again
+                Plugin.Logger.LogInfo($"{Tag} '{FilterName}' section created above Status.");
             }
             catch (Exception ex)
             {
@@ -80,152 +80,146 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>CityMapFilterCategory IS the header line clone (the MonoBehaviour sits on the lineEntry
-        /// prefab), so the header's sibling index is the category's own. Headers and filters are appended to their
-        /// separate templates' parents; when that parent is the same object, visual order is sibling order and
-        /// "first under Status" = header index + 1. If the two parents differ, fall back to taking the place of
-        /// the category's first native filter. If neither works, leave the row where the game appended it and say
-        /// so in the log.</summary>
-        private static void PlaceFirstUnderStatus(CityMapFilter f, CityMapFilterCategory category)
-        {
-            try
-            {
-                Transform ft = f.transform;
-                Transform ht = category.transform;
-                if (ft.parent != null && ht.parent != null && ft.parent == ht.parent)
-                {
-                    ft.SetSiblingIndex(ht.GetSiblingIndex() + 1);
-                    Plugin.Logger.LogInfo($"{Tag} '{FilterName}' placed at the Status header index + 1 (now {ft.GetSiblingIndex()}).");
-                    return;
-                }
-
-                Transform? firstNative = (ft.parent != null) ? ft.parent.Find(StatusFirstFilter) : null;
-                if (firstNative != null)
-                {
-                    ft.SetSiblingIndex(firstNative.GetSiblingIndex());
-                    Plugin.Logger.LogInfo($"{Tag} '{FilterName}' placed at the first native Status filter's index (now {ft.GetSiblingIndex()}) — header and filter rows do not share a parent.");
-                    return;
-                }
-
-                Plugin.Logger.LogWarning($"{Tag} could not place '{FilterName}' under Status — it stays where the game appended it.");
-            }
-            catch (Exception ex)
-            {
-                try { Plugin.Logger.LogWarning($"{Tag} place filter: {ex.Message} — '{FilterName}' stays where the game appended it."); } catch { }
-            }
-        }
-
-        /// <summary>Default ON (user decision 2026-09-06). The game starts every filter unticked and re-ticks the
-        /// names in the save's SelectedCitymapFilters each time the map opens (CityMapFilters.cs:122-127 → LoadFilters
-        /// :203-211). Seed that list ONCE per playthrough so the first map open ticks "Players"; from then on the
-        /// game's own list rules — an untick sticks (CityMapFilter.cs:107 removes the name on click). The once-only
-        /// marker is a PlayerPrefs key per SHARED playthrough id (pinned on host and client before the world loads);
-        /// without an id the seed is skipped. Known edge (accepted 2026-09-06): the marker is written now, the seeded
-        /// name reaches disk only with the world's next save — a quit before any save leaves that world unseeded, and
-        /// the player can simply tick the filter.</summary>
-        private static void SeedDefaultOn()
-        {
-            try
-            {
-                // The SAME predicate Tick uses for its "not in MP -> remove all pins" branch. It is already TRUE on a
-                // joining CLIENT when CityMapFilters.Start() runs: MPClient.OnConnected sets _connected at the
-                // transport event (MPClient.cs:196-199), long before LoadData and long before the city scene loads.
-                if (!(MPServer.IsRunning || MPClient.IsClientInWorld)) return;   // r5: never seed a single-player save (F-2026-09-06-I)
-                var gi = SaveGameManager.Current;
-                if (gi == null || gi.SelectedCitymapFilters == null) return;
-                // r4 (review F-2026-09-06-G MAJOR-1): key by the SHARED playthrough id, pinned on BOTH sides before the world
-                // loads (client: ClientHandleLoadData, MPSaveCoordinator.cs:1254; host: :1116/:1199/:2559/:3410). The
-                // coordinator's own id is host-only, and a client's SaveGameName is the constant "save" — that fallback made
-                // the key identical for every world a client ever joined. No id (single player) → no seed.
-                string id = MPSaveManager.ActivePlaythrough;
-                if (string.IsNullOrEmpty(id)) id = MPSaveCoordinator.ActivePlaythroughId;
-                if (string.IsNullOrEmpty(id)) return;
-                string key = "bamp.players-filter-seeded." + id;
-                if (UnityEngine.PlayerPrefs.GetInt(key, 0) != 0) return;
-                if (!gi.SelectedCitymapFilters.Contains(FilterName)) gi.SelectedCitymapFilters.Add(FilterName);
-                UnityEngine.PlayerPrefs.SetInt(key, 1);
-                UnityEngine.PlayerPrefs.Save();   // r4: the marker must survive a crash (review F-2026-09-06-G D)
-                Plugin.Logger.LogInfo($"{Tag} '{FilterName}' filter seeded ON for this playthrough (first sight on this machine).");
-            }
-            catch (Exception ex)
-            {
-                try { Plugin.Logger.LogWarning($"{Tag} seed default: {ex.Message}"); } catch { }
-            }
-        }
-
-        /// <summary>Is the "Players" toggle ticked? The same call HousingMapCues already makes for a native filter
-        /// (HousingMapCues.cs:168, __instance.IsFilterSelected("buildingresume_rented_by_you")).</summary>
-        internal static bool PlayersFilterOn()
-        {
-            try { return InstanceBehavior<UIs>.Instance.mapFilters.IsFilterSelected(FilterName); }
-            catch { return false; }
-        }
-
         // ── Piece three: one filter row per online player ─────────────────────
 
-        /// <summary>One row per online player, cloned from the panel's OWN filter template and SetUp, but never
-        /// registered in the game's filter dictionaries (we do not call CreateFilter, and we pass
-        /// excludeFromSelection: true) - so LoadFilters, ToggleAllFilters, IsFilterSelected and IsFilterAvailable
-        /// never see it: no save-file writes, no restore. The row's CHECKBOX shows/hides that player's pin; the
-        /// row's CROSSHAIR toggles the guide arrow to them.</summary>
+        /// <summary>One row per online player, created with the game's OWN CreateFilter (CityMapFilters.cs:372-382),
+        /// so the row is REGISTERED: it lands in _filterEntries/_filterToggles, the game writes its tick to the save's
+        /// SelectedCitymapFilters on every click (CityMapFilter.cs:107/:110), re-ticks it from that list when the map
+        /// opens (LoadFilters :203-213) and flips it with the panel's toggle-all (:663-680) — exactly like a native
+        /// row. The row's CHECKBOX shows/hides that player's pin (read straight off the toggle); the row's CROSSHAIR
+        /// toggles the guide arrow to them. CreateFilter returns the row already AddFilter-ed and activated by the
+        /// category's UpdateFilterVisibility, so the raw player NAME is written over the label immediately after —
+        /// one Localizor pass may log an unknown-key warning first (accepted: it is gated on non-critical warnings,
+        /// LocalizorManager.cs:293-295).</summary>
         private static void EnsureRow(string pid)
         {
-            if (_rows.ContainsKey(pid) || _playersRow == null || _statusCategory == null) return;
-            Transform? obj = null;                                            // outside the try so the catch can destroy an orphaned clone
+            if (_rows.ContainsKey(pid) || _playersCategory == null) return;
+            CityMapFilter? row = null; string name = "bamp_player_" + pid;
             try
             {
                 var filters = InstanceBehavior<UIs>.Instance.mapFilters;
-                Transform tpl = filters.filterEntry;                          // publicized private template (CityMapFilters.cs:25-26)
-                obj = UnityEngine.Object.Instantiate(tpl, tpl.parent);
-                obj.name = "bamp_player_" + pid;
-                var row = obj.GetComponent<CityMapFilter>();
-                if (row == null) { UnityEngine.Object.Destroy(obj.gameObject); return; }
                 string p = pid;
-                row.SetUp("bamp_player_" + pid,
-                          isOn => OnRowToggled(p, isOn),
-                          filters.playerIcon,
-                          new CityMapFilterData { isAvailable = () => _online.Contains(p) },
-                          excludeFromSelection: true);                        // never written to the save's SelectedCitymapFilters (CityMapFilter.cs:107-111 skipped); no focus point -> the game does not wire its centring click
-                var pr = new PlayerRow { Pid = pid, Row = row };
-                try { string nm = MPNames.Resolve(pid); pr.Row!.label.SetValue(nm, true); pr.Label = nm; } catch { }   // clear the placeholder key BEFORE AddFilter enables the row
-                // the crosshair is OUR tracker toggle: show it and wire our own click (the game's OnFocusButtonClick is not attached)
-                try
-                {
-                    var btn = row.focusButton;                                // publicized private Button (CityMapFilter.cs:31)
-                    if (btn != null)
-                    {
-                        btn.gameObject.SetActive(true);
-                        btn.onClick.AddListener(() => OnCrosshairClick(p));
-                        pr.Cross = btn.image ?? btn.GetComponentInChildren<Image>(true);
-                        if (pr.Cross != null) pr.CrossDefault = pr.Cross.color;
-                    }
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} crosshair for '{pid}': {ex.Message}"); }
-                int idx = _playersRow.transform.GetSiblingIndex() + 1 + _rows.Count;   // BEFORE AddFilter: _rows.Count must still exclude this row (order unchanged), and a destroyed _playersRow throws before the row reaches the category
-                _statusCategory.AddFilter(row);                               // category list only (search/collapse/header); NOT the game's filter dictionaries
-                _rows[pid] = pr;                                              // registered the moment the row is in the category: a later throw must never leave a destroyed row in _filters (G8)
-                row.transform.SetSiblingIndex(Mathf.Min(idx, row.transform.parent.childCount - 1));
-                // default: pin on (the game starts every toggle unticked)
-                try
-                {
-                    row.Toggle.SetIsOnWithoutNotify(true);                    // never notify: OnToggleClick resets the player's click (CityMapFilter.cs:104)
-                    if (row.Toggle is ToggleExtender te)                     // its on-look is applied only from onValueChanged (ToggleExtender.cs:22-27) — mirror it
-                    { if (te.icon != null) te.icon.color = te.iconOnColor; if (te.background != null && te.backgroundOnSprite != null) te.background.sprite = te.backgroundOnSprite; }
-                }
-                catch { }
+                int idx = RowIndexFor();                                       // BEFORE CreateFilter: excludes this row; throws first if our header is gone
+                row = filters.CreateFilter(name, filters.playerIcon, new CityMapFilterData { isAvailable = () => _online.Contains(p) }, _playersCategory);   // REGISTERED: the game persists its tick in the save like any native row
+                if (row == null) { _rows[pid] = new PlayerRow { Pid = pid, Name = name }; Plugin.Logger.LogWarning($"{Tag} CreateFilter returned nothing for '{pid}'."); return; }
+                var pr = new PlayerRow { Pid = pid, Row = row, Name = name };
+                _rows[pid] = pr;                                               // registered the moment it exists (never destroy a registered row — G8)
+                try { string nm = MPNames.Resolve(pid); row.label.SetValue(nm, true); pr.Label = nm; } catch { }
+                PlaceRow(row, idx);
+                WireCrosshair(pr, p);                                          // crosshair: SetActive(true) + onClick -> OnCrosshairClick(p); CrossDefault captured
+                SeedFirstSight(pr);                                            // first sight on this machine in this world = ticked
                 RefreshRowLook(pr);
                 Plugin.Logger.LogInfo($"{Tag} filter row created for '{pid}'.");
             }
             catch (Exception ex)
             {
-                if (!_rows.ContainsKey(pid))                                  // the row never reached the category → discard the clone and never retry this scene
+                if (!_rows.ContainsKey(pid))
                 {
-                    try { if (obj != null) UnityEngine.Object.Destroy(obj.gameObject); } catch { }
-                    _rows[pid] = new PlayerRow { Pid = pid };                 // Row == null: RefreshRowLook returns; PinOnFor stays true
+                    // r3 (F-2026-09-06-X MINOR-3): `row` is still null whenever CreateFilter itself threw, so ask the
+                    // game's OWN registry instead (publicized private Dictionary<string, CityMapFilter>, CityMapFilters.cs:83).
+                    // Nothing is ever destroyed: a throw after _filterEntries.Add leaves a registered object the game holds,
+                    // and destroying it would break the game's dictionaries.
+                    CityMapFilter? live = null;
+                    try { InstanceBehavior<UIs>.Instance.mapFilters._filterEntries.TryGetValue(name, out live); } catch { }
+                    if (live != null) { _rows[pid] = new PlayerRow { Pid = pid, Row = live, Name = name }; }   // registered and alive: keep it and own it
+                    else { _rows[pid] = new PlayerRow { Pid = pid, Name = name }; }                            // nothing registered: never retried this scene
                 }
-                // else: the row is live in the category (AddFilter succeeded) — keep it; a destroyed row left in _filters would throw in the game's UI (G8)
                 try { Plugin.Logger.LogWarning($"{Tag} row for '{pid}': {ex.Message}"); } catch { }
             }
+        }
+
+        /// <summary>Where this row belongs: our section's header, then the rows already under it. Called BEFORE
+        /// CreateFilter, so _rows.Count still excludes this row (row order unchanged) and a destroyed header throws
+        /// HERE — before anything of ours has been registered with the panel.</summary>
+        private static int RowIndexFor() => _playersCategory!.transform.GetSiblingIndex() + 1 + _rows.Count;
+
+        /// <summary>Headers are lineEntry clones under lineEntry.transform.parent (CityMapFilters.cs:353) and rows are
+        /// filterEntry clones under filterEntry.parent (:374); whether those two parents are the same object is not
+        /// readable from the prefab. SAME parent → visual order is sibling order, so the row takes the index
+        /// RowIndexFor computed. DIFFERENT parent → take the place of the first native Status filter, which is where
+        /// our section now sits. Neither → leave the row where the game appended it. Logged once per scene.</summary>
+        private static void PlaceRow(CityMapFilter row, int idx)
+        {
+            try
+            {
+                Transform rt = row.transform;
+                Transform ht = _playersCategory!.transform;
+                if (rt.parent != null && ht.parent != null && rt.parent == ht.parent)
+                {
+                    rt.SetSiblingIndex(Mathf.Min(idx, rt.parent.childCount - 1));
+                    if (!_placeLogged) { _placeLogged = true; Plugin.Logger.LogInfo($"{Tag} rows sit under the '{FilterName}' header (headers and rows share a parent; first row at index {rt.GetSiblingIndex()})."); }
+                    return;
+                }
+                Transform? firstNative = (rt.parent != null) ? rt.parent.Find(StatusFirstFilter) : null;
+                if (firstNative != null)
+                {
+                    rt.SetSiblingIndex(firstNative.GetSiblingIndex());
+                    if (!_placeLogged) { _placeLogged = true; Plugin.Logger.LogInfo($"{Tag} rows placed at the first native Status filter's index — headers and filter rows do not share a parent."); }
+                    return;
+                }
+                if (!_placeLogged) { _placeLogged = true; Plugin.Logger.LogWarning($"{Tag} could not place the player rows — they stay where the game appended them."); }
+            }
+            catch (Exception ex) { try { Plugin.Logger.LogWarning($"{Tag} place row: {ex.Message}"); } catch { } }
+        }
+
+        /// <summary>The crosshair is OUR tracker toggle. CreateFilter passes no focus point, so SetUp hides
+        /// focusButton and wires no click of its own (CityMapFilter.cs:67-76; the else branch at :75) — show it and
+        /// add our listener. CrossDefault is captured before anything tints it.</summary>
+        private static void WireCrosshair(PlayerRow pr, string p)
+        {
+            try
+            {
+                CityMapFilter? row = pr.Row;
+                if (row == null) return;
+                var btn = row.focusButton;                                     // publicized private Button (CityMapFilter.cs:31)
+                if (btn != null)
+                {
+                    btn.gameObject.SetActive(true);
+                    btn.onClick.AddListener(() => OnCrosshairClick(p));
+                    pr.Cross = btn.image ?? btn.GetComponentInChildren<Image>(true);
+                    if (pr.Cross != null) pr.CrossDefault = pr.Cross.color;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} crosshair for '{p}': {ex.Message}"); }
+        }
+
+        /// <summary>User decision 2026-09-06: a player's row starts TICKED the first time this machine sees them in this world, and from
+        /// then on the save's own SelectedCitymapFilters rules (the game adds/removes the name on click and re-ticks listed names on
+        /// map open). The once-only marker is per (world, player) in the mod's settings store. A saved tick for a player who is not
+        /// in the game is inert: LoadFilters skips names without a toggle (CityMapFilters.cs:207) and offline rows are hidden.</summary>
+        private static void SeedFirstSight(PlayerRow pr)
+        {
+            try
+            {
+                if (pr.Row == null) return;
+                var gi = SaveGameManager.Current; if (gi == null || gi.SelectedCitymapFilters == null) return;
+                bool listed = gi.SelectedCitymapFilters.Contains(pr.Name);
+                // r3 (F-2026-09-06-X MINOR-2): the once-only SEED needs the playthrough id (its marker key is per
+                // world); the RESTORE below reads only the save's own list, so it runs whether or not the id is known.
+                string id = MPSaveManager.ActivePlaythrough; if (string.IsNullOrEmpty(id)) id = MPSaveCoordinator.ActivePlaythroughId;
+                if (!string.IsNullOrEmpty(id))
+                {
+                    string key = "bamp.player-row-seen." + id + "." + pr.Pid;
+                    bool seen = UnityEngine.PlayerPrefs.GetInt(key, 0) != 0;
+                    if (!seen)
+                    {
+                        if (!listed) gi.SelectedCitymapFilters.Add(pr.Name);  // ticked in the save from now on, until the player unticks (the game removes it)
+                        UnityEngine.PlayerPrefs.SetInt(key, 1); UnityEngine.PlayerPrefs.Save();
+                        listed = true;
+                    }
+                }
+                // rows created after the map's LoadFilters pass (a player who joined mid-session) must reflect the saved tick now
+                if (listed && !pr.Row.Toggle.isOn) pr.Row.Toggle.SetIsOnWithoutNotify(true);   // silent: OnToggleClick would reset the player's click (CityMapFilter.cs:104)
+                if (pr.Row.Toggle is ToggleExtender te)
+                {
+                    // r3 (MINOR-1): the silent tick never fires ToggleExtender.OnValueChanged, so mirror ALL of that look, not just the icon (ToggleExtender.cs:22-31)
+                    bool on = pr.Row.Toggle.isOn;
+                    if (te.icon != null) te.icon.color = on ? te.iconOnColor : Color.white;
+                    if (te.background != null) { var sp = on ? te.backgroundOnSprite : te.backgroundOffSprite; if (sp != null) te.background.sprite = sp; }
+                }
+                try { _playersCategory?.UpdateToggleAllState(); } catch { }   // the silent tick skips the header refresh
+            }
+            catch (Exception ex) { try { Plugin.Logger.LogWarning($"{Tag} first-sight seed: {ex.Message}"); } catch { } }
         }
 
         /// <summary>Name + colours on the row: the name via SetValue(clearKey) so Localizor never sees a fake key; the player's colour on the
@@ -240,12 +234,6 @@ namespace BigAmbitionsMP
             bool lit = Tracked == pr.Pid;
             if (pr.Cross != null && (lit != pr.CrossLit || (lit && pr.HasColour && pr.Cross.color != (Color)pr.Colour)))
             { try { pr.Cross.color = lit && pr.HasColour ? (Color)pr.Colour : pr.CrossDefault; pr.CrossLit = lit; } catch { } }
-        }
-
-        /// <summary>The row's checkbox: this player's pin on/off. The Status header's all-on/all-off reaches it too - that is the expected meaning.</summary>
-        private static void OnRowToggled(string pid, bool isOn)
-        {
-            try { if (_rows.TryGetValue(pid, out var pr)) pr.PinOn = isOn; } catch { }
         }
 
         /// <summary>The row's crosshair: toggle the guide arrow to this player. On -> lit in the player's colour, the map centres on them once;
@@ -327,16 +315,16 @@ namespace BigAmbitionsMP
         private sealed class PlayerRow
         {
             public string Pid = ""; public CityMapFilter? Row; public string Label = "";
+            public string Name = "";   // "bamp_player_" + pid (the registered filter name)
             public Color32 Colour; public bool HasColour;
-            public bool PinOn = true;                              // the row's checkbox: this player's pin on the map (default on)
             public Image? Cross; public Color CrossDefault = Color.white; public bool CrossLit;   // the crosshair graphic + its untouched colour
         }
         private static readonly Dictionary<string, PlayerRow> _rows = new Dictionary<string, PlayerRow>();   // one filter row per player seen this scene
-        private static CityMapFilter? _playersRow;                 // the "Players" row (anchor for sibling placement)
-        private static CityMapFilterCategory? _statusCategory;
+        private static CityMapFilterCategory? _playersCategory;    // OUR "Players" section: header + collapse arrow + select-all box
+        private static bool _placeLogged;                           // the row-placement case is logged once per scene
         private static readonly HashSet<string> _online = new HashSet<string>();   // live remote ids, refreshed by Tick (read by the rows' isAvailable)
         private static bool _rowsDirty;                            // set when _online changes -> refresh row visibility once
-        private static bool PinOnFor(string pid) => !_rows.TryGetValue(pid, out var r) || r.PinOn;
+        private static bool PinOnFor(string pid) => !_rows.TryGetValue(pid, out var r) || r.Row == null || r.Row.Toggle.isOn;
 
         /// <summary>MAIN THREAD, once per frame from MPCanvasUI.Update.</summary>
         internal static void Tick()
@@ -358,7 +346,7 @@ namespace BigAmbitionsMP
                     return;
                 }
 
-                bool show = CityMap.IsOpen && PlayersFilterOn();
+                bool show = CityMap.IsOpen;   // pins are gated per row by the row's own toggle; the section's select-all flips them all
 
                 // ── who is online this frame: rows and pins both read this ────
                 // r1b (review F-2026-09-06-P MINOR-5): GetRemotePlayerIds builds a fresh List over the registry's
@@ -386,11 +374,11 @@ namespace BigAmbitionsMP
                     if (changed) { _online.Clear(); foreach (var id in _live) _online.Add(id); _rowsDirty = true; }
                     foreach (var id in _live) EnsureRow(id);
                     foreach (var kv in _rows) RefreshRowLook(kv.Value);            // name/colour/crosshair state (cheap compares)
-                    if (_rowsDirty && _statusCategory != null) { _rowsDirty = false; try { _statusCategory.UpdateFilterVisibility(); } catch { } }   // re-applies isAvailable (CityMapFilterCategory.cs:164-176; publicized private)
+                    if (_rowsDirty && _playersCategory != null) { _rowsDirty = false; try { _playersCategory.UpdateFilterVisibility(); } catch { } }   // re-applies isAvailable (CityMapFilterCategory.cs:164-176; publicized private)
                     if (Tracked != null && !_online.Contains(Tracked)) StopTracking("not connected");
                 }
 
-                // r2: with the map CLOSED or the "Players" toggle OFF nothing can be seen, so do no PIN work at
+                // r2: with the map closed nothing can be seen, so do no PIN work at
                 // all — no pin creation, no position maths. Every existing pin is hidden once and _allHidden keeps
                 // every later frame free. A player who LEAVES while hidden therefore keeps a (hidden) pin until the
                 // next frame with show == true, which removes it before anything shows.
@@ -426,7 +414,7 @@ namespace BigAmbitionsMP
                     bool isTracked = pid == Tracked;
                     if (!show && !isTracked)
                     {
-                        // nothing visible for this one: the map is shut (or the filter off) and someone ELSE is tracked
+                        // nothing visible for this one: the map is shut and someone ELSE is tracked
                         try { if (_pins.TryGetValue(pid, out var hp) && hp.Poi != null && !hp.Poi.hidden) hp.Poi.SetHidden(true); } catch { }
                         continue;
                     }
@@ -630,7 +618,7 @@ namespace BigAmbitionsMP
                 // isAvailable here, or the rows would keep naming departed players until the scene ends.
                 _online.Clear();
                 _rowsDirty = false;
-                try { if (_statusCategory != null) _statusCategory.UpdateFilterVisibility(); } catch { }
+                try { if (_playersCategory != null) _playersCategory.UpdateFilterVisibility(); } catch { }
             }
             catch (Exception ex) { Warn("reset", ex); }
         }
