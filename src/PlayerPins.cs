@@ -2,9 +2,11 @@ using System;
 using System.Collections.Generic;
 using HarmonyLib;
 using UnityEngine;
-using City.CityMap;   // CityMapFilter, CityMapFilterCategory
+using UnityEngine.UI;   // Image, Button, Toggle - the filter row's crosshair graphic
+using City.CityMap;   // CityMapFilter, CityMapFilterCategory, CityMapFilterData
 using Entities;       // InstanceBehavior
 using UI;             // UIs
+using UI.Guiders;     // DirectionGuiderType, GuidersManager (the indoors-hide rule)
 
 namespace BigAmbitionsMP
 {
@@ -69,6 +71,7 @@ namespace BigAmbitionsMP
                     return;
                 }
                 PlaceFirstUnderStatus(f, category);
+                _playersRow = f; _statusCategory = category; _rows.Clear(); _trackerPoi = null; Tracked = null;   // piece three: a new CityMapFilters means new rows (the old panel died with its scene)
                 SeedDefaultOn();
             }
             catch (Exception ex)
@@ -124,6 +127,10 @@ namespace BigAmbitionsMP
         {
             try
             {
+                // The SAME predicate Tick uses for its "not in MP -> remove all pins" branch. It is already TRUE on a
+                // joining CLIENT when CityMapFilters.Start() runs: MPClient.OnConnected sets _connected at the
+                // transport event (MPClient.cs:196-199), long before LoadData and long before the city scene loads.
+                if (!(MPServer.IsRunning || MPClient.IsClientInWorld)) return;   // r5: never seed a single-player save (F-2026-09-06-I)
                 var gi = SaveGameManager.Current;
                 if (gi == null || gi.SelectedCitymapFilters == null) return;
                 // r4 (review F-2026-09-06-G MAJOR-1): key by the SHARED playthrough id, pinned on BOTH sides before the world
@@ -154,6 +161,133 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
+        // ── Piece three: one filter row per online player ─────────────────────
+
+        /// <summary>One row per online player, cloned from the panel's OWN filter template and SetUp, but never
+        /// registered in the game's filter dictionaries (we do not call CreateFilter, and we pass
+        /// excludeFromSelection: true) - so LoadFilters, ToggleAllFilters, IsFilterSelected and IsFilterAvailable
+        /// never see it: no save-file writes, no restore. The row's CHECKBOX shows/hides that player's pin; the
+        /// row's CROSSHAIR toggles the guide arrow to them.</summary>
+        private static void EnsureRow(string pid)
+        {
+            if (_rows.ContainsKey(pid) || _playersRow == null || _statusCategory == null) return;
+            Transform? obj = null;                                            // outside the try so the catch can destroy an orphaned clone
+            try
+            {
+                var filters = InstanceBehavior<UIs>.Instance.mapFilters;
+                Transform tpl = filters.filterEntry;                          // publicized private template (CityMapFilters.cs:25-26)
+                obj = UnityEngine.Object.Instantiate(tpl, tpl.parent);
+                obj.name = "bamp_player_" + pid;
+                var row = obj.GetComponent<CityMapFilter>();
+                if (row == null) { UnityEngine.Object.Destroy(obj.gameObject); return; }
+                string p = pid;
+                row.SetUp("bamp_player_" + pid,
+                          isOn => OnRowToggled(p, isOn),
+                          filters.playerIcon,
+                          new CityMapFilterData { isAvailable = () => _online.Contains(p) },
+                          excludeFromSelection: true);                        // never written to the save's SelectedCitymapFilters (CityMapFilter.cs:107-111 skipped); no focus point -> the game does not wire its centring click
+                var pr = new PlayerRow { Pid = pid, Row = row };
+                try { string nm = MPNames.Resolve(pid); pr.Row!.label.SetValue(nm, true); pr.Label = nm; } catch { }   // clear the placeholder key BEFORE AddFilter enables the row
+                // the crosshair is OUR tracker toggle: show it and wire our own click (the game's OnFocusButtonClick is not attached)
+                try
+                {
+                    var btn = row.focusButton;                                // publicized private Button (CityMapFilter.cs:31)
+                    if (btn != null)
+                    {
+                        btn.gameObject.SetActive(true);
+                        btn.onClick.AddListener(() => OnCrosshairClick(p));
+                        pr.Cross = btn.image ?? btn.GetComponentInChildren<Image>(true);
+                        if (pr.Cross != null) pr.CrossDefault = pr.Cross.color;
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} crosshair for '{pid}': {ex.Message}"); }
+                int idx = _playersRow.transform.GetSiblingIndex() + 1 + _rows.Count;   // BEFORE AddFilter: _rows.Count must still exclude this row (order unchanged), and a destroyed _playersRow throws before the row reaches the category
+                _statusCategory.AddFilter(row);                               // category list only (search/collapse/header); NOT the game's filter dictionaries
+                _rows[pid] = pr;                                              // registered the moment the row is in the category: a later throw must never leave a destroyed row in _filters (G8)
+                row.transform.SetSiblingIndex(Mathf.Min(idx, row.transform.parent.childCount - 1));
+                // default: pin on (the game starts every toggle unticked)
+                try
+                {
+                    row.Toggle.SetIsOnWithoutNotify(true);                    // never notify: OnToggleClick resets the player's click (CityMapFilter.cs:104)
+                    if (row.Toggle is ToggleExtender te)                     // its on-look is applied only from onValueChanged (ToggleExtender.cs:22-27) — mirror it
+                    { if (te.icon != null) te.icon.color = te.iconOnColor; if (te.background != null && te.backgroundOnSprite != null) te.background.sprite = te.backgroundOnSprite; }
+                }
+                catch { }
+                RefreshRowLook(pr);
+                Plugin.Logger.LogInfo($"{Tag} filter row created for '{pid}'.");
+            }
+            catch (Exception ex)
+            {
+                if (!_rows.ContainsKey(pid))                                  // the row never reached the category → discard the clone and never retry this scene
+                {
+                    try { if (obj != null) UnityEngine.Object.Destroy(obj.gameObject); } catch { }
+                    _rows[pid] = new PlayerRow { Pid = pid };                 // Row == null: RefreshRowLook returns; PinOnFor stays true
+                }
+                // else: the row is live in the category (AddFilter succeeded) — keep it; a destroyed row left in _filters would throw in the game's UI (G8)
+                try { Plugin.Logger.LogWarning($"{Tag} row for '{pid}': {ex.Message}"); } catch { }
+            }
+        }
+
+        /// <summary>Name + colours on the row: the name via SetValue(clearKey) so Localizor never sees a fake key; the player's colour on the
+        /// label text (icon tint is reset by ToggleExtender prefabs) and on the crosshair while this player is tracked.</summary>
+        private static void RefreshRowLook(PlayerRow pr)
+        {
+            if (pr.Row == null) return;
+            string name = MPNames.Resolve(pr.Pid);
+            if (name != pr.Label) { try { pr.Row.label.SetValue(name, true); pr.Label = name; } catch { } }
+            if (PlayerColours.TryColourFor(pr.Pid, out var c) && (!pr.HasColour || !SameColour(c, pr.Colour)))
+            { try { pr.Row.SetLabelColor(c); pr.Colour = c; pr.HasColour = true; } catch { } }
+            bool lit = Tracked == pr.Pid;
+            if (pr.Cross != null && (lit != pr.CrossLit || (lit && pr.HasColour && pr.Cross.color != (Color)pr.Colour)))
+            { try { pr.Cross.color = lit && pr.HasColour ? (Color)pr.Colour : pr.CrossDefault; pr.CrossLit = lit; } catch { } }
+        }
+
+        /// <summary>The row's checkbox: this player's pin on/off. The Status header's all-on/all-off reaches it too - that is the expected meaning.</summary>
+        private static void OnRowToggled(string pid, bool isOn)
+        {
+            try { if (_rows.TryGetValue(pid, out var pr)) pr.PinOn = isOn; } catch { }
+        }
+
+        /// <summary>The row's crosshair: toggle the guide arrow to this player. On -> lit in the player's colour, the map centres on them once;
+        /// off -> normal look, the map stays. One tracked player at a time (another crosshair switches).</summary>
+        private static void OnCrosshairClick(string pid)
+        {
+            try
+            {
+                if (Tracked == pid) { StopTracking("crosshair"); return; }
+                string? prev = Tracked;
+                Tracked = pid;
+                DestroyTrackerPoi();                                          // a fresh POI for the new target; TickTracker recreates it
+                if (prev != null && _rows.TryGetValue(prev, out var ppr)) RefreshRowLook(ppr);
+                if (_rows.TryGetValue(pid, out var pr)) RefreshRowLook(pr);
+                _centreOnce = true;   // the map centres from TickTracker next frame, after TickOne has refreshed the anchor
+                Plugin.Logger.LogInfo($"{Tag} tracking '{pid}'.");
+            }
+            catch (Exception ex) { try { Plugin.Logger.LogWarning($"{Tag} crosshair: {ex.Message}"); } catch { } }
+        }
+
+        private static void StopTracking(string why)
+        {
+            if (Tracked == null && _trackerPoi == null) return;
+            string? pid = Tracked; Tracked = null; _centreOnce = false; DestroyTrackerPoi();
+            if (pid != null && _rows.TryGetValue(pid, out var pr)) RefreshRowLook(pr);
+            if (pid != null) Plugin.Logger.LogInfo($"{Tag} tracking of '{pid}' stopped ({why}).");
+        }
+
+        private static void DestroyTrackerPoi()
+        {
+            var poi = _trackerPoi; _trackerPoi = null; _trackerLabel = ""; _trackerHasColour = false;
+            if (poi == null) return;
+            try
+            {
+                var cm = InstanceBehavior<CityManager>.Instance;
+                var map = (cm != null) ? cm.cityMap : null;
+                if (map != null && map.pois != null) map.pois.Remove(poi);
+            }
+            catch { }
+            try { UnityEngine.Object.Destroy(poi.gameObject); } catch { }   // PointOfInterest.OnDestroy rebuilds both POI caches (PointOfInterest.cs:248-255)
+        }
+
         // ── The pins ──────────────────────────────────────────────────────────
 
         private sealed class Pin
@@ -182,6 +316,28 @@ namespace BigAmbitionsMP
         /// costs one pass and nothing at all on the frames after it.</summary>
         private static bool _allHidden;
 
+        // ── Piece three: per-player rows + the tracker ────────────────────────
+        /// <summary>Display PlayerId of the ONE remote player being tracked (guide arrow), or null. Main thread only.</summary>
+        internal static string? Tracked { get; private set; }
+        private static PointOfInterest? _trackerPoi;              // guider-flagged POI on the tracked player's anchor
+        private static string _trackerLabel = "";
+        private static bool _centreOnce;                          // r1b: a crosshair switched ON centres the map ONCE, from TickTracker (the click-time anchor is stale)
+        private static Color32 _trackerColour;                    // last colour pushed to the tracker POI ...
+        private static bool _trackerHasColour;                    // ... so it repaints only on change, exactly as a pin does (:280)
+        private sealed class PlayerRow
+        {
+            public string Pid = ""; public CityMapFilter? Row; public string Label = "";
+            public Color32 Colour; public bool HasColour;
+            public bool PinOn = true;                              // the row's checkbox: this player's pin on the map (default on)
+            public Image? Cross; public Color CrossDefault = Color.white; public bool CrossLit;   // the crosshair graphic + its untouched colour
+        }
+        private static readonly Dictionary<string, PlayerRow> _rows = new Dictionary<string, PlayerRow>();   // one filter row per player seen this scene
+        private static CityMapFilter? _playersRow;                 // the "Players" row (anchor for sibling placement)
+        private static CityMapFilterCategory? _statusCategory;
+        private static readonly HashSet<string> _online = new HashSet<string>();   // live remote ids, refreshed by Tick (read by the rows' isAvailable)
+        private static bool _rowsDirty;                            // set when _online changes -> refresh row visibility once
+        private static bool PinOnFor(string pid) => !_rows.TryGetValue(pid, out var r) || r.PinOn;
+
         /// <summary>MAIN THREAD, once per frame from MPCanvasUI.Update.</summary>
         internal static void Tick()
         {
@@ -198,16 +354,49 @@ namespace BigAmbitionsMP
 
                 if (!inSession || map == null)
                 {
-                    if (_pins.Count > 0) ResetAllNow();   // this branch already runs on the main thread
+                    if (_pins.Count > 0 || _online.Count > 0) ResetAllNow();   // one-shot: ResetAllNow empties both (rows stay, hidden via the empty _online)
                     return;
                 }
 
-                // r2: with the map CLOSED or the "Players" toggle OFF nothing can be seen, so do no work at
-                // all — no id list, no pin creation, no position maths. Every existing pin is hidden once and
-                // _allHidden keeps every later frame free. A player who LEAVES while hidden therefore keeps a
-                // (hidden) pin until the next frame with show == true, which removes it before anything shows.
                 bool show = CityMap.IsOpen && PlayersFilterOn();
-                if (!show)
+
+                // ── who is online this frame: rows and pins both read this ────
+                // r1b (review F-2026-09-06-P MINOR-5): GetRemotePlayerIds builds a fresh List over the registry's
+                // Keys on EVERY call (RemotePlayerManager.cs:394-395), and nothing this block feeds can be SEEN
+                // unless the map PANEL is open (the rows) or somebody is tracked (the arrow). Off both, skip the
+                // roster read entirely and fall straight through to the one-time hide pass below. _live is then
+                // only ever READ on frames this block has just refilled: every later path needs show (which
+                // implies CityMap.IsOpen) or Tracked != null.
+                if (CityMap.IsOpen || Tracked != null)
+                {
+                    _live.Clear();
+                    var ids = RemotePlayerManager.GetRemotePlayerIds();
+                    if (ids != null)
+                    {
+                        for (int i = 0; i < ids.Count; i++)
+                        {
+                            string pid = ids[i];
+                            if (string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId) continue;   // never a pin for yourself
+                            _live.Add(pid);
+                        }
+                    }
+
+                    // ── piece three: one filter row per online player ─────────
+                    bool changed = _online.Count != _live.Count || !_online.SetEquals(_live);
+                    if (changed) { _online.Clear(); foreach (var id in _live) _online.Add(id); _rowsDirty = true; }
+                    foreach (var id in _live) EnsureRow(id);
+                    foreach (var kv in _rows) RefreshRowLook(kv.Value);            // name/colour/crosshair state (cheap compares)
+                    if (_rowsDirty && _statusCategory != null) { _rowsDirty = false; try { _statusCategory.UpdateFilterVisibility(); } catch { } }   // re-applies isAvailable (CityMapFilterCategory.cs:164-176; publicized private)
+                    if (Tracked != null && !_online.Contains(Tracked)) StopTracking("not connected");
+                }
+
+                // r2: with the map CLOSED or the "Players" toggle OFF nothing can be seen, so do no PIN work at
+                // all — no pin creation, no position maths. Every existing pin is hidden once and _allHidden keeps
+                // every later frame free. A player who LEAVES while hidden therefore keeps a (hidden) pin until the
+                // next frame with show == true, which removes it before anything shows.
+                // PIECE THREE: a TRACKED player keeps this pass alive with the map SHUT — that is what feeds the
+                // edge arrow and its live distance (PermanentPointsOfInterest runs before CityMap's !IsOpen return).
+                if (!show && Tracked == null)
                 {
                     if (!_allHidden)
                     {
@@ -222,22 +411,7 @@ namespace BigAmbitionsMP
                 }
                 _allHidden = false;
 
-                Sprite? icon = PlayerIcon();
-
-                _live.Clear();
-                var ids = RemotePlayerManager.GetRemotePlayerIds();
-                if (ids != null)
-                {
-                    for (int i = 0; i < ids.Count; i++)
-                    {
-                        string pid = ids[i];
-                        if (string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId) continue;   // never a pin for yourself
-                        _live.Add(pid);
-                        try { TickOne(pid, map, icon, show); }
-                        catch (Exception ex) { Warn("pin '" + pid + "'", ex); }
-                    }
-                }
-
+                // departed players first, so a pin never outlives its player by a frame
                 if (_pins.Count > _live.Count)
                 {
                     _gone.Clear();
@@ -245,11 +419,25 @@ namespace BigAmbitionsMP
                     for (int i = 0; i < _gone.Count; i++) RemovePin(_gone[i], map);
                     _gone.Clear();
                 }
+
+                Sprite? icon = PlayerIcon();
+                foreach (var pid in _live)
+                {
+                    bool isTracked = pid == Tracked;
+                    if (!show && !isTracked)
+                    {
+                        // nothing visible for this one: the map is shut (or the filter off) and someone ELSE is tracked
+                        try { if (_pins.TryGetValue(pid, out var hp) && hp.Poi != null && !hp.Poi.hidden) hp.Poi.SetHidden(true); } catch { }
+                        continue;
+                    }
+                    try { TickOne(pid, map, icon, show, isTracked); }
+                    catch (Exception ex) { Warn("pin '" + pid + "'", ex); }
+                }
             }
             catch (Exception ex) { Warn("tick", ex); }
         }
 
-        private static void TickOne(string pid, CityMap map, Sprite? icon, bool show)
+        private static void TickOne(string pid, CityMap map, Sprite? icon, bool show, bool isTracked)
         {
             Pin p = EnsurePin(pid, map, icon);
             if (p.Poi == null || p.Anchor == null) return;
@@ -284,7 +472,45 @@ namespace BigAmbitionsMP
                 p.HasColour = true;
             }
 
-            p.Poi.SetHidden(!(show && placed));
+            // the row's checkbox gates this player's pin; the TRACKED player's pin yields to the tracker POI,
+            // which sits on the SAME anchor and draws the arrow + distance itself
+            p.Poi.SetHidden(!(show && placed && PinOnFor(pid)) || isTracked);
+            if (isTracked) TickTracker(p, placed);
+        }
+
+        /// <summary>The guide arrow: a SECOND POI on the tracked player's anchor, flagged as a guider so the game
+        /// draws it with the map CLOSED. PointOfInterest.UpdatePosition renders the off-screen edge arrow (:142-154)
+        /// and the live distance after the label (:156-165); the pump is PermanentPointsOfInterest.HandlePermanentPOIs,
+        /// called from CityMap.LateUpdate BEFORE its !IsOpen return. SetGuider must run before the POI's first real
+        /// enable (PointOfInterest.Start :82-110 disables a NON-guider's container for good) and the type must not be
+        /// Destination or PrivateDriver (both wire destructive buttons) - MainQuest wires nothing.
+        /// The indoors rule is the game's own, applied HERE: it only ever runs it over its five prefab guiders.</summary>
+        private static void TickTracker(Pin pin, bool placed)
+        {
+            try
+            {
+                if (_trackerPoi == null)
+                {
+                    CityManager? cm = null;
+                    try { cm = InstanceBehavior<CityManager>.Instance; } catch { }
+                    CityMap? map = (cm != null) ? cm.cityMap : null;
+                    if (map == null || pin.Anchor == null) return;
+                    Color32 c = pin.HasColour ? pin.LastColour : HousingMapCues.SharedColor;
+                    string label = MPNames.Resolve(pin.Pid);
+                    var poi = map.AddPoi(pin.Anchor.transform, PlayerIcon(), c, label, null);   // the same call shape the pins use (:308)
+                    if (poi == null) return;
+                    poi.SetGuider(DirectionGuiderType.MainQuest);   // BEFORE its first enable (PointOfInterest.cs:82-110); MainQuest wires nothing destructive
+                    _trackerPoi = poi; _trackerLabel = label; _trackerColour = c; _trackerHasColour = true;
+                    Plugin.Logger.LogInfo($"{Tag} tracker arrow created for '{pin.Pid}'.");
+                }
+                if (pin.HasColour && (!_trackerHasColour || !SameColour(pin.LastColour, _trackerColour)))
+                { _trackerPoi.SetIcon(PlayerIcon(), pin.LastColour); _trackerColour = pin.LastColour; _trackerHasColour = true; }
+                string want = MPNames.Resolve(pin.Pid); if (want != _trackerLabel) { _trackerPoi.SetText(want); _trackerLabel = want; }
+                if (_centreOnce && placed) { _centreOnce = false; try { var v = pin.Anchor!.transform.position; if (v != Vector3.zero) InstanceBehavior<CityManager>.Instance.cityMap.cityMapCam.MoveCameraToTarget(v); } catch { } }
+                bool hidden = !placed || GuidersManager.ShouldGuidersBeHidden();   // the game applies this only to its five native guiders (GuidersManager.cs:165-171)
+                _trackerPoi.SetHidden(hidden);
+            }
+            catch (Exception ex) { try { Plugin.Logger.LogWarning($"{Tag} tracker: {ex.Message}"); } catch { } }
         }
 
         private static Pin EnsurePin(string pid, CityMap map, Sprite? icon)
@@ -389,6 +615,7 @@ namespace BigAmbitionsMP
         {
             try
             {
+                StopTracking("session reset");
                 CityMap? map = null;
                 try { var cm = InstanceBehavior<CityManager>.Instance; map = (cm != null) ? cm.cityMap : null; } catch { }
                 foreach (var kv in _pins) DestroyPinObjects(kv.Value, map);
@@ -398,6 +625,12 @@ namespace BigAmbitionsMP
                 _cbcByKey.Clear();
                 _nextCbcScan = 0f;
                 _allHidden = false;
+                // Rows are NEVER destroyed (there is no RemoveFilter - G8): they hide because nobody is online any
+                // more. Tick returns on the !inSession path BEFORE its own row pass, so empty the set and re-apply
+                // isAvailable here, or the rows would keep naming departed players until the scene ends.
+                _online.Clear();
+                _rowsDirty = false;
+                try { if (_statusCategory != null) _statusCategory.UpdateFilterVisibility(); } catch { }
             }
             catch (Exception ex) { Warn("reset", ex); }
         }
