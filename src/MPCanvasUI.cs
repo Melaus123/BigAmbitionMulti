@@ -664,6 +664,7 @@ namespace BigAmbitionsMP
                 try
                 {
                     // Reflection: DebugLogManager lives in the IngameDebugConsole plugin assembly,
+            PlayerPins.Tick();      // 2026-09-05 colours piece two: the Players map filter + one live pin per remote player
                     // which the mod doesn't reference — a dev key doesn't earn a csproj reference.
                     var t = HarmonyLib.AccessTools.TypeByName("IngameDebugConsole.DebugLogManager");
                     var dlm = t?.GetProperty("Instance", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null);

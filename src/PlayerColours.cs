@@ -98,6 +98,7 @@ namespace BigAmbitionsMP
         {
             try { _slotByPlayer.Clear(); _ownerByAddrKey.Clear(); MarkDirty(); }
             catch (Exception ex) { Warn("reset session", ex); }
+            try { PlayerPins.ResetAll(); } catch { }   // piece two: the map pins die with the session too
         }
 
         // ── Local override (the game's own mod-option prefs) ──────────────────
