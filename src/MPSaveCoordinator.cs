@@ -134,7 +134,7 @@ namespace BigAmbitionsMP
             // settle-gate skip), leaving the session WITHOUT their .hsg; the next load of it
             // fresh-starts them.  Backstop: after the upload window, re-run the carry INCLUDING
             // connected members — it only copies when the target still holds nothing newer.
-            lock (_lock) _pendingCarryBackstops.Add((session, Environment.TickCount));
+            lock (_lock) _pendingCarryBackstops.Add((session, Environment.TickCount, DateTime.UtcNow));
 
             // Host's own save + manifest base — on the main thread (IL2CPP access).
             // The host's .hsg is written straight into its own MP folder, so there
@@ -284,7 +284,7 @@ namespace BigAmbitionsMP
             // Round-184 fix 1 (rig-caught, test184-int4): this MANUAL path never queued the
             // upload backstop — HostSaveNow did — so a save-as followed by a quick quit could
             // still be born without a member whose upload failed.  Same contract as HostSaveNow.
-            lock (_lock) _pendingCarryBackstops.Add((session, Environment.TickCount));
+            lock (_lock) _pendingCarryBackstops.Add((session, Environment.TickCount, DateTime.UtcNow));
             try
             {
                 var slot = PerformLocalSave(session, out bool saved);
@@ -592,14 +592,21 @@ namespace BigAmbitionsMP
         /// save to the host (the save writer is threaded, so we wait for it).</summary>
         // Round-184 fix 1: coordinated saves whose upload window is still open.  Each entry
         // resolves by EARLY COMPLETION (every connected member's .hsg landed — polled at most
-        // every 2s), by the 45s deadline, or by an explicit teardown FLUSH — save-and-quit is
-        // common and the process is often gone long before 45s (user call, 2026-07-29).
-        private static readonly List<(string session, int atMs)> _pendingCarryBackstops = new();
+        // every 2s), by the 20 s deadline, or by an explicit teardown FLUSH — save-and-quit is
+        // common and the process is often gone long before 20 s (user call, 2026-07-29).
+        // H-SERVE-1: sinceUtc = the moment this save's SaveNow went out.  A member's stored .hsg
+        // only counts as "landed" for THIS save when it is at least that new — EXISTENCE alone made
+        // the probe report a completed round while the base folder still held a stale copy, and the
+        // quit-time carry then skipped that member (field bundle 20260905-234136).
+        private static readonly List<(string session, int atMs, DateTime sinceUtc)> _pendingCarryBackstops = new();
         private static int _nextBackstopPollMs;
 
-        /// <summary>True when every CONNECTED member already has an .hsg in the session folder —
-        /// the backstop has nothing to add.</summary>
-        private static bool SessionHasAllConnected(string session)
+        /// <summary>True when every CONNECTED member's upload for THIS save has landed in the session
+        /// folder — the backstop has nothing to add.  H-SERVE-1: the old probe tested EXISTENCE only, so
+        /// a stale copy left over from an earlier save answered "landed" and the quit-time carry-forward
+        /// skipped a member whose upload never arrived; the file must now also be at least as new as the
+        /// save's SaveNow broadcast (5 s of clock-skew / mtime-granularity slack).</summary>
+        private static bool SessionHasAllConnected(string session, DateTime sinceUtc)
         {
             try
             {
@@ -607,11 +614,36 @@ namespace BigAmbitionsMP
                 {
                     if (stable == MPConfig.StableId) continue;   // the host writes its own directly
                     string dir = Path.Combine(MPSaveManager.MpSessionFolder(session), stable);
-                    if (!Directory.Exists(dir) || NewestHsg(dir) == null) return false;
+                    if (!Directory.Exists(dir)) return false;
+                    string? hsg = NewestHsg(dir);
+                    if (hsg == null) return false;
+                    DateTime w; try { w = File.GetLastWriteTimeUtc(hsg); } catch { return false; }
+                    if (w < sinceUtc.AddSeconds(-5)) return false;
                 }
                 return true;
             }
             catch { return false; }
+        }
+
+        /// <summary>H-SERVE-1: how many CONNECTED members (the host aside) have NO fresh upload for this
+        /// save — the number the quit-time flush is about to carry forward from the lineage.  Log only.</summary>
+        private static int ConnectedNotLanded(string session, DateTime sinceUtc)
+        {
+            int n = 0;
+            try
+            {
+                foreach (var stable in MPServer.ConnectedStableIds())
+                {
+                    if (stable == MPConfig.StableId) continue;
+                    string dir = Path.Combine(MPSaveManager.MpSessionFolder(session), stable);
+                    string? hsg = Directory.Exists(dir) ? NewestHsg(dir) : null;
+                    if (hsg == null) { n++; continue; }
+                    DateTime w; try { w = File.GetLastWriteTimeUtc(hsg); } catch { n++; continue; }
+                    if (w < sinceUtc.AddSeconds(-5)) n++;
+                }
+            }
+            catch { }
+            return n;
         }
 
         private static void TickCarryBackstops()
@@ -619,14 +651,16 @@ namespace BigAmbitionsMP
             if (_pendingCarryBackstops.Count == 0) return;                                // benign unlocked peek
             if (unchecked(Environment.TickCount - _nextBackstopPollMs) < 0) return;       // 2s IO throttle
             _nextBackstopPollMs = Environment.TickCount + 2000;
-            List<(string session, int atMs)> snapshot;
-            lock (_lock) snapshot = new List<(string, int)>(_pendingCarryBackstops);
-            var done = new List<(string, int)>();
+            List<(string session, int atMs, DateTime sinceUtc)> snapshot;
+            lock (_lock) snapshot = new List<(string, int, DateTime)>(_pendingCarryBackstops);
+            var done = new List<(string, int, DateTime)>();
             List<string>? carry = null;
             foreach (var e in snapshot)
             {
-                if (SessionHasAllConnected(e.session)) { done.Add(e); continue; }         // complete — uploads all landed
-                if (unchecked(Environment.TickCount - e.atMs) > 45_000)
+                if (SessionHasAllConnected(e.session, e.sinceUtc)) { done.Add(e); continue; }   // complete — uploads all landed
+                // H-SERVE-1 (E6): 20 s, not 45 — the exit wait (MPPatches, save-and-exit) bounds itself
+                // at 10 s, and this deadline must not out-wait a host that is already quitting.
+                if (unchecked(Environment.TickCount - e.atMs) > 20_000)
                 {
                     done.Add(e);
                     (carry ??= new List<string>()).Add(e.session);
@@ -643,22 +677,65 @@ namespace BigAmbitionsMP
 
         /// <summary>Round-184: complete every pending backstop NOW — save-and-quit, a menu
         /// return, or loading another session must never leave a just-saved session missing a
-        /// member because the 45s window never elapsed.</summary>
+        /// member because the 20 s window never elapsed.</summary>
         public static void FlushCarryBackstopsNow(string reason)
         {
-            List<(string session, int atMs)> all;
+            List<(string session, int atMs, DateTime sinceUtc)> all;
             lock (_lock)
             {
                 if (_pendingCarryBackstops.Count == 0) return;
-                all = new List<(string, int)>(_pendingCarryBackstops);
+                all = new List<(string, int, DateTime)>(_pendingCarryBackstops);
                 _pendingCarryBackstops.Clear();
             }
             foreach (var e in all)
             {
-                if (SessionHasAllConnected(e.session)) continue;
-                Plugin.Logger.LogInfo($"[MPSave] carry-forward backstop FLUSH ({reason}) for '{e.session}' — completing before teardown (round-184).");
+                if (SessionHasAllConnected(e.session, e.sinceUtc)) continue;
+                // H-SERVE-1: with the freshness-aware probe this flush now also fires for CONNECTED
+                // members whose upload for this save never landed — that is the intended repair: their
+                // best lineage copy is carried in rather than the base keeping a stale one.
+                int notLanded = ConnectedNotLanded(e.session, e.sinceUtc);
+                Plugin.Logger.LogInfo($"[MPSave] carry-forward backstop FLUSH ({reason}) for '{e.session}' — completing before teardown (round-184); {notLanded} connected member(s) had no fresh upload and are carried forward (H-SERVE-1).");
                 CarryForwardAbsentMembers(e.session, includeConnected: true);
             }
+        }
+
+        private static bool _exitWaitActive;
+        internal static bool ExitWaitActive => _exitWaitActive;
+        /// <summary>H-SERVE-1 (B): wait until every connected member's SaveNow upload for the ACTIVE base session has landed
+        /// (freshness-aware probe), or until <paramref name="maxSeconds"/> elapse, then run <paramref name="then"/> once.</summary>
+        internal static System.Collections.IEnumerator WaitForUploadsThen(float maxSeconds, Action then)
+        {
+            if (_exitWaitActive) yield break;
+            _exitWaitActive = true;
+            float start = UnityEngine.Time.realtimeSinceStartup;
+            string session = "";
+            DateTime since = DateTime.UtcNow;
+            // The session name exactly as HostSaveSync resolves it (:266-276): the active pointer can sit
+            // on a suffixed sibling, and a MANUAL save always lands on the lineage base.
+            try
+            {
+                lock (_lock)
+                {
+                    if (string.IsNullOrEmpty(_activeSessionName)) _activeSessionName = DefaultSessionName();
+                    session = StripAutoSuffix(_activeSessionName);
+                    foreach (var e in _pendingCarryBackstops) if (e.session == session) since = e.sinceUtc;
+                }
+            }
+            catch { }
+            bool landed = false;
+            float nextProbe = 0f;
+            while (UnityEngine.Time.realtimeSinceStartup - start < maxSeconds)
+            {
+                if (UnityEngine.Time.realtimeSinceStartup >= nextProbe)   // review r1 NOTE-8: stat the store twice a second, not every frame
+                {
+                    nextProbe = UnityEngine.Time.realtimeSinceStartup + 0.5f;
+                    try { if (session.Length > 0 && SessionHasAllConnected(session, since)) { landed = true; break; } } catch { }
+                }
+                yield return null;
+            }
+            Plugin.Logger.LogInfo($"[MPSave] exit wait: {(landed ? "all member uploads landed" : "timed out — the quit-time carry fills the gap")} after {UnityEngine.Time.realtimeSinceStartup - start:0.0}s (session '{session}').");
+            _exitWaitActive = false;
+            try { then(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] exit wait continuation: {ex.Message}"); }
         }
 
         // ── Round-271 (Fix A): join baseline save, fired on the joiner's SETTLED report ──
@@ -1662,8 +1739,11 @@ namespace BigAmbitionsMP
         // ── Round-184: the ONE save-serving ladder ───────────────────────────────
         internal enum ServeVerdict { Served, Rescued, Unavailable, Fresh }
 
-        /// <summary>The single fallback ladder for serving a member their save — exact session →
-        /// lineage rescue → refuse-if-slot-exists → fresh-start-only-if-truly-new.  BOTH serve
+        /// <summary>The single fallback ladder for serving a member their save — H-SERVE-1: ONE
+        /// rank-based pick across the whole lineage (the base folder is a candidate like any other;
+        /// content day from the .hsg.meta sidecar, then character age, then file time, fenced by the
+        /// loaded world's day and by the rollback window) → refuse-if-slot-exists →
+        /// fresh-start-only-if-truly-new.  BOTH serve
         /// paths (world start + mid-session join) resolve through here: this logic existed twice
         /// and a fix landed in only one copy (rig-caught 2026-07-29 — the lobby-start rejoin
         /// still fresh-started after only the mid-join path got the lineage rescue).  On
@@ -1675,40 +1755,40 @@ namespace BigAmbitionsMP
         {
             servedFrom = sourceSession;
             cash = 0f;
-            // Round-274c (verifier CONFIRMED-1, rig-reproduced): the DIRECT read is a serve
-            // like any other.  After a rollback the mid-join source (the latest save target)
-            // can itself be a MARKED sibling still holding a member's gap-window file (the
-            // carry-forward keeps newer-mtime files) — unfenced, it served a day-52 character
-            // into a day-51 world with the founding 'not the recorded owner' symptom intact.
-            // Same test, same verdict: a refused direct read falls to the rescue ladder.
+            // Round-274c kept its force in H-SERVE-1 form: there is no privileged direct read any more — the base
+            // folder is one candidate among the lineage, and every candidate passes the abandoned-window test and
+            // the day fence inside the ranked scan.
             data = null;
-            string? srcHsg = null;
-            try { srcHsg = NewestHsg(MPSaveManager.MpCharacterFolder(sourceSession, stableId)); } catch { }
-            if (srcHsg != null && IsAbandonedCopy(sourceSession, srcHsg))
-                Plugin.Logger.LogWarning($"[MPSave] direct serve source '{sourceSession}' holds a gap-window copy for stable={stableId} — refused (round-274c); the rescue ladder decides.");
-            else
-                data = ReadSaveBytesGzip(sourceSession, stableId);
             var verdict = ServeVerdict.Served;
+            // H-SERVE-1: the base folder's copy is a candidate like any other. Pick the best eligible copy across the
+            // lineage (content day, then character age, then time), fenced by the loaded world's day and by the rollback
+            // window exactly as the rescue ladder always was — the direct read had neither fence.
             int refusedAbandoned = 0;
-            if (data == null)
+            var ranked = LineageRankedEligible(sourceSession, stableId, FenceDayFor(sourceSession), allowUnknownDay: true, out refusedAbandoned);
+            foreach (var cand in ranked)
             {
-                // Round-233: fence the rescue by the LOADED session's day — a deliberately
-                // rewound world must not hand a joiner their future-timeline character.
-                // Round-271 sharpens the fence to the save MOMENT: abandoned-timeline slots
-                // (newer than the loaded save at load time) are excluded inside the selector,
-                // closing the same-day rollback hole (field 20260816-213224).
-                var altPick = LineageNewestEligible(sourceSession, stableId, FenceDayFor(sourceSession), allowUnknownDay: true, out refusedAbandoned);
-                string? alt = altPick?.srcSession;
-                if (!string.IsNullOrEmpty(alt) && alt != sourceSession)
+                data = ReadSaveBytesGzip(cand.srcSession, stableId);
+                if (data == null) { Plugin.Logger.LogWarning($"[MPSave] serve for stable={stableId}: candidate '{cand.srcSession}' (day {cand.day}, age {cand.age}) unreadable — trying the next (review r1 MAJOR-1)."); continue; }
+                if (cand.srcSession != sourceSession)
                 {
-                    data = ReadSaveBytesGzip(alt!, stableId);
-                    if (data != null)
+                    verdict = ServeVerdict.Rescued; servedFrom = cand.srcSession;
+                    string baseNote = "";
+                    try
                     {
-                        verdict = ServeVerdict.Rescued;
-                        servedFrom = alt!;
-                        Plugin.Logger.LogWarning($"[MPSave] serve rescue: no .hsg for stable={stableId} in '{sourceSession}' — adopted their newest at-or-before lineage copy from '{alt}' ({data.Value.raw}B). The session was missing this member (interrupted save / save-as without them).");
+                        string? bh = NewestHsg(MPSaveManager.MpCharacterFolder(sourceSession, stableId));
+                        if (bh != null) { var bm = ReadMetaInfo(bh); baseNote = $" over base copy (day {bm.day}, age {bm.age}, {File.GetLastWriteTimeUtc(bh):u})"; }
                     }
+                    catch { }
+                    Plugin.Logger.LogWarning($"[MPSave] serve for stable={stableId}: picked '{cand.srcSession}' (day {cand.day}, age {cand.age}, {cand.when:u}){baseNote} — H-SERVE-1.");
                 }
+                break;
+            }
+            // Review r1 MAJOR-1: copies EXIST but none could be read — never answer Fresh (a new character whose empty
+            // records would overwrite the member's live businesses); Unavailable makes the joiner retry instead.
+            if (data == null && ranked.Count > 0)
+            {
+                Plugin.Logger.LogError($"[MPSave] serve for stable={stableId}: {ranked.Count} cop(ies) found, none readable — answering Unavailable, not Fresh.");
+                return ServeVerdict.Unavailable;
             }
             if (data == null && refusedAbandoned > 0)
                 Plugin.Logger.LogWarning($"[MPSave] serve for stable={stableId}: refused {refusedAbandoned} abandoned-timeline cop(ies) (rolled-back load, round-271) and no copy at-or-before the loaded save exists — verdict falls through (fresh = remake, per the timeline-coherence ruling 2026-08-17).");
@@ -1735,6 +1815,43 @@ namespace BigAmbitionsMP
             }
             catch { }
             return verdict;
+        }
+
+        /// <summary>H-SERVE-1: the .hsg.meta sidecar's content day and character age (pure JSON reads — safe on any thread).
+        /// day = the world day the file was written (the JOIN SNAP re-stamps a fresh body, so day alone cannot tell a stale body
+        /// from a real one); age = characterData.ageInDays (1080 + days lived; frozen by "Disable aging"; the doctor's treatment
+        /// subtracts years). -1 when the sidecar is absent or unreadable (legacy copies).</summary>
+        internal static (int day, int age) ReadMetaInfo(string hsgPath)
+        {
+            try
+            {
+                string mp = hsgPath + ".meta";
+                if (!File.Exists(mp)) return (-1, -1);
+                var jo = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(mp));
+                int day = jo["day"]?.Type == Newtonsoft.Json.Linq.JTokenType.Integer ? (int)jo["day"]! : -1;
+                int age = -1;
+                var cd = jo["characterData"];
+                if (cd != null && cd["ageInDays"]?.Type == Newtonsoft.Json.Linq.JTokenType.Integer) age = (int)cd["ageInDays"]!;
+                return (day, age);
+            }
+            catch { return (-1, -1); }
+        }
+
+        /// <summary>H-SERVE-1: ONE ranking for "which copy of this member is the best" — used by the serve and by every carry.
+        /// Higher content day wins; on equal days a higher character age wins when the difference is a plausible lived span
+        /// (1..365 days — the JOIN SNAP re-stamp leaves a fresh body 1080 while the real one has lived on), while a larger gap
+        /// (the doctor's −10 years, the age-purchase cheat) is ignored; then the newer file wins. Unknown (-1) day or age
+        /// ranks lowest on that key. Returns >0 when a ranks above b.</summary>
+        internal static int CompareCopyRank((int day, int age, DateTime when) a, (int day, int age, DateTime when) b)
+        {
+            if (a.day != b.day) return a.day.CompareTo(b.day);
+            if (a.age != b.age && a.age >= 0 && b.age >= 0)
+            {
+                int d = Math.Abs(a.age - b.age);
+                if (d >= 1 && d <= 365) return a.age.CompareTo(b.age);
+            }
+            else if (a.age != b.age) return a.age.CompareTo(b.age);   // one side unknown: the known age wins
+            return a.when.CompareTo(b.when);
         }
 
         /// <summary>Round-275b: the .hsg.meta sidecar next to a member's newest save in a
@@ -2689,28 +2806,19 @@ namespace BigAmbitionsMP
             catch { return true; }   // H4: fail closed — refusal costs a rescue attempt, trust costs the timeline
         }
 
-        /// <summary>Round-233 (field 20260802-200058 + rewind analysis): THE shared day-fenced
-        /// "newest eligible copy" selector for every place that pulls a member's newest .hsg out
-        /// of the world lineage (save-time carry, quit checkpoint, load-time serve rescue).
-        ///
-        /// Eligibility runs BEFORE newest-selection — a fence-blocked future copy (a rewound
-        /// world's old-timeline files, day 153 in a day-50 world) can never shadow an eligible
-        /// older one. A candidate is eligible when its manifest slot day ≤ maxDay + 1 (one day of
-        /// midnight-straddle tolerance — the same skew the disconnect-commit window accepts: a
-        /// member's day can read one ahead of a save written moments later), or when its day is
-        /// UNKNOWN (manifest-less '-recover' / self-saves) and the caller allows that. Unknown-day
-        /// copies may FILL an empty slot but never REPLACE one (callers pass allowUnknownDay
-        /// accordingly). maxDay &lt; 0 = fence unavailable → day compare skipped. Manifest slot
-        /// days only (pure JSON reads — thread-safe; the IL2CPP save scanner is main-thread-only
-        /// and this runs on serve paths too).</summary>
-        private static (string srcSession, string srcDir, DateTime when, int day)? LineageNewestEligible(
+        /// <summary>H-SERVE-1 r2: every eligible copy of a member across the lineage, best first. Same eligibility as
+        /// LineageNewestEligible (abandoned-window exclusion; the day fence maxDay+1); the ORDER is THREE TIERS, then
+        /// CompareCopyRank descending inside a tier: (0) in-fence copies (day <= maxDay, or no fence), (1) midnight-
+        /// straddle copies (day == maxDay+1), (2) unknown-day copies (no sidecar and no manifest slot). A rolled-back
+        /// world must not hand out a next-day copy while a same-day one exists (review r1 MAJOR-2), and a legacy
+        /// unknown-day copy must never outrank a member's real next-day copy (review r2 MINOR-1).</summary>
+        private static List<(string srcSession, string srcDir, DateTime when, int day, int age)> LineageRankedEligible(
             string aroundSession, string stableId, int maxDay, bool allowUnknownDay, out int abandonedRefused)
         {
             abandonedRefused = 0;
+            var list = new List<(string srcSession, string srcDir, DateTime when, int day, int age)>();
             try
             {
-                (string srcSession, string srcDir, DateTime when, int day)? best = null;
-                DateTime bestWhen = DateTime.MinValue;
                 foreach (var s in LineageSessions(aroundSession))
                 {
                     string dir = Path.Combine(MPSaveManager.MpSessionFolder(s), stableId);
@@ -2722,15 +2830,60 @@ namespace BigAmbitionsMP
                     // per FILE (H2): only a file rewritten after the rollback load is eligible.
                     if (IsAbandonedCopy(s, hsg)) { abandonedRefused++; continue; }
                     DateTime when; try { when = File.GetLastWriteTimeUtc(hsg); } catch { continue; }
-                    int day = -1;
-                    try { day = MPSaveManager.ReadManifest(s)?.Slots?.Find(x => x.StableId == stableId)?.Day ?? -1; } catch { }
+                    // H-SERVE-1: the file's OWN day (sidecar) first; the manifest slot day only when
+                    // the copy has no sidecar (legacy).  age = the character's ageInDays, the only
+                    // thing that separates a re-stamped fresh body from the real one on equal days.
+                    var mi = ReadMetaInfo(hsg);
+                    int day = mi.day;
+                    if (day < 0)
+                    {
+                        try { day = MPSaveManager.ReadManifest(s)?.Slots?.Find(x => x.StableId == stableId)?.Day ?? -1; } catch { }
+                    }
+                    int age = mi.age;
                     if (day < 0 && !allowUnknownDay) continue;
                     if (day >= 0 && maxDay >= 0 && day > maxDay + 1) continue;   // timeline fence
-                    if (when > bestWhen) { bestWhen = when; best = (s, dir, when, day); }
+                    list.Add((s, dir, when, day, age));
                 }
-                return best;
+                list.Sort((a, b) =>
+                {
+                    // Tiers (review r2 MINOR-1): 0 = in-fence (day <= maxDay, or no fence), 1 = midnight straddle (day == maxDay+1),
+                    // 2 = unknown day (no sidecar and no manifest slot) — a legacy copy must never outrank a member's real next-day copy.
+                    int Tier(int d) => maxDay < 0 ? (d < 0 ? 2 : 0) : (d < 0 ? 2 : (d <= maxDay ? 0 : 1));
+                    int ta = Tier(a.day), tb = Tier(b.day);
+                    if (ta != tb) return ta.CompareTo(tb);
+                    return -CompareCopyRank((a.day, a.age, a.when), (b.day, b.age, b.when));
+                });
             }
-            catch { return null; }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ranked lineage scan '{aroundSession}'/{stableId}: {ex.Message}"); }
+            return list;
+        }
+
+        /// <summary>Round-233 (field 20260802-200058 + rewind analysis): THE shared day-fenced
+        /// "newest eligible copy" selector for every place that pulls a member's newest .hsg out
+        /// of the world lineage (save-time carry, quit checkpoint, load-time serve rescue).
+        ///
+        /// Eligibility runs BEFORE newest-selection — a fence-blocked future copy (a rewound
+        /// world's old-timeline files, day 153 in a day-50 world) can never shadow an eligible
+        /// older one. A candidate is eligible when its manifest slot day ≤ maxDay + 1 (one day of
+        /// midnight-straddle tolerance — the same skew the disconnect-commit window accepts: a
+        /// member's day can read one ahead of a save written moments later), or when its day is
+        /// UNKNOWN (manifest-less '-recover' / self-saves) and the caller allows that. Unknown-day
+        /// copies may FILL an empty slot but never REPLACE one (callers pass allowUnknownDay
+        /// accordingly). maxDay &lt; 0 = fence unavailable → day compare skipped.
+        ///
+        /// H-SERVE-1: the day is the .hsg.meta SIDECAR's own day FIRST (the day the file itself was
+        /// written); the manifest slot day is the FALLBACK, for legacy sidecar-less copies. And the
+        /// winner is the best by CompareCopyRank (content day, then character age, then file time),
+        /// not merely the newest FILE — a JOIN-SNAP re-stamped fresh body carries the world's day on
+        /// a day-1 character, and mtime alone picked it over the real copy. Pure JSON reads —
+        /// thread-safe; the IL2CPP save scanner is main-thread-only and this runs on serve paths
+        /// too.
+        /// H-SERVE-1 r2: the first entry of LineageRankedEligible.</summary>
+        private static (string srcSession, string srcDir, DateTime when, int day, int age)? LineageNewestEligible(
+            string aroundSession, string stableId, int maxDay, bool allowUnknownDay, out int abandonedRefused)
+        {
+            var l = LineageRankedEligible(aroundSession, stableId, maxDay, allowUnknownDay, out abandonedRefused);
+            return l.Count > 0 ? l[0] : null;
         }
 
         /// <summary>Round-233: the fence's reference day — the live world clock when available
@@ -2803,23 +2956,41 @@ namespace BigAmbitionsMP
                             Plugin.Logger.LogInfo($"[MPSave] carry-forward for stable={stable}: only abandoned-timeline cop(ies) exist ({carryRefused} refused, round-271) — slot left without this member rather than injecting the old timeline.");
                         continue;
                     }
-                    var (srcSession, srcDir, srcWhen, srcDay) = best.Value;
+                    var (srcSession, srcDir, srcWhen, srcDay, srcAge) = best.Value;
                     if (srcSession == targetSession) continue;   // already its own newest eligible
+                    int tgtDay = -1, tgtAge = -1;
                     if (already != null)
                     {
-                        // Replace only when the lineage holds something strictly newer — on EVERY
-                        // save path now, not just the quit checkpoint (the round-233 fix).
+                        // Replace only when the lineage holds something BETTER — on EVERY save path
+                        // now, not just the quit checkpoint (the round-233 fix).  H-SERVE-1: the test
+                        // is the shared RANK, not mtime.  A JOIN-SNAP re-stamped fresh body is the
+                        // newest FILE while holding a day-1 character, and the mtime rule let it
+                        // overwrite the member's last good copy (field bundle 20260905-234136).
                         DateTime tWhen; try { tWhen = File.GetLastWriteTimeUtc(already); } catch { continue; }
-                        if (tWhen >= srcWhen) continue;
+                        var tmi = ReadMetaInfo(already);
+                        tgtDay = tmi.day;
+                        if (tgtDay < 0)
+                        {
+                            try { tgtDay = MPSaveManager.ReadManifest(targetSession)?.Slots?.Find(x => x.StableId == stable)?.Day ?? -1; } catch { }
+                        }
+                        tgtAge = tmi.age;
+                        if (CompareCopyRank((srcDay, srcAge, srcWhen), (tgtDay, tgtAge, tWhen)) <= 0) continue;
                     }
                     try
                     {
                         string dstDir = MPSaveManager.MpCharacterFolder(targetSession, stable);
+                        var stampUtc = DateTime.UtcNow;
                         foreach (var f in Directory.GetFiles(srcDir))
-                            File.Copy(f, Path.Combine(dstDir, Path.GetFileName(f)), overwrite: true);
+                        {
+                            string dst = Path.Combine(dstDir, Path.GetFileName(f));
+                            File.Copy(f, dst, overwrite: true);
+                            // Review r1 MINOR-4: File.Copy keeps the SOURCE mtime; the carried copy must be the folder's newest
+                            // (NewestHsg is mtime-based) and must read as "written after the load" to the abandoned-window test.
+                            try { File.SetLastWriteTimeUtc(dst, stampUtc); } catch { }
+                        }
                         var slot = MPSaveManager.ReadManifest(srcSession)?.Slots?.Find(x => x.StableId == stable);
                         if (slot != null) MergeSlot(targetSession, slot);
-                        Plugin.Logger.LogInfo($"[MPSave] Carried forward absent member (stable={stable}, day={srcDay}) from '{srcSession}' → '{targetSession}'{(already != null ? " — REPLACED a stale copy (round-233)" : "")}.");
+                        Plugin.Logger.LogInfo($"[MPSave] Carried forward absent member (stable={stable}, day/age {srcDay}/{srcAge}) from '{srcSession}' → '{targetSession}'{(already != null ? $" — REPLACED a stale copy (round-233): it out-ranks the target copy (day/age {tgtDay}/{tgtAge}) (H-SERVE-1)" : "")}.");
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] Carry-forward '{stable}': {ex.Message}"); }
                 }

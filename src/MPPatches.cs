@@ -5562,6 +5562,7 @@ namespace BigAmbitionsMP
 
             static bool Prefix(object __instance)
             {
+                if (MPSaveCoordinator.ExitWaitActive) { Plugin.Logger.LogInfo("[MPSave] Save & Exit already in progress — second click ignored (H-SERVE-1 r2)."); return false; }
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return true;   // SP → normal
                 try
                 {
@@ -5570,7 +5571,15 @@ namespace BigAmbitionsMP
                         name = "";   // unedited box ⇒ save-and-exit under the CURRENT session (review F2, same rule as Save)
                     Plugin.Logger.LogInfo($"[MenuSave] Save & Exit '{name}' → coordinated MP save, then quit (no SP save).");
                     MPSaveCoordinator.MenuSave(exiting: true, saveName: name);
-                    MiniMenuUtil.QuitToDesktop(__instance);
+                    // H-SERVE-1 (B): give connected members' SaveNow uploads a bounded chance to land before the process dies —
+                    // poll the authoritative "landed" probe every frame, quit when all landed or after 10 s (events over timers:
+                    // the state is re-read live; the deadline only bounds it). The quit-time flush then carries anyone still missing.
+                    if (MPServer.IsRunning && MPServer.ConnectedStableIds().Count > 1 && MPCanvasUI.Instance != null)
+                    {
+                        var mm = __instance;
+                        MPCanvasUI.Instance.StartCoroutine(MPSaveCoordinator.WaitForUploadsThen(10f, () => { try { MiniMenuUtil.QuitToDesktop(mm); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] deferred quit: {ex.Message}"); } }));
+                    }
+                    else MiniMenuUtil.QuitToDesktop(__instance);
                 }
                 catch (Exception ex)
                 {
