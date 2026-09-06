@@ -69,6 +69,7 @@ namespace BigAmbitionsMP
                     return;
                 }
                 PlaceFirstUnderStatus(f, category);
+                SeedDefaultOn();
             }
             catch (Exception ex)
             {
@@ -108,6 +109,40 @@ namespace BigAmbitionsMP
             catch (Exception ex)
             {
                 try { Plugin.Logger.LogWarning($"{Tag} place filter: {ex.Message} — '{FilterName}' stays where the game appended it."); } catch { }
+            }
+        }
+
+        /// <summary>Default ON (user decision 2026-09-06). The game starts every filter unticked and re-ticks the
+        /// names in the save's SelectedCitymapFilters each time the map opens (CityMapFilters.cs:122-127 → LoadFilters
+        /// :203-211). Seed that list ONCE per playthrough so the first map open ticks "Players"; from then on the
+        /// game's own list rules — an untick sticks (CityMapFilter.cs:107 removes the name on click). The once-only
+        /// marker is a PlayerPrefs key per SHARED playthrough id (pinned on host and client before the world loads);
+        /// without an id the seed is skipped. Known edge (accepted 2026-09-06): the marker is written now, the seeded
+        /// name reaches disk only with the world's next save — a quit before any save leaves that world unseeded, and
+        /// the player can simply tick the filter.</summary>
+        private static void SeedDefaultOn()
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null || gi.SelectedCitymapFilters == null) return;
+                // r4 (review F-2026-09-06-G MAJOR-1): key by the SHARED playthrough id, pinned on BOTH sides before the world
+                // loads (client: ClientHandleLoadData, MPSaveCoordinator.cs:1254; host: :1116/:1199/:2559/:3410). The
+                // coordinator's own id is host-only, and a client's SaveGameName is the constant "save" — that fallback made
+                // the key identical for every world a client ever joined. No id (single player) → no seed.
+                string id = MPSaveManager.ActivePlaythrough;
+                if (string.IsNullOrEmpty(id)) id = MPSaveCoordinator.ActivePlaythroughId;
+                if (string.IsNullOrEmpty(id)) return;
+                string key = "bamp.players-filter-seeded." + id;
+                if (UnityEngine.PlayerPrefs.GetInt(key, 0) != 0) return;
+                if (!gi.SelectedCitymapFilters.Contains(FilterName)) gi.SelectedCitymapFilters.Add(FilterName);
+                UnityEngine.PlayerPrefs.SetInt(key, 1);
+                UnityEngine.PlayerPrefs.Save();   // r4: the marker must survive a crash (review F-2026-09-06-G D)
+                Plugin.Logger.LogInfo($"{Tag} '{FilterName}' filter seeded ON for this playthrough (first sight on this machine).");
+            }
+            catch (Exception ex)
+            {
+                try { Plugin.Logger.LogWarning($"{Tag} seed default: {ex.Message}"); } catch { }
             }
         }
 
