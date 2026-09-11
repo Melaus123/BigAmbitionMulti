@@ -1,0 +1,320 @@
+{
+  "id": "T-P4B-PEOPLE-A",
+  "title": "phase 4b people build A, two players: (train) the client trains one of the host's employees - routed, the host's machine pays once and runs the game's own training; (transfer) the client moves a second host employee to a client shop (release on the host, adopt on the client) and back again; (candidates) the client claims one of the host's candidates and the host, its owner, is refused while the claim stands; the pool is listed on both machines; ends dissolved",
+  "preconditions": "Fixture save1. Build A deployed. The host's staff at its first flipped shop are injected copies on the client (T-P0/T-P4-BONUS precedent). The transfer round trip returns the employee to the host's shop with the same id but leaves them unscheduled (the release unassigns shifts) - a fixture mutation, recorded. Candidate counts depend on the fixture and are reported, not asserted. Ends dissolved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED",
+    "\\[Transfer\\] .*the record is lost",
+    "\\[Transfer\\] .*held nowhere",
+    "\\[Transfer\\] .*refused:",
+    "Employee with ID .* not found"
+  ],
+  "oracles_report": [
+    "\\[Merger\\] training",
+    "\\[SharedShop\\] applied routed training",
+    "\\[SharedShop\\] routed training",
+    "\\[Transfer\\]",
+    "\\[Candidates\\]",
+    "\\[TestDrive\\] candidate:",
+    "\\[Candidates\\] claim",
+    "\\[Transfer\\] .*RETURNED",
+    "\\[Transfer\\] .*refused",
+    "\\[Transfer\\] .*cleared .* leftover shift",
+    "\\[Transfer\\] .*adopt relayed"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST P4B-PEOPLE-A START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "capture": {
+        "clientShop": "keys=\\['([^']+)'"
+      },
+      "note": "host view: the client's first flipped building = the transfer destination"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 30,
+      "note": "the client's world needs to settle; the host's staff copies land on the client"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "capture": {
+        "hostShop": "keys=\\['([^']+)'"
+      },
+      "note": "client view: the host's first flipped building"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "employees ${hostShop}",
+      "expect_result": "injected=True",
+      "capture": {
+        "empTrain": "(?:': |; )((?!BAMP_DUTY)[^|]+)\\|[^|]*\\|assigned=[^|]*\\|injected=True\\|bonus=\\d+\\|canbonus=(?:True|False)\\|skill=[^;]+?:(?:\\d|[1-9]\\d)(?= ;|$)",
+        "empMove": "; ((?!BAMP_DUTY)[^|]+)\\|[^|]*\\|assigned=[^|]*\\|injected=True[^;]*$"
+      },
+      "note": "two DIFFERENT injected copies of the host's staff (BAMP_DUTY synthetics skipped): empTrain = the first with a primary skill below 100 (run 6: a maxed employee prices training at 0); empMove = the LAST injected row (run 7: the second row was the same employee as empTrain, and the game's own training unassigns them - assignedAddress null - so the host rightly refused the move 'they are at ''' (owner wins))"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "train ${empTrain}",
+      "expect_result": "^OK train addr='${hostShop}' employee='${empTrain}' cost=\\d+\\.\\d\\d routed=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[SharedShop\\] applied routed training of '.*' from '${clientPid}'",
+          "within_s": 20
+        }
+      ],
+      "note": "P3 TRAIN: nothing charged on the client; the host's machine re-runs the game's own training sequence once (its own price) on the real record"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "transfer ${empMove} ${clientShop}",
+      "expect_result": "^OK transfer armed employee='${empMove}' injected=True home='${hostShop}' -> '${clientShop}'",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Transfer\\] .*: released to the host - '.*' \\(${empMove}\\) left '${hostShop}' for '${clientShop}'",
+          "within_s": 40
+        },
+        {
+          "role": "h",
+          "regex": "\\[Transfer\\] .*: ADOPTED by '${clientPid}' at '${clientShop}' - one save holds the record again",
+          "within_s": 40
+        },
+        {
+          "role": "c",
+          "regex": "\\[MergerStaff\\] ADOPTED '.*' \\(${empMove}\\) into '${clientShop}'",
+          "within_s": 40
+        }
+      ],
+      "note": "P2 (r2, host-held): the client asks the host; the host has the SOURCE runner (itself) release to the host, holds the record, relays adopt-in to the client, which adopts and acks; one save holds the record again"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "transfers",
+      "expect_result": "^OK transfers pending=0$",
+      "note": "the host's in-transit table is empty after the ack"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "sleep_s": 5
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "employees ${clientShop}",
+      "expect_result": "(?:': |; )${empMove}\\|[^|]*\\|assigned=${clientShop}\\|injected=False",
+      "note": "the moved employee is now the CLIENT's own record at the client shop (same id, injected=False)"
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "cmd": "transfer ${empMove} ${hostShop}",
+      "expect_result": "^OK transfer armed employee='${empMove}' injected=False home='' -> '${hostShop}'",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Transfer\\] .*: released to the host - '.*' \\(${empMove}\\) left '${clientShop}' for '${hostShop}'",
+          "within_s": 40
+        },
+        {
+          "role": "h",
+          "regex": "\\[Transfer\\] .*: ADOPTED by '${hostPid}' at '${hostShop}' - one save holds the record again",
+          "within_s": 40
+        },
+        {
+          "role": "h",
+          "regex": "\\[MergerStaff\\] ADOPTED '.*' \\(${empMove}\\) into '${hostShop}'",
+          "within_s": 40
+        }
+      ],
+      "note": "leg 2 (r2): MY OWN employee -> a partner shop now takes the same host-held path, release-first (the adopt-out path is retired for merged partners); FIXTURE HYGIENE: the employee returns to the host's shop"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "transfers",
+      "expect_result": "^OK transfers pending=0$"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "sleep_s": 5
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "employees ${hostShop}",
+      "expect_result": "(?:': |; )${empMove}\\|[^|]*\\|assigned=${hostShop}\\|injected=False",
+      "note": "back home as the HOST's own record, same id"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "candidates",
+      "expect_result": "^OK \\d+ candidate\\(s\\)",
+      "note": "P1 POOL (reported): the host's own candidates (origin=mine) + the client's copies"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "candidates ${hostPid}",
+      "expect_result": "^OK [1-9]\\d* candidate\\(s\\) from '${hostPid}': ",
+      "capture": {
+        "cand": "(?:': |; )([^|]+)\\|[^|]*\\|wage=[^|]*\\|expires=[^|]*\\|origin=${hostPid}\\|claimed=(?= ;|$)"
+      },
+      "note": "the client's view of the host's pool; the first candidate NOBODY holds (run 8: the client's fixture save now carries a live negotiation for Jose King, opened by run 5's rig claim and saved by the coordinated save, so the client re-asserts that claim at connect and it is granted before this leg runs)"
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "claim ${cand} hold",
+      "expect_result": "^OK claim .*candidate='${cand}' origin='${hostPid}' mode='hold' sent=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Candidates\\] claim of '${cand}' \\(of '${hostPid}'\\) GRANTED to '${clientPid}'",
+          "within_s": 15
+        }
+      ],
+      "note": "P1 CLAIM: the client asks first and is granted; 'hold' keeps a synthetic live negotiation so the 5 s sweep does not release it"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "claim ${cand}",
+      "expect_result": "^OK claim .*candidate='${cand}' origin='mine' mode='ask' sent=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Candidates\\] claim of '${cand}' by '${hostPid}' REFUSED - '${clientPid}' is already talking to them",
+          "within_s": 15
+        }
+      ],
+      "note": "T7: the OWNER of the candidate is refused the same way while a partner holds the claim"
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "claim ${cand} drop",
+      "expect_result": "^OK claim .*candidate='${cand}'.*mode='drop'",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Candidates\\] '${clientPid}' released '${cand}' - back in the company pool",
+          "within_s": 15
+        }
+      ],
+      "note": "the client drops the claim; the host logs the release"
+    },
+    {
+      "seq": 29,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 33,
+      "role": "both",
+      "cmd": "mark TEST P4B-PEOPLE-A END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

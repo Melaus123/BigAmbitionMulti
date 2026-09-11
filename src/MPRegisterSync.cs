@@ -1690,6 +1690,11 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] save strip ({when}): {ex.Message}"); }
 
+            // MERGER PHASE 4b (PEOPLE) part 1, same choke point: a partner's CANDIDATE copies live in the
+            // OTHER list (gi.CandidateEmployeeInstances), which this loop never walks - they come out here
+            // and go back in the restore below, exactly as the injected employee records do.
+            var removedCandidates = CompanyCandidates.StripInjected("the save");
+
             // Restore delegate — re-add the EXACT objects after serialization completes (dup-guarded; the main
             // thread is blocked through the save, so no tick can re-inject during the window, but be defensive).
             return () =>
@@ -1715,6 +1720,7 @@ namespace BigAmbitionsMP
                             if (ReferenceEquals(day.workShifts[j], shift)) { present = true; break; }
                         if (!present) day.AddWorkShift(shift);
                     }
+                    CompanyCandidates.RestoreInjected(removedCandidates, "the save");
                     if (removedEmployees.Count > 0)
                         Plugin.Logger.LogInfo($"[SynthStaff] restored {removedEmployees.Count} synthetic(s) after save ({when}).");
                 }

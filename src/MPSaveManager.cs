@@ -102,6 +102,14 @@ namespace BigAmbitionsMP
         /// a host restart leaves every member's partner rows blank until the next day change.
         /// Empty/absent on manifests written before the field existed.</summary>
         public List<MpCompanyBooksEntry> CompanyBooks { get; set; } = new();
+        /// <summary>Merger phase 4b (people) P2 (D20-4): the host's IN-TRANSIT EMPLOYEE TRANSFERS as of
+        /// this save moment. A cross-member move releases the record from one save before the other
+        /// adopts it, so for that window the HOST is the only holder - and a host restart with the
+        /// window open would otherwise lose a real employee for good (nobody's .hsg has them). Rides the
+        /// model like Paperwork/Absence/CompanyBooks and follows the same timeline exactly: written with
+        /// the slot, REPLACED from the loaded slot on every load, reset on a new world, never carried
+        /// over in memory. Empty/absent on manifests written before the field existed.</summary>
+        public List<MpTransferEntry> Transfers { get; set; } = new();
 
         /// <summary>Round-53 — per-SAVE needs/morale authority (user design 2026-07-22): the load
         /// lobby mirrors these, the Customize panel edits them, and the edited values become the
@@ -180,6 +188,27 @@ namespace BigAmbitionsMP
         public string LastSimulatorPid { get; set; } = "";
         public List<string> Addresses { get; set; } = new();
         public int    SinceDay     { get; set; }
+    }
+
+    /// <summary>Merger phase 4b (people) P2 - ONE in-transit transfer. The RECORD travels as TEXT
+    /// (the EmployeeEditPayload serialized), mirroring MpPaperworkEntry, so a future payload shape
+    /// round-trips through an older host untouched. Day/Hour are the GAME clock when the entry was
+    /// stamped: the host's give-back deadline is one game hour, and a restart resumes from it.</summary>
+    public class MpTransferEntry
+    {
+        public string TransferId    { get; set; } = "";
+        public string EmployeeId    { get; set; } = "";
+        public string FromAddressKey{ get; set; } = "";
+        public string ToAddressKey  { get; set; } = "";
+        public string SourcePid     { get; set; } = "";
+        public string DestPid       { get; set; } = "";
+        /// <summary>requested | released | adopting | returning | cancelled - the stage the `transfers`
+        /// verb prints. "cancelled" is a request the source never answered within a game hour: the entry is
+        /// KEPT for one game day (r3 MAJOR-5) so a release still in the air finds it and is handed back.</summary>
+        public string Stage         { get; set; } = "";
+        public int    Day           { get; set; }
+        public int    Hour          { get; set; }
+        public string RecordJson    { get; set; } = "";
     }
 
     public static class MPSaveManager

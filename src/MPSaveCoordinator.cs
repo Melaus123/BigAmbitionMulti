@@ -3540,6 +3540,7 @@ namespace BigAmbitionsMP
                 m.Paperwork = MPServer.SnapshotPaperwork();
                 m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
                 m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): the books store rides the same save moment
+                m.Transfers = MPServer.SnapshotTransfers();   // phase 4b (people) P2: an in-transit employee is held by NOBODY's .hsg - the host's table is the only copy
                 m.Loans = MPHub.SnapshotLoans();   // sweep 2026-08-18: loans are part of the save moment
                 // Round-53: the running session's tuning dials persist with the save (mid-session
                 // changes included), so the next load's lobby mirrors what this world actually ran.
@@ -3606,6 +3607,7 @@ namespace BigAmbitionsMP
                     m.Paperwork = MPServer.SnapshotPaperwork();   // phase 3-A: the store rides the model, so a grants-only write cannot drop it (no flush here — this path is not guaranteed main-thread)
                     m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
                     m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): same reason - a grants-only write must not drop the books store
+                    m.Transfers = MPServer.SnapshotTransfers();   // phase 4b (people) P2: same reason - a grants-only write must not drop an in-transit employee
                     m.Loans = MPHub.SnapshotLoans();   // sweep 2026-08-18: loans ride the manifest like grants
                     // Round-274/H1: do NOT touch SavedAtUnix here — it means "when was this
                     // WORLD saved", and a grants-only persist is not a world save.  Re-stamping
@@ -3689,6 +3691,7 @@ namespace BigAmbitionsMP
                     m.Paperwork = MPServer.SnapshotPaperwork();
                     m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
                     m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): the books stamp sits under the SAME lineage gate
+                    m.Transfers = MPServer.SnapshotTransfers();   // phase 4b (people) P2: the in-transit stamp sits under the SAME lineage gate
                 }
                 MPSaveManager.WriteManifest(sessionName, m);
             }

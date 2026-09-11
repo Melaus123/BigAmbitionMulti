@@ -135,6 +135,34 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} CommitStaffOp: {ex.Message}"); return false; }
         }
 
+        /// <summary>Phase 4b (people) P2: the SAME-owner half of employee mixing. A partner's employee
+        /// moved from one of that partner's shops to ANOTHER of that partner's shops is not a transfer at
+        /// all - one machine runs both ends - so it is the ordinary routed assign the owner-side apply
+        /// below already performs. The cross-OWNER half is the two-phase release/adopt in
+        /// MergerEmployeeSync, which is the only case where a record has to change save.</summary>
+        public static bool CommitAssign(string employeeId, string fromKey, string toKey)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(employeeId)) return false;
+                if (!IsFromRoutedOwner(employeeId)) return false;
+                _seq.TryGetValue(employeeId, out var seq); seq++; _seq[employeeId] = seq;
+                bool unassign = string.IsNullOrEmpty(toKey);
+                var p = new SharedStaffEditPayload
+                {
+                    PlayerId = MPConfig.PlayerId, EmployeeId = employeeId, Seq = seq, SeqEpoch = _seqEpoch,
+                    Action = unassign ? "unassign" : "assign",
+                    AddressKey = unassign ? (fromKey ?? "") : toKey,
+                    FromAddressKey = fromKey ?? "",
+                };
+                Plugin.Logger.LogInfo($"[Merger] staff {p.Action} routed to owner '{MPRegisterSync.OwnerOfInjected(employeeId)}' ('{p.FromAddressKey}' -> '{p.AddressKey}', {employeeId})");
+                if (MPServer.IsRunning) { MPServer.HostRouteSharedStaffEdit(p, MPConfig.PlayerId); return true; }
+                if (MPClient.IsConnected) { MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedStaffEdit, MPConfig.PlayerId, p)); return true; }
+                return false;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} CommitAssign: {ex.Message}"); return false; }
+        }
+
         // ── bulk (mass) actions: ONE GROUP per selection (ruling 23) ──
 
         /// <summary>Which group a row belongs to: "" = mine, an owner id = a record copied from that granting owner,
@@ -239,6 +267,12 @@ namespace BigAmbitionsMP
         {
             try { TickOwner(); } catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} bench publish: {ex.Message}"); }
             try { TickAssignScan(); } catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} assignment scan: {ex.Message}"); }
+            // Phase 4b (people): the company candidate pool rides the same main-thread tick this
+            // file already owns, rather than adding a second entry point in the UI update.
+            try { CompanyCandidates.Tick(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] tick: {ex.Message}"); }
+            // Phase 4b (people) P2 r2 (T1): the host's in-transit transfers are swept on the same
+            // main-thread tick - a recurring check with a confirmed exit, not a one-shot timer.
+            try { if (MPServer.IsRunning) MPServer.HostTransfersTick(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Transfer] tick: {ex.Message}"); }
         }
 
         // ── owner: publish my bench ──
@@ -551,6 +585,55 @@ namespace BigAmbitionsMP
                     return;
                 }
 
+                // Phase 4b (people) P3: TRAINING moves nobody either, so it is applied before the placement
+                // gate as well. The game's own bulk train is ChangeMoneySafe(-cost) and then a trainingSession
+                // (decompile TrainPrimarySkillMassAction.cs:28-46); run HERE it is the company's money leaving
+                // once, on the machine whose real record it buys, and the skill it buys is the one that lasts.
+                // The sender's figure is a BOUND only - the cost is recomputed from this machine's record.
+                if (p.Action == "train")
+                {
+                    float tsent = p.Wage;
+                    if (!(tsent > 0f) || tsent > 10000000f)
+                    { Plugin.Logger.LogWarning($"{Tag} routed training of '{SafeName(emp)}' by '{p.PlayerId}': implausible cost {tsent} - ignored."); return; }
+                    // The same per-ADDRESS test as the raise and the bonus (W3-0 r1): holding one of my shops
+                    // must not buy training for any of my employees - bench, headquarters and drivers included.
+                    string tatKey = (AddrOf(emp.assignedAddress) ?? "").Trim();
+                    string twantKey = (p.AddressKey ?? "").Trim();
+                    if (twantKey.Length == 0 || !string.Equals(tatKey, twantKey, StringComparison.OrdinalIgnoreCase))
+                    { Plugin.Logger.LogWarning($"{Tag} routed training of '{SafeName(emp)}' by '{p.PlayerId}': employee is not at '{twantKey}' - ignored."); return; }
+                    BigAmbitions.Characters.Skills.Skill tskill = null;
+                    try { tskill = emp.characterData.skills[0]; } catch { }
+                    if (tskill == null)
+                    { Plugin.Logger.LogWarning($"{Tag} routed training of '{SafeName(emp)}' by '{p.PlayerId}': no primary skill on my record - ignored."); return; }
+                    bool tcan = false; try { tcan = emp.CanTrainSkill(tskill); } catch { }
+                    if (!tcan)
+                    { Plugin.Logger.LogWarning($"{Tag} routed training of '{SafeName(emp)}' by '{p.PlayerId}': they cannot be trained right now (already training, away, or at full skill) - ignored."); return; }
+                    int tinc = Mathf.Min(Mathf.CeilToInt(100f - tskill.value), 10);
+                    float tcost = 0f; try { tcost = EmployeeHelper.GetTrainingCost(emp, tskill.name, tinc); } catch { }
+                    if (!(tcost > 0f))
+                    { Plugin.Logger.LogWarning($"{Tag} routed training of '{SafeName(emp)}' by '{p.PlayerId}': the game prices it at {tcost} - ignored."); return; }
+                    bool tpaid = false;
+                    try
+                    {
+                        var tdata = new Dictionary<string, string> { { "employee", SafeName(emp) }, { "skillName", tskill.name } };
+                        var tinfo = new TransactionInfo("ba:transaction_employeetraining", tdata);
+                        tinfo.SetTaxDeductibleName("ba:transaction_employeetraining_label");
+                        tpaid = GameManager.ChangeMoneySafe(0f - tcost, tinfo);
+                    }
+                    catch (Exception tex) { Plugin.Logger.LogWarning($"{Tag} routed training: {tex.Message}"); return; }
+                    if (!tpaid)
+                    { Plugin.Logger.LogWarning($"{Tag} routed training of '{SafeName(emp)}' by '{p.PlayerId}': the game refused the payment - nothing charged."); return; }
+                    try { EmployeeHelper.UnassignEmployeeFromAllWorkshifts(emp); } catch (Exception uex) { Plugin.Logger.LogWarning($"{Tag} routed training unassign shifts: {uex.Message}"); }
+                    try { emp.trainingSession = new EmployeeInstance.TrainingInstance { skill = tskill.name, startDay = SaveGameManager.Current.Day }; }
+                    catch (Exception sex) { Plugin.Logger.LogWarning($"{Tag} routed training session: {sex.Message}"); }
+                    try { SaveGameManager.MarkChange(); } catch { }
+                    string tkey = AddrOf(emp.assignedAddress);
+                    Plugin.Logger.LogInfo($"{Tag} applied routed training of '{SafeName(emp)}' from '{p.PlayerId}' - {tskill.name} +{tinc} for {tcost.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)}.");
+                    RefreshMyEmployeesIfOpen();
+                    RepublishAfterStaffEdit(tkey, tkey);
+                    return;
+                }
+
                 var gi = SaveGameManager.Current;
                 Address oldAddr = emp.assignedAddress;
                 string oldKey = AddrOf(oldAddr);
@@ -685,11 +768,12 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>Phase 4b: is this a record whose BONUS must be routed? An injected copy of a partner's
-        /// employee standing at an address this machine only borrows through the merger (flipped). Direct-grant
-        /// records are deliberately excluded — their bonus button is greyed and their bulk menu offers assign
-        /// only, and that behaviour is not widened here.</summary>
-        private static bool IsRoutedMergedBonus(EmployeeInstance e, out string addrKey)
+        /// <summary>Phase 4b: is this a record whose PAID op (a bonus, and from part 2 of the phase a
+        /// training run) must be routed? An injected copy of a partner's employee standing at an address
+        /// this machine only borrows through the merger (flipped). Direct-grant records are deliberately
+        /// excluded - their bonus button is greyed and their bulk menu offers assign only, and that
+        /// behaviour is not widened here.</summary>
+        private static bool IsRoutedMergedOp(EmployeeInstance e, out string addrKey)
         {
             addrKey = "";
             try
@@ -720,7 +804,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!IsRoutedMergedBonus(__instance, out string addrKey)) return true;   // mine / single player: native
+                    if (!IsRoutedMergedOp(__instance, out string addrKey)) return true;   // mine / single player: native
                     __result = false;
                     float amount = 0f; try { amount = __instance.GetBonusAmount(); } catch { }
                     if (!(amount > 0f))
@@ -875,18 +959,126 @@ namespace BigAmbitionsMP
             static void Finalizer() { _massAssignOwner = ""; }
         }
 
-        /// <summary>Training is money — the owner's people are never trainable here (the game then hides the
-        /// train buttons). Wave 3 (W3-3) widens this to the routed UNION, so a company member cannot train a
-        /// merger-flipped partner's employee on their own replica either. CanTrainSkill is the ONE seam both
-        /// training paths pass through (MyEmployees.cs:373-374 and TrainPrimarySkillMassAction.cs:24); the
-        /// writes themselves live in anonymous confirm lambdas, so refusal here is the whole gate and there
-        /// is nothing to route to the owner.</summary>
+        /// <summary>Phase 4b (people) P3: TRUE only while the game's own bulk-training CONFIRMATION runs. The
+        /// mass action's per-employee work lives in an anonymous confirm lambda, so "the player has just
+        /// confirmed a training run" cannot be told from "the details panel is asking whether to draw a Train
+        /// button" by the call site alone - the delegate itself is bracketed instead (the two patches below).</summary>
+        private static bool _inMassTrain;
+        private static bool _massTrainArming;
+
+        /// <summary>Perform() only SHOWS the confirmation - it hands HudConfirm the delegate that does the work,
+        /// synchronously - so this window is exactly "we are building that dialog".</summary>
+        [HarmonyPatch(typeof(TrainPrimarySkillMassAction), nameof(TrainPrimarySkillMassAction.Perform))]
+        public static class Patch_MassTrain_Perform_Arm
+        {
+            static void Prefix() { _massTrainArming = true; }
+            static void Finalizer() { _massTrainArming = false; }
+        }
+
+        /// <summary>THE SHARED HudConfirm.Show WRAPPER. Two features ride it, each behind its own arming
+        /// flag, and neither wraps anything while its flag is down:
+        ///  * the bulk-train confirmation (phase 4b P3) - the flag is up for the wrapped action's duration
+        ///    and for nothing else, which is what makes CanTrainSkill tell a commit from a question;
+        ///  * U4 (re-check r3 MAJOR-4) - deleting a contacts MESSAGE. ContactsApp.RemoveMessage only BUILDS
+        ///    this dialog; the removal that takes a partner's candidate copy out of both lists is the
+        ///    confirm action itself, so the company-copy repair has to run AFTER it, not in a postfix on
+        ///    RemoveMessage (which returns first). CompanyCandidates.MessagePurgeArmed is that flag.
+        /// The overload is found by shape (the two Show overloads differ in their first parameter), the same
+        /// reflection the work tabs already use on this type.</summary>
+        [HarmonyPatch]
+        public static class Patch_HudConfirm_MassTrainWindow
+        {
+            static System.Reflection.MethodBase TargetMethod()
+            {
+                System.Reflection.MethodBase fallback = null;
+                foreach (var m in typeof(HudConfirm).GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
+                {
+                    if (m.Name != "Show") continue;
+                    var ps = m.GetParameters();
+                    if (fallback == null) fallback = m;
+                    if (ps.Length > 2 && ps[0].ParameterType != typeof(string) && ps[2].ParameterType == typeof(Action)) return m;
+                }
+                return fallback;
+            }
+
+            static void Prefix(ref Action onConfirmAction)
+            {
+                try
+                {
+                    if (onConfirmAction == null) return;
+                    bool train = _massTrainArming;
+                    bool purge = false;
+                    try { purge = CompanyCandidates.MessagePurgeArmed; } catch { }
+                    if (!train && !purge) return;
+                    var inner = onConfirmAction;
+                    onConfirmAction = () =>
+                    {
+                        bool was = _inMassTrain;
+                        if (train) _inMassTrain = true;
+                        try { inner(); }
+                        finally
+                        {
+                            if (train) _inMassTrain = was;
+                            // U4: the message whose deletion has just been confirmed may have taken a
+                            // partner's candidate copy out of both lists with it - put it back now that the
+                            // confirmed action has actually run (the origin's record is what decides).
+                            if (purge) { try { CompanyCandidates.RepairAfterMessagePurge(); } catch { } }
+                        }
+                    };
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} confirm-dialog wrapper: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>Training is money. For a DIRECT-GRANT record the answer is still a flat no (rulings 14, 19):
+        /// the owner's people are not trainable on a helper's machine, and the game then hides the train buttons.
+        /// For a MERGED partner's employee phase 4b (people) P3 changes the answer - the menu may offer it, and
+        /// the moment the player confirms the bulk run the per-employee effect is ROUTED to whoever runs that
+        /// shop (who pays once from the shared wallet and sets the trainingSession on the REAL record) while the
+        /// local replica is left untouched: exactly the shape of the bonus fix beside it. A merger copy this
+        /// machine cannot route for (no flipped address) keeps the old refusal.
+        /// CanTrainSkill is the ONE seam both training paths pass through (MyEmployees.cs:373-374 and
+        /// TrainPrimarySkillMassAction.cs:24), and the writes live in anonymous confirm lambdas, so it is also
+        /// the only place the effect can be intercepted PER EMPLOYEE - which is what makes a MIXED bulk
+        /// selection work: every record is decided on its own, and every refusal is logged against its id.</summary>
         [HarmonyPatch(typeof(EmployeeInstance), nameof(EmployeeInstance.CanTrainSkill))]
         public static class Patch_EmployeeInstance_CanTrainSkill_Guard
         {
             static void Postfix(EmployeeInstance __instance, ref bool __result)
             {
-                try { if (__result && IsFromRoutedOwner(__instance?.id)) __result = false; } catch { }
+                try
+                {
+                    if (!__result) return;
+                    string id = __instance?.id ?? "";
+                    if (id.Length == 0) return;
+                    if (IsFromGrantOwner(id)) { __result = false; return; }                  // direct grant: unchanged
+                    if (!IsRoutedMergedOp(__instance, out string addrKey))
+                    { if (IsFromRoutedOwner(id)) __result = false; return; }                 // a merger copy with nowhere to route
+                    // MINOR-8 r2: the DETAILS-PANEL train button cannot be routed. Its click handler is an
+                    // anonymous onClick listener built inside MyEmployees.ShowEmployee (decompile :373-418),
+                    // and for an ASSIGNED employee - which every merger copy at a partner's shop is - it
+                    // short-circuits into Notifications.ShowError("myemployees_unassign_for_training")
+                    // before it reaches HudConfirm, so there is no seam to arm the flag from and no way to
+                    // stop the game's own error firing. The button therefore stays HIDDEN here, exactly as
+                    // it was before P3: answering the question with false is what hides it
+                    // (buttonByName.gameObject.SetActive(employeeInstance.CanTrainSkill(skill))).
+                    // The BULK train is the routed path and is unaffected.
+                    if (!_inMassTrain) { __result = false; return; }                          // a question, not a commit
+                    __result = false;                                                        // the replica is never trained here
+                    float cost = 0f;
+                    try
+                    {
+                        var sk = __instance.characterData.skills[0];
+                        cost = EmployeeHelper.GetTrainingCost(__instance, sk.name, Mathf.Min(Mathf.CeilToInt(100f - sk.value), 10));
+                    }
+                    catch { }
+                    if (!(cost > 0f))
+                    { Plugin.Logger.LogWarning($"[Merger] training NOT routed for '{addrKey}' ({id}): the cost reads {cost} on this copy."); return; }
+                    if (!CommitStaffOp(id, addrKey, "train", cost))
+                    { Plugin.Logger.LogWarning($"[Merger] training NOT routed for '{addrKey}' ({id}): no route out of this machine - nothing was charged here."); return; }
+                    Plugin.Logger.LogInfo($"[Merger] training routed to owner '{MPRegisterSync.OwnerOfInjected(id)}' for '{addrKey}' ({id}, {cost.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)})");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} train intercept: {ex.Message}"); }
             }
         }
 
@@ -1025,6 +1217,8 @@ namespace BigAmbitionsMP
             _inflight.Clear(); _appliedSeq.Clear(); _poolSigSent = ""; _logged.Clear(); _fireGreyed = false;
             ListScope = false; DropdownForGrantRecord = false; _dropdownPage = null;
             _massAssignOwner = ""; _menuGroupKnown = false; _menuGroup = null;
+            _inMassTrain = false; _massTrainArming = false;
+            try { CompanyCandidates.Reset(); } catch { }
         }
     }
 }

@@ -2712,12 +2712,21 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(Helpers.EmployeeHelper), nameof(Helpers.EmployeeHelper.RunHourly))]
         public static class Patch_EmployeeHelper_RunHourly_SkipModRecords
         {
+            // MERGER PHASE 4b (PEOPLE) part 1: this same pass AGES the candidate list and DELETES at zero
+            // (decompile Helpers/EmployeeHelper.cs:242-246). A partner's candidate copy must never be aged or
+            // deleted here - its clock is the ORIGIN's, carried by the pool republish - so the copies sit the
+            // pass out too and go straight back in the finalizer below (CompanyCandidates holds the stash:
+            // Harmony allows only one __state, and this pass is main-thread and non-reentrant).
             static void Prefix(out System.Collections.Generic.List<Entities.EmployeeInstance> __state)
-                => __state = StripModEmployeeRecords("the hourly employee pass");
+            {
+                __state = StripModEmployeeRecords("the hourly employee pass");
+                CompanyCandidates.StripForHourlyPass();
+            }
 
             static Exception? Finalizer(System.Collections.Generic.List<Entities.EmployeeInstance> __state, Exception __exception)
             {
                 RestoreModEmployeeRecords(__state, "RunHourly");
+                CompanyCandidates.RestoreAfterHourlyPass();
                 try
                 {
                     if ((MPServer.IsRunning || MPClient.IsClientInWorld || MPClient.OfflineFork) && __state != null && __state.Count > 0)   // H-FORK-1: holds in the offline fork

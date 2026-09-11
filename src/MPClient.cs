@@ -307,6 +307,7 @@ namespace BigAmbitionsMP
             // absence reset above is; it touches tracking only, never any game state.
             try { GameStatePatcher.EnqueueOnMainThread(() => CompanyFeed.ClearAll("the connection dropped")); } catch { }
             try { GameStatePatcher.EnqueueOnMainThread(() => CompanyLists.ClearAll("the connection dropped")); } catch { }   // wave 4: no partner display copies without a session
+            try { GameStatePatcher.EnqueueOnMainThread(() => CompanyCandidates.ClearAll("the connection dropped")); } catch { }   // phase 4b (people): same rule for the shared candidate copies
             PlayerColours.ResetSession();   // colours r2 (MINOR-5): an involuntary drop ends the session too - Disconnect() only covers the voluntary path
             bool wasConnected = _connected;
             double secs = _connectClock.IsRunning ? _connectClock.Elapsed.TotalSeconds : -1;
@@ -674,6 +675,14 @@ namespace BigAmbitionsMP
                     // Host-relayed: this machine OWNS the employee — perform the native reassignment.
                     var sf = env.GetPayload<SharedStaffEditPayload>();
                     if (sf != null) GameStatePatcher.EnqueueOnMainThread(() => SharedShopStaff.ApplyOnOwner(sf));
+                    break;
+                }
+                case MessageType.CompanyCandidates:
+                {
+                    // Merger phase 4b (people) part 1: a co-member's candidate pool, a claim verdict, or
+                    // "somebody hired out of your pool". Main thread - it writes this save's candidate list.
+                    var cc = env.GetPayload<CompanyCandidatesPayload>();
+                    if (cc != null) GameStatePatcher.EnqueueOnMainThread(() => CompanyCandidates.Receive(cc));
                     break;
                 }
                 case MessageType.SharedPriceEdit:

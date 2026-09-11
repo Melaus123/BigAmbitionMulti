@@ -955,7 +955,9 @@ namespace BigAmbitionsMP
                         bool einj = false; try { einj = MPRegisterSync.IsInjectedStaff(e.id); } catch { }
                         // Phase 4b: the bonus figures as THIS machine reads them (on a copy the cooldown is not synced, so canbonus is the satisfaction test only; the runner's own record is the real gate).
                         float ebonus = 0f; bool ecan = false; try { ebonus = e.GetBonusAmount(); ecan = e.CanGiveBonus(); } catch { }
-                        string eline = $"{e.id}|{ename}|assigned={eaddr}|injected={einj}|bonus={ebonus.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}|canbonus={ecan}";
+                        // Phase 4b (people): the primary skill as this machine reads it, so a scenario can pick a trainable employee (value < 100).
+                        string eskill = ""; try { var esk = e.characterData?.skills; if (esk != null && esk.Count > 0 && esk[0] != null) eskill = $"{esk[0].name}:{esk[0].value.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}"; } catch { }
+                        string eline = $"{e.id}|{ename}|assigned={eaddr}|injected={einj}|bonus={ebonus.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}|canbonus={ecan}|skill={eskill}";
                         Plugin.Logger.LogWarning($"[TestDrive] employee: {eline}");
                         if (eshown++ > 0) esb.Append(" ; ");
                         esb.Append(eline);
@@ -1167,8 +1169,107 @@ namespace BigAmbitionsMP
                         : $"OK staffop addr='{skey}' employee='{sempId}' op='{sop}' wage={sval} routed={srouted}";
                 }
 
+                case "candidates":
+                {
+                    // Phase 4b (people) P1: the candidate list AS THIS MACHINE SEES IT - own rows and the
+                    // company copies together, each naming its origin and who (if anyone) has claimed it.
+                    // An argument filters to one origin pid.
+                    var clines = CompanyCandidates.Readout();
+                    var csb = new StringBuilder();
+                    int cshown = 0, ctotal = 0;
+                    foreach (var cline in clines)
+                    {
+                        if (arg.Length > 0 && !cline.Contains("|origin=" + arg)) continue;
+                        ctotal++;
+                        if (cshown >= 30) continue;
+                        Plugin.Logger.LogWarning($"[TestDrive] candidate: {cline}");
+                        if (cshown++ > 0) csb.Append(" ; ");
+                        csb.Append(cline);
+                    }
+                    return $"OK {ctotal} candidate(s){(arg.Length > 0 ? $" from '{arg}'" : "")}: {csb}";
+                }
+
+                case "claim":
+                {
+                    // The same message MyEmployees.NegotiateWithCandidate sends before it opens a negotiation.
+                    // T7(b): a second word pins or releases the claim for a harness race - `hold` marks a
+                    // synthetic live negotiation so the 5 s sweep cannot take the claim back, `drop` clears
+                    // that mark AND releases the claim. heldBy is read from the local table at call time.
+                    if (arg.Length == 0) return "ERR usage: claim <candidateId> [hold|drop]";
+                    var ctk = arg.Split(' ');
+                    string cid = ctk[0];
+                    string cmode = ctk.Length > 1 ? ctk[1].ToLowerInvariant() : "";
+                    if (cmode.Length > 0 && cmode != "hold" && cmode != "drop") return "ERR usage: claim <candidateId> [hold|drop]";
+                    string cowner = CompanyCandidates.OwnerOfCandidate(cid);
+                    bool csent = false;
+                    if (cmode == "drop") CompanyCandidates.DropClaim(cid);
+                    else
+                    {
+                        if (cmode == "hold") CompanyCandidates.SetVerbHold(cid, true);
+                        csent = CompanyCandidates.CommitClaim(cid);
+                    }
+                    return $"OK claim addr-less candidate='{cid}' origin='{(cowner.Length > 0 ? cowner : "mine")}' mode='{(cmode.Length > 0 ? cmode : "ask")}' sent={csent} heldBy='{CompanyCandidates.ClaimantOf(cid)}'";
+                }
+
+                case "transfers":
+                {
+                    // T6: the HOST's in-transit table - the records no save holds right now. A member has
+                    // nothing to show here by design (the host is the only holder).
+                    if (!MPServer.IsRunning) return "ERR transfers is a host verb - the host holds the in-transit table";
+                    var trows = MPServer.TransfersReadout();
+                    var tfsb = new StringBuilder();
+                    foreach (var trow in trows)
+                    {
+                        Plugin.Logger.LogWarning($"[TestDrive] transfer: {trow}");
+                        if (tfsb.Length > 0) tfsb.Append(" ; ");
+                        tfsb.Append(trow);
+                    }
+                    return $"OK transfers pending={trows.Count}{(trows.Count > 0 ? " [" + tfsb + "]" : "")}";
+                }
+
+                case "transfer":
+                {
+                    // Phase 4b (people) P2: the dropdown's whole game-state write is assignedAddress
+                    // (MyEmployees.cs:206 / CandidateCellView.cs:81), so setting it here is exactly what a
+                    // player does - the 2 s merger scan then decides between a routed assign and the
+                    // two-phase release/adopt, and logs which under [Transfer].
+                    var ttk = arg.Split(' ');
+                    if (ttk.Length < 3) return "ERR usage: transfer <employeeId> <num> <ba:street_x>";
+                    string tempId = ttk[0];
+                    string taddr  = ttk[1] + " " + ttk[2];
+                    var temp = FindEmployee(tempId);
+                    if (temp == null) return $"ERR no employee '{tempId}' on this machine";
+                    var treg = GameStatePatcher.FindRegistration(taddr);
+                    if (treg == null) return $"ERR no registration for '{taddr}'";
+                    bool tinj = false;  try { tinj = MPRegisterSync.IsInjectedStaff(tempId); } catch { }
+                    string thome = "";  try { thome = MPRegisterSync.InjectedAddrOf(tempId); } catch { }
+                    string tkey = taddr; try { tkey = GameStateReader.AddressKey(treg); } catch { }
+                    temp.assignedAddress = treg.Address;
+                    return $"OK transfer armed employee='{tempId}' injected={tinj} home='{thome}' -> '{tkey}'";
+                }
+
+                case "train":
+                {
+                    // Phase 4b (people) P3: the routed TRAIN leg on its own, without the bulk dialog. The
+                    // cost is read here exactly as the mass action reads it (skills[0], +10 capped at 100)
+                    // and travels as a BOUND - the machine that runs the address recomputes and pays.
+                    if (arg.Length == 0) return "ERR employee id required";
+                    var rnemp = FindEmployee(arg);
+                    if (rnemp == null) return $"ERR no employee '{arg}' on this machine";
+                    string rnaddr = ""; try { if (rnemp.assignedAddress != null) rnaddr = GameStateReader.AddressKey(rnemp.assignedAddress); } catch { }
+                    float rncost = 0f;
+                    try
+                    {
+                        var rnsk = rnemp.characterData.skills[0];
+                        rncost = Helpers.EmployeeHelper.GetTrainingCost(rnemp, rnsk.name, UnityEngine.Mathf.Min(UnityEngine.Mathf.CeilToInt(100f - rnsk.value), 10));
+                    }
+                    catch { }
+                    bool rnrouted = SharedShopStaff.CommitStaffOp(arg, rnaddr, "train", rncost);
+                    return $"OK train addr='{rnaddr}' employee='{arg}' cost={rncost.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} routed={rnrouted}";
+                }
+
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|candidates|claim|transfer|transfers|train)";
             }
         }
 

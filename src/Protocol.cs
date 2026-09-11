@@ -212,6 +212,7 @@ namespace BigAmbitionsMP
         CompanyFeed           = 211,     // MERGER PHASE 4b (2026-09-11, D19-5): the SHARED TRANSACTION FEED. Host -> a member's ONLINE co-members: one member's own money-movement record (the native Transaction's type/categories/data/amount/balance/deductible flag/address/game time), and the same type carries the host's join REPLAY of the last N per owner. The member->host leg needs no type of its own: the record rides the wallet forward it belongs to (MergerWalletDeltaPayload.Tx). Receivers append a TAGGED display copy to their own gi.Transactions so the EconoView lists show the whole company's movements; the copies are LIFTED for every veiled pass and every save, so they are never summed into a member's own financial record and never reach a .hsg.
         MergerTax             = 212,     // MERGER PHASE 4a / B9 (2026-09-11, user decision): the TAX PAY-ALL. Action=payall: the member who just paid its own bill natively asks the host to have every partner settle theirs. Action=payown: host -> one ONLINE partner - run your own native pay action now (the money leaves the SHARED wallet through ChangeMoney, which the MergerWallet mirror follows). Action=report: that partner's result back to the payer's log (no on-screen text either way). A pay-all for an OFFLINE partner is HELD by the host and delivered at that partner's next connect.
         CompanyLists          = 213,     // MERGER PHASE 2 WAVE 4 (2026-09-11, D18), WIDENED BY 4c PART 1 (D20-6): ONE owner's FIVE headquarters/agreement list families - delivery contracts and logistics manager plans as INSTALLED DISPLAY COPIES, plus the four SCREEN-LAYER families 4c part 1 added (pricing manager plans, import partnerships, HR manager plans, headhunter plans), which are never installed into a game list at all - Host -> that owner's ONLINE co-members (and the same type replays them to a joiner). The books payload could not carry these: 4a's bundle is per-DAY financial records and is rebuilt from gi.financialSummaries, while these are the owner's live agreement objects the host already holds per owner in PaperworkStore. Receivers INSTALL them into their own gi lists through the absence installer, TAGGED - the two BizMan screens that show them read the GAME lists directly (BizManDeliveries.cs:53 `SaveGameManager.Current.DeliveryContracts.FindAll(...)`, LogisticsManagersPlanList.cs:108 -> LogisticsManagerHelper.cs:62 `SaveGameManager.Current.logisticsManagerPlans.FindAll(...)`), so 4b's screen-layer overlay has nothing to hook. The tag keeps them out of every .hsg (the absence strip) AND out of the two execution passes. Member -> host needs no type: the owner's own publish already carries the lists.
+        CompanyCandidates     = 214,     // MERGER PHASE 4b (PEOPLE) part 1 (2026-09-11, D20-1): THE SHARED CANDIDATE POOL and its CLAIM. Four legs on one type, told apart by Action. "pool": a member's own candidate rows (client -> HOST, and the host fans them to that member's ONLINE co-members and replays them to a joiner) - a candidate pool is per SAVE (Helpers/RecruitmentHelper.cs:80) and job-board generation for a merged shop is already owner-only, so without this leg a member cannot even SEE what the company's boards produced. "claim": a member asks to open a salary negotiation on a company candidate; the host grants it to the FIRST asker and refuses the rest (the RivalStaffSync poach-claim shape), so two members can never hire the same person. "verdict": host -> the WHOLE company (the origin included, because the origin's own record must know it is taken) - who holds the candidate now, "" when released. "hired": the member who completed the hire -> host -> the ORIGIN, whose own candidate record is then discarded through the game's own DiscardCandidate. Receivers hold the rows as TAGGED display copies in their own CandidateEmployeeInstances: stripped at the save choke point and lifted out of the hourly pass that ages and deletes candidates, so expiry is the ORIGIN's clock and copies never vanish at different times on different machines.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -271,6 +272,32 @@ namespace BigAmbitionsMP
         public int    ComplaintHoursUntilNext  { get; set; }
         public int    ComplaintDeadlineHours   { get; set; }
         public bool   ComplaintHasRival        { get; set; }
+        // MERGER PHASE 4b (PEOPLE) part 2, r2 (2026-09-11, D20-4 + review r1 MAJOR-1/2): THE HOST-HELD
+        // TRANSFER. Moving an employee to a shop a DIFFERENT machine runs cannot be one message: both
+        // machines would hold a live record with the same real id and payroll is id-keyed, so wages would
+        // be billed twice for as long as the overlap lasted. And it cannot be a straight line between the
+        // two machines either - a destination that refuses or disconnects leaves the record in NO save.
+        // The HOST is the authority and the holder, so one TransferId carries six legs:
+        //   "transfer-request"  initiator -> host   (AddressKey = the shop they work at now, "" when the
+        //                                            asker's own save holds them; OtherAddressKey = where
+        //                                            they are going)
+        //   "release"           host -> the SOURCE runner
+        //   "released"          source -> host      (the WHOLE record above; the host now holds it alone)
+        //   "adopt-in"          host -> the DESTINATION runner (the record again)
+        //   "adopted"           destination -> host (the entry closes)
+        //   "transfer-refused"  destination -> host (or no ack within one GAME hour) -> "return" to the
+        //   "return"/"returned" source, which re-adopts its own record: NOTHING IS EVER LOST.
+        //   "drop"/"dropped"    host -> a LATE adopter (r3 MAJOR-2): its "adopted" arrived after the host
+        //                       had already handed the record back, so two saves hold the same live id -
+        //                       it removes what it adopted and acknowledges. Idempotent like every leg.
+        // The FROM end is the address the record was last seen SETTLED at, not what the dropdown has already
+        // written (r3 RIG-1) - and an EMPTY one on a give-back means "back to the bench", which the re-adopt
+        // must accept (r3 MAJOR-1): a record the host holds can never be refused its way home.
+        // Idempotency is per (TransferId, STAGE), never per id - a give-back must never be swallowed by
+        // the release that preceded it (review r1 MAJOR-1). The host's table is persisted in the manifest
+        // (MpManifest.Transfers), so a host restart resumes it rather than losing the record.
+        public string TransferId      { get; set; } = "";
+        public string OtherAddressKey { get; set; } = "";
     }
 
     // ── Shared-shop management (Business PERMISSION feature; src/SharedShopSchedule.cs) — separate from the merger ──
@@ -322,13 +349,42 @@ namespace BigAmbitionsMP
     public class SharedStaffEditPayload
     {
         public string PlayerId   { get; set; } = "";   // sender (validated SenderIs at the host)
-        public string Action     { get; set; } = "";   // "assign" | "unassign" | wave 3 (W3-3): "raise" (Wage) | phase 4b: "bonus" (Wage = the sender's figure, a bound only; the runner charges its own record's amount)
+        public string Action     { get; set; } = "";   // "assign" | "unassign" | wave 3 (W3-3): "raise" (Wage) | phase 4b: "bonus" and "train" (Wage = the sender's figure, a bound only; the runner recomputes and charges its own record's amount)
         public string EmployeeId { get; set; } = "";
         public string AddressKey { get; set; } = "";
         public string FromAddressKey { get; set; } = "";   // where the helper believed the employee was ("" = bench); the owner rejects if that is no longer true (owner wins, as for schedule days)
         public float  Wage       { get; set; }         // wave 3 "raise": the new hourly wage, absolute and never a delta; phase 4b "bonus": the sender's amount, a bound only; ignored by assign/unassign
         public int    Seq        { get; set; }
         public int    SeqEpoch   { get; set; }
+    }
+
+    // -- Merger phase 4b (people): the shared candidate pool (MessageType.CompanyCandidates) --
+
+    /// <summary>One candidate as the company sees them: the same StaffInfo row the roster and the bench
+    /// already use, plus the three things a CANDIDATE has and an employee does not - the ORIGIN's expiry
+    /// clock (never recounted on a copy), the job-board flag, and the demands the hire negotiates over.
+    /// ClaimedBy carries the host's current claim so a joiner's first pool already renders it.</summary>
+    public class CandidateRow
+    {
+        public StaffInfo Staff { get; set; } = new();
+        public int    HoursUntilExpiring { get; set; }
+        public bool   FromJobBoard       { get; set; }
+        public List<string> Demands      { get; set; } = new();
+        public string ClaimedBy          { get; set; } = "";
+    }
+
+    /// <summary>The four legs of the shared candidate pool - see the MessageType comment. Action is the
+    /// discriminator: "pool" (Candidates + OwnerPid), "claim" (CandidateId), "release" (CandidateId),
+    /// "verdict" (CandidateId + ClaimedBy + Ok), "hired" (CandidateId, sender = the hirer).</summary>
+    public class CompanyCandidatesPayload
+    {
+        public string PlayerId    { get; set; } = "";   // sender (validated SenderIs at the host)
+        public string Action      { get; set; } = "";
+        public string OwnerPid    { get; set; } = "";   // whose pool: the ORIGIN of these rows / of this candidate
+        public string CandidateId { get; set; } = "";
+        public string ClaimedBy   { get; set; } = "";   // verdict: who holds it now ("" = free again)
+        public bool   Ok          { get; set; }         // verdict: granted to ClaimedBy
+        public List<CandidateRow> Candidates { get; set; } = new();
     }
 
     /// <summary>Shared-shop slice 4: ONE item's retail price at a shared shop, set by a permitted player. The native

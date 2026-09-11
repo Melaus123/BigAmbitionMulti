@@ -433,6 +433,11 @@ namespace BigAmbitionsMP
                 MergerAbsence.HostReset();
                 MergerAbsence.Reset();
                 RestoreAbsenceFromManifest(m);
+                // Phase 4b (people) P2/P1 r2: the in-transit transfers follow the absence marks exactly -
+                // same moment, same clear-then-apply. The candidate pool and its claims are a SESSION
+                // thing and are simply cleared: the members republish theirs within one tick of the load.
+                RestoreTransfersFromManifest(m);
+                HostResetCandidates();
                 try { PaperworkSync.Reset(); } catch { }   // and this machine's publisher forgets the previous world's day/edge
                 PruneOffers("session state restored");   // r4: the restored store decides which offers still stand
                 RestoreWalletFromManifest(m);   // slice 4: ledger BEFORE the broadcast below (members snap to it)
@@ -2194,6 +2199,16 @@ namespace BigAmbitionsMP
                         GameStatePatcher.EnqueueOnMainThread(() => HostRouteSharedStaffEdit(sf, senderPid));
                     break;
                 }
+                case MessageType.CompanyCandidates:
+                {
+                    // Merger phase 4b (people) part 1: a member's candidate pool, or a claim/release on
+                    // one of them, or "somebody hired out of your pool". Main thread - the pool leg
+                    // reads the sender's rows and every leg may write the host's own candidate list.
+                    var cc = env.GetPayload<CompanyCandidatesPayload>();
+                    if (cc != null && SenderIs(cc.PlayerId, senderPid, MessageType.CompanyCandidates))
+                        GameStatePatcher.EnqueueOnMainThread(() => HostRouteCompanyCandidates(cc, senderPid));
+                    break;
+                }
                 case MessageType.SharedPriceEdit:
                 {
                     var pe = env.GetPayload<SharedPriceEditPayload>();
@@ -3418,7 +3433,7 @@ namespace BigAmbitionsMP
             // so a mid-day joiner saw blank partner rows until the next day change, and a pay-all held
             // while it was offline was never delivered. THIS method is the one both the fresh join
             // (SendWorldStateTo) and the reconnect resync run, and it already knows the joiner's pid.
-            if (!string.IsNullOrEmpty(grantJoinerPid)) { SendCompanyBooksTo(peer, grantJoinerPid); SendCompanyFeedTo(peer, grantJoinerPid); SendCompanyListsTo(peer, grantJoinerPid); }
+            if (!string.IsNullOrEmpty(grantJoinerPid)) { SendCompanyBooksTo(peer, grantJoinerPid); SendCompanyFeedTo(peer, grantJoinerPid); SendCompanyListsTo(peer, grantJoinerPid); SendCompanyCandidatesTo(peer, grantJoinerPid); }
             else Plugin.Logger.LogInfo($"[Books] join replay refused for peer {peer.Id}: that peer has no player id yet (its books arrive with the next publish).");
             SendMarketEventsTo(peer);        // active market events (change-broadcast only)
             SendPlayerShopPricesTo(peer);    // player-run shop prices (change-broadcast only)
@@ -6305,6 +6320,7 @@ namespace BigAmbitionsMP
                     }
 
                     MergerSync.StoreRemove(s);
+                    HostForgetCandidatesOf(actorPid);   // phase 4b (people) r2 (MINOR-9): their pool rows and claims leave with them
                     Plugin.Logger.LogInfo($"[Merger] '{actorPid}' left their merger group.");
                     // r4: a dissolving company's offer (and one the leaver had out that nobody can answer any
                     // more) is retired by the validator AFTER the store change — a 3+ company keeps both.
@@ -6336,7 +6352,15 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(senderPid)) return;
+                if (p == null || string.IsNullOrEmpty(senderPid)) return;
+                // Phase 4b (people) P2 r2 (T1): the transfer legs are the HOST's own conversation - it asks
+                // for the release, holds the record, relays the adopt and hands it back. They are validated
+                // in HostRouteTransfer, not by the per-address grant gate below, and they are read BEFORE
+                // the address check: a move out of the asker's OWN save carries no from-address at all.
+                if (p.Action == "transfer-request" || p.Action == "released" || p.Action == "adopted"
+                 || p.Action == "transfer-refused" || p.Action == "returned" || p.Action == "dropped")
+                { HostRouteTransfer(p, senderPid); return; }
+                if (string.IsNullOrEmpty(p.AddressKey)) return;
                 if (!BuildingOwners.TryGetValue(p.AddressKey, out var owner) || string.IsNullOrEmpty(owner))
                 { Plugin.Logger.LogWarning($"[MergerStaff] employee edit for unowned '{p.AddressKey}' — dropped."); return; }
                 string ownerPid = owner == "host" ? MPConfig.PlayerId : owner;
@@ -6676,6 +6700,748 @@ namespace BigAmbitionsMP
                 else SendToPid(ftarget, MessageEnvelope.Create(MessageType.SharedStaffEdit, "host", p));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedStaffEdit: {ex.Message}"); }
+        }
+
+        // ═══ MERGER PHASE 4b (PEOPLE) part 1 (D20-1): THE SHARED CANDIDATE POOL ═══
+        // The host is the only machine that can arbitrate a CLAIM, so it keeps two small tables: the last
+        // pool each member published (replayed to a joiner, and the lookup that says whose candidate an id
+        // is), and who currently holds each candidate. A claim is granted to the FIRST asker; it dies when
+        // the holder releases it, goes offline, stops re-asserting it (the 30 s keepalive), or the owner
+        // stops listing that candidate at all. Nothing here is persisted - a company's hiring race is a
+        // session thing, exactly like the poach claim it is modelled on (RivalStaffSync).
+
+        private static readonly Dictionary<string, CompanyCandidatesPayload> _candidatesByOwner = new();   // owner pid -> last pool
+        private static readonly Dictionary<string, (string pid, float at)> _candidateClaims = new();       // candidateId -> holder + last assert
+        private const float CandidateClaimStaleSeconds = 120f;   // 4x the claimant's 30 s keepalive
+
+        /// <summary>HOST (main thread): one of the candidate-pool legs. Every leg is gated on the sender
+        /// being in a company, and a claim additionally on the sender sharing THAT company with the
+        /// candidate's origin. Refusals are logged, never silent.</summary>
+        public static void HostRouteCompanyCandidates(CompanyCandidatesPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(senderPid)) return;
+                if (!SharedRateOk(senderPid, "candidate message")) return;
+                if (!MergerSync.InAnyGroup(senderPid))
+                { Plugin.Logger.LogInfo($"[Candidates] '{p.Action}' from '{senderPid}' - not in a company, dropped."); return; }
+
+                if (p.Action == "pool")
+                {
+                    var rows = p.Candidates ?? new List<CandidateRow>();
+                    if (rows.Count > 100)
+                    { Plugin.Logger.LogWarning($"[Candidates] pool from '{senderPid}': implausible count {rows.Count} - dropped."); return; }
+                    p.OwnerPid = senderPid;                      // never take the sender's word for whose pool this is
+                    var listed = new HashSet<string>();
+                    foreach (var row in rows)
+                    {
+                        string cid = row?.Staff?.Id ?? "";
+                        if (cid.Length == 0) continue;
+                        listed.Add(cid);
+                        row.ClaimedBy = _candidateClaims.TryGetValue(cid, out var cl) ? (cl.pid ?? "") : "";
+                    }
+                    // A claim on somebody this owner no longer lists (hired, declined, expired) is dead.
+                    var dead = new List<string>();
+                    foreach (var kv in _candidateClaims)
+                        if (OwnerOfCandidate(kv.Key) == senderPid && !listed.Contains(kv.Key)) dead.Add(kv.Key);
+                    _candidatesByOwner[senderPid] = p;
+                    foreach (var cid in dead) _candidateClaims.Remove(cid);
+                    FanOutCandidates(p, senderPid, includeOwner: false);
+                    return;
+                }
+
+                string id = p.CandidateId ?? "";
+                if (id.Length == 0) { Plugin.Logger.LogWarning($"[Candidates] '{p.Action}' from '{senderPid}' with no candidate id - dropped."); return; }
+                string ownerPid = OwnerOfCandidate(id);
+                if (ownerPid.Length == 0)
+                { Plugin.Logger.LogWarning($"[Candidates] '{p.Action}' by '{senderPid}' for '{id}' - no member lists that candidate, dropped."); return; }
+                if (ownerPid != senderPid && !MergerSync.MergedRuntime(ownerPid, senderPid))
+                { Plugin.Logger.LogWarning($"[Candidates] '{p.Action}' by '{senderPid}' for '{id}' (of '{ownerPid}') - not in that company, dropped."); return; }
+
+                if (p.Action == "claim")
+                {
+                    _candidateClaims.TryGetValue(id, out var held);
+                    string holder = held.pid ?? "";
+                    bool free = holder.Length == 0 || holder == senderPid || !IsOnlinePid(holder)
+                             || UnityEngine.Time.unscaledTime - held.at > CandidateClaimStaleSeconds;
+                    if (!free)
+                    {
+                        Plugin.Logger.LogInfo($"[Candidates] claim of '{id}' by '{senderPid}' REFUSED - '{holder}' is already talking to them.");
+                        SendToPid(senderPid, MessageEnvelope.Create(MessageType.CompanyCandidates, "host",
+                            new CompanyCandidatesPayload { PlayerId = "host", Action = "verdict", OwnerPid = ownerPid, CandidateId = id, ClaimedBy = holder, Ok = false }));
+                        return;
+                    }
+                    _candidateClaims[id] = (senderPid, UnityEngine.Time.unscaledTime);
+                    if (holder != senderPid)
+                        Plugin.Logger.LogInfo($"[Candidates] claim of '{id}' (of '{ownerPid}') GRANTED to '{senderPid}'.");
+                    FanOutCandidates(new CompanyCandidatesPayload { PlayerId = "host", Action = "verdict", OwnerPid = ownerPid, CandidateId = id, ClaimedBy = senderPid, Ok = true }, ownerPid, includeOwner: true);
+                    return;
+                }
+
+                if (p.Action == "release")
+                {
+                    if (!_candidateClaims.TryGetValue(id, out var cur) || cur.pid != senderPid)
+                    { Plugin.Logger.LogInfo($"[Candidates] release of '{id}' by '{senderPid}' - they do not hold it, ignored."); return; }
+                    _candidateClaims.Remove(id);
+                    Plugin.Logger.LogInfo($"[Candidates] '{senderPid}' released '{id}' - back in the company pool.");
+                    FanOutCandidates(new CompanyCandidatesPayload { PlayerId = "host", Action = "verdict", OwnerPid = ownerPid, CandidateId = id, ClaimedBy = "", Ok = true }, ownerPid, includeOwner: true);
+                    return;
+                }
+
+                if (p.Action == "accept")
+                {
+                    // T2 (review r1 MAJOR-3): the ACCEPT is the moment of commitment, so it is the moment the
+                    // host reads. Nothing is cached - not even this member's own claim.
+                    HostRouteCandidateAccept(p, senderPid, ownerPid);
+                    return;
+                }
+
+                if (p.Action == "hired")
+                {
+                    _candidateClaims.Remove(id);
+                    _candidateHired.Add(id);                  // T2: the consumed mark, so a later accept is refused
+                    if (_candidatesByOwner.TryGetValue(ownerPid, out var pool) && pool?.Candidates != null)
+                        pool.Candidates.RemoveAll(r => (r?.Staff?.Id ?? "") == id);
+                    Plugin.Logger.LogInfo($"[Candidates] '{senderPid}' hired '{id}' out of '{ownerPid}'s pool - telling the origin to drop their record.");
+                    // U3(b) r3: held for EVERY member that is offline, not only the origin (an unseen hired
+                    // mark is how an orphan negotiation - and a second hire of one person - is born).
+                    FanOutOrHoldCandidateMark(p, ownerPid);
+                    FanOutCandidates(new CompanyCandidatesPayload { PlayerId = "host", Action = "verdict", OwnerPid = ownerPid, CandidateId = id, ClaimedBy = "", Ok = true }, ownerPid, includeOwner: true);
+                    return;
+                }
+
+                Plugin.Logger.LogWarning($"[Candidates] unknown action '{p.Action}' from '{senderPid}' - dropped.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] HostRouteCompanyCandidates: {ex.Message}"); }
+        }
+
+        /// <summary>Re-stamp every row of a stored pool with the claim that stands RIGHT NOW (MINOR-7).</summary>
+        private static void StampClaims(CompanyCandidatesPayload pool)
+        {
+            try
+            {
+                var rows = pool?.Candidates;
+                if (rows == null) return;
+                foreach (var row in rows)
+                {
+                    string cid = row?.Staff?.Id ?? "";
+                    if (cid.Length == 0) continue;
+                    row.ClaimedBy = _candidateClaims.TryGetValue(cid, out var cl) ? (cl.pid ?? "") : "";
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>Whose pool holds this candidate id ("" = nobody's, as far as the host has been told).</summary>
+        private static string OwnerOfCandidate(string candidateId)
+        {
+            foreach (var kv in _candidatesByOwner)
+            {
+                var rows = kv.Value?.Candidates;
+                if (rows == null) continue;
+                for (int i = 0; i < rows.Count; i++)
+                    if ((rows[i]?.Staff?.Id ?? "") == candidateId) return kv.Key;
+            }
+            return "";
+        }
+
+        /// <summary>Ship one candidate message to the ONLINE members of ownerPid's company. A POOL skips the
+        /// owner (their own list is their own save); a VERDICT includes them, because the origin's real
+        /// record must know it has been claimed.</summary>
+        private static int FanOutCandidates(CompanyCandidatesPayload pay, string ownerPid, bool includeOwner)
+        {
+            int fanout = 0;
+            try
+            {
+                if (!_running || pay == null || string.IsNullOrEmpty(ownerPid)) return 0;
+                byte[]? bytes = null;
+                foreach (var cp in ConnectedClientPeers())
+                {
+                    bool isOwner = cp.playerId == ownerPid;
+                    if (isOwner && !includeOwner) continue;
+                    if (!isOwner && !MergerSync.MergedRuntime(ownerPid, cp.playerId)) continue;
+                    bytes ??= MessageEnvelope.Create(MessageType.CompanyCandidates, "host", pay).Serialize();
+                    cp.peer.Send(bytes, reliable: true);
+                    fanout++;
+                }
+                bool hostIsOwner = MPConfig.PlayerId == ownerPid;
+                if ((includeOwner || !hostIsOwner) && (hostIsOwner || MergerSync.MergedRuntime(ownerPid, MPConfig.PlayerId)))
+                { CompanyCandidates.Receive(pay); fanout++; }       // the host is a member too (already on the main thread)
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] fan-out: {ex.Message}"); }
+            return fanout;
+        }
+
+        /// <summary>HOST: a JOINER's catch-up - every co-member's candidate pool as it stands now. Rides the
+        /// same join replay the books, the feed and the agreement lists ride.</summary>
+        public static void SendCompanyCandidatesTo(MPLink peer, string joinerPid)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(joinerPid)) return;
+                int n = 0; bool sentMine = false;
+                foreach (var kv in new List<KeyValuePair<string, CompanyCandidatesPayload>>(_candidatesByOwner))
+                {
+                    if (kv.Key == joinerPid || kv.Value == null) continue;
+                    if (!MergerSync.MergedRuntime(kv.Key, joinerPid)) continue;
+                    // MINOR-7: the STORED pool carries the claims as they stood when it was published. The
+                    // joiner must see the claims as they stand NOW, so every row is re-stamped from the
+                    // live table before the replay goes out.
+                    StampClaims(kv.Value);
+                    Send(peer, MessageEnvelope.Create(MessageType.CompanyCandidates, "host", kv.Value));
+                    n++;
+                    if (kv.Key == MPConfig.PlayerId) sentMine = true;
+                }
+                // r3 MINOR-2: the replay ALWAYS ends with a pool for the HOST's own pid, even an empty one.
+                // A candidate-free company publishes nothing, and CompanyCandidates arms its orphan sweep on
+                // the first pool that ARRIVES - without this it could never arm on a client.
+                if (!sentMine && joinerPid != MPConfig.PlayerId && MergerSync.MergedRuntime(MPConfig.PlayerId, joinerPid))
+                {
+                    Send(peer, MessageEnvelope.Create(MessageType.CompanyCandidates, "host",
+                        new CompanyCandidatesPayload { PlayerId = "host", Action = "pool", OwnerPid = MPConfig.PlayerId }));
+                    n++;
+                }
+                if (n > 0) Plugin.Logger.LogInfo($"[Candidates] join replay to '{joinerPid}': {n} co-member pool(s).");
+                HostFlushHeldCandidates(peer, joinerPid);   // T3: a hire notice held while they were away
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] join replay: {ex.Message}"); }
+        }
+
+
+        // === MERGER PHASE 4b (PEOPLE) P2 r2 (T1): THE HOST-HELD TRANSFER ===
+        // Review r1 MAJOR-1/2: a cross-member move used to be a straight line between the two machines -
+        // the source removed its record and posted it at the destination. A destination that refused, or
+        // that had gone, meant the record existed in NO save; a host restart mid-move meant the same.
+        // The authority is now the host: it asks the source to RELEASE, HOLDS the record itself, relays
+        // the adopt, and hands the record BACK to the source if the adopt refuses, the destination is
+        // gone, or a whole game hour passes with no acknowledgement. The table is persisted in the
+        // manifest, so a restart resumes it (MpManifest.Transfers).
+
+        private class HostTransfer
+        {
+            public string TransferId = "", EmployeeId = "", FromAddr = "", ToAddr = "";
+            public string SourcePid = "", DestPid = "", Stage = "requested", RelayedTo = "";
+            public int Day, Hour, LastLogDay = -1, LastLogHour = -1;
+            public EmployeeEditPayload? Record;
+        }
+
+        private static readonly Dictionary<string, HostTransfer> _transfers = new();
+
+        /// <summary>U2 (re-check r3 MAJOR-2): transfer ids the host has GIVEN BACK, with the game day it
+        /// happened. A late "adopted" naming one of these means the destination is holding a second live
+        /// copy of an id the source already has, so it is answered with a "drop" leg. Only ids the host
+        /// actually returned are in here: an "adopted" for an id that simply closed normally is ignored, so
+        /// a duplicated acknowledgement can never destroy a record that legitimately moved.</summary>
+        private static readonly Dictionary<string, int> _transfersReturned = new();
+
+        private static int GameDayNow() { try { return SaveGameManager.Current?.Day ?? 0; } catch { return 0; } }
+        private static int GameHourNow() { try { return SaveGameManager.Current?.Hour ?? 0; } catch { return 0; } }
+        private static int GameHoursSince(int day, int hour) => (GameDayNow() - day) * 24 + (GameHourNow() - hour);
+
+        /// <summary>Deliver one employee payload to the machine that runs an address: the host applies it
+        /// itself, anyone else gets it on the wire. Held nowhere - the caller keeps the transfer entry.</summary>
+        private static void SendEmployeeEditToPid(string pid, EmployeeEditPayload p)
+        {
+            if (string.IsNullOrEmpty(pid)) return;
+            if (pid == MPConfig.PlayerId) MergerEmployeeSync.ApplyOnOwner(p);
+            else SendToPid(pid, MessageEnvelope.Create(MessageType.MergerEmployeeEdit, "host", p));
+        }
+
+        private static EmployeeEditPayload TransferLeg(HostTransfer t, string action, string addressKey, string otherKey)
+        {
+            var p = (action == "adopt-in" || action == "return") && t.Record != null
+                  ? MergerEmployeeSync.CloneRecord(t.Record)
+                  : new EmployeeEditPayload();
+            p.PlayerId = "host";
+            p.Action = action;
+            p.EmployeeId = t.EmployeeId;
+            p.TransferId = t.TransferId;
+            p.AddressKey = addressKey ?? "";
+            p.OtherAddressKey = otherKey ?? "";
+            return p;
+        }
+
+        /// <summary>HOST (main thread): every leg of a host-held transfer. Idempotent by (TransferId,
+        /// stage) at both ends - a repeated leg re-acknowledges and changes nothing.</summary>
+        public static void HostRouteTransfer(EmployeeEditPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(senderPid)) return;
+                string tid = p.TransferId ?? "";
+                if (tid.Length == 0)
+                { Plugin.Logger.LogWarning($"[Transfer] '{p.Action}' from '{senderPid}' with no transfer id - dropped."); return; }
+
+                if (p.Action == "transfer-request")
+                {
+                    if (_transfers.ContainsKey(tid)) return;                       // a resend of the ask
+                    // An EMPTY from-end means the REQUESTER holds the record itself (their own employee, or
+                    // one on their bench): there is no partner roster to check it against, and the source
+                    // runner is the asker. A NAMED from-end is a partner's shop and is checked like the
+                    // destination - registered, granted to the asker, and run by somebody right now.
+                    string from = p.AddressKey ?? "", to = p.OtherAddressKey ?? "";
+                    if (to.Length == 0)
+                    { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: a transfer needs a destination."); return; }
+                    if (!BuildingOwners.TryGetValue(to, out var toRaw) || string.IsNullOrEmpty(toRaw))
+                    { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: '{to}' is not a registered business here."); return; }
+                    string toOwner = toRaw == "host" ? MPConfig.PlayerId : toRaw;
+                    if (toOwner != senderPid && !GrantSync.IsGranted(GrantKind.Business, toOwner, senderPid))
+                    { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: '{senderPid}' does not hold the destination '{to}'."); return; }
+                    string src = senderPid;
+                    if (from.Length > 0)
+                    {
+                        if (!BuildingOwners.TryGetValue(from, out var fo) || string.IsNullOrEmpty(fo))
+                        { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: '{from}' is not a registered business here."); return; }
+                        string fromOwner = fo == "host" ? MPConfig.PlayerId : fo;
+                        if (fromOwner != senderPid && !GrantSync.IsGranted(GrantKind.Business, fromOwner, senderPid))
+                        { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: '{senderPid}' does not hold the source '{from}'."); return; }
+                        src = RouteTargetFor(from, fromOwner);
+                    }
+                    string dst = RouteTargetFor(to, toOwner);
+                    if (src.Length == 0 || dst.Length == 0)
+                    { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: nobody is running '{(src.Length == 0 ? from : to)}' - nothing released."); return; }
+                    if (src == dst)
+                    { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: one machine runs both ends - that move is an ordinary routed assign."); return; }
+                    var t = new HostTransfer { TransferId = tid, EmployeeId = p.EmployeeId ?? "", FromAddr = from, ToAddr = to,
+                                               SourcePid = src, DestPid = dst, Stage = "requested", Day = GameDayNow(), Hour = GameHourNow() };
+                    _transfers[tid] = t;
+                    Plugin.Logger.LogInfo($"[Transfer] {tid}: requested ('{t.EmployeeId}' {from} -> {to}); asking '{src}' to release.");
+                    SendEmployeeEditToPid(src, TransferLeg(t, "release", from, to));
+                    return;
+                }
+
+                if (!_transfers.TryGetValue(tid, out var e))
+                {
+                    if (p.Action == "adopted")
+                    {
+                        // U2 (MAJOR-2): the entry is gone. If the host GAVE THE RECORD BACK before this
+                        // acknowledgement arrived, the sender is holding a duplicate of a live id and must
+                        // drop it; if the entry simply closed on a successful adopt, this is a repeat and is
+                        // ignored (dropping on a repeat would destroy a record that moved correctly).
+                        if (_transfersReturned.ContainsKey(tid))
+                        {
+                            Plugin.Logger.LogWarning($"[Transfer] {tid}: 'adopted' from '{senderPid}' names a transfer the host had already returned - telling them to drop the record.");
+                            SendEmployeeEditToPid(senderPid, new EmployeeEditPayload
+                            {
+                                PlayerId = "host", Action = "drop", EmployeeId = p.EmployeeId ?? "", TransferId = tid,
+                                AddressKey = p.AddressKey ?? "", OtherAddressKey = p.OtherAddressKey ?? "",
+                            });
+                        }
+                        return;
+                    }
+                    if (p.Action == "returned" || p.Action == "dropped") return;   // an ack for an entry already closed
+                    Plugin.Logger.LogWarning($"[Transfer] {tid}: '{p.Action}' from '{senderPid}' names no transfer the host holds - dropped.");
+                    return;
+                }
+
+                if (p.Action == "released")
+                {
+                    if (senderPid != e.SourcePid)
+                    { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: 'released' came from '{senderPid}', not the source '{e.SourcePid}'."); return; }
+                    // U2 (MINOR-1): the STAGE decides what a release means. One that lands while the host is
+                    // already relaying an adopt or a give-back is a duplicate - the host holds the record
+                    // either way, so it is acknowledged as already-held and nothing is relayed twice.
+                    if (e.Stage == "adopting" || e.Stage == "returning" || e.Stage == "released")
+                    { Plugin.Logger.LogInfo($"[Transfer] {tid}: 'released' arrived while the host is already {e.Stage} - the record is already held here; nothing re-relayed."); return; }
+                    // U2 (MAJOR-5): the "requested" deadline CANCELS the entry instead of dropping it, so a
+                    // release that raced that deadline still finds its transfer. It is taken in and handed
+                    // straight back to the machine that let go - never discarded with the record gone.
+                    if (e.Stage == "cancelled")
+                    {
+                        if (e.Record == null) e.Record = MergerEmployeeSync.CloneRecord(p);
+                        e.Day = GameDayNow(); e.Hour = GameHourNow();
+                        Plugin.Logger.LogWarning($"[Transfer] {tid}: 'released' landed after the host had cancelled the move - held and handed straight back to '{senderPid}'.");
+                        RelayReturn(e);
+                        return;
+                    }
+                    if (e.Record == null)
+                    {
+                        e.Record = MergerEmployeeSync.CloneRecord(p);
+                        e.Day = GameDayNow(); e.Hour = GameHourNow();
+                        e.Stage = "released";
+                        Plugin.Logger.LogInfo($"[Transfer] {tid}: released to the host by '{senderPid}' - the host is the only holder now.");
+                    }
+                    RelayAdopt(e);
+                    return;
+                }
+
+                if (p.Action == "adopted")
+                {
+                    // U2 (MAJOR-2): only the machine the adopt was RELAYED TO, while the entry is still
+                    // adopting, may close it. A late acknowledgement (the host had already timed the adopt
+                    // out and given the record back) would otherwise close the entry with the id live in TWO
+                    // saves - payroll is id-keyed, so it would be paid twice. That sender is told to drop.
+                    bool tooLate = e.Stage == "returning" || e.Stage == "cancelled"
+                                || (e.Stage == "adopting" && e.RelayedTo.Length > 0 && senderPid != e.RelayedTo);
+                    if (tooLate)
+                    {
+                        Plugin.Logger.LogWarning($"[Transfer] {tid}: 'adopted' from '{senderPid}' arrived while the host is {e.Stage} - too late; telling them to drop the record.");
+                        SendEmployeeEditToPid(senderPid, TransferLeg(e, "drop", e.ToAddr, e.FromAddr));
+                        return;
+                    }
+                    if (e.Stage != "adopting")
+                    { Plugin.Logger.LogWarning($"[Transfer] {tid}: 'adopted' from '{senderPid}' while the host is {e.Stage} - nothing was ever relayed to them, ignored."); return; }
+                    _transfers.Remove(tid);
+                    Plugin.Logger.LogInfo($"[Transfer] {tid}: ADOPTED by '{senderPid}' at '{e.ToAddr}' - one save holds the record again.");
+                    return;
+                }
+
+                if (p.Action == "transfer-refused")
+                {
+                    e.Day = GameDayNow(); e.Hour = GameHourNow(); e.RelayedTo = "";
+                    Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: '{senderPid}' could not take '{e.EmployeeId}' at '{e.ToAddr}' - going back to the source.");
+                    RelayReturn(e);
+                    return;
+                }
+
+                if (p.Action == "returned")
+                {
+                    _transfers.Remove(tid);
+                    _transfersReturned[tid] = GameDayNow();   // U2: a late "adopted" for this id must be dropped, not closed
+                    Plugin.Logger.LogInfo($"[Transfer] {tid}: RETURNED to '{senderPid}' - nothing was lost.");
+                    return;
+                }
+
+                if (p.Action == "dropped")
+                {
+                    // U2: the late adopter has removed its duplicate. The record is back to exactly one save.
+                    Plugin.Logger.LogInfo($"[Transfer] {tid}: '{senderPid}' dropped the copy it adopted too late - one save holds the record again.");
+                    return;
+                }
+
+                Plugin.Logger.LogWarning($"[Transfer] {tid}: unknown leg '{p.Action}' from '{senderPid}' - dropped.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Transfer] HostRouteTransfer: {ex.Message}"); }
+        }
+
+        private static string RunnerOf(string addressKey)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return "";
+            if (!BuildingOwners.TryGetValue(addressKey, out var o) || string.IsNullOrEmpty(o)) return "";
+            return RouteTargetFor(addressKey, o == "host" ? MPConfig.PlayerId : o);
+        }
+
+        private static void RelayAdopt(HostTransfer e)
+        {
+            string dst = RunnerOf(e.ToAddr);
+            if (dst.Length == 0)
+            {
+                Plugin.Logger.LogWarning($"[Transfer] {e.TransferId}: refused: nobody runs '{e.ToAddr}' any more - going back to the source.");
+                e.RelayedTo = "";
+                RelayReturn(e);
+                return;
+            }
+            e.DestPid = dst; e.RelayedTo = dst; e.Stage = "adopting";
+            Plugin.Logger.LogInfo($"[Transfer] {e.TransferId}: adopt relayed to '{dst}'.");
+            SendEmployeeEditToPid(dst, TransferLeg(e, "adopt-in", e.ToAddr, e.FromAddr));
+        }
+
+        private static void RelayReturn(HostTransfer e)
+        {
+            e.Stage = "returning";
+            // U2 (MINOR-2): the give-back goes to the machine that RELEASED, whenever it is here - not to
+            // whoever happens to run the from-address NOW. Only when the releaser has gone does the record
+            // go to the stand-in running that address, which adopts it tagged to the absent owner exactly as
+            // the absence installer does. With no from-address and the releaser away, the host keeps holding.
+            // SourcePid is never overwritten: it is what the "released" gate is checked against.
+            string src = (e.SourcePid == MPConfig.PlayerId || IsOnlinePid(e.SourcePid)) ? e.SourcePid
+                       : (e.FromAddr.Length > 0 ? RunnerOf(e.FromAddr) : "");
+            if (src.Length == 0)
+            {
+                if (e.LastLogDay != GameDayNow() || e.LastLogHour != GameHourNow())
+                {
+                    e.LastLogDay = GameDayNow(); e.LastLogHour = GameHourNow();
+                    Plugin.Logger.LogWarning($"[Transfer] {e.TransferId}: refused: neither '{e.SourcePid}' nor anybody running '{e.FromAddr}' is here - the host keeps '{e.EmployeeId}' until one of them is back.");
+                }
+                return;
+            }
+            // The deadline clock restarts on every offer, so a give-back that cannot land is re-offered once
+            // a GAME hour instead of on every tick for ever.
+            e.Day = GameDayNow(); e.Hour = GameHourNow();
+            e.RelayedTo = src;
+            SendEmployeeEditToPid(src, TransferLeg(e, "return", e.FromAddr, e.ToAddr));
+        }
+
+        /// <summary>HOST, MAIN THREAD (the shared-staff tick): the recurring check the design asks for -
+        /// events drive the happy path, and this only catches what never answered. One GAME hour is the
+        /// deadline, read from the game's own clock, so a paused world never expires anything.</summary>
+        public static void HostTransfersTick()
+        {
+            try
+            {
+                if (_transfersReturned.Count > 0)
+                {
+                    var oldTids = new List<string>();
+                    foreach (var kv in _transfersReturned) if (GameDayNow() - kv.Value >= 1) oldTids.Add(kv.Key);
+                    foreach (var k in oldTids) _transfersReturned.Remove(k);
+                }
+                if (!_running || _transfers.Count == 0) return;
+                foreach (var e in new List<HostTransfer>(_transfers.Values))
+                {
+                    if (e == null) continue;
+                    if (e.Stage == "adopting")
+                    {
+                        string dst = RunnerOf(e.ToAddr);
+                        if (dst.Length > 0 && dst != e.RelayedTo) { RelayAdopt(e); continue; }   // a restored entry, or the runner changed
+                    }
+                    if (GameHoursSince(e.Day, e.Hour) < 1) continue;
+                    if (e.Stage == "requested")
+                    {
+                        // U2 (MAJOR-5): do NOT drop the entry. A release can still be in the air, and an
+                        // entry the host has forgotten turns that release into "names no transfer the host
+                        // holds - dropped" with the record already gone from the source's save. The entry is
+                        // CANCELLED and kept for one game day, long enough for a late release to find it and
+                        // be handed straight back.
+                        e.Stage = "cancelled"; e.Day = GameDayNow(); e.Hour = GameHourNow();
+                        Plugin.Logger.LogWarning($"[Transfer] {e.TransferId}: refused: the source never released '{e.EmployeeId}' within a game hour - nothing moved (the entry is kept a game day in case the release is still in the air).");
+                        continue;
+                    }
+                    if (e.Stage == "cancelled")
+                    {
+                        if (GameHoursSince(e.Day, e.Hour) >= 24)
+                        {
+                            _transfers.Remove(e.TransferId);
+                            Plugin.Logger.LogInfo($"[Transfer] {e.TransferId}: the cancelled entry for '{e.EmployeeId}' is a game day old - forgotten (nothing was ever released).");
+                        }
+                        continue;
+                    }
+                    if (e.Stage == "adopting")
+                    {
+                        Plugin.Logger.LogWarning($"[Transfer] {e.TransferId}: refused: no adopt acknowledgement within a game hour - going back to the source.");
+                        e.Day = GameDayNow(); e.Hour = GameHourNow();
+                        RelayReturn(e);
+                        continue;
+                    }
+                    if (e.Stage == "returning") RelayReturn(e);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Transfer] host tick: {ex.Message}"); }
+        }
+
+        /// <summary>TestDrive `transfers`: one line per in-transit record the host holds.</summary>
+        public static List<string> TransfersReadout()
+        {
+            var outp = new List<string>();
+            try
+            {
+                foreach (var e in _transfers.Values)
+                    if (e != null) outp.Add($"{e.TransferId}:{e.EmployeeId} {e.FromAddr}->{e.ToAddr} stage={e.Stage}");
+            }
+            catch { }
+            return outp;
+        }
+
+        /// <summary>Merger phase 4b (people) P2: the in-transit table for the manifest MODEL, beside the
+        /// absence marks it rides with. The RECORD travels as text (the payload serialized).</summary>
+        public static List<MpTransferEntry> SnapshotTransfers()
+        {
+            var list = new List<MpTransferEntry>();
+            try
+            {
+                foreach (var e in _transfers.Values)
+                {
+                    if (e == null || string.IsNullOrEmpty(e.TransferId)) continue;
+                    string json = "";
+                    try { if (e.Record != null) json = Newtonsoft.Json.JsonConvert.SerializeObject(e.Record); } catch { }
+                    list.Add(new MpTransferEntry
+                    {
+                        TransferId = e.TransferId, EmployeeId = e.EmployeeId,
+                        FromAddressKey = e.FromAddr, ToAddressKey = e.ToAddr,
+                        SourcePid = e.SourcePid, DestPid = e.DestPid,
+                        Stage = e.Stage, Day = e.Day, Hour = e.Hour, RecordJson = json,
+                    });
+                }
+                list.Sort((x, y) => string.CompareOrdinal(x.TransferId, y.TransferId));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Transfer] manifest snapshot: {ex.Message}"); }
+            return list;
+        }
+
+        /// <summary>Host: REPLACE the in-transit table from the manifest being restored - clear-then-apply
+        /// beside the absence restore, same timeline rule. An entry with no record (it never got past
+        /// "requested") is dropped: nothing was released, so there is nothing to lose. Every restored
+        /// entry resumes on the next tick - re-relayed to whoever runs the destination now, else
+        /// returned to the source.</summary>
+        public static void RestoreTransfersFromManifest(MpManifest m)
+        {
+            try
+            {
+                _transfers.Clear();
+                _transfersReturned.Clear();   // U2: the give-back memo belongs to the table it guards
+                int n = 0;
+                if (m?.Transfers != null)
+                    foreach (var t in m.Transfers)
+                    {
+                        if (string.IsNullOrEmpty(t?.TransferId)) continue;
+                        EmployeeEditPayload? rec = null;
+                        try { if (!string.IsNullOrEmpty(t.RecordJson)) rec = Newtonsoft.Json.JsonConvert.DeserializeObject<EmployeeEditPayload>(t.RecordJson); } catch { }
+                        if (rec == null) continue;                       // nothing was ever released under this id
+                        _transfers[t.TransferId] = new HostTransfer
+                        {
+                            TransferId = t.TransferId, EmployeeId = t.EmployeeId ?? "",
+                            FromAddr = t.FromAddressKey ?? "", ToAddr = t.ToAddressKey ?? "",
+                            SourcePid = t.SourcePid ?? "", DestPid = t.DestPid ?? "",
+                            Stage = t.Stage == "returning" || t.Stage == "cancelled" ? t.Stage : "adopting",
+                            Day = t.Day, Hour = t.Hour, Record = rec, RelayedTo = "",
+                        };
+                        n++;
+                    }
+                if (n > 0) Plugin.Logger.LogInfo($"[Transfer] restored {n} in-transit entr{(n == 1 ? "y" : "ies")} from the manifest.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Transfer] manifest restore: {ex.Message}"); }
+        }
+
+        // === MERGER PHASE 4b (PEOPLE) P1 r2 (T2/T3): THE HIRE GATE AND THE OFFLINE ORIGIN ===
+
+        private static readonly HashSet<string> _candidateHired = new();                                    // ids the host has already granted
+        private static readonly Dictionary<string, List<CompanyCandidatesPayload>> _candidateHeld = new();  // offline pid -> notices
+
+        /// <summary>HOST: the live read at the moment of commitment (review r1 MAJOR-3). An accept is
+        /// granted only when the candidate has not been granted to anybody yet AND either the asker holds
+        /// the claim or nobody does. The HIRED mark is what makes the hire safe even if a claim was
+        /// wrongly freed by the stale sweep.</summary>
+        private static void HostRouteCandidateAccept(CompanyCandidatesPayload p, string senderPid, string ownerPid)
+        {
+            string id = p.CandidateId ?? "";
+            bool ok;
+            string why = "";
+            if (_candidateHired.Contains(id)) { ok = false; why = "already hired"; }
+            else
+            {
+                string holder = _candidateClaims.TryGetValue(id, out var cl) ? (cl.pid ?? "") : "";
+                if (holder.Length > 0 && holder != senderPid) { ok = false; why = $"'{holder}' holds the claim"; }
+                else ok = true;
+            }
+            if (ok)
+            {
+                _candidateHired.Add(id);
+                _candidateClaims[id] = (senderPid, UnityEngine.Time.unscaledTime);
+                Plugin.Logger.LogInfo($"[Candidates] hire of '{id}' GRANTED to '{senderPid}'.");
+            }
+            else Plugin.Logger.LogWarning($"[Candidates] hire of '{id}' REFUSED ({why}).");
+            var verdict = new CompanyCandidatesPayload { PlayerId = "host", Action = "hire-verdict", OwnerPid = ownerPid, CandidateId = id, ClaimedBy = senderPid, Ok = ok };
+            if (senderPid == MPConfig.PlayerId) CompanyCandidates.Receive(verdict);
+            else SendToPid(senderPid, MessageEnvelope.Create(MessageType.CompanyCandidates, "host", verdict));
+            if (!ok) return;
+            // The consumed mark goes to the WHOLE company, the origin included: every copy drops and the
+            // origin's own record is discarded through the game's own path (held if they are offline).
+            var mark = new CompanyCandidatesPayload { PlayerId = "host", Action = "hired", OwnerPid = ownerPid, CandidateId = id, ClaimedBy = senderPid, Ok = true };
+            FanOutOrHoldCandidateMark(mark, ownerPid);
+            if (_candidatesByOwner.TryGetValue(ownerPid, out var pool) && pool?.Candidates != null)
+                pool.Candidates.RemoveAll(r => (r?.Staff?.Id ?? "") == id);
+            Plugin.Logger.LogInfo($"[Candidates] HIRED mark fanned out for '{id}'.");
+        }
+
+        /// <summary>U3(b) r3: every pid the host knows in one company - the ONLINE members from the live
+        /// group model, plus every pid that has published a pool, held a claim, or has notices waiting
+        /// (those three tables outlive a disconnect; only LEAVING the company clears them, through
+        /// HostForgetCandidatesOf). Membership for an OFFLINE pid is answered through the STABLE id, which
+        /// is never pruned on departure - MergedRuntime could not answer for them at all.</summary>
+        private static List<string> CompanyPidsFor(string anyPid)
+        {
+            var outp = new List<string>();
+            try
+            {
+                if (string.IsNullOrEmpty(anyPid)) return outp;
+                string grp = MergerSync.GroupOfStable(StableOfPid(anyPid));
+                if (string.IsNullOrEmpty(grp)) return outp;
+                void Add(string pid)
+                {
+                    if (string.IsNullOrEmpty(pid) || outp.Contains(pid)) return;
+                    if (MergerSync.GroupOfStable(StableOfPid(pid)) != grp) return;
+                    outp.Add(pid);
+                }
+                foreach (var kv in _candidatesByOwner) Add(kv.Key);
+                foreach (var kv in _candidateClaims) Add(kv.Value.pid ?? "");
+                foreach (var kv in _candidateHeld) Add(kv.Key);
+                foreach (var cp in ConnectedClientPeers()) Add(cp.playerId);
+                Add(MPConfig.PlayerId);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] company roster of '{anyPid}': {ex.Message}"); }
+            return outp;
+        }
+
+        /// <summary>U3(b) r3 (re-check MAJOR-3): the HIRED mark must reach EVERY member of the company, not
+        /// only the origin and whoever happens to be online. An offline member's display copy is still in
+        /// their save when they come back; with no notice to remove it - and with the fan-out reaching only
+        /// online members before - they could press Accept on a negotiation they still had open and the
+        /// game's own hire would mint a SECOND real employee with the hired person's id. Online members get
+        /// it now; offline ones are HELD per pid (idempotent by action+id) and replayed at their next join.
+        /// </summary>
+        private static void FanOutOrHoldCandidateMark(CompanyCandidatesPayload mark, string ownerPid)
+        {
+            try
+            {
+                FanOutCandidates(mark, ownerPid, includeOwner: true);
+                int held = 0;
+                foreach (var pid in CompanyPidsFor(ownerPid))
+                {
+                    if (pid == MPConfig.PlayerId || IsOnlinePid(pid)) continue;
+                    HostSendOrHoldCandidate(pid, mark);
+                    held++;
+                }
+                if (held > 0)
+                    Plugin.Logger.LogInfo($"[Candidates] the hired mark for '{mark.CandidateId}' is held for {held} offline member(s).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] hired-mark fan-out: {ex.Message}"); }
+        }
+
+        /// <summary>HOST: a notice the ORIGIN must see even if they are not here (review r1 MAJOR-4 - the
+        /// MergerTax pay-all hold, mirrored). Held per pid, replayed at their next join.</summary>
+        private static void HostSendOrHoldCandidate(string pid, CompanyCandidatesPayload pay)
+        {
+            if (string.IsNullOrEmpty(pid) || pay == null) return;
+            if (pid == MPConfig.PlayerId) { CompanyCandidates.Receive(pay); return; }
+            if (IsOnlinePid(pid)) { SendToPid(pid, MessageEnvelope.Create(MessageType.CompanyCandidates, "host", pay)); return; }
+            if (!_candidateHeld.TryGetValue(pid, out var list)) { list = new List<CompanyCandidatesPayload>(); _candidateHeld[pid] = list; }
+            foreach (var h in list)
+                if (h != null && h.Action == pay.Action && h.CandidateId == pay.CandidateId) return;   // idempotent by (action, id)
+            list.Add(pay);
+            Plugin.Logger.LogInfo($"[Candidates] held {list.Count} notice(s) for offline '{pid}'.");
+        }
+
+        /// <summary>HOST: deliver what was held for a member who has just come back.</summary>
+        private static void HostFlushHeldCandidates(MPLink peer, string pid)
+        {
+            try
+            {
+                if (peer == null || string.IsNullOrEmpty(pid)) return;
+                if (!_candidateHeld.TryGetValue(pid, out var list) || list == null || list.Count == 0) return;
+                foreach (var h in list)
+                    if (h != null) Send(peer, MessageEnvelope.Create(MessageType.CompanyCandidates, "host", h));
+                Plugin.Logger.LogInfo($"[Candidates] replayed {list.Count} notice(s) to '{pid}'.");
+                _candidateHeld.Remove(pid);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] held replay: {ex.Message}"); }
+        }
+
+        /// <summary>HOST: a member left the company (or the world) - their rows leave every other member's
+        /// pool, their claims go back, and nothing of theirs is held any more (review r1 MINOR-9).</summary>
+        public static void HostForgetCandidatesOf(string pid)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(pid)) return;
+                bool had = _candidatesByOwner.Remove(pid);
+                var drop = new List<string>();
+                foreach (var kv in _candidateClaims) if ((kv.Value.pid ?? "") == pid) drop.Add(kv.Key);
+                foreach (var cid in drop) _candidateClaims.Remove(cid);
+                _candidateHeld.Remove(pid);
+                if (had || drop.Count > 0)
+                {
+                    // An EMPTY pool for that owner is the message every copy needs: the apply's absolute-set
+                    // rule then removes every row of theirs.
+                    FanOutCandidates(new CompanyCandidatesPayload { PlayerId = "host", Action = "pool", OwnerPid = pid, Candidates = new List<CandidateRow>() }, pid, includeOwner: false);
+                    Plugin.Logger.LogInfo($"[Candidates] '{pid}' left - their rows are dropped from every pool and {drop.Count} claim(s) released.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] forget '{pid}': {ex.Message}"); }
+        }
+
+        /// <summary>Host: a new world, a load, or a dissolve - the session tables go (review r1 MINOR-9).</summary>
+        public static void HostResetCandidates()
+        {
+            _candidatesByOwner.Clear(); _candidateClaims.Clear(); _candidateHired.Clear(); _candidateHeld.Clear();
         }
 
         /// <summary>Shared-shop slice 4: one item's price at a shared shop → the shop's OWNER, plus the per-sender
