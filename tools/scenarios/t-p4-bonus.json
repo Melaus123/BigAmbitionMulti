@@ -1,0 +1,160 @@
+{
+  "id": "T-P4-BONUS",
+  "title": "pay-bonus fix, two players: a bonus paid by the CLIENT to one of the HOST's employees (an injected copy on the client) is routed to the host's machine, which re-runs the game's own GiveBonus once from the shared wallet on the real record; ends dissolved",
+  "preconditions": "Fixture save1. Build with the pay-bonus fix deployed. Run 1 (2026-09-11) showed the host's view of the client's first flipped shop holds only BAMP_DUTY synthetics (no injected client staff there), so the leg runs client -> host's staff, the direction T-P0 proved has injected copies. The routed figure (10) is only a bound: the runner charges its own record's GetBonusAmount. Ends dissolved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "bonus": "10"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED"
+  ],
+  "oracles_report": [
+    "\\[Merger\\] bonus",
+    "\\[SharedShop\\] applied routed bonus",
+    "\\[SharedShop\\] routed bonus"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST P4-BONUS START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 30,
+      "note": "the client's world needs to settle (wave-4 lesson) and the host's staff copies need to land on the client"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "capture": {
+        "hostShop": "keys=\\['([^']+)'"
+      },
+      "note": "the client's view: the host's first flipped building (T-P0 precedent)"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "employees ${hostShop}",
+      "expect_result": "canbonus=True",
+      "capture": {
+        "hostEmployee": "(?:': |; )((?!BAMP_DUTY)[^|]+)\\|[^|]*\\|assigned=[^|]*\\|injected=True\\|bonus=\\d+\\|canbonus=True"
+      },
+      "note": "the first REAL injected copy of the host's staff at that shop whose satisfaction leaves a bonus worth paying (run 2: the first row, Monica Reese, was refused by the host's own CanGiveBonus - 'no bonus is available'; BAMP_DUTY synthetics skipped - run 1)"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "staffop ${hostShop} ${hostEmployee} bonus ${bonus}",
+      "expect_result": "^OK staffop addr='${hostShop}' employee='${hostEmployee}' op='bonus' amount=${bonus}\\.00 routed=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[SharedShop\\] applied routed bonus of '.*' from '${clientPid}' \\(",
+          "within_s": 20
+        }
+      ],
+      "note": "the fix: no local charge on the client; the host's machine (the runner) re-runs the game's own GiveBonus once - its OWN computed amount - and the effect lands on the real record. If the host log shows 'no bonus is available for them right now' instead, the fixture employee is content or on cooldown (a legitimate refusal, not a defect) - record it and choose another employee"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 20,
+      "role": "both",
+      "cmd": "mark TEST P4-BONUS END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

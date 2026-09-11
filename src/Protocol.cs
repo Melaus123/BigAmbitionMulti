@@ -322,11 +322,11 @@ namespace BigAmbitionsMP
     public class SharedStaffEditPayload
     {
         public string PlayerId   { get; set; } = "";   // sender (validated SenderIs at the host)
-        public string Action     { get; set; } = "";   // "assign" | "unassign" | wave 3 (W3-3): "raise" (Wage)
+        public string Action     { get; set; } = "";   // "assign" | "unassign" | wave 3 (W3-3): "raise" (Wage) | phase 4b: "bonus" (Wage = the sender's figure, a bound only; the runner charges its own record's amount)
         public string EmployeeId { get; set; } = "";
         public string AddressKey { get; set; } = "";
         public string FromAddressKey { get; set; } = "";   // where the helper believed the employee was ("" = bench); the owner rejects if that is no longer true (owner wins, as for schedule days)
-        public float  Wage       { get; set; }         // wave 3 "raise": the new hourly wage, absolute and never a delta; ignored by every other action
+        public float  Wage       { get; set; }         // wave 3 "raise": the new hourly wage, absolute and never a delta; phase 4b "bonus": the sender's amount, a bound only; ignored by assign/unassign
         public int    Seq        { get; set; }
         public int    SeqEpoch   { get; set; }
     }

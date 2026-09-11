@@ -944,7 +944,9 @@ namespace BigAmbitionsMP
                         if (arg.Length == 0 && eshown >= 30) continue;   // cap only the ALL-employees listing; an address-scoped list is bounded by that shop (run T-P0-6: a 51-staff shop hid the adopted hire, 2026-09-10)
                         string ename = ""; try { ename = e.characterData?.name?.ToString() ?? ""; } catch { }
                         bool einj = false; try { einj = MPRegisterSync.IsInjectedStaff(e.id); } catch { }
-                        string eline = $"{e.id}|{ename}|assigned={eaddr}|injected={einj}";
+                        // Phase 4b: the bonus figures as THIS machine reads them (on a copy the cooldown is not synced, so canbonus is the satisfaction test only; the runner's own record is the real gate).
+                        float ebonus = 0f; bool ecan = false; try { ebonus = e.GetBonusAmount(); ecan = e.CanGiveBonus(); } catch { }
+                        string eline = $"{e.id}|{ename}|assigned={eaddr}|injected={einj}|bonus={ebonus.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}|canbonus={ecan}";
                         Plugin.Logger.LogWarning($"[TestDrive] employee: {eline}");
                         if (eshown++ > 0) esb.Append(" ; ");
                         esb.Append(eline);
@@ -1131,24 +1133,29 @@ namespace BigAmbitionsMP
 
                 case "staffop":
                 {
-                    // W3-6: the routed staff op. The game has NO player-facing raise surface — hourlyWage is
+                    // W3-6 + phase 4b: the routed staff ops. The game has NO player-facing raise surface — hourlyWage is
                     // written only by hiring negotiation (CandidateSalaryNegotiation.cs:101) and by rival
                     // poaching (EmployeeInstance.cs:1087/:1159) — so this lever IS the seam for "raise".
                     var stk = arg.Split(' ');
-                    if (stk.Length < 5) return "ERR usage: staffop <num> <ba:street_x> <employeeId> raise <wage>";
+                    if (stk.Length < 5) return "ERR usage: staffop <num> <ba:street_x> <employeeId> raise <wage> | bonus <amount>";
                     string saddr  = stk[0] + " " + stk[1];
                     string sempId = stk[2];
                     string sop    = stk[3];
-                    if (sop != "raise") return "ERR only 'raise' is routed (training and to-do are refused on a routed record)";
+                    if (sop != "raise" && sop != "bonus") return "ERR only 'raise' and 'bonus' are routed (training and to-do are refused on a routed record)";
                     if (!float.TryParse(stk[4], System.Globalization.NumberStyles.Float,
                                         System.Globalization.CultureInfo.InvariantCulture, out var swage))
-                        return "ERR wage must be a number";
+                        return sop == "bonus" ? "ERR amount must be a number" : "ERR wage must be a number";
                     var sreg = GameStatePatcher.FindRegistration(saddr);
                     if (sreg == null) return $"ERR no registration at '{saddr}'";
                     string skey = saddr; try { skey = GameStateReader.AddressKey(sreg); } catch { }
                     if (FindEmployee(sempId) == null) return $"ERR no employee '{sempId}' on this machine";
+                    // Phase 4b: "bonus" carries the AMOUNT in the payload field the wage uses; the machine that
+                    // runs the address re-runs the game's own GiveBonus and treats the figure only as a bound.
                     bool srouted = SharedShopStaff.CommitStaffOp(sempId, skey, sop, swage);
-                    return $"OK staffop addr='{skey}' employee='{sempId}' op='{sop}' wage={swage.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} routed={srouted}";
+                    string sval = swage.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+                    return sop == "bonus"
+                        ? $"OK staffop addr='{skey}' employee='{sempId}' op='bonus' amount={sval} routed={srouted}"
+                        : $"OK staffop addr='{skey}' employee='{sempId}' op='{sop}' wage={sval} routed={srouted}";
                 }
 
                 default:

@@ -6665,7 +6665,8 @@ namespace BigAmbitionsMP
                 if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))   // wave 3 (W3-1): UNION — direct grant or merger membership
                 { Plugin.Logger.LogWarning($"[SharedShop] staff edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission and not a company member, dropped."); return; }
                 string ftarget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0
-                if (ftarget.Length == 0 || ftarget == senderPid) return;
+                if (ftarget.Length == 0) { Plugin.Logger.LogWarning($"[SharedShop] staff edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — nobody runs that address right now (owner offline, no stand-in), dropped."); return; }
+                if (ftarget == senderPid) return;
                 if (ftarget == MPConfig.PlayerId) SharedShopStaff.ApplyOnOwner(p);
                 else SendToPid(ftarget, MessageEnvelope.Create(MessageType.SharedStaffEdit, "host", p));
             }

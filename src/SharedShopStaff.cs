@@ -516,6 +516,41 @@ namespace BigAmbitionsMP
                     return;
                 }
 
+                // Phase 4b (money): a BONUS moves nobody either, so it is applied before the placement gate too.
+                // THE MONEY: the game's own GiveBonus charges the wallet HERE and sets satisfaction on the real
+                // record (decompile EmployeeInstance.cs:1022-1039) — which is exactly what must happen, once, on
+                // this machine; the sender's figure is only a bound, never the charge.
+                if (p.Action == "bonus")
+                {
+                    float sent = p.Wage;
+                    // GetBonusAmount is (100 - satisfaction) * hourlyWage * 8 * 30 / 100 (EmployeeInstance.cs:994-997);
+                    // with wave 3's wage ceiling of 10000 no honest bonus can exceed 10000 * 8 * 30.
+                    if (!(sent > 0f) || sent > 2400000f)
+                    { Plugin.Logger.LogWarning($"{Tag} routed bonus of '{SafeName(emp)}' by '{p.PlayerId}': implausible amount {sent} — ignored."); return; }
+                    // Same per-ADDRESS test as the raise (W3-0 r1): holding one of my shops must not buy a bonus
+                    // for any of my employees — bench, headquarters and drivers included.
+                    string batKey = (AddrOf(emp.assignedAddress) ?? "").Trim();
+                    string bwantKey = (p.AddressKey ?? "").Trim();
+                    if (bwantKey.Length == 0 || !string.Equals(batKey, bwantKey, StringComparison.OrdinalIgnoreCase))
+                    { Plugin.Logger.LogWarning($"{Tag} routed bonus of '{SafeName(emp)}' by '{p.PlayerId}': employee is not at '{bwantKey}' — ignored."); return; }
+                    // The gate the native BUTTON uses (MyEmployees.cs:499-500 → CanGiveBonus): an amount worth
+                    // paying and the 30-day cooldown clear — read on MY record, which is the true one.
+                    bool bcan = false; try { bcan = emp.CanGiveBonus(); } catch { }
+                    if (!bcan)
+                    { Plugin.Logger.LogWarning($"{Tag} routed bonus of '{SafeName(emp)}' by '{p.PlayerId}': no bonus is available for them right now (cooldown or amount) — ignored."); return; }
+                    float bown = 0f; try { bown = emp.GetBonusAmount(); } catch { }
+                    bool bpaid = false;
+                    try { bpaid = emp.GiveBonus(); } catch (Exception bex) { Plugin.Logger.LogWarning($"{Tag} routed bonus: {bex.Message}"); return; }
+                    if (!bpaid)   // the game's own answer — ChangeMoneySafe declined (funds)
+                    { Plugin.Logger.LogWarning($"{Tag} routed bonus of '{SafeName(emp)}' by '{p.PlayerId}': the game refused the payment — nothing charged."); return; }
+                    try { SaveGameManager.MarkChange(); } catch { }
+                    string bkey = AddrOf(emp.assignedAddress);
+                    Plugin.Logger.LogInfo($"{Tag} applied routed bonus of '{SafeName(emp)}' from '{p.PlayerId}' ({bown.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)}).");
+                    RefreshMyEmployeesIfOpen();
+                    RepublishAfterStaffEdit(bkey, bkey);   // the new satisfaction reaches every copy
+                    return;
+                }
+
                 var gi = SaveGameManager.Current;
                 Address oldAddr = emp.assignedAddress;
                 string oldKey = AddrOf(oldAddr);
@@ -647,6 +682,55 @@ namespace BigAmbitionsMP
                     else if (grant && _logged.Add("fire-button")) Plugin.Logger.LogWarning($"{Tag} could not find the fire button to grey it (the action itself is blocked).");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} details guards: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>Phase 4b: is this a record whose BONUS must be routed? An injected copy of a partner's
+        /// employee standing at an address this machine only borrows through the merger (flipped). Direct-grant
+        /// records are deliberately excluded — their bonus button is greyed and their bulk menu offers assign
+        /// only, and that behaviour is not widened here.</summary>
+        private static bool IsRoutedMergedBonus(EmployeeInstance e, out string addrKey)
+        {
+            addrKey = "";
+            try
+            {
+                if (e == null || string.IsNullOrEmpty(e.id)) return false;
+                if (!MPRegisterSync.IsInjectedStaff(e.id)) return false;   // a live copy of somebody else's record
+                if (IsFromGrantOwner(e.id)) return false;                  // direct grant: today's behaviour stands
+                string k = (AddrOf(e.assignedAddress) ?? "").Trim();
+                if (k.Length == 0 || !MergerFlip.IsFlipped(k)) return false;
+                addrKey = k;
+                return true;
+            }
+            catch { addrKey = ""; return false; }
+        }
+
+        /// <summary>THE MONEY FIX (phase 4b). EmployeeInstance.GiveBonus (decompile EmployeeInstance.cs:1022-1039)
+        /// is the game's ONE bonus commit — the details-panel button (MyEmployees.cs:540-542,
+        /// OnPayBonusButtonClick → GiveBonus) and the bulk "pay bonuses" action (PayBonusesMassAction.GiveBonuses)
+        /// both end here. Run on a merged partner's employee it charged THIS machine's wallet — the shared one —
+        /// while the satisfaction it bought landed on the display copy that the next roster publish overwrites:
+        /// money spent, nothing bought. So on such a record the native body is skipped entirely (no charge, no
+        /// local effect) and the op goes to whoever runs the address; false as the result is the plain truth
+        /// ("not paid here") and leaves the panel exactly as the game leaves a refused bonus — no new text.</summary>
+        [HarmonyPatch(typeof(EmployeeInstance), nameof(EmployeeInstance.GiveBonus))]
+        public static class Patch_EmployeeInstance_GiveBonus_Route
+        {
+            static bool Prefix(EmployeeInstance __instance, ref bool __result)
+            {
+                try
+                {
+                    if (!IsRoutedMergedBonus(__instance, out string addrKey)) return true;   // mine / single player: native
+                    __result = false;
+                    float amount = 0f; try { amount = __instance.GetBonusAmount(); } catch { }
+                    if (!(amount > 0f))
+                    { Plugin.Logger.LogWarning($"[Merger] bonus NOT routed for '{addrKey}' ({__instance.id}): the amount reads {amount} on this copy."); return false; }
+                    if (!CommitStaffOp(__instance.id, addrKey, "bonus", amount))
+                    { Plugin.Logger.LogWarning($"[Merger] bonus NOT routed for '{addrKey}' ({__instance.id}): no route out of this machine — nothing was charged here."); return false; }
+                    Plugin.Logger.LogInfo($"[Merger] bonus routed to owner '{MPRegisterSync.OwnerOfInjected(__instance.id)}' for '{addrKey}' ({__instance.id}, {amount.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)})");
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} bonus intercept: {ex.Message}"); return true; }
             }
         }
 
