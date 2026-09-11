@@ -1,7 +1,7 @@
 """rigrun.py - scenario driver for the two-instance MP test rig (Agent economy, 2026-09-10).
 
-Runs a JSON scenario end to end: pre-flight, arm the TestDrive file-drop channel, launch BOTH
-instances with local\\launch-mp-test.bat, wait for each instance's ARMED line, send the scenario's
+Runs a JSON scenario end to end: pre-flight, arm the TestDrive file-drop channel, launch the
+scenario's instances (top-level "instances": 2 or 3, default 2) with local\\launch-mp-test.bat, wait for each instance's ARMED line, send the scenario's
 commands as <role>-<seq>.cmd files, match each .result, grep each role's log from that role's last
 mark, then write a verdict report to local\\runs\\.
 
@@ -22,7 +22,7 @@ Rules this script encodes (from .modding/08-testdrive.md - the notes win over an
   * launcher: local\\launch-mp-test.bat is THE launcher; never bare-start the Steam exe.
   * freshness: a failed launch does not recreate a log. Gate on mtime > launch time AND on log
     IDENTITY (exactly one "channel ARMED" line; this run's marker present) - the stale-log trap.
-  * client log Player-instance2.log truncates on relaunch with no -prev sibling: snapshot first.
+  * client logs Player-instance2/3.log truncate on relaunch with no -prev sibling: snapshot first.
   * grep mod lines on the emitter prefix "[BAMP] [Tag]", never a bare tag.
   * teardown via CloseMainWindow (WM_CLOSE), not taskkill /f - it exercises the real quit path;
     taskkill by PID is the fallback only. Never kill by image name (that kills both instances).
@@ -46,19 +46,22 @@ ROOT = r"C:\code\BigAmbitionsMP"
 LOCALLOW = r"C:\Users\allsc\AppData\LocalLow\Hovgaard Games\Big Ambitions"
 DEPLOYED = os.path.join(LOCALLOW, r"ModsLocal\BigAmbitionsMP\BigAmbitionsMP.dll")
 CHANNEL = os.path.join(LOCALLOW, r"BigAmbitionsMP\testdrive")
-LOGS = {"h": os.path.join(LOCALLOW, "Player.log"), "c": os.path.join(LOCALLOW, "Player-instance2.log")}
+ROLES = ["h", "c", "d"]                       # h = Steam install (host), c/d = the client installs
+INSTALLS = {"c": r"C:\BigAmbitions2", "d": r"C:\BigAmbitions3"}   # role by install path; else "h"
+LOGS = {"h": os.path.join(LOCALLOW, "Player.log"),
+        "c": os.path.join(LOCALLOW, "Player-instance2.log"),
+        "d": os.path.join(LOCALLOW, "Player-instance3.log")}
 LAUNCHER = os.path.join(ROOT, r"local\launch-mp-test.bat")
 RUNS = os.path.join(ROOT, r"local\runs")
-CLIENT_INSTALL = r"C:\BigAmbitions2"
 GAME_EXE = "Big Ambitions.exe"
 
-ARMED_RE = {r: re.compile(r"\[BAMP\] \[TestDrive\] channel ARMED \(dev build, role '%s'\)" % r) for r in "hc"}
+ARMED_RE = {r: re.compile(r"\[BAMP\] \[TestDrive\] channel ARMED \(dev build, role '%s'\)" % r) for r in ROLES}
 RESULT_TIMEOUT_S = 60.0
 POLL_S = 0.5
 DEFAULT_WITHIN_S = 10.0
 BOOT_FREEZE_S = 60.0
 BOOT_FREEZE_LINES = 40
-ROLE_NAME = {"h": "host", "c": "client"}
+ROLE_NAME = {"h": "host", "c": "client", "d": "client2"}
 
 
 # ---------------------------------------------------------------- small helpers
@@ -196,7 +199,11 @@ def game_processes():
             if _k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
                 path = buf.value
                 if os.path.basename(path).lower() == GAME_EXE.lower():
-                    role = "c" if path.lower().startswith(CLIENT_INSTALL.lower()) else "h"
+                    role = "h"
+                    for rl, inst in INSTALLS.items():
+                        if path.lower().startswith(inst.lower()):
+                            role = rl
+                            break
                     out.append((pid, path, role))
         finally:
             _k32.CloseHandle(h)
@@ -291,6 +298,7 @@ def apply_captures(capture, result_text, vars_):
     """A step's capture map: regex -> first group of the match against the step's .result text."""
     got = {}
     for name, pattern in (capture or {}).items():
+        pattern = subst(pattern, vars_, escape=True)   # T-P1-3 run 2 lesson: captures carried a raw ${dPid} into re.search
         m = re.search(pattern, result_text)
         if not m:
             return None, "capture '%s' did not match /%s/" % (name, pattern)
@@ -303,10 +311,17 @@ def load_scenario(path):
     with open(path, "r", encoding="utf-8") as f:
         sc = json.load(f)
     steps = sc.get("steps") or []
+    inst = sc.get("instances", 2)
+    if inst not in (2, 3):
+        raise ValueError('"instances" must be 2 or 3 (absent = 2, the old two-instance rig)')
+    active = ROLES[:inst]
     for i, s in enumerate(steps, 1):
         s.setdefault("seq", i)
-        if s.get("role") not in ("h", "c", "both"):
-            raise ValueError("step %d: role must be h|c|both" % i)
+        if s.get("role") not in tuple(ROLES) + ("both", "all"):
+            raise ValueError("step %d: role must be %s|both|all" % (i, "|".join(ROLES)))
+        if s.get("role") in ROLES and s["role"] not in active:
+            raise ValueError("step %d: role '%s' needs instances=%d"
+                             % (i, s["role"], ROLES.index(s["role"]) + 1))
         if not s.get("cmd") and not s.get("sleep_s"):
             raise ValueError("step %d: needs cmd or sleep_s" % i)
     return sc
@@ -324,9 +339,11 @@ class Run:
             k, _, v = kv.partition("=")
             self.vars[k.strip()] = v
         self.rows, self.notes, self.seq = [], [], 0
-        self.mark_off = {"h": 0, "c": 0}
-        self.run_start_off = {"h": 0, "c": 0}
-        self.flicked = {"h": False, "c": False}
+        self.instances = int(sc.get("instances", 2) or 2)
+        self.active = ROLES[: self.instances]           # 2 -> h,c (unchanged); 3 -> h,c,d
+        self.mark_off = {r: 0 for r in ROLES}
+        self.run_start_off = {r: 0 for r in ROLES}
+        self.flicked = {r: False for r in ROLES}
         self.launch_t = None
         self.id = sc.get("id", "run")
         self.rundir = os.path.join(RUNS, "%s-%s" % (self.id, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
@@ -419,17 +436,19 @@ class Run:
         if stale:
             self.notes.append("cleared %d stale channel file(s) before arming" % len(stale))
         os.makedirs(self.rundir, exist_ok=True)
-        # the client log truncates on relaunch with no -prev sibling: snapshot it first
-        if os.path.exists(LOGS["c"]):
-            shutil.copy2(LOGS["c"], os.path.join(self.rundir, "pre-launch-client-Player-instance2.log"))
-        self.pre_mtime = {r: log_mtime(LOGS[r]) for r in "hc"}
+        # a client log truncates on relaunch with no -prev sibling: snapshot EVERY one that exists
+        for role in ROLES[1:]:
+            if os.path.exists(LOGS[role]):
+                shutil.copy2(LOGS[role], os.path.join(
+                    self.rundir, "pre-launch-%s-%s" % (ROLE_NAME[role], os.path.basename(LOGS[role]))))
+        self.pre_mtime = {r: log_mtime(LOGS[r]) for r in ROLES}
 
     def launch(self):
         self.launch_t = now()
-        say("launching BOTH instances via %s" % LAUNCHER)
-        subprocess.Popen(["cmd", "/c", "start", "", "/D", os.path.dirname(LAUNCHER), LAUNCHER],
-                         creationflags=0x00000008)
-        self.notes.append("launch at %s via local\\launch-mp-test.bat" % stamp(self.launch_t))
+        say("launching %d instance(s) [%s] via %s" % (self.instances, ",".join(self.active), LAUNCHER))
+        subprocess.Popen(["cmd", "/c", "start", "", "/D", os.path.dirname(LAUNCHER), LAUNCHER,
+                          str(self.instances)], creationflags=0x00000008)
+        self.notes.append("launch at %s via local\\launch-mp-test.bat %d" % (stamp(self.launch_t), self.instances))
 
     def wait_armed(self, role, timeout_s=300.0):
         """Freshness: mtime newer than launch. Identity: exactly one ARMED line for this role."""
@@ -460,7 +479,11 @@ class Run:
 
     # ---- steps
     def roles_of(self, step):
-        return ["h", "c"] if step["role"] == "both" else [step["role"]]
+        if step["role"] == "both":
+            return ["h", "c"]              # unchanged: host + first client
+        if step["role"] == "all":
+            return list(self.active)       # every ACTIVE role of this scenario
+        return [step["role"]]
 
     def do_step(self, step):
         seq, verdicts = step["seq"], []
@@ -521,13 +544,13 @@ class Run:
         """Whole-log absence greps (FAIL if present) + the notes' passive greps (report only)."""
         out = []
         for pat in self.sc.get("oracles_absent") or []:
-            for role in "hc":
+            for role in self.active:
                 hits = [l.strip()[:200] for l in read_text_from(LOGS[role], self.run_start_off[role]).splitlines()
                         if re.search(pat, l)]
                 if hits:
                     out.append(("FAIL", "%s: /%s/ x%d -> %s" % (ROLE_NAME[role], pat, len(hits), hits[0])))
         for pat in self.sc.get("oracles_report") or []:
-            for role in "hc":
+            for role in self.active:
                 hits = [l.strip()[:200] for l in read_text_from(LOGS[role], self.run_start_off[role]).splitlines()
                         if re.search(pat, l)]
                 if hits:
@@ -537,7 +560,8 @@ class Run:
     # ---- report
     def write_report(self, passed, total, oracle_rows, blocked=None):
         os.makedirs(self.rundir, exist_ok=True)
-        for role, name in (("h", "host-Player.log"), ("c", "client-Player-instance2.log")):
+        for role in self.active:
+            name = "%s-%s" % (ROLE_NAME[role], os.path.basename(LOGS[role]))
             try:
                 if os.path.exists(LOGS[role]):
                     shutil.copy2(LOGS[role], os.path.join(self.rundir, name))
@@ -549,6 +573,7 @@ class Run:
              "- HEAD commit: `%s`" % getattr(self, "head", "?"),
              "- deployed DLL md5: `%s` (DEV markers %s)" % (getattr(self, "deployed_md5", "?"),
                                                             getattr(self, "markers", "?")),
+             "- instances: %d (roles %s)" % (self.instances, ",".join(self.active)),
              "- launch: %s" % (stamp(self.launch_t) if self.launch_t else "(not launched)"),
              "- variables: %s" % json.dumps(self.vars, sort_keys=True), ""]
         if blocked:
@@ -573,6 +598,7 @@ class Run:
 
 def dry_run(sc, args):
     print("scenario %s - %s" % (sc.get("id"), sc.get("title", "")))
+    print("instances: %s (roles %s)" % (sc.get("instances", 2), ",".join(ROLES[: int(sc.get("instances", 2) or 2)])))
     print("preconditions: %s" % sc.get("preconditions", "(none stated)"))
     print("%-4s %-5s %-44s %-34s %s" % ("step", "role", "cmd", "expect_result", "expect_log / note"))
     for s in sc["steps"]:
@@ -721,7 +747,7 @@ def main():
     say("pre-flight OK - HEAD %s, deployed md5 %s, DEV markers %d" % (r.head, r.deployed_md5, r.markers))
     r.arm_channel()
     r.launch()
-    for role in ("h", "c"):
+    for role in r.active:
         err = r.wait_armed(role)
         if err:
             say("FAIL " + err)

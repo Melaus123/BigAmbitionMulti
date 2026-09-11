@@ -118,6 +118,8 @@ namespace BigAmbitionsMP
         public string StableId { get; set; } = "";
         public string Name     { get; set; } = "";   // last-known display name (UI roster)
         public string Group    { get; set; } = "";   // merged-company id (several disjoint groups per session; "" on old manifests → folded into one legacy group)
+        public int    Order    { get; set; } = -1;   // phase 1-A: this member's index in the group's JOIN ORDER (-1 on old manifests → stored file order stands)
+        public long   GroupSeq { get; set; }         // phase 1-A: the group's mint sequence, smaller = older (0 on old manifests → re-minted at load)
     }
 
     public static class MPSaveManager
@@ -126,23 +128,33 @@ namespace BigAmbitionsMP
         private const string ManifestName = "manifest.bamp.json";
 
 #if BAMP_DEV
-        // Dev separate-machine SIMULATION: when the client instance is launched with
-        // BAMP_SIM_SEPARATE_SAVES=1, it redirects its ENTIRE MP save tree to a sibling root
-        // ('_BAMP_MP_SIMCLIENT') so host+client on ONE machine no longer share save files — the host only
-        // ever sees what the client UPLOADS over the network, exactly like real separate machines. Lets us
-        // validate the separate-machine save/recovery paths (Phases 1-3) solo. Resolved once, cached.
+        // Dev separate-machine SIMULATION: when a client instance is launched with
+        // BAMP_SIM_SEPARATE_SAVES set to any NON-EMPTY value, it redirects its ENTIRE MP save tree to a
+        // sibling root, so host+client(s) on ONE machine no longer share save files — the host only ever
+        // sees what a client UPLOADS over the network, exactly like real separate machines. The value "1"
+        // keeps the original root name ('_BAMP_MP_SIMCLIENT'); any OTHER value is appended to it
+        // ("3" -> '_BAMP_MP_SIMCLIENT3'), so a THIRD instance gets its own save tree. Lets us validate the
+        // separate-machine save/recovery paths (Phases 1-3) solo, with 2 or 3 instances. Resolved once, cached.
         private const string MpRootNameSim = "_BAMP_MP_SIMCLIENT";
         private static int _simRoot = -1;   // -1 unresolved, 0 off, 1 on
+        private static string _simRootName = MpRootNameSim;
         private static bool SimSeparateRoot()
         {
             if (_simRoot < 0)
             {
-                try { _simRoot = string.Equals(Environment.GetEnvironmentVariable("BAMP_SIM_SEPARATE_SAVES"), "1", StringComparison.Ordinal) ? 1 : 0; }
-                catch { _simRoot = 0; }
-                if (_simRoot == 1) Plugin.Logger.LogWarning("[MPSave] SIM: separate-client save root ENABLED ('_BAMP_MP_SIMCLIENT') — dev separate-machine simulation.");
+                string v;
+                try { v = Environment.GetEnvironmentVariable("BAMP_SIM_SEPARATE_SAVES") ?? ""; }
+                catch { v = ""; }
+                v = v.Trim();
+                _simRoot = v.Length > 0 ? 1 : 0;
+                _simRootName = (_simRoot == 1 && !string.Equals(v, "1", StringComparison.Ordinal))
+                    ? MpRootNameSim + v : MpRootNameSim;
+                if (_simRoot == 1) Plugin.Logger.LogWarning($"[MPSave] SIM: separate-client save root ENABLED ('{_simRootName}') — dev separate-machine simulation.");
             }
             return _simRoot == 1;
         }
+        /// <summary>The sim root name chosen by SimSeparateRoot() (resolves it if needed).</summary>
+        private static string SimRootName() { SimSeparateRoot(); return _simRootName; }
         // Store v2 M2 sandbox: BAMP_STORE_ROOT_OVERRIDE=<folderName> points the ENTIRE
         // MP store at a sibling root (e.g. a copy of the real store) so the migration
         // can be rehearsed and kill-tested without touching live data. Dev builds only;
@@ -159,7 +171,7 @@ namespace BigAmbitionsMP
             }
             return _rootOverrideState == 1 ? _rootOverride : null;
         }
-        private static string RootName => RootOverride() ?? (SimSeparateRoot() ? MpRootNameSim : MpRootName);
+        private static string RootName => RootOverride() ?? (SimSeparateRoot() ? SimRootName() : MpRootName);
 #else
         private static string RootName => MpRootName;
 #endif

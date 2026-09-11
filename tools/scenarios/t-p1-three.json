@@ -1,0 +1,459 @@
+{
+  "id": "T-P1-3",
+  "title": "phase-1 merger, three players: foreign-company fold on a non-member, offer to a company, busy refusal, insider offer pruned, grow to 3, name/order/wallet, leave from 3 (name splits back), dissolve",
+  "preconditions": "Fixture save1 (host melaus/Prabaha, client Client1/REX) plus the THIRD instance (role d, PlayerId Client2, no slot in save1 -> new player: charconfirm is armed before hostload). Dev build with phase-1 r4 (offers as host state) and the rivals/notify/offers verbs. Group ids are captured from the host's offers table. Waits are cmd-less sleep_s steps; every accepted propose is followed by a host offers assertion.",
+  "instances": 3,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "dPid": "Client2",
+    "hostName": "Prabaha",
+    "clientName": "REX",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED"
+  ],
+  "oracles_report": [
+    "\\[Merger\\] rivals list",
+    "\\[Merger\\] offer from",
+    "rivals list refresh",
+    "\\[Merger\\] UNION",
+    "\\[Merger\\] GROWN",
+    "\\[Merger\\] FORMED",
+    "\\[EconProbe\\] wallet",
+    "\\[Merger\\] rivals self-report pushed"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "d",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "d",
+      "cmd": "charconfirm",
+      "expect_result": "^OK armed",
+      "note": "Client2 has no slot in save1: the character screen will appear on load and must be confirmed headless"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
+          "within_s": 300
+        },
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
+          "within_s": 60
+        }
+      ]
+    },
+    {
+      "seq": 6,
+      "role": "all",
+      "cmd": "mark TEST P1-3 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 7,
+      "role": "d",
+      "cmd": "status",
+      "expect_result": "role=d.*inMp=True"
+    },
+    {
+      "seq": 8,
+      "role": "d",
+      "cmd": "rivals",
+      "expect_result": "^OK rows=\\d+.*name='${hostName}'.*",
+      "capture": {
+        "dName": "name='([^']+)';id='me'"
+      },
+      "note": "before any merge the newcomer sees Prabaha and REX as separate rows; its own row name is captured as dName"
+    },
+    {
+      "seq": 9,
+      "role": "d",
+      "cmd": "rivals",
+      "expect_result": "name='${clientName}'"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] FORMED group",
+          "within_s": 20
+        }
+      ]
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*name='${hostName} & ${clientName}' founder=${hostPid}"
+    },
+    {
+      "seq": 16,
+      "role": "d",
+      "cmd": "mergestatus",
+      "expect_result": "member=False"
+    },
+    {
+      "seq": 17,
+      "role": "d",
+      "cmd": "rivals",
+      "expect_result": "^(?!.*name='${hostName}';)(?!.*name='${clientName}';).*name='${hostName} & ${clientName}';id='${hostPid}'",
+      "expect_log": [
+        {
+          "role": "d",
+          "regex": "\\[Merger\\] rivals list: folded",
+          "within_s": 5
+        }
+      ],
+      "note": "NON-MEMBER view: the two-player company is ONE row keyed on its founder; no separate Prabaha / REX rows"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "merge propose ${dPid}",
+      "expect_result": "OK merge propose sent",
+      "note": "BUSY case setup: the company's founder offers the newcomer"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${dPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 21,
+      "role": "d",
+      "cmd": "offers",
+      "expect_result": "incoming='${hostPid}'"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "merge propose ${dPid}",
+      "expect_result": "OK merge propose sent",
+      "note": "a second member offers the same newcomer while an offer is pending -> host refuses (busy toast on c), the table keeps ONE entry"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${dPid}<-${hostPid}\\]$"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "offers",
+      "expect_result": "outgoing=''"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "merge unpropose",
+      "expect_result": "OK merge unpropose sent"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[\\]"
+    },
+    {
+      "seq": 29,
+      "role": "d",
+      "cmd": "offers",
+      "expect_result": "incoming=''"
+    },
+    {
+      "seq": 30,
+      "role": "d",
+      "cmd": "merge propose ${hostPid}",
+      "expect_result": "OK merge propose sent",
+      "note": "INSIDER case setup (re-review r2 MAJOR #1): the newcomer offers the COMPANY (key = its group id)"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[([A-Za-z0-9_-]+)<-${dPid}\\]",
+      "capture": {
+        "gid": "pending=\\[([A-Za-z0-9_-]+)<-${dPid}\\]"
+      }
+    },
+    {
+      "seq": 33,
+      "role": "c",
+      "cmd": "offers",
+      "expect_result": "incoming='${dPid}'",
+      "note": "every member of the target company sees the incoming row"
+    },
+    {
+      "seq": 34,
+      "role": "c",
+      "cmd": "merge propose ${dPid}",
+      "expect_result": "OK merge propose sent",
+      "note": "a member offers the newcomer back (distinct key: crossing offers)"
+    },
+    {
+      "seq": 35,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 36,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "${dPid}<-${clientPid}"
+    },
+    {
+      "seq": 37,
+      "role": "d",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] GROWN group",
+          "within_s": 20
+        },
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] offer from '${dPid}' to '${gid}' dropped",
+          "within_s": 20
+        }
+      ],
+      "note": "the newcomer accepts the member's offer and JOINS the company; the newcomer's own offer to the company it just joined is pruned in the SAME host call (insider rule) - so the drop line is expected here, not after"
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[\\]",
+      "note": "table empty after the insider prune (the log line was asserted on the accept step)"
+    },
+    {
+      "seq": 40,
+      "role": "d",
+      "cmd": "offers",
+      "expect_result": "incoming='' outgoing=''"
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*name='${hostName} & ${clientName} & ${dName}' founder=${hostPid} order=\\[${hostName},${clientName},${dName}\\]"
+    },
+    {
+      "seq": 42,
+      "role": "d",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*name='${hostName} & ${clientName} & ${dName}' founder=${hostPid}"
+    },
+    {
+      "seq": 43,
+      "role": "d",
+      "cmd": "rivals",
+      "expect_result": "^(?!.*name='${hostName}';)(?!.*name='${clientName}';).*name='${hostName} & ${clientName} & ${dName}';id='me'",
+      "note": "MEMBER view on the newcomer: one company row as its own"
+    },
+    {
+      "seq": 44,
+      "role": "h",
+      "cmd": "money",
+      "expect_result": "merged=True",
+      "capture": {
+        "hostMoney": "money=([0-9.]+)"
+      }
+    },
+    {
+      "seq": 45,
+      "role": "c",
+      "cmd": "money",
+      "expect_result": "money=${hostMoney} merged=True",
+      "note": "one shared wallet mirrored to every member"
+    },
+    {
+      "seq": 46,
+      "role": "d",
+      "cmd": "money",
+      "expect_result": "money=${hostMoney} merged=True"
+    },
+    {
+      "seq": 47,
+      "role": "d",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[EconProbe\\] wallet SPLIT .*\\(3 member\\(s\\)\\)",
+          "within_s": 20
+        }
+      ],
+      "note": "LEAVE FROM THREE: the leaver takes a third; the company survives with two"
+    },
+    {
+      "seq": 48,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 49,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*name='${hostName} & ${clientName}' founder=${hostPid} order=\\[${hostName},${clientName}\\]",
+      "note": "the name splits back to the remaining members (user requirement)"
+    },
+    {
+      "seq": 50,
+      "role": "d",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 51,
+      "role": "d",
+      "cmd": "rivals",
+      "expect_result": "^(?!.*name='${hostName}';)(?!.*name='${clientName}';).*name='${hostName} & ${clientName}';id='${hostPid}'.*name='${dName}';id='me'",
+      "note": "the ex-member sees the company as ONE foreign row again and its own name on its own row"
+    },
+    {
+      "seq": 52,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[EconProbe\\] wallet DISSOLVE",
+          "within_s": 20
+        }
+      ]
+    },
+    {
+      "seq": 53,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 54,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 55,
+      "role": "h",
+      "cmd": "rivals",
+      "expect_result": "^(?!.*name='${hostName} & ).*name='${clientName}';.*",
+      "note": "REVERT on the host: REX is a plain row again"
+    },
+    {
+      "seq": 56,
+      "role": "c",
+      "cmd": "rivals",
+      "expect_result": "^(?!.*name='${hostName} & ).*name='${hostName}';"
+    },
+    {
+      "seq": 57,
+      "role": "d",
+      "cmd": "rivals",
+      "expect_result": "^(?!.*name='${hostName} & ).*name='${hostName}';.*"
+    },
+    {
+      "seq": 58,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[\\]"
+    },
+    {
+      "seq": 59,
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK",
+      "note": "post-run: the manager checks the saves carry no company name"
+    },
+    {
+      "seq": 60,
+      "role": "all",
+      "cmd": "mark TEST P1-3 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

@@ -397,14 +397,27 @@ namespace BigAmbitionsMP
                 MergerSync.ResetStore();
                 int mn = 0;
                 if (m.Merger != null)
-                    foreach (var mem in m.Merger)
+                {
+                    // Phase 1-A: restore in the stored JOIN ORDER (Order = -1 on an older manifest, where
+                    // file order is the order) — a stable index tie-break keeps that file order intact.
+                    var seq = new List<int>();
+                    for (int i = 0; i < m.Merger.Count; i++) seq.Add(i);
+                    seq.Sort((x, y) =>
                     {
+                        int c = (m.Merger[x]?.Order ?? -1).CompareTo(m.Merger[y]?.Order ?? -1);
+                        return c != 0 ? c : x.CompareTo(y);
+                    });
+                    foreach (var i in seq)
+                    {
+                        var mem = m.Merger[i];
                         if (string.IsNullOrEmpty(mem?.StableId)) continue;
                         // Old manifests carry no Group — fold them into one legacy group.
-                        MergerSync.StoreAdd(string.IsNullOrEmpty(mem.Group) ? "legacy" : mem.Group, mem.StableId);
+                        MergerSync.StoreRestore(string.IsNullOrEmpty(mem.Group) ? "legacy" : mem.Group, mem.StableId, mem.GroupSeq);
                         if (!string.IsNullOrEmpty(mem.Name)) GrantSync.NoteName(mem.StableId, mem.Name);
                         mn++;
                     }
+                }
+                PruneOffers("session state restored");   // r4: the restored store decides which offers still stand
                 RestoreWalletFromManifest(m);   // slice 4: ledger BEFORE the broadcast below (members snap to it)
                 MPHub.RestoreLoans(m.Loans);    // sweep 2026-08-18: the loaded slot's loans are the timeline truth
                 RefreshGrantsAndBroadcast();
@@ -1046,6 +1059,7 @@ namespace BigAmbitionsMP
                 // phantom "staffed" register (see HandlePlayerLeft client-side).
                 var lp = leftPlayer;
                 GameStatePatcher.EnqueueOnMainThread(() => { MPRegisterSync.RemovePlayer(lp); MPRestSync.RemovePlayer(lp); });   // duty + time-skip vote both die with the player
+                GameStatePatcher.EnqueueOnMainThread(() => PruneOffers("'" + lp + "' left"));   // phase 1-A r4: the ONE validator; the RefreshGrantsAndBroadcast enqueued below carries the pruned table (r6: no second broadcast)
             }
 
             // A departed player drops out of every runtime grant relationship (their durable grants in
@@ -1365,6 +1379,15 @@ namespace BigAmbitionsMP
                     var ee = env.GetPayload<EmployeeEditPayload>();
                     if (ee != null && SenderIs(ee.PlayerId, senderPid, MessageType.MergerEmployeeEdit))
                         GameStatePatcher.EnqueueOnMainThread(() => HostRouteEmployeeEdit(ee, senderPid));
+                    break;
+                }
+
+                case MessageType.NotificationRelay:
+                {
+                    // Merger slice 6: a member's business-scoped pop-up — fan it out inside THAT member's group.
+                    var nr = env.GetPayload<NotificationRelayPayload>();
+                    if (nr != null && SenderIs(nr.PlayerId, senderPid, MessageType.NotificationRelay))
+                        GameStatePatcher.EnqueueOnMainThread(() => HostRelayNotification(nr, senderPid));
                     break;
                 }
 
@@ -5100,15 +5123,135 @@ namespace BigAmbitionsMP
         }
 
         // ── Merger slice 1: form/dissolve arbitration (HOST, main thread) ────────
-        // Consent flow: propose → the TARGET accepts or declines → commit. Proposals PERSIST until
-        // answered or withdrawn ("unpropose"); a withdraw/decline arms a per-pair COOLDOWN so nobody
-        // can spam a player with proposal notifications (user, 2026-07-07). A session can hold several
-        // disjoint merger groups; a player belongs to at most one. Any member may LEAVE at any time
-        // (a last pair dissolves that group). Growth: an existing member proposes; accept joins the
-        // proposer's group.
-        private static readonly Dictionary<string, string> _mergerPendingByTarget = new();   // targetPid → fromPid
+        // Consent flow: propose → the TARGET side accepts or declines → commit. Proposals PERSIST until
+        // answered or withdrawn ("unpropose"); a withdraw/decline arms a COOLDOWN so nobody can spam a
+        // player with proposal notifications (user, 2026-07-07). A session can hold several disjoint
+        // merger groups; a player belongs to at most one. Any member may LEAVE at any time (a last pair
+        // dissolves that group).
+        // Phase 1-A (D4, user 2026-09-10): an offer goes to a whole COMPANY. The pending map is keyed by
+        // a TARGET KEY — the target's groupId when they are in a company, else their pid — so ONE offer
+        // reaches every member of that company and ANY member may answer for it. Accept UNIONS the two
+        // sides (either may already be a company); there is no theoretical limit on members, and no group
+        // outside the two in play is touched.
+        /// <summary>Phase 1-A r4 (restructure): ONE pending offer. AskedPid is the pid the proposer
+        /// CLICKED — the row their "Cancel offer" chip parks on even when the key names a company.
+        /// (internal, not private: the TestDrive 'offers' verb prints From.)</summary>
+        internal sealed class MergerOffer { public string From = ""; public string AskedPid = ""; }
+        internal static readonly Dictionary<string, MergerOffer> _mergerPendingByTarget = new();   // target KEY → offer
         private static readonly Dictionary<string, long>   _mergerCooldown = new();          // "from|to" → next-allowed ms
         private const long MergerReproposeCooldownMs = 60_000;
+
+        /// <summary>HOST: a StableId back to the PlayerId KNOWN THIS SESSION ("" when that member never connected this
+        /// session). NOT an online test - StableIdByPlayer is never pruned on departure; use IsOnlinePid for that.</summary>
+        private static string PidOfStable(string stable)
+        {
+            if (string.IsNullOrEmpty(stable)) return "";
+            if (stable == MPConfig.StableId) return MPConfig.PlayerId;
+            foreach (var kv in StableIdByPlayer) if (kv.Value == stable) return kv.Key;
+            return "";
+        }
+
+        /// <summary>HOST, phase 1-A: the ONLINE members of ONE group, in join order. Empty for an
+        /// unknown group — every caller stays keyed to the group ids in play (D4-4). r4: ONLINE now
+        /// MEANS online — PidOfStable resolves through StableIdByPlayer, which keeps a departed
+        /// member's handle for a rejoin, so every pid is checked against the live peer list.</summary>
+        private static List<string> PidsOfGroup(string groupId)
+        {
+            var pids = new List<string>();
+            if (string.IsNullOrEmpty(groupId) || !MergerSync.StoreGroups.ContainsKey(groupId)) return pids;
+            foreach (var s in MergerSync.JoinOrderOfGroup(groupId))
+            {
+                string pid = PidOfStable(s);
+                if (IsOnlinePid(pid)) pids.Add(pid);
+            }
+            return pids;
+        }
+
+        /// <summary>HOST, phase 1-A: everyone an offer keyed by <paramref name="targetKey"/> is addressed
+        /// to — a whole company when the key names a group, else the single player the key names.</summary>
+        private static List<string> PidsOfTargetKey(string targetKey)
+        {
+            if (MergerSync.StoreGroups.ContainsKey(targetKey)) return PidsOfGroup(targetKey);
+            var one = new List<string>();
+            if (IsOnlinePid(targetKey)) one.Add(targetKey);   // r4: a pid key whose player left addresses nobody
+            return one;
+        }
+
+        /// <summary>HOST, phase 1-A r2: liveness by CONNECTION. StableIdByPlayer is never pruned on a
+        /// departure (a rejoiner keeps their handle), so a stable lookup is NOT an online test.</summary>
+        private static bool IsOnlinePid(string pid)
+            => !string.IsNullOrEmpty(pid) && (pid == MPConfig.PlayerId || PeerForPlayer(pid) != null);
+
+        /// <summary>HOST, phase 1-A r4: retire ONE pending entry. Nobody's ROW is cleared here — every
+        /// machine derives its incoming row and its Cancel chip from the offer table in the state
+        /// broadcast (A3/A4), so there is no "withdrawn" relay any more. The proposer still hears that
+        /// their offer died (the existing "declined" toast), and only if they are online. No cooldown —
+        /// nobody declined. The CALLER broadcasts once, after the whole prune.</summary>
+        private static void DropMergerOffer(string key, string reason)
+        {
+            if (string.IsNullOrEmpty(key) || !_mergerPendingByTarget.TryGetValue(key, out var off)) return;
+            string fromPid = off?.From ?? "";
+            _mergerPendingByTarget.Remove(key);
+            Plugin.Logger.LogInfo($"[Merger] offer from '{fromPid}' to '{key}' dropped: {reason}.");
+            if (!IsOnlinePid(fromPid)) return;
+            if (fromPid == MPConfig.PlayerId) PassengerHud.Toast("Merger proposal declined.");
+            else SendToPid(fromPid, MessageEnvelope.Create(MessageType.MergerRequest, "host",
+                 new MergerRequestPayload { Action = "declined", FromPid = off?.AskedPid ?? "" }));
+        }
+
+        /// <summary>HOST, phase 1-A r4 — THE offer-table validator, and the only thing that retires an
+        /// entry. Three rounds of per-case patching kept missing cases (a departed proposer, a company
+        /// that dissolved under its own offer, a proposer who joined the company he had proposed to), so
+        /// the rule lives in ONE place and every mutation of the store or the table ends here. An entry
+        /// survives only if ALL of: its proposer is ONLINE; its key still resolves to an online player or
+        /// to a live company with at least one ONLINE member; and its proposer is NOT already inside the
+        /// company the key names (nothing left to merge). Returns true when something was removed —
+        /// the caller then rebroadcasts the state.</summary>
+        private static bool PruneOffers(string reason)
+        {
+            if (_mergerPendingByTarget.Count == 0) return false;
+            var dead = new List<string>();
+            foreach (var kv in _mergerPendingByTarget)
+            {
+                string key = kv.Key, from = kv.Value?.From ?? "";
+                bool keyIsGroup = MergerSync.StoreGroups.ContainsKey(key);
+                if (!IsOnlinePid(from)) { dead.Add(key); continue; }                       // (i) proposer gone
+                if (!(keyIsGroup ? PidsOfGroup(key).Count > 0 : IsOnlinePid(key))) { dead.Add(key); continue; }   // (ii) nobody can answer
+                string gFrom = MergerSync.GroupOfStable(StableOfPid(from));
+                bool inside = keyIsGroup
+                            ? gFrom == key
+                            : (gFrom != "" && gFrom == MergerSync.GroupOfStable(StableOfPid(key)));
+                if (inside) dead.Add(key);                                                 // (iii) proposer is already in there
+            }
+            foreach (var k in dead) DropMergerOffer(k, reason);
+            // (iv) r6 (review r4 #1): an offer addressed to a PLAYER who has since joined a company is an offer to
+            // that company (D4-1) - re-key it so every member can answer and only ONE offer per side exists; when
+            // that company already holds an offer, this one goes (the company is "busy").
+            var rekey = new List<string>();
+            foreach (var kv in _mergerPendingByTarget)
+                if (!MergerSync.StoreGroups.ContainsKey(kv.Key) && MergerSync.GroupOfStable(StableOfPid(kv.Key)) != "") rekey.Add(kv.Key);
+            foreach (var k in rekey)
+            {
+                string g = MergerSync.GroupOfStable(StableOfPid(k));
+                var off = _mergerPendingByTarget[k];
+                if (string.IsNullOrEmpty(g) || off == null) continue;
+                if (_mergerPendingByTarget.ContainsKey(g)) { DropMergerOffer(k, "their company already holds an offer"); dead.Add(k); continue; }
+                _mergerPendingByTarget.Remove(k);
+                _mergerPendingByTarget[g] = off;
+                dead.Add(k);   // the table changed - the caller broadcasts
+                Plugin.Logger.LogInfo($"[Merger] offer from '{off.From}' to '{k}' re-keyed to company '{g}' ({reason}).");
+            }
+            return dead.Count > 0;
+        }
+
+        /// <summary>HOST, phase 1-A: the pending offer this actor may answer — their company's first,
+        /// then one addressed to them personally. "" when there is none.</summary>
+        private static string PendingKeyFor(string actorPid)
+        {
+            string g = MergerSync.GroupOfStable(StableOfPid(actorPid));
+            if (!string.IsNullOrEmpty(g) && _mergerPendingByTarget.ContainsKey(g)) return g;
+            return _mergerPendingByTarget.ContainsKey(actorPid) ? actorPid : "";
+        }
 
         public static void HostMergerAction(string action, string targetPid, string actorPid)
         {
@@ -5120,78 +5263,176 @@ namespace BigAmbitionsMP
                 case "propose":
                 {
                     if (string.IsNullOrEmpty(targetPid) || targetPid == actorPid) return;
-                    if (StableOfPid(targetPid) == "") return;                        // target must be online
-                    if (MergerSync.InAnyGroup(targetPid)) return;                    // already in a company (theirs or another)
-                    if (_mergerPendingByTarget.ContainsKey(targetPid)) return;       // target already has an offer pending
-                    foreach (var kv in _mergerPendingByTarget)
-                        if (kv.Value == actorPid) return;                            // one outgoing offer per proposer
-                    if (_mergerCooldown.TryGetValue(actorPid + "|" + targetPid, out var next) && now < next)
+                    if (!IsOnlinePid(targetPid)) return;                             // target must be CONNECTED (a stable handle outlives a departure)
+                    string gActor = MergerSync.GroupOfStable(StableOfPid(actorPid));
+                    string gTgt   = MergerSync.GroupOfStable(StableOfPid(targetPid));
+                    if (gActor != "" && gActor == gTgt) return;                      // D4-1: already the SAME company
+                    string tkey = gTgt != "" ? gTgt : targetPid;                     // TARGET KEY: their company, else them
+                    if (_mergerPendingByTarget.TryGetValue(tkey, out var held) && held?.From != actorPid)
+                    {   // r2 (review #2; wording approved 2026-09-11): SOMEONE ELSE's offer is pending on that side - say why nothing happens
+                        // (r5: my OWN pending offer to the same side is not "busy" - it is re-sent below as a reminder)
+                        var busy = new MergerRequestPayload { Action = "busy", FromPid = targetPid };
+                        if (actorPid == MPConfig.PlayerId) PassengerHud.Toast("They already have an offer pending.");   // r4: toast only - no chip to clear
+                        else SendToPid(actorPid, MessageEnvelope.Create(MessageType.MergerRequest, "host", busy));
+                        return;
+                    }
+                    if (_mergerCooldown.TryGetValue(actorPid + "|" + tkey, out var next) && now < next)
                     {   // anti-spam: a withdrawn/declined offer can't be re-sent immediately
                         var cool = new MergerRequestPayload { Action = "cooldown", FromPid = targetPid };
-                        if (actorPid == MPConfig.PlayerId) PassengerHud.Toast("Wait a minute before proposing to them again.");
+                        if (actorPid == MPConfig.PlayerId) PassengerHud.Toast("Wait a minute before proposing to them again.");   // r4: toast only - the chip follows the broadcast table, not this call
                         else SendToPid(actorPid, MessageEnvelope.Create(MessageType.MergerRequest, "host", cool));
                         return;
                     }
-                    _mergerPendingByTarget[targetPid] = actorPid;
-                    Plugin.Logger.LogInfo($"[Merger] '{actorPid}' proposes a merger to '{targetPid}'.");
+                    // r5 (user decision 2026-09-11): a new offer REPLACES the proposer's existing one - and re-offering the
+                    // SAME side re-sends it as a reminder. The old key takes the withdraw cooldown, so a reminder to one
+                    // side is possible at most once a minute; the old addressees' rows clear through the state broadcast.
+                    string prior = "";
+                    foreach (var kv in _mergerPendingByTarget) if (kv.Value?.From == actorPid) { prior = kv.Key; break; }
+                    if (prior != "")
+                    {
+                        _mergerPendingByTarget.Remove(prior);
+                        _mergerCooldown[actorPid + "|" + prior] = now + MergerReproposeCooldownMs;
+                        Plugin.Logger.LogInfo($"[Merger] '{actorPid}' withdrew the proposal to '{prior}' ({(prior == tkey ? "re-sent as a reminder" : "replaced by a new offer")}).");
+                    }
+                    _mergerPendingByTarget[tkey] = new MergerOffer { From = actorPid, AskedPid = targetPid };
+                    if (gTgt != "")
+                        Plugin.Logger.LogInfo($"[Merger] '{actorPid}' proposes a merger to company '{gTgt}' (asked '{targetPid}'); every online member may answer.");
+                    else
+                        Plugin.Logger.LogInfo($"[Merger] '{actorPid}' proposes a merger to '{targetPid}'.");
                     var relay = new MergerRequestPayload { Action = "proposal", FromPid = actorPid };
-                    if (targetPid == MPConfig.PlayerId) MergerSync.IncomingFromPid = actorPid;
-                    else SendToPid(targetPid, MessageEnvelope.Create(MessageType.MergerRequest, "host", relay));
+                    // D4-1: the NOTIFICATION reaches every online member of the target side; the ROW each of
+                    // them sees is derived from the offer table in the state broadcast below (r4).
+                    foreach (var pid in PidsOfTargetKey(tkey))
+                    {
+                        if (pid == MPConfig.PlayerId) PassengerHud.Toast($"{actorPid} proposes a company merger — see Permissions.");
+                        else SendToPid(pid, MessageEnvelope.Create(MessageType.MergerRequest, "host", relay));
+                    }
+                    RebroadcastMergerState(true);
                     break;
                 }
                 case "unpropose":
                 {
                     string tgt = "";
-                    foreach (var kv in _mergerPendingByTarget) if (kv.Value == actorPid) { tgt = kv.Key; break; }
+                    foreach (var kv in _mergerPendingByTarget) if (kv.Value?.From == actorPid) { tgt = kv.Key; break; }
                     if (tgt == "") return;
                     _mergerPendingByTarget.Remove(tgt);
                     _mergerCooldown[actorPid + "|" + tgt] = now + MergerReproposeCooldownMs;
                     Plugin.Logger.LogInfo($"[Merger] '{actorPid}' withdrew the proposal to '{tgt}'.");
-                    var relay = new MergerRequestPayload { Action = "withdrawn", FromPid = actorPid };
-                    if (tgt == MPConfig.PlayerId) MergerSync.IncomingFromPid = "";   // silent — no toast on withdraw
-                    else SendToPid(tgt, MessageEnvelope.Create(MessageType.MergerRequest, "host", relay));
+                    // r4: no relay — every addressee's incoming row clears because the entry is gone from
+                    // the broadcast table, and a withdraw stays silent (it must not be a notification channel).
+                    PruneOffers("stale at withdraw");
+                    RebroadcastMergerState(true);
                     break;
                 }
                 case "accept":
                 {
-                    if (!_mergerPendingByTarget.TryGetValue(actorPid, out var fromPid)) return;
-                    _mergerPendingByTarget.Remove(actorPid);
+                    // D4-2: ANY member of the target company may answer — the offer is keyed by their group.
+                    string akey = PendingKeyFor(actorPid);
+                    if (akey == "" || !_mergerPendingByTarget.TryGetValue(akey, out var aoff)) return;
+                    string fromPid = aoff?.From ?? "";
                     string a = StableOfPid(fromPid), b = StableOfPid(actorPid);
-                    if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return;   // someone left mid-consent
-                    // Phase 0 (2026-09-10, map §21.6): the propose-time 'not already in a company' check is re-run at ACCEPT -
-                    // a target who joined another company while this offer was pending would otherwise be added to a
-                    // second group (one player in two groups; the half-merged state the user forbade). Group UNION is phase 1.
-                    if (MergerSync.GroupOfStable(b) != "" || MergerSync.InAnyGroup(actorPid))   // r2 (review #5): the STORE is what StoreAdd writes to
+                    if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return;   // someone left mid-consent (r6: table untouched - the departure prune retires the entry with a broadcast)
+                    _mergerPendingByTarget.Remove(akey);
+                    string gA = MergerSync.GroupOfStable(a), gB = MergerSync.GroupOfStable(b);
+                    // Phase 1-A (2026-09-10, D4-3): the phase-0 'target already in a company' refusal is REPLACED by
+                    // the union below — only the degenerate case survives: the two sides became the SAME company
+                    // while the offer was pending, so there is nothing left to merge.
+                    if (gA != "" && gA == gB)
                     {
-                        Plugin.Logger.LogWarning($"[Merger] accept by '{actorPid}' of '{fromPid}' REFUSED - they are already in a company (joined while the offer was pending).");
-                        var stale = new MergerRequestPayload { Action = "withdrawn", FromPid = fromPid };
-                        if (actorPid == MPConfig.PlayerId) MergerSync.IncomingFromPid = "";
-                        else SendToPid(actorPid, MessageEnvelope.Create(MessageType.MergerRequest, "host", stale));
-                        _mergerCooldown[fromPid + "|" + actorPid] = now + MergerReproposeCooldownMs;   // r3 (re-review #4): same anti-spam as a decline
-                        // r2 (review #6): the proposer learns the offer died - same relay and toast as a decline (their Cancel chip clears).
-                        var dead = new MergerRequestPayload { Action = "declined", FromPid = actorPid };
-                        if (fromPid == MPConfig.PlayerId) { MergerSync.OutgoingToPid = ""; PassengerHud.Toast("Merger proposal declined."); }
-                        else SendToPid(fromPid, MessageEnvelope.Create(MessageType.MergerRequest, "host", dead));
+                        Plugin.Logger.LogWarning($"[Merger] accept by '{actorPid}' of '{fromPid}' REFUSED - they are already in the same company (joined while the offer was pending).");
+                        _mergerCooldown[fromPid + "|" + akey] = now + MergerReproposeCooldownMs;   // r3 (re-review #4): same anti-spam as a decline
+                        // r2 (review #6): the proposer learns the offer died - same toast as a decline. r4: the
+                        // addressees' rows and the proposer's chip follow the broadcast table below, not a relay.
+                        if (fromPid == MPConfig.PlayerId) PassengerHud.Toast("Merger proposal declined.");
+                        else if (IsOnlinePid(fromPid)) SendToPid(fromPid, MessageEnvelope.Create(MessageType.MergerRequest, "host",
+                                 new MergerRequestPayload { Action = "declined", FromPid = actorPid }));
+                        PruneOffers("unanswerable after a same-company accept");
+                        RebroadcastMergerState(true);
                         return;
                     }
-                    GrantSync.NoteName(a, fromPid); GrantSync.NoteName(b, actorPid);
-                    // Join the proposer's existing company, else mint a fresh group for the pair.
-                    string group = MergerSync.GroupOfStable(a);
-                    group = MergerSync.StoreAdd(group, a);
-                    MergerSync.StoreAdd(group, b);
-                    Plugin.Logger.LogInfo($"[Merger] FORMED/GROWN group '{group}': '{fromPid}' + '{actorPid}'.");
-                    RefreshGrantsAndBroadcast();
+                    // Durable roster names: NOT the pid (that is what made MemberNames read as ids).
+                    GrantSync.NoteName(a, DisplayNameFor(fromPid)); GrantSync.NoteName(b, DisplayNameFor(actorPid));
+                    // D4-3 UNION, one host call, no observer can see a member in two groups: neither side in a
+                    // company mints a pair; one side in a company takes the other in; BOTH in companies merges
+                    // them into the OLDER group (its id, its founder, its join order first) and pools the wallets.
+                    string group;
+                    if (gA == "" && gB == "")
+                    {
+                        group = MergerSync.StoreAdd("", a);
+                        MergerSync.StoreAdd(group, b);
+                        Plugin.Logger.LogInfo($"[Merger] FORMED group '{group}': '{fromPid}' + '{actorPid}'.");
+                    }
+                    else if (gB == "")
+                    {
+                        group = MergerSync.StoreAdd(gA, b);
+                        Plugin.Logger.LogInfo($"[Merger] GROWN group '{group}': '{actorPid}' joined '{fromPid}'.");
+                    }
+                    else if (gA == "")
+                    {
+                        group = MergerSync.StoreAdd(gB, a);   // the PROPOSER joins the target's company
+                        Plugin.Logger.LogInfo($"[Merger] GROWN group '{group}': '{fromPid}' joined '{actorPid}'.");
+                    }
+                    else
+                    {
+                        long sA = MergerSync.SeqOfGroup(gA), sB = MergerSync.SeqOfGroup(gB);
+                        group = (sA != 0 && (sB == 0 || sA <= sB)) ? gA : gB;   // the OLDER company keeps its id
+                        string other = group == gA ? gB : gA;
+                        // r4: a third party's offer keyed on the ABSORBED id, and any offer whose proposer is now
+                        // inside the survivor, are retired by PruneOffers below — AFTER the store change, because
+                        // the validator asks the store what is still answerable rather than guessing per case.
+                        MergerSync.StoreUnion(group, other);
+                        // r2 (review #3): cooldowns keyed on the absorbed id follow it to the survivor.
+                        var rekey = new List<string>();
+                        foreach (var ck in _mergerCooldown.Keys) if (ck.EndsWith("|" + other, StringComparison.Ordinal)) rekey.Add(ck);
+                        foreach (var ck in rekey)
+                        {
+                            long until = _mergerCooldown[ck]; _mergerCooldown.Remove(ck);
+                            string nk = ck.Substring(0, ck.Length - other.Length) + group;
+                            if (!_mergerCooldown.TryGetValue(nk, out var have) || have < until) _mergerCooldown[nk] = until;
+                        }
+                        // Wallets merge HOST-SIDE so the absorbed members' shared cash is not stranded on a
+                        // group id that no longer exists (no contribution ledger by design — "this is ours").
+                        if (_walletBalance.TryGetValue(other, out var ob))
+                        {
+                            _walletBalance.TryGetValue(group, out var kb);
+                            _walletBalance[group] = kb + ob;
+                        }
+                        _walletBalance.Remove(other);
+                        if (_walletContributed.TryGetValue(other, out var oc))
+                        {
+                            if (!_walletContributed.TryGetValue(group, out var kc)) { kc = new HashSet<string>(); _walletContributed[group] = kc; }
+                            foreach (var s in oc) kc.Add(s);
+                        }
+                        _walletContributed.Remove(other);
+                        int unionCount = MergerSync.StoreGroups.TryGetValue(group, out var uset) ? uset.Count : 0;
+                        Plugin.Logger.LogInfo($"[Merger] UNION group '{other}' -> '{group}': members now {unionCount}.");
+                        PruneOffers("unanswerable after a merger accept");
+                        RefreshGrantsAndBroadcast();   // carries the pruned offer table with the new membership
+                        // AFTER the state broadcast: MergerWallet.ApplyState drops any balance whose GroupId is
+                        // not the receiver's CURRENT group, and the absorbed members only just learned theirs.
+                        BroadcastWalletGroup(group);
+                        break;
+                    }
+                    PruneOffers("unanswerable after a merger accept");
+                    RefreshGrantsAndBroadcast();   // carries the pruned offer table with the new membership
                     break;
                 }
                 case "decline":
                 {
-                    if (!_mergerPendingByTarget.TryGetValue(actorPid, out var fromPid)) return;
-                    _mergerPendingByTarget.Remove(actorPid);
-                    _mergerCooldown[fromPid + "|" + actorPid] = now + MergerReproposeCooldownMs;
+                    // D4-2: any member of the target company may decline for it.
+                    string dkey = PendingKeyFor(actorPid);
+                    if (dkey == "" || !_mergerPendingByTarget.TryGetValue(dkey, out var doff)) return;
+                    string fromPid = doff?.From ?? "";
+                    _mergerPendingByTarget.Remove(dkey);
+                    _mergerCooldown[fromPid + "|" + dkey] = now + MergerReproposeCooldownMs;
                     Plugin.Logger.LogInfo($"[Merger] '{actorPid}' declined '{fromPid}'.");
                     var relay = new MergerRequestPayload { Action = "declined", FromPid = actorPid };
-                    if (fromPid == MPConfig.PlayerId) { MergerSync.OutgoingToPid = ""; PassengerHud.Toast("Merger proposal declined."); }
-                    else SendToPid(fromPid, MessageEnvelope.Create(MessageType.MergerRequest, "host", relay));
+                    if (fromPid == MPConfig.PlayerId) PassengerHud.Toast("Merger proposal declined.");
+                    else if (IsOnlinePid(fromPid)) SendToPid(fromPid, MessageEnvelope.Create(MessageType.MergerRequest, "host", relay));
+                    // r4: the decliner AND their co-members lose the incoming row because the entry is gone
+                    // from the broadcast table below — no silent "withdrawn" relay, no host-local writes.
+                    PruneOffers("stale at decline");
+                    RebroadcastMergerState(true);
                     break;
                 }
                 case "leave":
@@ -5225,7 +5466,7 @@ namespace BigAmbitionsMP
                                 var rest = new MergerWalletStatePayload { GroupId = "", Balance = bal - share };
                                 if (otherPid == MPConfig.PlayerId) MergerWallet.ApplyState(rest);
                                 else if (otherPid != "") SendToPid(otherPid, MessageEnvelope.Create(MessageType.MergerWalletState, "host", rest));
-                                else CashByStableId[other] = bal - share;   // offline member: their restore figure
+                                else if (other != "") CashByStableId[other] = bal - share;   // offline member: their restore figure
                                 Plugin.Logger.LogInfo($"[EconProbe] wallet DISSOLVE '{g0}': remaining member gets ${bal - share:N0}.");
                                 _walletBalance.Remove(g0);
                                 _walletContributed.Remove(g0);
@@ -5241,6 +5482,9 @@ namespace BigAmbitionsMP
 
                     MergerSync.StoreRemove(s);
                     Plugin.Logger.LogInfo($"[Merger] '{actorPid}' left their merger group.");
+                    // r4: a dissolving company's offer (and one the leaver had out that nobody can answer any
+                    // more) is retired by the validator AFTER the store change — a 3+ company keeps both.
+                    PruneOffers("unanswerable after a member left the company");
                     RefreshGrantsAndBroadcast();
                     break;
                 }
@@ -5278,6 +5522,36 @@ namespace BigAmbitionsMP
                 else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.MergerEmployeeEdit, "host", p));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MergerStaff] HostRouteEmployeeEdit: {ex.Message}"); }
+        }
+
+        /// <summary>HOST (main thread), merger slice 6: fan ONE member's business-scoped pop-up out to
+        /// every OTHER ONLINE member of THE SENDER'S merged company - and to the host itself when the
+        /// host is a member of that same group. A non-member never receives it, and neither does a
+        /// member of a DIFFERENT group: every hop is gated on MergerSync.MergedRuntime(sender, peer),
+        /// which is true only for two pids inside one group. Serialize once, send per peer (the
+        /// Broadcast idiom). The host's own sender calls this directly - no wire hop for the host.</summary>
+        public static void HostRelayNotification(NotificationRelayPayload p, string senderPid)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(senderPid) || !NotificationRelay.PayloadSane(p, "host relay")) return;   // review #3/#6: bounded before fan-out
+                if (!MergerSync.InAnyGroup(senderPid)) return;   // left the company between send and arrival
+                byte[] bytes = null;
+                int fanout = 0;
+                foreach (var cp in ConnectedClientPeers())
+                {
+                    if (cp.playerId == senderPid) continue;                            // never back to the sender
+                    if (!MergerSync.MergedRuntime(senderPid, cp.playerId)) continue;   // the sender's group only
+                    if (bytes == null) bytes = MessageEnvelope.Create(MessageType.NotificationRelay, "host", p).Serialize();
+                    cp.peer.Send(bytes, reliable: true);
+                    fanout++;
+                }
+                if (MPConfig.PlayerId != senderPid && MergerSync.MergedRuntime(senderPid, MPConfig.PlayerId))
+                { NotificationRelay.ApplyRelayed(p); fanout++; }                       // the host is a member too
+                if (fanout == 0)
+                    Plugin.Logger.LogInfo($"[NotifyRelay] '{p.HeaderKey}' from '{senderPid}' - no other online member to relay to.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[NotifyRelay] HostRelayNotification: {ex.Message}"); }
         }
 
         // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -5627,23 +5901,40 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>The merged-companies state broadcast: per group, online member pids (enforcement)
-        /// + the full display roster from the store (offline members stay listed by name).</summary>
+        /// + the full display roster from the store (offline members stay listed by name), PLUS the
+        /// pending-offer table (r4) — the one authority every machine derives its merger chips from.</summary>
         private static MergerStatePayload BuildMergerState()
         {
             var pay = new MergerStatePayload();
             foreach (var grp in MergerSync.StoreGroups)
             {
                 var info = new MergerGroupInfo { GroupId = grp.Key };
-                foreach (var s in grp.Value)
+                // Phase 1-A (D3): walk the group in JOIN ORDER (founder first) — the display name, the
+                // ordered rosters and FounderPid all read off this one walk.
+                string founder = MergerSync.FounderOfGroup(grp.Key);
+                var walk = MergerSync.JoinOrderOfGroup(grp.Key);
+                if (string.IsNullOrEmpty(founder) || !grp.Value.Contains(founder))
+                    founder = walk.Count > 0 ? walk[0] : "";
+                foreach (var s in walk)
                 {
                     info.MemberCount++;
-                    string nm = GrantSync.NameOf(s);
-                    if (s == MPConfig.StableId) { info.MemberPids.Add(MPConfig.PlayerId); nm = MPConfig.PlayerId; }
-                    else
-                        foreach (var kv in StableIdByPlayer)
-                            if (kv.Value == s) { info.MemberPids.Add(kv.Key); nm = kv.Key; break; }
-                    info.MemberNames.Add(string.IsNullOrEmpty(nm) ? "(offline member)" : nm);
+                    string pid = PidOfStable(s);
+                    // NOT filtered by IsOnlinePid (manager, r4 read): MemberPids feeds IsMemberPid/MergedRuntime on every
+                    // machine - access to a member's shops, the rivals fold and the register/staff rules must keep
+                    // naming a member who is merely OFFLINE (their buildings stay flipped through BuildingKeys).
+                    // Only the OFFER machinery resolves online pids (PidsOfGroup/PidsOfTargetKey via IsOnlinePid).
+                    // Names, not ids: an online member resolves through the character-name map (phase 1-A
+                    // fix — MemberNames used to carry the PlayerId), an offline one through the store.
+                    string nm = string.IsNullOrEmpty(pid) ? GrantSync.NameOf(s) : DisplayNameFor(pid);
+                    if (string.IsNullOrEmpty(nm)) nm = "(offline member)";
+                    if (!string.IsNullOrEmpty(pid)) { info.MemberPids.Add(pid); info.MemberPidsOrdered.Add(pid); }
+                    info.MemberNames.Add(nm);
+                    info.MemberNamesOrdered.Add(nm);
+                    if (s == founder) info.FounderPid = pid;
                 }
+                // D3: the founder's name then the rest in join order. The game has no per-player company
+                // name (BusinessName is per building), so this is built from character names.
+                info.DisplayName = string.Join(" & ", info.MemberNamesOrdered);
                 // Slice 3: every building OPERATED by a group member (rental ledger; a member's own
                 // buildings are harmless in the list — the receiver's flip skips natively-rented regs).
                 foreach (var kv in BuildingOwners)
@@ -5655,15 +5946,29 @@ namespace BigAmbitionsMP
                 }
                 pay.Groups.Add(info);
             }
+            // r4: the offer table travels WITH the state, so every machine (the host included) derives its
+            // own incoming row and "Cancel offer" chip from it instead of from optimistic UI writes and relays.
+            foreach (var kv in _mergerPendingByTarget)
+            {
+                if (kv.Value == null) continue;
+                var oi = new MergerOfferInfo { From = kv.Value.From, TargetKey = kv.Key, AskedPid = kv.Value.AskedPid };
+                oi.TargetPids.AddRange(PidsOfTargetKey(kv.Key));   // ONLINE addressees only
+                pay.Offers.Add(oi);
+            }
+            pay.Offers.Sort((x, y) => string.CompareOrdinal(x.TargetKey, y.TargetKey));   // r6: dictionary order is not stable across a remove+insert
             return pay;
         }
 
-        /// <summary>Slice 3: periodic merger-state refresh while any merger exists — newly rented/
-        /// vacated company buildings reach every member's flip set without waiting for a grant or
-        /// roster event (host flip Tick calls this ~10s).</summary>
-        public static void RebroadcastMergerState()
+        /// <summary>Slice 3: periodic merger-state refresh while any merger OR pending offer exists —
+        /// newly rented/vacated company buildings reach every member's flip set without waiting for a
+        /// grant or roster event (host flip Tick calls this ~10s). r4: also the broadcast every offer-table
+        /// mutation ends with (force: true sends the emptying edge too — the last offer going away must
+        /// reach the clients that are still rendering its chips). It has ALWAYS applied the state to the
+        /// host itself before sending, exactly as RefreshGrantsAndBroadcast does.</summary>
+        public static void RebroadcastMergerState(bool force = false)
         {
-            if (!_running || MergerSync.StoreGroups.Count == 0) return;
+            if (!_running) return;
+            if (!force && MergerSync.StoreGroups.Count == 0 && _mergerPendingByTarget.Count == 0) return;
             var pay = BuildMergerState();
             MergerSync.ApplyState(pay);
             Broadcast(MessageEnvelope.Create(MessageType.MergerState, "host", pay));

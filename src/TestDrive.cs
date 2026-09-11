@@ -10,9 +10,9 @@ namespace BigAmbitionsMP
     ///
     /// PROTOCOL — the channel is ARMED by creating the folder
     ///   &lt;LocalLow&gt;\Hovgaard Games\Big Ambitions\BigAmbitionsMP\testdrive\
-    /// (both rig instances share that LocalLow, so commands are ROLE-ADDRESSED by filename:
-    /// "h-*.cmd" runs on the HOST instance — the one NOT installed under BigAmbitions2 —
-    /// and "c-*.cmd" on the CLIENT instance).  A .cmd file holds one command line; the mod
+    /// (all rig instances share that LocalLow, so commands are ROLE-ADDRESSED by filename:
+    /// "h-*.cmd" runs on the HOST instance — the Steam install — while "c-*.cmd" / "d-*.cmd" run on
+    /// the client installs C:\BigAmbitions2 / C:\BigAmbitions3).  A .cmd file holds one command line; the mod
     /// polls every 0.5s on the main thread, executes, writes "&lt;file&gt;.result" ("OK ..." /
     /// "ERR ..."), deletes the .cmd, and logs a [TestDrive] line.  See
     /// .modding/08-testdrive.md for the verb reference and per-test scripts.
@@ -26,10 +26,30 @@ namespace BigAmbitionsMP
         private static string? _dir;
         private static bool _armedLogged;
 
-        /// <summary>Instance role by install location: the rig's second instance lives under
-        /// C:\BigAmbitions2 (launch_client.bat); anything else is the Steam (host) install.</summary>
-        private static string Role =>
-            MPConfig.GameRootPath.IndexOf("BigAmbitions2", StringComparison.OrdinalIgnoreCase) >= 0 ? "c" : "h";
+        /// <summary>Instance role by install location: the Steam install is the HOST ("h"); an install
+        /// folder named BigAmbitions&lt;N&gt; (N &gt;= 2) is a CLIENT with the letter (char)('c' + N - 2) —
+        /// BigAmbitions2 = "c", BigAmbitions3 = "d", BigAmbitions4 = "e". Anything unparsable = "h".</summary>
+        private static string? _role;
+        private static string Role => _role ?? (_role = ComputeRole());
+
+        private static string ComputeRole()
+        {
+            try
+            {
+                string name = Path.GetFileName(MPConfig.GameRootPath.TrimEnd('\\', '/'));
+                int i = name.Length;
+                while (i > 0 && name[i - 1] >= '0' && name[i - 1] <= '9') i--;
+                if (i > 0 && i < name.Length &&
+                    string.Equals(name.Substring(0, i), "BigAmbitions", StringComparison.OrdinalIgnoreCase))
+                {
+                    int n;
+                    if (int.TryParse(name.Substring(i), out n) && n >= 2 && n <= 9)
+                        return ((char)('c' + n - 2)).ToString();
+                }
+            }
+            catch { }
+            return "h";
+        }
 
         /// <summary>"blocksave" verb state — MPSaveCoordinator.SaveBlockedBy honors it (dev builds)
         /// so the round-237 deferral machinery can be exercised end-to-end (defer → heartbeat →
@@ -565,7 +585,7 @@ namespace BigAmbitionsMP
                 // -- merger phase 0 test levers (2026-09-10) -------------------
                 case "merge":
                 {
-                    // Thin wrapper over the merger chips in MPCanvasUI (:2545-2641): on the HOST
+                    // Thin wrapper over the merger chips in MPCanvasUI (:2543-2645): on the HOST
                     // the chip calls MPServer.HostMergerAction directly with its OWN pid as the
                     // actor; on a client it sends MPClient.SendMergerAction. Same two calls here.
                     var mtk = arg.Split(' ');
@@ -575,9 +595,11 @@ namespace BigAmbitionsMP
                         return "ERR merge propose <pid>|accept|decline|leave|unpropose";
                     if (mact == "propose" && mpid.Length == 0) return "ERR 'merge propose' needs a target pid";
                     if (mact != "propose") mpid = "";        // every other chip sends an empty target
-                    if (MPServer.IsRunning)        MPServer.HostMergerAction(mact, mpid, MPConfig.PlayerId);
-                    else if (MPClient.IsConnected) MPClient.SendMergerAction(mact, mpid);
-                    else return "ERR not in a multiplayer session";
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR not in a multiplayer session";
+                    // r4: a THIN wrapper again - the button writes no UI state either. Both offer fields are
+                    // derived from the host's broadcast offer table, so the verb just makes the same call.
+                    if (MPServer.IsRunning) MPServer.HostMergerAction(mact, mpid, MPConfig.PlayerId);
+                    else                    MPClient.SendMergerAction(mact, mpid);
                     return $"OK merge {mact} sent" + (mpid.Length > 0 ? $" -> '{mpid}'" : "");
                 }
 
@@ -604,7 +626,109 @@ namespace BigAmbitionsMP
                     }
                     catch { }
                     gsb.Append(']');
+                    // Phase 1-A: the company's identity - display name, founder pid, join order.
+                    gsb.Append($" name='{MergerSync.MyGroupDisplayName}' founder={MergerSync.MyGroupFounderPid} order=[");
+                    int go = 0;
+                    try { foreach (var om in MergerSync.MyMemberNamesOrdered) { if (go++ > 0) gsb.Append(','); gsb.Append(om); } } catch { }
+                    gsb.Append(']');
                     return gsb.ToString();
+                }
+
+                // -- merger phase 1 test levers (2026-09-11) -------------------
+                case "rivals":
+                {
+                    // The DATA half of RivalLeaderboard.Load (decompile :26-29) replayed headless
+                    // with the phase 1-B fold gate on: GetAllRivalData() -> per-rival
+                    // GetRivalLeaderboardData -> GetPlayerLeaderboardData() appended -> the same
+                    // descending-weeklyIncome sort.  No UI rows, no writes of its own (the mapper
+                    // may defeat a bankrupt rival exactly as the native Load does on every open).
+                    // Reflection throughout: the rivals UI types are not csproj-referenced, so
+                    // MPPatches resolves them by name too (:1694).
+                    var lt  = HarmonyLib.AccessTools.TypeByName("UI.Smartphone.Apps.Rivals.RivalLeaderboard");
+                    var lgr = lt == null ? null : HarmonyLib.AccessTools.Method(lt, "GetRivalLeaderboardData");  // public static, RivalData
+                    var lgp = lt == null ? null : HarmonyLib.AccessTools.Method(lt, "GetPlayerLeaderboardData"); // PRIVATE static, no args
+                    if (lgr == null || lgp == null) return "ERR RivalLeaderboard.GetRivalLeaderboardData/GetPlayerLeaderboardData not resolvable";
+                    // One row = { entryName, rivalId|me, weeklyIncome, biz count, bldg count, isDefeated }.
+                    object[] LRow(object o)
+                    {
+                        var ot = o.GetType();
+                        object Fv(string n) { var f = HarmonyLib.AccessTools.Field(ot, n); return f == null ? null : f.GetValue(o); }
+                        string lid = (Fv("rivalId") as string) ?? "";
+                        var lbiz = Fv("ownedBusinesses") as System.Collections.ICollection;
+                        var lbld = Fv("ownedBuildings")  as System.Collections.ICollection;
+                        return new object[]
+                        {
+                            (Fv("entryName") as string) ?? "",
+                            lid.Length == 0 ? "me" : lid,
+                            (Fv("weeklyIncome") is float lw ? lw : 0f),
+                            lbiz == null ? 0 : lbiz.Count,
+                            lbld == null ? 0 : lbld.Count,
+                            (Fv("isDefeated") is bool lf && lf)
+                        };
+                    }
+                    var lrows = new System.Collections.Generic.List<object[]>();
+                    try
+                    {
+                        GameStatePatcher.RivalsLeaderboardLoadRunning = true;
+                        var lall = BigAmbitions.Rivals.RivalsHelper.GetAllRivalData();
+                        if (lall != null)
+                            foreach (var lr in lall)
+                            {
+                                if (lr == null) continue;
+                                var lrow = lgr.Invoke(null, new object[] { lr });
+                                if (lrow != null) lrows.Add(LRow(lrow));
+                            }
+                        var lme = lgp.Invoke(null, null);
+                        if (lme != null) lrows.Add(LRow(lme));
+                    }
+                    catch (Exception lex) { return $"ERR rivals: {lex.Message}"; }
+                    finally { GameStatePatcher.RivalsLeaderboardLoadRunning = false; }
+                    // Load :29 verbatim: (x, y) => y.weeklyIncome.CompareTo(x.weeklyIncome).
+                    lrows.Sort((x, y) => ((float)y[2]).CompareTo((float)x[2]));
+                    var lsb = new StringBuilder($"OK rows={lrows.Count} mode=lb");
+                    foreach (var ld in lrows)
+                        lsb.Append($" | name='{ld[0]}';id='{ld[1]}';income={(int)(float)ld[2]};biz={ld[3]};bldg={ld[4]};defeated={ld[5]}");
+                    return lsb.ToString();
+                }
+
+                case "notify":
+                {
+                    // Fires the game's own toast through its single gateway (decompile
+                    // UI.Notification/Notifications.cs:26) - the phase 1-C Postfix on that method
+                    // decides whether it relays.  The verb adds no relay path of its own.
+                    var ntk = arg.Split(' ');
+                    string nkey  = ntk.Length > 0 ? ntk[0].Trim() : "";
+                    string naddr = ntk.Length > 1 ? string.Join(" ", ntk, 1, ntk.Length - 1).Trim() : "";
+                    if (nkey.Length == 0 || naddr.Length == 0) return "ERR usage: notify <headerKey> <addressKey>";
+                    var nreg = GameStatePatcher.FindRegistration(naddr);
+                    if (nreg == null) return $"ERR no registration at '{naddr}'";
+                    string nname = nreg.BusinessName ?? "";
+                    var ndata = new System.Collections.Generic.Dictionary<string, string> { { "businessName", nname } };
+                    UI.Notification.Notifications.Show(UI.Notification.NotificationType.Info, nkey, ndata, 5f, null, null, false, false);
+                    return $"OK notify key='{nkey}' addr='{naddr}' name='{nname}'";
+                }
+
+                case "offers":
+                {
+                    // Read-only: the client-side offer fields plus, on the HOST only, the
+                    // authoritative pending-proposal map (target key -> proposer pid).
+                    var osb = new StringBuilder($"OK incoming='{MergerSync.IncomingFromPid}' outgoing='{MergerSync.OutgoingToPid}' ");
+                    if (!MPServer.IsRunning) { osb.Append("pending=n/a"); return osb.ToString(); }
+                    osb.Append("pending=[");
+                    try
+                    {
+                        var okeys = new System.Collections.Generic.List<string>(MPServer._mergerPendingByTarget.Keys);
+                        okeys.Sort(StringComparer.Ordinal);
+                        int oi = 0;
+                        foreach (var ok in okeys)
+                        {
+                            if (oi++ > 0) osb.Append(',');
+                            osb.Append(ok).Append("<-").Append(MPServer._mergerPendingByTarget[ok]?.From ?? "");
+                        }
+                    }
+                    catch { }
+                    osb.Append(']');
+                    return osb.ToString();
                 }
 
                 case "regstate":

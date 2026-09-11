@@ -3591,8 +3591,16 @@ namespace BigAmbitionsMP
         {
             var list = new List<MpMergerMember>();
             foreach (var kv in MergerSync.StoreGroups)
-                foreach (var s in kv.Value)
-                    list.Add(new MpMergerMember { StableId = s, Name = GrantSync.NameOf(s), Group = kv.Key });
+            {
+                // Phase 1-A: members go down in JOIN ORDER with their index and the group's mint
+                // sequence beside them, so the founder, the order and which of two companies is the
+                // older one all survive a save/load (both fields are additive — an old manifest that
+                // has neither still restores, founder = first member in stored order).
+                long gseq = MergerSync.SeqOfGroup(kv.Key);
+                int ord = 0;
+                foreach (var s in MergerSync.JoinOrderOfGroup(kv.Key))
+                    list.Add(new MpMergerMember { StableId = s, Name = GrantSync.NameOf(s), Group = kv.Key, Order = ord++, GroupSeq = gseq });
+            }
             return list;
         }
 

@@ -810,36 +810,38 @@ namespace BigAmbitionsMP
                     }
                     Plugin.Logger.LogInfo($"[Patcher] ClientRivalStats populated: {payload.Stats.Count} entries, {bizRows} business income rows.");
 
-                    // If the leaderboard UI is currently visible (its
-                    // GameObject is active in the hierarchy), re-call its
-                    // Load() so the just-arrived stats are reflected.  We
-                    // CHECK activeInHierarchy explicitly — Load() on a
-                    // hidden/uninitialized RivalLeaderboard can dereference
-                    // null serialized fields and crash the process natively.
-                    try
-                    {
-                        var lbs = UnityEngine.Object.FindObjectsOfType(typeof(UI.Smartphone.Apps.Rivals.RivalLeaderboard));
-                        if (lbs != null && lbs.Length > 0)
-                        {
-                            for (int i = 0; i < lbs.Length; i++)
-                            {
-                                var lb = lbs[i] as UI.Smartphone.Apps.Rivals.RivalLeaderboard;
-                                if (lb == null) continue;
-                                bool active = false;
-                                try { active = lb.gameObject != null && lb.gameObject.activeInHierarchy; } catch { }
-                                if (!active)
-                                {
-                                    Plugin.Logger.LogInfo("[Patcher] Skipping Load() on inactive RivalLeaderboard.");
-                                    continue;
-                                }
-                                try { lb.Load(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] RivalLeaderboard.Load post-stats: {ex.Message}"); }
-                            }
-                        }
-                    }
-                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] post-stats Load re-call: {ex.Message}"); }
+                    // The just-arrived stats change every row: re-Load an OPEN leaderboard.
+                    RefreshRivalLeaderboardIfVisible();
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyRivalsStatsSnapshot: {ex.Message}"); }
             });
+        }
+        /// <summary>Re-Load an OPEN rivals leaderboard so a state change is reflected without
+        /// closing the app. We CHECK activeInHierarchy explicitly - Load() on a hidden/uninitialized
+        /// RivalLeaderboard can dereference null serialized fields and crash the process natively.
+        /// MAIN THREAD ONLY. Callers: the rivals-stats apply above, and MergerSync.ApplyState
+        /// (Phase 1-B: membership decides which rows fold into one company entry).</summary>
+        public static void RefreshRivalLeaderboardIfVisible()
+        {
+            try
+            {
+                var lbs = UnityEngine.Object.FindObjectsOfType(typeof(UI.Smartphone.Apps.Rivals.RivalLeaderboard));
+                if (lbs == null || lbs.Length == 0) return;
+                for (int i = 0; i < lbs.Length; i++)
+                {
+                    var lb = lbs[i] as UI.Smartphone.Apps.Rivals.RivalLeaderboard;
+                    if (lb == null) continue;
+                    bool active = false;
+                    try { active = lb.gameObject != null && lb.gameObject.activeInHierarchy; } catch { }
+                    if (!active)
+                    {
+                        Plugin.Logger.LogInfo("[Patcher] Skipping Load() on inactive RivalLeaderboard.");
+                        continue;
+                    }
+                    try { lb.Load(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] RivalLeaderboard.Load refresh: {ex.Message}"); }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] leaderboard refresh: {ex.Message}"); }
         }
 
         /// <summary>
@@ -3429,9 +3431,49 @@ namespace BigAmbitionsMP
             {
                 if (string.IsNullOrEmpty(id)) return;
                 if (!ClientRivalStats.TryGetValue(id, out var stat)) return;
-                bool hasInc = stat.IncomeHistory   != null && stat.IncomeHistory.Count   > 0;
-                bool hasBiz = stat.BizCountHistory != null && stat.BizCountHistory.Count > 0;
-                if (!hasInc && !hasBiz) return;
+
+                // r2/R4: a pid that ANCHORS a foreign merged company carries that COMPANY's single
+                // leaderboard row, so its chart must be the COMPANY's - the ELEMENTWISE SUM over the
+                // known members' series, aligned by .Day (a Day present in any member's series appears
+                // once; members lacking it add 0). A plain pid keeps the per-player series.
+                // ACCEPTED: the PORTRAIT stays the anchor's - SelectedRivalUI resolves it from
+                // data.rivalId (decompile :101/:131), and only a real session pid survives the
+                // OnRivalDefeat guard and the save-time synthetic-state strip.
+                var incPts = new List<Tuple<int, float>>();
+                var bizPts = new List<Tuple<int, int>>();
+                var company = MPPatches.MergerRivalsFold.ForeignCompanyAnchoredBy(id);
+                if (company != null)
+                {
+                    var incSum = new System.Collections.Generic.Dictionary<int, float>();
+                    var bizSum = new System.Collections.Generic.Dictionary<int, int>();
+                    foreach (var pid in company.MemberPidsOrdered ?? new List<string>())
+                    {
+                        if (string.IsNullOrEmpty(pid)) continue;
+                        if (!ClientRivalStats.TryGetValue(pid, out var ms) || ms == null) continue;
+                        if (ms.IncomeHistory != null)
+                            foreach (var pt in ms.IncomeHistory)
+                                if (pt != null) { incSum.TryGetValue(pt.Day, out var v); incSum[pt.Day] = v + pt.Value; }
+                        if (ms.BizCountHistory != null)
+                            foreach (var pt in ms.BizCountHistory)
+                                if (pt != null) { bizSum.TryGetValue(pt.Day, out var v); bizSum[pt.Day] = v + pt.Value; }
+                    }
+                    var days = new List<int>(incSum.Keys); days.Sort();
+                    foreach (var d in days) incPts.Add(new Tuple<int, float>(d, incSum[d]));
+                    var bdays = new List<int>(bizSum.Keys); bdays.Sort();
+                    foreach (var d in bdays) bizPts.Add(new Tuple<int, int>(d, bizSum[d]));
+                }
+                else
+                {
+                    if (stat.IncomeHistory != null)
+                        foreach (var pnt in stat.IncomeHistory)
+                            if (pnt != null) incPts.Add(new Tuple<int, float>(pnt.Day, pnt.Value));
+                    if (stat.BizCountHistory != null)
+                        foreach (var pnt in stat.BizCountHistory)
+                            if (pnt != null) bizPts.Add(new Tuple<int, int>(pnt.Day, pnt.Value));
+                }
+                bool hasInc = incPts.Count > 0;
+                bool hasBiz = bizPts.Count > 0;
+                if (!hasInc && !hasBiz && company == null) return;   // r6: a company anchor falls through so an empty sum still replaces a stale per-player chart
                 var states = SaveGameManager.Current?.rivalStates;
                 if (states == null) return;
 
@@ -3443,18 +3485,11 @@ namespace BigAmbitionsMP
                     st = new BigAmbitions.Rivals.RivalState { rivalId = id };
                     states.Add(st);
                 }
-                if (hasInc)
-                {
-                    st.weeklyIncomeHistory = new List<Tuple<int, float>>();
-                    foreach (var pnt in stat.IncomeHistory!)
-                        if (pnt != null) st.weeklyIncomeHistory.Add(new Tuple<int, float>(pnt.Day, pnt.Value));
-                }
-                if (hasBiz)
-                {
-                    st.numberOfBusinessesHistory = new List<Tuple<int, int>>();
-                    foreach (var pnt in stat.BizCountHistory!)
-                        if (pnt != null) st.numberOfBusinessesHistory.Add(new Tuple<int, int>(pnt.Day, pnt.Value));
-                }
+                if (hasInc || company != null) st.weeklyIncomeHistory = incPts;   // r7: same rule as the business series - a company anchor's empty sum replaces a stale per-player chart
+                // B3: for a COMPANY anchor the summed series is the whole truth - assign it even when it is
+                // empty, or a per-player series installed on this pid before it anchored a company survives
+                // as the company's chart. A plain pid keeps the old 'only when I have points' rule.
+                if (hasBiz || company != null) st.numberOfBusinessesHistory = bizPts;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] InstallPlayerRivalStateHistory '{id}': {ex.Message}"); }
         }

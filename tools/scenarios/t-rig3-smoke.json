@@ -1,0 +1,15 @@
+{
+  "id": "T-RIG3",
+  "title": "third instance smoke: three instances boot, each arms its own role letter, the third uses its own save root",
+  "preconditions": "Dev build deployed with the rig-3 hunks (role letter by install folder; BAMP_SIM_SEPARATE_SAVES=3). No session load - boot, identity and channel only.",
+  "instances": 3,
+  "vars": {},
+  "oracles_absent": ["NullReferenceException"],
+  "oracles_report": ["\\[MPSave\\] SIM: separate-client save root ENABLED"],
+  "steps": [
+    {"seq": 1, "role": "h", "cmd": "status", "expect_result": "role=h", "note": "Steam install = host role"},
+    {"seq": 2, "role": "c", "cmd": "status", "expect_result": "role=c", "note": "C:/BigAmbitions2 = c"},
+    {"seq": 3, "role": "d", "cmd": "status", "expect_result": "role=d", "note": "C:/BigAmbitions3 = d; its own sim save root is checked by the oracles_report line (logged at first store access, possibly before any mark)"},
+    {"seq": 4, "role": "all", "cmd": "mark RIG3 SMOKE OK", "expect_result": "OK MARK"}
+  ]
+}

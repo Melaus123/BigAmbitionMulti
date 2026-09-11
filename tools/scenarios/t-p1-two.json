@@ -1,0 +1,414 @@
+{
+  "id": "T-P1-2",
+  "title": "phase-1 merger, two players: company name, rivals fold + revert, notification relay, offer rows, withdrawn offers",
+  "preconditions": "Fixture save1 (host melaus/Prabaha, client Client1/REX). Dev build with P1-A r3, P1-B r2, P1-C and the rivals/notify/offers verbs. Result regexes were written against the verb formats in brief-testdrive-p1-verbs.md and mergestatus (name='..' founder=<pid> order=[names]) - re-check them against the verb builder's report before the first run. Run 2 lesson: waits are cmd-less sleep_s steps; every accepted propose is followed by a host 'offers' assertion.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "hostName": "Prabaha",
+    "clientName": "REX",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "\\[Merger\\] accept .* REFUSED",
+    "\\[NotifyRelay\\] shown 'bamp_test_not_allowed'",
+    "upload SKIPPED"
+  ],
+  "oracles_report": [
+    "\\[NotifyRelay\\]",
+    "\\[Merger\\] rivals list",
+    "\\[Merger\\] offer from",
+    "rivals list refresh",
+    "\\[Merger\\] propose to .* ignored"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
+          "within_s": 240
+        },
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
+          "within_s": 60
+        }
+      ]
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST P1-2 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "rivals",
+      "expect_result": "^OK rows=\\d+.*name='${clientName}'",
+      "note": "before the merge the host's list carries the client's character name as its own row"
+    },
+    {
+      "seq": 6,
+      "role": "c",
+      "cmd": "rivals",
+      "expect_result": "^OK rows=\\d+.*name='${hostName}'"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "note": "let the offer settle (state broadcast)",
+      "seq": 8
+    },
+    {
+      "role": "h",
+      "sleep_s": 2,
+      "note": "declared wait (moved from step 'merge propose ${clientPid}': the driver honours sleep_s only on a cmd-less step)",
+      "seq": 9
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "offers",
+      "expect_result": "incoming='${hostPid}'",
+      "note": "the incoming row exists on the target"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "outgoing='${clientPid}'.*pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "withdrew the proposal to '${clientPid}' \\(re-sent as a reminder\\)",
+          "within_s": 5
+        }
+      ],
+      "note": "r5 (user decision): re-offering the same side re-sends the offer as a reminder",
+      "seq": 12
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 13
+    },
+    {
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "outgoing='${clientPid}'.*pending=\\[${clientPid}<-${hostPid}\\]",
+      "seq": 14
+    },
+    {
+      "role": "c",
+      "cmd": "offers",
+      "expect_result": "incoming='${hostPid}'",
+      "note": "the target still sees one incoming row",
+      "seq": 15
+    },
+    {
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent",
+      "note": "a second reminder inside 60 s is throttled (cooldown toast on the host, table unchanged)",
+      "seq": 16
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 17
+    },
+    {
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]$",
+      "seq": 18
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "merge unpropose",
+      "expect_result": "OK merge unpropose sent"
+    },
+    {
+      "role": "h",
+      "sleep_s": 2,
+      "note": "declared wait (moved from step 'merge unpropose': the driver honours sleep_s only on a cmd-less step)",
+      "seq": 20
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "offers",
+      "expect_result": "incoming=''",
+      "note": "a withdrawal clears the target's row silently"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "outgoing=''.*pending=\\[\\]"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent",
+      "note": "the 60 s anti-spam cooldown applies to a WITHDRAWN offer too: expect the host-local cooldown refusal, nothing pending"
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "note": "let the offer settle (state broadcast)",
+      "seq": 24
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "note": "declared wait (moved from step 'merge propose ${clientPid}': the driver honours sleep_s only on a cmd-less step)",
+      "seq": 25
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[\\]"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "mark waiting out the 60 s re-propose cooldown",
+      "expect_result": "OK MARK"
+    },
+    {
+      "role": "h",
+      "sleep_s": 62,
+      "note": "declared wait (moved from step 'mark waiting out the 60 s re-propose cooldown': the driver honours sleep_s only on a cmd-less step)",
+      "seq": 28
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "note": "let the offer settle (state broadcast)",
+      "seq": 30
+    },
+    {
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]",
+      "note": "the host accepted the offer (run 2 lesson: 'sent' is not 'accepted')",
+      "seq": 31
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] FORMED group",
+          "within_s": 20
+        }
+      ]
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9].*name='${hostName} & ${clientName}' founder=${hostPid} order=\\[${hostName},${clientName}\\]",
+      "capture": {
+        "clientShop": "keys=\\['([^']+)'"
+      }
+    },
+    {
+      "seq": 34,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9].*name='${hostName} & ${clientName}' founder=${hostPid}",
+      "capture": {
+        "hostShop": "keys=\\['([^']+)'"
+      }
+    },
+    {
+      "seq": 35,
+      "role": "h",
+      "cmd": "rivals",
+      "expect_result": "^(?!.*name='${clientName}')(?!.*name='${hostName}').*name='${hostName} & ${clientName}';id='me'",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] rivals list: folded",
+          "within_s": 5
+        }
+      ],
+      "note": "one company row, keyed as the local player's own row; no separate REX / Prabaha rows"
+    },
+    {
+      "seq": 36,
+      "role": "c",
+      "cmd": "rivals",
+      "expect_result": "^(?!.*name='${clientName}')(?!.*name='${hostName}').*name='${hostName} & ${clientName}';id='me'",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Merger\\] rivals list: folded",
+          "within_s": 5
+        }
+      ]
+    },
+    {
+      "seq": 37,
+      "role": "h",
+      "cmd": "notify employeehelper_notification_employee_retired ${hostShop}",
+      "expect_result": "^OK notify key='employeehelper_notification_employee_retired' addr='${hostShop}'",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[NotifyRelay\\] shown 'employeehelper_notification_employee_retired' for '${hostShop}' from '${hostPid}'",
+          "within_s": 15
+        }
+      ],
+      "note": "an owner's allow-listed toast about its own shop reaches the partner"
+    },
+    {
+      "seq": 38,
+      "role": "c",
+      "cmd": "notify notification_unpaid_licensing_fee ${clientShop}",
+      "expect_result": "^OK notify key='notification_unpaid_licensing_fee' addr='${clientShop}'",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[NotifyRelay\\] shown 'notification_unpaid_licensing_fee' for '${clientShop}' from '${clientPid}'",
+          "within_s": 15
+        }
+      ]
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "cmd": "notify bamp_test_not_allowed ${hostShop}",
+      "expect_result": "^OK notify key='bamp_test_not_allowed'",
+      "note": "not on the allow-list: must NOT relay (oracles_absent checks the client log)"
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "note": "declared wait (moved from step 'notify bamp_test_not_allowed ${hostShop}': the driver honours sleep_s only on a cmd-less step)",
+      "seq": 40
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "cmd": "notify employeehelper_notification_employee_retired ${clientShop}",
+      "expect_result": "^OK notify",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[NotifyRelay\\] 'employeehelper_notification_employee_retired' not relayed - no owned business named",
+          "within_s": 10
+        }
+      ],
+      "note": "a toast naming the PARTNER's shop is not mine to relay (TrulyMine gate)"
+    },
+    {
+      "seq": 42,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] '${clientPid}' left their merger group",
+          "within_s": 20
+        }
+      ]
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "note": "declared wait (moved from step 'merge leave': the driver honours sleep_s only on a cmd-less step)",
+      "seq": 43
+    },
+    {
+      "seq": 44,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 45,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 46,
+      "role": "h",
+      "cmd": "rivals",
+      "expect_result": "^(?!.*name='${hostName} & ${clientName}').*name='${clientName}'",
+      "note": "REVERT (user requirement): the client's own character name is back, no company row"
+    },
+    {
+      "seq": 47,
+      "role": "c",
+      "cmd": "rivals",
+      "expect_result": "^(?!.*name='${hostName} & ${clientName}').*name='${hostName}'"
+    },
+    {
+      "seq": 48,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[\\]"
+    },
+    {
+      "seq": 49,
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK",
+      "note": "post-run: the manager checks both saves carry no company name (hsg reader)"
+    },
+    {
+      "seq": 50,
+      "role": "both",
+      "cmd": "mark TEST P1-2 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

@@ -205,6 +205,7 @@ namespace BigAmbitionsMP
         ServiceCarResume      = 204,     // Rider → Host → OWNER: the rider boarded (native DriveAway on our GhostTaxi) or cancelled the map — resume the car's previous driving state.
         ShopValuation         = 205,     // H-BIZ-1 (2026-09-03, user option A): "request": viewer → Host → the shop's OWNER when the BizMan page of another PLAYER's shop opens; "answer": owner → Host → exactly ONE viewer (ToPid) carrying the game's own closure figure for that shop (interior items' selling prices + vehicles at the address + deposit — BizManPresentation.OnTerminateContractConfirm's formula). No grant gate: the native page shows an estimate to anyone. Small, on demand, never broadcast.
         BusinessChangeBatch   = 206,     // 2026-09-10 (burst fix): several changed business records in ONE envelope so the 4 KB deflate floor applies — the host sweep and the join/daily delta use it; a single immediate push still uses BusinessChange.
+        NotificationRelay     = 207,     // Merger slice 6 (2026-09-10, user requirement: the top-right pop-ups must MATCH on every member of a merged company): ONE business-scoped game toast — the GAME'S OWN headerKey + notificationData — from the member whose shop raised it, via the Host, to every OTHER ONLINE member of THAT sender's group. No new on-screen text: the receiver calls the game's own Notifications.Show with the same key, untracked (nothing persisted) and click-inert. Never leaves the group; non-members and other groups never receive it. Rides Gameplay (small, timely, and it writes no state a Bulk snapshot also writes).
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -597,6 +598,16 @@ namespace BigAmbitionsMP
         /// <summary>AddressKeys of every building OPERATED by a group member (host-resolved from its
         /// ownership map) — slice 3: each member's ownership-flip target set (minus their own).</summary>
         public List<string> BuildingKeys { get; set; } = new List<string>();
+        /// <summary>Phase 1-A (D3) — the company's display name: the FOUNDER's name, then the other
+        /// members' names in JOIN ORDER, joined with " &amp; ". The game has no per-player company name
+        /// (only per-building BusinessName), so these are character names.</summary>
+        public string       DisplayName        { get; set; } = "";
+        /// <summary>Phase 1-A — the founding member in PlayerId space ("" when the founder is offline).</summary>
+        public string       FounderPid         { get; set; } = "";
+        /// <summary>Phase 1-A — ONLINE member pids in JOIN ORDER (founder first).</summary>
+        public List<string> MemberPidsOrdered  { get; set; } = new List<string>();
+        /// <summary>Phase 1-A — the FULL roster's display names in JOIN ORDER (offline included).</summary>
+        public List<string> MemberNamesOrdered { get; set; } = new List<string>();
     }
 
     /// <summary>Merger slice 1 — ALL merged companies in the session (a session can hold several
@@ -604,16 +615,53 @@ namespace BigAmbitionsMP
     public class MergerStatePayload
     {
         public List<MergerGroupInfo> Groups { get; set; } = new List<MergerGroupInfo>();
+        /// <summary>Phase 1-A r4 (additive) — the host's PENDING OFFER table. Every machine derives its
+        /// merger chips from this, so an offer that was silently refused or quietly retired can never
+        /// leave a chip stranded on a client.</summary>
+        public List<MergerOfferInfo> Offers { get; set; } = new List<MergerOfferInfo>();
+    }
+
+    /// <summary>Phase 1-A r4 — ONE pending merger offer as the host holds it. TargetKey is the company id
+    /// the offer is addressed to, else the target's pid; TargetPids are the ONLINE players that key
+    /// resolves to (any of them may answer); AskedPid is the player the proposer actually clicked, which
+    /// is the row their "Cancel offer" chip belongs on.</summary>
+    public class MergerOfferInfo
+    {
+        public string       From       { get; set; } = "";
+        public string       TargetKey  { get; set; } = "";
+        public string       AskedPid   { get; set; } = "";
+        public List<string> TargetPids { get; set; } = new List<string>();
     }
 
     /// <summary>Merger slice 1 — form/dissolve traffic. Client → host: Action = "propose" (TargetPid set)
     /// / "unpropose" / "accept" / "decline" / "leave". Host → member: Action = "proposal" (FromPid =
-    /// proposer) / "withdrawn" (proposer cancelled) / "declined" / "cooldown" (re-propose throttled).</summary>
+    /// proposer) / "declined" / "cooldown" (re-propose throttled) / "busy" (the other side already holds
+    /// an offer). r4: these are NOTIFICATIONS ONLY — every chip and row is derived from
+    /// MergerStatePayload.Offers, and the old "withdrawn" relay is gone.</summary>
     public class MergerRequestPayload
     {
         public string Action    { get; set; } = "";
         public string TargetPid { get; set; } = "";
         public string FromPid   { get; set; } = "";
+    }
+
+    /// <summary>Merger slice 6 - ONE relayed business-scoped notification (MessageType.NotificationRelay).
+    /// Carries the GAME'S OWN header key and notification data verbatim, so the receiver renders the
+    /// game's wording, icon and localisation - the mod invents no text. AddressKey is resolved on the
+    /// SENDING machine (display name -> registration -> address key) and is the only address that
+    /// travels; the data dictionary holds only display names the game itself put there. StampMinute
+    /// (Day*1440 + minute of day) makes the receiver's duplicate identifier stable, so the game's
+    /// native de-dupe collapses the same event arriving twice.</summary>
+    public class NotificationRelayPayload
+    {
+        public string PlayerId    { get; set; } = "";   // the member whose machine raised the toast
+        public int    Type        { get; set; }         // UI.Notification.NotificationType
+        public string HeaderKey   { get; set; } = "";   // the game's own localisation key
+        public Dictionary<string, string> Data { get; set; } = new Dictionary<string, string>();
+        public string AddressKey  { get; set; } = "";   // the sender's business the toast is about
+        public float  Seconds     { get; set; } = 4f;
+        public bool   Sound       { get; set; } = true;
+        public long   StampMinute { get; set; }
     }
 
     /// <summary>Round-44 — a simulated customer's appearance, shipped once per customer so both players

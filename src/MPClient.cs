@@ -553,6 +553,14 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.NotificationRelay:
+                {
+                    // Slice 6, host-relayed: a partner's business pop-up — show the GAME'S own toast here.
+                    var nr = env.GetPayload<NotificationRelayPayload>();
+                    if (nr != null) GameStatePatcher.EnqueueOnMainThread(() => NotificationRelay.ApplyRelayed(nr));
+                    break;
+                }
+
                 // ── Shared-shop management (Business PERMISSION feature) — separate from the merger case above ──
                 case MessageType.SharedScheduleEdit:
                 {
@@ -622,31 +630,21 @@ namespace BigAmbitionsMP
 
                 case MessageType.MergerRequest:
                 {
-                    // "proposal": someone wants to merge with ME — surface Accept/Decline in the
-                    // Permissions tab. "declined": my proposal was turned down.
+                    // r4: NOTIFICATIONS ONLY. The Accept/Decline row and the "Cancel offer" chip are derived
+                    // from MergerState.Offers in MergerSync.ApplyState, which arrives one round trip behind
+                    // this toast — nothing here writes UI state, and a withdraw is silent (no relay at all).
                     var mr = env.GetPayload<MergerRequestPayload>();
                     if (mr == null) break;
                     GameStatePatcher.EnqueueOnMainThread(() =>
                     {
                         if (mr.Action == "proposal")
-                        {
-                            MergerSync.IncomingFromPid = mr.FromPid ?? "";
                             PassengerHud.Toast($"{mr.FromPid} proposes a company merger — see Permissions.");
-                        }
-                        else if (mr.Action == "withdrawn")
-                        {
-                            MergerSync.IncomingFromPid = "";   // silent — a withdraw must not be a notification channel
-                        }
                         else if (mr.Action == "declined")
-                        {
-                            MergerSync.OutgoingToPid = "";
                             PassengerHud.Toast("Merger proposal declined.");
-                        }
                         else if (mr.Action == "cooldown")
-                        {
-                            MergerSync.OutgoingToPid = "";
                             PassengerHud.Toast("Wait a minute before proposing to them again.");
-                        }
+                        else if (mr.Action == "busy")   // phase 1-A r2: the other side already holds a pending offer (wording approved 2026-09-11)
+                            PassengerHud.Toast("They already have an offer pending.");
                     });
                     break;
                 }

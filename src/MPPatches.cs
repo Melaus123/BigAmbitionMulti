@@ -1707,6 +1707,7 @@ namespace BigAmbitionsMP
                     // and the client injects the host/other clients.
                     if (!MPClient.IsClientInWorld && !MPServer.IsRunning) return;
                     GameStatePatcher.RivalsLeaderboardLoadRunning = true;
+                    MergerRivalsFold.BeginLoad();   // merger fold: this Load's folded-company cache
                     // Reset on EVERY Load (before the throttle) so the re-Load
                     // fired when the stats snapshot arrives logs fresh income
                     // samples — otherwise the diag cap is spent on the first
@@ -1845,6 +1846,10 @@ namespace BigAmbitionsMP
                                 // rd's replica regs whose dailyIncomes are empty here).
                                 try { if (!string.IsNullOrEmpty(ps.MostActiveNeighborhood)) lb.mostActiveNeighborhood = ps.MostActiveNeighborhood; } catch { }
                             }
+                            // MERGER Phase 1-B (B2): when this pid anchors a foreign merged company, the
+                            // row IS that company - name, income and lists are the members' sum/union,
+                            // not the anchor's own (which the populate above just restored).
+                            MergerRivalsFold.ApplyToLeaderboardRow(id, rd, lb);
                         }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_GetRivalLeaderboardData] player row '{id}': {ex.Message}"); }
                         return;
@@ -2119,6 +2124,338 @@ namespace BigAmbitionsMP
         // GATED to the Load context only (RivalsLeaderboardLoadRunning) so
         // GetAllRivalData's other callers — CityMapFilters.CreateSpecialRivalFilters
         // and RivalsHelper.GetPlayerRanking — never see the synthetic players.
+        // ===== MERGER Phase 1-B: one rivals row per merged company (map SS25) =====
+        /// <summary>
+        /// Folds a merged company's members into ONE rivals-list entry (user requirement 2026-09-10:
+        /// a merged company is ONE entry, every figure the SUM of the members', separate groups stay
+        /// separate). Everything here is computed locally from state this machine already holds - no
+        /// protocol change, and with no merger in the session every branch is a no-op.
+        ///
+        /// INCOME IS SUMMED OVER DE-DUPLICATED PER-BUSINESS ROWS, NOT PER-MEMBER TOTALS. A member's
+        /// published WeeklyIncome is FinancialSummaryHelper.GetLastFinancialSummaries(7).totalProfit
+        /// (RivalSelfStats.Build), and Patch_FinancialSummary_OwnBusinessesOnly deliberately keeps
+        /// merger-FLIPPED partner shops IN each member's daily summary ("a merged company's combined
+        /// books") - so two members' totals already overlap on every flipped address and adding them
+        /// would count the same shop twice. Address-keyed de-duplication is immune to that.
+        ///
+        /// ONE BUSINESS DEFINITION for every member including the local one: the NATIVE leaderboard
+        /// test (RivalLeaderboard.GetPlayerLeaderboardData decompile :73 - generatesrevenue-tagged, or
+        /// the factory) applied to the local BuildingRegistration behind each address. The published
+        /// address sets (RivalSelfStats: every non-residential rented reg) only say WHICH addresses
+        /// belong to the company; they never decide what counts as a business.
+        /// </summary>
+        internal static class MergerRivalsFold
+        {
+            /// <summary>One company's folded totals.</summary>
+            internal sealed class Company
+            {
+                internal float  WeeklyIncome;
+                internal int    KnownMembers;      // r2/R2: members whose stats row was present
+                internal int    NoFigures;         // r2/R2: members with no stats row (offline)
+                internal string Neighborhood = "";
+                internal readonly System.Collections.Generic.List<BuildingRegistration> Businesses = new();
+                internal readonly System.Collections.Generic.List<BuildingRegistration> Buildings  = new();
+            }
+
+            /// <summary>Foreign companies folded during THIS leaderboard Load, keyed by the anchor pid
+            /// whose row carries them. Filled in the GetAllRivalData Postfix (which runs first), read in
+            /// the GetRivalLeaderboardData Postfix - so the pass over registrations happens once.</summary>
+            private static readonly System.Collections.Generic.Dictionary<string, Company> _anchorRows = new();
+
+            internal static void BeginLoad() { try { _anchorRows.Clear(); } catch { } }
+
+            /// <summary>The native leaderboard's business test (GetPlayerLeaderboardData :73).</summary>
+            private static bool NativeRevenueBusiness(BuildingRegistration reg)
+            {
+                try
+                {
+                    if (reg.businessTypeName == "ba:businesstype_factory") return true;
+                    return BusinessTypeHelper.GetData(reg).HasTag(BigAmbitions.Tags.TagRef.Businesstag.generatesrevenue);
+                }
+                catch { return false; }
+            }
+
+            /// <summary>Weekly income for one company address: the host-authoritative figure when the
+            /// stats snapshot carries it, else the local registration's own average.</summary>
+            private static float IncomeOf(string key, BuildingRegistration reg)
+            {
+                if (GameStatePatcher.ClientBusinessIncomeByAddress.TryGetValue(key, out var inc)) return inc;
+                try { return reg.GetAvgWeeklyIncome(); } catch { return 0f; }
+            }
+
+            /// <summary>Sum/union one company. <paramref name="memberPids"/> are its ONLINE members;
+            /// <paramref name="group"/> is the company itself - its BuildingKeys cover members who are
+            /// OFFLINE; <paramref name="includeLocalPlayer"/> adds THIS machine's own operations (true
+            /// only for MY company - the local player is the one member no snapshot row describes).
+            /// Null when nothing could be resolved.
+            ///
+            /// r2/R1 ADDRESS SOURCE: the union over the members of ClientRivalStats[pid].Businesses[]
+            /// .AddressKey (host-authoritative; present on the HOST and on clients alike) UNION the
+            /// group's BuildingKeys (Protocol.cs:599 - every building operated by ANY member, offline
+            /// included). ClientRivalBusinessAddrs is NEVER read here: it is written only on the client
+            /// apply path (GameStatePatcher.cs:808), so on the HOST every foreign company folded to
+            /// $0 / 0 businesses.
+            /// r2/R2 INCOME SCALE: WeeklyIncome is the SUM of the members' self-reported NET figures
+            /// (RivalStatsInfo.WeeklyIncome - the same FinancialSummaryHelper totalProfit the native
+            /// local row and every remote player row use), NOT the per-business GROSS sum: one sort
+            /// field, one scale. The LOCAL player's own contribution is left to the native row (see the
+            /// GetPlayerLeaderboardData Postfix). No double count - a partner's flipped replica
+            /// registrations report $0 per-business and MergerWallet mirrors the balance without a
+            /// transaction, so neither touches a member's summary. Per-business figures now weight
+            /// mostActiveNeighborhood only.</summary>
+            internal static Company? Build(MergerGroupInfo? group,
+                                           System.Collections.Generic.IEnumerable<string> memberPids,
+                                           bool includeLocalPlayer)
+            {
+                try
+                {
+                    var owners   = new System.Collections.Generic.HashSet<string>();
+                    var bizAddrs = new System.Collections.Generic.HashSet<string>();
+                    float netIncome = 0f; int known = 0, noFigures = 0;
+                    foreach (var pid in memberPids)
+                    {
+                        if (string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId) continue;
+                        owners.Add(pid);
+                        if (GameStatePatcher.ClientRivalStats.TryGetValue(pid, out var st) && st != null)
+                        {
+                            known++;
+                            netIncome += st.WeeklyIncome;
+                            if (st.Businesses != null)
+                                foreach (var b in st.Businesses)
+                                    if (b != null && !string.IsNullOrEmpty(b.AddressKey)) bizAddrs.Add(b.AddressKey);
+                        }
+                        else noFigures++;      // B4: an ONLINE member who has not self-reported yet - counted, logged once per Load
+                    }
+                    if (group?.BuildingKeys != null)
+                        foreach (var a in group.BuildingKeys) if (!string.IsNullOrEmpty(a)) bizAddrs.Add(a);
+                    if (!includeLocalPlayer && owners.Count == 0 && bizAddrs.Count == 0) return null;
+
+                    var gi = SaveGameManager.Current;
+                    if (gi == null || gi.BuildingRegistrations == null) return null;
+
+                    var biz  = new System.Collections.Generic.Dictionary<string, BuildingRegistration>();
+                    var bldg = new System.Collections.Generic.Dictionary<string, BuildingRegistration>();
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null) continue;
+                        try
+                        {
+                            string key = GameStateReader.AddressKey(reg);
+                            if (string.IsNullOrEmpty(key)) continue;
+                            // Businesses: a member's published address set, plus - for MY company - every
+                            // shop this machine itself rents, which under the slice-3 ownership flip
+                            // already includes partners' shops. The dictionary de-duplicates the overlap.
+                            bool localRented = includeLocalPlayer && reg.RentedByPlayer;
+                            if ((localRented || bizAddrs.Contains(key)) && NativeRevenueBusiness(reg)) biz[key] = reg;
+                            // Real estate: bought by this machine, or ledgered to a member.
+                            bool ownsBuilding = includeLocalPlayer && reg.BuildingOwnedByPlayer;
+                            if (!ownsBuilding)
+                            {
+                                string owner = reg.buildingOwnerRivalId?.ToString() ?? "";
+                                ownsBuilding = owner.Length > 0 && owners.Contains(owner);
+                            }
+                            if (ownsBuilding) bldg[key] = reg;
+                        }
+                        catch { }
+                    }
+
+                    var co   = new Company();
+                    co.WeeklyIncome = netIncome;                 // r2/R2: members' NET figures, not per-business gross
+                    co.KnownMembers = known; co.NoFigures = noFigures;
+                    var hood = new System.Collections.Generic.Dictionary<string, float>();
+                    foreach (var kv in biz)
+                    {
+                        float wk = IncomeOf(kv.Key, kv.Value);   // weights the neighborhood pick ONLY
+                        co.Businesses.Add(kv.Value);
+                        string h = ""; try { h = kv.Value.Neighborhood ?? ""; } catch { }
+                        if (h.Length > 0) { hood.TryGetValue(h, out var s); hood[h] = s + wk; }
+                    }
+                    foreach (var kv in bldg) co.Buildings.Add(kv.Value);
+                    float best = float.MinValue;
+                    foreach (var kv in hood) if (kv.Value > best) { best = kv.Value; co.Neighborhood = kv.Key; }
+                    return co;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] rivals fold build: {ex.Message}"); return null; }
+            }
+
+            /// <summary>The pid a FOREIGN company's single row is keyed on: its founder when that member
+            /// is online, else the first online member in join order. ALWAYS a real session pid - a row
+            /// keyed by a GroupId would slip past the OnRivalDefeat player guard and the save-time
+            /// synthetic-state strip, both of which recognise player ids only.</summary>
+            internal static string AnchorPid(MergerGroupInfo g)
+            {
+                if (g == null) return "";
+                try
+                {
+                    string f = g.FounderPid ?? "";
+                    if (f.Length > 0 && GameStatePatcher.ClientPlayerRoster.ContainsKey(f)) return f;
+                    foreach (var pid in g.MemberPidsOrdered ?? new System.Collections.Generic.List<string>())
+                        if (!string.IsNullOrEmpty(pid) && GameStatePatcher.ClientPlayerRoster.ContainsKey(pid)) return pid;
+                }
+                catch { }
+                return "";
+            }
+
+            /// <summary>Is this remote pid folded away - a member of MY company, or a non-anchor member of
+            /// a foreign one? Such a pid must never become a leaderboard row of its own.</summary>
+            internal static bool IsFoldedAway(string pid)
+            {
+                if (string.IsNullOrEmpty(pid) || !MergerSync.AnyGroup) return false;
+                if (MergerSync.IsMemberPid(pid)) return true;              // my company: folded onto MY row
+                try
+                {
+                    foreach (var g in MergerSync.ForeignGroups)
+                    {
+                        var pids = g.MemberPidsOrdered;
+                        if (pids == null || !pids.Contains(pid)) continue;
+                        return pid != AnchorPid(g);                        // only the anchor survives
+                    }
+                }
+                catch { }
+                return false;
+            }
+
+            /// <summary>The foreign company whose single row this pid anchors, or null.</summary>
+            internal static MergerGroupInfo? ForeignCompanyAnchoredBy(string pid)
+            {
+                if (string.IsNullOrEmpty(pid) || !MergerSync.AnyGroup) return null;
+                try { foreach (var g in MergerSync.ForeignGroups) if (AnchorPid(g) == pid) return g; }
+                catch { }
+                return null;
+            }
+
+            private static void Fill(System.Collections.Generic.List<BuildingRegistration>? dst,
+                                    System.Collections.Generic.List<BuildingRegistration> src)
+            {
+                if (dst == null) return;
+                dst.Clear();
+                foreach (var r in src) dst.Add(r);
+            }
+
+            /// <summary>B2, step 1 - before the synthetic anchor row reaches the native row builder,
+            /// give it the company's NAME and the members' UNIONED lists. Doing it here (not only on the
+            /// finished row) also keeps GetRivalLeaderboardData :104 from reading a zero-business anchor
+            /// and calling DefeatRival on a company that plainly owns shops.</summary>
+            internal static void ApplyToRivalData(BigAmbitions.Rivals.RivalData rd, MergerGroupInfo g)
+            {
+                if (rd == null || g == null) return;
+                try
+                {
+                    var co = Build(g, g.MemberPidsOrdered ?? new System.Collections.Generic.List<string>(), false);
+                    if (co == null) return;
+                    _anchorRows[rd.id ?? ""] = co;
+                    string name = MergerSync.GroupDisplayName(g.GroupId);
+                    if (!string.IsNullOrEmpty(name)) rd.rivalName = name;
+                    Fill(rd.ownedBuildings, co.Buildings);
+                    Fill(rd.ownedBusinesses, co.Businesses);
+                    Fill(rd.ownedRetailOfficeBusinesses, co.Businesses);
+                    Log(g.MemberPidsOrdered?.Count ?? 0, string.IsNullOrEmpty(name) ? (rd.rivalName ?? "") : name, co);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] foreign fold: {ex.Message}"); }
+            }
+
+            /// <summary>B2, step 2 - the finished row. The player-row branch above rebuilt rd's lists
+            /// from the ANCHOR's own ownership and copied them onto lb; put the company back on both.</summary>
+            internal static void ApplyToLeaderboardRow(string anchorPid, BigAmbitions.Rivals.RivalData rd,
+                                                      UI.Smartphone.Apps.Rivals.RivalLeaderboardData lb)
+            {
+                if (lb == null || string.IsNullOrEmpty(anchorPid) || !MergerSync.AnyGroup) return;
+                if (!_anchorRows.TryGetValue(anchorPid, out var co) || co == null) return;
+                var g = ForeignCompanyAnchoredBy(anchorPid);
+                if (g == null) return;
+                try
+                {
+                    string name = MergerSync.GroupDisplayName(g.GroupId);
+                    if (!string.IsNullOrEmpty(name)) lb.entryName = name;
+                    lb.weeklyIncome = co.WeeklyIncome;
+                    lb.ownedBusinesses = co.Businesses;
+                    lb.ownedBuildings  = co.Buildings;
+                    lb.mostActiveNeighborhood = co.Neighborhood ?? "";
+                    lb.isDefeated = false;
+                    if (rd != null)
+                    {
+                        Fill(rd.ownedBuildings, co.Buildings);
+                        Fill(rd.ownedBusinesses, co.Businesses);
+                        Fill(rd.ownedRetailOfficeBusinesses, co.Businesses);
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] foreign row: {ex.Message}"); }
+            }
+
+            /// <summary>B5 - one INFO line per company folded on a leaderboard load.</summary>
+            internal static void Log(int members, string name, Company co)
+            {
+                string offline = co.NoFigures > 0 ? $", {co.NoFigures} member(s) without figures" : "";   // B4: members push their figures (B1), so a gap is 'not yet', not 'offline'
+                Plugin.Logger.LogInfo(
+                    $"[Merger] rivals list: folded {members} member(s) into '{name}' " +
+                    $"(income ${co.WeeklyIncome:N0}, businesses {co.Businesses.Count}, buildings {co.Buildings.Count}{offline})");
+            }
+        }
+
+        // ===== MERGER Phase 1-B (B1b): the LOCAL player's row IS the company row =====
+        // RivalLeaderboard.GetPlayerLeaderboardData (decompile :68-99) builds the local player's row
+        // natively from local data with rivalId == null, and Load appends it at :28 - the host stats
+        // snapshot never touches it. When I am merged, rewrite that ONE row into the COMPANY row:
+        // company name, summed income, unioned business / real-estate lists, recomputed primary
+        // neighborhood. rivalId STAYS null - that is the native player-row contract the detail view and
+        // its charts read. Not merged => untouched, so single-player and unmerged sessions see no change.
+        [HarmonyPatch]
+        public static class Patch_RivalLeaderboard_GetPlayerLeaderboardData_MergerFold
+        {
+            static System.Reflection.MethodBase? TargetMethod() =>
+                VehicleManager.FindGameType("UI.Smartphone.Apps.Rivals.RivalLeaderboard")?.GetMethod("GetPlayerLeaderboardData",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                  | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.DeclaredOnly);
+
+            static void Postfix(UI.Smartphone.Apps.Rivals.RivalLeaderboardData __result)
+            {
+                try
+                {
+                    if (__result == null || !MergerSync.IAmMember) return;
+                    var members = MergerSync.MyMemberPidsOrdered;
+                    var co = MergerRivalsFold.Build(MergerSync.MyGroup, members, true);
+                    if (co == null) return;
+                    string name = MergerSync.MyGroupDisplayName;
+                    if (!string.IsNullOrEmpty(name)) __result.entryName = name;
+                    // r2/R2: the native value IS the local member's NET contribution (and already
+                    // includes the $0 replica rows), so ADD the other members' NET figures to it.
+                    __result.weeklyIncome += co.WeeklyIncome;
+                    __result.ownedBusinesses = co.Businesses;
+                    __result.ownedBuildings  = co.Buildings;
+                    __result.mostActiveNeighborhood = co.Neighborhood ?? "";
+                    int folded = 0;
+                    foreach (var pid in members) if (!string.IsNullOrEmpty(pid) && pid != MPConfig.PlayerId) folded++;
+                    MergerRivalsFold.Log(folded, string.IsNullOrEmpty(name) ? (__result.entryName ?? "") : name, co);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_GetPlayerLeaderboardData_MergerFold] {ex.Message}"); }
+            }
+        }
+
+        // ===== MERGER Phase 1-B (B1c): a company name is longer than one player's name =====
+        // RivalLeaderboardButton.SetUp (decompile :54-71) pushes data.entryName into a private
+        // TextMeshProUGUI laid out for a single character name. Turn word wrapping on and cap the
+        // overflow with an ellipsis so a multi-member company name degrades gracefully instead of
+        // clipping mid-glyph. The prefab's row height is NOT touched - the leaderboard instantiates its
+        // rows into a parent that sizes them, and growing one row there would desynchronise the list.
+        [HarmonyPatch]
+        public static class Patch_RivalLeaderboardButton_SetUp_MergerWrap
+        {
+            static System.Reflection.MethodBase? TargetMethod() =>
+                VehicleManager.FindGameType("UI.Smartphone.Apps.Rivals.RivalLeaderboardButton")?.GetMethod("SetUp",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                  | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly);
+
+            static void Postfix(TMPro.TextMeshProUGUI ___nameText)
+            {
+                try
+                {
+                    if (___nameText == null || !MergerSync.AnyGroup) return;   // inert with no merger anywhere
+                    ___nameText.enableWordWrapping = true;
+                    ___nameText.overflowMode = TMPro.TextOverflowModes.Ellipsis;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_RivalLeaderboardButton_SetUp_MergerWrap] {ex.Message}"); }
+            }
+        }
         [HarmonyPatch]
         public static class Patch_RivalsHelper_GetAllRivalData
         {
@@ -2137,7 +2474,8 @@ namespace BigAmbitionsMP
                     if (__result == null) return;
 
                     // GetAllRivalData returns a freshly-built List<RivalData> each
-                    // call (it does `new List<>(cache.Values.Where(...))`), so we
+                    // call (decompile RivalsHelper.cs:788 - new List<RivalData>(
+                    // RivalDataCache.Values); there is NO filter), so we
                     // can append our synthetic remote-player entries directly to
                     // that per-call list without polluting the cache or other
                     // callers.  (Gated to the Load context by the flag above.)
@@ -2166,15 +2504,26 @@ namespace BigAmbitionsMP
                     if (purged > 0)
                         Plugin.Logger.LogInfo($"[Patch_GetAllRivalData] purged {purged} stale player stub row(s).");
 
-                    int appended = 0;
+                    int appended = 0, suppressed = 0;
                     foreach (var kv in GameStatePatcher.ClientPlayerRoster)
                     {
                         string pid = kv.Key;
                         if (string.IsNullOrEmpty(pid)) continue;
                         if (pid == MPConfig.PlayerId) continue;   // local player: game's GetPlayerLeaderboardData path
+                        // MERGER Phase 1-B: a merged company is ONE entry. (B1a) the other members of MY
+                        // company fold onto my own native row; (B2) a foreign company folds onto its
+                        // FOUNDER's row - a real session pid, so the OnRivalDefeat player guard and the
+                        // save-time synthetic-state strip still recognise it. Either way the folded-away
+                        // members never appear as rivals of their own.
+                        if (MergerRivalsFold.IsFoldedAway(pid)) { suppressed++; continue; }
                         var syn = GameStatePatcher.BuildSyntheticPlayerRivalData(pid);
-                        if (syn != null) { list.Add(syn); appended++; }
+                        if (syn == null) continue;
+                        var foreign = MergerRivalsFold.ForeignCompanyAnchoredBy(pid);
+                        if (foreign != null) MergerRivalsFold.ApplyToRivalData(syn, foreign);
+                        list.Add(syn); appended++;
                     }
+                    if (suppressed > 0)
+                        Plugin.Logger.LogInfo($"[Patch_GetAllRivalData] merger: suppressed {suppressed} member row(s) - their company shows as one entry.");
 
                     if (appended > 0)
                         Plugin.Logger.LogInfo($"[Patch_GetAllRivalData] appended {appended} remote player(s) to the leaderboard list (now {list.Count}).");

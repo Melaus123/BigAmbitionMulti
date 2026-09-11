@@ -2542,15 +2542,16 @@ namespace BigAmbitionsMP
                     {
                         if (_mergerConfirmMode == "propose" && !string.IsNullOrEmpty(_mergerConfirmPid))
                         {
+                            // r4: ask and nothing else. The chip appears when the host's offer table says the
+                            // offer exists (synchronously on the host, one round trip on a client), so a refusal
+                            // - silent or toasted - leaves nothing behind and needs no local guard.
                             if (MPServer.IsRunning) MPServer.HostMergerAction("propose", _mergerConfirmPid, MPConfig.PlayerId);
                             else                    MPClient.SendMergerAction("propose", _mergerConfirmPid);
-                            MergerSync.OutgoingToPid = _mergerConfirmPid;
                         }
                         else if (_mergerConfirmMode == "accept")
                         {
                             if (MPServer.IsRunning) MPServer.HostMergerAction("accept", "", MPConfig.PlayerId);
                             else                    MPClient.SendMergerAction("accept");
-                            MergerSync.IncomingFromPid = "";
                         }
                         _hubPermSig = "";
                     }
@@ -2626,7 +2627,6 @@ namespace BigAmbitionsMP
                     {
                         if (MPServer.IsRunning) MPServer.HostMergerAction("decline", "", MPConfig.PlayerId);
                         else                    MPClient.SendMergerAction("decline");
-                        MergerSync.IncomingFromPid = "";
                         _hubPermSig = "";
                     }
                     else if (act == 11)                               // leave the merger (a last pair dissolves it)
@@ -2639,7 +2639,6 @@ namespace BigAmbitionsMP
                     {
                         if (MPServer.IsRunning) MPServer.HostMergerAction("unpropose", "", MPConfig.PlayerId);
                         else                    MPClient.SendMergerAction("unpropose");
-                        MergerSync.OutgoingToPid = "";
                         _hubPermSig = "";
                     }
                     return;
@@ -2996,7 +2995,11 @@ namespace BigAmbitionsMP
 #if BAMP_DEV
             if (MergerSync.IAmMember)
             {
-                AddPermRow(idx++, RowH, $"<b>Merged company</b>  <color={muted}>{string.Join(", ", MergerSync.MemberNames)}</color>",
+                // Phase 1-A (D3): the company's OWN name (founder first, then the others in join order)
+                // where the row used to list the roster; a host that sends no name falls back to it.
+                string coName = MergerSync.MyGroupDisplayName;
+                if (string.IsNullOrEmpty(coName)) coName = string.Join(", ", MergerSync.MemberNames);
+                AddPermRow(idx++, RowH, $"<b>Merged company</b>  <color={muted}>{coName}</color>",
                     ("Leave merger", grey, "merger", (byte)11, GrantKind.Vehicle));
             }
             if (!string.IsNullOrEmpty(MergerSync.IncomingFromPid))
@@ -3017,14 +3020,18 @@ namespace BigAmbitionsMP
                 bool gb = GrantSync.IsGranted(GrantKind.Business, me, pl);
 #if BAMP_DEV
                 // Merger chip (DEV-ONLY until the campaign ships): member of MY company → static
-                // "Merged"; member of ANOTHER company → static "In a company" (they must leave it
-                // before they can be proposed to); my proposal pending → "Cancel offer" (act 12
-                // withdraws — host arms a re-propose cooldown so withdraw/re-propose can't be used to
-                // spam notifications); else a Merge button (act 8 → confirm popup). A merger implies
-                // every key, so the kind toggles read fully granted while merged (IsGranted unions).
+                // "Merged"; my proposal pending on THIS player → "Cancel offer" (act 12 withdraws — host
+                // arms a re-propose cooldown so withdraw/re-propose can't be used to spam notifications).
+                // r4: both offer fields are DERIVED from the host's broadcast offer table, never set here;
+                // their CO-MEMBERS while that offer stands → static "In a company" (the one offer already
+                // reaches them, phase 1-A D4-1); else a Merge button (act 8 → confirm popup), which since
+                // phase 1-A is offered for a player in ANOTHER company too — accepting unions the two.
+                // A merger implies every key, so the kind toggles read fully granted while merged.
                 var mchip = (MergerSync.IAmMember && MergerSync.IsMemberPid(pl)) ? ("Merged", purple, "", (byte)0, GrantKind.Vehicle)
-                          : MergerSync.InAnyGroup(pl)                            ? ("In a company", grey, "", (byte)0, GrantKind.Vehicle)
                           : MergerSync.OutgoingToPid == pl                       ? ("Cancel offer", grey, "merger", (byte)12, GrantKind.Vehicle)
+                          : MergerSync.InAnyGroup(pl)
+                            && MergerSync.MergedRuntime(MergerSync.OutgoingToPid, pl)
+                                                                                 ? ("In a company", grey, "", (byte)0, GrantKind.Vehicle)
                           : ("Merge", grey, "pid:" + pl, (byte)8, GrantKind.Vehicle);
                 AddPermRow(idx++, RowH, pl,
                     ("Vehicle",  gv ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Vehicle),
@@ -3095,8 +3102,8 @@ namespace BigAmbitionsMP
                            "can leave the merger at any time.";
             if (_mergerConfirmLbl != null)
                 _mergerConfirmLbl.text = mode == "propose"
-                    ? $"<b>Propose merging companies with {pid}?</b>\n\n{terms}\n\nThey will be asked to accept."
-                    : $"<b>Merge companies with {pid}?</b>\n\n{terms}";
+                    ? $"<b>Propose merging companies with {MPNames.Resolve(pid)}?</b>\n\n{terms}\n\nThey will be asked to accept."
+                    : $"<b>Merge companies with {MPNames.Resolve(pid)}?</b>\n\n{terms}";
             _mergerConfirmGO.SetActive(true);
             _mergerConfirmGO.transform.SetAsLastSibling();   // above the tab content
         }
