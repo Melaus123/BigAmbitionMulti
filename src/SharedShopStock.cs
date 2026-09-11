@@ -142,7 +142,13 @@ namespace BigAmbitionsMP
         /// Scoped exactly like the stock substitution, and deliberately NOT extended to the aggregate
         /// `ProductsSoldLastWeek(itemName)`: that one loops the player's own rented registrations, and a shared
         /// shop's replica only counts as rented inside our render window, which cannot overlap the purchasing
-        /// agent's screen. So the owner's figures can never leak into the helper's own totals.</summary>
+        /// agent's screen. So the owner's figures can never leak into the helper's own totals.
+        ///
+        /// MERGER (wave 2, 2026-09-11) is the one exception to that last sentence, and not by this patch's doing:
+        /// a merger-flipped partner shop is RentedByPlayer on a member's machine PERMANENTLY, so the owner's sales
+        /// that SharedShopPrices.ApplyHistorySnapshot writes into the replica's orderHistory are visible to every
+        /// native routine that walks the member's rented registrations — the aggregate included. Company-wide is
+        /// arguably the right reading under a merger; it is written down here because nothing verifies it.</summary>
         [HarmonyPatch(typeof(FinancialSummaryHelper), nameof(FinancialSummaryHelper.ProductsSoldLastWeekInRegistration))]
         public static class Patch_ProductsSoldLastWeek_OwnerFigure
         {

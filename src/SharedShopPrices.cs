@@ -269,10 +269,15 @@ namespace BigAmbitionsMP
         /// <summary>OWNER, MAIN THREAD: answer ONE editor with the recent per-item sales of that shop.</summary>
         private static void OwnerAnswerHistory(SharedSalesHistoryPayload req)
         {
-            if (!GrantSync.IsGrantedDirect(GrantKind.Business, MPConfig.PlayerId, req.PlayerId))
+            // Merger phase 2 wave 2 (2026-09-11): the READ-side UNION — a DIRECT Business grant, or membership of
+            // my merged company. Decomposed rather than one GrantSync.IsGranted call so the sending log can say
+            // which of the two let the request in (the shape ApplyOnOwner already uses for routed price edits).
+            bool histDirect = GrantSync.IsGrantedDirect(GrantKind.Business, MPConfig.PlayerId, req.PlayerId);
+            bool histMerged = !histDirect && MergerSync.MergedRuntime(MPConfig.PlayerId, req.PlayerId);
+            if (!histDirect && !histMerged)
             {
                 if (_logged.Add("hist-nogrant|" + req.PlayerId))
-                    Plugin.Logger.LogInfo($"{Tag} sales-history request from '{req.PlayerId}' but they hold no Business grant from me — ignored.");
+                    Plugin.Logger.LogInfo($"{Tag} sales-history request from '{req.PlayerId}' but they hold no Business grant from me and are not a member of my company — ignored.");
                 return;
             }
             var reg = GameStatePatcher.FindRegistration(req.AddressKey);
@@ -324,7 +329,7 @@ namespace BigAmbitionsMP
                     }
             }
             catch { }
-            Plugin.Logger.LogInfo($"{Tag} sending '{req.PlayerId}' the last {HistoryDays} days of sales for '{req.AddressKey}': {reply.Days.Count} day(s), {rows} row(s), {reply.Products.Count} product(s) on sale.");
+            Plugin.Logger.LogInfo($"{Tag} sending '{req.PlayerId}' the last {HistoryDays} days of sales for '{req.AddressKey}': {reply.Days.Count} day(s), {rows} row(s), {reply.Products.Count} product(s) on sale.{(histMerged ? " (merged)" : "")}");
             if (MPServer.IsRunning) MPServer.HostRouteSharedSalesHistory(reply, MPConfig.PlayerId);
             else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedSalesHistory, MPConfig.PlayerId, reply));
         }
@@ -435,10 +440,12 @@ namespace BigAmbitionsMP
                     if (reg.retailPrices != null)
                         foreach (var rp in reg.retailPrices)
                             if (rp != null && rp.itemName != null && !_baseline.ContainsKey(rp.itemName)) _baseline[rp.itemName] = rp.price;
-                    // Wave 1 routes PRICE EDITS only: the sales/products snapshot is gated on a DIRECT grant at
-                    // both ends (MPServer.cs:5800, OwnerAnswerHistory below), so asking for a flipped shop would
-                    // only earn a dropped request in the host log.
-                    if (reopened && SharedShopSchedule.IsSharedShop(reg, addr)) RequestHistory(addr);
+                    // Wave 2 (2026-09-11) widened all three gates of the snapshot — requester (here), host
+                    // (MPServer.HostRouteSharedSalesHistory) and owner (OwnerAnswerHistory above) — to the grant
+                    // UNION, so a company member's NATIVE pricing tab on a merger-flipped partner shop lists the
+                    // owner's products and recent sales instead of the replica's empty ones. Same predicate as the
+                    // wave-1 price routing, so the tab that asks is exactly the tab whose edits route.
+                    if (reopened && PriceRouted(reg, addr)) RequestHistory(addr, SharedShopSchedule.IsMergedShop(reg, addr));
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} pricing session: {ex.Message}"); }
             }
@@ -460,11 +467,11 @@ namespace BigAmbitionsMP
             _openAddr = ""; _baseline.Clear(); _dirty.Clear();   // _held survives: it is address-keyed and expires on time
         }
 
-        private static void RequestHistory(string addr)
+        private static void RequestHistory(string addr, bool merged = false)
         {
             if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
             var p = new SharedSalesHistoryPayload { PlayerId = MPConfig.PlayerId, Action = "request", AddressKey = addr };
-            Plugin.Logger.LogInfo($"{Tag} pricing tab opened on '{addr}' — asking the owner for its recent sales.");
+            Plugin.Logger.LogInfo($"{Tag} pricing tab opened on '{addr}'{(merged ? " (merged)" : "")} — asking the owner for its recent sales.");
             if (MPServer.IsRunning) MPServer.HostRouteSharedSalesHistory(p, MPConfig.PlayerId);
             else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedSalesHistory, MPConfig.PlayerId, p));
         }

@@ -154,6 +154,21 @@ namespace BigAmbitionsMP
             try { return reg != null ? GameStateReader.AddressKey(reg) : ""; } catch { return ""; }
         }
 
+        /// <summary>Merger phase 2 wave 2 (2026-09-11): the buildings whose work-tab INFO is read from the owner —
+        /// a DIRECT-grant shared building, or a merger-flipped partner building (locally RentedByPlayer through the
+        /// flip, so a member's NATIVE tabs otherwise draw a replica whose interior never loaded). READ side only:
+        /// the edit routes still ride SendEdit, whose host gate stays permission-only until waves 3-4.</summary>
+        private static bool InfoRead(BuildingRegistration reg, string addr)
+        {
+            if (SharedShopSchedule.IsSharedShop(reg, addr)) return true;
+            if (!SharedShopSchedule.IsMergedShop(reg, addr)) return false;
+            // r2 (review MAJOR-1): IsMergedShop INCLUDES a partner's headquarters (the schedule pipeline wants it), but
+            // the host's SharedWorkAddressAllowed refuses HQ addresses for every routed op - a request would die there
+            // with a WARN every 5 s while the tab is open. HQ tabs are phase 4c; until then no info session for an HQ.
+            try { if (reg != null && reg.businessTypeName == "ba:businesstype_headquarters") return false; } catch { }
+            return true;
+        }
+
         /// <summary>The shared building whose work tab is open here, and which tab it is. Read by
         /// SharedShopStock, whose stock substitution is scoped to the surface actually on screen.</summary>
         internal static string OpenAddr => _openAddr;
@@ -186,7 +201,7 @@ namespace BigAmbitionsMP
         {
             var reg = OpenPageReg();
             string addr = AddrOf(reg);
-            if (reg == null || !SharedShopSchedule.IsSharedShop(reg, addr)) { CloseSession(); return false; }
+            if (reg == null || !InfoRead(reg, addr)) { CloseSession(); return false; }
             bool reopened = _openAddr != addr || _openTab != tab;
             _openAddr = addr; _openTab = tab;
             if (reopened)
@@ -1979,7 +1994,7 @@ namespace BigAmbitionsMP
         /// <summary>Ask the owner for each shared warehouse/factory card, debounced per address.</summary>
         private static void RequestCards()
         {
-            if (GrantSync.SharedManageCount == 0) return;   // review #11: no sweep when nothing is shared (single-player incl.)
+            if (GrantSync.SharedManageCount == 0 && MergerFlip.FlippedCount == 0) return;   // review #11: no sweep when nothing is shared (single-player incl.); wave 2 adds merger-flipped partner buildings
             var gi = SaveGameManager.Current;
             if (gi?.BuildingRegistrations == null) return;
             int sent = 0;
@@ -1990,7 +2005,7 @@ namespace BigAmbitionsMP
                 string type = ""; try { type = reg.GetBuildingType() ?? ""; } catch { }
                 if (type != "ba:buildingtype_warehouse") continue;
                 string addr = AddrOf(reg);
-                if (addr.Length == 0 || !SharedShopSchedule.IsSharedShop(reg, addr)) continue;
+                if (addr.Length == 0 || !InfoRead(reg, addr)) continue;
                 if (_cardNext.TryGetValue(addr, out var next) && now < next) continue;
                 _cardNext[addr] = now + PollSeconds;
                 _cardSig.TryGetValue(addr, out var sig);
@@ -2261,13 +2276,17 @@ namespace BigAmbitionsMP
         /// game's own methods — the only machine whose item data is authoritative.</summary>
         private static void OwnerAnswer(SharedWorkInfoPayload req)
         {
-            if (!GrantSync.IsGrantedDirect(GrantKind.Business, MPConfig.PlayerId, req.PlayerId))
+            // Merger phase 2 wave 2 (2026-09-11): the READ-side UNION — a DIRECT Business grant, or membership of
+            // my merged company. Decomposed so the sending log can say which of the two let the request in.
+            bool infoDirect = GrantSync.IsGrantedDirect(GrantKind.Business, MPConfig.PlayerId, req.PlayerId);
+            bool infoMerged = !infoDirect && MergerSync.MergedRuntime(MPConfig.PlayerId, req.PlayerId);
+            if (!infoDirect && !infoMerged)
             {
                 if (_logged.Add("work-nogrant|" + req.PlayerId))
-                    Plugin.Logger.LogInfo($"{Tag} work-info request from '{req.PlayerId}' but they hold no Business grant from me — ignored.");
+                    Plugin.Logger.LogInfo($"{Tag} work-info request from '{req.PlayerId}' but they hold no Business grant from me and are not a member of my company — ignored.");
                 return;
             }
-            BuildAndSendSnapshot(req.AddressKey, req.Tab, req.PlayerId, req.Sig);
+            BuildAndSendSnapshot(req.AddressKey, req.Tab, req.PlayerId, req.Sig, merged: infoMerged);
         }
 
         // ═══════════════════════════ 7c · MARKETING ═══════════════════════════
@@ -3683,7 +3702,7 @@ namespace BigAmbitionsMP
 
         /// <summary>OWNER: build one tab's snapshot and send it to one helper (also the echo after an edit).
         /// When the requester's sig matches the fresh content, nothing is sent - the poll costs no reply.</summary>
-        private static void BuildAndSendSnapshot(string addressKey, string tab, string toPid, string requesterSig = "", bool echo = false)
+        private static void BuildAndSendSnapshot(string addressKey, string tab, string toPid, string requesterSig = "", bool echo = false, bool merged = false)
         {
             var reg = GameStatePatcher.FindRegistration(addressKey);
             if (reg == null || !MergerFlip.TrulyMine(reg)) return;
@@ -3728,7 +3747,7 @@ namespace BigAmbitionsMP
                     : tab == "deliveries" ? $"{reply.Contracts.Count} contract(s), {reply.Products.Count} product(s)."
                     : tab == "marketing"  ? $"{reply.Campaigns.Count} marketing campaign(s)."
                     : tab == "settings"   ? $"name '{reply.Settings?.BusinessName}' + logo settings."
-                    :                     $"{reply.Stations.Count} workstation(s), {reply.ResourceStock.Count} resource count(s)."));
+                    :                     $"{reply.Stations.Count} workstation(s), {reply.ResourceStock.Count} resource count(s).") + (merged ? " (merged)" : ""));
             if (MPServer.IsRunning) MPServer.HostRouteSharedWorkInfo(reply, MPConfig.PlayerId);
             else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedWorkInfo, MPConfig.PlayerId, reply));
         }

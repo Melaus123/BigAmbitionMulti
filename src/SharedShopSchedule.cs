@@ -96,7 +96,7 @@ namespace BigAmbitionsMP
 
         /// <summary>A merger-flipped shop this machine helps run (phase 0, 2026-09-10). NOT a shared shop: only the
         /// schedule pipeline and auto-fill read merged shops this way — visibility, prices and work tabs stay
-        /// permission-only (prices ROUTE for merged shops since phase 2 wave 1; the other surfaces are still being routed). HEADQUARTERS ARE IN for merged shops (unlike shared shops, ruling 27): the retired merger
+        /// permission-only for WRITES except prices (phase 2 wave 1 routes them); READS of prices, stock and work-tab info follow merged shops since wave 2; the remaining write routes are waves 3-4. HEADQUARTERS ARE IN for merged shops (unlike shared shops, ruling 27): the retired merger
         /// write-back covered partner HQ schedules and the merger will manage HQ fully (plan phase 4c); the validated
         /// pipeline carries HQ scheduling unchanged (merger map §22.x). Review 2026-09-10 #4.</summary>
         public static bool IsMergedShop(BuildingRegistration reg, string addr)
