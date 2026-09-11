@@ -170,7 +170,11 @@ namespace BigAmbitionsMP
             // B9-ii: the outstanding tax bill as the GAME holds it.
             try
             {
-                p.TaxDue         = Helpers.TaxHelper.GetCurrentTaxesToPay() + Helpers.TaxHelper.GetBackTaxesToPay();
+                // T9 (phase 4b): the CURRENT-period figure is published beside the whole outstanding
+                // one - the tax page's single amount label natively shows the current bill only, so the
+                // company total must sum current-only halves (back taxes have their own label).
+                p.TaxCurrentDue  = Helpers.TaxHelper.GetCurrentTaxesToPay();
+                p.TaxDue         = p.TaxCurrentDue + Helpers.TaxHelper.GetBackTaxesToPay();
                 p.TaxDeadlineDay = Helpers.TaxHelper.GetCurrentTaxesDueDay();
                 p.TaxPeriod      = gi.currentUnpaidTaxes?.day ?? 0;
             }
@@ -385,6 +389,7 @@ namespace BigAmbitionsMP
 
                 PutStore(senderPid, p);
                 Plugin.Logger.LogInfo($"[Books] stored for '{senderPid}' (day {p.Day}, {p.Statements.Count} statements).");
+                HostFlushHeld(senderPid);   // (i): a pay-all held for this member can now be period-checked against the bundle it has just published
                 HostFanOut(p);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] store: {ex.Message}"); }
@@ -480,10 +485,22 @@ namespace BigAmbitionsMP
                     have.Statements.RemoveAll(x => x != null && x.Day == d && x.AddressKey == k);
                     have.Statements.Add(st);
                 }
+                // (ii) carried over from the 4a review: priorMoved covered the BUSINESS statements
+                // only, so a filed REAL-ESTATE row was swapped into the stored bundle while the day's
+                // RealEstate and TotalProfit still carried whatever that bundle held for the same
+                // address - the moved row counted twice (or, where the owner had none, never).  Its
+                // share moves exactly like a business row's: had - prior + filed, on the day's
+                // RealEstate line and on TotalProfit, of which it is a component.
+                var priorMovedRe = new Dictionary<int, float>();
+                var filedRe      = new Dictionary<int, float>();
                 foreach (var re in filed.RealEstate)
                 {
                     if (re == null) continue;
                     string k = re.AddressKey; int d = re.Day;
+                    foreach (var old in have.RealEstate)
+                        if (old != null && old.Day == d && old.AddressKey == k)
+                        { priorMovedRe.TryGetValue(d, out var q); priorMovedRe[d] = q + old.Amount; }
+                    filedRe.TryGetValue(d, out var f); filedRe[d] = f + re.Amount;
                     have.RealEstate.RemoveAll(x => x != null && x.Day == d && x.AddressKey == k);
                     have.RealEstate.Add(re);
                 }
@@ -500,6 +517,16 @@ namespace BigAmbitionsMP
                     priorMoved.TryGetValue(d, out var prior);
                     had.BusinessProfit = had.BusinessProfit - prior + t.BusinessProfit;
                     had.TotalProfit    = had.TotalProfit    - prior + t.TotalProfit;
+                    // (ii): the same swap for the day's real-estate line.  A filed bundle's own Totals
+                    // carry only BusinessProfit/TotalProfit (HostFileSimulated :450), so the filed
+                    // figure here is the sum of the rows that actually moved, not t.RealEstate.
+                    priorMovedRe.TryGetValue(d, out var priorRe);
+                    filedRe.TryGetValue(d, out var filedReAmt);
+                    if (priorRe != 0f || filedReAmt != 0f)
+                    {
+                        had.RealEstate  = had.RealEstate  - priorRe + filedReAmt;
+                        had.TotalProfit = had.TotalProfit - priorRe + filedReAmt;
+                    }
                 }
                 if (filed.Day > have.Day) have.Day = filed.Day;
                 if (string.IsNullOrEmpty(have.StableId) && !string.IsNullOrEmpty(filed.StableId)) have.StableId = filed.StableId;
@@ -980,6 +1007,29 @@ namespace BigAmbitionsMP
             return sum;
         }
 
+        private static bool _oldPayloadLogged;
+
+        /// <summary>T9 (phase 4b): the partners' CURRENT tax due only - what the tax page's one amount
+        /// label natively shows (back taxes have their own label, EconoViewTaxes.cs:93).  A bundle
+        /// published by a build older than this one carries TaxCurrentDue = 0, so it adds NOTHING
+        /// rather than adding its whole outstanding figure to a current-only label; the fallback is
+        /// logged once.</summary>
+        public static float PartnerTaxCurrentDue()
+        {
+            float sum = 0f;
+            foreach (var kv in _partner)
+            {
+                if (!MergerSync.IsMemberPid(kv.Key)) continue;
+                if (kv.Value.TaxCurrentDue <= 0f && kv.Value.TaxDue > 0f && !_oldPayloadLogged)
+                {
+                    _oldPayloadLogged = true;
+                    Plugin.Logger.LogInfo($"[Tax] '{kv.Key}' published before the current/back tax split - its bill adds nothing to the company total until it republishes.");
+                }
+                sum += kv.Value.TaxCurrentDue;
+            }
+            return sum;
+        }
+
         private static int _payAllPendingPeriod = -1;
 
         /// <summary>B9-iv, MAIN THREAD.  The local player just paid their OWN bill natively; ask every
@@ -1054,7 +1104,15 @@ namespace BigAmbitionsMP
 
                 int current = -1;
                 lock (_store) if (_store.TryGetValue(pid, out var bk) && bk != null) current = bk.TaxPeriod;
-                if (current >= 0 && current != ask.Period)
+                if (current < 0)
+                {   // (i) carried over from the 4a review: with no stored bundle the period could not be
+                    // compared and the ask went out UNCHECKED - exactly the case M4 exists to stop.  The
+                    // ask is KEPT instead: the membership edge makes a member publish its books within
+                    // seconds of connecting, and HostStore re-runs this flush the moment it does.
+                    Plugin.Logger.LogInfo($"[Tax] held pay-all for '{pid}' kept: no books bundle yet, so its tax period cannot be compared with the held period {ask.Period}.");
+                    return;
+                }
+                if (current != ask.Period)
                 {
                     lock (_held) _held.Remove(pid);
                     Plugin.Logger.LogInfo($"[Tax] held pay-all for '{pid}' DROPPED: it named period {ask.Period}, that member's current period is {current}.");

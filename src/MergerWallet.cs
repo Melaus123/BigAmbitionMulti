@@ -54,7 +54,9 @@ namespace BigAmbitionsMP
                 {
                     if (amount == 0f || _applyingReconcile) return;
                     if (!MergerSync.IAmMember) return;
-                    Forward(amount, transactionInfo?.Type ?? "", contribution: false);
+                    // PHASE 4b (T1): the record the native path has just enqueued rides this same
+                    // forward - the shared feed needs no message of its own on this leg.
+                    Forward(amount, transactionInfo?.Type ?? "", contribution: false, CompanyFeed.CaptureOwn());
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Wallet] forward: {ex.Message}"); }
             }
@@ -98,7 +100,14 @@ namespace BigAmbitionsMP
                 if (!MergerSync.IAmMember) return;
                 float diff = MoneyNow() - before;
                 if (Math.Abs(diff) < 0.005f) return;
-                Forward(diff, key, contribution: false);
+                // m5 (review r2 of 4b): these two paths enqueue a native Transaction of their own -
+                // 'SaveGameManager.Current.Transactions.Enqueue(new Transaction(info)' at
+                // BuildingHelper.cs:645 and RealEstateHelper.cs:270, each one line after its
+                // 'SaveGameManager.Current.Money += num'.  The enqueue PRECEDES the method's return, so
+                // this POSTFIX sees it as the queue's newest entry and CaptureOwn shares it.  Without
+                // this the compat force-sale moved the shared wallet but was the one movement no
+                // partner ever saw.  (Neither path calls ChangeMoney, so nothing double-forwards.)
+                Forward(diff, key, contribution: false, CompanyFeed.CaptureOwn());
             }
             catch { }
         }
@@ -132,14 +141,19 @@ namespace BigAmbitionsMP
             catch { }
         }
 
-        private static void Forward(float amount, string key, bool contribution)
+        private static void Forward(float amount, string key, bool contribution, PwTransaction? tx = null)
         {
             Plugin.Logger.LogInfo($"[EconProbe] wallet Δ{(amount >= 0 ? "+" : "")}{amount:N0} '{key}'{(contribution ? " (pool)" : "")} → host ledger.");
             if (MPServer.IsRunning)
+            {
                 MPServer.HostWalletDelta(MPConfig.PlayerId, amount, key, contribution);
+                // PHASE 4b (T1): the host is a member too - its own record goes straight into the ring
+                // and the fan-out, with no envelope to itself.
+                if (tx != null) CompanyFeed.HostIngest(tx, MPConfig.PlayerId);
+            }
             else if (MPClient.IsConnected)
                 MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.MergerWalletDelta, MPConfig.PlayerId,
-                    new MergerWalletDeltaPayload { PlayerId = MPConfig.PlayerId, Amount = amount, Key = key, Contribution = contribution }));
+                    new MergerWalletDeltaPayload { PlayerId = MPConfig.PlayerId, Amount = amount, Key = key, Contribution = contribution, Tx = tx }));
         }
 
         // ── Inbound: authoritative balance → local mirror ─────────────────────

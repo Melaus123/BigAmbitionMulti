@@ -470,6 +470,7 @@ namespace BigAmbitionsMP
         public static void ResetPaperwork()
         {
             try { CompanyBooks.HostReset(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] host store reset: {ex.Message}"); }   // phase 4a rides the same world boundary
+            try { CompanyFeed.HostReset(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Feed] host ring reset: {ex.Message}"); }      // phase 4b: the feed ring is memory-only and rides the same boundary
             lock (_paperwork) _paperwork.Clear();
             lock (_capWarnedDay) _capWarnedDay.Clear();
             lock (_resendServedAt) { _resendServedAt.Clear(); _resendThrottleLogged.Clear(); }   // r7: the throttle dies with the session too
@@ -2060,7 +2061,11 @@ namespace BigAmbitionsMP
                     // Merger slice 4: a member's native money delta → the host ledger.
                     var wd = env.GetPayload<MergerWalletDeltaPayload>();
                     if (wd != null && SenderIs(wd.PlayerId, senderPid, MessageType.MergerWalletDelta))
-                        GameStatePatcher.EnqueueOnMainThread(() => HostWalletDelta(wd.PlayerId, wd.Amount, wd.Key, wd.Contribution));
+                        GameStatePatcher.EnqueueOnMainThread(() =>
+                        {
+                            HostWalletDelta(wd.PlayerId, wd.Amount, wd.Key, wd.Contribution);
+                            CompanyFeed.HostIngest(wd.Tx, wd.PlayerId);   // PHASE 4b (T1): the transaction record rides the wallet forward
+                        });
                     break;
                 }
 
@@ -3403,7 +3408,7 @@ namespace BigAmbitionsMP
             // so a mid-day joiner saw blank partner rows until the next day change, and a pay-all held
             // while it was offline was never delivered. THIS method is the one both the fresh join
             // (SendWorldStateTo) and the reconnect resync run, and it already knows the joiner's pid.
-            if (!string.IsNullOrEmpty(grantJoinerPid)) SendCompanyBooksTo(peer, grantJoinerPid);
+            if (!string.IsNullOrEmpty(grantJoinerPid)) { SendCompanyBooksTo(peer, grantJoinerPid); SendCompanyFeedTo(peer, grantJoinerPid); }
             else Plugin.Logger.LogInfo($"[Books] join replay refused for peer {peer.Id}: that peer has no player id yet (its books arrive with the next publish).");
             SendMarketEventsTo(peer);        // active market events (change-broadcast only)
             SendPlayerShopPricesTo(peer);    // player-run shop prices (change-broadcast only)
@@ -7170,6 +7175,52 @@ namespace BigAmbitionsMP
                 CompanyBooks.HostFlushHeld(joinerPid);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] join replay: {ex.Message}"); }
+        }
+
+        // MERGER PHASE 4b - SHARED TRANSACTION FEED (2026-09-11, D19-5)
+
+        /// <summary>HOST: relay ONE member's transaction record to every ONLINE co-member of that
+        /// member's company (never back to the owner - its own entry is already in its own queue).</summary>
+        public static int SendCompanyFeedToGroup(PwTransaction rec)
+        {
+            int fanout = 0;
+            try
+            {
+                if (!_running || rec == null || string.IsNullOrEmpty(rec.OwnerPid)) return 0;
+                if (!MergerSync.InAnyGroup(rec.OwnerPid)) { Plugin.Logger.LogInfo($"[Feed] relay refused: '{rec.OwnerPid}' is not in a company."); return 0; }
+                var p = new CompanyFeedPayload { PlayerId = "host", Action = "entry" };
+                p.Entries.Add(rec);
+                byte[]? bytes = null;
+                foreach (var cp in ConnectedClientPeers())
+                {
+                    if (cp.playerId == rec.OwnerPid) continue;
+                    if (!MergerSync.MergedRuntime(rec.OwnerPid, cp.playerId)) continue;
+                    bytes ??= MessageEnvelope.Create(MessageType.CompanyFeed, "host", p).Serialize();
+                    cp.peer.Send(bytes, reliable: true);
+                    fanout++;
+                }
+                if (MPConfig.PlayerId != rec.OwnerPid && MergerSync.MergedRuntime(rec.OwnerPid, MPConfig.PlayerId))
+                { CompanyFeed.Receive(p); fanout++; }        // the host is a member too
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Feed] relay: {ex.Message}"); }
+            return fanout;
+        }
+
+        /// <summary>HOST: replay the co-members' recent entries to a JOINER. Memory only - the ring
+        /// never rides the manifest (a member's own transactions are in its own save).</summary>
+        public static void SendCompanyFeedTo(MPLink peer, string joinerPid)
+        {
+            if (peer == null || string.IsNullOrEmpty(joinerPid)) return;
+            try
+            {
+                var entries = CompanyFeed.HostReplayFor(joinerPid);
+                if (entries.Count == 0) { Plugin.Logger.LogInfo($"[Feed] join replay for '{joinerPid}': the host holds no co-member entries yet."); return; }
+                var p = new CompanyFeedPayload { PlayerId = "host", Action = "replay" };
+                p.Entries.AddRange(entries);
+                Send(peer, MessageEnvelope.Create(MessageType.CompanyFeed, "host", p));
+                Plugin.Logger.LogInfo($"[Feed] replayed {entries.Count} entries to '{joinerPid}' (join replay).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Feed] join replay: {ex.Message}"); }
         }
 
         public static void SendInteriorSnapshotTo(MPLink peer, InteriorSnapshotPayload snap)

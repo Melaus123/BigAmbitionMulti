@@ -209,6 +209,7 @@ namespace BigAmbitionsMP
         BusinessPaperwork     = 208,     // MERGER PHASE 3-A (2026-09-11, D13): one member's per-business PAPERWORK bundle - client -> HOST only, never the other way in this build. The books the interior/business syncs never carried (orderHistory, today's till, factory exports, marketing campaigns), the owner-level agreements FILTERED to the sender's own addresses (delivery contracts, import partnerships + this week's importer orders, the four manager plans, installation/moving contracts, licensing-fee state), and the FULL employee records behind the 7-field roster publish. The host keeps the LATEST bundle per member in the mod's session manifest (manifest.bamp.json - never a .hsg field) so an absent member's businesses can be handed to a simulator (P3-B) and survive a host restart. Publish-and-store only: nothing here changes gameplay. Rides Bulk (rule 9: it is a snapshot-class bundle).
         MergerHandover        = 209,     // MERGER PHASE 3-B (2026-09-11, plan §9, D1/D13/D15): Host -> the DESIGNATED SIMULATOR - "run these addresses of this absent member as an owner would". Carries the absent owner's building keys, the paperwork bundle the host stored in P3-A (as TEXT - a straight passthrough of what P3-A serialised), and the whole absence table so every receiver knows who simulates what. The INTERIORS follow separately as ordinary direct InteriorSnapshots, one per host tick (paced). The simulator sends the SAME type back carrying only Ack, so the host logs delivery; Drop=true retires a mark (dissolve, re-designation, nobody online) and the receiver undoes its apply. NEVER sent to the absent owner's own machine as a hand-over. MERGER PHASE 3-C (2026-09-11, D2/D13): the SAME type with Return=true IS the RETURN LEG - host -> the RETURNED OWNER, carrying the paperwork the host holds for exactly the addresses that were simulated in their absence plus the name of the machine that ran them; the interiors follow as paced direct InteriorSnapshots exactly as the hand-over's do. A return stamps SimulatorPid with the sentinel 'return-leg' (never a player id), so a pre-P3-C build ignores it instead of installing the owner's own businesses as an absent member's.
         CompanyBooks          = 210,     // MERGER PHASE 4a (2026-09-11, D14/D18/D19): one member's OWN daily books - the last 30 day records as per-day totals (every float FinancialSummary holds), the BusinessIncomeStatement rows of the addresses this machine owns or simulates, and the real-estate rows, plus that member's net-worth components (investments, loans remaining, assets) and its outstanding TAX bill (B9-ii). Client -> HOST, and the host fans one owner's books out to that owner's ONLINE co-members and replays them to a joiner. Receivers OVERLAY the rows onto their own gi.financialSummaries, which is the single list every money surface in the game reads - so D14 lands with no per-surface patch. NEVER written to a .hsg: the overlay is stripped around every save.
+        CompanyFeed           = 211,     // MERGER PHASE 4b (2026-09-11, D19-5): the SHARED TRANSACTION FEED. Host -> a member's ONLINE co-members: one member's own money-movement record (the native Transaction's type/categories/data/amount/balance/deductible flag/address/game time), and the same type carries the host's join REPLAY of the last N per owner. The member->host leg needs no type of its own: the record rides the wallet forward it belongs to (MergerWalletDeltaPayload.Tx). Receivers append a TAGGED display copy to their own gi.Transactions so the EconoView lists show the whole company's movements; the copies are LIFTED for every veiled pass and every save, so they are never summed into a member's own financial record and never reach a .hsg.
         MergerTax             = 212,     // MERGER PHASE 4a / B9 (2026-09-11, user decision): the TAX PAY-ALL. Action=payall: the member who just paid its own bill natively asks the host to have every partner settle theirs. Action=payown: host -> one ONLINE partner - run your own native pay action now (the money leaves the SHARED wallet through ChangeMoney, which the MergerWallet mirror follows). Action=report: that partner's result back to the payer's log (no on-screen text either way). A pay-all for an OFFLINE partner is HELD by the host and delivered at that partner's next connect.
     }
 
@@ -608,6 +609,11 @@ namespace BigAmbitionsMP
         public float  Amount       { get; set; }
         public string Key          { get; set; } = "";   // TransactionInfo.Type — attribution/probes
         public bool   Contribution { get; set; }
+        /// <summary>MERGER PHASE 4b (T1): the native transaction record this delta produced, so the
+        /// shared feed needs no second message on the member -> host leg. NULL on a delta with no
+        /// native record (the compat force-sale bypasses, the merge-time pooling) and from a member
+        /// running an older build.</summary>
+        public PwTransaction? Tx { get; set; }
     }
 
     /// <summary>Merger slice 4 — the authoritative shared balance. GroupId names the merged company
@@ -3746,6 +3752,10 @@ namespace BigAmbitionsMP
         // B9-ii - the bill as the GAME holds it (current + back taxes), its deadline, and the tax
         // period the current bill belongs to (Taxes.day), so a pay-all can be refused twice over.
         public float TaxDue         { get; set; }
+        // T9 (phase 4b): the CURRENT-period bill only. The tax page's one amount label natively shows
+        // the current bill (back taxes have their own label, EconoViewTaxes.cs:93), so the company
+        // total sums THIS field. Additive: a bundle from an older build carries 0 and adds nothing.
+        public float TaxCurrentDue  { get; set; }
         public int   TaxDeadlineDay { get; set; }
         public int   TaxPeriod      { get; set; }
     }
@@ -3760,5 +3770,40 @@ namespace BigAmbitionsMP
         public bool   Ok       { get; set; }
         public float  Amount   { get; set; }
         public string Reason   { get; set; } = "";
+    }
+
+    /// <summary>MERGER PHASE 4b - one member's own money-movement record, mirroring the game's live
+    /// Transaction fields (Transaction.cs:71-88: transactionType, transactionCategories, amount,
+    /// timestamp, address, balance, isTaxDeductible, transactionData - the DataHolder struct beside
+    /// them is [Obsolete] and empty on this build). Seq is the owner's own counter: it orders a join
+    /// replay and makes a duplicate recognisable.</summary>
+    public class PwTransaction
+    {
+        public string OwnerPid   { get; set; } = "";
+        public long   Seq        { get; set; }
+        /// <summary>M1 (r4) - which RUN of the owner's Seq counter this entry belongs to: a GUID minted
+        /// once per owner PROCESS. Seq restarts at 1 when the owner's process restarts, so a high-water
+        /// duplicate test is only valid inside one nonce. Additive and optional: an entry from a pre-r4
+        /// sender carries "", which is treated as one nonce (the old behaviour).</summary>
+        public string SessionNonce { get; set; } = "";
+        public string Type       { get; set; } = "";
+        public List<string> Categories { get; set; } = new();
+        public Dictionary<string, string> Data { get; set; } = new();
+        public float  Amount     { get; set; }
+        public float  Balance    { get; set; }
+        public bool   Deductible { get; set; }
+        public int    Day        { get; set; }
+        public int    Hour       { get; set; }
+        public int    Minute     { get; set; }
+        public string AddressKey { get; set; } = "";
+    }
+
+    /// <summary>MERGER PHASE 4b - the host's relay of one member's entry ("entry") or a joiner's
+    /// catch-up batch ("replay"). Host -> member only.</summary>
+    public class CompanyFeedPayload
+    {
+        public string PlayerId { get; set; } = "";
+        public string Action   { get; set; } = "";
+        public List<PwTransaction> Entries { get; set; } = new();
     }
 }

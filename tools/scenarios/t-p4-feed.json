@@ -1,0 +1,206 @@
+{
+  "id": "T-P4-FEED",
+  "title": "phase 4b transaction feed, two players: after formation a $1 spend (and its earn-back) on each machine is forwarded and received into the partner's registry (feed partner>0 on both), dissolving clears them (partner=0); net zero money; ends dissolved",
+  "preconditions": "Fixture save1 (host melaus/Prabaha, client Client1/REX); a running world produces wage/rent movements within a minute. Build with phase 4b deployed. Scenario ends dissolved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED",
+    "(?i)\\[Feed\\] .* not found"
+  ],
+  "oracles_report": [
+    "\\[Feed\\]",
+    "\\[Books\\]",
+    "\\[Merger\\]"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST P4-FEED START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "feed",
+      "expect_result": "^OK feed own=\\d+ partner=0 ",
+      "note": "no company yet: nothing injected"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "note": "formation; the world may produce no movement for minutes, so the scenario creates its own below"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "spend 1",
+      "expect_result": "^OK spend amount=-1\\.00 money=",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Feed\\] forwarded ba:transaction_licensingfee",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[Feed\\] received 1 entries of '${clientPid}'",
+          "within_s": 20
+        }
+      ],
+      "note": "one real $1 spend on the client, through the game's own money path: forwarded with the wallet delta and received into the host's registry"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "spend -1",
+      "expect_result": "^OK spend amount=1\\.00 money=",
+      "note": "earn it back: net zero on the client"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "spend 1",
+      "expect_result": "^OK spend amount=-1\\.00 money=",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Feed\\] received 1 entries of '${hostPid}'",
+          "within_s": 20
+        }
+      ],
+      "note": "and the other direction: the host's spend reaches the client's registry"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "spend -1",
+      "expect_result": "^OK spend amount=1\\.00 money=",
+      "note": "net zero on the host (its save is written at the end)"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "feed 3",
+      "expect_result": "^OK feed own=\\d+ partner=[1-9]\\d* "
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "feed 3",
+      "expect_result": "^OK feed own=\\d+ partner=[1-9]\\d* "
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "books",
+      "expect_result": "^OK books days=[1-9]\\d* ",
+      "note": "4a still overlays alongside the feed"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Feed\\] cleared",
+          "within_s": 20
+        },
+        {
+          "role": "c",
+          "regex": "\\[Feed\\] cleared",
+          "within_s": 20
+        }
+      ],
+      "note": "FIXTURE HYGIENE: end dissolved; the registries are cleared on both"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "feed",
+      "expect_result": "^OK feed own=\\d+ partner=0 "
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "feed",
+      "expect_result": "^OK feed own=\\d+ partner=0 "
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 24,
+      "role": "both",
+      "cmd": "mark TEST P4-FEED END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

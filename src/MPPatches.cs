@@ -8165,12 +8165,12 @@ namespace BigAmbitionsMP
                     if (!MergerSync.IAmMember || ___taxesOwedAmountLabel == null) return;
                     // MINOR (b, review r2): this label natively shows the CURRENT bill only - back taxes
                     // have their own label (EconoViewTaxes.cs:93) - so the OWN half is current-only too.
-                    // The partners' half is still their whole outstanding figure: CompanyBooksPayload
-                    // carries one TaxDue (current + back) and no split, and the payload lives in
-                    // src/Protocol.cs, which this brief does not name.
+                    // T9 (phase 4b): and so is the PARTNERS' half now - CompanyBooksPayload carries an
+                    // additive TaxCurrentDue beside its whole-outstanding TaxDue, and this label sums
+                    // that one. A partner still on the older build publishes 0 there and adds nothing.
                     float own = 0f;
                     try { own = Helpers.TaxHelper.GetCurrentTaxesToPay(); } catch { }
-                    float partners = CompanyBooks.PartnerTaxDue();
+                    float partners = CompanyBooks.PartnerTaxCurrentDue();
                     if (partners <= 0f) return;                          // nothing to add: leave the page alone
                     ___taxesOwedAmountLabel.text = (own + partners).ToShortCurrencyFormat();
                     // m-e (review r3): with no own bill the page had just written its own "no taxes
@@ -8253,6 +8253,186 @@ namespace BigAmbitionsMP
                     ___nameLabel.color = c;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] row tint: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>MERGER PHASE 4b / R2 (r3 restructure): the LAST-TRANSACTIONS list gets its partner
+        /// rows HERE, at the screen layer - nothing is ever enqueued into gi.Transactions. LoadLatest
+        /// fills the controller's own model list, `public List&lt;TModel&gt; data;`
+        /// (BaTable/BaTable.cs:14), from the queue (EconoViewLastTransactionsScrollerController.cs:27-38)
+        /// and orders it DAY-DESCENDING (SortByDayDescending :48-61); it keeps EVERY entry, so the merge
+        /// keeps them all too. Each partner row becomes a model through the game's OWN private
+        /// `CreateModel(Transaction)` (:43-46, cached MethodInfo), so its label is built exactly as a
+        /// native row's - and the model holds no reference back to its transaction
+        /// (EconoViewLastTransactionModel.cs:5-18 is amount/day/labelData), which is why the owner is
+        /// recorded against the MODEL for the tint. RELOAD: LoadLatest calls the private ReloadData()
+        /// itself at :40, so this postfix re-calls that same method - it stops and restarts the
+        /// ReloadWhenReady coroutine (:77-99), which is what actually hands the scroller its data.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.EconoView.EconoViewLastTransactionsScrollerController),
+                      nameof(UI.Smartphone.Apps.EconoView.EconoViewLastTransactionsScrollerController.LoadLatest))]
+        public static class Patch_EconoViewLastTx_PartnerRows
+        {
+            private static System.Reflection.MethodInfo? _createModel;
+            private static System.Reflection.MethodInfo? _reloadData;
+
+            static void Postfix(UI.Smartphone.Apps.EconoView.EconoViewLastTransactionsScrollerController __instance,
+                                List<UI.Smartphone.Apps.EconoView.EconoViewLastTransactionModel> ___data)
+            {
+                try
+                {
+                    if (!MergerSync.IAmMember || ___data == null) return;   // R8: one bool read, no allocation
+                    CompanyFeed.ForgetModels(typeof(UI.Smartphone.Apps.EconoView.EconoViewLastTransactionModel));
+                    CompanyFeed.NoteOpenList(__instance);
+
+                    var cm = _createModel ??= HarmonyLib.AccessTools.Method(
+                        typeof(UI.Smartphone.Apps.EconoView.EconoViewLastTransactionsScrollerController), "CreateModel");
+                    if (cm == null)
+                    { Plugin.Logger.LogWarning("[Feed] rows refused: EconoViewLastTransactionsScrollerController.CreateModel not found."); return; }
+
+                    var args = new object[1];
+                    int n = CompanyFeed.MergeInto(___data,
+                        t => { args[0] = t; return cm.Invoke(null, args) as UI.Smartphone.Apps.EconoView.EconoViewLastTransactionModel; },
+                        m => m.day,
+                        "last transactions");
+                    if (n <= 0) return;
+
+                    var rd = _reloadData ??= HarmonyLib.AccessTools.Method(
+                        typeof(UI.Smartphone.Apps.EconoView.EconoViewLastTransactionsScrollerController), "ReloadData");
+                    if (rd == null) { Plugin.Logger.LogWarning("[Feed] reload refused: ReloadData not found - the rows show on the next open."); return; }
+                    rd.Invoke(__instance, null);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Feed] last-transactions rows: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>MERGER PHASE 4b / R3 (r3 restructure): the FULL-TRANSACTIONS page, the same way.
+        /// EconoViewFullTransactionsScrollerController.Load REPLACES the model list with a LINQ
+        /// projection of the sequence it is handed (:12-13, `data = transactions.Select(...).ToList()`),
+        /// so ___data is read AFTER that assignment and merged into in place. ORDER/SIZE: its caller
+        /// hands it `orderby x.timestamp.Day descending` over the reversed queue
+        /// (EconoViewFullTransactions.cs:143-147) and Load keeps every element - so the same stable
+        /// day-descending merge, with no trim. The row model has a public constructor
+        /// (TransactionModel.cs:21-28) fed by the same EconoViewOverview.GenerateTransactionData the
+        /// game's own projection uses. RELOAD: Load ends with scroller.ReloadData() (:15), so this
+        /// postfix calls it again on the same field - `public EnhancedScroller scroller;`
+        /// (BaTable/BaTable.cs:18). FILTERS (m4, r4): the page's day/type/amount dropdowns filter the
+        /// GAME's queue before Load is called (EconoViewFullTransactions.cs:129-142), so they narrow the
+        /// OWN rows only - `filtered: true` puts the partner rows through the same three tests, from the
+        /// selection the prefix below stashes.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.EconoView.EconoViewFullTransactionsScrollerController),
+                      nameof(UI.Smartphone.Apps.EconoView.EconoViewFullTransactionsScrollerController.Load))]
+        public static class Patch_EconoViewFullTx_PartnerRows
+        {
+            static void Postfix(List<UI.Smartphone.Apps.EconoView.TransactionModel> ___data,
+                                EnhancedUI.EnhancedScroller.EnhancedScroller ___scroller)
+            {
+                try
+                {
+                    if (!MergerSync.IAmMember || ___data == null) return;   // R8: one bool read, no allocation
+                    CompanyFeed.ForgetModels(typeof(UI.Smartphone.Apps.EconoView.TransactionModel));
+                    int n = CompanyFeed.MergeInto(___data,
+                        t => new UI.Smartphone.Apps.EconoView.TransactionModel(
+                                 UI.Smartphone.Apps.EconoView.EconoViewOverview.GenerateTransactionData(t),
+                                 t.timestamp != null ? t.timestamp.Day : 0, t.transactionType, t.amount, t.balance),
+                        m => m.Day,
+                        "full transactions", filtered: true);
+                    if (n > 0 && ___scroller != null) ___scroller.ReloadData();
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Feed] full-transactions rows: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>m4 (r4 re-check): THE PAGE'S DROPDOWNS. EconoViewFullTransactions filters the GAME's
+        /// queue itself - day, then type, then amount option (EconoViewFullTransactions.cs:129-142) -
+        /// and only then hands the survivors to the controller's Load (:143), so without this the
+        /// partner rows would ignore the dropdowns entirely. This stashes the three selections so the
+        /// Load postfix above can apply the SAME rule to them.
+        /// A PREFIX, not a postfix: RefreshTransactionsList CALLS Load, so a postfix would stash one
+        /// refresh too late and every filter change would show the PREVIOUS filter's partner rows.
+        /// The injected fields are the page's own privates - declarations quoted verbatim:
+        ///   EconoViewFullTransactions.cs:37  "private string _selectedTransactionType;"
+        ///   EconoViewFullTransactions.cs:39  "private Transaction.AmountOption _selectedAmountOption;"
+        ///   EconoViewFullTransactions.cs:41  "private int _selectedDay;"
+        /// NO CLEAR-ON-CLOSE HOOK EXISTS (the page has no OnDisable/Hide) and none is needed:
+        /// EconoViewFullTransactionsScrollerController.Load has exactly ONE caller in the game - the
+        /// method patched here - so the stash is always the selection of the refresh in flight, and
+        /// Show() (:43-54) resets all three and refreshes, so a reopen starts unfiltered.
+        /// KNOWN LIMIT (UI, not behaviour): the TYPE dropdown's options are built from this machine's
+        /// OWN queue (:56-71), so a type only a partner has is never offered - every type that IS
+        /// offered filters the partner rows correctly.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.EconoView.EconoViewFullTransactions), "RefreshTransactionsList")]
+        public static class Patch_EconoViewFullTx_FilterStash
+        {
+            static void Prefix(int ____selectedDay, string ____selectedTransactionType,
+                               Transaction.AmountOption ____selectedAmountOption)
+            {
+                try { CompanyFeed.NoteFullPageFilter(____selectedDay, ____selectedTransactionType, (int)____selectedAmountOption); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Feed] filter stash refused: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>R4, the paint (T5 in the original plan). A row whose model the screen overlay above
+        /// built for a PARTNER carries that member's colour on the row LABEL only (the amount keeps the
+        /// game's own green/red, EconoViewLastTransactionCellView.cs:29). ___label is the cell's own serialized field - decompile line
+        /// EconoViewLastTransactionCellView.cs:12, "private TextLocalizationComponent label;" - and its
+        /// TMP object is reached through the Localizor component's TextContainer member, exactly as
+        /// HousingMapCues reaches it. EnhancedScroller RECYCLES these cells, so a row that is NOT a
+        /// partner's must have the label's ORIGINAL colour put back or it keeps the last one's.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.EconoView.EconoViewLastTransactionCellView),
+                      nameof(UI.Smartphone.Apps.EconoView.EconoViewLastTransactionCellView.SetData))]
+        public static class Patch_EconoViewLastTxCell_PartnerTint
+        {
+            /// <summary>m2 (r4 re-check): the entry keeps the LABEL as well as its colour. Unity REUSES
+            /// instance ids after a destroy, so an id alone can hand a new label the dead one's
+            /// "original" colour - the stored label is compared to the live one and the entry rebuilt
+            /// when they differ. A destroyed label reads as null through Unity's ==, which is what lets
+            /// SweepDeadLabels drop it; the whole map is emptied at the scene boundary by
+            /// ForgetLabelColours (called from CompanyFeed.Reset).</summary>
+            private struct LabelHome { public TMPro.TMP_Text Label; public UnityEngine.Color Colour; }
+
+            private static readonly Dictionary<int, LabelHome> _labelHomeColour = new();
+
+            /// <summary>m2: the scene boundary - every label in this map died with the scene.</summary>
+            public static void ForgetLabelColours() => _labelHomeColour.Clear();
+
+            private static void SweepDeadLabels()
+            {
+                List<int>? dead = null;
+                foreach (var kv in _labelHomeColour) if (kv.Value.Label == null) (dead ??= new List<int>()).Add(kv.Key);
+                if (dead == null) return;
+                foreach (var k in dead) _labelHomeColour.Remove(k);
+            }
+
+            static void Postfix(UI.Smartphone.Apps.EconoView.EconoViewLastTransactionModel data,
+                                Localizor.LanguageChangeEvent.TextLocalizationComponent ___label)
+            {
+                try
+                {
+                    if (data == null || ___label == null) return;
+                    // m1 (r4 re-check): THE MEMBERSHIP READ COMES FIRST. A machine that has never been in
+                    // a company has never tinted a label, so the map is empty and there is nothing to put
+                    // back: it leaves here having paid two field reads per cell and no reflection at all.
+                    // The map is NOT part of the test once it has entries - a machine that has just left a
+                    // company must still restore what it tinted, which is what the second read below does.
+                    bool member = MergerSync.IAmMember;
+                    if (!member && _labelHomeColour.Count == 0) return;
+
+                    if (!(HousingMapCues.GetMember(___label, "TextContainer") is TMPro.TMP_Text tc)) return;
+                    int id = tc.GetInstanceID();
+                    if (!_labelHomeColour.TryGetValue(id, out var h) || h.Label != tc)
+                    {
+                        if (_labelHomeColour.Count >= 128) SweepDeadLabels();
+                        h = new LabelHome { Label = tc, Colour = tc.color };
+                        _labelHomeColour[id] = h;
+                    }
+
+                    if (!member
+                        || !CompanyFeed.TryOwnerOfModel(data, out var pid)
+                        || !PlayerColours.TryColourFor(pid, out var c))
+                    { tc.color = h.Colour; return; }  // this machine's own row: the label's own colour
+                    tc.color = c;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Feed] row tint: {ex.Message}"); }
             }
         }
 

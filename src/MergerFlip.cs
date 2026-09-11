@@ -78,6 +78,7 @@ namespace BigAmbitionsMP
             _nextTick = UnityEngine.Time.unscaledTime + 1f;
             try { MergerAbsence.Tick(); } catch { }   // P3-B: the host's PACED hand-over snapshots, one per tick
             try { CompanyBooks.Tick(); } catch { }    // P4a M0: the MEMBERSHIP EDGE - publish/apply on join, clear on the way out (nothing else fires on formation)
+            try { CompanyFeed.Tick(); } catch { }     // P4b: the same edge for the shared transaction feed - a departed owner's rows go from the registry
             if (_veilDepth > 0)
             {
                 // DIAG [FlipProbe] (2026-07-07, host stuck-flip: no 'flip OFF' after dissolve): a
@@ -229,6 +230,10 @@ namespace BigAmbitionsMP
             // whole save, then put back by the Pop below. Without this the veiled tax Step would bill
             // every member for the whole company's sales (design read Q3-b).
             try { CompanyBooks.SuspendPush(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] veil lift refused: {ex.Message} - the overlay may be live during a veiled pass."); }
+            // PHASE 4b r3: the shared transaction feed needs NO lift here. Nothing is ever enqueued
+            // into gi.Transactions any more - the partner rows are built at the screen layer from a
+            // mod-side registry - so CreateFinancialSummary's two passes over that queue
+            // (FinancialSummaryHelper :58 and :150) already see this member's own entries only.
             if (_flipped.Count == 0) return;
             // DIAG [FlipProbe]: outermost push with live flips — the save-leak tracer (a save with
             // flips but NO such line before it means a save path bypassed the strip).
@@ -284,6 +289,7 @@ namespace BigAmbitionsMP
             // by the time this runs a DIFFERENT save's records are already loaded (review r2 M2). The
             // active clear on dissolve/unmerge/disconnect is CompanyBooks.Tick's membership edge.
             try { CompanyBooks.Reset(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] tracking clear refused: {ex.Message}"); }
+            try { CompanyFeed.Reset(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Feed] tracking clear refused: {ex.Message}"); }
         }
     }
 }

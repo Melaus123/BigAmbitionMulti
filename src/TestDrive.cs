@@ -642,6 +642,51 @@ namespace BigAmbitionsMP
                     return CompanyBooks.TestDriveLine(arg);
                 }
 
+                case "feed":
+                {
+                    // MERGER PHASE 4b (R6). Read-only. How many entries this machine's own
+                    // transaction queue holds, how many partner rows the mod-side registry holds, and
+                    // the newest of the two; with <n>, the newest n rows of the merged view and the
+                    // pid each belongs to ('own' = this machine's). Nothing is written, and nothing
+                    // the verb reports is ever in gi.Transactions except this machine's own.
+                    return CompanyFeed.TestDriveLine(arg);
+                }
+
+                case "spend":
+                {
+                    // MERGER PHASE 4b (r4) - TEST LEVER. The world can go minutes without producing a
+                    // transaction, so the rig needs one on demand. This makes ONE real money movement
+                    // through the game's OWN path: GameManager.ChangeMoneySafe (GameManager.cs:1096)
+                    // calls ChangeMoney (:1114), which builds the native Transaction and Enqueues it
+                    // (:1136-1145) - so the merger wallet forward and CompanyFeed.CaptureOwn see it
+                    // exactly as they see a world-produced one. No mod-only shortcut anywhere.
+                    // SIGN: `spend 100` costs 100 (delta -100, type ba:transaction_licensingfee);
+                    // `spend -100` earns 100 (delta +100, type ba:transaction_businessinventorysold).
+                    // Both are `delta = -amount`. TransactionInfo(string type, bool isTaxDeductible=false)
+                    // (TransactionInfo.cs:35) is the simplest valid constructor - ChangeMoney's only use
+                    // of Categories is null-guarded (:1121-1122).
+                    // MAIN THREAD: TestDrive.Tick runs from MPCanvasUI (MPCanvasUI.cs:698), so the
+                    // movement happens here and the balance after it can be reported in the same line.
+                    var spgi = SaveGameManager.Current;
+                    if (spgi == null) return "ERR spend: no game instance";
+                    if (arg.Length == 0) return "ERR spend: usage: spend <amount> (positive spends, negative earns)";
+                    if (!float.TryParse(arg.Trim(), System.Globalization.NumberStyles.Float,
+                                        System.Globalization.CultureInfo.InvariantCulture, out float spAmt))
+                        return $"ERR spend: '{arg.Trim()}' is not a number";
+                    if (spAmt == 0f) return "ERR spend: amount must be non-zero (ChangeMoney returns on 0)";
+
+                    float spDelta = -spAmt;
+                    var spInfo = new TransactionInfo(spDelta < 0f ? "ba:transaction_licensingfee"
+                                                                 : "ba:transaction_businessinventorysold");
+                    bool spOk;
+                    try { spOk = GameManager.ChangeMoneySafe(spDelta, spInfo); }
+                    catch (Exception spEx) { return $"ERR spend: {spEx.Message}"; }
+                    if (!spOk) return $"ERR spend: refused, balance {spgi.Money.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} will not cover it";
+
+                    return $"OK spend amount={spDelta.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)}"
+                         + $" money={spgi.Money.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)}";
+                }
+
                 case "absence":
                 {
                     // Merger phase 3-B (B6). On the HOST the marks come from the live table; on any

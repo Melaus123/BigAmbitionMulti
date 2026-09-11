@@ -300,6 +300,12 @@ namespace BigAmbitionsMP
             // them back after, so a fork save that beats this drain still cannot write an absent owner's
             // paperwork into the player's own .hsg.
             try { GameStatePatcher.EnqueueOnMainThread(MergerAbsence.Reset); } catch { }
+            // PHASE 4b R10 (r2 re-check): OnDisconnected does NOT clear MergerSync._groupByPid (only a
+            // MergerState receive writes it), so IAmMember stays true after a drop and the feed's
+            // membership tick never fires its clear - a partner's rows would keep showing on a machine
+            // that is no longer connected to anyone. Marshalled to the main thread exactly as the
+            // absence reset above is; it touches tracking only, never any game state.
+            try { GameStatePatcher.EnqueueOnMainThread(() => CompanyFeed.ClearAll("the connection dropped")); } catch { }
             PlayerColours.ResetSession();   // colours r2 (MINOR-5): an involuntary drop ends the session too - Disconnect() only covers the voluntary path
             bool wasConnected = _connected;
             double secs = _connectClock.IsRunning ? _connectClock.Elapsed.TotalSeconds : -1;
@@ -574,6 +580,17 @@ namespace BigAmbitionsMP
                     // mutates the live gi.financialSummaries objects every money surface reads.
                     var cb = env.GetPayload<CompanyBooksPayload>();
                     if (cb != null) GameStatePatcher.EnqueueOnMainThread(() => CompanyBooks.Receive(cb));
+                    break;
+                }
+
+                case MessageType.CompanyFeed:
+                {
+                    // MERGER PHASE 4b (D19-5): a co-member's money movements, or the join replay of
+                    // them. Main thread - the apply puts them in the MOD-SIDE REGISTRY only (r3
+                    // restructure); nothing is ever enqueued into gi.Transactions. The two transaction
+                    // screens build their partner rows from that registry when their lists are built.
+                    var cf = env.GetPayload<CompanyFeedPayload>();
+                    if (cf != null) GameStatePatcher.EnqueueOnMainThread(() => CompanyFeed.Receive(cf));
                     break;
                 }
 

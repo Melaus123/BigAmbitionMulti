@@ -69,6 +69,10 @@ namespace BigAmbitionsMP
                 // near-cap bundle must not head-of-line-block gameplay.
                 case (int)MessageType.CompanyBooks:
                 case (int)MessageType.MergerTax:           // the pay-all is keyed to the books it reads (TaxDue/TaxPeriod) - same lane keeps that order
+                // Merger phase 4b (m1, review r2): the shared feed's JOIN REPLAY is up to 200 entries
+                // PER PARTNER in one envelope - the same snapshot class as the books bundle beside it,
+                // and it must not head-of-line-block gameplay.
+                case (int)MessageType.CompanyFeed:
                 case (int)MessageType.ClientDisconnectUpload:
                 case (int)MessageType.PeerLogReply:
                 case (int)MessageType.AuditDrillReply:
