@@ -21,12 +21,17 @@ namespace BigAmbitionsMP
     /// shop" and most on "another player's shop that is SHARED with me through a Business grant".
     ///
     /// What it does, and nothing more:
-    ///  • VISIBILITY (call-scoped, never an ownership flag): the shared shops are APPENDED to exactly two lists —
-    ///    the BizMan main list (BusinessScrollerController.PopulateAllModels) and the BizMan page's business
-    ///    dropdown (GetPlayerBuildingRegistrations, only while BizManBusiness.RefreshData is running). Every other
-    ///    "pick one of your businesses" surface (employee assignment, mass actions, contracts, marketing, recruitment,
-    ///    moving, interior firm, logistics, purchasing) keeps hiding them, so the player's own employees can never be
-    ///    pointed at a shared shop and no contract can be opened on one.
+    ///  • VISIBILITY (call-scoped, never an ownership flag): the shared shops are APPENDED to the BizMan main list
+    ///    (BusinessScrollerController.PopulateAllModels), to the BizMan page's business dropdown
+    ///    (GetPlayerBuildingRegistrations while BizManBusiness.RefreshData runs) and — D9 r3 — to the business picker
+    ///    of the TWO NPC contacts whose follow-up is already inside what a Business grant allows: the wholesale
+    ///    manager (a delivery contract = the "Deliveries" tab) and the marketing agency (a campaign = the "Marketing"
+    ///    tab), and there ORDINARY shops only, since a shared warehouse or factory gets neither tab. Recruitment,
+    ///    moving, the interior firm, the import manager, food delivery and the furniture store now ANSWER an access
+    ///    holder (src/AccessGates.cs) but their pickers keep hiding shared shops — as do employee assignment, mass
+    ///    actions, logistics and purchasing — so the player's own employees can never be pointed at a shared shop and
+    ///    no out-of-access contract can be opened on one. Every appended entry also has to pass the caller's own
+    ///    filter delegate, and the list is re-sorted the way the native helper sorts it (D9 r3).
     ///  • TINT: the list card and the page's business-type label are coloured the mod's "shared with me" teal
     ///    (HousingMapCues.SharedColor — the same colour the city map and building hover already use) so the player
     ///    can see it is someone else's. No text is added (ruling 17).
@@ -146,6 +151,56 @@ namespace BigAmbitionsMP
                     break;
             }
             return list;
+        }
+
+        /// <summary>D9 r3: the same discriminator AllowedTabs's switch uses (:121-147) to tell an ORDINARY shop from a
+        /// warehouse / factory / headquarters / empty shell. Ordinary = the switch's `default:` arm — the only one
+        /// that grants "Deliveries" (:143) and "Marketing" (:144), which are the two things the widened NPC pickers
+        /// let a helper start. Anything else is held out of those pickers.</summary>
+        private static bool IsOrdinaryBusinessType(BuildingRegistration reg)
+        {
+            string type = ""; try { type = reg?.businessTypeName ?? ""; } catch { }
+            switch (type)
+            {
+                case "ba:businesstype_headquarters":
+                case "ba:businesstype_empty":
+                case "":
+                case "ba:businesstype_warehouse":
+                case "ba:businesstype_factory":
+                    return false;
+                default:
+                    return true;
+            }
+        }
+
+        /// <summary>BuildingHelper.DefaultBuildingRegistrationSort (BuildingHelper.cs:814-817) is PRIVATE, so the
+        /// fallback the native helper installs at :745 is bound once by reflection rather than re-implemented.
+        /// Null if the method is ever renamed — the re-sort is then skipped, which is what the list did before r3.</summary>
+        private static readonly BuildingHelper.BuildingRegistrationSortDelegate _nativeSort = BindNativeSort();
+
+        private static BuildingHelper.BuildingRegistrationSortDelegate BindNativeSort()
+        {
+            try
+            {
+                var mi = AccessTools.Method(typeof(BuildingHelper), "DefaultBuildingRegistrationSort");
+                return mi == null ? null
+                                  : AccessTools.MethodDelegate<BuildingHelper.BuildingRegistrationSortDelegate>(mi);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>D9 r3: re-sort exactly the way BuildingHelper.GetPlayerBuildingRegistrations does
+        /// (BuildingHelper.cs:743-747) — the caller's own sortDelegate when it passed one, else the native default —
+        /// so an appended shop lands in the picker's alphabetical place instead of at the bottom of the list.</summary>
+        private static void SortLikeNative(List<BuildingRegistration> list, BuildingHelper.BuildingRegistrationSortDelegate sortDelegate)
+        {
+            try
+            {
+                var cmp = sortDelegate ?? _nativeSort;
+                if (cmp == null || list == null) return;
+                list.Sort((x, y) => cmp(x, y));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} picker re-sort: {ex.Message}"); }
         }
 
         private static readonly System.Reflection.FieldInfo _fTabs        = AccessTools.Field(typeof(BizManBusiness), "_tabs");
@@ -294,20 +349,37 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>The game's "my businesses" helper — APPEND the shared shops, but ONLY for the BizMan page's own
-        /// dropdown. Runs after the 2026-07-16 hide postfix (Priority.Low), which keeps removing them everywhere else.</summary>
+        /// dropdown, or (D9 r2/r3) while the wholesale manager or the marketing agency is the dialog the game ITSELF
+        /// has open — that dialog's business picker reads this same helper about a second after the NPC answered.
+        /// The other six contacts answer an access holder but are NOT widened here (AccessGates.cs, R1 table).
+        /// D9 r3, BOTH branches — the BizMan dropdown included, which was appending unfiltered since the feature
+        /// landed: the native method applies its filterDelegate to its own entries and THEN sorts
+        /// (BuildingHelper.cs:733-748), so an appended entry has to clear the same filter and the list has to be
+        /// re-sorted, or the picker shows a shop its own filter had excluded, at the bottom of the list. The
+        /// dialog branch additionally lists ORDINARY shops only. Runs after the 2026-07-16 hide postfix
+        /// (Priority.Low), which keeps removing them everywhere else.</summary>
         [HarmonyPatch(typeof(BuildingHelper), nameof(BuildingHelper.GetPlayerBuildingRegistrations))]
         [HarmonyPriority(Priority.Low)]
         public static class Patch_GetPlayerBuildingRegistrations_AppendSharedForBizMan
         {
-            static void Postfix(List<BuildingRegistration> __result)
+            static void Postfix(List<BuildingRegistration> __result,
+                                BuildingHelper.BuildingRegistrationFilterDelegate filterDelegate,
+                                BuildingHelper.BuildingRegistrationSortDelegate sortDelegate)
             {
                 try
                 {
-                    if (_bizManRefreshDepth <= 0 || __result == null) return;
+                    if (__result == null) return;
+                    string dialogType = null;
+                    if (_bizManRefreshDepth <= 0)
+                    {
+                        dialogType = AccessGates.ActiveAccessDialogType();   // the GAME's DialogController.current.dialog — never a timer
+                        if (dialogType == null) return;
+                    }
                     if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;   // same gate as the list append
                     if (GrantSync.SharedManageCount == 0) return;
                     var gi = SaveGameManager.Current;
                     if (gi?.BuildingRegistrations == null) return;
+                    int listed = 0, appended = 0;
                     foreach (var reg in gi.BuildingRegistrations)
                     {
                         if (reg == null) continue;
@@ -315,8 +387,20 @@ namespace BigAmbitionsMP
                         if (!SharedShopSchedule.IsSharedShop(reg, addr)) continue;
                         string name = ""; try { name = reg.BusinessName?.ToString() ?? ""; } catch { }
                         if (name.Length == 0) continue;                      // the page's own filter: established businesses only
-                        if (!__result.Contains(reg)) __result.Add(reg);
+                        // r3: an NPC picker may only offer what the grant already allows — ordinary shops.
+                        if (dialogType != null && !IsOrdinaryBusinessType(reg)) continue;
+                        // r3: the caller's own filter, the one the native method applied to its entries at :739.
+                        if (filterDelegate != null)
+                        {
+                            bool keep = false;
+                            try { keep = filterDelegate(reg); } catch { keep = false; }
+                            if (!keep) continue;
+                        }
+                        if (!__result.Contains(reg)) { __result.Add(reg); appended++; }
+                        listed++;
                     }
+                    if (appended > 0) SortLikeNative(__result, sortDelegate);   // r3: the native order, not "appended last"
+                    if (dialogType != null) AccessGates.LogPickerScopeOnce(dialogType, listed);   // R5
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} dropdown append: {ex.Message}"); }
             }
