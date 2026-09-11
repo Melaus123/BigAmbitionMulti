@@ -465,6 +465,101 @@ namespace BigAmbitionsMP
         /// <summary>P3-C's removal surface: what B3(d) put into this machine's GameInstance lists (and
         /// into the one Address-keyed map, tagged as an InstalledDictEntry).</summary>
         public static IReadOnlyList<(string Owner, string List, object Item)> InstalledListItems => _installed;
+
+        // ── MERGER PHASE 2 WAVE 4 (D18): the DISPLAY-COPY surface ────────────
+        // Wave 4 installs a partner's delivery contracts and logistics plans on a plain CO-MEMBER through
+        // THIS installer, tagged under an owner string of its own ("display:<pid>", never a player id), so
+        // the save strip (MPSaveCoordinator/OfflineForkSave read InstalledListItems), RemoveInstalled and
+        // IsInstalledItem already cover them. An absence tags with a real pid and a display copy never does,
+        // so the two are always distinguishable (IsDisplayInstall) - and r2 MAJOR-2 makes them MUTUALLY
+        // EXCLUSIVE per owner as well: becoming that owner's stand-in lifts their display copies first
+        // (CompanyLists.SuspendOwner, from ApplyHandover) and the end of the simulation puts them back
+        // (CompanyLists.ReinstallOwner, from UndoLocal). Both sets in the lists at once would run every
+        // agreement twice.
+        public static string DisplayOwnerTag(string ownerPid) => "display:" + (ownerPid ?? "");
+
+        /// <summary>WAVE 4: install one address's list items out of a bundle under `ownerTag`. The same
+        /// call B3(d) makes, with the tag chosen by the caller.</summary>
+        public static int InstallListsForDisplay(string addr, BusinessPaperworkPayload bundle, HashSet<string> owned, string ownerTag)
+            => InstallListsFor(addr, bundle, owned, ownerTag);
+
+        /// <summary>WAVE 4: lift every item installed under `ownerTag` back out (RemoveInstalled's own
+        /// per-owner filter - an absence's items are tagged with a pid and are never touched).</summary>
+        public static int RemoveInstalledForOwner(string ownerTag) => RemoveInstalled(ownerTag);
+
+        /// <summary>THE EXECUTION-GUARD PREDICATE: is this list element one THIS machine installed (an
+        /// absence hand-over's, or a wave-4 display copy)? A native pass must never run one it does not
+        /// also simulate.</summary>
+        public static bool IsTaggedInstall(object item) => IsInstalledItem(item);
+
+        /// <summary>WAVE 4 r2 (review MAJOR-1): is this list element a DISPLAY COPY - an item installed
+        /// under a "display:&lt;pid&gt;" tag, which must never run and never reach a save? An install tagged
+        /// with a REAL pid is the opposite case: this machine stands in for that absent owner, the item is
+        /// that owner's live agreement and the native passes are exactly what must run it. IsTaggedInstall
+        /// cannot tell the two apart (it is a reference scan), so every wave-4 predicate uses THIS one.</summary>
+        public static bool IsDisplayInstall(object item)
+        {
+            if (item == null || _installed.Count == 0) return false;
+            foreach (var e in _installed)
+                if (ReferenceEquals(e.Item, item))
+                    return e.Owner != null && e.Owner.StartsWith("display:", StringComparison.Ordinal);
+            return false;
+        }
+
+        /// <summary>WAVE 4 r2 (review MAJOR-3): whose absence is this machine standing in for at `addressKey`?
+        /// "" when nobody - the building is mine, or not simulated here. The routed replays tag their installs
+        /// with THIS pid so the save strip keeps them out of my .hsg and the return leg lifts them.</summary>
+        public static string OwnerSimulatedFor(string addressKey)
+            => !string.IsNullOrEmpty(addressKey) && _simHere.Count > 0 && _simHere.TryGetValue(addressKey, out var o) ? (o ?? "") : "";
+
+        /// <summary>WAVE 4 r2 (review MAJOR-3): the STAND-IN's own replay of a routed edit. The same installer
+        /// the hand-over uses, TAGGED with the ABSENT OWNER's pid - the items are that owner's agreements:
+        /// stripped from this machine's save, published back under the owner by the filing, and lifted by the
+        /// return leg. Upsert is on for the same reason the return path sets it: an incoming row REPLACES the
+        /// row already under its key instead of being refused.</summary>
+        public static int InstallListsTagged(string addr, BusinessPaperworkPayload bundle, HashSet<string> owned, string ownerPid)
+        {
+            bool wasTagged = _tagInstalls, wasUpsert = _returnUpsert;
+            _tagInstalls = true; _returnUpsert = true;
+            try { return InstallListsFor(addr, bundle, owned, ownerPid); }
+            finally { _tagInstalls = wasTagged; _returnUpsert = wasUpsert; }
+        }
+
+        /// <summary>WAVE 4 r2 (review MAJOR-3): adopt an object THIS machine built natively into the tagged
+        /// set, for a stand-in's routed creation - the item goes into the game list through the game's own
+        /// code and only its BOOKKEEPING is added here. Same effect as an install: save strip, undo and the
+        /// display predicate all see it.</summary>
+        public static bool RegisterInstalledFor(string ownerPid, string listName, object item)
+        {
+            if (item == null || string.IsNullOrEmpty(listName)) return false;
+            foreach (var e in _installed) if (ReferenceEquals(e.Item, item)) return false;
+            _installed.Add((ownerPid ?? "", listName, item));
+            return true;
+        }
+
+        /// <summary>WAVE 4 r2 (review MAJOR-3): drop the tag record of an item SOMEONE ELSE has already taken
+        /// out of the game list (a replace-by-id). Leaving it would orphan the record, and the save strip's
+        /// restore would put the dead object back - two plans with one id.</summary>
+        public static int ForgetInstalled(object item)
+        {
+            if (item == null) return 0;
+            int n = 0;
+            for (int i = _installed.Count - 1; i >= 0; i--)
+                if (ReferenceEquals(_installed[i].Item, item)) { _installed.RemoveAt(i); n++; }
+            return n;
+        }
+
+        /// <summary>WAVE 4 (V2c): the OPERATOR's own replay of a routed plan edit. The very same installer,
+        /// UNTAGGED - these items are the operator's REAL agreements: they must sit in its save and must be
+        /// run by its passes, which is exactly what the tag would prevent (the P3-C return path flips the
+        /// same flag for the same reason).</summary>
+        public static int InstallListsUntagged(string addr, BusinessPaperworkPayload bundle, HashSet<string> owned, string owner)
+        {
+            bool wasTagged = _tagInstalls, wasUpsert = _returnUpsert;
+            _tagInstalls = false; _returnUpsert = true;
+            try { return InstallListsFor(addr, bundle, owned, owner); }
+            finally { _tagInstalls = wasTagged; _returnUpsert = wasUpsert; }
+        }
         public static IReadOnlyCollection<string> PromotedStaff => _promotedStaff.Keys;
 
         public static List<string> SimulatedAddresses()
@@ -543,7 +638,13 @@ namespace BigAmbitionsMP
                 // installer has to know which of them are the owner's to install it exactly once.
                 var owned = new HashSet<string>(p.Addresses ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
                 string owner = p.OwnerPid ?? "";
-                UndoLocal(owner, $"re-applying the hand-over for '{owner}'");   // MAJOR-2: undo THEN install
+                UndoLocal(owner, $"re-applying the hand-over for '{owner}'", restoreDisplay: false);   // MAJOR-2: undo THEN install
+                // WAVE 4 r2 (review MAJOR-2): this machine is about to hold that owner's REAL items. Its
+                // DISPLAY COPIES of the same agreements must go first, or both sets sit in the lists at once
+                // and every wholesale pass would order the goods and charge the fee twice. The registry is
+                // KEPT, so the return leg can put the display copies back.
+                try { CompanyLists.SuspendOwner(owner, "now simulating that owner's businesses here"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] display-copy suspend: {ex.Message}"); }
                 foreach (var addr in p.Addresses ?? new List<string>())
                 {
                     if (string.IsNullOrEmpty(addr)) continue;
@@ -574,7 +675,7 @@ namespace BigAmbitionsMP
         /// owner's addresses leave the exception set, only that owner's promoted records are demoted
         /// (removed here - the owner's next roster publish re-injects them as display copies) and only
         /// that owner's installed list items are lifted back out.</summary>
-        public static void UndoLocal(string ownerPid, string why)
+        public static void UndoLocal(string ownerPid, string why, bool restoreDisplay = true)
         {
             string owner = ownerPid ?? "";
             var addrs = new List<string>();
@@ -591,6 +692,14 @@ namespace BigAmbitionsMP
             foreach (var id in staff) _promotedStaff.Remove(id);
             Plugin.Logger.LogInfo($"[Absence] stopped simulating {addrs.Count} address(es) for '{owner}' ({why}) - "
                                 + $"{demoted}/{staff.Count} staff + {items} list item(s) released.");
+            // WAVE 4 r2 (review MAJOR-2): the simulation is over, so this machine is a plain co-member for
+            // that owner again - its display copies go back in (only for addresses still flipped here, which
+            // is the installer's own test). Skipped when the caller is about to install the real items again.
+            if (restoreDisplay)
+            {
+                try { CompanyLists.ReinstallOwner(owner, why); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] display-copy restore: {ex.Message}"); }
+            }
         }
 
         /// <summary>Every owner at once - the scene/session boundary's undo.</summary>

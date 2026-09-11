@@ -144,6 +144,7 @@ namespace BigAmbitionsMP
                         reg.RentedByPlayer = false;
                         reg.businessOwnerRivalId = parkedRival;
                         _flipped.Remove(key);
+                        try { CompanyLists.OnUnflipped(key); } catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] un-flip clear refused: {ex.Message}"); }   // wave 4 (V1): a building that stopped being a company building shows no partner agreements
                         RefreshPoi(reg);
                         Plugin.Logger.LogInfo($"[Merger] flip OFF '{key}' (left merger / ownership changed).");
                     }
@@ -290,6 +291,12 @@ namespace BigAmbitionsMP
             // active clear on dissolve/unmerge/disconnect is CompanyBooks.Tick's membership edge.
             try { CompanyBooks.Reset(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] tracking clear refused: {ex.Message}"); }
             try { CompanyFeed.Reset(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Feed] tracking clear refused: {ex.Message}"); }
+            // WAVE 4 (V1): the display-copy REGISTRY is dropped here. ClearAll does call RemoveInstalled,
+            // but that lift is REFERENCE-based (it looks for the exact objects it installed), so on a
+            // different save's already-loaded lists it simply finds nothing and removes nothing - safe at a
+            // scene boundary. The active lift on un-flip/unmerge/disconnect is OnUnflipped and MPClient's
+            // drop hook.
+            try { CompanyLists.ClearAll("session/scene reset"); } catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] tracking clear refused: {ex.Message}"); }
         }
     }
 }

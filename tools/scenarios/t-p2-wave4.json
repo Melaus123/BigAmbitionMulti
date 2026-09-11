@@ -1,0 +1,229 @@
+{
+  "id": "T-P2-WAVE4",
+  "title": "phase-2 wave 4, two players: after formation each member's paperwork publish installs the partner's contracts/plans as display copies on the other machine; a Sell-All on the partner's warehouse routes to the owner, who recomputes and sells (the client side, so the fixture save is untouched); dissolving clears the copies; ends dissolved",
+  "preconditions": "Fixture save1 (host melaus/Prabaha with warehouses; client Client1/REX with warehouses). Build with wave 4 deployed. Scenario ends dissolved; the routed Sell-All targets the CLIENT's warehouse so save1 (host) is not changed by it.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "(?i)\\[CompanyLists\\] .* not found",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED",
+    "sell-all REFUSED .* confirmation could not be raised",
+    "HudConfirm\\.Show lookup"
+  ],
+  "oracles_report": [
+    "\\[CompanyLists\\]",
+    "\\[Merger\\] sell-all",
+    "\\[Merger\\] contract",
+    "\\[Merger\\] plan"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST P2-WAVE4 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 30,
+      "note": "the client's world needs to settle before its paperwork publish is accepted (run 1: 'publish skipped - world not settled' at +40 s)"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed day=\\d+ businesses=[1-9]",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[CompanyLists\\] installed \\d+ contracts, \\d+ plans of '${clientPid}'",
+          "within_s": 30
+        }
+      ],
+      "note": "the client's publish reaches the host store and fans out: the host installs the client's contracts/plans as display copies"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed day=\\d+ businesses=[1-9]",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[CompanyLists\\] installed \\d+ contracts, \\d+ plans of '${hostPid}'",
+          "within_s": 30
+        }
+      ],
+      "note": "and the host's publish installs its lists on the client"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "lists ${clientPid}",
+      "expect_result": "^OK '${clientPid}': contracts \\d+, plans [1-9]\\d*, addresses [1-9]\\d*, tagged [1-9]\\d*"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "lists ${hostPid}",
+      "expect_result": "^OK '${hostPid}': contracts [1-9]\\d*, plans [1-9]\\d*, addresses [1-9]\\d*, tagged [1-9]\\d*"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "warehouses",
+      "expect_result": "^OK warehouses own=\\['.*flipped=\\['",
+      "capture": {
+        "clientWh": "flipped=\\['([^']+)'"
+      },
+      "note": "the host sees the client's warehouses flipped"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "sellall ${clientWh}",
+      "expect_result": "^OK sell-all quote asked for '${clientWh}'",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Merger\\] sell-all quote for '${clientWh}' to '${hostPid}': [0-9.]+",
+          "within_s": 20
+        },
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] sell-all quote [0-9.]+ for '${clientWh}' put to the player in the game's own confirmation",
+          "within_s": 20
+        }
+      ],
+      "note": "D21 step 1: the click asks the runner (the client) for its own total; the runner answers; the host raises the game's own confirmation from that quote (a raise failure is an oracle_absent)"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "sellall ${clientWh} 1",
+      "expect_result": "^OK sell-all routed for '${clientWh}' at quote 1",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "(?i)\\[Merger\\] sell-all refused for '${clientWh}'.*stale",
+          "within_s": 20
+        }
+      ],
+      "note": "D21 step 2 driven with a deliberately stale quote (1): the runner recomputes, finds the quote stale and refuses - nothing is sold (fixture hygiene) and the equality gate is proven"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[CompanyLists\\] cleared",
+          "within_s": 20
+        },
+        {
+          "role": "c",
+          "regex": "\\[CompanyLists\\] cleared",
+          "within_s": 20
+        }
+      ],
+      "note": "FIXTURE HYGIENE: end dissolved; the display copies are removed on both"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 25,
+      "role": "both",
+      "cmd": "mark TEST P2-WAVE4 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

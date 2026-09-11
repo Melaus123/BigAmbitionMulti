@@ -844,4 +844,376 @@ namespace BigAmbitionsMP
             }
         }
     }
+
+    /// <summary>MERGER PHASE 2 WAVE 4 - DISPLAY COPIES (D18, 2026-09-11).
+    ///
+    /// A co-member must SEE the company's wholesale delivery contracts and HQ logistics plans for the
+    /// partner shops the merger flipped onto its machine.  Phase 4b's screen-layer overlay cannot serve
+    /// them: both screens read the GAME lists directly -
+    ///   BizManDeliveries.cs:53  `SaveGameManager.Current.DeliveryContracts.FindAll((DeliveryContract x) =&gt; x.businessAddress == _bizManBusiness.buildingRegistration.Address)`
+    ///   LogisticsManagerHelper.cs:62 `SaveGameManager.Current.logisticsManagerPlans.FindAll((LogisticsManagerPlan x) =&gt; x.headquartersAddress == headquartersAddress)` (via LogisticsManagersPlanList.cs:108 GetFilteredPlans)
+    /// - so there is no model list to merge into.  The rows therefore go into the GAME lists through the
+    /// ABSENCE installer, TAGGED: the tag already keeps them out of every .hsg (MPSaveCoordinator's and
+    /// OfflineForkSave's strip read MergerAbsence.InstalledListItems) and it is what the two EXECUTION
+    /// GUARDS in MPPatches test, so a display copy is never run by this machine.
+    ///
+    /// INERT without a merger: Receive refuses when this machine is not a member, and nothing is
+    /// installed for an address that is not FLIPPED here.  Main thread only (every call site enqueues).</summary>
+    public static class CompanyLists
+    {
+        /// <summary>ownerPid -> the last set this machine installed for that owner.  The registry for the
+        /// TestDrive verb and for the row tint's "whose business is this?" answer.</summary>
+        private static readonly Dictionary<string, CompanyListsPayload> _byOwner = new();
+
+        /// <summary>address key -> owner pid, for the row tint (V3).  Rebuilt on every apply.</summary>
+        private static readonly Dictionary<string, string> _ownerOfAddr = new(StringComparer.OrdinalIgnoreCase);
+
+        public static int OwnerCount => _byOwner.Count;
+
+        /// <summary>V3: whose business is this row's?  false = mine (or nothing installed) - no tint.</summary>
+        public static bool TryOwnerOfAddress(string addressKey, out string pid)
+        {
+            pid = "";
+            if (_ownerOfAddr.Count == 0 || string.IsNullOrEmpty(addressKey)) return false;
+            return _ownerOfAddr.TryGetValue(addressKey, out pid!) && !string.IsNullOrEmpty(pid);
+        }
+
+        /// <summary>MAIN THREAD.  One owner's agreement lists arrived (a fan-out or a join replay).</summary>
+        public static void Receive(CompanyListsPayload p)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.OwnerPid)) return;
+                if (p.OwnerPid == MPConfig.PlayerId) return;                       // never overlay my own agreements
+                if (string.Equals(p.Action, "clear", StringComparison.OrdinalIgnoreCase))
+                { ClearOwner(p.OwnerPid, "the host retired that owner's lists"); return; }
+                if (!MergerSync.IAmMember)
+                { Plugin.Logger.LogInfo($"[CompanyLists] refused '{p.OwnerPid}': this machine is not a company member."); return; }
+                Apply(p);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] receive: {ex.Message}"); }
+        }
+
+        private static void Apply(CompanyListsPayload p)
+        {
+            string tag = MergerAbsence.DisplayOwnerTag(p.OwnerPid);
+            int lifted = 0;
+            try { lifted = MergerAbsence.RemoveInstalledForOwner(tag); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] lift of the previous set: {ex.Message}"); }
+
+            // The installer works one address at a time out of a paperwork bundle, so the rows are handed
+            // back in exactly that shape.  Only the two families wave 4 carries are filled; every other
+            // list on the bundle stays empty, so nothing else can be installed by accident.
+            var bundle = new BusinessPaperworkPayload();
+            bundle.Lists.DeliveryContracts.AddRange(p.DeliveryContracts ?? new List<PwDeliveryContract>());
+            bundle.Lists.LogisticsManagerPlans.AddRange(p.LogisticsManagerPlans ?? new List<PwLogisticsPlan>());
+
+            var addrs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var a in p.Addresses ?? new List<string>()) if (!string.IsNullOrEmpty(a)) addrs.Add(a);
+            foreach (var d in bundle.Lists.DeliveryContracts) if (!string.IsNullOrEmpty(d?.BusinessAddressKey)) addrs.Add(d.BusinessAddressKey);
+            foreach (var g in bundle.Lists.LogisticsManagerPlans) if (!string.IsNullOrEmpty(g?.HeadquartersAddressKey)) addrs.Add(g.HeadquartersAddressKey);
+
+            int installed = 0, skippedNotFlipped = 0, skippedSimulated = 0, nContracts = 0, nPlans = 0;
+            foreach (var a in addrs)
+            {
+                // A display copy exists ONLY for a partner building the merger flipped onto this machine.
+                if (!MergerFlip.IsFlipped(a)) { skippedNotFlipped++; continue; }
+                // An address this machine SIMULATES already holds that owner's REAL items (the absence
+                // installer put them there, where the game IS meant to run them) - a second, inert copy
+                // would double every row on the screen.
+                if (MergerAbsence.SimulatesHere(a)) { skippedSimulated++; continue; }
+                try { installed += MergerAbsence.InstallListsForDisplay(a, bundle, addrs, tag); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] install '{a}': {ex.Message}"); }
+                foreach (var d in bundle.Lists.DeliveryContracts)
+                    if (string.Equals(d?.BusinessAddressKey ?? "", a, StringComparison.OrdinalIgnoreCase)) nContracts++;
+                foreach (var g in bundle.Lists.LogisticsManagerPlans)
+                    if (string.Equals(g?.HeadquartersAddressKey ?? "", a, StringComparison.OrdinalIgnoreCase)) nPlans++;
+            }
+
+            _byOwner[p.OwnerPid] = p;
+            RebuildOwnerMap();
+            Plugin.Logger.LogInfo($"[CompanyLists] installed {nContracts} contracts, {nPlans} plans of '{p.OwnerPid}' (display copies; "
+                                + $"{installed} item(s) in, {lifted} replaced, {skippedNotFlipped} address(es) not flipped here, {skippedSimulated} simulated here).");
+            RefreshOpenScreens();
+        }
+
+        /// <summary>Retire one owner's display copies (un-flip, unmerge, that owner left, disconnect).</summary>
+        public static void ClearOwner(string ownerPid, string why)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ownerPid)) return;
+                int n = 0;
+                try { n = MergerAbsence.RemoveInstalledForOwner(MergerAbsence.DisplayOwnerTag(ownerPid)); } catch { }
+                bool had = _byOwner.Remove(ownerPid);
+                RebuildOwnerMap();
+                if (n > 0 || had)
+                {
+                    Plugin.Logger.LogInfo($"[CompanyLists] cleared {n} display copy item(s) of '{ownerPid}' - {why}.");
+                    RefreshOpenScreens();
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] clear '{ownerPid}': {ex.Message}"); }
+        }
+
+        /// <summary>WAVE 4 r2 (review MAJOR-2): this machine has just become the STAND-IN for `ownerPid` -
+        /// lift that owner's display copies but KEEP the registry entry, so the return leg can put them back
+        /// (and so the row tint still knows whose buildings these are). The two sets never coexist for one
+        /// owner: the real, owner-pid-tagged items go in immediately after this.</summary>
+        public static void SuspendOwner(string ownerPid, string why)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ownerPid) || !_byOwner.ContainsKey(ownerPid)) return;
+                int n = MergerAbsence.RemoveInstalledForOwner(MergerAbsence.DisplayOwnerTag(ownerPid));
+                if (n > 0)
+                {
+                    Plugin.Logger.LogInfo($"[CompanyLists] lifted {n} display copy item(s) of '{ownerPid}' - {why} (the registry is kept for the return).");
+                    RefreshOpenScreens();
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] suspend '{ownerPid}': {ex.Message}"); }
+        }
+
+        /// <summary>WAVE 4 r2 (review MAJOR-2): the simulation for `ownerPid` has ended - put that owner's
+        /// display copies back from the registry. Apply's own tests decide what is eligible (still flipped
+        /// here, not simulated here), so an address that stayed simulated brings nothing back.</summary>
+        public static void ReinstallOwner(string ownerPid, string why)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ownerPid) || !MergerSync.IAmMember) return;
+                if (!_byOwner.TryGetValue(ownerPid, out var p) || p == null) return;
+                Plugin.Logger.LogInfo($"[CompanyLists] re-installing the display copies of '{ownerPid}' - {why}.");
+                Apply(p);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] re-install '{ownerPid}': {ex.Message}"); }
+        }
+
+        public static void ClearAll(string why)
+        {
+            if (_byOwner.Count == 0) { _ownerOfAddr.Clear(); return; }
+            foreach (var pid in new List<string>(_byOwner.Keys)) ClearOwner(pid, why);
+            _byOwner.Clear(); _ownerOfAddr.Clear();
+        }
+
+        /// <summary>MergerFlip's OFF edge: an address that stopped being a flipped company building must
+        /// not keep showing its owner's agreements.  That owner's whole set goes - the next publish brings
+        /// back whatever is still flipped here.</summary>
+        public static void OnUnflipped(string addressKey)
+        {
+            if (_byOwner.Count == 0 || string.IsNullOrEmpty(addressKey)) return;
+            if (!_ownerOfAddr.TryGetValue(addressKey, out var pid) || string.IsNullOrEmpty(pid)) return;
+            ClearOwner(pid, $"'{addressKey}' is no longer a flipped company building");
+        }
+
+        private static void RebuildOwnerMap()
+        {
+            _ownerOfAddr.Clear();
+            // WAVE 4 r2 (review MAJOR-4 + minor a): the registry IS the last-known truth for every partner
+            // plan, so it also SEEDS the route's dedupe cache. Without the seed the very first LoadPlan of a
+            // display copy routes a no-op back to its owner; with it, nothing is routed until the plan really
+            // differs from what the owner last published.
+            _planById.Clear();
+            _lastSentPlan.Clear();
+            foreach (var kv in _byOwner)
+            {
+                var p = kv.Value;
+                if (p == null) continue;
+                foreach (var d in p.DeliveryContracts ?? new List<PwDeliveryContract>())
+                    if (!string.IsNullOrEmpty(d?.BusinessAddressKey)) _ownerOfAddr[d.BusinessAddressKey] = kv.Key;
+                foreach (var g in p.LogisticsManagerPlans ?? new List<PwLogisticsPlan>())
+                {
+                    if (g == null || string.IsNullOrEmpty(g.Id)) continue;
+                    _planById[g.Id] = g;
+                    try { _lastSentPlan[g.Id] = Newtonsoft.Json.JsonConvert.SerializeObject(g); } catch { }
+                }
+                foreach (var g in p.LogisticsManagerPlans ?? new List<PwLogisticsPlan>())
+                    if (!string.IsNullOrEmpty(g?.HeadquartersAddressKey)) _ownerOfAddr[g.HeadquartersAddressKey] = kv.Key;
+                foreach (var a in p.Addresses ?? new List<string>())
+                    if (!string.IsNullOrEmpty(a) && !_ownerOfAddr.ContainsKey(a)) _ownerOfAddr[a] = kv.Key;
+            }
+        }
+
+        /// <summary>The deliveries screen rebuilds from the game list in OnEnable (BizManDeliveries.cs:35);
+        /// a set that lands while it is OPEN is shown by re-running that same public refresh.  No new UI
+        /// and no timer.  The logistics list rebuilds on its own OnEnable and has no public equivalent.</summary>
+        private static void RefreshOpenScreens()
+        {
+            try
+            {
+                foreach (var d in UnityEngine.Object.FindObjectsOfType<UI.Smartphone.Apps.BizMan.BizManDeliveries>())
+                    if (d != null && d.isActiveAndEnabled) d.RefreshData();
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] deliveries refresh: {ex.Message}"); }
+        }
+
+        /// <summary>V4 lever `lists [ownerPid]`.  Read-only.</summary>
+        public static string TestDriveLine(string arg)
+        {
+            try
+            {
+                int tagged = 0;
+                foreach (var e in MergerAbsence.InstalledListItems)
+                    if ((e.Owner ?? "").StartsWith("display:", StringComparison.Ordinal)) tagged++;
+                string want = (arg ?? "").Trim();
+                if (want.Length == 0)
+                {
+                    var parts = new List<string>();
+                    foreach (var kv in _byOwner)
+                        parts.Add($"{kv.Key}: contracts {kv.Value?.DeliveryContracts?.Count ?? 0}, plans {kv.Value?.LogisticsManagerPlans?.Count ?? 0}");
+                    return $"OK display copies from {_byOwner.Count} owner(s), tagged {tagged}"
+                         + (parts.Count > 0 ? " | " + string.Join(" | ", parts) : "");
+                }
+                if (!_byOwner.TryGetValue(want, out var one) || one == null) return $"ERR no display copies held for '{want}'";
+                return $"OK '{want}': contracts {one.DeliveryContracts?.Count ?? 0}, plans {one.LogisticsManagerPlans?.Count ?? 0}, "
+                     + $"addresses {one.Addresses?.Count ?? 0}, tagged {tagged}";
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
+        // -- MEMBER side: the routed PLAN EDIT (V2c) ---------------------------
+
+        /// <summary>plan id -> the last shape this machine sent, so a plain re-selection of a plan (which
+        /// also re-runs LoadPlan) never routes and a real change always does.</summary>
+        private static readonly Dictionary<string, string> _lastSentPlan = new();
+
+        /// <summary>WAVE 4 r2 (review MAJOR-4): plan id -> the OWNER's last published DTO. The route compares
+        /// against this, so a value the native pass changed by itself (a nulled target) is not a member edit.</summary>
+        private static readonly Dictionary<string, PwLogisticsPlan> _planById = new();
+
+        /// <summary>One line per plan whose emptied target was ignored - not once per LoadPlan.</summary>
+        private static readonly HashSet<string> _loggedEmptyTarget = new();
+
+        /// <summary>One live plan as the wire DTO — the same mapping PaperworkSync.Build uses.</summary>
+        public static PwLogisticsPlan PlanToDto(Buildings.Office.Headquarters.LogisticsManagerPlan pl)
+        {
+            var pp = new PwLogisticsPlan
+            {
+                Id = pl.id, AssignedEmployeeId = pl.assignedEmployeeId,
+                HeadquartersAddressKey = SafeKey(pl.headquartersAddress),
+                TargetAddressKey = SafeKey(pl.targetAddress), IsFactory = pl.isFactory,
+            };
+            if (pl.destinations != null)
+                foreach (var d in pl.destinations)
+                {
+                    if (d == null) continue;
+                    var pdst = new PwLogisticsDestination { DeliveryTargetAddressKey = SafeKey(d.deliveryTargetAddress) };
+                    if (d.stockTargets != null)
+                        foreach (var t in d.stockTargets)
+                            pdst.StockTargets.Add(new PwItemOrderLine { ItemName = t.itemName, Amount = t.targetAmount });
+                    pp.Destinations.Add(pdst);
+                }
+            return pp;
+        }
+
+        private static string SafeKey(Address a) { try { return GameStateReader.AddressKey(a); } catch { return ""; } }
+
+        /// <summary>Is this plan object one of the DISPLAY COPIES installed here?  Only those are routed -
+        /// a plan of my own is edited natively and never leaves this machine.
+        /// WAVE 4 r2 (review MAJOR-1): the test is the TAG STRING, not "did this machine install it". A
+        /// machine standing in for an absent owner installs that owner's REAL plans through the same
+        /// installer under a real pid: those must run, must be routed nowhere, and must be editable
+        /// natively. Only a "display:&lt;pid&gt;" tag marks the inert copy.</summary>
+        public static bool IsDisplayPlan(object plan)
+        {
+            if (plan == null) return false;
+            try { return MergerAbsence.IsDisplayInstall(plan); } catch { return false; }
+        }
+
+        /// <summary>MEMBER, MAIN THREAD (V2c): send the WHOLE plan to whoever runs its headquarters. The
+        /// member's own list is NOT written by this — the game's UI has already mutated the display copy in
+        /// place, and the operator's next publish replaces it wholesale (V1). Deduped by shape, so the
+        /// screen's own refresh calls cost nothing. Cross-owner is PRE-CHECKED here with the existing
+        /// wording and re-checked at the host and on the operator.</summary>
+        public static void RoutePlanEdit(Buildings.Office.Headquarters.LogisticsManagerPlan plan, string why)
+        {
+            try
+            {
+                if (plan == null || !IsDisplayPlan(plan)) return;
+                var dto = PlanToDto(plan);
+                if (string.IsNullOrEmpty(dto.HeadquartersAddressKey)) return;
+                // WAVE 4 r2 (review MAJOR-4): an EMPTY target is never a member's edit. The native pass nulls
+                // targetAddress itself whenever the plan's warehouse is not RentedByPlayer on THIS machine
+                // (LogisticsManagerPlan.GetPlannedDeliveries, decompile :56-60), and routing that would take
+                // the owner's real warehouse off their plan. The plan-load route only ever carries a target
+                // the registry also knows about; clearing one is not a routed edit in wave 4.
+                if (string.IsNullOrEmpty(dto.TargetAddressKey)
+                    && _planById.TryGetValue(dto.Id ?? "", out var known) && !string.IsNullOrEmpty(known.TargetAddressKey))
+                {
+                    if (_loggedEmptyTarget.Add(dto.Id ?? ""))
+                        Plugin.Logger.LogInfo($"[Merger] plan {dto.Id} not routed: its target was cleared locally (the owner's warehouse is '{known.TargetAddressKey}') - a display copy's emptied target is never an edit.");
+                    return;
+                }
+                string shape;
+                try { shape = Newtonsoft.Json.JsonConvert.SerializeObject(dto); } catch { shape = ""; }
+                if (shape.Length > 0 && _lastSentPlan.TryGetValue(dto.Id ?? "", out var was) && was == shape) return;   // nothing changed
+
+                // Every end of a routed plan must belong to the SAME member as its headquarters. A mixed plan
+                // is a two-machine goods movement — refused until the routed cargo transfer of phase 4c exists.
+                if (!TryOwnerOfAddress(dto.HeadquartersAddressKey, out var hqOwner)) return;
+                foreach (var key in EndKeys(dto))
+                {
+                    if (TryOwnerOfAddress(key, out var endOwner) && endOwner == hqOwner) continue;
+                    Plugin.Logger.LogWarning($"[Merger] plan REFUSED cross-owner for '{dto.HeadquartersAddressKey}' (plan {dto.Id}): "
+                                           + $"'{key}' is not run by '{hqOwner}' — company building operated elsewhere, refused until the routed cargo transfer of phase 4c exists.");
+                    return;
+                }
+                if (shape.Length > 0) _lastSentPlan[dto.Id ?? ""] = shape;
+                SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                { PlayerId = MPConfig.PlayerId, AddressKey = dto.HeadquartersAddressKey, Op = "mergerplan", Plan = dto });
+                Plugin.Logger.LogInfo($"[Merger] plan edit routed to '{hqOwner}' for '{dto.HeadquartersAddressKey}' (plan {dto.Id}) — {why}");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan edit route: {ex.Message}"); }
+        }
+
+        /// <summary>V2c CREATION: a member pressing "add plan" on a PARTNER's headquarters. Nothing is added
+        /// locally — the operator creates the plan and the next fan-out brings the display copy back.</summary>
+        public static bool RoutePlanCreate(string hqAddressKey, bool isFactory)
+        {
+            try
+            {
+                if (!TryOwnerOfAddress(hqAddressKey, out var hqOwner))
+                { Plugin.Logger.LogWarning($"[Merger] logistics plan at '{hqAddressKey}' refused - company building operated elsewhere and no owner known here."); return false; }
+                var dto = new PwLogisticsPlan
+                { Id = Guid.NewGuid().ToString("N"), HeadquartersAddressKey = hqAddressKey, IsFactory = isFactory };
+                SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                { PlayerId = MPConfig.PlayerId, AddressKey = hqAddressKey, Op = "mergerplan", Plan = dto });
+                Plugin.Logger.LogInfo($"[Merger] plan edit routed to '{hqOwner}' for '{hqAddressKey}' (plan {dto.Id}) — creation");
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan create route: {ex.Message}"); return false; }
+        }
+
+        private static IEnumerable<string> EndKeys(PwLogisticsPlan dto)
+        {
+            if (!string.IsNullOrEmpty(dto.TargetAddressKey)) yield return dto.TargetAddressKey;
+            foreach (var d in dto.Destinations ?? new List<PwLogisticsDestination>())
+                if (!string.IsNullOrEmpty(d?.DeliveryTargetAddressKey)) yield return d.DeliveryTargetAddressKey;
+        }
+
+        // -- HOST side: the extraction the fan-out ships -----------------------
+
+        /// <summary>HOST: the two agreement families out of ONE owner's stored bundle.  The bundle the
+        /// host holds is already filed per owner (MPServer.HostFileSimulatedPaperwork), so no further
+        /// filtering is needed - what is in it belongs to that owner.</summary>
+        public static CompanyListsPayload Extract(BusinessPaperworkPayload bundle, string ownerPid)
+        {
+            var p = new CompanyListsPayload { PlayerId = "host", OwnerPid = ownerPid ?? "", Action = "lists" };
+            var l = bundle?.Lists;
+            if (l != null)
+            {
+                if (l.DeliveryContracts != null) p.DeliveryContracts.AddRange(l.DeliveryContracts);
+                if (l.LogisticsManagerPlans != null) p.LogisticsManagerPlans.AddRange(l.LogisticsManagerPlans);
+            }
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var b in bundle?.Businesses ?? new List<BusinessPaperwork>())
+                if (!string.IsNullOrEmpty(b?.AddressKey) && seen.Add(b.AddressKey)) p.Addresses.Add(b.AddressKey);
+            foreach (var d in p.DeliveryContracts)
+                if (!string.IsNullOrEmpty(d?.BusinessAddressKey) && seen.Add(d.BusinessAddressKey)) p.Addresses.Add(d.BusinessAddressKey);
+            foreach (var g in p.LogisticsManagerPlans)
+                if (!string.IsNullOrEmpty(g?.HeadquartersAddressKey) && seen.Add(g.HeadquartersAddressKey)) p.Addresses.Add(g.HeadquartersAddressKey);
+            return p;
+        }
+    }
 }

@@ -306,6 +306,7 @@ namespace BigAmbitionsMP
             // that is no longer connected to anyone. Marshalled to the main thread exactly as the
             // absence reset above is; it touches tracking only, never any game state.
             try { GameStatePatcher.EnqueueOnMainThread(() => CompanyFeed.ClearAll("the connection dropped")); } catch { }
+            try { GameStatePatcher.EnqueueOnMainThread(() => CompanyLists.ClearAll("the connection dropped")); } catch { }   // wave 4: no partner display copies without a session
             PlayerColours.ResetSession();   // colours r2 (MINOR-5): an involuntary drop ends the session too - Disconnect() only covers the voluntary path
             bool wasConnected = _connected;
             double secs = _connectClock.IsRunning ? _connectClock.Elapsed.TotalSeconds : -1;
@@ -591,6 +592,16 @@ namespace BigAmbitionsMP
                     // screens build their partner rows from that registry when their lists are built.
                     var cf = env.GetPayload<CompanyFeedPayload>();
                     if (cf != null) GameStatePatcher.EnqueueOnMainThread(() => CompanyFeed.Receive(cf));
+                    break;
+                }
+
+                case MessageType.CompanyLists:
+                {
+                    // MERGER PHASE 2 WAVE 4 (V1, D18): a partner's delivery contracts and logistics plans as
+                    // DISPLAY COPIES. Host -> member only; the member never sends this type. Main thread -
+                    // it writes the game's own lists (tagged, and stripped at every save).
+                    var cl = env.GetPayload<CompanyListsPayload>();
+                    if (cl != null) GameStatePatcher.EnqueueOnMainThread(() => CompanyLists.Receive(cl));
                     break;
                 }
 

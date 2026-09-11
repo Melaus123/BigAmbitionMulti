@@ -73,6 +73,10 @@ namespace BigAmbitionsMP
                 // PER PARTNER in one envelope - the same snapshot class as the books bundle beside it,
                 // and it must not head-of-line-block gameplay.
                 case (int)MessageType.CompanyFeed:
+                // Merger phase 2 wave 4 (r2 minor b): a CompanyLists fan-out carries one owner's WHOLE set of
+                // delivery contracts and logistics plans - the same snapshot class as the paperwork bundle it
+                // is cut from, and it must not head-of-line-block gameplay.
+                case (int)MessageType.CompanyLists:
                 case (int)MessageType.ClientDisconnectUpload:
                 case (int)MessageType.PeerLogReply:
                 case (int)MessageType.AuditDrillReply:

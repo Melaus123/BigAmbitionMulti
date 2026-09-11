@@ -3601,7 +3601,19 @@ namespace BigAmbitionsMP
                     if (reg == null) return true;                    // native handles the empty pick (:69)
                     bool rented; try { rented = reg.RentedByPlayer; } catch { return true; }
                     if (!rented || MergerFlip.TrulyMine(reg)) return true;
-                    Plugin.Logger.LogInfo($"[Merger] delivery contract to '{GameStateReader.AddressKey(reg)}' refused - company building, order from its operator (route pending)");
+                    // WAVE 4 (V2a): the refusal becomes a ROUTE. The member's dialog adds NOTHING locally
+                    // (__result null is the method's own invalid-input answer, :71/:76/:86, so the dialog
+                    // simply does not advance and there is no new on-screen text); the operator replays the
+                    // creation through the game's own construction and its publish brings the contract back
+                    // as a display copy (V1). The wholesale store is the dialog's own contact (:87).
+                    string bizKey = GameStateReader.AddressKey(reg);
+                    string whKey = ""; try { whKey = GameStateReader.AddressKey(DialogController.current.contact.Address); } catch { }
+                    if (whKey.Length == 0)
+                    { Plugin.Logger.LogWarning($"[Merger] contract create REFUSED for '{bizKey}': the dialog's wholesale contact has no address."); __result = null; return false; }
+                    if (!MPServer.IsRunning && !MPClient.IsConnected)
+                    { Plugin.Logger.LogWarning($"[Merger] contract create REFUSED for '{bizKey}': no session to route it over."); __result = null; return false; }
+                    SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                    { PlayerId = MPConfig.PlayerId, AddressKey = bizKey, Op = "mergercontract", StrValue = whKey });
                     __result = null;
                     return false;
                 }
@@ -3618,7 +3630,9 @@ namespace BigAmbitionsMP
         /// both simulated here for an absent owner — on the machine standing in for one, its lifted copy is the
         /// live state, so that owner's own daily legs keep running while they are away. Every mixed leg is
         /// refused: one end mine and the other run here for an absent partner is a goods movement between two
-        /// MEMBERS' buildings — wave 4's route, never a side effect of an absence. The HQ owner's own legs are untouched
+        /// MEMBERS' buildings — refused until the routed cargo transfer of phase 4c exists (slice 7 delivers
+        /// from a warehouse/factory to ANY group business with the deduction made on both machines), never a
+        /// side effect of an absence. The HQ owner's own legs are untouched
         /// (which is why this is a per-leg gate and not a veil entry). The plan's UI creation is not
         /// touched. LogisticsManagerPlan has NO name field (its id is a base64 uuid), so the plan is
         /// named in the log by its warehouse address key. One INFO per plan per game day.</summary>
@@ -3633,6 +3647,21 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (MergerFlip.FlippedCount == 0 || __instance == null) return true;   // inert without a merger
+                    // WAVE 4 (V1 execution guard): a DISPLAY COPY is a partner's plan installed here only so
+                    // the member can SEE and EDIT it. It must never move goods on this machine. A plan this
+                    // machine SIMULATES is not tagged (the absence installer tags under the owner's pid, the
+                    // display installer under "display:<pid>"), so simulated legs still run.
+                    if (CompanyLists.IsDisplayPlan(__instance))
+                    {
+                        int dday = 0; try { dday = SaveGameManager.Current != null ? SaveGameManager.Current.Day : 0; } catch { }
+                        string dkey = __instance.id ?? "?";
+                        if (!_loggedDay.TryGetValue(dkey, out var dseen) || dseen != dday)
+                        {
+                            _loggedDay[dkey] = dday;
+                            Plugin.Logger.LogInfo($"[Merger] logistics plan '{dkey}' skipped - a display copy of a partner's plan, run by its operator.");
+                        }
+                        return false;
+                    }
                     bool src = FlippedAddr(__instance.targetAddress);
                     bool dst = destination != null && FlippedAddr(destination.deliveryTargetAddress);
                     string srcKey = "", dstKey = "";
@@ -3654,11 +3683,49 @@ namespace BigAmbitionsMP
                     if (!_loggedDay.TryGetValue(key, out var seen) || seen != day)
                     {
                         _loggedDay[key] = day;
-                        Plugin.Logger.LogInfo($"[Merger] logistics plan '{plan}' skipped - source/destination is a company building operated elsewhere (route pending)");
+                        Plugin.Logger.LogInfo($"[Merger] logistics plan '{plan}' skipped - source/destination is a company building operated elsewhere (a two-machine goods movement; refused until the routed cargo transfer of phase 4c exists)");
                     }
                     return false;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics leg gate: {ex.Message}"); return true; }
+            }
+        }
+
+        /// <summary>WAVE 4 r2 (review MAJOR-4) — THE PLAN PASS ITSELF.
+        /// `public IEnumerable&lt;LogisticsManagerPlanDestination&gt; GetPlannedDeliveries()`
+        /// (LogisticsManagerPlan.cs:52) is what the hourly logistics pass walks for EVERY plan in
+        /// gi.logisticsManagerPlans — display copies included, because that list is walked whole. Two things
+        /// happen there that a partner's plan must never do on a member's machine: :56 calls
+        /// `LogisticsManagerInstance.IsEmployeeAvailable()` on a manager this machine may not hold at all (a
+        /// null instance — an NRE the hourly tick wall then eats, costing the member its own pass for that
+        /// hour), and :58-60 NULLS `targetAddress` whenever the plan's warehouse is not RentedByPlayer here,
+        /// which for a partner's warehouse outside the merged set is simply the truth — silently deleting the
+        /// OWNER's warehouse from the OWNER's plan. A display copy is skipped whole: it is run by its
+        /// operator, exactly like its legs (S3) and its wholesale contracts. A plan this machine SIMULATES is
+        /// not a display copy (r2 MAJOR-1: the tag string decides) and still runs. Inert without a merger.</summary>
+        [HarmonyPatch(typeof(Buildings.Office.Headquarters.LogisticsManagerPlan), "GetPlannedDeliveries")]
+        public static class Patch_LogisticsPlanPlanned_DisplayCopyGuard
+        {
+            private static readonly System.Collections.Generic.Dictionary<string, int> _loggedDay = new System.Collections.Generic.Dictionary<string, int>();
+
+            static bool Prefix(Buildings.Office.Headquarters.LogisticsManagerPlan __instance,
+                               ref System.Collections.Generic.IEnumerable<Entities.LogisticsManagerPlanDestination> __result)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0 || __instance == null) return true;   // inert without a merger
+                    if (!CompanyLists.IsDisplayPlan(__instance)) return true;
+                    __result = System.Linq.Enumerable.Empty<Entities.LogisticsManagerPlanDestination>();
+                    int dday = 0; try { dday = SaveGameManager.Current != null ? SaveGameManager.Current.Day : 0; } catch { }
+                    string dkey = __instance.id ?? "?";
+                    if (!_loggedDay.TryGetValue(dkey, out var dseen) || dseen != dday)
+                    {
+                        _loggedDay[dkey] = dday;
+                        Plugin.Logger.LogInfo($"[Merger] logistics plan '{dkey}' not planned here - a display copy of a partner's plan, run by its operator.");
+                    }
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics plan-pass gate: {ex.Message}"); return true; }
             }
         }
 
@@ -3730,10 +3797,23 @@ namespace BigAmbitionsMP
         private static bool EndFitsPlan(int planSet, int endSet)
             => (planSet == SetOwn || planSet == SetSim) && (endSet == SetNone || endSet == planSet);
 
+        /// <summary>WAVE 4 (V2c): a TAGGED DISPLAY COPY of a partner's plan IS editable here — the native UI
+        /// mutates it in place and the mutation is then routed to the operator. What still cannot happen is a
+        /// MIXED plan: every end must belong to the same member as the plan's headquarters, which is what
+        /// CompanyLists' address->owner map answers. Refused until the routed cargo transfer of phase 4c
+        /// exists. `key` empty = clearing a row, always allowed.</summary>
+        private static bool RoutedEndFits(Buildings.Office.Headquarters.LogisticsManagerPlan plan, string key)
+        {
+            if (string.IsNullOrEmpty(key)) return true;
+            string hq = ""; try { hq = GameStateReader.AddressKey(plan.headquartersAddress); } catch { }
+            if (!CompanyLists.TryOwnerOfAddress(hq, out var hqOwner)) return false;
+            return CompanyLists.TryOwnerOfAddress(key, out var endOwner) && endOwner == hqOwner;
+        }
+
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList), "AddPlan")]
         public static class Patch_LogisticsPlanCreate_MergerGate
         {
-            static bool Prefix()
+            static bool Prefix(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList __instance)
             {
                 try
                 {
@@ -3742,7 +3822,13 @@ namespace BigAmbitionsMP
                     var biz = ui != null && ui.fullMenu != null && ui.fullMenu.bizMan != null ? ui.fullMenu.bizMan.business : null;
                     var reg = biz != null ? biz.buildingRegistration : null;
                     if (!PartnerOperated(reg)) return true;
-                    Plugin.Logger.LogWarning($"[Merger] logistics plan at '{GameStateReader.AddressKey(reg)}' refused - company building operated elsewhere (route pending)");
+                    // WAVE 4 (V2c): creation becomes a ROUTE. Nothing is added to this machine's list - the
+                    // operator creates the plan and its publish brings the display copy back (V1).
+                    string hq = GameStateReader.AddressKey(reg);
+                    bool isFactory = false;
+                    try { isFactory = (__instance.currentTab ?? "").Equals("factory", StringComparison.OrdinalIgnoreCase); } catch { }
+                    if (!CompanyLists.RoutePlanCreate(hq, isFactory))
+                        Plugin.Logger.LogWarning($"[Merger] logistics plan at '{hq}' refused - company building operated elsewhere and the route could not be sent.");
                     return false;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics plan-create gate: {ex.Message}"); return true; }
@@ -3759,12 +3845,26 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (MergerFlip.FlippedCount == 0) return true;
-                    if (EndFitsPlan(PlanSet(____currentPlan), OperatingSet(businessAddress))) return true;
                     string a = ""; try { a = GameStateReader.AddressKey(businessAddress); } catch { }
-                    Plugin.Logger.LogWarning($"[Merger] logistics plan destination '{a}' refused - company building operated elsewhere (route pending)");
+                    // WAVE 4 (V2c): on a tagged DISPLAY COPY the native mutation is allowed and the Postfix
+                    // routes the whole plan; only a cross-owner end is still refused.
+                    if (CompanyLists.IsDisplayPlan(____currentPlan))
+                    {
+                        if (RoutedEndFits(____currentPlan, a)) return true;
+                        Plugin.Logger.LogWarning($"[Merger] plan REFUSED cross-owner for '{a}' - company building operated elsewhere, refused until the routed cargo transfer of phase 4c exists.");
+                        return false;
+                    }
+                    if (EndFitsPlan(PlanSet(____currentPlan), OperatingSet(businessAddress))) return true;
+                    Plugin.Logger.LogWarning($"[Merger] logistics plan destination '{a}' refused - company building operated elsewhere (refused until the routed cargo transfer of phase 4c exists)");
                     return false;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics plan-destination gate: {ex.Message}"); return true; }
+            }
+
+            static void Postfix(Buildings.Office.Headquarters.LogisticsManagerPlan ____currentPlan)
+            {
+                try { CompanyLists.RoutePlanEdit(____currentPlan, "destination changed"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan-destination route: {ex.Message}"); }
             }
         }
 
@@ -3781,11 +3881,194 @@ namespace BigAmbitionsMP
                     if (MergerFlip.FlippedCount == 0 || warehouseIndex <= 0 || ____warehouses == null
                         || warehouseIndex - 1 >= ____warehouses.Count) return true;   // index 0 = clearing the warehouse
                     var reg = ____warehouses[warehouseIndex - 1];
+                    string wk = ""; try { wk = GameStateReader.AddressKey(reg); } catch { }
+                    if (CompanyLists.IsDisplayPlan(____currentPlan))
+                    {
+                        if (RoutedEndFits(____currentPlan, wk)) return true;   // the Postfix on LoadPlan routes it
+                        Plugin.Logger.LogWarning($"[Merger] plan REFUSED cross-owner for '{wk}' - company building operated elsewhere, refused until the routed cargo transfer of phase 4c exists.");
+                        return false;
+                    }
                     if (EndFitsPlan(PlanSet(____currentPlan), OperatingSet(reg))) return true;
-                    Plugin.Logger.LogWarning($"[Merger] logistics plan warehouse '{GameStateReader.AddressKey(reg)}' refused - company building operated elsewhere (route pending)");
+                    Plugin.Logger.LogWarning($"[Merger] logistics plan warehouse '{wk}' refused - company building operated elsewhere (refused until the routed cargo transfer of phase 4c exists)");
                     return false;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics plan-warehouse gate: {ex.Message}"); return true; }
+            }
+        }
+
+        /// <summary>WAVE 4 (V2c) — THE CATCH-ALL for every in-place mutation of a tagged display plan.
+        /// `public void LoadPlan(LogisticsManagerPlan plan)` is what the whole plan UI re-runs after a
+        /// change: the warehouse dropdown (LogisticsManagerPlanUI.cs:569), a destination reorder (:113), a
+        /// destination removal and the add-destination path (LogisticsManagerDestinationUI.cs:60 via
+        /// `_logisticsManagerPlanUI.LoadPlan(_currentPlan)`) all end there, and every one of them mutates
+        /// the STORED plan object in place and calls SaveGameManager.MarkChange. Routing from this one
+        /// point covers them without patching each anonymous delegate. CompanyLists dedupes by the plan's
+        /// serialised shape, so a plain re-selection sends nothing.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI), "LoadPlan")]
+        public static class Patch_LogisticsPlanLoad_MergerRoute
+        {
+            static void Postfix(Buildings.Office.Headquarters.LogisticsManagerPlan plan)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0) return;   // inert without a merger
+                    CompanyLists.RoutePlanEdit(plan, "plan edited");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan-load route: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>WAVE 4 (V1 execution guard) — THE WHOLESALE DELIVERY PASS.
+        /// `BusinessHelper.HandleWholesaleDeliveries()` (Helpers/BusinessHelper.cs:422, called from
+        /// GameManager.cs:603) walks `SaveGameManager.Current.DeliveryContracts` whole
+        /// (`foreach (DeliveryContract deliveryContract in SaveGameManager.Current.DeliveryContracts)`,
+        /// :429) and has no ownership test of any kind — a tagged DISPLAY COPY would order goods, pay a
+        /// delivery fee out of the shared wallet and land stock on a replica. There is no per-item hook in
+        /// that loop, so the guard LIFTS the display copies out for the duration of the pass and puts them
+        /// back in a Finalizer (which also runs when the native method throws).
+        /// PREDICATE (r2, review MAJOR-1): lift a contract when `MergerAbsence.IsDisplayInstall(contract)` —
+        /// the TAG STRING, not "did this machine install it" and not the address. IsTaggedInstall also
+        /// answers true for the absence hand-over's installs, which are an absent owner's REAL contracts
+        /// and are meant to run here; and the address test it used to be paired with let a display copy
+        /// survive on an address that later became simulated (r2 MAJOR-2) and order the same goods twice.
+        /// A display copy never runs, on any address, ever.
+        /// Inert without a merger and whenever nothing is installed.</summary>
+        [HarmonyPatch(typeof(BusinessHelper), nameof(BusinessHelper.HandleWholesaleDeliveries))]
+        public static class Patch_WholesaleDeliveries_DisplayCopyGuard
+        {
+            private static readonly List<(int Index, Entities.DeliveryContract Item)> _lifted = new();
+
+            static void Prefix()
+            {
+                _lifted.Clear();
+                try
+                {
+                    var gi = SaveGameManager.Current;
+                    if (gi == null || MergerAbsence.InstalledListItems.Count == 0) return;
+                    var list = gi.DeliveryContracts;
+                    for (int i = list.Count - 1; i >= 0; i--)
+                    {
+                        var c = list[i];
+                        if (c == null || !MergerAbsence.IsDisplayInstall(c)) continue;   // r2 MAJOR-1: the tag decides
+                        _lifted.Add((i, c));
+                        list.RemoveAt(i);
+                    }
+                    if (_lifted.Count > 0)
+                        Plugin.Logger.LogInfo($"[CompanyLists] wholesale pass: {_lifted.Count} display copy contract(s) held out (they run on their operator).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] wholesale guard lift: {ex.Message}"); }
+            }
+
+            static void Finalizer()
+            {
+                try
+                {
+                    var gi = SaveGameManager.Current;
+                    if (gi == null) { _lifted.Clear(); return; }
+                    for (int i = _lifted.Count - 1; i >= 0; i--)
+                    {
+                        var (idx, item) = _lifted[i];
+                        if (idx > gi.DeliveryContracts.Count) idx = gi.DeliveryContracts.Count;
+                        gi.DeliveryContracts.Insert(idx, item);
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] wholesale guard restore: {ex.Message}"); }
+                finally { _lifted.Clear(); }
+            }
+        }
+
+        /// <summary>WAVE 4 (V3) — ATTRIBUTION, BizMan Deliveries. `DeliveryContractEntry.Initialize(
+        /// DeliveryContract contract, Action&lt;DeliveryContractEntry, DeliveryContract&gt; selectContract)`
+        /// (:36) builds one contract row. `___businessNameText` = three underscores + the exact field name
+        /// `businessNameText` (DeliveryContractEntry.cs:24 `private TMP_Text businessNameText;` — no leading
+        /// underscore of its own). ONLY that label's colour is touched; the fee column keeps the game's own.
+        /// Rows are pooled/instantiated per refresh, so the label's original colour is cached by instance id
+        /// and restored for every row that is not a partner's.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.DeliveryContractEntry), "Initialize")]
+        public static class Patch_DeliveryContractEntry_PartnerTint
+        {
+            private static readonly Dictionary<int, UnityEngine.Color> _home = new();
+
+            /// <summary>r2 minor (e): the partner colour of each pooled row label, by label instance id. The
+            /// row REPAINTS itself on selection (DeliveryContractEntry.SetSelected, :84/:90, black when
+            /// selected and white when not), which wiped the attribution the moment a row was clicked.</summary>
+            internal static readonly Dictionary<int, UnityEngine.Color> Tinted = new();
+
+            static void Postfix(Entities.DeliveryContract contract, TMPro.TMP_Text ___businessNameText)
+            {
+                try
+                {
+                    if (contract == null || ___businessNameText == null) return;
+                    int id = ___businessNameText.GetInstanceID();
+                    if (!_home.TryGetValue(id, out var home)) { home = ___businessNameText.color; _home[id] = home; }
+                    string key = ""; try { key = GameStateReader.AddressKey(contract.businessAddress); } catch { }
+                    if (!MergerSync.IAmMember
+                        || !CompanyLists.TryOwnerOfAddress(key, out var pid)
+                        || !PlayerColours.TryColourFor(pid, out var c))
+                    { Tinted.Remove(id); ___businessNameText.color = home; return; }
+                    Tinted[id] = c;
+                    ___businessNameText.color = c;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] contract row tint: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>WAVE 4 r2 (minor e) — THE SELECTION REPAINT. `public void SetSelected(bool isSelected)`
+        /// (DeliveryContractEntry.cs:81) rewrites `businessNameText.color` on every selection change (:84
+        /// black, :90 white), so a partner row lost its member colour as soon as it was clicked. The row's
+        /// own colour is re-applied afterwards; the fee column keeps the game's own, exactly as at
+        /// Initialize. Only rows the Initialize postfix actually tinted are touched.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.DeliveryContractEntry), "SetSelected")]
+        public static class Patch_DeliveryContractEntry_TintOnSelect
+        {
+            static void Postfix(TMPro.TMP_Text ___businessNameText)
+            {
+                try
+                {
+                    if (___businessNameText == null || Patch_DeliveryContractEntry_PartnerTint.Tinted.Count == 0) return;
+                    if (Patch_DeliveryContractEntry_PartnerTint.Tinted.TryGetValue(___businessNameText.GetInstanceID(), out var c))
+                        ___businessNameText.color = c;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] contract row tint (selection): {ex.Message}"); }
+            }
+        }
+
+        /// <summary>WAVE 4 (V3) — ATTRIBUTION, BizMan logistics plan list.
+        /// `LogisticsManagersPlanListEntry.Initialize(LogisticsManagerPlan plan, Action&lt;...&gt; onSelected)`
+        /// builds one plan row; `___locationNameNotSelectedLabel` / `___locationNameSelectedLabel` are three
+        /// underscores + the exact field names (LogisticsManagersPlanListEntry.cs:25 and :31, neither has a
+        /// leading underscore). The manager-name label is left alone. The row is a partner's when its plan's
+        /// HEADQUARTERS belongs to a partner — which is exactly what a display copy is.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanListEntry), "Initialize")]
+        public static class Patch_LogisticsPlanEntry_PartnerTint
+        {
+            private static readonly Dictionary<int, UnityEngine.Color> _home = new();
+
+            static void Postfix(Buildings.Office.Headquarters.LogisticsManagerPlan plan,
+                                TMPro.TMP_Text ___locationNameNotSelectedLabel,
+                                TMPro.TMP_Text ___locationNameSelectedLabel)
+            {
+                try
+                {
+                    if (plan == null) return;
+                    string key = ""; try { key = GameStateReader.AddressKey(plan.headquartersAddress); } catch { }
+                    bool partner = MergerSync.IAmMember
+                                && CompanyLists.TryOwnerOfAddress(key, out var pid)
+                                && PlayerColours.TryColourFor(pid, out var c0);
+                    UnityEngine.Color tint = default;
+                    if (partner) { CompanyLists.TryOwnerOfAddress(key, out var pid2); PlayerColours.TryColourFor(pid2, out var c1); tint = c1; }
+                    Paint(___locationNameNotSelectedLabel, partner, tint);
+                    Paint(___locationNameSelectedLabel, partner, tint);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] plan row tint: {ex.Message}"); }
+            }
+
+            private static void Paint(TMPro.TMP_Text label, bool partner, UnityEngine.Color tint)
+            {
+                if (label == null) return;
+                int id = label.GetInstanceID();
+                if (!_home.TryGetValue(id, out var home)) { home = label.color; _home[id] = home; }
+                label.color = partner ? tint : home;
             }
         }
 

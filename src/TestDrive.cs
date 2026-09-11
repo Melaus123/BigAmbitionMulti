@@ -652,6 +652,55 @@ namespace BigAmbitionsMP
                     return CompanyFeed.TestDriveLine(arg);
                 }
 
+                case "lists":
+                {
+                    // MERGER PHASE 2 WAVE 4 (V4). Read-only. With no argument: how many owners' DISPLAY
+                    // COPIES this machine holds and how many tagged items are installed for them; with an
+                    // owner pid: that owner's contract/plan counts. Nothing is written.
+                    return CompanyLists.TestDriveLine(arg);
+                }
+
+                case "contract":
+                {
+                    // MERGER PHASE 2 WAVE 4 (V4) - TEST LEVER. `contract <bizAddr> <wholesaleAddr>` sends the
+                    // V2a route exactly as the wholesale dialog does. The OPERATOR re-runs the duplicate and
+                    // shelf pre-checks; nothing is created here. Refuses off a merger, as the gate does.
+                    var cargs = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (cargs.Length < 2) return "ERR usage: contract <businessAddressKey> <wholesaleAddressKey>";
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    if (!MergerFlip.IsFlipped(cargs[0])) return $"ERR '{cargs[0]}' is not a merger-flipped company building here";
+                    SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                    { PlayerId = MPConfig.PlayerId, AddressKey = cargs[0], Op = "mergercontract", StrValue = cargs[1] });
+                    return $"OK contract create routed for '{cargs[0]}' (wholesale '{cargs[1]}')";
+                }
+
+                case "sellall":
+                {
+                    // MERGER PHASE 2 WAVE 4 (V4, r2 D21) - TEST LEVER. Sell-All is ACCURATE BY CONSTRUCTION:
+                    // the runner sells only at a figure IT quoted. `sellall <warehouseAddr>` therefore asks
+                    // for the quote (the answer opens the game's own confirmation, exactly as the click
+                    // does), and `sellall <warehouseAddr> <quote>` routes that number straight through the
+                    // equality gate - the way to exercise a STALE quote from the rig. Nothing is sold here.
+                    // Address keys are TWO tokens ('46 ba:street_fourthstreet'), like every other lever.
+                    var sargs = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (sargs.Length < 2) return "ERR usage: sellall <num> <ba:street_x> [quote]";
+                    string waddr = sargs[0] + " " + sargs[1];
+                    sargs = sargs.Length > 2 ? new[] { waddr, sargs[2] } : new[] { waddr };
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    if (!MergerFlip.IsFlipped(waddr)) return $"ERR '{waddr}' is not a merger-flipped company building here";
+                    if (sargs.Length == 1)
+                    {
+                        SharedShopWorkTabs.AskSellQuote(waddr);
+                        return $"OK sell-all quote asked for '{waddr}' (the answer raises the game's own confirmation)";
+                    }
+                    if (!float.TryParse(sargs[1], System.Globalization.NumberStyles.Float,
+                                        System.Globalization.CultureInfo.InvariantCulture, out var squote))
+                        return "ERR usage: sellall <num> <ba:street_x> [quote]";
+                    SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                    { PlayerId = MPConfig.PlayerId, AddressKey = waddr, Op = "mergersellall", Estimate = squote });
+                    return $"OK sell-all routed for '{waddr}' at quote {squote} (the runner sells only if its own total still equals it)";
+                }
+
                 case "spend":
                 {
                     // MERGER PHASE 4b (r4) - TEST LEVER. The world can go minutes without producing a

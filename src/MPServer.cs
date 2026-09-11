@@ -530,13 +530,16 @@ namespace BigAmbitionsMP
                 // re-installed that STALE copy - nextDeliveryDay, daysUntilRepeat, plan nextUpdateDay
                 // and paidLicensingFeesToday all rewound, so deliveries re-fired and the POOLED WALLET
                 // paid again. File those addresses under the OWNER first; what is left is the sender's.
+                var filedOwners = new List<string>();
                 try
                 {
+                    _lastFiledOwners.Clear();
                     if (HostFileSimulatedPaperwork(p, senderPid))
                     {
                         json  = Newtonsoft.Json.JsonConvert.SerializeObject(p);
                         bytes = System.Text.Encoding.UTF8.GetByteCount(json);
                     }
+                    filedOwners.AddRange(_lastFiledOwners);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] owner filing for '{senderPid}': {ex.Message}"); }
                 int hostDay = 0; try { hostDay = GameStateReader.GetGameTime().day; } catch { }
@@ -597,6 +600,12 @@ namespace BigAmbitionsMP
                 lock (_paperwork)
                     _paperwork[key] = new PaperworkEntry { StableId = key, Day = p.Day, ReceivedDay = hostDay, Json = json };
                 Plugin.Logger.LogInfo($"[Paperwork] stored for '{senderPid}' (day {p.Day}, {bytes} bytes).");
+                // MERGER PHASE 2 WAVE 4 (V1, D18): the DISPLAY-COPY fan-out rides the D14 books hook's twin -
+                // every STORE of an owner's paperwork. This is the only event that carries the owner's live
+                // agreement lists, so there is nothing earlier to hook. Owner-filed parts (the simulator
+                // case above) are fanned out under the OWNER, not the sender, by FanOutCompanyLists(key).
+                FanOutCompanyLists(key, "paperwork stored");
+                foreach (var ok in filedOwners) if (ok != key) FanOutCompanyLists(ok, "paperwork filed under its owner");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] store: {ex.Message}"); }
         }
@@ -672,6 +681,7 @@ namespace BigAmbitionsMP
                     _paperwork[mark.OwnerStable] = new PaperworkEntry
                     { StableId = mark.OwnerStable, Day = owned.Day, ReceivedDay = hostDay, Json = mjson };
                 any = true;
+                _lastFiledOwners.Add(mark.OwnerStable);   // wave 4: this OWNER's display copies changed too
                 Plugin.Logger.LogInfo($"[Paperwork] filed {movedBiz} simulated businesses of "
                                     + $"'{mark.OwnerPid}' from '{senderPid}'.");
             }
@@ -3408,7 +3418,7 @@ namespace BigAmbitionsMP
             // so a mid-day joiner saw blank partner rows until the next day change, and a pay-all held
             // while it was offline was never delivered. THIS method is the one both the fresh join
             // (SendWorldStateTo) and the reconnect resync run, and it already knows the joiner's pid.
-            if (!string.IsNullOrEmpty(grantJoinerPid)) { SendCompanyBooksTo(peer, grantJoinerPid); SendCompanyFeedTo(peer, grantJoinerPid); }
+            if (!string.IsNullOrEmpty(grantJoinerPid)) { SendCompanyBooksTo(peer, grantJoinerPid); SendCompanyFeedTo(peer, grantJoinerPid); SendCompanyListsTo(peer, grantJoinerPid); }
             else Plugin.Logger.LogInfo($"[Books] join replay refused for peer {peer.Id}: that peer has no player id yet (its books arrive with the next publish).");
             SendMarketEventsTo(peer);        // active market events (change-broadcast only)
             SendPlayerShopPricesTo(peer);    // player-run shop prices (change-broadcast only)
@@ -6767,6 +6777,23 @@ namespace BigAmbitionsMP
                     { Plugin.Logger.LogWarning($"[SharedShop] work-info request by '{senderPid}' on '{p.AddressKey}' — no Business permission and not a company member, dropped."); return; }
                     if (!SharedWorkAddressAllowed(p.AddressKey))
                     { Plugin.Logger.LogWarning($"[SharedShop] work-info request by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
+                    // MERGER PHASE 2 WAVE 4 r2 (D21): the SELL-ALL QUOTE is not a tab snapshot. It must be
+                    // answered by the machine that HOLDS the stock (the owner, or its absence stand-in), not
+                    // by the ledger owner, and like the three parity routes it is MEMBERSHIP-only - ruling 29
+                    // keeps a permission helper away from the owner's inventory.
+                    if (p.Tab == "sellquote")
+                    {
+                        if (!MergerSync.MergedRuntime(ownerPid, senderPid))
+                        { Plugin.Logger.LogWarning($"[Merger] sell-all quote by '{senderPid}' on '{p.AddressKey}' REFUSED: not a company member with owner '{ownerPid}'."); return; }
+                        string qtarget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0: owner online → owner, else its simulator
+                        if (qtarget.Length == 0)
+                        { Plugin.Logger.LogWarning($"[Merger] sell-all quote REFUSED for '{p.AddressKey}': nobody is running that building (RouteTargetFor)."); return; }
+                        if (qtarget == senderPid) return;
+                        Plugin.Logger.LogInfo($"[Merger] sell-all quote routed to '{qtarget}' for '{p.AddressKey}'");
+                        if (qtarget == MPConfig.PlayerId) SharedShopWorkTabs.HandleWorkInfo(p);
+                        else SendToPid(qtarget, MessageEnvelope.Create(MessageType.SharedWorkInfo, "host", p));
+                        return;
+                    }
                     if (!AskOwnerOnline("work-info", p.AddressKey, senderPid, ownerPid)) return;   // W3-0 r1 (F7)
                     if (ownerPid == MPConfig.PlayerId) SharedShopWorkTabs.HandleWorkInfo(p);
                     else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedWorkInfo, "host", p));
@@ -6803,10 +6830,38 @@ namespace BigAmbitionsMP
                 if (ownerPid.Length == 0 || ownerPid == senderPid) return;
                 if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))   // wave 3 (W3-1): UNION — direct grant or merger membership
                 { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' on '{p.AddressKey}' — no Business permission and not a company member, dropped."); return; }
-                if (!SharedWorkAddressAllowed(p.AddressKey))
+                // MERGER PHASE 2 WAVE 4 (V2): the three PARITY routes ride this envelope as new Ops (rule 5 -
+                // one new MessageType in the whole wave, and it went to the display copies). They are gated on
+                // MEMBERSHIP ONLY, never on a bare Business grant: a permission helper gets today's behaviour
+                // exactly (ruling 29 keeps Sell-All refused for them). "mergerplan" ALONE skips
+                // SharedWorkAddressAllowed, which excludes a HEADQUARTERS for the grant surface (rulings
+                // 24/27) - a plan lives on one. The contract creation (a shop) and the sell-all (a warehouse)
+                // keep the address check: neither has any business on an excluded address (r2 minor c - the
+                // code used to skip it for all three while this comment already said otherwise).
+                bool w4 = p.Op == "mergercontract" || p.Op == "mergersellall" || p.Op == "mergerplan";
+                if (w4 && !MergerSync.MergedRuntime(ownerPid, senderPid))
+                { Plugin.Logger.LogWarning($"[Merger] {p.Op} by '{senderPid}' on '{p.AddressKey}' REFUSED: not a company member with owner '{ownerPid}'."); return; }
+                if (w4 && p.Op == "mergerplan")
+                {
+                    if (p.Plan == null) { Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED for '{p.AddressKey}': the payload carried no plan."); return; }
+                    if (PlanCrossesOwners(p.Plan, out var xwhy))
+                    { Plugin.Logger.LogWarning($"[Merger] plan REFUSED cross-owner for '{p.AddressKey}' (plan {p.Plan.Id}): {xwhy} — a two-machine goods movement, refused until the routed cargo transfer of phase 4c exists."); return; }
+                }
+                if (p.Op != "mergerplan" && !SharedWorkAddressAllowed(p.AddressKey))
                 { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
                 string wtarget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0
-                if (wtarget.Length == 0 || wtarget == senderPid) return;
+                if (wtarget.Length == 0)
+                {
+                    if (w4) Plugin.Logger.LogWarning($"[Merger] {p.Op} REFUSED for '{p.AddressKey}': nobody is running that building (RouteTargetFor).");
+                    return;
+                }
+                if (wtarget == senderPid) return;
+                if (w4)
+                {
+                    if (p.Op == "mergercontract")      Plugin.Logger.LogInfo($"[Merger] contract create routed to '{wtarget}' for '{p.AddressKey}'");
+                    else if (p.Op == "mergersellall")  Plugin.Logger.LogInfo($"[Merger] sell-all routed to '{wtarget}' for '{p.AddressKey}'");
+                    else                               Plugin.Logger.LogInfo($"[Merger] plan edit routed to '{wtarget}' for '{p.AddressKey}' (plan {p.Plan?.Id})");
+                }
                 if (wtarget == MPConfig.PlayerId) SharedShopWorkTabs.OwnerApplyEdit(p);
                 else SendToPid(wtarget, MessageEnvelope.Create(MessageType.SharedWorkEdit, "host", p));
             }
@@ -7133,6 +7188,108 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] fan-out: {ex.Message}"); }
             return fanout;
+        }
+
+        // ── MERGER PHASE 2 WAVE 4 - COMPANY LISTS (display copies, D18) ──────────
+
+        /// <summary>Owner stable ids whose stored entry the last HostFileSimulatedPaperwork changed.</summary>
+        private static readonly List<string> _lastFiledOwners = new();
+
+        /// <summary>HOST: ship ONE owner's two agreement families to every ONLINE co-member of that owner
+        /// (never back to the owner - its own lists are its own save). `stable` is the PaperworkStore key.
+        /// Refusals are logged, never silent.</summary>
+        public static int FanOutCompanyLists(string stable, string why)
+        {
+            int fanout = 0;
+            try
+            {
+                if (!_running || string.IsNullOrEmpty(stable)) return 0;
+                string ownerPid = PidOfStable(stable);
+                if (string.IsNullOrEmpty(ownerPid))
+                { Plugin.Logger.LogInfo($"[CompanyLists] fan-out refused for stable '{stable}' ({why}): no player id known this session."); return 0; }
+                if (!MergerSync.InAnyGroup(ownerPid))
+                { Plugin.Logger.LogInfo($"[CompanyLists] fan-out refused: '{ownerPid}' is not in a company."); return 0; }
+                var pay = BuildCompanyLists(stable, ownerPid);
+                if (pay == null) return 0;
+                byte[]? bytes = null;
+                foreach (var cp in ConnectedClientPeers())
+                {
+                    if (cp.playerId == ownerPid) continue;
+                    if (!MergerSync.MergedRuntime(ownerPid, cp.playerId)) continue;
+                    bytes ??= MessageEnvelope.Create(MessageType.CompanyLists, "host", pay).Serialize();
+                    cp.peer.Send(bytes, reliable: true);
+                    fanout++;
+                }
+                if (MPConfig.PlayerId != ownerPid && MergerSync.MergedRuntime(ownerPid, MPConfig.PlayerId))
+                { GameStatePatcher.EnqueueOnMainThread(() => CompanyLists.Receive(pay)); fanout++; }   // the host is a member too
+                if (fanout > 0)
+                    Plugin.Logger.LogInfo($"[CompanyLists] fanned out {pay.DeliveryContracts.Count} contracts, "
+                                        + $"{pay.LogisticsManagerPlans.Count} plans of '{ownerPid}' to {fanout} co-member(s) ({why}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] fan-out: {ex.Message}"); }
+            return fanout;
+        }
+
+        private static CompanyListsPayload? BuildCompanyLists(string stable, string ownerPid)
+        {
+            string had;
+            lock (_paperwork) had = _paperwork.TryGetValue(stable, out var pe) ? (pe.Json ?? "") : "";
+            if (string.IsNullOrEmpty(had)) return null;
+            BusinessPaperworkPayload? pw = null;
+            try { pw = Newtonsoft.Json.JsonConvert.DeserializeObject<BusinessPaperworkPayload>(had); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] read of '{ownerPid}' entry: {ex.Message}"); return null; }
+            if (pw == null) return null;
+            return CompanyLists.Extract(pw, ownerPid);
+        }
+
+        /// <summary>HOST: a JOINER's catch-up - every co-member's agreement lists as they stand now. Runs
+        /// from the same join replay the books and the feed ride (review r2 M1's call site).</summary>
+        public static void SendCompanyListsTo(MPLink peer, string joinerPid)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(joinerPid)) return;
+                int n = 0;
+                List<string> keys;
+                lock (_paperwork) keys = new List<string>(_paperwork.Keys);
+                foreach (var stable in keys)
+                {
+                    string ownerPid = PidOfStable(stable);
+                    if (string.IsNullOrEmpty(ownerPid) || ownerPid == joinerPid) continue;
+                    if (!MergerSync.MergedRuntime(ownerPid, joinerPid)) continue;
+                    var pay = BuildCompanyLists(stable, ownerPid);
+                    if (pay == null) continue;
+                    Send(peer, MessageEnvelope.Create(MessageType.CompanyLists, "host", pay));
+                    n++;
+                }
+                if (n > 0) Plugin.Logger.LogInfo($"[CompanyLists] join replay to '{joinerPid}': {n} owner(s).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] join replay: {ex.Message}"); }
+        }
+
+        /// <summary>HOST: does this plan cross an OWNER boundary? Its warehouse/factory end and every
+        /// destination must belong to ONE member in the rental ledger. Wave 4 refuses a mixed plan at the
+        /// EDIT, exactly as S3 refuses the mixed LEG - until phase 4c's routed cargo transfer exists.</summary>
+        private static bool PlanCrossesOwners(PwLogisticsPlan plan, out string why)
+        {
+            why = "";
+            if (plan == null) return false;
+            string first = "", firstKey = "";
+            foreach (var key in PlanEndKeys(plan))
+            {
+                if (!BuildingOwners.TryGetValue(key, out var o) || string.IsNullOrEmpty(o)) continue;
+                string pid = o == "host" ? MPConfig.PlayerId : o;
+                if (first.Length == 0) { first = pid; firstKey = key; continue; }
+                if (pid != first) { why = $"'{firstKey}' is run by '{first}' and '{key}' by '{pid}'"; return true; }
+            }
+            return false;
+        }
+
+        private static IEnumerable<string> PlanEndKeys(PwLogisticsPlan plan)
+        {
+            if (!string.IsNullOrEmpty(plan.TargetAddressKey)) yield return plan.TargetAddressKey;
+            foreach (var d in plan.Destinations ?? new List<PwLogisticsDestination>())
+                if (!string.IsNullOrEmpty(d?.DeliveryTargetAddressKey)) yield return d.DeliveryTargetAddressKey;
         }
 
         /// <summary>HOST: one MergerTax envelope to one named member. FALSE = that member is not

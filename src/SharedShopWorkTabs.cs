@@ -300,34 +300,272 @@ namespace BigAmbitionsMP
         /// <summary>Ruling 29: a helper never sells the owner's stock — the native button credits the CLICKER.
         /// The button is greyed by the render; this backstop blocks every other path to the method.
         /// Widened 2026-09-11 (merger stop-gap S1) to merger-FLIPPED partner warehouses, which are not
-        /// shared sessions and so never set _openAddr.</summary>
+        /// shared sessions and so never set _openAddr.
+        /// WAVE 4 r2 (D21): on a merger-FLIPPED partner warehouse the click is ACCURATE BY CONSTRUCTION -
+        /// QUOTE FIRST. The native method totals the REPLICA (Inventory.cs:72-80, over _palletShelves) and
+        /// puts that number in the game's own confirmation, and a replica's cargo is exactly what a member
+        /// does not hold; so the native method does not run at all. The click asks the machine that HOLDS the
+        /// stock for its own total, and the answer opens the game's OWN confirmation (same key, same
+        /// arguments) around THAT number - what the player sees is what the runner will charge, or the sale
+        /// is refused. The PERMISSION-grant case (a shared session, _openAddr set) stays refused for good -
+        /// ruling 29 is about a helper, not about a partner. INERT without a merger.</summary>
         [HarmonyPatch(typeof(WhInventory), nameof(WhInventory.SellAllInventory))]
         public static class Patch_WarehouseInventory_SellAll_Block
         {
-            static bool Prefix()
+            // ____warehouse = `___` + the field name `_warehouse` (Inventory.cs:26 `private
+            // Entities.Warehouse _warehouse;`) = four underscores.
+            static bool Prefix(Entities.Warehouse ____warehouse)
             {
                 if (_openAddr.Length == 0)
                 {
-                    if (MergerFlip.FlippedCount == 0) return true;   // r2 (review MINOR-3): no company building anywhere - skip the UI walk
-                    // MERGER STOP-GAP S1 (2026-09-11): a merger-FLIPPED partner warehouse is NOT a shared
-                    // session (_openAddr stays empty), so the native Sell All would run here: it credits
-                    // the CLICKER and clears the cargo on the LOCAL REPLICA, and the owner's next interior
-                    // push restores the cargo => money from nothing. Refused (silently, as above) until the
-                    // sale has an owner route. Live read of the page's own registration at the click.
-                    // INERT without a merger: TrulyMine is true for every rented reg while the flip table
-                    // is empty, and a non-rented reg falls through to native behaviour.
+                    // A merger-FLIPPED partner warehouse is NOT a shared session (_openAddr stays empty).
+                    bool partner = false; string addr = "";
                     try
                     {
-                        var flipReg = OpenPageReg();
-                        bool rented; try { rented = flipReg != null && flipReg.RentedByPlayer; } catch { rented = false; }
-                        if (!rented || MergerFlip.TrulyMine(flipReg)) return true;
-                        Plugin.Logger.LogInfo($"[Merger] Sell-All on '{AddrOf(flipReg)}' refused - a company building is sold by its operator (route pending)");
+                        if (MergerFlip.FlippedCount != 0 && ____warehouse != null)
+                        {
+                            try { addr = GameStateReader.AddressKey(____warehouse); } catch { addr = ""; }
+                            partner = addr.Length > 0 && MergerFlip.IsFlipped(addr) && !MergerFlip.TrulyMine(____warehouse);
+                        }
                     }
-                    catch { return true; }
-                    return false;
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] sell-all gate: {ex.Message}"); return true; }
+                    if (!partner) return true;   // my own warehouse: the game's own figure is the truth
+                    if (!MPServer.IsRunning && !MPClient.IsConnected)
+                    { Plugin.Logger.LogWarning($"[Merger] sell-all REFUSED for '{addr}': no session to route it over."); return false; }
+                    AskSellQuote(addr);
+                    return false;   // nothing is totalled, shown or sold off a replica
                 }
                 Plugin.Logger.LogInfo($"{Tag} Sell All on shared '{_openAddr}' blocked (ruling 29 — the merger will route it; permissions never).");
                 return false;
+            }
+        }
+
+        // ───────────── WAVE 4 r2 (D21) — SELL-ALL, ACCURATE BY CONSTRUCTION ─────────────
+        // quote (member → host → runner) · answer (runner → host → member) · the game's own confirmation
+        // around the ANSWER · the sale carries the quote back and is only made if it still holds.
+
+        private static string _sellQuoteAddr = "";     // the warehouse a quote is outstanding for
+        private static float  _sellQuoteAt;            // when it was asked (or when the sale was routed)
+        private const  float  SellQuoteWindow = 30f;   // an answer later than this belongs to no click
+
+        /// <summary>MEMBER, MAIN THREAD: ask whoever RUNS this warehouse what its inventory is worth.</summary>
+        internal static void AskSellQuote(string addr)
+        {
+            _sellQuoteAddr = addr; _sellQuoteAt = Time.unscaledTime;
+            RequestInfo(addr, "sellquote");
+        }
+
+        /// <summary>MEMBER: the runner's answer. The game's OWN confirmation is raised around the quoted
+        /// number; confirming routes the sale WITH that number. Never a sale without a confirmation - if the
+        /// dialog cannot be raised, nothing is sold.</summary>
+        private static void OnSellQuote(SharedWorkInfoPayload p)
+        {
+            if (_sellQuoteAddr.Length == 0 || p.AddressKey != _sellQuoteAddr)
+            { Plugin.Logger.LogInfo($"[Merger] sell-all quote for '{p.AddressKey}' arrived with no click waiting for it - ignored."); return; }
+            float age = Time.unscaledTime - _sellQuoteAt;
+            if (age > SellQuoteWindow)
+            { _sellQuoteAddr = ""; Plugin.Logger.LogWarning($"[Merger] sell-all quote for '{p.AddressKey}' arrived {age:F0}s late - the click is gone, nothing is shown."); return; }
+            string addr = p.AddressKey; float q = p.Quote;
+            _sellQuoteAddr = "";
+            if (!ShowSellAllConfirm(addr, q))
+                Plugin.Logger.LogWarning($"[Merger] sell-all REFUSED for '{addr}': the game's own confirmation could not be raised, so nothing was sold.");
+        }
+
+        /// <summary>MEMBER: the player said yes to the quoted figure. The quote rides along so the runner can
+        /// prove it still holds; a stale one is refused there and re-quoted here.</summary>
+        private static void RouteSellAll(string addr, float quote)
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected)
+                { Plugin.Logger.LogWarning($"[Merger] sell-all REFUSED for '{addr}': no session to route it over."); return; }
+                _sellQuoteAddr = addr; _sellQuoteAt = Time.unscaledTime;   // a stale-quote refusal re-quotes into a fresh confirmation
+                SendEdit(new SharedWorkEditPayload
+                { PlayerId = MPConfig.PlayerId, AddressKey = addr, Op = "mergersellall", Estimate = quote });
+                Plugin.Logger.LogInfo($"[Merger] sell-all confirmed for '{addr}' at the quoted {quote} - routed to its runner.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] sell-all route: {ex.Message}"); }
+        }
+
+        // The game's own confirmation, raised with the RUNNER's number. HudConfirm.Show's data parameter is a
+        // `Localizor.LanguageChangeEvent.LanguageChangeEventDataHolder` - Localizor is an un-referenced
+        // assembly, so the holder is built by reflection exactly as the boxesLabel readout reaches its
+        // Arguments. Key and Arguments are the native call's own (Inventory.cs:81-88), so no new text exists.
+        private static readonly Type _tLangData = AccessTools.TypeByName("Localizor.LanguageChangeEvent.LanguageChangeEventDataHolder");
+        private static readonly System.Reflection.MethodInfo? _mHudConfirmShow = FindHudConfirmShow();
+
+        private static System.Reflection.MethodInfo? FindHudConfirmShow()
+        {
+            try
+            {
+                foreach (var m in typeof(HudConfirm).GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
+                {
+                    if (m.Name != "Show") continue;
+                    var ps = m.GetParameters();
+                    if (ps.Length == 7 && ps[0].ParameterType != typeof(string)) return m;   // the data-holder overload
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] HudConfirm.Show lookup: {ex.Message}"); }
+            return null;
+        }
+
+        private static bool SetHolderMember(object box, string name, object value)
+        {
+            try
+            {
+                var f = _tLangData?.GetField(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (f != null) { f.SetValue(box, value); return true; }
+                var pr = _tLangData?.GetProperty(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (pr != null && pr.CanWrite) { pr.SetValue(box, value); return true; }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] sell-all confirmation field '{name}': {ex.Message}"); }
+            return false;
+        }
+
+        private static bool ShowSellAllConfirm(string addr, float quote)
+        {
+            try
+            {
+                if (_tLangData == null || _mHudConfirmShow == null) return false;
+                object? header = _tLangData.IsValueType ? Activator.CreateInstance(_tLangData) : null;
+                object body = Activator.CreateInstance(_tLangData)!;
+                if (!SetHolderMember(body, "Key", "bizman_inventory_sell_all_confirm")) return false;
+                SetHolderMember(body, "Arguments", new { totalPrice = Extensions.GenericExtensions.ToShortCurrencyFormat(quote) });
+                string a = addr; float q = quote;
+                Action onConfirm = () => RouteSellAll(a, q);
+                _mHudConfirmShow.Invoke(null, new object?[] { header, body, onConfirm, null, null, null, true });
+                Plugin.Logger.LogInfo($"[Merger] sell-all quote {quote} for '{addr}' put to the player in the game's own confirmation.");
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] sell-all confirmation: {ex.Message}"); return false; }
+        }
+
+        /// <summary>RUNNER: the ONE sell-all total on this machine - the warehouse screen's own predicate
+        /// (Inventory.cs:50-56, `ItemsGetter.GetByName(value.itemName).HasTag(iswarehousestorage)`) over the
+        /// pallet shelves, times ItemHelper.sellingMultiplier (:71). The quote and the sale both read it
+        /// HERE, so what was quoted is exactly what is charged. `shelves` collects the shelves for the sale.</summary>
+        private static float SellAllTotal(BuildingRegistration reg, List<BigAmbitions.Items.ItemInstance>? shelves)
+        {
+            float total = 0f;
+            if (reg == null) return 0f;
+            foreach (var v in reg.itemInstances.Values)
+            {
+                if (v == null) continue;
+                var byName = BigAmbitions.Items.ItemsGetter.GetByName(v.itemName);
+                if (!byName.HasTag(BigAmbitions.Tags.TagRef.Itemtag.iswarehousestorage)) continue;
+                shelves?.Add(v);
+                foreach (var c in v.cargoInstances) total += (float)c.amount * c.pricePerUnit;
+            }
+            return total * ItemHelper.sellingMultiplier;
+        }
+
+        /// <summary>RUNNER: answer one member's quote ask. MEMBERSHIP only - ruling 29 keeps a permission
+        /// helper away from the owner's stock, quote included.</summary>
+        private static void AnswerSellQuote(SharedWorkInfoPayload req, bool merged)
+        {
+            try
+            {
+                if (!merged)
+                { Plugin.Logger.LogWarning($"[Merger] sell-all quote for '{req.AddressKey}' REFUSED: '{req.PlayerId}' is not a member of my company (ruling 29)."); return; }
+                var reg = GameStatePatcher.FindRegistration(req.AddressKey);
+                if (reg == null)
+                { Plugin.Logger.LogWarning($"[Merger] sell-all quote REFUSED for '{req.AddressKey}': no registration here."); return; }
+                bool runsHere = false;
+                try { runsHere = MergerFlip.TrulyMine(reg) || MergerAbsence.SimulatesHere(req.AddressKey); } catch { }
+                if (!runsHere)
+                { Plugin.Logger.LogWarning($"[Merger] sell-all quote REFUSED for '{req.AddressKey}': that warehouse is not run here."); return; }
+                SendSellQuote(req.PlayerId, req.AddressKey, SellAllTotal(reg, null));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] sell-all quote REFUSED for '{req?.AddressKey}': {ex.Message}"); }
+        }
+
+        /// <summary>RUNNER → the ONE member that asked. The answer rides the tab-snapshot shape (Tab
+        /// "sellquote"), so no new message type exists.</summary>
+        private static void SendSellQuote(string toPid, string addr, float quote)
+        {
+            var reply = new SharedWorkInfoPayload
+            { PlayerId = MPConfig.PlayerId, Action = "snapshot", Tab = "sellquote", AddressKey = addr, ToPid = toPid, Quote = quote };
+            Plugin.Logger.LogInfo($"[Merger] sell-all quote for '{addr}' to '{toPid}': {quote}");
+            if (MPServer.IsRunning) MPServer.HostRouteSharedWorkInfo(reply, MPConfig.PlayerId);
+            else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedWorkInfo, MPConfig.PlayerId, reply));
+        }
+
+        /// <summary>RUNNER → the ONE member that asked: a routed COMMITMENT was refused, by CODE. The member
+        /// maps the code to the game's own notification locally (r2 minor f) - no text is ever on the wire.</summary>
+        private static void SendRoutedRefusal(string toPid, string addr, string code)
+        {
+            if (string.IsNullOrEmpty(toPid) || string.IsNullOrEmpty(code)) return;
+            var reply = new SharedWorkInfoPayload
+            { PlayerId = MPConfig.PlayerId, Action = "snapshot", Tab = "mergerack", AddressKey = addr, ToPid = toPid, AckCode = code };
+            if (MPServer.IsRunning) MPServer.HostRouteSharedWorkInfo(reply, MPConfig.PlayerId);
+            else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedWorkInfo, MPConfig.PlayerId, reply));
+        }
+
+        /// <summary>MEMBER (r2 minor f): a routed contract creation was refused on the runner for a reason the
+        /// game itself has a notification for. The dialog's own null return is silent, so the member saw
+        /// nothing at all; the game's OWN notification for that exact reason is raised here
+        /// (WholesaleStoreManagerDialog.cs:72 and :85). Only a refusal for a creation THIS machine routed in
+        /// the last few seconds is shown, and only the two codes below exist.</summary>
+        private static void OnRoutedRefusal(SharedWorkInfoPayload p)
+        {
+            try
+            {
+                if (_contractRouteAddr.Length == 0 || p.AddressKey != _contractRouteAddr
+                    || Time.unscaledTime - _contractRouteAt > SellQuoteWindow)
+                { Plugin.Logger.LogInfo($"[Merger] routed refusal '{p.AckCode}' for '{p.AddressKey}' matches no request of mine - ignored."); return; }
+                _contractRouteAddr = "";
+                if (p.AckCode == "dupe")
+                    UI.Notification.Notifications.ShowError("wholesalestoremanagerdialog_notification_already_have_contract",
+                                                           "wholesalestoremanagerdialog_notification_already_have_contract");
+                else if (p.AckCode == "shelf")
+                {
+                    Dictionary<string, string>? data = null;
+                    try
+                    {
+                        data = new Dictionary<string, string>
+                        { { "shelf", Helpers.LocalizationHelper.GetItemLabel(BigAmbitions.Items.ItemsGetter.GetRandomByTag(BigAmbitions.Tags.TagRef.Itemtag.isbusinessstorage)).ToString() } };
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] refusal notice data: {ex.Message}"); }
+                    UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error,
+                        "wholesalestoremanagerdialog_notification_require_shelf_in_business", data);
+                }
+                else { Plugin.Logger.LogWarning($"[Merger] routed refusal for '{p.AddressKey}': unknown code '{p.AckCode}' - nothing shown."); return; }
+                Plugin.Logger.LogInfo($"[Merger] routed contract creation for '{p.AddressKey}' was refused on its runner ('{p.AckCode}') - the game's own notice raised here.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] routed refusal: {ex.Message}"); }
+        }
+
+        private static string _contractRouteAddr = "";   // the last contract creation this machine routed
+        private static float  _contractRouteAt;
+
+        /// <summary>WAVE 4 (V2b) — WAREHOUSE SELL-ALL ROUTE. `private void OnConfirmSellAllInventory(float
+        /// price)` (Inventory.cs:94) is the commitment: it clears every pallet shelf (:96-103) and credits the
+        /// CLICKER with GameManager.ChangeMoneySafe (:106). On a merger-FLIPPED partner warehouse both halves
+        /// are wrong here — the cargo lives on a replica the owner's next interior push restores, and the
+        /// money is real. The click becomes a route to whoever runs the building; that machine RECOMPUTES the
+        /// total from its own pallets and runs the same native credit, so the sale happens exactly once, on
+        /// the machine whose stock it is. Nothing is cleared locally: the owner's interior push echoes it.
+        /// ____warehouse = `___` + the field name `_warehouse` (Inventory.cs:26 `private Entities.Warehouse
+        /// _warehouse;`) = four underscores.
+        /// WAVE 4 r2 (D21): the route itself moved one step EARLIER - the click now asks the runner for a
+        /// quote and the sale is routed from the game's own confirmation with that quoted number
+        /// (RouteSellAll). The native confirm callback can therefore only be reached on a partner warehouse
+        /// by a path that skipped the quote, and the one thing it must never do is sell at a replica's
+        /// figure: it is refused and logged. INERT without a merger: the flip table is empty.</summary>
+        [HarmonyPatch(typeof(WhInventory), "OnConfirmSellAllInventory")]
+        public static class Patch_WarehouseInventory_SellAll_Route
+        {
+            static bool Prefix(float price, Entities.Warehouse ____warehouse)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0 || ____warehouse == null) return true;   // inert without a merger
+                    string addr = ""; try { addr = GameStateReader.AddressKey(____warehouse); } catch { }
+                    if (addr.Length == 0 || !MergerFlip.IsFlipped(addr) || MergerFlip.TrulyMine(____warehouse)) return true;
+                    Plugin.Logger.LogWarning($"[Merger] sell-all REFUSED for '{addr}': the native confirmation was reached with a replica's figure {price} - the routed sale only ever carries the runner's own quote (D21).");
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] sell-all route: {ex.Message}"); return false; }
             }
         }
 
@@ -1848,7 +2086,7 @@ namespace BigAmbitionsMP
             return ok;
         }
 
-        private static void SendEdit(SharedWorkEditPayload p)
+        internal static void SendEdit(SharedWorkEditPayload p)   // wave 4: CompanyLists routes plan edits through the same envelope
         {
             _lastEditSentAt = Time.unscaledTime;
             // W3-7: one line per edit routed off a merger-flipped partner building. A direct-grant shop is the
@@ -1859,6 +2097,9 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Merger] work edit routed to owner '{MergerFlip.ParkedRunner(p.AddressKey)}' for '{p.AddressKey}' ({p.Op})");
             }
             catch { }
+            // r2 minor (f): a routed CONTRACT CREATION can be refused on the runner for a reason the game
+            // itself notifies about. Remember which one we sent, so only a refusal of OUR request shows.
+            if (p != null && p.Op == "mergercontract") { _contractRouteAddr = p.AddressKey ?? ""; _contractRouteAt = Time.unscaledTime; }
             if (MPServer.IsRunning) MPServer.HostRouteSharedWorkEdit(p, MPConfig.PlayerId);
             else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedWorkEdit, MPConfig.PlayerId, p));
         }
@@ -2323,6 +2564,11 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"{Tag} work-info request from '{req.PlayerId}' but they hold no Business grant from me and are not a member of my company — ignored.");
                 return;
             }
+            // WAVE 4 r2 (D21): the sell-all quote is not a tab snapshot - it is a figure computed for one
+            // click, and it is MEMBERSHIP-only. r3 (rig, T-P2-WAVE4 run 5): membership is tested on its
+            // OWN - `infoMerged` is false for a member who ALSO holds a direct grant (the '!infoDirect'
+            // precedence is for tab snapshots), and that refused the host's own quote on the fixture.
+            if (req.Tab == "sellquote") { AnswerSellQuote(req, MergerSync.MergedRuntime(MPConfig.PlayerId, req.PlayerId)); return; }
             BuildAndSendSnapshot(req.AddressKey, req.Tab, req.PlayerId, req.Sig, merged: infoMerged);
         }
 
@@ -3962,6 +4208,11 @@ namespace BigAmbitionsMP
         /// <summary>HELPER, MAIN THREAD: keep the owner's figures and repaint if that tab is still the one open.</summary>
         private static void ApplySnapshot(SharedWorkInfoPayload p)
         {
+            // WAVE 4 r2: two answers that belong to no open tab - the sell-all quote (D21) and a routed
+            // commitment's refusal (minor f). Both are addressed to this machine alone and are handled
+            // before any tab-session test.
+            if (p.Tab == "sellquote") { OnSellQuote(p); return; }
+            if (p.Tab == "mergerack") { OnRoutedRefusal(p); return; }
             var reg = GameStatePatcher.FindRegistration(p.AddressKey);
             if (reg == null) return;
             if (p.Tab == "card")
@@ -4017,6 +4268,186 @@ namespace BigAmbitionsMP
             else if (p.Tab == "settings" && p.Tab == _openTab) ApplySettingsSnapshot(p, reg);   // never while Insight is up: UpdatePromotion would overwrite its deliberately-zeroed first open
         }
 
+        // ═══════════════ MERGER PHASE 2 WAVE 4 — the routed commitments ═══════════════
+
+        /// <summary>WAVE 4 r2 (review MAJOR-3): whose agreement is a routed commitment on `addressKey` about
+        /// to become? "" when the building is truly mine - the item is MY agreement and installs untagged, in
+        /// my save, run by my passes. A pid when this machine is only STANDING IN for an absent owner: the
+        /// item is that owner's, and it must be installed exactly like the hand-over's own items (tagged with
+        /// the OWNER's pid) so the save strip keeps it out of my .hsg, the filing publishes it under the
+        /// owner, and the return leg lifts it back to them. An untagged install there would hand the absent
+        /// owner's agreement to the stand-in for good.</summary>
+        private static string StandInOwnerFor(string addressKey, BuildingRegistration reg)
+        {
+            try
+            {
+                if (reg != null && MergerFlip.TrulyMine(reg)) return "";
+                return MergerAbsence.OwnerSimulatedFor(addressKey);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] stand-in test '{addressKey}': {ex.Message}"); return ""; }
+        }
+
+        /// <summary>OPERATOR, MAIN THREAD (V2a). Replay a member's wholesale contract creation through the
+        /// game's OWN construction, re-running both of the dialog's pre-checks on THIS machine's truth:
+        /// the duplicate test (WholesaleStoreManagerDialog.cs:71, the OWNER's DeliveryContracts) and the
+        /// shelf test (:77, the business's own interior). The delivery fee comes from the wholesale store's
+        /// own settings (:88), exactly as the dialog reads it. The GameEvent fires here (:98) because the
+        /// contract is created here. The two phone messages are NOT replayed: they are sent to and from
+        /// `DialogController.current.contact` (:100-101) — the CALLER's open dialog — and there is none on
+        /// this machine; fabricating a contact entry would be new on-screen state, so it is refused and
+        /// logged. MarkDirty makes the next publish carry the contract back to the member as a display
+        /// copy (V1).</summary>
+        private static void ApplyRoutedContractCreate(BuildingRegistration reg, SharedWorkEditPayload p)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null || reg == null)
+                { Plugin.Logger.LogWarning($"[Merger] contract create REFUSED for '{p.AddressKey}': no business registration here."); return; }
+                var whAddr = MergerAbsence.AddressOfKey(p.StrValue ?? "");
+                if (whAddr == null)
+                { Plugin.Logger.LogWarning($"[Merger] contract create REFUSED for '{p.AddressKey}': unknown wholesale store '{p.StrValue}'."); return; }
+                foreach (var c in gi.DeliveryContracts)
+                    if (c != null && c.businessAddress == reg.Address && c.wholesaleAddress == whAddr)
+                    {
+                        Plugin.Logger.LogWarning($"[Merger] contract create REFUSED for '{p.AddressKey}': a contract with '{p.StrValue}' already exists here.");
+                        SendRoutedRefusal(p.PlayerId, p.AddressKey, "dupe");   // r2 minor (f): the game's own notice, raised on the member
+                        return;
+                    }
+                bool hasShelf = false;
+                try
+                {
+                    foreach (var it in reg.itemInstances.Values)
+                        if (it != null && it.ItemCached.HasTag(BigAmbitions.Tags.TagRef.Itemtag.isbusinessstorage)) { hasShelf = true; break; }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] contract create shelf check '{p.AddressKey}': {ex.Message}"); }
+                if (!hasShelf)
+                {
+                    Plugin.Logger.LogWarning($"[Merger] contract create REFUSED for '{p.AddressKey}': no business storage shelf in that business.");
+                    SendRoutedRefusal(p.PlayerId, p.AddressKey, "shelf");   // r2 minor (f)
+                    return;
+                }
+
+                float fee = 0f;
+                try
+                {
+                    var settings = BuildingHelper.GetBuilding(whAddr)?.SpecialService?.settings;
+                    var fi = settings?.GetType().GetField("deliveryFee");
+                    if (fi != null) fee = Convert.ToSingle(fi.GetValue(settings));
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] contract create fee read '{p.StrValue}': {ex.Message}"); }
+
+                var item = new Entities.DeliveryContract
+                {
+                    nextDeliveryDay  = Entities.DeliveryHelper.GetNextDeliveryDay(),
+                    wholesaleAddress = whAddr,
+                    businessAddress  = reg.Address,
+                    items            = new List<Entities.DeliveryContractItem>(),
+                    deliveryFee      = fee,
+                };
+                gi.DeliveryContracts.Add(item);
+                // WAVE 4 r2 (review MAJOR-3): on a STAND-IN this contract is the ABSENT OWNER's, not mine.
+                // The game built it natively; only its bookkeeping is added here, with the owner's pid - the
+                // same tag the hand-over's own installs carry, so the save strip, the filing and the return
+                // leg all treat it as that owner's.
+                string standIn = StandInOwnerFor(p.AddressKey, reg);
+                if (standIn.Length > 0 && MergerAbsence.RegisterInstalledFor(standIn, "DeliveryContracts", item))
+                    Plugin.Logger.LogInfo($"[Merger] contract create for '{p.AddressKey}' tagged to the absent owner '{standIn}' - it leaves with them.");
+                GameEvent.Invoke("ba:gameevent_newdeliverycontract");
+                SaveGameManager.MarkChange();
+                PaperworkSync.MarkDirty();
+                Plugin.Logger.LogInfo($"[Merger] contract create applied for '{p.AddressKey}' from '{p.PlayerId}' "
+                                    + $"(wholesale '{p.StrValue}', fee {fee}); the two phone messages were not replayed - "
+                                    + "they belong to the caller's own dialog contact.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] contract create REFUSED for '{p.AddressKey}': {ex.Message}"); }
+        }
+
+        /// <summary>OPERATOR, MAIN THREAD (V2b + D21). The member is confirming a figure THIS machine
+        /// quoted, so the sale is ACCURATE BY CONSTRUCTION: recompute the total here and sell ONLY if it
+        /// still equals the quote (float tolerance 0.005). A total that moved between the quote and the
+        /// confirmation means the player agreed to a number that no longer exists — the sale is refused and
+        /// a fresh quote is sent back, which re-opens the game's own confirmation on the member with the new
+        /// figure. The sale itself is the native commitment exactly as Inventory.cs:94-108 does it: clear
+        /// every pallet shelf's cargo, kick the in-building refresh, and credit through
+        /// GameManager.ChangeMoneySafe with the game's own TransactionInfo (the MergerWallet mirror follows
+        /// that call). The pallet-shelf predicate is the screen's own (Inventory.cs:50-56) and lives in
+        /// SellAllTotal, which the quote reads too.</summary>
+        private static void ApplyRoutedSellAll(BuildingRegistration reg, SharedWorkEditPayload p)
+        {
+            try
+            {
+                if (reg == null)
+                { Plugin.Logger.LogWarning($"[Merger] sell-all REFUSED for '{p.AddressKey}': no registration here."); return; }
+                var shelves = new List<BigAmbitions.Items.ItemInstance>();
+                float total = SellAllTotal(reg, shelves);
+                float quote = p.Estimate;
+                if (Math.Abs(total - quote) > 0.005f)
+                {
+                    Plugin.Logger.LogWarning($"[Merger] sell-all refused for '{p.AddressKey}': quote {quote} stale (now {total})");
+                    SendSellQuote(p.PlayerId, p.AddressKey, total);   // the member's screen re-quotes
+                    return;
+                }
+                foreach (var shelf in shelves)
+                {
+                    shelf.cargoInstances.Clear();
+                    try
+                    {
+                        if (InstanceBehavior<BuildingManager>.Instance?.building?.Address == reg.Address)
+                            shelf.OnItemsInCargoUpdated()();
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] sell-all cargo refresh '{p.AddressKey}': {ex.Message}"); }
+                }
+                var data = new Dictionary<string, string> { { "businessName", reg.BusinessName } };
+                GameManager.ChangeMoneySafe(total, new TransactionInfo("ba:transaction_businessinventorysold", data));
+                SaveGameManager.MarkChange();
+                Plugin.Logger.LogInfo($"[Merger] sell-all routed for '{p.AddressKey}': sold for {total} at the quote the member confirmed.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] sell-all REFUSED for '{p.AddressKey}': {ex.Message}"); }
+        }
+
+        /// <summary>OPERATOR, MAIN THREAD (V2c). One whole logistics plan, REPLACE-BY-ID: the old plan object
+        /// leaves gi.logisticsManagerPlans and the incoming one is built by the absence installer. The
+        /// cross-owner refusal already happened at the host (MPServer.PlanCrossesOwners) and on the member;
+        /// this is the belt-and-braces re-check on the machine that will actually run the legs.
+        /// WAVE 4 r2 (review MAJOR-3): the install is UNTAGGED only when the headquarters is TRULY MINE. On a
+        /// STAND-IN it is tagged with the ABSENT OWNER's pid, exactly like the hand-over's own installs -
+        /// otherwise the absent owner's plan would serialise into the stand-in's .hsg and the return leg,
+        /// which lifts by owner pid, would never take it back. The replaced object's tag record goes with it
+        /// (ForgetInstalled): leaving it orphaned let the save strip's restore re-add the dead plan, and the
+        /// list then held two plans with one id.</summary>
+        private static void ApplyRoutedPlanEdit(BuildingRegistration reg, SharedWorkEditPayload p)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                var plan = p.Plan;
+                if (gi == null || plan == null || string.IsNullOrEmpty(plan.Id))
+                { Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED for '{p.AddressKey}': no plan in the payload."); return; }
+                var superseded = new List<Buildings.Office.Headquarters.LogisticsManagerPlan>();
+                foreach (var x in gi.logisticsManagerPlans) if (x != null && x.id == plan.Id) superseded.Add(x);
+                int removed = gi.logisticsManagerPlans.RemoveAll(x => x != null && x.id == plan.Id);
+                int forgotten = 0;
+                foreach (var dead in superseded) forgotten += MergerAbsence.ForgetInstalled(dead);
+                var bundle = new BusinessPaperworkPayload();
+                bundle.Lists.LogisticsManagerPlans.Add(plan);
+                var owned = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { p.AddressKey };
+                string standIn = StandInOwnerFor(p.AddressKey, reg);
+                int n = standIn.Length == 0
+                      ? MergerAbsence.InstallListsUntagged(p.AddressKey, bundle, owned, MPConfig.PlayerId)
+                      : MergerAbsence.InstallListsTagged(p.AddressKey, bundle, owned, standIn);
+                if (n == 0)
+                { Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED for '{p.AddressKey}' (plan {plan.Id}): the installer built nothing."); return; }
+                SaveGameManager.MarkChange();
+                PaperworkSync.MarkDirty();
+                Plugin.Logger.LogInfo($"[Merger] plan edit applied for '{p.AddressKey}' from '{p.PlayerId}' (plan {plan.Id}; {removed} replaced, "
+                                    + $"{forgotten} tag record(s) released) - "
+                                    + (standIn.Length == 0 ? "my own agreement, installed untagged."
+                                                           : $"tagged to the absent owner '{standIn}', so it leaves with them."));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED for '{p.AddressKey}': {ex.Message}"); }
+        }
+
         // ═══════════════ owner-side edit apply ═══════════════
 
         /// <summary>OWNER, MAIN THREAD: apply one routed edit with the native checks, then echo that tab's
@@ -4044,6 +4475,14 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogWarning($"{Tag} work edit '{p.Op}' on '{p.AddressKey}' from '{p.PlayerId}' refused — not run here (not mine and not simulated here).");
                     return;
                 }
+                // ── MERGER PHASE 2 WAVE 4 (V2): the three PARITY routes. Each is a COMMITMENT on this
+                // machine's own state, not a tab edit, so none of them echoes a tab snapshot: the member sees
+                // the result through the copies the owner's next paperwork publish fans back (V1) and through
+                // the interior push. ──
+                if (p.Op == "mergercontract") { ApplyRoutedContractCreate(reg, p); return; }
+                if (p.Op == "mergersellall")  { ApplyRoutedSellAll(reg, p); return; }
+                if (p.Op == "mergerplan")     { ApplyRoutedPlanEdit(reg, p); return; }
+
                 bool applied; string echoTab;
                 if (p.Op == "rename" || p.Op == "logo")
                 {
