@@ -168,10 +168,11 @@ namespace BigAmbitionsMP
             // lifted copy IS the live state — those tabs are local, and routing them would send the edit to
             // itself and then drop it (HostRouteSharedWorkEdit refuses a target that is the sender).
             try { if (MergerAbsence.SimulatesHere(addr)) return false; } catch { }
-            // r2 (review MAJOR-1): IsMergedShop INCLUDES a partner's headquarters (the schedule pipeline wants it), but
-            // the host's SharedWorkAddressAllowed refuses HQ addresses for every routed op - a request would die there
-            // with a WARN every 5 s while the tab is open. HQ tabs are phase 4c; until then no info session for an HQ.
-            try { if (reg != null && reg.businessTypeName == "ba:businesstype_headquarters") return false; } catch { }
+            // PHASE 4c part 1 (H2): a MERGED partner's headquarters is now admitted. The host's
+            // SharedWorkAddressAllowed takes a merged-HQ exception for a company member (MPServer, the
+            // `mergedHq` argument), so the work-INFO and work-EDIT routes land on whoever runs the HQ.
+            // The DIRECT-grant path is untouched: IsSharedShop returns false for a headquarters
+            // (SharedShopSchedule.cs:85, ruling 2026-08-21), so only the merger branch can reach here.
             return true;
         }
 

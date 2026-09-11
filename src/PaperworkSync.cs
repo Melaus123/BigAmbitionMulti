@@ -902,8 +902,11 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] lift of the previous set: {ex.Message}"); }
 
             // The installer works one address at a time out of a paperwork bundle, so the rows are handed
-            // back in exactly that shape.  Only the two families wave 4 carries are filled; every other
-            // list on the bundle stays empty, so nothing else can be installed by accident.
+            // back in exactly that shape.  Only the two families that are INSTALLED are filled; every other
+            // list on the bundle stays empty, so nothing else can be installed by accident.  PHASE 4c part 1:
+            // the payload also carries the four HEADQUARTERS plan families, and those are deliberately NOT
+            // put on this bundle - they go to CompanyPlans' screen-layer registry below, never into a game
+            // list (an installed HR/headhunter copy would run off the replicated employee and charge twice).
             var bundle = new BusinessPaperworkPayload();
             bundle.Lists.DeliveryContracts.AddRange(p.DeliveryContracts ?? new List<PwDeliveryContract>());
             bundle.Lists.LogisticsManagerPlans.AddRange(p.LogisticsManagerPlans ?? new List<PwLogisticsPlan>());
@@ -932,6 +935,9 @@ namespace BigAmbitionsMP
 
             _byOwner[p.OwnerPid] = p;
             RebuildOwnerMap();
+            // 4c part 1 - AFTER the owner map: the registry's open-tab redraw asks TryOwnerOfAddress, which reads that map;
+            // before it, the FIRST feed for an HQ new to the map could not redraw an open tab (re-check r2).
+            try { CompanyPlans.Receive(p); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] registry update: {ex.Message}"); }
             Plugin.Logger.LogInfo($"[CompanyLists] installed {nContracts} contracts, {nPlans} plans of '{p.OwnerPid}' (display copies; "
                                 + $"{installed} item(s) in, {lifted} replaced, {skippedNotFlipped} address(es) not flipped here, {skippedSimulated} simulated here).");
             RefreshOpenScreens();
@@ -946,6 +952,7 @@ namespace BigAmbitionsMP
                 int n = 0;
                 try { n = MergerAbsence.RemoveInstalledForOwner(MergerAbsence.DisplayOwnerTag(ownerPid)); } catch { }
                 bool had = _byOwner.Remove(ownerPid);
+                try { CompanyPlans.ClearOwner(ownerPid, why); } catch { }   // 4c part 1: the HQ plan overlay goes with them
                 RebuildOwnerMap();
                 if (n > 0 || had)
                 {
@@ -965,6 +972,7 @@ namespace BigAmbitionsMP
             try
             {
                 if (string.IsNullOrEmpty(ownerPid) || !_byOwner.ContainsKey(ownerPid)) return;
+                try { CompanyPlans.SuspendOwner(ownerPid, why); } catch { }   // 4c part 1: the REAL plans are about to be installed
                 int n = MergerAbsence.RemoveInstalledForOwner(MergerAbsence.DisplayOwnerTag(ownerPid));
                 if (n > 0)
                 {
@@ -985,6 +993,7 @@ namespace BigAmbitionsMP
                 if (string.IsNullOrEmpty(ownerPid) || !MergerSync.IAmMember) return;
                 if (!_byOwner.TryGetValue(ownerPid, out var p) || p == null) return;
                 Plugin.Logger.LogInfo($"[CompanyLists] re-installing the display copies of '{ownerPid}' - {why}.");
+                try { CompanyPlans.ReinstallOwner(ownerPid, why); } catch { }   // 4c part 1
                 Apply(p);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] re-install '{ownerPid}': {ex.Message}"); }
@@ -992,6 +1001,7 @@ namespace BigAmbitionsMP
 
         public static void ClearAll(string why)
         {
+            try { CompanyPlans.ClearAll(why); } catch { }   // 4c part 1
             if (_byOwner.Count == 0) { _ownerOfAddr.Clear(); return; }
             foreach (var pid in new List<string>(_byOwner.Keys)) ClearOwner(pid, why);
             _byOwner.Clear(); _ownerOfAddr.Clear();
@@ -1205,6 +1215,11 @@ namespace BigAmbitionsMP
             {
                 if (l.DeliveryContracts != null) p.DeliveryContracts.AddRange(l.DeliveryContracts);
                 if (l.LogisticsManagerPlans != null) p.LogisticsManagerPlans.AddRange(l.LogisticsManagerPlans);
+                // 4c part 1: the other four HEADQUARTERS families travel too (screen layer on the receiver).
+                if (l.PricingManagerPlans != null) p.PricingManagerPlans.AddRange(l.PricingManagerPlans);
+                if (l.ImportPartnerships != null) p.ImportPartnerships.AddRange(l.ImportPartnerships);
+                if (l.HrManagerPlans != null) p.HrManagerPlans.AddRange(l.HrManagerPlans);
+                if (l.HeadhunterPlans != null) p.HeadhunterPlans.AddRange(l.HeadhunterPlans);
             }
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var b in bundle?.Businesses ?? new List<BusinessPaperwork>())
@@ -1212,6 +1227,16 @@ namespace BigAmbitionsMP
             foreach (var d in p.DeliveryContracts)
                 if (!string.IsNullOrEmpty(d?.BusinessAddressKey) && seen.Add(d.BusinessAddressKey)) p.Addresses.Add(d.BusinessAddressKey);
             foreach (var g in p.LogisticsManagerPlans)
+                if (!string.IsNullOrEmpty(g?.HeadquartersAddressKey) && seen.Add(g.HeadquartersAddressKey)) p.Addresses.Add(g.HeadquartersAddressKey);
+            // 4c part 1: a headquarters that only has (say) a pricing plan must still map to its owner, or
+            // the member's page cannot tell whose headquarters it has open.
+            foreach (var g in p.PricingManagerPlans)
+                if (!string.IsNullOrEmpty(g?.HeadquartersAddressKey) && seen.Add(g.HeadquartersAddressKey)) p.Addresses.Add(g.HeadquartersAddressKey);
+            foreach (var g in p.ImportPartnerships)
+                if (!string.IsNullOrEmpty(g?.HeadquartersAddressKey) && seen.Add(g.HeadquartersAddressKey)) p.Addresses.Add(g.HeadquartersAddressKey);
+            foreach (var g in p.HrManagerPlans)
+                if (!string.IsNullOrEmpty(g?.HeadquartersAddressKey) && seen.Add(g.HeadquartersAddressKey)) p.Addresses.Add(g.HeadquartersAddressKey);
+            foreach (var g in p.HeadhunterPlans)
                 if (!string.IsNullOrEmpty(g?.HeadquartersAddressKey) && seen.Add(g.HeadquartersAddressKey)) p.Addresses.Add(g.HeadquartersAddressKey);
             return p;
         }

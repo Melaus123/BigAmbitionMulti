@@ -8757,5 +8757,413 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ══ MERGER PHASE 4c PART 1 — THE HEADQUARTERS PLAN UNION VIEW (D20-6/D20-8, 2026-09-11) ══
+        //
+        // Open a merged PARTNER's headquarters and its five plan tabs show THAT headquarters' plans.
+        // Logistics already does this through wave 4's TAGGED INSTALLED display copies (its execution pass
+        // is guarded). The other FOUR families are drawn at the SCREEN LAYER only: the postfixes below hand
+        // CompanyPlans' DETACHED row objects to the list's OWN private SetUpPlanEntry, so the rows are the
+        // game's own rows, in the game's own order, with no new on-screen text — and nothing is ever added
+        // to this machine's game lists (an installed HR/headhunter copy would train, insure and recruit
+        // twice off the replicated employee, which is outside the authority veil).
+        //
+        // The reorderable list is deliberately NOT re-initialised after the partner rows go in: a drag maps
+        // an index straight back into GetPlansForHeadquarters (e.g. HrManagersPlanList.cs:72-78), which
+        // knows only the native rows, so a registered partner row would reorder the wrong plan.
+
+        /// <summary>The shared driver for the four postfixes. Returns how many partner rows were drawn.</summary>
+        private static int OverlayPlanRows(string family, object instance, System.Type listType,
+                                           UnityEngine.Transform rowParent, UnityEngine.Transform buttonEntry)
+        {
+            try
+            {
+                if (MergerFlip.FlippedCount == 0) return 0;            // inert without a merger
+                var m = AccessTools.Method(listType, "SetUpPlanEntry");
+                if (m == null)
+                {
+                    if (_planRowWarned.Add(family))
+                        Plugin.Logger.LogWarning($"[Plans] {family}: SetUpPlanEntry is not on {listType.Name} - the partner rows cannot be drawn (once per family).");
+                    return 0;
+                }
+                int n = CompanyPlans.ShowPartnerRows(family, rowParent, row => m.Invoke(instance, new object[] { row }));
+                if (n > 0 && buttonEntry != null) buttonEntry.SetAsLastSibling();   // the add button stays last
+                return n;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] {family} overlay: {ex.Message}"); return 0; }
+        }
+
+        private static readonly HashSet<string> _planRowWarned = new HashSet<string>();
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanList), "RefreshPlansList")]
+        public static class Patch_PricingPlanList_PartnerRows
+        {
+            // ___entryTemplate / ___buttonEntry = '___' + the exact field names, decompile
+            // PricingManagersPlanList.cs:21-22 `[SerializeField] private PricingManagersPlanListEntry entryTemplate;`
+            // and :24-25 `[SerializeField] private Transform buttonEntry;`.
+            static void Postfix(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanList __instance,
+                                UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanListEntry ___entryTemplate,
+                                UnityEngine.Transform ___buttonEntry)
+            {
+                OverlayPlanRows("pricing", __instance,
+                                typeof(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanList),
+                                ___entryTemplate != null ? ___entryTemplate.transform.parent : null, ___buttonEntry);
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PurchasingAgentsPlanList), "RefreshManagersList")]
+        public static class Patch_PurchasingPlanList_PartnerRows
+        {
+            // ___entryTemplate / ___noPartnershipsWarning = '___' + the exact field names, decompile
+            // PurchasingAgentsPlanList.cs:21 `public Transform entryTemplate;` and
+            // :25-26 `[SerializeField] private GameObject noPartnershipsWarning;`.
+            static void Postfix(UI.Smartphone.Apps.BizMan.PurchasingAgentsPlanList __instance,
+                                UnityEngine.Transform ___entryTemplate,
+                                UnityEngine.GameObject ___noPartnershipsWarning)
+            {
+                int n = OverlayPlanRows("purchasing", __instance,
+                                        typeof(UI.Smartphone.Apps.BizMan.PurchasingAgentsPlanList),
+                                        ___entryTemplate != null ? ___entryTemplate.parent : null, null);
+                // The native tail sets the "no partnerships" notice from the OWN row count alone
+                // (PurchasingAgentsPlanList.cs:81); a partner's headquarters with rows on it is not empty.
+                if (n > 0 && ___noPartnershipsWarning != null) ___noPartnershipsWarning.SetActive(false);
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList), "RefreshManagersList")]
+        public static class Patch_HrPlanList_PartnerRows
+        {
+            // ___entryTemplate / ___buttonEntry = '___' + the exact field names, decompile
+            // HrManagersPlanList.cs:23-24 `[SerializeField] private Transform entryTemplate;` and
+            // :26-27 `[SerializeField] private Transform buttonEntry;`.
+            static void Postfix(UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList __instance,
+                                UnityEngine.Transform ___entryTemplate, UnityEngine.Transform ___buttonEntry)
+            {
+                OverlayPlanRows("hr", __instance, typeof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList),
+                                ___entryTemplate != null ? ___entryTemplate.parent : null, ___buttonEntry);
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList), "RefreshManagersList")]
+        public static class Patch_HeadhunterPlanList_PartnerRows
+        {
+            // ___entryTemplate / ___buttonEntry = '___' + the exact field names, decompile
+            // HeadhuntersPlanList.cs:23-24 `[SerializeField] private Transform entryTemplate;` and
+            // :26-27 `[SerializeField] private Transform buttonEntry;`.
+            static void Postfix(UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList __instance,
+                                UnityEngine.Transform ___entryTemplate, UnityEngine.Transform ___buttonEntry)
+            {
+                OverlayPlanRows("headhunter", __instance, typeof(UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList),
+                                ___entryTemplate != null ? ___entryTemplate.parent : null, ___buttonEntry);
+            }
+        }
+
+        // ── H3: the four non-logistics families are READ-ONLY on a partner's headquarters in part 1 ──
+        // CREATION is the one that would really corrupt: PricingManagersPlanList.AddPlan :63-76,
+        // HrManagersPlanList.AddPlan :292-305 and HeadhuntersPlanList.AddPlan :230-243 all add the new plan
+        // to THIS machine's own gi list keyed to the PARTNER's headquarters address — it would then execute
+        // here and be published as this member's own plan. Purchasing has no AddPlan on its list (a
+        // partnership is created on the importer's own page, which is not a headquarters tab).
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanList), "AddPlan")]
+        public static class Patch_PricingPlanCreate_MergerGate
+        {
+            static bool Prefix()
+            { try { return MergerFlip.FlippedCount != 0 ? !CompanyPlans.RefuseEdit("pricing", "add plan") : true; } catch { return true; } }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList), "AddPlan")]
+        public static class Patch_HrPlanCreate_MergerGate
+        {
+            static bool Prefix()
+            { try { return MergerFlip.FlippedCount != 0 ? !CompanyPlans.RefuseEdit("hr", "add plan") : true; } catch { return true; } }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList), "AddPlan")]
+        public static class Patch_HeadhunterPlanCreate_MergerGate
+        {
+            static bool Prefix()
+            { try { return MergerFlip.FlippedCount != 0 ? !CompanyPlans.RefuseEdit("headhunter", "add plan") : true; } catch { return true; } }
+        }
+
+        // The MANAGER ASSIGNMENT commits. Every candidate dropdown behind them filters on
+        // `x.assignedAddress == <page address>` (PricingManagersPlanList.cs, HrManagersPlanList.cs:170,
+        // HeadhuntersPlanList.cs:116, PurchasingAgentsPlanList.cs:111), so the employee offered is never the
+        // partner's — assigning one here is meaningless until part 2 routes it.
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanList), "OnChangedPricingManager")]
+        public static class Patch_PricingManagerAssign_MergerGate
+        {
+            static bool Prefix(Buildings.Office.Headquarters.PricingManagerPlan plan)
+            { try { return !CompanyPlans.RefuseRow("pricing", "manager assignment", plan); } catch { return true; } }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList), "OnChangedHrManager")]
+        public static class Patch_HrManagerAssign_MergerGate
+        {
+            static bool Prefix(Buildings.Office.Headquarters.HrManagerPlan plan)
+            { try { return !CompanyPlans.RefuseRow("hr", "manager assignment", plan); } catch { return true; } }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList), "OnChangedHeadhunter")]
+        public static class Patch_HeadhunterAssign_MergerGate
+        {
+            static bool Prefix(Buildings.Office.Headquarters.HeadhunterPlan plan)
+            { try { return !CompanyPlans.RefuseRow("headhunter", "manager assignment", plan); } catch { return true; } }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PurchasingAgentsPlanList), "OnChangedPurchasingAgent")]
+        public static class Patch_PurchasingAgentAssign_MergerGate
+        {
+            static bool Prefix(Entities.ImportPartnership plan)
+            { try { return !CompanyPlans.RefuseRow("purchasing", "agent assignment", plan); } catch { return true; } }
+        }
+
+        /// <summary>H4 (D20-8): ONE PRICING MANAGER PER NEIGHBOURHOOD, COMPANY-WIDE.
+        /// `PricingManagerHelper.IsNeighborhoodSupervised(neighborhood, exceptPlanId)` (decompile :144-154)
+        /// is `foreach (PricingManagerPlan plan in Plans) if (!(plan.id == exceptPlanId) &amp;&amp;
+        /// plan.supervisedNeighborhood == neighborhood) return true;` — this player's OWN plans only, so two
+        /// members could each supervise the same neighbourhood and fight over its prices every update.
+        /// The postfix widens the SAME predicate to the partners' published pricing plans. Its one caller is
+        /// the neighbourhood dropdown's own filter (PricingManagerPlanUI.cs:81), so a taken neighbourhood is
+        /// simply not offered — the game's own refusal path, no new text.</summary>
+        [HarmonyPatch(typeof(Buildings.Office.Headquarters.PricingManagerHelper), "IsNeighborhoodSupervised")]
+        public static class Patch_PricingNeighbourhood_CompanyWide
+        {
+            static void Postfix(string neighborhood, string exceptPlanId, ref bool __result)
+            {
+                try
+                {
+                    if (__result || MergerFlip.FlippedCount == 0) return;   // inert without a merger
+                    if (CompanyPlans.SupervisedByPartner(neighborhood, exceptPlanId)) __result = true;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] neighbourhood rule: {ex.Message}"); }
+            }
+        }
+
+        // ══ 4c PART 1 r2 - THE REVIEW FIXES (MAJOR-1/2/3, 2026-09-11) ══════════════════════════════
+        //
+        // MAJOR-1 THE DRAG, belt and braces. (a) is in CompanyPlans.StripDragHandle: the overlay row loses its
+        // ReorderableListItem the instant it is built, so ReorderableList.InitializeItems (ReorderableList.cs:52-63,
+        // deferred one frame by :42-51) never enrols it and BeginDrag (:65-69) never counts it. (b) is here: the
+        // drop handler itself. It maps an index straight back into the NATIVE list
+        // (PricingManagersPlanList.cs:81, HrManagersPlanList.cs:73, HeadhuntersPlanList.cs:58,
+        // PurchasingAgentsPlanList.cs:56) - empty on a partner's headquarters - and the throw lands inside
+        // ReorderableList.EndDrag at :173, BEFORE `_draggingItem = null` (:176) and the layout restore
+        // (:177-188), leaving the tab stuck mid-drag. A prefix that returns false makes the drop a no-op and
+        // lets EndDrag finish its own cleanup.
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanList), "UpdatePlanOrder")]
+        public static class Patch_PricingPlanReorder_MergerGate
+        {
+            static bool Prefix(int fromIndex, int toIndex)
+            { try { return !CompanyPlans.RefuseReorder("pricing", fromIndex, toIndex); } catch { return true; } }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList), "UpdatePlanOrder")]
+        public static class Patch_HrPlanReorder_MergerGate
+        {
+            static bool Prefix(int fromIndex, int toIndex)
+            { try { return !CompanyPlans.RefuseReorder("hr", fromIndex, toIndex); } catch { return true; } }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList), "UpdatePlanOrder")]
+        public static class Patch_HeadhunterPlanReorder_MergerGate
+        {
+            static bool Prefix(int fromIndex, int toIndex)
+            { try { return !CompanyPlans.RefuseReorder("headhunter", fromIndex, toIndex); } catch { return true; } }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PurchasingAgentsPlanList), "OnPlanReordered")]
+        public static class Patch_PurchasingPlanReorder_MergerGate
+        {
+            static bool Prefix(int fromIndex, int toIndex)
+            { try { return !CompanyPlans.RefuseReorder("purchasing", fromIndex, toIndex); } catch { return true; } }
+        }
+
+        // ── MAJOR-2 (a): a partner's row is NOT SELECTABLE, so the detail pane never opens for one ──
+        // Each row's button invokes its list's own SelectPlan (PricingManagersPlanList.cs:110 through the
+        // entry's Initialize callback, HrManagersPlanList.cs:100-103, HeadhuntersPlanList.cs:91-94,
+        // PurchasingAgentsPlanList.cs:92-95), which runs LoadPlan and arms the pane's commits.
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanList), "SelectPlan")]
+        public static class Patch_PricingPlanSelect_MergerGate
+        {
+            // `PricingManagerPlan plan = entry.Plan;` (PricingManagersPlanList.cs:126) - the row carries its plan
+            // (PricingManagersPlanListEntry.cs:38 `public PricingManagerPlan Plan { get; private set; }`).
+            static bool Prefix(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanListEntry entry)
+            { try { return entry == null || !CompanyPlans.RefuseSelect("pricing", entry.Plan); } catch { return true; } }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList), "SelectPlan")]
+        public static class Patch_HrPlanSelect_MergerGate
+        {
+            static bool Prefix(Buildings.Office.Headquarters.HrManagerPlan plan)
+            { try { return !CompanyPlans.RefuseSelect("hr", plan); } catch { return true; } }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList), "SelectPlan",
+                      new System.Type[] { typeof(UnityEngine.Transform), typeof(Buildings.Office.Headquarters.HeadhunterPlan) })]
+        public static class Patch_HeadhunterPlanSelect_MergerGate
+        {
+            static bool Prefix(Buildings.Office.Headquarters.HeadhunterPlan plan)
+            { try { return !CompanyPlans.RefuseSelect("headhunter", plan); } catch { return true; } }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PurchasingAgentsPlanList), "SelectPlan",
+                      new System.Type[] { typeof(UnityEngine.Transform), typeof(Entities.ImportPartnership) })]
+        public static class Patch_PurchasingPlanSelect_MergerGate
+        {
+            static bool Prefix(Entities.ImportPartnership plan)
+            { try { return !CompanyPlans.RefuseSelect("purchasing", plan); } catch { return true; } }
+        }
+
+        // ── MAJOR-2 (b): the pane's own commits are gated as well ──
+        // The one that contaminates a save is HrManagerPlanUI.cs:261
+        // `EmployeeHelper.GetEmployeeById(employeeId).assignedHrManagerPlanId = _currentPlan.id;` - a REAL
+        // employee of this player (the candidate list is global: EmployeesScrollerController.cs:21-23) tagged
+        // with a plan id that exists in no list here, persisted in this player's .hsg and excluded from every
+        // real HR plan for ever. Fill (:224) and ClearAssignedEmployees (:242) both commit through the same
+        // method, so one gate covers all three.
+
+        [HarmonyPatch]
+        public static class Patch_HrPane_MergerGate
+        {
+            // ____currentPlan = '___' + '_currentPlan', decompile HrManagerPlanUI.cs:72
+            // `private HrManagerPlan _currentPlan;`.
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var t = typeof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI);
+                foreach (var n in new[] { "SetEmployeeAssigned", "CancelInsurance", "UpgradeInsurance", "DeletePlan" })
+                {
+                    var m = AccessTools.Method(t, n);
+                    if (m != null) yield return m;
+                }
+            }
+            static bool Prefix(Buildings.Office.Headquarters.HrManagerPlan ____currentPlan,
+                               System.Reflection.MethodBase __originalMethod)
+            { try { return !CompanyPlans.RefusePane("hr", __originalMethod?.Name ?? "pane commit", ____currentPlan); } catch { return true; } }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_PricingPane_MergerGate
+        {
+            // ____currentPlan = '___' + '_currentPlan', decompile PricingManagerPlanUI.cs:24
+            // `private PricingManagerPlan _currentPlan;`.
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var t = typeof(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerPlanUI);
+                foreach (var n in new[] { "ChangeNeighborhood", "DeletePlan" })
+                {
+                    var m = AccessTools.Method(t, n);
+                    if (m != null) yield return m;
+                }
+            }
+            static bool Prefix(Buildings.Office.Headquarters.PricingManagerPlan ____currentPlan,
+                               System.Reflection.MethodBase __originalMethod)
+            { try { return !CompanyPlans.RefusePane("pricing", __originalMethod?.Name ?? "pane commit", ____currentPlan); } catch { return true; } }
+        }
+
+        // The PRICE writes are gated on the model, which is where both screens meet: the cell view's manual
+        // price (PricingManagerProductCellView.cs:131) and the mass 'apply suggested'
+        // (PricingManagerProductsScrollerController.cs:91-95). Both end in ReapplyPriceWhereSold
+        // (PricingManagerPlan.cs:145-156 `SetPrice(supervisedStore, itemName, price)`), which writes LIVE
+        // retail prices - unrouted - off a partner's plan. No other caller exists.
+
+        [HarmonyPatch(typeof(Buildings.Office.Headquarters.PricingManagerPlan), "ApplyManualPrice")]
+        public static class Patch_PricingApplyManual_MergerGate
+        {
+            static bool Prefix(Buildings.Office.Headquarters.PricingManagerPlan __instance)
+            { try { return !CompanyPlans.RefusePane("pricing", "apply manual price", __instance); } catch { return true; } }
+        }
+
+        [HarmonyPatch(typeof(Buildings.Office.Headquarters.PricingManagerPlan), "ApplySuggestedPrice")]
+        public static class Patch_PricingApplySuggested_MergerGate
+        {
+            static bool Prefix(Buildings.Office.Headquarters.PricingManagerPlan __instance)
+            { try { return !CompanyPlans.RefusePane("pricing", "apply suggested price", __instance); } catch { return true; } }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_PurchasingPane_MergerGate
+        {
+            // ____currentImportPartnership = '___' + '_currentImportPartnership', decompile
+            // PurchasingAgentPlanUI.cs:55 `private ImportPartnership _currentImportPartnership;`.
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var t = typeof(UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentPlanUI);
+                foreach (var n in new[] { "DeletePlan", "EndPartnership", "MakeUrgentOrder", "StartOrder",
+                                          "CancelOrder", "SetLockTime", "OnRepeatingOrderToggleValueChanged",
+                                          "OnAutoStockToggleValueChanged" })
+                {
+                    var m = AccessTools.Method(t, n);
+                    if (m != null) yield return m;
+                }
+            }
+            static bool Prefix(Entities.ImportPartnership ____currentImportPartnership,
+                               System.Reflection.MethodBase __originalMethod)
+            { try { return !CompanyPlans.RefusePane("purchasing", __originalMethod?.Name ?? "pane commit", ____currentImportPartnership); } catch { return true; } }
+        }
+
+        // The headhunter pane has no write onto a real object of this machine: its tabs all write fields of
+        // `planUI.currentPlan` itself (HeadhuntersAutomaticReplacementTab.cs:143/149 assignedHrPlans,
+        // HeadhuntersRecruitingTab.cs:150-240 the recruiting settings), which for a partner row is a detached
+        // throwaway. The select gate above keeps the pane from opening for a partner row at all; of the pane's
+        // own commits only DeletePlan, the HR-plan assignment and StartRecruiting are gated below - the
+        // recruiting-settings writes are not, and land on the throwaway if the pane were ever reached.
+
+        [HarmonyPatch(typeof(HeadhunterPlanUI), "DeletePlan")]
+        public static class Patch_HeadhunterPaneDelete_MergerGate
+        {
+            // ___currentPlan = '___' + 'currentPlan', decompile HeadhunterPlanUI.cs:26-27
+            // `[HideInInspector] public HeadhunterPlan currentPlan;`.
+            static bool Prefix(Buildings.Office.Headquarters.HeadhunterPlan ___currentPlan)
+            { try { return !CompanyPlans.RefusePane("headhunter", "DeletePlan", ___currentPlan); } catch { return true; } }
+        }
+
+        [HarmonyPatch(typeof(HeadhuntersAutomaticReplacementTab), "SelectHrManagerPlan")]
+        public static class Patch_HeadhunterHrPlanAssign_MergerGate
+        {
+            // ___planUI = '___' + 'planUI', decompile HeadhuntersAutomaticReplacementTab.cs:17-18
+            // `[SerializeField] private HeadhunterPlanUI planUI;`.
+            static bool Prefix(HeadhunterPlanUI ___planUI)
+            { try { return !CompanyPlans.RefusePane("headhunter", "HR plan assignment", ___planUI != null ? ___planUI.currentPlan : null); } catch { return true; } }
+        }
+
+        [HarmonyPatch(typeof(Buildings.Office.Headquarters.HeadhunterPlan), "StartRecruiting")]
+        public static class Patch_HeadhunterStartRecruiting_MergerGate
+        {
+            static bool Prefix(Buildings.Office.Headquarters.HeadhunterPlan __instance)
+            { try { return !CompanyPlans.RefuseRow("headhunter", "start recruiting", __instance); } catch { return true; } }
+        }
+
+        /// <summary>MAJOR-3 PURCHASING CREATION. `ImportManagerDialog.OnImportPartnershipSettingsSet` keys the
+        /// new partnership to the chosen AGENT's headquarters (:104
+        /// `headquartersAddress = inputComponent.selectedEmployeeInstance.assignedAddress`) and adds it to THIS
+        /// machine's own list (:107 `SaveGameManager.Current.importPartnerships.Add(importPartnership)`). The
+        /// agent list is global (ImportPartnershipSettings.cs:22-27) and merged-partner staff are exempt from
+        /// the injected-staff filter (MPPatches.cs:5180-5182), so a partnership keyed to a PARTNER's
+        /// headquarters would execute here and republish as this member's. Refused before anything is added;
+        /// the dialog's own null return is the game's existing do-nothing path, so there is no new text.
+        /// Own headquarters and single player are untouched.</summary>
+        [HarmonyPatch(typeof(Dialogs.ImportManagerDialog), "OnImportPartnershipSettingsSet")]
+        public static class Patch_ImportPartnershipCreate_MergerGate
+        {
+            static bool Prefix(ref Entities.DialogEntry __result)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0) return true;      // inert without a merger
+                    var dc = DialogController.current;
+                    var input = dc != null ? dc.GetInputComponent<UI.Dialog.ImportPartnershipSettings>() : null;
+                    var agent = input != null ? input.selectedEmployeeInstance : null;
+                    if (agent == null) return true;                     // the game's own 'select an agent' path
+                    if (!CompanyPlans.RefusePartnershipCreate(agent.assignedAddress)) return true;
+                    __result = null;
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] partnership dialog: {ex.Message}"); return true; }
+            }
+        }
+
     }
 }

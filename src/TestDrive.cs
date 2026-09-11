@@ -660,6 +660,15 @@ namespace BigAmbitionsMP
                     return CompanyLists.TestDriveLine(arg);
                 }
 
+                case "plans":
+                {
+                    // MERGER PHASE 4c part 1 (H5). Read-only. With no argument: how many headquarters plans
+                    // of each family this machine owns, and how many each partner has published to the
+                    // screen-layer registry. With an owner pid: that owner's five counts. With an HQ address
+                    // key: that headquarters' plans by family and whose they are. Nothing is written.
+                    return CompanyPlans.TestDriveLine(arg);
+                }
+
                 case "contract":
                 {
                     // MERGER PHASE 2 WAVE 4 (V4) - TEST LEVER. `contract <bizAddr> <wholesaleAddr>` sends the
@@ -1159,7 +1168,7 @@ namespace BigAmbitionsMP
                 }
 
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans)";
             }
         }
 

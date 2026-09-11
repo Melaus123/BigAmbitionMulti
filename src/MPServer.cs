@@ -6489,14 +6489,19 @@ namespace BigAmbitionsMP
 
         /// <summary>Review #6: a Business grant is blanket across the owner's ESTABLISHED businesses — never
         /// empty premises, never a headquarters (rulings 24/27). The routes enforce the same per-address
-        /// line the access push draws, so a crafted request cannot reach what the design excludes.</summary>
-        private static bool SharedWorkAddressAllowed(string addressKey)
+        /// line the access push draws, so a crafted request cannot reach what the design excludes.
+        /// PHASE 4c part 1 (H2): `mergedHq` is the MERGER exception and nothing else — the caller passes it
+        /// only after MergerSync.MergedRuntime(owner, sender) has answered yes, so a headquarters opens for a
+        /// COMPANY MEMBER and stays shut for a bare Business grant (rulings 24/27 untouched).</summary>
+        private static bool SharedWorkAddressAllowed(string addressKey, bool mergedHq = false)
         {
             try
             {
                 var reg = GameStatePatcher.FindRegistration(addressKey);
                 string type = reg?.businessTypeName ?? "";
-                return type.Length != 0 && type != "ba:businesstype_empty" && type != "ba:businesstype_headquarters";
+                if (type.Length == 0 || type == "ba:businesstype_empty") return false;
+                if (type == "ba:businesstype_headquarters") return mergedHq;
+                return true;
             }
             catch { return false; }
         }
@@ -6776,7 +6781,7 @@ namespace BigAmbitionsMP
                     if (ownerPid == senderPid) return;
                     if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))   // wave 2: UNION — direct grant or merger membership
                     { Plugin.Logger.LogWarning($"[SharedShop] work-info request by '{senderPid}' on '{p.AddressKey}' — no Business permission and not a company member, dropped."); return; }
-                    if (!SharedWorkAddressAllowed(p.AddressKey))
+                    if (!SharedWorkAddressAllowed(p.AddressKey, MergerSync.MergedRuntime(ownerPid, senderPid)))
                     { Plugin.Logger.LogWarning($"[SharedShop] work-info request by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
                     // MERGER PHASE 2 WAVE 4 r2 (D21): the SELL-ALL QUOTE is not a tab snapshot. It must be
                     // answered by the machine that HOLDS the stock (the owner, or its absence stand-in), not
@@ -6819,8 +6824,8 @@ namespace BigAmbitionsMP
         /// <summary>Shared-shop slice 6b/6c: a helper's warehouse/factory/marketing/settings edit → the
         /// building's owner (applied here if the host owns it). Rate-capped like every routed op, and since
         /// merger phase 2 wave 3 (W3-1) gated on the UNION check, so a company member's native work-tab edit
-        /// on a merger-flipped partner building reaches the owner. SharedWorkAddressAllowed still refuses a
-        /// headquarters (phase 4c).</summary>
+        /// on a merger-flipped partner building reaches the owner. Since phase 4c part 1 a HEADQUARTERS is
+        /// admitted too, but only for a COMPANY MEMBER (SharedWorkAddressAllowed's `mergedHq`).</summary>
         public static void HostRouteSharedWorkEdit(SharedWorkEditPayload p, string senderPid)
         {
             try
@@ -6848,7 +6853,7 @@ namespace BigAmbitionsMP
                     if (PlanCrossesOwners(p.Plan, out var xwhy))
                     { Plugin.Logger.LogWarning($"[Merger] plan REFUSED cross-owner for '{p.AddressKey}' (plan {p.Plan.Id}): {xwhy} — a two-machine goods movement, refused until the routed cargo transfer of phase 4c exists."); return; }
                 }
-                if (p.Op != "mergerplan" && !SharedWorkAddressAllowed(p.AddressKey))
+                if (p.Op != "mergerplan" && !SharedWorkAddressAllowed(p.AddressKey, MergerSync.MergedRuntime(ownerPid, senderPid)))
                 { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
                 string wtarget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0
                 if (wtarget.Length == 0)
@@ -7196,7 +7201,7 @@ namespace BigAmbitionsMP
         /// <summary>Owner stable ids whose stored entry the last HostFileSimulatedPaperwork changed.</summary>
         private static readonly List<string> _lastFiledOwners = new();
 
-        /// <summary>HOST: ship ONE owner's two agreement families to every ONLINE co-member of that owner
+        /// <summary>HOST: ship ONE owner's agreement + headquarters-plan families to every ONLINE co-member of that owner
         /// (never back to the owner - its own lists are its own save). `stable` is the PaperworkStore key.
         /// Refusals are logged, never silent.</summary>
         public static int FanOutCompanyLists(string stable, string why)
@@ -7225,7 +7230,9 @@ namespace BigAmbitionsMP
                 { GameStatePatcher.EnqueueOnMainThread(() => CompanyLists.Receive(pay)); fanout++; }   // the host is a member too
                 if (fanout > 0)
                     Plugin.Logger.LogInfo($"[CompanyLists] fanned out {pay.DeliveryContracts.Count} contracts, "
-                                        + $"{pay.LogisticsManagerPlans.Count} plans of '{ownerPid}' to {fanout} co-member(s) ({why}).");
+                                        + $"{pay.LogisticsManagerPlans.Count} logistics, {pay.PricingManagerPlans.Count} pricing, "
+                                        + $"{pay.ImportPartnerships.Count} purchasing, {pay.HrManagerPlans.Count} hr, "
+                                        + $"{pay.HeadhunterPlans.Count} headhunter plan(s) of '{ownerPid}' to {fanout} co-member(s) ({why}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] fan-out: {ex.Message}"); }
             return fanout;
