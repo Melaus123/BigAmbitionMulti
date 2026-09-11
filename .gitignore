@@ -31,3 +31,4 @@ desktop.ini
 /tools/StoreMigrationHarness/
 /tools/sync-test-rig.ps1
 /tools/unit-tests/
+__pycache__/

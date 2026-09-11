@@ -13,7 +13,7 @@ Steam Workshop from. This script then REFUSES to build (it would overwrite it wi
 --over-release is passed, which only the manager passes, and only after the user has confirmed the Workshop upload.
 Exit code 0 = all three builds clean AND md5 match AND marker >= 1; 1 otherwise.
 """
-import hashlib, os, re, subprocess, sys
+import hashlib, os, re, shutil, subprocess, sys
 
 ROOT = r"C:\code\BigAmbitionsMP"
 CSPROJ = os.path.join(ROOT, "BigAmbitionsMP.csproj")
@@ -76,6 +76,19 @@ def main():
               " after the user has confirmed the Workshop upload (02-project-rules.md: Post-release hold).")
         return 1
 
+    # Backup/restore (user decision 2026-09-11, after F-2026-09-11-D): the csproj deploys EVERY configuration in
+    # order Debug, Release, Dev, so a cycle that fails AFTER a successful Release step leaves a RELEASE DLL in the
+    # game folder (0 DEV markers) and the next cycle refuses with a false RELEASE HOLD. Keep a copy of whatever was
+    # deployed before this cycle and put it back whenever the cycle does not end in a verified Dev deploy.
+    # The copy lives OUTSIDE the mod folder (user rule 2026-09-11: nothing test-only may travel with a Workshop
+    # upload, and ModsLocal\BigAmbitionsMP IS the upload source) - under the repo's gitignored local\ folder.
+    backup = None
+    if os.path.exists(DEPLOYED):
+        backup = os.path.join(ROOT, "local", "deployed-prebuild.dll")
+        os.makedirs(os.path.dirname(backup), exist_ok=True)
+        shutil.copy2(DEPLOYED, backup)
+        print(f"== pre-build deployed DLL saved ({md5(DEPLOYED)}, DEV markers {marker_count(DEPLOYED)}) -> {os.path.basename(backup)}")
+
     files = changed_src_files()
     print("== changed src files:", ", ".join(f"{s} {p}" for s, p in files) or "(none)")
     for status, path in files:
@@ -122,6 +135,10 @@ def main():
         problems.append("Dev DLL or deployed DLL missing")
 
     if problems:
+        if backup and os.path.exists(backup):
+            shutil.copy2(backup, DEPLOYED)
+            print(f"== RESTORED the pre-build DLL into the game folder ({md5(DEPLOYED)}, DEV markers {marker_count(DEPLOYED)})"
+                  " - a failed cycle never leaves a half-deployed configuration behind")
         print("RESULT: FAIL - " + "; ".join(problems))
         return 1
     print("RESULT: PASS")
