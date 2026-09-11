@@ -561,9 +561,237 @@ namespace BigAmbitionsMP
                     return $"OK screenshot queued → {path}";
                 }
 
+
+                // -- merger phase 0 test levers (2026-09-10) -------------------
+                case "merge":
+                {
+                    // Thin wrapper over the merger chips in MPCanvasUI (:2545-2641): on the HOST
+                    // the chip calls MPServer.HostMergerAction directly with its OWN pid as the
+                    // actor; on a client it sends MPClient.SendMergerAction. Same two calls here.
+                    var mtk = arg.Split(' ');
+                    string mact = mtk.Length > 0 ? mtk[0].ToLowerInvariant() : "";
+                    string mpid = mtk.Length > 1 ? string.Join(" ", mtk, 1, mtk.Length - 1).Trim() : "";
+                    if (mact != "propose" && mact != "accept" && mact != "decline" && mact != "leave" && mact != "unpropose")
+                        return "ERR merge propose <pid>|accept|decline|leave|unpropose";
+                    if (mact == "propose" && mpid.Length == 0) return "ERR 'merge propose' needs a target pid";
+                    if (mact != "propose") mpid = "";        // every other chip sends an empty target
+                    if (MPServer.IsRunning)        MPServer.HostMergerAction(mact, mpid, MPConfig.PlayerId);
+                    else if (MPClient.IsConnected) MPClient.SendMergerAction(mact, mpid);
+                    else return "ERR not in a multiplayer session";
+                    return $"OK merge {mact} sent" + (mpid.Length > 0 ? $" -> '{mpid}'" : "");
+                }
+
+                case "mergestatus":
+                {
+                    var gsb = new StringBuilder("OK ");
+                    gsb.Append($"member={MergerSync.IAmMember} group='{MergerSync.MyGroupId}' members=[");
+                    int gm = 0;
+                    try { foreach (var m in MergerSync.MemberNames) { if (gm++ > 0) gsb.Append(','); gsb.Append(m); } } catch { }
+                    gsb.Append($"] flipped={MergerFlip.FlippedCount} keys=[");
+                    // MergerFlip keeps its key->runner map private and a test driver may not widen
+                    // another module's surface: the group's building keys filtered by IsFlipped is
+                    // the same set, read-only.
+                    int gk = 0;
+                    try
+                    {
+                        foreach (var k in MergerSync.MyGroupBuildingKeys)
+                        {
+                            if (!MergerFlip.IsFlipped(k)) continue;
+                            if (gk++ > 0) gsb.Append(',');
+                            gsb.Append(QT).Append(k).Append(QT);
+                            if (gk >= 10) break;
+                        }
+                    }
+                    catch { }
+                    gsb.Append(']');
+                    return gsb.ToString();
+                }
+
+                case "regstate":
+                {
+                    // Read-only: the tenancy fields the ownership flip moves, the schedule size,
+                    // and the flip's own view of the address.
+                    if (arg.Length == 0) return "ERR address key required";
+                    var qreg = GameStatePatcher.FindRegistration(arg);
+                    if (qreg == null) return $"ERR no registration for '{arg}'";
+                    int qdays = 0, qshifts = 0;
+                    try
+                    {
+                        if (qreg.scheduleDays != null)
+                            foreach (var qsd in qreg.scheduleDays)
+                            { if (qsd == null) continue; qdays++; if (qsd.workShifts != null) qshifts += qsd.workShifts.Count; }
+                    }
+                    catch { }
+                    string qkey = arg; try { qkey = GameStateReader.AddressKey(qreg); } catch { }
+                    string qstamp = "", qname = "", qtype = "";
+                    try { qstamp = qreg.businessOwnerRivalId?.ToString() ?? ""; } catch { }
+                    try { qname  = qreg.BusinessName?.ToString() ?? ""; }        catch { }
+                    try { qtype  = qreg.businessTypeName?.ToString() ?? ""; }    catch { }
+                    return $"OK rented={qreg.RentedByPlayer} stamp='{qstamp}' forRent={qreg.AvailableForRent} type={qtype} "
+                         + $"name='{qname}' days={qdays} shifts={qshifts} flipped={MergerFlip.IsFlipped(qkey)} parked='{MergerFlip.ParkedRunner(qkey)}'";
+                }
+
+                case "employees":
+                {
+                    // RAW roster (the no-arg EmployeeHelper.GetEmployeeInstances() - the same list
+                    // MPPatches :1226 reads), so a merger's injected partner records are included.
+                    // CharacterData carries ONE name string, not a first/last pair.
+                    var elist = Helpers.EmployeeHelper.GetEmployeeInstances();
+                    if (elist == null) return "ERR no employee roster";
+                    var esb = new StringBuilder();
+                    int eshown = 0, etotal = 0;
+                    foreach (var e in elist)
+                    {
+                        if (e == null) continue;
+                        string eaddr = "";
+                        try { if (e.assignedAddress != null) eaddr = GameStateReader.AddressKey(e.assignedAddress); } catch { }
+                        if (arg.Length > 0 && !string.Equals(eaddr, arg, StringComparison.OrdinalIgnoreCase)) continue;
+                        etotal++;
+                        if (arg.Length == 0 && eshown >= 30) continue;   // cap only the ALL-employees listing; an address-scoped list is bounded by that shop (run T-P0-6: a 51-staff shop hid the adopted hire, 2026-09-10)
+                        string ename = ""; try { ename = e.characterData?.name?.ToString() ?? ""; } catch { }
+                        bool einj = false; try { einj = MPRegisterSync.IsInjectedStaff(e.id); } catch { }
+                        string eline = $"{e.id}|{ename}|assigned={eaddr}|injected={einj}";
+                        Plugin.Logger.LogWarning($"[TestDrive] employee: {eline}");
+                        if (eshown++ > 0) esb.Append(" ; ");
+                        esb.Append(eline);
+                    }
+                    return $"OK {etotal} employee(s){(arg.Length > 0 ? $" @ '{arg}'" : "")}: {esb}";
+                }
+
+                case "shift":
+                {
+                    // ONE WorkShift in the exact shape SharedShopSchedule.ReplaceDay (:670) uses:
+                    // sd.AddWorkShift(new WorkShift { ... }). type is set EXPLICITLY - WorkShiftType's
+                    // first member is Cleaning, so a defaulted type would silently make a cleaning shift.
+                    var stk = arg.Split(' ');
+                    if (stk.Length < 6) return "ERR usage: shift <num> <ba:street_x> <day> <employeeId> <fromHour> <toHour>";
+                    string saddr = stk[0] + " " + stk[1];
+                    if (!int.TryParse(stk[2], out var sday)) return "ERR day must be a number";
+                    if (!int.TryParse(stk[4], out var sfrom) || !int.TryParse(stk[5], out var sto)) return "ERR hours must be numbers";
+                    if (sto <= sfrom) return "ERR toHour must be after fromHour";
+                    string sempId = stk[3];
+                    var sreg2 = GameStatePatcher.FindRegistration(saddr);
+                    if (sreg2 == null) return $"ERR no registration for '{saddr}'";
+                    var semp = FindEmployee(sempId);
+                    if (semp == null) return $"ERR no employee '{sempId}' on this machine";
+                    string sempAddr = "";
+                    try { if (semp.assignedAddress != null) sempAddr = GameStateReader.AddressKey(semp.assignedAddress); } catch { }
+                    string sregKey = saddr; try { sregKey = GameStateReader.AddressKey(sreg2); } catch { }
+                    if (!string.Equals(sempAddr, sregKey, StringComparison.OrdinalIgnoreCase))
+                        return $"ERR employee '{sempId}' is assigned to '{sempAddr}', not '{sregKey}'";
+                    ScheduleDay? ssd = null;
+                    try { foreach (var d in sreg2.scheduleDays) if (d != null && (int)d.day == sday) { ssd = d; break; } } catch { }
+                    if (ssd == null)
+                    {
+                        // The day arg is matched against (int)ScheduleDay.day exactly as
+                        // SharedShopSchedule.FindDay (:645) does; the ordinals actually present are
+                        // listed rather than guessed at.
+                        var sords = new StringBuilder();
+                        try { foreach (var d in sreg2.scheduleDays) if (d != null) sords.Append((int)d.day).Append(' '); } catch { }
+                        return $"ERR '{saddr}' has no scheduleDay with day={sday} (ordinals present: {sords})";
+                    }
+                    ssd.AddWorkShift(new WorkShift
+                    {
+                        employeeId = sempId, itemInstanceId = "",
+                        startingHour = sfrom, endingHour = sto,
+                        type = WorkShiftType.Default,
+                    });
+                    return $"OK shift {sfrom}-{sto} for '{sempId}' added to '{saddr}' day {sday}; that day now holds {ssd.workShifts.Count} shift(s)";
+                }
+
+                case "shiftclear":
+                {
+                    // The inverse of 'shift', with ReplaceDay's keep-synthetic rule (:660-680):
+                    // this machine's own duty stand-ins survive a day rebuild.
+                    var ctk = arg.Split(' ');
+                    if (ctk.Length < 3) return "ERR usage: shiftclear <num> <ba:street_x> <day>";
+                    string caddr = ctk[0] + " " + ctk[1];
+                    if (!int.TryParse(ctk[2], out var cday)) return "ERR day must be a number";
+                    var creg2 = GameStatePatcher.FindRegistration(caddr);
+                    if (creg2 == null) return $"ERR no registration for '{caddr}'";
+                    ScheduleDay? csd = null;
+                    try { foreach (var d in creg2.scheduleDays) if (d != null && (int)d.day == cday) { csd = d; break; } } catch { }
+                    if (csd == null)
+                    {
+                        var cords = new StringBuilder();
+                        try { foreach (var d in creg2.scheduleDays) if (d != null) cords.Append((int)d.day).Append(' '); } catch { }
+                        return $"ERR '{caddr}' has no scheduleDay with day={cday} (ordinals present: {cords})";
+                    }
+                    if (csd.workShifts == null) return $"OK '{caddr}' day {cday} had no shift list";
+                    int cwas = csd.workShifts.Count;
+                    int cgone = csd.workShifts.RemoveAll(w => w == null || !SharedShopSchedule.IsSynthetic(w.employeeId));
+                    return $"OK cleared {cgone} shift(s) from '{caddr}' day {cday} ({cwas - cgone} synthetic kept)";
+                }
+
+                case "autofill":
+                    // Review 2026-09-10 #1: the button's helper pops a HudConfirm when staff are unassigned (nothing runs),
+                    // fills on a BACKGROUND thread, and its completion touches the open BizMan screen (and UpdateHQPlans for
+                    // an HQ) - a headless run never has that screen, so this lever would be racy at best and can throw on
+                    // the game thread at worst. Auto-fill stays a hands-on check.
+                    return "ERR autofill is not a harness lever (needs the Schedule screen open) - do it by hand";
+
+                case "fire":
+                {
+                    // MyEmployees.cs:632 - the fire button is a bare RemoveEmployee() on the selected
+                    // instance (no args). On an INJECTED partner record the merger prefix
+                    // (MergerEmployeeSync.cs:34-50) intercepts and routes the fire to the owner.
+                    if (arg.Length == 0) return "ERR employee id required";
+                    var femp = FindEmployee(arg);
+                    if (femp == null) return $"ERR no employee '{arg}' on this machine";
+                    string fname = ""; try { fname = femp.characterData?.name?.ToString() ?? ""; } catch { }
+                    bool finj = false; try { finj = MPRegisterSync.IsInjectedStaff(arg); } catch { }
+                    femp.RemoveEmployee();
+                    return $"OK RemoveEmployee invoked for '{arg}' ('{fname}', injected={finj})";
+                }
+
+                case "assign":
+                {
+                    // CandidateCellView.AssignBusiness (:192, the listener wired to the assign
+                    // dropdown at :81): the whole game-state write is `assignedAddress = reg.Address`.
+                    // The rest of that method re-draws the MyEmployees panel, which a headless
+                    // driver has nothing to refresh.
+                    var ntk = arg.Split(' ');
+                    if (ntk.Length < 3) return "ERR usage: assign <employeeId> <num> <ba:street_x>";
+                    string nempId = ntk[0];
+                    string naddr  = ntk[1] + " " + ntk[2];
+                    var nemp = FindEmployee(nempId);
+                    if (nemp == null) return $"ERR no employee '{nempId}' on this machine";
+                    var nreg = GameStatePatcher.FindRegistration(naddr);
+                    if (nreg == null) return $"ERR no registration for '{naddr}'";
+                    nemp.assignedAddress = nreg.Address;
+                    return $"OK assigned '{nempId}' -> '{naddr}'";
+                }
+
+                case "money":
+                {
+                    var mgi = SaveGameManager.Current;
+                    if (mgi == null) return "ERR no game instance";
+                    bool mmem = false; try { mmem = MergerSync.IAmMember; } catch { }
+                    // MergerWallet publishes NO balance accessor: the company balance is MIRRORED
+                    // into gi.Money by SetMirror (MergerWallet.cs :168-180), so while merged the
+                    // money figure IS the wallet - reported as the mirror rather than inventing one.
+                    return $"OK money={mgi.Money.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} merged={mmem} wallet={(mmem ? $"{mgi.Money.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} (mirror)" : "n/a")}";   // review 2026-09-10 #4: invariant culture (the readout regex expects a dot)
+                }
+
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money)";
             }
+        }
+
+        /// <summary>Single quote for the key list above - an escaped char literal inside an
+        /// interpolated string reads badly.</summary>
+        private const char QT = '\'';
+
+        /// <summary>Employee lookup by id over the RAW roster - the no-arg
+        /// EmployeeHelper.GetEmployeeInstances(), which returns gi.EmployeeInstances unfiltered
+        /// (MPPatches :1211), so a merger's injected partner records are visible to the driver.</summary>
+        private static Entities.EmployeeInstance? FindEmployee(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return null;
+            var list = Helpers.EmployeeHelper.GetEmployeeInstances();
+            if (list == null) return null;
+            foreach (var e in list) if (e != null && e.id == id) return e;
+            return null;
         }
 
         /// <summary>Armed by 'charconfirm'. Runs on the 0.5s tick cadence: waits for

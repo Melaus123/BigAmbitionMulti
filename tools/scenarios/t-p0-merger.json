@@ -1,0 +1,305 @@
+{
+  "id": "T-P0",
+  "title": "phase-0 merger: form, flip, shared shop staffing, shared money, leave",
+  "preconditions": "A stored MP session both roles have a slot in (--session NAME, e.g. TESTBATCH-0813). Pass --var clientPid=<n> and --var hostHQ='<addressKey>' (a merge propose needs the peer id BEFORE any merge result exists to capture it from; hostHQ is a fixture address). hostShop is captured from the client's mergestatus keys; ${clientEmployee} is an id from the client's own 'employees' output. The merge verbs landed in src/TestDrive.cs (working tree, uncommitted, 2026-09-10) and every regex below was checked against their real result strings - re-check them if that file changes. If a slot-less client lands on character customization, 08-testdrive.md requires a 'charconfirm' on that role.",
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "hostHQ": "15 ba:street_fifthavenue",
+    "session": "save1"
+  },
+  "steps": [
+    {
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK",
+      "note": "08-testdrive.md INITIAL-entry order: host -> join -> hostload (the brief's hostload-then-join is the mid-game-join path)",
+      "seq": 1
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "note": "client waits in the lobby",
+      "seq": 2
+    },
+    {
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
+          "within_s": 240
+        },
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
+          "within_s": 60
+        }
+      ],
+      "note": "gate = the host's own 'all players world-ready' release line (verified in run T-P0-20260910-230451, host log :1320), not a guessed StartLoadGame line",
+      "seq": 3
+    },
+    {
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "role=h",
+      "capture": {
+        "hostSession": "session='([^']*)'"
+      },
+      "seq": 4
+    },
+    {
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "role=c",
+      "seq": 5
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST P0 START",
+      "expect_result": "OK MARK",
+      "seq": 6
+    },
+    {
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent",
+      "seq": 7
+    },
+    {
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\].*(FORMED|GROWN)",
+          "within_s": 20
+        }
+      ],
+      "seq": 8
+    },
+    {
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "capture": {
+        "hostShop": "keys=\\['([^']+)'"
+      },
+      "note": "keys are single-quoted in TestDrive.cs mergestatus; first flipped key taken as hostShop (an address key is '<num> ba:street_x' - two tokens, which is exactly what shift/assign expect)",
+      "seq": 9
+    },
+    {
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "capture": {
+        "clientShop": "keys=\\['([^']+)'"
+      },
+      "note": "host view: the client's first flipped building",
+      "seq": 10
+    },
+    {
+      "role": "c",
+      "cmd": "employees ${clientShop}",
+      "expect_result": "employee\\(s\\)",
+      "capture": {
+        "clientEmployee": "employee\\(s\\)(?: @ '[^']*')?: ([^|]+)\\|"
+      },
+      "note": "the client's own employee at its own shop (adopt source)",
+      "seq": 11
+    },
+    {
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True",
+      "seq": 12
+    },
+    {
+      "role": "h",
+      "cmd": null,
+      "sleep_s": 120,
+      "note": "declared wait: one full heartbeat window (the only sleep in this scenario)",
+      "seq": 13
+    },
+    {
+      "role": "c",
+      "cmd": "regstate ${hostShop}",
+      "expect_result": "rented=True stamp='' .*flipped=True",
+      "note": "member side: the partner's shop reads as rented with an empty stamp and the flip on",
+      "seq": 14
+    },
+    {
+      "role": "h",
+      "cmd": "regstate ${hostShop}",
+      "expect_result": "rented=True",
+      "seq": 15
+    },
+    {
+      "role": "c",
+      "cmd": "employees ${hostShop}",
+      "expect_result": "employee\\(s\\)",
+      "capture": {
+        "hostEmployee": "employee\\(s\\)(?: @ '[^']*')?: ([^|]+)\\|"
+      },
+      "note": "TestDrive.cs returns ONE line: 'OK N employee(s) @ <addr>: id|name|assigned=..|injected=.. ; id2|..' (entries joined by ' ; ', not newlines)",
+      "seq": 16
+    },
+    {
+      "role": "c",
+      "cmd": "shift ${hostShop} 1 ${hostEmployee} 9 17",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[SharedShop\\] routed schedule @ '${hostShop}' by",
+          "within_s": 15
+        }
+      ],
+      "note": "PLACEHOLDER regex - the owner-apply line text is the other builder's to name (src/SharedShopStaff.cs has the [SharedShop] tag but no apply line yet)",
+      "seq": 17
+    },
+    {
+      "role": "h",
+      "cmd": "regstate ${hostShop}",
+      "expect_result": "shifts=[1-9]",
+      "seq": 18
+    },
+    {
+      "role": "c",
+      "cmd": "regstate ${hostShop}",
+      "expect_result": "shifts=[1-9]",
+      "seq": 19
+    },
+    {
+      "role": "c",
+      "cmd": "employees ${hostHQ}",
+      "expect_result": "employee\\(s\\)",
+      "capture": {
+        "hostHQEmployee": "employee\\(s\\)(?: @ '[^']*')?: ([^|]+)\\|"
+      },
+      "note": "an HQ employee (a shift must name someone assigned there)",
+      "seq": 20
+    },
+    {
+      "role": "c",
+      "cmd": "shift ${hostHQ} 1 ${hostHQEmployee} 9 17",
+      "expect_result": "^OK",
+      "seq": 21
+    },
+    {
+      "role": "h",
+      "cmd": "regstate ${hostHQ}",
+      "expect_result": "shifts=[1-9]",
+      "seq": 22
+    },
+    {
+      "role": "c",
+      "cmd": "fire ${hostEmployee}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[MergerStaff\\].*FIRE",
+          "within_s": 15
+        }
+      ],
+      "seq": 23
+    },
+    {
+      "role": "h",
+      "cmd": "employees ${hostShop}",
+      "refute_result": "${hostEmployee}",
+      "seq": 24
+    },
+    {
+      "role": "c",
+      "cmd": "employees ${hostShop}",
+      "refute_result": "${hostEmployee}",
+      "seq": 25
+    },
+    {
+      "role": "c",
+      "cmd": "assign ${clientEmployee} ${hostShop}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[MergerStaff\\] ADOPTED .*\\(${clientEmployee}\\)",
+          "within_s": 25
+        }
+      ],
+      "seq": 26,
+      "note": "the owner's ADOPTED line is the proof; run 4 checked the roster 6 s after the assign (one-shot) and aborted before the transfer could land"
+    },
+    {
+      "role": "h",
+      "cmd": "employees ${hostShop}",
+      "expect_result": "${clientEmployee}",
+      "note": "after the ADOPTED line the owner's roster lists the adopted id",
+      "seq": 27
+    },
+    {
+      "role": "h",
+      "cmd": "money",
+      "expect_result": "merged=True",
+      "capture": {
+        "hostMoney": "money=([0-9.]+)"
+      },
+      "seq": 28
+    },
+    {
+      "role": "c",
+      "cmd": "money",
+      "expect_result": "money=${hostMoney}\\b.*merged=True",
+      "note": "shared purse: the client must read the host's figure exactly",
+      "seq": 29
+    },
+    {
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] flip OFF",
+          "within_s": 20
+        },
+        {
+          "role": "c",
+          "regex": "\\[BAMP\\] \\[Merger\\] flip OFF",
+          "within_s": 20
+        }
+      ],
+      "seq": 30
+    },
+    {
+      "role": "both",
+      "cmd": "mergestatus",
+      "expect_result": "member=False",
+      "seq": 31
+    },
+    {
+      "role": "both",
+      "cmd": "money",
+      "expect_result": "merged=False",
+      "seq": 32
+    }
+  ],
+  "oracles_absent": [
+    "\\[Merger\\] accept .* REFUSED",
+    "NullReferenceException",
+    "upload SKIPPED",
+    "cross-owner staffing",
+    "\\[BAMP\\] \\[Integrity\\].*(todo|removed)"
+  ],
+  "oracles_report": [
+    "resolves to NO session player",
+    "runner stamp.*REFUSED",
+    "refused at creation",
+    "LOADED-DAY MISMATCH"
+  ]
+}
