@@ -2601,6 +2601,14 @@ namespace BigAmbitionsMP
                     if (act == 6 && id.StartsWith("pid:"))            // toggle an ONLINE player's key (per kind)
                     {
                         string pid = id.Substring(4);
+                        // Merger: the merger overrides the three permissions while it stands, so a
+                        // co-member's toggle is inert here too (the row draws it disabled). No store write,
+                        // no toast -- the stored grant survives and resumes after an unmerge.
+                        if (MergerSync.IAmMember && MergerSync.IsMemberPid(pid))
+                        {
+                            Plugin.Logger.LogInfo($"[Merger] permission toggle ignored for co-member '{pid}' (merger overrides the three permissions)");
+                            return;
+                        }
                         bool now = !GrantSync.IsGranted(kind, MPConfig.PlayerId, pid);
                         if (MPServer.IsRunning) MPServer.HostSetGrant(kind, pid, now);
                         else                    MPClient.SendPermissionGrant(kind, pid, now);
@@ -3018,6 +3026,14 @@ namespace BigAmbitionsMP
                 bool gv = GrantSync.IsGranted(GrantKind.Vehicle, me, pl);
                 bool gh = GrantSync.IsGranted(GrantKind.Housing, me, pl);
                 bool gb = GrantSync.IsGranted(GrantKind.Business, me, pl);
+                // Merger (user ruling 2026-09-11): a merger is a SUPERSET of the three permissions and
+                // overrides them while it stands, so a co-member's three toggles are drawn in the hub's
+                // disabled style (the grey the "In a company" chip uses) and the click path ignores them.
+                // The stored grants are never touched here and come back live after an unmerge.
+                bool coMerged = MergerSync.IAmMember && MergerSync.IsMemberPid(pl);
+                var cv = coMerged ? grey : gv ? purple : grey;
+                var ch = coMerged ? grey : gh ? purple : grey;
+                var cb = coMerged ? grey : gb ? purple : grey;
 #if BAMP_DEV
                 // Merger chip (DEV-ONLY until the campaign ships): member of MY company → static
                 // "Merged"; my proposal pending on THIS player → "Cancel offer" (act 12 withdraws — host
@@ -3026,7 +3042,8 @@ namespace BigAmbitionsMP
                 // their CO-MEMBERS while that offer stands → static "In a company" (the one offer already
                 // reaches them, phase 1-A D4-1); else a Merge button (act 8 → confirm popup), which since
                 // phase 1-A is offered for a player in ANOTHER company too — accepting unions the two.
-                // A merger implies every key, so the kind toggles read fully granted while merged.
+                // A merger implies every key AND overrides the three permissions: a co-member's kind
+                // toggles are drawn disabled (grey) and are inert -- see coMerged above.
                 var mchip = (MergerSync.IAmMember && MergerSync.IsMemberPid(pl)) ? ("Merged", purple, "", (byte)0, GrantKind.Vehicle)
                           : MergerSync.OutgoingToPid == pl                       ? ("Cancel offer", grey, "merger", (byte)12, GrantKind.Vehicle)
                           : MergerSync.InAnyGroup(pl)
@@ -3034,15 +3051,15 @@ namespace BigAmbitionsMP
                                                                                  ? ("In a company", grey, "", (byte)0, GrantKind.Vehicle)
                           : ("Merge", grey, "pid:" + pl, (byte)8, GrantKind.Vehicle);
                 AddPermRow(idx++, RowH, pl,
-                    ("Vehicle",  gv ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Vehicle),
-                    ("Housing",  gh ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Housing),
-                    ("Business", gb ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Business),
+                    ("Vehicle",  cv, "pid:" + pl, (byte)6, GrantKind.Vehicle),
+                    ("Housing",  ch, "pid:" + pl, (byte)6, GrantKind.Housing),
+                    ("Business", cb, "pid:" + pl, (byte)6, GrantKind.Business),
                     mchip);
 #else
                 AddPermRow(idx++, RowH, pl,
-                    ("Vehicle",  gv ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Vehicle),
-                    ("Housing",  gh ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Housing),
-                    ("Business", gb ? purple : grey, "pid:" + pl, (byte)6, GrantKind.Business));
+                    ("Vehicle",  cv, "pid:" + pl, (byte)6, GrantKind.Vehicle),
+                    ("Housing",  ch, "pid:" + pl, (byte)6, GrantKind.Housing),
+                    ("Business", cb, "pid:" + pl, (byte)6, GrantKind.Business));
 #endif
             }
             // Offline grantees (not in the live roster) — same two toggles, by StableId handle.
