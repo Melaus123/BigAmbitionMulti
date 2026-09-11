@@ -324,6 +324,111 @@ namespace BigAmbitionsMP
             catch { }
         }
 
+        /// <summary>MERGER PHASE 3-C (C2d): the RETURNED OWNER takes the simulated record of one of its
+        /// OWN employees back. Matched BY ID against this machine's real records:
+        ///   - an id this save ALREADY holds is UPDATED IN PLACE - never duplicated and never re-hired
+        ///     (the adopt reconstruction would stamp a fresh dayHired, roll a new sick day and grant a
+        ///     new complaint grace, which would erase exactly the absence this leg is carrying back);
+        ///   - an id this save does NOT hold is a hire the simulator made while the owner was away, and
+        ///     comes in through PromoteRecord - the same reconstruction P3-B promotes with, which
+        ///     removes any same-id record first, so it cannot duplicate either.
+        /// Returns 1 = updated, 2 = added, 0 = neither.</summary>
+        public static int ApplyReturnedRecord(EmployeeEditPayload rec)
+        {
+            if (rec == null || string.IsNullOrEmpty(rec.EmployeeId) || string.IsNullOrEmpty(rec.AddressKey)) return 0;
+            EmployeeInstance? inst = null;
+            try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(rec.EmployeeId, out inst); } catch { }
+            if (inst == null)
+            {
+                // The dictionary is a cache; the save's own list is the truth.
+                try
+                {
+                    var list = SaveGameManager.Current?.EmployeeInstances;
+                    if (list != null)
+                        foreach (var e in list)
+                            if (e != null && e.id == rec.EmployeeId) { inst = e; break; }
+                }
+                catch { }
+            }
+            if (inst == null) return PromoteRecord(rec) ? 2 : 0;
+            StampLiveFields(inst, rec);
+            StampExtendedFields(inst, rec);
+            return 1;
+        }
+
+        /// <summary>The fields the ADOPT reconstruction sets while BUILDING a record, written onto an
+        /// EXISTING one instead. Each in its own try so one renamed game field cannot cost the rest.</summary>
+        private static void StampLiveFields(EmployeeInstance inst, EmployeeEditPayload p)
+        {
+            try { inst.hourlyWage = p.Wage; } catch { }
+            try { if (p.Satisfaction > 0f) inst.satisfaction = p.Satisfaction; } catch { }
+            try
+            {
+                var a = MergerAbsence.AddressOfKey(p.AddressKey);
+                if (a != null) inst.assignedAddress = a;   // the simulator may have moved them between MY shops
+            }
+            catch { }
+            try
+            {
+                if (p.Skills != null && p.Skills.Count > 0)
+                {
+                    var skills = inst.characterData.skills;
+                    skills.Clear();
+                    foreach (var pair in p.Skills)
+                    {
+                        int eq = pair == null ? -1 : pair.IndexOf('=');
+                        if (eq <= 0) continue;
+                        float.TryParse(pair.Substring(eq + 1), System.Globalization.NumberStyles.Float,
+                                       System.Globalization.CultureInfo.InvariantCulture, out var val);
+                        skills.Add(new BigAmbitions.Characters.Skills.Skill { name = pair.Substring(0, eq), value = val });
+                    }
+                }
+            }
+            catch { }
+            try { if (p.Demands != null && p.Demands.Count > 0) { inst.demands.Clear(); inst.demands.AddRange(p.Demands); } } catch { }
+            try
+            {
+                // TRAINING: the record resumes the session the simulator had it in (or none).
+                if (string.IsNullOrEmpty(p.TrainingSkill)) inst.trainingSession = null;
+                else
+                {
+                    if (inst.trainingSession == null)
+                    {
+                        var f = FieldOnType(inst.GetType(), "trainingSession");
+                        if (f != null) f.SetValue(inst, Activator.CreateInstance(f.FieldType));
+                    }
+                    var ts = inst.trainingSession;
+                    if (ts != null) { ts.skill = p.TrainingSkill; ts.startDay = p.TrainingStartDay; }
+                }
+            }
+            catch { }
+            try
+            {
+                var c = inst.complaintData;
+                if (c != null)
+                {
+                    c.isComplaining            = p.ComplaintIsComplaining;
+                    c.hoursUntilNextComplaint  = p.ComplaintHoursUntilNext;
+                    c.complaintDeadlineHours   = p.ComplaintDeadlineHours;
+                    c.hasRival                 = p.ComplaintHasRival;
+                }
+            }
+            catch { }
+        }
+
+        private static System.Reflection.FieldInfo? FieldOnType(Type t, string name)
+        {
+            const System.Reflection.BindingFlags F = System.Reflection.BindingFlags.Public
+                                                   | System.Reflection.BindingFlags.NonPublic
+                                                   | System.Reflection.BindingFlags.Instance;
+            for (var ty = t; ty != null; ty = ty.BaseType)
+            {
+                var f = ty.GetField(name, F);
+                if (f != null) return f;
+            }
+            return null;
+        }
+
         private static readonly HashSet<string> _refusedSynthetic = new();   // H-ADOPT-1 refusal log, once per id
 
         public static void Reset()

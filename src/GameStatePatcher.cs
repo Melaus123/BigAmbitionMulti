@@ -1052,7 +1052,16 @@ namespace BigAmbitionsMP
                     {
                         var regO = FindRegistration(payload.AddressKey);
                         bool mineO = false; try { mineO = regO != null && MergerFlip.TrulyMine(regO); } catch { }
-                        if (mineO && !ContestedTenancy.IsKnownEssentiallyEmpty(regO, out int myScore))
+                        // MERGER PHASE 3-C (C2a) - the ONE narrow exception to the rule above: while THIS
+                        // machine is a RETURNED owner whose return payload names this address, the host's
+                        // SeedOrHeal copy IS the state a co-member simulated in my absence, and replacing
+                        // my stale developed copy with it is the whole point of the return leg (D2's only
+                        // carve-out). r2 F1b: the test is NON-CONSUMING - the set is drained only where the
+                        // apply actually COMMITS (further down), so a return snapshot refused or deferred after
+                        // this point still finds its address in the set when it is re-sent or re-asked. Every
+                        // other address, sender and flag still refuse exactly as before.
+                        if (mineO && !ContestedTenancy.IsKnownEssentiallyEmpty(regO, out int myScore)
+                            && !(payload.SeedOrHeal && MergerAbsence.IsReturnInterior(payload.AddressKey)))
                         {
                             Plugin.Logger.LogWarning($"[Patcher] Interior apply REFUSED for '{payload.AddressKey}': this machine OWNS the building and its copy is "
                                 + (myScore < 0 ? "not yet readable" : $"developed (score {myScore})")
@@ -1134,7 +1143,17 @@ namespace BigAmbitionsMP
                     bool isPlayerBusiness = false;
                     try { isPlayerBusiness = IsAnyPlayerBusiness(reg) || reg.RentedByPlayer || !string.IsNullOrEmpty(payload.OwnerPlayerId); }
                     catch { }
-                    if (isPlayerBusiness && !payload.Authoritative)
+                    // MERGER PHASE 3-C r2 (F1b, belt and braces): a RETURN snapshot is vouched AT THE SOURCE
+                    // (InteriorSync.SendSnapshotToPlayer's vouchEmpty - the host copy of a marked address is
+                    // the truth even when it holds zero items), so this gate never fires for one. If it ever
+                    // does - an older host, or any path that loses the vouch - the return leg's own address
+                    // list carries it through rather than leaving the returned owner on a stale interior, and
+                    // the miss is LOGGED so it can never be silent.
+                    bool returnVouchMiss = isPlayerBusiness && !payload.Authoritative
+                                        && payload.SeedOrHeal && MergerAbsence.IsReturnInterior(payload.AddressKey);
+                    if (returnVouchMiss)
+                        Plugin.Logger.LogWarning($"[Patcher] return snapshot for '{payload.AddressKey}' arrived NON-authoritative — the host did not vouch it; applied anyway because the return leg names this address (P3-C r2 F1b).");
+                    if (isPlayerBusiness && !payload.Authoritative && !returnVouchMiss)
                     {
                         Plugin.Logger.LogWarning($"[Patcher] Interior apply SKIPPED for '{payload.AddressKey}': non-authoritative snapshot for a player-owned business — kept local interior.");
                         return;
@@ -1538,6 +1557,16 @@ namespace BigAmbitionsMP
                     catch { }
 
                     Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' {InteriorSync.SnapshotSummary(payload)} (changed={changedIds.Count} moved={movedIds.Count} cargoOnly={cargoOnlyIds.Count} stackedInPlace={stackedInPlace} removed={removedIds.Count}){_deltaNames}.");
+                    // MERGER PHASE 3-C r2 (F1c): THE RETURN SET IS CONSUMED HERE, and nowhere else - this is
+                    // the one point at which this snapshot's items and designs are actually on the local
+                    // copy. Every refusal and every deferral returns ABOVE this line (the S4-identical skip,
+                    // the round-178 owner guard, the round-184 resurrection window, the all-zero refusal, the
+                    // no-registration miss, the non-authoritative skip and the mid-edit busy gate), so a
+                    // return snapshot that did not land still finds its address in the set when the host
+                    // re-sends or the re-ask is answered. A return whose host copy is EMPTY reaches here too
+                    // and drains the set exactly like a full one, so the set can never be left holding an
+                    // address for a much later generic heal to walk through (r1 m4).
+                    if (payload.SeedOrHeal) MergerAbsence.ConsumeReturnInterior(payload.AddressKey);
                     InteriorSync.NoteSnapshotApply(payload.AddressKey);   // round-213: re-send-loop detector
                     // Round-281: this apply COMPLETED, so it is now the baseline for both guards —
                     // the S4-lite duplicate test above, and the struct version every incoming cargo

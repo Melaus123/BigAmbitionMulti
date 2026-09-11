@@ -639,6 +639,9 @@ namespace BigAmbitionsMP
                     // Merger phase 3-B (B6). On the HOST the marks come from the live table; on any
                     // other machine from the MergerState broadcast. simulating_here is what THIS
                     // machine actually runs for an absent owner. Read-only - no write path of its own.
+                    // Phase 3-C (C6): the HOST also prints the last return it sent this session
+                    // (returned=[...]) and every other machine the addresses a return actually replaced
+                    // here (replaced=[...]).
                     return MergerAbsence.TestDriveLine();
                 }
 

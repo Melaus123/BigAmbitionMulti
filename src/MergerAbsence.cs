@@ -20,7 +20,12 @@ namespace BigAmbitionsMP
     /// that itself drops is simply replaced and the new one is seeded from the host exactly like
     /// the first.
     ///
-    /// THE RETURN LEG IS P3-C.  Nothing here copies anything back, and r4 (m1) is what finally
+    /// THE RETURN LEG IS P3-C - BUILT (2026-09-11, D2/D13/D15): when the owner is back AND their own
+    /// world has loaded, the host sends them MergerHandover with Return=true - the host's paperwork for
+    /// exactly the marked addresses - then paces those interiors to them and clears the mark WHEN THE
+    /// OWNER ACKS IT (r2 F4 - the send only flags it); their own
+    /// machine applies it to its OWN registrations, lists and staff (never a native save field written
+    /// for another player) and shows the one approved toast.  r4 (m1) is what finally
     /// makes the mark SURVIVE the owner's return: HostNoteReturn flags it OwnerBack and the host's
     /// reconcile spares it from the dead sweep that used to drop it in the very same pass, so P3-C
     /// still has something to consume.  Every installed list item is tagged so P3-C can lift it out
@@ -28,7 +33,7 @@ namespace BigAmbitionsMP
     /// back, so exactly ONE machine ever runs those shops.  The return leg's source is therefore the HOST's
     /// stored paperwork entry for the owner (the simulator's publishes were filed under the owner's stable
     /// while it was away), which StorePaperwork's OwnerBack guard (r6 F1) holds against the returned
-    /// owner's own republish until P3-C copies back and clears the mark.
+    /// owner's own republish until P3-C copies back and the returned owner's ACK clears the mark (r2 F4).
     ///
     /// INERTNESS: no marks → SimulatesHere is one empty-dictionary read and every tick is a count
     /// check.  A direct-grant session (no merger) never produces a mark at all.
@@ -47,6 +52,16 @@ namespace BigAmbitionsMP
             /// <summary>r4 m1: the owner is back ONLINE and the return leg has not run yet. The mark is
             /// kept (and spared the reconcile's dead sweep) until P3-C consumes it.</summary>
             public bool OwnerBack;
+            /// <summary>P3-C (return toast): the last machine that actually simulated these addresses.
+            /// r5 CLEARS SimulatorPid the moment the owner is back, so by the time the return leg builds
+            /// its payload this is the only record of who ran the shops. Never cleared by a return;
+            /// persisted additively in the manifest (a mark restored without it simply shows no toast).</summary>
+            public string LastSimulatorPid = "";
+            /// <summary>r2 F4: a return leg has been SENT for this mark and the owner has not acked it yet.
+            /// The mark now lives until that ack, so an owner who drops during the paced interior send has
+            /// something to re-fire from. IN-MEMORY ONLY - deliberately never persisted to the manifest, so
+            /// a host restart re-fires the return, which is the intended outcome.</summary>
+            public bool ReturnSent;
         }
 
         private static readonly Dictionary<string, AbsenceMark> _marks = new();   // ownerStable → mark
@@ -65,7 +80,8 @@ namespace BigAmbitionsMP
             addresses ??= new List<string>();
             if (_marks.TryGetValue(ownerStable, out var have)
                 && have.SimulatorPid == simulatorPid && SameSet(have.Addresses, addresses))
-            { have.OwnerPid = ownerPid ?? have.OwnerPid; have.OwnerBack = false; return false; }
+            { have.OwnerPid = ownerPid ?? have.OwnerPid; have.OwnerBack = false; have.ReturnSent = false;   // r2 F4: absent again
+              have.LastSimulatorPid = simulatorPid; return false; }
 
             _marks[ownerStable] = new AbsenceMark
             {
@@ -74,6 +90,7 @@ namespace BigAmbitionsMP
                 SimulatorPid = simulatorPid,
                 Addresses    = new List<string>(addresses),
                 SinceDay     = have != null ? have.SinceDay : sinceDay,
+                LastSimulatorPid = simulatorPid,   // P3-C: who ran them, kept past r5's clear
             };
             return true;
         }
@@ -119,11 +136,56 @@ namespace BigAmbitionsMP
         /// <summary>HOST: forget a return log so a later absence logs its return again.</summary>
         public static void HostClearReturnLog(string ownerPid) { if (!string.IsNullOrEmpty(ownerPid)) _returnLogged.Remove(ownerPid); }
 
+        /// <summary>HOST, MAIN THREAD (P3-C r2, F4): the RETURNED OWNER acked the return leg. THIS - never
+        /// the send - is what clears the mark, so a return lost to a drop during the paced interior send
+        /// re-fires at the owner's next load instead of vanishing while their stale publish overwrites the
+        /// host's simulated record (r1 m5). Only the mark's OWN owner can clear it: the caller passes the
+        /// SENDER's player id and stable id, never anything the payload claims. Returns how many cleared -
+        /// zero is a refusal and says why.</summary>
+        public static int HostClearMarkOnReturnAck(string ownerPid, string ownerStable)
+        {
+            int n = 0;
+            try
+            {
+                var kill = new List<string>();
+                foreach (var kv in _marks)
+                {
+                    var m = kv.Value;
+                    if (m == null || !m.OwnerBack) continue;
+                    bool isOwner = (!string.IsNullOrEmpty(ownerPid)    && m.OwnerPid    == ownerPid)
+                                || (!string.IsNullOrEmpty(ownerStable) && m.OwnerStable == ownerStable);
+                    if (isOwner) kill.Add(kv.Key);
+                }
+                foreach (var s in kill) { _marks.Remove(s); n++; }
+                if (n > 0)
+                {
+                    _returnLogged.Remove(ownerPid ?? "");
+                    Plugin.Logger.LogInfo($"[Absence] return of '{ownerPid}' acknowledged - mark cleared.");
+                }
+                else
+                    Plugin.Logger.LogInfo($"[Absence] return ack from '{ownerPid}' names no mark of theirs that is back - "
+                                        + "ignored (already cleared, or the sender is not that mark's owner).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return ack: {ex.Message}"); }
+            return n;
+        }
+
+        /// <summary>HOST (r2 F4): a return has been sent for this stable and is still waiting for the ack.
+        /// While that is true the reconcile neither re-sends it nor re-designates a simulator.</summary>
+        public static bool IsReturnSent(string ownerStable)
+            => _marks.TryGetValue(ownerStable ?? "", out var m) && m != null && m.OwnerBack && m.ReturnSent;
+
+        /// <summary>HOST (r2 F4): the owner went absent again, so the sent-but-unacked return is void and
+        /// the normal designation takes over.</summary>
+        public static void HostClearReturnSent(string ownerStable)
+        { if (_marks.TryGetValue(ownerStable ?? "", out var m) && m != null) m.ReturnSent = false; }
+
         /// <summary>HOST: put one mark back from the manifest (clear-then-apply restore, MPServer).
         /// SimulatorPid is deliberately NOT restored - a player id from the previous session names
         /// nobody here - so the mark comes back SUSPENDED and the next reconcile designates a simulator
         /// and sends the hand-over. SinceDay is the whole point of persisting it and is kept exactly.</summary>
-        public static void HostRestoreMark(string ownerStable, string ownerPid, List<string> addresses, int sinceDay)
+        public static void HostRestoreMark(string ownerStable, string ownerPid, List<string> addresses, int sinceDay,
+                                          string lastSimulatorPid = "")
         {
             if (string.IsNullOrEmpty(ownerStable)) return;
             _marks[ownerStable] = new AbsenceMark
@@ -133,6 +195,9 @@ namespace BigAmbitionsMP
                 SimulatorPid = "",
                 Addresses    = addresses == null ? new List<string>() : new List<string>(addresses),
                 SinceDay     = sinceDay,
+                // P3-C: the previous session's simulator is nobody HERE, but the NAME it resolves to is
+                // still the truthful answer to "who ran my shops" - the toast is the only reader.
+                LastSimulatorPid = lastSimulatorPid ?? "",
             };
         }
 
@@ -170,10 +235,13 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>HOST: reset with the world (new world / manifest restore).</summary>
-        public static void HostReset() { _marks.Clear(); _returnLogged.Clear(); _snapQueue.Clear(); }
+        public static void HostReset() { _marks.Clear(); _returnLogged.Clear(); _snapQueue.Clear(); _lastReturnLine = ""; }
 
         // ── B2 hand-over send (host) ──────────────────────────────────────────
-        private static readonly List<(string addr, string pid)> _snapQueue = new();   // paced: one per tick
+        // r2 F1a: the third element says whether this pair belongs to the RETURN LEG. A return's snapshot
+        // is vouched even when the host copy is empty (the host copy IS the truth for a marked address);
+        // a hand-over's is not, and queues false.
+        private static readonly List<(string addr, string pid, bool returnLeg)> _snapQueue = new();   // paced: one per tick
 
         /// <summary>HOST: hand the designated simulator its payload, then PACE one interior snapshot
         /// per tick to it. The host itself applies locally instead of sending to itself.</summary>
@@ -216,7 +284,7 @@ namespace BigAmbitionsMP
                     foreach (var q in _snapQueue)
                         if (q.pid == m.SimulatorPid && string.Equals(q.addr, a, StringComparison.OrdinalIgnoreCase))
                         { queued = true; break; }
-                    if (!queued) _snapQueue.Add((a, m.SimulatorPid));
+                    if (!queued) _snapQueue.Add((a, m.SimulatorPid, false));
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] hand-over send: {ex.Message}"); }
@@ -251,15 +319,128 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] drop send: {ex.Message}"); }
         }
 
-        /// <summary>HOST, 1 Hz (chained off MergerFlip.Tick): one queued interior snapshot per tick.</summary>
+        // == MERGER PHASE 3-C - THE RETURN LEG, HOST SIDE (C1) =================
+        /// <summary>A pre-P3-C build reads SimulatorPid and ignores any hand-over not addressed to it,
+        /// so the return leg stamps THIS - never a real player id - into that field.</summary>
+        public const string ReturnSentinel = "return-leg";
+
+        private static string _lastReturnLine = "";
+        /// <summary>HOST, TestDrive (C6): the last return this session ("pid: N addresses").</summary>
+        public static string LastReturnLine => _lastReturnLine;
+
+        /// <summary>HOST, MAIN THREAD (C1): the RETURN. The owner is back and their own save has loaded,
+        /// so they are given the state of exactly the businesses that were simulated in their absence:
+        ///   - the PAPERWORK the host holds for those addresses (D13 - the host copy is the source: the
+        ///     simulator's publishes were filed under the owner's stable at every publish, and the r6 F1
+        ///     guard has been holding them against the returned owner's own republish). It is split out
+        ///     of a DESERIALISED COPY of the stored entry, so the stored TEXT is never mutated;
+        ///   - the INTERIORS, paced exactly like the hand-over's (one per tick through the same queue),
+        ///     and VOUCHED even when the host copy is empty (r2 F1a);
+        /// and the mark is then flagged ReturnSent - r2 F4: it is the OWNER'S ACK that clears it, never
+        /// this send, so a delivery that dies mid-flight re-fires instead of vanishing. No filed paperwork
+        /// is not a failure: the interiors still go and the owner's own state stands for everything else
+        /// (D2). D15: the simulator is not consulted and need not be online - nothing here reads it.</summary>
+        public static bool HostSendReturn(AbsenceMark m, string ranByName, string ownerPid)
+        {
+            if (m == null || !m.OwnerBack) return false;
+            string owner = string.IsNullOrEmpty(ownerPid) ? (m.OwnerPid ?? "") : ownerPid;
+            var addresses = new List<string>(m.Addresses ?? new List<string>());
+            addresses.RemoveAll(string.IsNullOrEmpty);
+            try
+            {
+                string json = "";
+                int parts = 0, biz = 0;
+                var marked = new HashSet<string>(addresses, StringComparer.OrdinalIgnoreCase);
+                string stored = MPServer.PaperworkJsonForStable(m.OwnerStable);
+                if (!string.IsNullOrEmpty(stored) && marked.Count > 0)
+                {
+                    BusinessPaperworkPayload? copy = null;
+                    try { copy = Newtonsoft.Json.JsonConvert.DeserializeObject<BusinessPaperworkPayload>(stored); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return: owner entry parse '{m.OwnerStable}': {ex.Message}"); }
+                    if (copy != null)
+                    {
+                        // `copy` is a throwaway deserialisation - the surgery empties it, never the store.
+                        var mine = PaperworkSync.SplitOutAddresses(copy, marked, out parts);
+                        biz = mine.Businesses?.Count ?? 0;   // HELPER CONTRACT: counted before anything moves it
+                        if (parts > 0)
+                        {
+                            mine.PlayerId = owner;
+                            mine.StableId = m.OwnerStable;
+                            try { json = Newtonsoft.Json.JsonConvert.SerializeObject(mine); }
+                            catch (Exception ex)
+                            { Plugin.Logger.LogWarning($"[Absence] return: serialise '{m.OwnerStable}': {ex.Message}"); json = ""; parts = 0; }
+                        }
+                    }
+                }
+                int bytes = string.IsNullOrEmpty(json) ? 0 : System.Text.Encoding.UTF8.GetByteCount(json);
+                var p = new MergerHandoverPayload
+                {
+                    OwnerPid      = owner,
+                    OwnerStable   = m.OwnerStable,
+                    SimulatorPid  = ReturnSentinel,
+                    SinceDay      = m.SinceDay,
+                    Addresses     = new List<string>(addresses),
+                    PaperworkJson = json,
+                    Return        = true,
+                    RanByName     = ranByName ?? "",
+                    Marks         = HostSnapshot(),
+                };
+                int snaps = 0;
+                if (owner == MPConfig.PlayerId) ApplyReturn(p);          // the host is the owner: no wire, no snapshots
+                else
+                {
+                    MPServer.SendToPlayer(owner, MessageEnvelope.Create(MessageType.MergerHandover, "host", p));
+                    foreach (var a in addresses)
+                    {
+                        bool queued = false;
+                        foreach (var q in _snapQueue)
+                            if (q.pid == owner && string.Equals(q.addr, a, StringComparison.OrdinalIgnoreCase))
+                            { queued = true; break; }
+                        if (!queued) { _snapQueue.Add((a, owner, true)); snaps++; }
+                    }
+                }
+                if (parts == 0)
+                    Plugin.Logger.LogInfo($"[Absence] return to '{owner}': no filed paperwork for {addresses.Count} addresses "
+                                        + $"(their own state stands; {snaps} snapshots queued).");
+                else
+                    Plugin.Logger.LogInfo($"[Absence] return to '{owner}' ({addresses.Count} addresses, {bytes} bytes paperwork "
+                                        + $"covering {biz} businesses, {snaps} snapshots) - simulated since day {m.SinceDay}.");
+                _lastReturnLine = $"{owner}: {addresses.Count} addresses";
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return send: {ex.Message}"); }
+            // r2 F4: the mark is NOT cleared here. Delivery is only PROVEN by the owner's "return-applied"
+            // ack (HostClearMarkOnReturnAck), so an owner who drops during the paced interior send - and
+            // reconnects before the 10 s reconcile re-marks them - still has a mark to re-fire from
+            // instead of a stale publish overwriting the host's simulated record (r1 m5). The flag is
+            // in-memory only and deliberately NOT persisted: a host restart re-fires the return. While it
+            // is set the reconcile neither re-sends nor re-designates, so C5's "a second return sends
+            // nothing" still holds. StorePaperwork's OwnerBack guard therefore ends at the ACK, one hop
+            // later - harmless: the owner sends the ack at the end of ApplyReturn, before its own next
+            // paperwork publish, so the guard is already gone when that publish reaches the host.
+            m.ReturnSent = true;
+            return true;
+        }
+
+        /// <summary>HOST, 1 Hz (chained off MergerFlip.Tick): one queued interior snapshot per tick.
+        /// P3-C: ALSO the owner-side recurrence for a return payload that arrived before this machine's
+        /// world was ready (this tick runs on every machine, not just the host).</summary>
         public static void Tick()
         {
             try
             {
+                if (_heldReturn != null)
+                {
+                    bool ready = false;
+                    try { ready = SaveGameManager.Current?.BuildingRegistrations != null; } catch { }
+                    if (ready) { var held = _heldReturn; _heldReturn = null; ApplyReturn(held); }
+                }
                 if (_snapQueue.Count == 0 || !MPServer.IsRunning) return;
-                var (addr, pid) = _snapQueue[0];
+                var (addr, pid, returnLeg) = _snapQueue[0];
                 _snapQueue.RemoveAt(0);
-                InteriorSync.SendSnapshotToPlayer(addr, pid, forceItemAuthority: true);
+                // r2 F1a: vouchEmpty for a RETURN only - the host's copy of a marked address is the truth
+                // even when it holds zero items, so the returned owner's apply must not skip it as
+                // non-authoritative. A hand-over keeps the old "never vouch an empty list" rule.
+                InteriorSync.SendSnapshotToPlayer(addr, pid, forceItemAuthority: true, vouchEmpty: returnLeg);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] paced snapshot: {ex.Message}"); }
         }
@@ -295,7 +476,8 @@ namespace BigAmbitionsMP
         {
             _known.Clear();
             if (s?.Absences != null) _known.AddRange(s.Absences);
-            RequestResendIfInstallsLost();   // r4 F3
+            StopSimulatingWhatNoMarkNames();   // P3-C C3
+            RequestResendIfInstallsLost();     // r4 F3
         }
 
         private static readonly HashSet<string> _resendAsked = new();   // ownerPid, F3: log once until served
@@ -433,6 +615,10 @@ namespace BigAmbitionsMP
             try { UndoLocalAll("session/scene reset"); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] reset undo: {ex.Message}"); }
             _simHere.Clear(); _known.Clear(); _promotedStaff.Clear(); _installed.Clear();
             _snapQueue.Clear(); _idWarned.Clear(); _fieldWarned.Clear(); _resendAsked.Clear();
+            // P3-C (C5): a held return payload dies with the connection - the host clears a mark only
+            // after a SEND, so the next return re-sends the whole thing.
+            _heldReturn = null; _heldLogged = false; _returnAddrs.Clear(); _replaced.Clear(); _lastToastKey = "";
+            _tagInstalls = true; _returnUpsert = false;
         }
 
         // ── B3(c) staff promotion ─────────────────────────────────────────────
@@ -658,11 +844,21 @@ namespace BigAmbitionsMP
             return n;
         }
 
+        /// <summary>P3-C (C2c): FALSE while the RETURNED OWNER re-installs its own businesses' items.
+        /// Those items are the owner's real ones - they must never be lifted by an undo and never sit
+        /// out that machine's save, which is exactly what the tag causes.</summary>
+        private static bool _tagInstalls = true;
+
+        /// <summary>r2 F2: TRUE only while the RETURNED OWNER re-installs its own businesses' lists, and
+        /// the one thing it changes is that a dictionary row the returned bundle carries REPLACES the row
+        /// already under that key instead of being refused.</summary>
+        private static bool _returnUpsert;
+
         private static bool Install(string listName, IList list, object item)
         {
             if (list == null || item == null) return false;
             list.Add(item);
-            _installed.Add((_installOwner, listName, item));
+            if (_tagInstalls) _installed.Add((_installOwner, listName, item));
             return true;
         }
 
@@ -676,9 +872,16 @@ namespace BigAmbitionsMP
 
         private static bool InstallDict(string name, IDictionary dict, object key, object value)
         {
-            if (dict == null || key == null || value == null || dict.Contains(key)) return false;
+            if (dict == null || key == null || value == null) return false;
+            bool have = dict.Contains(key);
+            // r2 F2: a RETURN never DELETES the owner's importer rows (RemoveOwnItemsFor leaves that map
+            // alone), so a row the returned bundle carries has to REPLACE the one already here - otherwise
+            // the owner keeps their pre-absence row for that importer. Rows the bundle does NOT carry are
+            // left exactly as they are, so an unmarked building's orders can never be collateral. A
+            // HAND-OVER still refuses an existing key: that row belongs to the simulating machine itself.
+            if (have && !_returnUpsert) return false;
             dict[key] = value;
-            _installed.Add((_installOwner, name, new InstalledDictEntry { Key = key, Value = value }));
+            if (_tagInstalls && !have) _installed.Add((_installOwner, name, new InstalledDictEntry { Key = key, Value = value }));
             return true;
         }
 
@@ -1114,7 +1317,305 @@ namespace BigAmbitionsMP
             return true;
         }
 
-        // ── B6 TestDrive line ─────────────────────────────────────────────────
+        // == MERGER PHASE 3-C - THE RETURN LEG, OWNER SIDE (C2) ================
+        // Nothing here is ever done to another player's data: this is the RETURNED OWNER's own machine
+        // writing its OWN registrations, its OWN GameInstance lists and its OWN employee records - which
+        // is their game (D2: the owner's state wins everywhere EXCEPT the marked addresses, and those are
+        // exactly the businesses somebody else ran for them).
+
+        private static MergerHandoverPayload? _heldReturn;   // arrived before this world was ready
+        private static bool _heldLogged;
+        /// <summary>The addresses of the return payload this machine is currently applying - the ONLY
+        /// predicate the round-178 exception in GameStatePatcher reads. One apply each (consumed).</summary>
+        private static readonly HashSet<string> _returnAddrs = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly List<string> _replaced = new();   // C6, this session
+        private static string _lastToastKey = "";
+
+        /// <summary>OWNER (C2a, r2 F1b): is this SeedOrHeal snapshot the simulated copy of one of the
+        /// addresses the return just named? NON-CONSUMING - the round-178 exception (and the
+        /// non-authoritative belt beside it) only ASK. Draining the set inside a guard was r1's M1: the
+        /// entry was spent before the apply was final, so a snapshot refused or deferred FURTHER DOWN
+        /// left the owner on a stale interior with nothing left in the set to let the re-send through.</summary>
+        public static bool IsReturnInterior(string addressKey)
+            => !string.IsNullOrEmpty(addressKey) && _returnAddrs.Count > 0 && _returnAddrs.Contains(addressKey);
+
+        /// <summary>OWNER (r2 F1c): the apply has COMMITTED this address's items and designs to my copy,
+        /// so the return's one-apply exception for it closes NOW and a later generic snapshot is refused
+        /// exactly as before. Called once at the commit point for every SeedOrHeal apply that gets there;
+        /// an address no return named is a silent no-op, and an EMPTY host copy drains the set just like
+        /// a full one - an address left behind in the set is what would let a much later heal walk
+        /// through the exception onto a by-then developed interior (r1 m4).</summary>
+        public static bool ConsumeReturnInterior(string addressKey)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey) || _returnAddrs.Count == 0) return false;
+                if (!_returnAddrs.Remove(addressKey)) return false;
+                if (!_replaced.Contains(addressKey)) _replaced.Add(addressKey);
+                Plugin.Logger.LogInfo($"[Absence] replaced my '{addressKey}' with the simulated copy.");
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>OWNER, MAIN THREAD (C2): take back exactly the businesses that were simulated in my
+        /// absence. (a) the interiors are the paced snapshots that FOLLOW this payload - this call opens
+        /// the one-apply-each exception for them; (b) the books go back onto my registrations; (c) my
+        /// stale list items for those addresses go and the returned ones take their place as MY OWN
+        /// items (never tagged, never stripped at save); (d) the full staff records are written onto my
+        /// real records by id; (e) my next publish carries the returned state. Nothing outside those
+        /// addresses is touched. A payload that arrives before my world is ready is HELD and applied
+        /// from the 1 Hz tick (recurrence, logged once).</summary>
+        public static void ApplyReturn(MergerHandoverPayload p)
+        {
+            if (p == null) return;
+            // r2 F5: a return NAMES ITS ADDRESSEE, exactly as the hand-over path checks its own. A payload
+            // whose OwnerPid is not this machine is somebody else's return - a misroute, an older host, or
+            // a forgery - and applying it would write another player's simulated businesses onto MY
+            // registrations, lists and staff. Refuse it, and say so.
+            if (p.OwnerPid != MPConfig.PlayerId)
+            {
+                Plugin.Logger.LogWarning($"[Absence] return REFUSED: addressed to '{p.OwnerPid}', not to this machine "
+                                       + $"('{MPConfig.PlayerId}') - nothing applied.");
+                return;
+            }
+            try
+            {
+                bool ready = false;
+                try { ready = SaveGameManager.Current?.BuildingRegistrations != null; } catch { }
+                if (!ready)
+                {
+                    _heldReturn = p;
+                    if (!_heldLogged)
+                    {
+                        _heldLogged = true;
+                        Plugin.Logger.LogInfo("[Absence] a return payload arrived before this machine's world was ready - "
+                                            + "held and applied at world-ready.");
+                    }
+                    return;
+                }
+                _heldReturn = null; _heldLogged = false;
+
+                var addrs = new HashSet<string>(p.Addresses ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+                addrs.Remove("");
+                if (addrs.Count == 0)
+                { Plugin.Logger.LogInfo($"[Absence] return from the host names no addresses - nothing to apply."); return; }
+
+                // (a) the interiors follow this message on the same lane, one per host tick.
+                _returnAddrs.Clear();
+                foreach (var a in addrs) _returnAddrs.Add(a);
+
+                BusinessPaperworkPayload? bundle = null;
+                if (!string.IsNullOrEmpty(p.PaperworkJson))
+                {
+                    try { bundle = Newtonsoft.Json.JsonConvert.DeserializeObject<BusinessPaperworkPayload>(p.PaperworkJson); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return paperwork parse: {ex.Message}"); }
+                }
+
+                int books = 0, items = 0, staffUpd = 0, staffAdd = 0;
+                if (bundle != null)
+                {
+                    try { books = PaperworkSync.ApplyReturnedBusinesses(bundle, addrs); }        // (b)
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return books: {ex.Message}"); }
+                    try { items = ReinstallOwnLists(bundle, addrs, p.OwnerPid ?? ""); }          // (c)
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return lists: {ex.Message}"); }
+                    try { ApplyReturnedStaff(bundle, addrs, out staffUpd, out staffAdd); }       // (d)
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return staff: {ex.Message}"); }
+                }
+                else
+                    Plugin.Logger.LogInfo($"[Absence] return for {addrs.Count} address(es) carried no paperwork - "
+                                        + "my own records stand; the interiors still replace my copies.");
+
+                try { PaperworkSync.MarkDirty(); } catch { }                                     // (e)
+                Plugin.Logger.LogInfo($"[Absence] return applied: {addrs.Count} address(es), {books} business record(s), "   // (f)
+                                    + $"{items} list item(s), {staffUpd} staff updated + {staffAdd} added "
+                                    + $"(simulated since day {p.SinceDay}).");
+                ShowReturnToast(p);                                                              // (g)
+                // (h) r2 F4: THE ACK. The host keeps the mark - and with it StorePaperwork's OwnerBack
+                // guard - until this lands, so a drop during the paced interior send can no longer leave
+                // this machine half-returned with no mark to re-fire from (r1 m5). Sent HERE, at the end
+                // of the apply and well before this machine's next paperwork publish (PaperworkSync's
+                // cadence is 30 s), so the guard outliving the apply by one hop costs nothing. The
+                // interiors are consumed independently as they arrive; a lost ack simply means the return
+                // re-fires at the next load, which the _peerApplying one-shot already tolerates.
+                if (MPServer.IsRunning)
+                    MPServer.HostReturnAck(MPConfig.PlayerId);   // the host IS the owner: no wire
+                else if (MPClient.IsConnected)
+                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.MergerHandover, MPConfig.PlayerId,
+                        new MergerHandoverPayload
+                        {
+                            OwnerPid     = MPConfig.PlayerId,
+                            OwnerStable  = p.OwnerStable ?? "",
+                            SimulatorPid = ReturnSentinel,
+                            Ack          = "return-applied",
+                            Addresses    = new List<string>(p.Addresses ?? new List<string>()),
+                        }));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return apply: {ex.Message}"); }
+        }
+
+        /// <summary>C2(g) - the ONE approved on-screen line of this leg (user approval 2026-09-11). Once
+        /// per return; no name known means no toast at all rather than an invented one.</summary>
+        private static void ShowReturnToast(MergerHandoverPayload p)
+        {
+            try
+            {
+                string key = (p.OwnerStable ?? "") + "|" + p.SinceDay;
+                if (key == _lastToastKey) return;
+                _lastToastKey = key;
+                string name = p.RanByName ?? "";
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    Plugin.Logger.LogInfo($"[Absence] return toast skipped for '{p.OwnerPid}' - no simulator name known.");
+                    return;
+                }
+                PassengerHud.Toast($"While you were away, {name} ran your businesses. They are back in your hands.");
+                Plugin.Logger.LogInfo($"[Absence] return toast shown to '{p.OwnerPid}' (ran by '{name}').");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return toast: {ex.Message}"); }
+        }
+
+        /// <summary>C2(c): my stale list items for these addresses leave, the returned ones take their
+        /// place. The SAME installer P3-B uses, with the tag OFF - these are my own items now, so an
+        /// undo must never lift them and the save strip must never hold them back.</summary>
+        private static int ReinstallOwnLists(BusinessPaperworkPayload bundle, HashSet<string> addrs, string owner)
+        {
+            var gi = SaveGameManager.Current;
+            if (gi == null) return 0;
+            int removed = RemoveOwnItemsFor(gi, addrs);
+            int n = 0;
+            bool wasTagged = _tagInstalls, wasUpsert = _returnUpsert;
+            _tagInstalls = false; _returnUpsert = true;   // r2 F2: a returned dict row REPLACES mine
+            try { foreach (var a in addrs) n += InstallListsFor(a, bundle, addrs, owner); }
+            finally { _tagInstalls = wasTagged; _returnUpsert = wasUpsert; }
+            Plugin.Logger.LogInfo($"[Absence] my own lists for {addrs.Count} address(es): {removed} stale item(s) out, "
+                                + $"{n} returned item(s) in.");
+            return n;
+        }
+
+        /// <summary>Which field of each installed list names the building. The removal below is the
+        /// inverse of InstallListsFor and reads exactly the fields it writes.</summary>
+        private static readonly (string List, string[] Fields)[] _addrFields =
+        {
+            ("DeliveryContracts",                 new[] { "businessAddress" }),
+            ("importPartnerships",                new[] { "headquartersAddress" }),
+            ("logisticsManagerPlans",             new[] { "headquartersAddress" }),
+            ("pricingManagerPlans",               new[] { "headquartersAddress" }),
+            ("hrManagerPlans",                    new[] { "headquartersAddress" }),
+            ("headhunterPlans",                   new[] { "headquartersAddress" }),
+            ("interiorInstallationFirmContracts", new[] { "addressToDoTheInstallation" }),
+            ("movingServiceContracts",            new[] { "originMovingAddress", "destinationMovingAddress" }),
+            ("disabledLicensingFees",             new[] { "address" }),
+            ("paidLicensingFeesToday",            new[] { "Item1" }),
+        };
+
+        /// <summary>Take MY pre-absence items for exactly these addresses back out, so the returned ones
+        /// replace them instead of doubling them. An item this machine INSTALLED for some OTHER absent
+        /// owner is tagged and is never touched here (it is theirs; UndoLocal is what lifts it).</summary>
+        private static int RemoveOwnItemsFor(GameInstance gi, HashSet<string> addrs)
+        {
+            int n = 0;
+            // r2 F2: itemsOrderedThisWeekByImporter is deliberately NOT cleared here. Its rows are keyed by
+            // the IMPORTER's address, never by one of the marked buildings, and the same importer can also
+            // supply an UNMARKED headquarters - deleting the row because a MARKED HQ happens to have a
+            // partnership with that importer would throw away the unmarked HQ's orders for the week, and
+            // they would only come back if the returned bundle happened to carry that importer's row.
+            // (Today every building of the owner is marked - AddressesOfStable is the whole of
+            // BuildingOwners for the stable - so no unmarked HQ can share an importer; this is hardening
+            // for the day that stops being true.) The returned bundle UPSERTS instead: InstallDict
+            // replaces the row for every key the bundle carries and leaves every other row untouched, so
+            // nothing is lost and nothing is doubled.
+            foreach (var (name, fields) in _addrFields)
+            {
+                try
+                {
+                    var list = ListByName(gi, name);
+                    if (list == null) continue;
+                    for (int i = list.Count - 1; i >= 0; i--)
+                    {
+                        var it = list[i];
+                        if (it == null) continue;
+                        bool hit = false;
+                        foreach (var f in fields) if (addrs.Contains(AddrKeyOf(it, f))) { hit = true; break; }
+                        if (!hit || IsInstalledItem(it)) continue;
+                        list.RemoveAt(i);
+                        n++;
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return: clearing '{name}': {ex.Message}"); }
+            }
+
+            return n;
+        }
+
+        private static string AddrKeyOf(object o, string field)
+        {
+            try
+            {
+                var v = FieldOf(o, field)?.GetValue(o);
+                return v is Address a ? GameStateReader.AddressKey(a) : "";
+            }
+            catch { return ""; }
+        }
+
+        private static bool IsInstalledItem(object item)
+        {
+            if (_installed.Count == 0) return false;
+            foreach (var e in _installed) if (ReferenceEquals(e.Item, item)) return true;
+            return false;
+        }
+
+        /// <summary>C2(d): the returned full records onto MY real employee records, matched BY ID. An id
+        /// I already hold is UPDATED in place (never duplicated, never re-hired); an id I do not hold is
+        /// a hire the simulator made while I was away and comes in through the same reconstruction P3-B
+        /// promotes with.</summary>
+        private static void ApplyReturnedStaff(BusinessPaperworkPayload bundle, HashSet<string> addrs,
+                                               out int updated, out int added)
+        {
+            updated = 0; added = 0;
+            foreach (var rec in bundle?.Employees ?? new List<EmployeeEditPayload>())
+            {
+                if (rec == null || string.IsNullOrEmpty(rec.EmployeeId)) continue;
+                if (!addrs.Contains(rec.AddressKey ?? "")) continue;
+                try
+                {
+                    int r = MergerEmployeeSync.ApplyReturnedRecord(rec);
+                    if (r == 1) updated++;
+                    else if (r == 2) added++;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return staff '{rec.EmployeeId}': {ex.Message}"); }
+            }
+        }
+
+        /// <summary>C3 (derived safety, every machine): this machine still simulates an address that NO
+        /// mark names any more - the host restarted, or its drop never arrived. The broadcast table is
+        /// the truth, so give those addresses back exactly as a drop would. Never fires while a mark
+        /// still names this machine, and never for an owner the table still lists.</summary>
+        private static void StopSimulatingWhatNoMarkNames()
+        {
+            try
+            {
+                if (_simHere.Count == 0) return;
+                var named = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var a in _known)
+                {
+                    if (a == null || a.SimulatorPid != MPConfig.PlayerId) continue;
+                    foreach (var addr in a.Addresses ?? new List<string>())
+                        if (!string.IsNullOrEmpty(addr)) named.Add(addr);
+                }
+                var orphans = new List<string>();
+                foreach (var kv in _simHere)
+                    if (!named.Contains(kv.Key))
+                    {
+                        Plugin.Logger.LogInfo($"[Absence] stopped simulating '{kv.Key}' for '{kv.Value}' (mark gone).");
+                        if (!orphans.Contains(kv.Value)) orphans.Add(kv.Value);
+                    }
+                foreach (var owner in orphans) UndoLocal(owner, "no mark names this machine any more");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] mark-gone sweep: {ex.Message}"); }
+        }
+
+        // == B6 TestDrive line =================================================
         public static string TestDriveLine()
         {
             var marks = new List<string>();
@@ -1134,7 +1635,12 @@ namespace BigAmbitionsMP
             else
                 foreach (var a in _known)
                     marks.Add($"{a.OwnerPid}->{a.SimulatorPid}: {string.Join(",", a.Addresses ?? new List<string>())}");
-            return $"OK absence marks=[{string.Join("; ", marks)}] simulating_here=[{string.Join(",", SimulatedAddresses())}]";
+            // P3-C (C6): the host adds the last return it sent this session; every other machine adds
+            // the addresses a return actually replaced here.
+            string extra = MPServer.IsRunning
+                         ? $" returned=[{_lastReturnLine}]"
+                         : $" replaced=[{string.Join(",", _replaced)}]";
+            return $"OK absence marks=[{string.Join("; ", marks)}] simulating_here=[{string.Join(",", SimulatedAddresses())}]" + extra;
         }
     }
 }

@@ -136,11 +136,11 @@
       "expect_result": "^OK absence marks=\\[\\] simulating_here=\\[\\]"
     },
     {
+      "seq": 15,
       "role": "h",
       "cmd": "mark pre-drop baseline",
       "expect_result": "OK MARK",
-      "note": "sets the host's search baseline before the disconnect",
-      "seq": 15
+      "note": "sets the host's search baseline before the disconnect"
     },
     {
       "seq": 16,
@@ -210,28 +210,74 @@
           "role": "h",
           "regex": "\\[Absence\\] owner '${clientPid}' returned",
           "within_s": 120
+        },
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] return to '${clientPid}'",
+          "within_s": 150
         }
       ],
-      "note": "the host detects the owner's return (the copy-back is P3-C)"
+      "note": "P3-B: the host detects the owner's return (simulator dropped, mark kept). P3-C: the return leg fires at the owner's applying edge (after its own load) - paperwork + interiors sent, mark cleared."
     },
     {
       "seq": 25,
       "role": "h",
-      "sleep_s": 5
+      "cmd": "absence",
+      "expect_result": "returned=\\[.+\\]",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Absence\\] return applied: \\d+ address",
+          "within_s": 90
+        },
+        {
+          "role": "c",
+          "regex": "\\[Absence\\] replaced my '",
+          "within_s": 90
+        },
+        {
+          "role": "c",
+          "regex": "\\[Absence\\] return toast shown to '${clientPid}'",
+          "within_s": 90
+        }
+      ],
+      "note": "P3-C: the host's verb shows the last return; the owner applied it, replaced its stale copies (round-178 exception) and saw the approved toast (D17). Client lines are scanned from the client's last mark (its join)."
     },
     {
       "seq": 26,
+      "role": "c",
+      "cmd": "absence",
+      "expect_result": "replaced=\\[.+\\]",
+      "note": "P3-C: the owner's verb lists the addresses the return replaced here"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Paperwork\\] stored for '${clientPid}'",
+          "within_s": 20
+        }
+      ],
+      "note": "P3-C: with the mark cleared the owner's own publish stores normally (no OwnerBack guard)"
+    },
+    {
+      "seq": 28,
       "role": "c",
       "cmd": "status",
       "expect_result": "role=c.*inMp=True"
     },
     {
-      "seq": 27,
+      "seq": 29,
       "role": "c",
       "cmd": "mergestatus",
       "expect_result": "member=True"
     },
     {
+      "seq": 30,
       "role": "c",
       "cmd": "merge leave",
       "expect_result": "OK merge leave sent",
@@ -242,23 +288,22 @@
           "within_s": 20
         }
       ],
-      "note": "FIXTURE HYGIENE: end with the company dissolved so the save step never writes a merger into save1's manifest (T-P3-3 run 1 lesson)",
-      "seq": 28
+      "note": "FIXTURE HYGIENE: end with the company dissolved so the save step never writes a merger into save1's manifest (T-P3-3 run 1 lesson)"
     },
     {
+      "seq": 31,
       "role": "h",
-      "sleep_s": 3,
-      "seq": 29
+      "sleep_s": 3
     },
     {
-      "seq": 30,
+      "seq": 32,
       "role": "h",
       "cmd": "save",
       "expect_result": "^OK",
       "note": "post-run: the manager checks the manifest carries Paperwork + Absence sections and the saves carry no merger state"
     },
     {
-      "seq": 31,
+      "seq": 33,
       "role": "both",
       "cmd": "mark TEST P3-2 END",
       "expect_result": "OK MARK"

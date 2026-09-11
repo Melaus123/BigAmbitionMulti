@@ -579,8 +579,13 @@ namespace BigAmbitionsMP
                 {
                     // MERGER PHASE 3-B: the host designated THIS machine to run an absent member's
                     // businesses (or told it to stop). Main thread - the apply touches GameInstance.
+                    // P3-C: the SAME type, Return=true, is the RETURN LEG arriving at the OWNER - the
+                    // state of the businesses that were simulated while this machine was away. Also main
+                    // thread (it writes this save's own registrations, lists and staff).
                     var hv = env.GetPayload<MergerHandoverPayload>();
-                    if (hv != null) GameStatePatcher.EnqueueOnMainThread(() => MergerAbsence.ApplyHandover(hv));
+                    if (hv == null) break;
+                    if (hv.Return) GameStatePatcher.EnqueueOnMainThread(() => MergerAbsence.ApplyReturn(hv));
+                    else           GameStatePatcher.EnqueueOnMainThread(() => MergerAbsence.ApplyHandover(hv));
                     break;
                 }
 

@@ -612,6 +612,196 @@ namespace BigAmbitionsMP
             return outp;
         }
 
+        // == MERGER PHASE 3-C (C2b) - THE BOOKS BACK ONTO THE OWNER'S REGISTRATIONS ==
+
+        /// <summary>THE RETURNED OWNER, MAIN THREAD: replace orderHistory / unprocessedCompletedOrders /
+        /// factoryExports / marketingCampaigns of exactly these addresses from the returned bundle - the
+        /// inverse of BuildOne, and the owner writing its OWN registrations. Nothing outside `addrs` is
+        /// touched (D2), and an address with no registration here is skipped with a line. The element
+        /// types are not csproj-named, so each list's own generic argument mints its elements (the same
+        /// trick the absence installer uses); every part is independent, so one renamed game field costs
+        /// that part only. Returns how many business records were written.</summary>
+        public static int ApplyReturnedBusinesses(BusinessPaperworkPayload bundle, HashSet<string> addrs)
+        {
+            int n = 0;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null || bundle?.Businesses == null || addrs == null || addrs.Count == 0) return 0;
+                foreach (var b in bundle.Businesses)
+                {
+                    if (b == null || string.IsNullOrEmpty(b.AddressKey) || !addrs.Contains(b.AddressKey)) continue;
+                    BuildingRegistration? reg = null;
+                    foreach (var r in gi.BuildingRegistrations)
+                        if (r != null && SafeRegKey(r) == b.AddressKey) { reg = r; break; }
+                    if (reg == null)
+                    {
+                        Plugin.Logger.LogWarning($"[Paperwork] returned books for '{b.AddressKey}': no registration on this "
+                                               + "machine - skipped (my own state stands for it).");
+                        continue;
+                    }
+                    int oh = PwFill<PwOrderHistoryEntry>(reg, "orderHistory", b.OrderHistory, (o, h) =>
+                    {
+                        PwSet(o, "dayNumber", h.DayNumber);
+                        PwSet(o, "totalCustomers", h.TotalCustomers);
+                        PwSet(o, "totalRevenue", h.TotalRevenue);
+                        PwFill<PwItemReport>(o, "itemSales", h.ItemSales, (s, i) =>
+                        {
+                            PwSet(s, "itemName", i.ItemName);
+                            PwSet(s, "amountSold", i.AmountSold);
+                            PwSet(s, "totalPrice", i.TotalPrice);
+                            PwSet(s, "totalWholesalePrice", i.TotalWholesalePrice);
+                        });
+                        PwFill<PwHourReport>(o, "hourReports", h.HourReports, (s, r2) =>
+                        {
+                            PwSet(s, "hour", r2.Hour);
+                            PwSet(s, "customers", r2.Customers);
+                        });
+                    });
+                    int till = PwFill<PwOrder>(reg, "unprocessedCompletedOrders", b.UnprocessedCompletedOrders, (o, po) =>
+                    {
+                        PwSet(o, "completed", po.Completed);
+                        PwSet(o, "customerServiceSkill", po.CustomerServiceSkill);
+                        PwSet(o, "cleanliness", po.Cleanliness);
+                        PwSet(o, "customerDemandScore", po.CustomerDemandScore);
+                        PwFillStrings(o, "customerDemandTypes", po.CustomerDemandTypes);
+                        PwFill<PwOrderEntry>(o, "entries", po.Entries, (e, oe) =>
+                        {
+                            PwSet(e, "itemName", oe.ItemName);
+                            PwSet(e, "price", oe.Price);
+                            PwSet(e, "available", oe.Available);
+                            PwSet(e, "priceAccceptable", oe.PriceAcceptable);   // the game's own spelling
+                            PwSet(e, "paid", oe.Paid);
+                            PwSet(e, "processed", oe.Processed);
+                            PwSet(e, "wholesalePrice", oe.WholesalePrice);
+                        });
+                    });
+                    int fx = PwFill<PwFactoryExport>(reg, "factoryExports", b.FactoryExports, (o, f) =>
+                    {
+                        PwSet(o, "itemName", f.ItemName);
+                        PwSet(o, "amount", f.Amount);
+                        PwSet(o, "totalIngredientsCost", f.TotalIngredientsCost);
+                        PwSet(o, "totalPrice", f.TotalPrice);
+                    });
+                    int mc = PwFill<PwMarketingCampaign>(reg, "marketingCampaigns", b.MarketingCampaigns, (o, c) =>
+                    {
+                        var a = MergerAbsence.AddressOfKey(c.AgencyAddressKey);
+                        if (a != null) PwFieldOf(o, "agencyAddress")?.SetValue(o, a);
+                        PwSetEnumByName(o, "marketingTypeName", c.MarketingTypeName);
+                        PwSet(o, "enabled", c.Enabled);
+                    });
+                    n++;
+                    Plugin.Logger.LogInfo($"[Paperwork] returned books for '{b.AddressKey}': {oh} day(s) of history, "
+                                        + $"{till} unprocessed order(s), {fx} factory export(s), {mc} campaign(s).");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] returned books: {ex.Message}"); }
+            return n;
+        }
+
+        private const System.Reflection.BindingFlags PwFlags = System.Reflection.BindingFlags.Public
+                                                             | System.Reflection.BindingFlags.NonPublic
+                                                             | System.Reflection.BindingFlags.Instance;
+
+        private static System.Reflection.FieldInfo? PwFieldOf(object o, string name)
+        {
+            try
+            {
+                if (o == null || string.IsNullOrEmpty(name)) return null;
+                for (var t = o.GetType(); t != null; t = t.BaseType)
+                {
+                    var f = t.GetField(name, PwFlags);
+                    if (f != null) return f;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static void PwSet(object o, string name, object val)
+        {
+            try
+            {
+                var f = PwFieldOf(o, name);
+                if (f == null || val == null) return;
+                f.SetValue(o, f.FieldType.IsEnum ? Enum.ToObject(f.FieldType, val) : Convert.ChangeType(val, f.FieldType));
+            }
+            catch { }
+        }
+
+        /// <summary>An enum field written from the NAME BuildOne serialised (ToString()).</summary>
+        private static void PwSetEnumByName(object o, string name, string value)
+        {
+            try
+            {
+                var f = PwFieldOf(o, name);
+                if (f == null || !f.FieldType.IsEnum || string.IsNullOrEmpty(value)) return;
+                f.SetValue(o, Enum.Parse(f.FieldType, value, ignoreCase: true));
+            }
+            catch { }
+        }
+
+        /// <summary>Rebuild one list field from DTO rows: the field's own generic argument mints the
+        /// elements and `fill` writes them. Returns how many rows the list ended up holding.</summary>
+        private static int PwFill<T>(object owner, string fieldName, List<T>? src, System.Action<object, T> fill)
+        {
+            try
+            {
+                var f = PwFieldOf(owner, fieldName);
+                if (f == null) return 0;
+                var list = f.GetValue(owner) as System.Collections.IList;
+                if (list == null)
+                {
+                    list = Activator.CreateInstance(f.FieldType) as System.Collections.IList;
+                    if (list == null) return 0;
+                    f.SetValue(owner, list);
+                }
+                var et = f.FieldType.GetGenericArguments();
+                if (et.Length != 1) return 0;
+                list.Clear();
+                foreach (var s in src ?? new List<T>())
+                {
+                    if (s == null) continue;
+                    var e = Activator.CreateInstance(et[0]);
+                    fill(e, s);
+                    list.Add(e);
+                }
+                return list.Count;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] returned '{fieldName}': {ex.Message}"); return 0; }
+        }
+
+        /// <summary>A string COLLECTION field (List, HashSet or a fixed array), replaced wholesale.</summary>
+        private static void PwFillStrings(object owner, string fieldName, List<string>? values)
+        {
+            try
+            {
+                var f = PwFieldOf(owner, fieldName);
+                if (f == null) return;
+                values ??= new List<string>();
+                if (f.FieldType.IsArray)
+                {
+                    var arr = Array.CreateInstance(f.FieldType.GetElementType(), values.Count);
+                    for (int i = 0; i < values.Count; i++) arr.SetValue(values[i], i);
+                    f.SetValue(owner, arr);
+                    return;
+                }
+                var cur = f.GetValue(owner);
+                if (cur == null)
+                {
+                    cur = Activator.CreateInstance(f.FieldType);
+                    if (cur == null) return;
+                    f.SetValue(owner, cur);
+                }
+                var t = cur.GetType();
+                t.GetMethod("Clear", Type.EmptyTypes)?.Invoke(cur, null);
+                var add = t.GetMethod("Add", new[] { typeof(string) });
+                if (add == null) return;
+                foreach (var s in values) add.Invoke(cur, new object[] { s ?? "" });
+            }
+            catch { }
+        }
+
         private static string Key(Address a) { try { return GameStateReader.AddressKey(a); } catch { return ""; } }
         private static string SafeRegKey(BuildingRegistration r) { try { return GameStateReader.AddressKey(r); } catch { return ""; } }
 

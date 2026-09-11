@@ -1026,14 +1026,22 @@ namespace BigAmbitionsMP
         /// the guard mis-read the delivery as "someone else's shop" and the buyer refused to adopt
         /// the 70 items it was sent (rig 2026-07-30, empty purchased shop). At sale time the seller
         /// has released and the receiver IS the new owner — vouch, but never for an EMPTY list.</summary>
-        public static void SendSnapshotToPlayer(string addressKey, string pid, bool forceItemAuthority = false)
+        /// <summary>vouchEmpty (MERGER PHASE 3-C r2, F1a): THE RETURN LEG. For an address that was
+        /// MARKED absent, the HOST's copy IS the truth - it is the state a co-member simulated while the
+        /// owner was away - so it is vouched EVEN WHEN IT HOLDS ZERO ITEMS. That is D2's one carve-out
+        /// (the owner's own state wins everywhere EXCEPT the marked addresses): without it a marked shop
+        /// the simulator emptied arrived non-authoritative, the owner's apply skipped it, and the owner
+        /// kept a stale interior for a shop somebody else had cleared. Only the return leg's paced drain
+        /// passes it; every other caller leaves it false and the "never for an EMPTY list" rule stands.</summary>
+        public static void SendSnapshotToPlayer(string addressKey, string pid, bool forceItemAuthority = false,
+                                                bool vouchEmpty = false)
         {
             try
             {
                 if (!MPServer.IsRunning || string.IsNullOrEmpty(addressKey) || string.IsNullOrEmpty(pid)) return;
                 var snap = BuildSnapshotForHostSend(addressKey);
                 if (snap == null) { Plugin.Logger.LogWarning($"[InteriorSync] direct send: no snapshot for '{addressKey}'."); return; }
-                if (forceItemAuthority && snap.ItemInstances != null && snap.ItemInstances.Count > 0)
+                if (forceItemAuthority && (vouchEmpty || (snap.ItemInstances != null && snap.ItemInstances.Count > 0)))
                 {
                     snap.Authoritative              = true;
                     snap.ItemInstancesAuthoritative = true;
@@ -1047,7 +1055,7 @@ namespace BigAmbitionsMP
                 // Stage 0: every caller of this path is a heal or hand-over (sale, takeover,
                 // arbitration, round-184) — recovery traffic, applies even mid-edit.
                 MPServer.SendToPlayer(pid, MessageEnvelope.Create(MessageType.InteriorSnapshot, "host", AsSeedOrHeal(snap)));
-                Plugin.Logger.LogInfo($"[InteriorSync] snapshot of '{addressKey}' sent directly to '{pid}' ({SnapshotSummary(snap)}{(forceItemAuthority ? ", sale-authoritative" : "")}).");
+                Plugin.Logger.LogInfo($"[InteriorSync] snapshot of '{addressKey}' sent directly to '{pid}' ({SnapshotSummary(snap)}{(forceItemAuthority ? (vouchEmpty ? ", return-authoritative" : ", sale-authoritative") : "")}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] direct send: {ex.Message}"); }
         }

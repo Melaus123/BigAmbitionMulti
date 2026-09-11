@@ -155,6 +155,10 @@ namespace BigAmbitionsMP
         public string OwnerStable  { get; set; } = "";
         public string OwnerPid     { get; set; } = "";
         public string SimulatorPid { get; set; } = "";
+        /// <summary>P3-C (return toast): the last machine that actually simulated these addresses.
+        /// ADDITIVE - a manifest written before this field restores as empty, and the owner then
+        /// simply gets no toast.</summary>
+        public string LastSimulatorPid { get; set; } = "";
         public List<string> Addresses { get; set; } = new();
         public int    SinceDay     { get; set; }
     }

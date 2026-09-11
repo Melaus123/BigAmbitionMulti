@@ -539,7 +539,9 @@ namespace BigAmbitionsMP
                 // period, and a wholesale store wiped it within 30 s (PaperworkSync's publish cadence),
                 // leaving the mark pointing at nothing simulated. While the mark says OwnerBack the host
                 // KEEPS its own parts for the MARKED addresses and takes the publisher's for every OTHER
-                // address. P3-C clears the mark, and that is what ends this guard.
+                // address. P3-C clears the mark - at the returned owner's ACK (r2 F4), not at the send -
+                // and that is what ends this guard. The ack precedes the owner's next publish, so the
+                // guard is always gone by the time that publish arrives.
                 int keptAddrs = 0, keptParts = 0;
                 try
                 {
@@ -718,7 +720,7 @@ namespace BigAmbitionsMP
         ///     flagged OwnerBack (r4 m1 - it used to fall straight into the sweep below in the same
         ///     pass, so the return leg would have found nothing to copy); the owner's own machine is
         ///     never told to un-flip anything, and the copy-back off the simulator's tagged installs is
-        ///     P3-C, which is also what CLEARS the mark. r5: the simulator is told to STOP the moment the
+        ///     P3-C, whose owner-side ACK is what CLEARS the mark (r2 F4). r5: the simulator is told to STOP the moment the
         ///     owner is back (one machine per address, always), so what P3-C consumes is the HOST's stored
         ///     record of the absence - which StorePaperwork's OwnerBack guard (r6 F1) keeps the returned
         ///     owner's own republish from overwriting.
@@ -760,9 +762,23 @@ namespace BigAmbitionsMP
                             // B4 + r4 m1: log once, flag OwnerBack, and WANT the mark. Without the
                             // wanted.Add the dead sweep below dropped it in this very pass.
                             if (MergerAbsence.HostNoteReturn(stable, pid, day)) wanted.Add(stable);
+                            // P3-C r2 (F4): a return has gone out for this mark and the owner has not
+                            // acked it yet. The mark lives until that ack, so this pass must neither
+                            // re-send the return nor re-designate a simulator - it just keeps the mark
+                            // wanted (the ack clears it; an owner who drops again resets the flag below).
+                            if (MergerAbsence.IsReturnSent(stable)) { wanted.Add(stable); continue; }
+                            // P3-C (C1) RECURRENCE: the applying edge that normally fires the return can
+                            // PRECEDE the flag above (the peer reports Settled before this pass flips
+                            // OwnerBack), and nothing else would ever come back for that mark. This 10 s
+                            // pass catches that ordering - and only once the peer is provably past its own
+                            // load, so the return still overwrites the load instead of the other way round.
+                            // No broadcast from here: the caller broadcasts the state right after this
+                            // reconcile, and it will already lack the mark this cleared.
+                            if (IsPlayerApplying(pid)) HostReturnIfMarked(pid, broadcast: false);
                             continue;
                         }
                         MergerAbsence.HostClearReturnLog(pid);
+                        MergerAbsence.HostClearReturnSent(stable);   // r2 F4: absent again - a sent return is void
                         if (sim == pid) continue;                             // cannot simulate for itself
                         var addrs = AddressesOfStable(stable);
                         if (addrs.Count == 0) continue;                       // nothing to hand over
@@ -790,6 +806,58 @@ namespace BigAmbitionsMP
                     MergerAbsence.HostDropMark(s, "company dissolved, owner no longer a member, owner is back online, or no addresses left");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] reconcile: {ex.Message}"); }
+        }
+
+        /// <summary>HOST, MAIN THREAD (MERGER PHASE 3-C, C1): the RETURN LEG's trigger. For every mark
+        /// that says this peer is the OWNER and is BACK, hand them the state of exactly the businesses
+        /// that were simulated in their absence. r2 F4: the send does NOT clear the mark - it flags it
+        /// ReturnSent and the OWNER'S ACK clears it - so a return lost to a drop mid-delivery re-fires at
+        /// the owner's next load instead of vanishing. Called at the peer's applying edge (their own load
+        /// is provably done) and again from the reconcile while that edge has already passed; a mark that
+        /// is already ReturnSent is skipped here AND there, so nothing ever double-sends. The marks are
+        /// collected FIRST so the loop never walks the table while a send mutates it.</summary>
+        internal static void HostReturnIfMarked(string pid, bool broadcast)
+        {
+            try
+            {
+                if (!_running || string.IsNullOrEmpty(pid) || MergerAbsence.MarkCount == 0) return;
+                string stable = ""; try { stable = StableOfPid(pid) ?? ""; } catch { }
+                var due = new List<MergerAbsence.AbsenceMark>();
+                foreach (var kv in MergerAbsence.Marks)
+                {
+                    var m = kv.Value;
+                    if (m == null || !m.OwnerBack || m.ReturnSent) continue;   // r2 F4: one send per mark
+                    if (m.OwnerPid != pid && (stable.Length == 0 || m.OwnerStable != stable)) continue;
+                    due.Add(m);
+                }
+                int sent = 0;
+                foreach (var m in due)
+                {
+                    // The toast's name: the character name of the LAST machine that simulated these
+                    // shops (DisplayNameFor already falls back to the player id). Empty only when no
+                    // simulator was ever recorded - a mark restored from a pre-P3-C manifest.
+                    string ranBy = string.IsNullOrEmpty(m.LastSimulatorPid) ? "" : DisplayNameFor(m.LastSimulatorPid);
+                    if (MergerAbsence.HostSendReturn(m, ranBy, pid)) sent++;
+                }
+                if (sent > 0 && broadcast) RefreshGrantsAndBroadcast();   // r2 F4: the marks stay until the owner acks
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return trigger for '{pid}': {ex.Message}"); }
+        }
+
+        /// <summary>HOST, MAIN THREAD (MERGER PHASE 3-C r2, F4): the RETURNED OWNER acked their return.
+        /// The SENDER is the only identity that counts here - the payload names nobody the host trusts -
+        /// and only a mark whose owner that sender IS (by player id or by stable id) is cleared. Clearing
+        /// is what ends StorePaperwork's OwnerBack guard and takes the owner out of the broadcast absence
+        /// table, so the state goes out straight after.</summary>
+        internal static void HostReturnAck(string senderPid)
+        {
+            try
+            {
+                if (!_running || string.IsNullOrEmpty(senderPid)) return;
+                string stable = ""; try { stable = StableOfPid(senderPid) ?? ""; } catch { }
+                if (MergerAbsence.HostClearMarkOnReturnAck(senderPid, stable) > 0) RefreshGrantsAndBroadcast();
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return ack from '{senderPid}': {ex.Message}"); }
         }
 
         /// <summary>HOST, MAIN THREAD (P3-B r4 F3): re-send ONE hand-over to the machine that already
@@ -923,15 +991,24 @@ namespace BigAmbitionsMP
             var list = new List<MpAbsenceMark>();
             try
             {
-                foreach (var a in MergerAbsence.HostSnapshot())
+                // P3-C: the LIVE table, not HostSnapshot() - the broadcast shape (AbsenceInfo) has no
+                // room for LastSimulatorPid, and once r5 clears SimulatorPid at the owner's return that
+                // field is the only record of who actually ran the shops (the return toast's name).
+                foreach (var kv in MergerAbsence.Marks)
+                {
+                    var a = kv.Value;
+                    if (a == null) continue;
                     list.Add(new MpAbsenceMark
                     {
-                        OwnerStable  = a.OwnerStable,
-                        OwnerPid     = a.OwnerPid,
-                        SimulatorPid = a.SimulatorPid,
-                        Addresses    = new List<string>(a.Addresses ?? new List<string>()),
-                        SinceDay     = a.SinceDay,
+                        OwnerStable      = a.OwnerStable,
+                        OwnerPid         = a.OwnerPid,
+                        SimulatorPid     = a.SimulatorPid,
+                        LastSimulatorPid = a.LastSimulatorPid,
+                        Addresses        = new List<string>(a.Addresses ?? new List<string>()),
+                        SinceDay         = a.SinceDay,
                     });
+                }
+                list.Sort((x, y) => string.CompareOrdinal(x.OwnerStable, y.OwnerStable));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] manifest snapshot: {ex.Message}"); }
             return list;
@@ -952,7 +1029,7 @@ namespace BigAmbitionsMP
                     foreach (var a in m.Absence)
                     {
                         if (string.IsNullOrEmpty(a?.OwnerStable)) continue;
-                        MergerAbsence.HostRestoreMark(a.OwnerStable, a.OwnerPid, a.Addresses, a.SinceDay);
+                        MergerAbsence.HostRestoreMark(a.OwnerStable, a.OwnerPid, a.Addresses, a.SinceDay, a.LastSimulatorPid);
                         n++;
                     }
                 if (n > 0)
@@ -1937,10 +2014,21 @@ namespace BigAmbitionsMP
                     // r4 F3: the same client -> host direction also carries the ONE request a simulator
                     // can make - Ack="resend" ("my scene reloaded, my installs are gone, hand it to me
                     // again"). Nothing was added to the payload for it: this type already travelled this
-                    // way carrying nothing but Ack.
+                    // way carrying nothing but Ack. P3-C r2 (F4) adds the second: Ack="return-applied",
+                    // the RETURNED OWNER confirming the return leg landed - the one thing that clears the
+                    // mark (the host's send only flags it ReturnSent).
                     var hv = env.GetPayload<MergerHandoverPayload>();
                     if (hv == null) break;
-                    if (hv.Ack == "resend")
+                    if (hv.Ack == "return-applied")
+                    {
+                        // MERGER PHASE 3-C r2 (F4): the OWNER acked the RETURN leg. THIS - never the send -
+                        // is what clears the mark, so a return lost to a drop during the paced interior
+                        // send re-fires at that owner's next load instead of vanishing while their stale
+                        // publish overwrites the host's simulated record.
+                        string ackPid = senderPid;
+                        GameStatePatcher.EnqueueOnMainThread(() => HostReturnAck(ackPid));
+                    }
+                    else if (hv.Ack == "resend")
                     {
                         string askPid = senderPid, askStable = hv.OwnerStable ?? "";
                         GameStatePatcher.EnqueueOnMainThread(() => HostResendHandover(askPid, askStable));
@@ -3829,6 +3917,13 @@ namespace BigAmbitionsMP
             {
                 string applyPid = p.PlayerId;
                 GameStatePatcher.EnqueueOnMainThread(() => ResendJoinerState(applyPid));
+                // MERGER PHASE 3-C (C1): the RETURN LEG's send point. This edge is the FIRST moment
+                // provably AFTER that peer's own save has loaded and settled (the quiesce end and the
+                // 3 s settle window both precede it), so the returned state OVERWRITES their load
+                // instead of being overwritten by it - which is exactly what world-ready would risk.
+                // Enqueued second, and the main-thread queue is FIFO, so it also lands after the join
+                // re-send above. One-shot per load (the _peerApplying latch).
+                GameStatePatcher.EnqueueOnMainThread(() => HostReturnIfMarked(applyPid, broadcast: true));
             }
             // Round-276b (verifier finding 5): a bare report winning the race must not
             // silence a later, detailed report of the SAME phase — the detail is the
