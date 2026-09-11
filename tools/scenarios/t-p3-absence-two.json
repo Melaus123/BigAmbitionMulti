@@ -1,0 +1,267 @@
+{
+  "id": "T-P3-2",
+  "title": "phase-3 absence, two players: the client drops, the host (a member) simulates its businesses, the client returns; paperwork published/stored on both sides",
+  "preconditions": "Fixture save1 (host melaus/Prabaha, client Client1/REX). Dev build with P3-A (paperwork publish), P3-B (designation + hand-over) and the paperwork/absence verbs. Uses the driver's drop/relaunch steps. Log strings per brief-p3b-handover.md - re-check against the builder's report before the first run. The return leg (P3-C) is asserted only as the host's 'owner returned' line until P3-C lands. Ends dissolved (fixture hygiene).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED",
+    "\\[Paperwork\\] .* refused"
+  ],
+  "oracles_report": [
+    "\\[Paperwork\\]",
+    "\\[Absence\\]",
+    "\\[EconProbe\\] wallet",
+    "\\[Merger\\] offer from"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
+          "within_s": 240
+        },
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
+          "within_s": 60
+        }
+      ]
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST P3-2 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] FORMED group",
+          "within_s": 20
+        }
+      ]
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "capture": {
+        "clientShop": "keys=\\['([^']+)'"
+      }
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed day=\\d+ businesses=[1-9]",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Paperwork\\] stored for '${clientPid}'",
+          "within_s": 15
+        }
+      ],
+      "note": "the member publishes its paperwork; the host stores it"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed day=\\d+ businesses=[1-9]",
+      "note": "the host member publishes too (applied locally)"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "paperwork",
+      "expect_result": "^OK paperwork stored=\\[.*stable=",
+      "note": "host census lists stored bundles"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "absence",
+      "expect_result": "^OK absence marks=\\[\\] simulating_here=\\[\\]"
+    },
+    {
+      "role": "h",
+      "cmd": "mark pre-drop baseline",
+      "expect_result": "OK MARK",
+      "note": "sets the host's search baseline before the disconnect",
+      "seq": 15
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "drop": true,
+      "note": "the client member drops out",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] simulating '${clientShop}' for '${clientPid}'",
+          "within_s": 90
+        }
+      ]
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "mark client dropped",
+      "expect_result": "OK MARK",
+      "note": "the host is a member: it designates itself and starts simulating the absent member's businesses (no hand-over send) (the take-over evidence is asserted on the drop step itself: it fires in the same second as the disconnect)"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "absence",
+      "expect_result": "^OK absence marks=\\[${clientPid}->${hostPid}( ownerBack=\\d)?: .*${clientShop}.*\\] simulating_here=\\[.*${clientShop}"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "note": "the departed member stays a member; its buildings stay flipped"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "let a few owner-style pushes for the simulated shop go by"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed",
+      "note": "the simulator's publish now covers the marked addresses too"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "relaunch": true,
+      "note": "the absent member returns"
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] owner '${clientPid}' returned",
+          "within_s": 120
+        }
+      ],
+      "note": "the host detects the owner's return (the copy-back is P3-C)"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "role=c.*inMp=True"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True"
+    },
+    {
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] '${clientPid}' left their merger group",
+          "within_s": 20
+        }
+      ],
+      "note": "FIXTURE HYGIENE: end with the company dissolved so the save step never writes a merger into save1's manifest (T-P3-3 run 1 lesson)",
+      "seq": 28
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 29
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK",
+      "note": "post-run: the manager checks the manifest carries Paperwork + Absence sections and the saves carry no merger state"
+    },
+    {
+      "seq": 31,
+      "role": "both",
+      "cmd": "mark TEST P3-2 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

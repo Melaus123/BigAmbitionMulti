@@ -80,7 +80,12 @@ def stamp(t=None):
 
 
 def say(msg):
-    print("[%s] %s" % (stamp(), msg), flush=True)
+    text = "[%s] %s" % (stamp(), msg)
+    try:
+        print(text, flush=True)
+    except UnicodeEncodeError:   # T-P3-3 run 2: a game log line with a non-cp1252 glyph crashed the driver BEFORE teardown
+        enc = getattr(sys.stdout, "encoding", None) or "ascii"
+        print(text.encode(enc, "replace").decode(enc, "replace"), flush=True)
 
 
 def run(cmd):
@@ -577,7 +582,12 @@ class Run:
         self.notes.append("DROP step %d: %s pid=%d WM_CLOSE at %s, gone after %.1fs, snapshot %s (%d bytes)"
                           % (seq, ROLE_NAME[role], pid, stamp(t0), took, os.path.basename(snap),
                              self.drop_off[role]))
-        return self.cmdless_row(seq, role, label, exp, "PASS", "dropped pid=%d after %.1fs" % (pid, took))
+        ok, ev = self.check_logs_from_last_mark(step, role)
+        if not ok:
+            say("FAIL step %d (%s): %s" % (seq, ROLE_NAME[role], ev))
+            return self.cmdless_row(seq, role, label, exp, "FAIL", ev)
+        return self.cmdless_row(seq, role, label, exp, "PASS",
+                                ("dropped pid=%d after %.1fs" % (pid, took)) + ((" | " + ev) if ev else ""))
 
     def relaunch_role(self, step):
         """D2: start ONLY this role's internal launcher, then wait for a FRESH ARMED line from the new
@@ -601,8 +611,12 @@ class Run:
         self.drop_off[role], self.drop_head[role] = 0, b""
         self.notes.append("RELAUNCH step %d: %s started at %s via %s, ARMED at %s (%.1fs); marks rebased to byte %d"
                           % (seq, ROLE_NAME[role], stamp(t0), os.path.basename(bat), stamp(), took, off))
+        ok, ev = self.check_logs_from_last_mark(step, role)
+        if not ok:
+            say("FAIL step %d (%s): %s" % (seq, ROLE_NAME[role], ev))
+            return self.cmdless_row(seq, role, label, exp, "FAIL", ev)
         return self.cmdless_row(seq, role, label, exp, "PASS",
-                                "relaunched pid fresh, ARMED after %.1fs (log offset %d)" % (took, off))
+                                ("relaunched pid fresh, ARMED after %.1fs (log offset %d)" % (took, off)) + ((" | " + ev) if ev else ""))
 
     # ---- steps
     def roles_of(self, step):
@@ -614,6 +628,22 @@ class Run:
                                   % (step.get("seq"), step["role"], ",".join(r for r in want if r in self.down)))
             return live
         return [step["role"]]
+
+    def check_logs_from_last_mark(self, step, default_role):
+        """expect_log for a cmd-less step (drop/relaunch): searched from each role's LAST mark, because
+        the evidence (a take-over on disconnect) can precede any mark sent after the step itself."""
+        evidence = ""
+        for el in step.get("expect_log") or []:
+            lrole = el.get("role", default_role)
+            try:
+                pat = subst(el["regex"], self.vars, escape=True)
+            except Unresolved as u:
+                return False, "expect_log has unresolved ${%s}" % u
+            line, lerr = self.wait_log(lrole, pat, float(el.get("within_s", DEFAULT_WITHIN_S)))
+            if lerr:
+                return False, lerr
+            evidence = (evidence + " | " if evidence else "") + "%s: %s" % (ROLE_NAME[lrole], line)
+        return True, evidence
 
     def do_step(self, step):
         seq, verdicts = step["seq"], []
