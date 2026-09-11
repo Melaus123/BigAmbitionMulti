@@ -3555,6 +3555,95 @@ namespace BigAmbitionsMP
             static Exception Finalizer(Exception __exception) { MergerFlip.VeilPop(); return __exception; }
         }
 
+        // ─────────── MERGER PHASE 2 STOP-GAPS (2026-09-11) ───────────
+        // Three NATIVE writes on a merger-FLIPPED partner building spend or move REAL company value
+        // against a LOCAL REPLICA: the goods land (or vanish) on the replica, the owner's next push
+        // overwrites them, and the money movement is real for everyone (the shared wallet mirrors
+        // company cash). Each is REFUSED at its point of commitment until it has an owner route.
+        // SILENT to the player (no new on-screen text) + one INFO line saying why. INERT without a
+        // merger: the flip table is empty, so every gate returns immediately. S1 (warehouse Sell All)
+        // lives in SharedShopWorkTabs.cs next to the shared-session block it widens.
+
+        /// <summary>True when this address is a PARTNER building the merger flipped to look rented on
+        /// this machine. Reads the flip table directly (the game's own state, no timers); allocation-free
+        /// while un-merged.</summary>
+        private static bool FlippedAddr(Address address)
+        {
+            if (MergerFlip.FlippedCount == 0) return false;
+            try { return MergerFlip.IsFlipped(GameStateReader.AddressKey(address)); } catch { return false; }
+        }
+
+        /// <summary>STOP-GAP S2 — DELIVERY CONTRACT / WHOLESALE ORDER CREATION.
+        /// WholesaleStoreManagerDialog.cs:65 `private DialogEntry OnDeliveryContractSettingsSet()` is the
+        /// game's ONLY point where a DeliveryContract enters SaveGameManager.Current.DeliveryContracts
+        /// (:97). On a member's machine the business picker offers the partner's FLIPPED shops, and the
+        /// pass that fills the contract (BusinessHelper.HandleWholesaleDeliveries, GameManager.cs:603)
+        /// has NO ownership gate and no veil entry — the goods would land on the replica and vanish on
+        /// the owner's next push while the delivery fee and the goods cost are real for everyone.
+        /// CREATION is gated, never the pass: veiling HandleWholesaleDeliveries would also disturb
+        /// contracts already in flight. Refusal = __result null, exactly what this method's own
+        /// invalid-input paths return (:71, :76, :86) — the dialog entry simply does not advance, so
+        /// there is no new on-screen text. The origin (the wholesale store NPC) is never a player
+        /// building and so can never be flipped; only the DESTINATION business is tested.</summary>
+        [HarmonyPatch(typeof(Dialogs.WholesaleStoreManagerDialog), "OnDeliveryContractSettingsSet")]
+        public static class Patch_WholesaleContractCreate_MergerGate
+        {
+            static bool Prefix(ref Entities.DialogEntry __result)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0) return true;   // inert without a merger
+                    var settings = DialogController.current?.GetInputComponent<UI.Dialog.DeliveryContractSettings>();
+                    var reg = settings?.selectedBusiness;
+                    if (reg == null) return true;                    // native handles the empty pick (:69)
+                    bool rented; try { rented = reg.RentedByPlayer; } catch { return true; }
+                    if (!rented || MergerFlip.TrulyMine(reg)) return true;
+                    Plugin.Logger.LogInfo($"[Merger] delivery contract to '{GameStateReader.AddressKey(reg)}' refused - company building, order from its operator (route pending)");
+                    __result = null;
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] contract-creation gate: {ex.Message}"); return true; }
+            }
+        }
+
+        /// <summary>STOP-GAP S3 — HQ LOGISTICS PLAN LEG.
+        /// LogisticsManagerPlan.cs:74 `public void DeliverDestination(LogisticsManagerPlanDestination
+        /// destination)` moves the goods for ONE leg. It checks only RAW RentedByPlayer on the plan's own
+        /// warehouse (:79) — which the flip satisfies — and does not test the DESTINATION at all, and the
+        /// logistics pass has no veil entry, so a leg would move goods into or out of a partner's flipped
+        /// replica. The leg is refused when either end is flipped; the HQ owner's own legs are untouched
+        /// (which is why this is a per-leg gate and not a veil entry). The plan's UI creation is not
+        /// touched. LogisticsManagerPlan has NO name field (its id is a base64 uuid), so the plan is
+        /// named in the log by its warehouse address key. One INFO per plan per game day.</summary>
+        [HarmonyPatch(typeof(Buildings.Office.Headquarters.LogisticsManagerPlan), "DeliverDestination")]
+        public static class Patch_LogisticsPlanLeg_MergerGate
+        {
+            private static readonly System.Collections.Generic.Dictionary<string, int> _loggedDay = new System.Collections.Generic.Dictionary<string, int>();
+
+            static bool Prefix(Buildings.Office.Headquarters.LogisticsManagerPlan __instance,
+                               Entities.LogisticsManagerPlanDestination destination)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0 || __instance == null) return true;   // inert without a merger
+                    bool src = FlippedAddr(__instance.targetAddress);
+                    bool dst = destination != null && FlippedAddr(destination.deliveryTargetAddress);
+                    if (!src && !dst) return true;
+                    string plan = "?";
+                    try { plan = GameStateReader.AddressKey(__instance.targetAddress); } catch { }
+                    int day = 0; try { day = SaveGameManager.Current != null ? SaveGameManager.Current.Day : 0; } catch { }
+                    string key = __instance.id ?? plan;
+                    if (!_loggedDay.TryGetValue(key, out var seen) || seen != day)
+                    {
+                        _loggedDay[key] = day;
+                        Plugin.Logger.LogInfo($"[Merger] logistics plan '{plan}' skipped - source/destination is a company building operated elsewhere (route pending)");
+                    }
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics leg gate: {ex.Message}"); return true; }
+            }
+        }
+
         // Tick-chain containment wall (2026-07-07, ANTIPATTERNS Class 11): GameManager.NewDay and the
         // hourly section of RunMainGameTick each run a long ORDERED list of subsystem calls with no
         // per-step isolation — one throw silently kills every step after it (the payroll-runaway bug:

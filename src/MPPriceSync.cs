@@ -154,7 +154,9 @@ namespace BigAmbitionsMP
                 if (same) return;
                 // Shared-shop slice 4: an item this machine has just re-priced (routed, not yet confirmed) keeps its
                 // local value — otherwise the owner's re-assert pulls the number back under the helper's cursor. Per
-                // ITEM, so everything else in the same message still applies.
+                // ITEM, so everything else in the same message still applies. The hold is keyed by ADDRESS + item and
+                // asks no question about WHY the shop is routed, so merger phase 2's flipped partner shops are covered
+                // by the same rule with no change here (2026-09-11).
                 var localHeld = new Dictionary<string, float>();
                 var incoming = new Dictionary<string, float>();
                 foreach (var rp in p.Prices) if (rp?.ItemName != null) incoming[rp.ItemName] = rp.Price;

@@ -12,8 +12,10 @@ namespace BigAmbitionsMP
     /// <summary>
     /// SHARED-SHOP MANAGEMENT (the Business PERMISSION feature) — slice 4: pricing. Plan §2.4, rulings 12, 17, 25.
     ///
-    /// THIS IS NOT THE MERGER. Everything keys on "a shop another player shares with me through a DIRECT Business
-    /// grant"; own shops, AI shops and single-player keep the native path untouched.
+    /// Everything keys on "a shop another player RUNS that I may price": a DIRECT Business grant, or — since merger
+    /// phase 2 wave 1 (2026-09-11) — a MERGER-FLIPPED partner shop, which takes the SAME routed edit. Own shops, AI
+    /// shops and single-player keep the native path untouched. (The sales/products snapshot below stays DIRECT-GRANT
+    /// only; a flipped shop routes its price edits and nothing else yet.)
     ///
     /// What a helper gets:
     ///  • THE PRICING TAB on a shared shop (the allow-list gains "InventoryPricing"), with the game's own editor.
@@ -92,6 +94,14 @@ namespace BigAmbitionsMP
             try { return reg != null ? GameStateReader.AddressKey(reg) : ""; } catch { return ""; }
         }
 
+        /// <summary>Merger phase 2 wave 1 (2026-09-11): the registrations whose price edits are ROUTED to the shop's
+        /// owner instead of being kept here — a DIRECT-grant shared shop, or a merger-flipped partner shop (locally
+        /// RentedByPlayer through the flip, but not MergerFlip.TrulyMine). A member's native cell write otherwise hits
+        /// their REPLICA only: the owner never learns of it, does not publish it, and their routine re-assert
+        /// (MPPriceSync.Apply) pulls the old number back within ~30 s. Both kinds ride the one SharedPriceEdit hop.</summary>
+        internal static bool PriceRouted(BuildingRegistration reg, string addr)
+            => SharedShopSchedule.IsSharedShop(reg, addr) || SharedShopSchedule.IsMergedShop(reg, addr);
+
         /// <summary>The registration the BizMan page is currently showing, or null.</summary>
         private static BuildingRegistration OpenPageReg()
         {
@@ -125,23 +135,62 @@ namespace BigAmbitionsMP
                     // Only a real difference from the owner's state is worth a message. The game re-writes the same
                     // value into the field whenever a row is (re)bound, so without this every scroll would "edit".
                     if (_baseline.TryGetValue(item, out var b) && Mathf.Approximately(b, d.price)) continue;
-                    _baseline[item] = d.price;
-                    _held[_openAddr + "|" + item] = (d.price, now);
-                    Send(item, d.price);
+                    Commit(_openAddr, item, d.price);
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} price tick: {ex.Message}"); }
         }
 
-        private static void Send(string itemName, float price)
+        /// <summary>Record ONE committed price and route it: the hold that keeps the owner's re-assert off this item
+        /// until the publish comes back, then the message. Shared by the tab's quiet timer and the dev lever.</summary>
+        private static void Commit(string addr, string itemName, float price)
+        {
+            _baseline[itemName] = price;   // (tab session: one open address at a time; the lever below never seeds it)
+            _held[addr + "|" + itemName] = (price, Time.unscaledTime);
+            Send(addr, itemName, price);
+        }
+
+        /// <summary>DEV LEVER (TestDrive "setprice"): commit a price the way the pricing tab does and report whether
+        /// the seam routed it. The tab has NO named setter to call — its write is the anonymous onValueChanged
+        /// listener wired in InventoryProductCellView.Start (:114-115), which assigns the model's
+        /// RetailPriceReference.price AND StoredRetailPriceReference.price, i.e. the reg's two native rows. This does
+        /// exactly that, then takes the same PriceRouted decision the tab's session gate takes.</summary>
+        internal static bool CommitPriceEdit(BuildingRegistration reg, string addressKey, string itemName, float price)
+        {
+            if (reg == null || string.IsNullOrEmpty(addressKey) || string.IsNullOrEmpty(itemName)) return false;
+            // r2 (review MINOR-1): decide BEFORE writing - a foreign address that is neither mine nor routed must not be
+            // touched by the lever (the tab cannot reach such a shop at all).
+            bool routed = PriceRouted(reg, addressKey);
+            if (!routed && !MergerFlip.TrulyMine(reg)) return false;
+            bool wrote = false;
+            if (reg.retailPrices != null)
+                foreach (var rp in reg.retailPrices)
+                    if (rp != null && rp.itemName == itemName) { rp.price = price; wrote = true; break; }
+            if (reg.storedRetailPrices != null)
+                foreach (var rp in reg.storedRetailPrices)
+                    if (rp != null && rp.itemName == itemName) { rp.price = price; break; }
+            if (!wrote || !routed) return false;
+            // r2 (review MINOR-2): the lever does not seed _baseline (item-keyed, meant for the ONE open tab address);
+            // it holds the item and sends, which is all the tab's Commit does that matters off-tab.
+            _held[addressKey + "|" + itemName] = (price, Time.unscaledTime);
+            Send(addressKey, itemName, price);
+            return true;
+        }
+
+        private static void Send(string addr, string itemName, float price)
         {
             _seq.TryGetValue(itemName, out var seq); seq++; _seq[itemName] = seq;
             var p = new SharedPriceEditPayload
             {
-                PlayerId = MPConfig.PlayerId, AddressKey = _openAddr, ItemName = itemName,
+                PlayerId = MPConfig.PlayerId, AddressKey = addr, ItemName = itemName,
                 Price = price, Seq = seq, SeqEpoch = _seqEpoch,
             };
-            Plugin.Logger.LogInfo($"{Tag} routing price of '{itemName}' at '{_openAddr}' to the owner: {price:F2} (seq {seq}).");
+            string parked = ""; try { parked = MergerFlip.ParkedRunner(addr); } catch { }
+            string shown = price.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+            if (parked.Length > 0)
+                Plugin.Logger.LogInfo($"[Merger] price edit routed to owner '{parked}' for '{addr}' ({itemName} -> {shown})");
+            else
+                Plugin.Logger.LogInfo($"{Tag} routing price of '{itemName}' at '{addr}' to the owner: {shown} (seq {seq}).");
             if (MPServer.IsRunning) MPServer.HostRouteSharedPriceEdit(p, MPConfig.PlayerId);
             else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedPriceEdit, MPConfig.PlayerId, p));
         }
@@ -157,10 +206,15 @@ namespace BigAmbitionsMP
             {
                 if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(p.ItemName)) return;
                 if (p.PlayerId == MPConfig.PlayerId) return;
-                if (!GrantSync.IsGrantedDirect(GrantKind.Business, MPConfig.PlayerId, p.PlayerId))
+                // Merger phase 2 wave 1: the UNION check — a DIRECT Business grant, or membership of my merged
+                // company (the same widening HostRouteEmployeeEdit already relies on). Decomposed rather than one
+                // GrantSync.IsGranted call so the applied log can say which of the two let the edit in.
+                bool direct = GrantSync.IsGrantedDirect(GrantKind.Business, MPConfig.PlayerId, p.PlayerId);
+                bool merged = !direct && MergerSync.MergedRuntime(MPConfig.PlayerId, p.PlayerId);
+                if (!direct && !merged)
                 {
                     if (_logged.Add("price-nogrant|" + p.PlayerId))
-                        Plugin.Logger.LogInfo($"{Tag} price edit from '{p.PlayerId}' but they hold no Business grant from me — ignored.");
+                        Plugin.Logger.LogWarning($"{Tag} price edit from '{p.PlayerId}' refused: no Business grant from me and not a member of my company — ignored.");
                     return;
                 }
                 // IsSaneMoney FIRST (audit 2026-08-26): `p.Price < 0f || p.Price > 10000f` is FALSE for
@@ -192,6 +246,7 @@ namespace BigAmbitionsMP
                     return;
                 }
                 Plugin.Logger.LogInfo($"{Tag} '{p.PlayerId}' set '{p.ItemName}' at '{p.AddressKey}' to {p.Price:F2} — applied.");
+                if (merged) Plugin.Logger.LogInfo($"[Merger] price edit applied for '{p.AddressKey}' from '{p.PlayerId}'");
                 MPPriceSync.PublishNow(p.AddressKey);
                 RefreshPricingTabIfOpen(p.AddressKey);   // the owner may be looking at this very tab
             }
@@ -371,7 +426,7 @@ namespace BigAmbitionsMP
                 {
                     var reg = OpenPageReg();
                     string addr = AddrOf(reg);
-                    if (reg == null || !SharedShopSchedule.IsSharedShop(reg, addr)) { CloseSession(); return; }
+                    if (reg == null || !PriceRouted(reg, addr)) { CloseSession(); return; }
                     bool reopened = _openAddr != addr;
                     _openAddr = addr;
                     if (reopened) { _baseline.Clear(); _dirty.Clear(); }   // _held is address-keyed and expires on its own — never cleared here
@@ -380,7 +435,10 @@ namespace BigAmbitionsMP
                     if (reg.retailPrices != null)
                         foreach (var rp in reg.retailPrices)
                             if (rp != null && rp.itemName != null && !_baseline.ContainsKey(rp.itemName)) _baseline[rp.itemName] = rp.price;
-                    if (reopened) RequestHistory(addr);
+                    // Wave 1 routes PRICE EDITS only: the sales/products snapshot is gated on a DIRECT grant at
+                    // both ends (MPServer.cs:5800, OwnerAnswerHistory below), so asking for a flipped shop would
+                    // only earn a dropped request in the host log.
+                    if (reopened && SharedShopSchedule.IsSharedShop(reg, addr)) RequestHistory(addr);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} pricing session: {ex.Message}"); }
             }

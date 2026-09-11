@@ -277,13 +277,34 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Ruling 29: a helper never sells the owner's stock — the native button credits the CLICKER.
-        /// The button is greyed by the render; this backstop blocks every other path to the method.</summary>
+        /// The button is greyed by the render; this backstop blocks every other path to the method.
+        /// Widened 2026-09-11 (merger stop-gap S1) to merger-FLIPPED partner warehouses, which are not
+        /// shared sessions and so never set _openAddr.</summary>
         [HarmonyPatch(typeof(WhInventory), nameof(WhInventory.SellAllInventory))]
         public static class Patch_WarehouseInventory_SellAll_Block
         {
             static bool Prefix()
             {
-                if (_openAddr.Length == 0) return true;
+                if (_openAddr.Length == 0)
+                {
+                    if (MergerFlip.FlippedCount == 0) return true;   // r2 (review MINOR-3): no company building anywhere - skip the UI walk
+                    // MERGER STOP-GAP S1 (2026-09-11): a merger-FLIPPED partner warehouse is NOT a shared
+                    // session (_openAddr stays empty), so the native Sell All would run here: it credits
+                    // the CLICKER and clears the cargo on the LOCAL REPLICA, and the owner's next interior
+                    // push restores the cargo => money from nothing. Refused (silently, as above) until the
+                    // sale has an owner route. Live read of the page's own registration at the click.
+                    // INERT without a merger: TrulyMine is true for every rented reg while the flip table
+                    // is empty, and a non-rented reg falls through to native behaviour.
+                    try
+                    {
+                        var flipReg = OpenPageReg();
+                        bool rented; try { rented = flipReg != null && flipReg.RentedByPlayer; } catch { rented = false; }
+                        if (!rented || MergerFlip.TrulyMine(flipReg)) return true;
+                        Plugin.Logger.LogInfo($"[Merger] Sell-All on '{AddrOf(flipReg)}' refused - a company building is sold by its operator (route pending)");
+                    }
+                    catch { return true; }
+                    return false;
+                }
                 Plugin.Logger.LogInfo($"{Tag} Sell All on shared '{_openAddr}' blocked (ruling 29 — the merger will route it; permissions never).");
                 return false;
             }
