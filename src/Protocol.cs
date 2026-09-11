@@ -206,6 +206,7 @@ namespace BigAmbitionsMP
         ShopValuation         = 205,     // H-BIZ-1 (2026-09-03, user option A): "request": viewer → Host → the shop's OWNER when the BizMan page of another PLAYER's shop opens; "answer": owner → Host → exactly ONE viewer (ToPid) carrying the game's own closure figure for that shop (interior items' selling prices + vehicles at the address + deposit — BizManPresentation.OnTerminateContractConfirm's formula). No grant gate: the native page shows an estimate to anyone. Small, on demand, never broadcast.
         BusinessChangeBatch   = 206,     // 2026-09-10 (burst fix): several changed business records in ONE envelope so the 4 KB deflate floor applies — the host sweep and the join/daily delta use it; a single immediate push still uses BusinessChange.
         NotificationRelay     = 207,     // Merger slice 6 (2026-09-10, user requirement: the top-right pop-ups must MATCH on every member of a merged company): ONE business-scoped game toast — the GAME'S OWN headerKey + notificationData — from the member whose shop raised it, via the Host, to every OTHER ONLINE member of THAT sender's group. No new on-screen text: the receiver calls the game's own Notifications.Show with the same key, untracked (nothing persisted) and click-inert. Never leaves the group; non-members and other groups never receive it. Rides Gameplay (small, timely, and it writes no state a Bulk snapshot also writes).
+        BusinessPaperwork     = 208,     // MERGER PHASE 3-A (2026-09-11, D13): one member's per-business PAPERWORK bundle - client -> HOST only, never the other way in this build. The books the interior/business syncs never carried (orderHistory, today's till, factory exports, marketing campaigns), the owner-level agreements FILTERED to the sender's own addresses (delivery contracts, import partnerships + this week's importer orders, the four manager plans, installation/moving contracts, licensing-fee state), and the FULL employee records behind the 7-field roster publish. The host keeps the LATEST bundle per member in the mod's session manifest (manifest.bamp.json - never a .hsg field) so an absent member's businesses can be handed to a simulator (P3-B) and survive a host restart. Publish-and-store only: nothing here changes gameplay. Rides Bulk (rule 9: it is a snapshot-class bundle).
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -238,6 +239,33 @@ namespace BigAmbitionsMP
         public float  Satisfaction { get; set; } = 100f;
         public List<string> Skills  { get; set; } = new();   // "name=value" (characterData.skills)
         public List<string> Demands { get; set; } = new();
+        // Merger phase 3-A (2026-09-11): the REST of a real EmployeeInstance. The adopt path used to
+        // stamp these by hand on the receiving machine (a fresh hire's dayHired / sick roll / complaint
+        // grace); paperwork needs the SENDER's actual values, so the same DTO now carries them.
+        // Every field is additive - an "adopt" from an older build simply leaves them at default.
+        public int    DayHired            { get; set; }
+        public int    NextSickDay         { get; set; }
+        public int    WorkedHoursToday    { get; set; }
+        public int    WorkedHoursThisWeek { get; set; }
+        public int    WorkedDays          { get; set; }
+        public int    AssignedWeeklyHours { get; set; }
+        public bool   IsAbsent            { get; set; }
+        public bool   IsReplaced          { get; set; }
+        public bool   IsBeingReplaced     { get; set; }
+        public bool   IsTrainingDay       { get; set; }
+        public bool   HasSendQuitWarning  { get; set; }
+        public bool   SendRetirementNotice{ get; set; }
+        public string AssignedHrManagerPlanId { get; set; } = "";
+        public string TrainingSkill      { get; set; } = "";   // trainingSession (null on the wire = not training)
+        public int    TrainingStartDay   { get; set; } = -1;
+        public float  InitialCombinedSkillAmount { get; set; }
+        public string PresetId           { get; set; } = "";
+        public List<int>    AssignedWeeklyDays        { get; set; } = new();   // DayOfWeekOrdered values
+        public List<string> AssignedWorkStationItems  { get; set; } = new();
+        public bool   ComplaintIsComplaining   { get; set; }
+        public int    ComplaintHoursUntilNext  { get; set; }
+        public int    ComplaintDeadlineHours   { get; set; }
+        public bool   ComplaintHasRival        { get; set; }
     }
 
     // ── Shared-shop management (Business PERMISSION feature; src/SharedShopSchedule.cs) — separate from the merger ──
@@ -3352,5 +3380,249 @@ namespace BigAmbitionsMP
     public class RivalsStatsSnapshotPayload
     {
         public List<RivalStatsInfo> Stats { get; set; } = new();
+    }
+
+    // MERGER PHASE 3-A - BUSINESS PAPERWORK (2026-09-11, plan §9, D13)
+    // Plain mirrors of the game's own types (§10: never Newtonsoft a game type). Every list is
+    // additive and tolerant of absence - an older/newer peer simply reads an empty one.
+    // NOTE (gap, recorded on purpose): Order.timestamp is a BigAmbitions.DayNightCycle.Timestamp
+    // whose type is not in our decompile, so an order's clock stamp does NOT travel. Everything the
+    // daily till pass sums (entries, paid flags, prices) does.
+
+    /// <summary>One line of a completed order (Order.entries / OrderEntry).</summary>
+    public class PwOrderEntry
+    {
+        public string ItemName        { get; set; } = "";
+        public float  Price           { get; set; }
+        public bool   Available       { get; set; }
+        public bool   PriceAcceptable { get; set; } = true;   // game field: priceAccceptable (its spelling)
+        public bool   Paid            { get; set; }
+        public bool   Processed       { get; set; }
+        public float  WholesalePrice  { get; set; }
+    }
+
+    /// <summary>One entry of reg.unprocessedCompletedOrders - today's till, which the game's own
+    /// hourly/daily pass turns into that business's revenue.</summary>
+    public class PwOrder
+    {
+        public List<PwOrderEntry> Entries { get; set; } = new();
+        public bool   Completed            { get; set; }
+        public float  CustomerServiceSkill { get; set; }
+        public float  Cleanliness          { get; set; }
+        public List<string> CustomerDemandTypes { get; set; } = new();
+        public float  CustomerDemandScore  { get; set; }
+    }
+
+    public class PwItemReport
+    {
+        public string ItemName            { get; set; } = "";
+        public int    AmountSold          { get; set; }
+        public float  TotalPrice          { get; set; }
+        public float  TotalWholesalePrice { get; set; }
+    }
+
+    public class PwHourReport
+    {
+        public int Hour      { get; set; }
+        public int Customers { get; set; }
+    }
+
+    /// <summary>One day of reg.orderHistory - the 16-day book the replica never had (Protocol :189:
+    /// "orderHistory is local-only - the replica's is empty"). Unlike SharedSalesHistory's 14-day
+    /// 3-field digest, this is the WHOLE entry, because a simulator has to keep writing it.</summary>
+    public class PwOrderHistoryEntry
+    {
+        public int   DayNumber      { get; set; }
+        public int   TotalCustomers { get; set; }
+        public float TotalRevenue   { get; set; }
+        public List<PwItemReport> ItemSales   { get; set; } = new();
+        public List<PwHourReport> HourReports { get; set; } = new();
+    }
+
+    public class PwFactoryExport
+    {
+        public string ItemName             { get; set; } = "";
+        public int    Amount               { get; set; }
+        public float  TotalIngredientsCost { get; set; }
+        public float  TotalPrice           { get; set; }
+    }
+
+    public class PwMarketingCampaign
+    {
+        public string AgencyAddressKey  { get; set; } = "";
+        public string MarketingTypeName { get; set; } = "";   // MarketingTypeName enum, by name
+        public bool   Enabled           { get; set; }
+    }
+
+    /// <summary>Item + amount, the shape shared by DeliveryContractItem, ImportProduct and
+    /// ItemAmountTarget (itemName/targetAmount). Unused fields stay at their defaults.</summary>
+    public class PwItemOrderLine
+    {
+        public string ItemName              { get; set; } = "";
+        public int    Boxes                 { get; set; }
+        public int    Amount                { get; set; }
+        public int    AmountOrderedLastWeek { get; set; }
+        public int    AmountOrderedThisWeek { get; set; }
+        public string AssignedWarehouseKey  { get; set; } = "";
+    }
+
+    public class PwDeliveryContract
+    {
+        public string BusinessAddressKey  { get; set; } = "";   // the FILTER key: DeliveryContract.businessAddress
+        public string WholesaleAddressKey { get; set; } = "";
+        public bool   Enabled             { get; set; }
+        public bool   IsUrgentOrder       { get; set; }
+        public int    NextDeliveryDay     { get; set; }
+        public bool   RepeatingOrder      { get; set; }
+        public float  DeliveryFee         { get; set; }
+        public List<PwItemOrderLine> Items { get; set; } = new();
+    }
+
+    public class PwImportPartnership
+    {
+        public string Id                     { get; set; } = "";
+        public string HeadquartersAddressKey { get; set; } = "";   // the FILTER key
+        public string ImportAddressKey       { get; set; } = "";
+        public string EmployeeInstanceId     { get; set; } = "";
+        public int    NextDeliveryDay        { get; set; }
+        public bool   IsRepeatingOrder       { get; set; }
+        public int    DaysUntilRepeat        { get; set; }
+        public bool   IsActive               { get; set; }
+        public bool   IsUrgentOrder          { get; set; }
+        public bool   IsTarget               { get; set; }
+        public List<PwItemOrderLine> Products { get; set; } = new();
+    }
+
+    /// <summary>One row of gi.itemsOrderedThisWeekByImporter (an Address-keyed dictionary).</summary>
+    public class PwImporterWeekOrder
+    {
+        public string AddressKey { get; set; } = "";
+        public List<PwItemOrderLine> Items { get; set; } = new();
+    }
+
+    public class PwLogisticsDestination
+    {
+        public string DeliveryTargetAddressKey { get; set; } = "";
+        public List<PwItemOrderLine> StockTargets { get; set; } = new();
+    }
+
+    public class PwLogisticsPlan
+    {
+        public string Id                     { get; set; } = "";
+        public string AssignedEmployeeId     { get; set; } = "";
+        public string HeadquartersAddressKey { get; set; } = "";   // the FILTER key (all four plans)
+        public string TargetAddressKey       { get; set; } = "";
+        public bool   IsFactory              { get; set; }
+        public List<PwLogisticsDestination> Destinations { get; set; } = new();
+    }
+
+    public class PwPricingPlan
+    {
+        public string Id                     { get; set; } = "";
+        public string AssignedEmployeeId     { get; set; } = "";
+        public string HeadquartersAddressKey { get; set; } = "";
+        public string SupervisedNeighborhood { get; set; } = "";
+        public int    NextUpdateDay          { get; set; }
+        public int    NextUpdateHour         { get; set; }
+        public List<string> ManuallyPricedItems { get; set; } = new();
+    }
+
+    public class PwHrPlan
+    {
+        public string Id                     { get; set; } = "";
+        public string AssignedEmployeeId     { get; set; } = "";
+        public string HeadquartersAddressKey { get; set; } = "";
+        public List<string> AssignedEmployees { get; set; } = new();
+        public bool   ReplaceAbsentEmployees { get; set; }
+        public int    TrainingTarget         { get; set; }
+    }
+
+    public class PwHeadhunterPlan
+    {
+        public string Id                     { get; set; } = "";
+        public string AssignedEmployeeId     { get; set; } = "";
+        public string HeadquartersAddressKey { get; set; } = "";
+        public List<string> AssignedHrPlans  { get; set; } = new();
+        public bool   IsRecruiting           { get; set; }
+        public string SkillRecruiting        { get; set; } = "";
+        public float  SkillValueTarget       { get; set; }
+        public List<string> DealBreakerTypes { get; set; } = new();
+        public bool   AutomaticallyReplaceOnRetire { get; set; }
+        public bool   AutomaticallyReplaceOnResign { get; set; }
+        public int    RemainingCandidatesToRecruit { get; set; }
+        public int    AmountOfCandidatesToRecruitPreference { get; set; }
+    }
+
+    public class PwInstallContract
+    {
+        public string FirmAddressKey       { get; set; } = "";
+        public string AddressKey           { get; set; } = "";   // the FILTER key: addressToDoTheInstallation
+        public string DesignName           { get; set; } = "";
+        public bool   IsBlueprint          { get; set; }
+        public bool   IsCompatBlueprint    { get; set; }
+        public bool   HasDiscontinuedItems { get; set; }
+        public int    DayOfInstallation    { get; set; }
+        public string BusinessTypeName     { get; set; } = "";
+    }
+
+    public class PwMovingContract
+    {
+        public string OriginAddressKey        { get; set; } = "";
+        public string DestinationAddressKey   { get; set; } = "";
+        public string MovingCompanyAddressKey { get; set; } = "";
+        public int    MovingDay               { get; set; }
+        public int    MovingHour              { get; set; }
+        public bool   TransferBizManSettings  { get; set; }
+    }
+
+    /// <summary>gi.disabledLicensingFees (address + itemId + weekday) and gi.paidLicensingFeesToday
+    /// (an (Address, itemId) tuple - Day = -1 there, the list is a single day by definition).</summary>
+    public class PwLicensingFee
+    {
+        public string AddressKey { get; set; } = "";
+        public string ItemId     { get; set; } = "";
+        public int    Day        { get; set; } = -1;   // DayOfWeekOrdered value; -1 = "paid today" row
+    }
+
+    /// <summary>The per-OWNER lists (GameInstance, not BuildingRegistration), FILTERED to items whose
+    /// business is one of the sender's OWN addresses. A merger-flipped partner shop is never in here -
+    /// its real owner publishes it.</summary>
+    public class PaperworkOwnerLists
+    {
+        public List<PwDeliveryContract>  DeliveryContracts  { get; set; } = new();
+        public List<PwImportPartnership> ImportPartnerships { get; set; } = new();
+        public List<PwImporterWeekOrder> ItemsOrderedThisWeekByImporter { get; set; } = new();
+        public List<PwLogisticsPlan>     LogisticsManagerPlans { get; set; } = new();
+        public List<PwPricingPlan>       PricingManagerPlans   { get; set; } = new();
+        public List<PwHrPlan>            HrManagerPlans        { get; set; } = new();
+        public List<PwHeadhunterPlan>    HeadhunterPlans       { get; set; } = new();
+        public List<PwInstallContract>   InteriorInstallationFirmContracts { get; set; } = new();
+        public List<PwMovingContract>    MovingServiceContracts { get; set; } = new();
+        public List<PwLicensingFee>      DisabledLicensingFees  { get; set; } = new();
+        public List<PwLicensingFee>      PaidLicensingFeesToday { get; set; } = new();
+    }
+
+    /// <summary>One business's own books (the BuildingRegistration half of the paperwork).</summary>
+    public class BusinessPaperwork
+    {
+        public string AddressKey { get; set; } = "";
+        public List<PwOrderHistoryEntry> OrderHistory { get; set; } = new();
+        public List<PwOrder>   UnprocessedCompletedOrders { get; set; } = new();
+        public List<PwFactoryExport>     FactoryExports { get; set; } = new();
+        public List<PwMarketingCampaign> MarketingCampaigns { get; set; } = new();
+    }
+
+    /// <summary>MERGER PHASE 3-A: one member's whole paperwork bundle - member to HOST only. Latest
+    /// wins on the host, which keeps it per member in the session manifest. Employees reuse the
+    /// merger ADOPT DTO (EmployeeEditPayload) with Action="record", extended additively above so a
+    /// record carries everything a real EmployeeInstance holds, not just a fresh hire's fields.</summary>
+    public class BusinessPaperworkPayload
+    {
+        public string PlayerId { get; set; } = "";   // sender (validated SenderIs at the host)
+        public string StableId { get; set; } = "";   // the durable key the host stores under
+        public int    Day      { get; set; }         // the sender's game day at publish time
+        public List<BusinessPaperwork>   Businesses { get; set; } = new();
+        public PaperworkOwnerLists       Lists      { get; set; } = new();
+        public List<EmployeeEditPayload> Employees  { get; set; } = new();
     }
 }

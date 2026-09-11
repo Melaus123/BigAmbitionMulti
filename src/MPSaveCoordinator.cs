@@ -456,6 +456,11 @@ namespace BigAmbitionsMP
                         }
                     }
                     catch { }
+                    // Merger phase 3-A (review r1 MAJOR-4): the publish WALKS GameInstance
+                    // (BuildingRegistrations, EmployeeInstances, the eleven owner lists), so it runs
+                    // here — on the main thread, inside the enqueued save body and before the .hsg
+                    // this upload ships — never on the message thread that took the SaveNow.
+                    try { PaperworkSync.FlushNow("pre-save"); } catch { }
                     var slot = PerformLocalSave(session, out bool saved);
                     // Round-237 fix B: a failed save must never ship.  The upload reads the
                     // folder's newest .hsg — on failure that is the PREVIOUS save's bytes —
@@ -1215,7 +1220,10 @@ namespace BigAmbitionsMP
             // dies as 'not the recorded owner' and their furnishing work silently evaporates).
             CaptureAbandonedTimeline(session, m);
 
-            MPServer.RestoreOwnershipFromManifest(m);              // cross-machine ownership + cash seed
+            // Merger phase 3-A: the paperwork store rides the manifest MODEL (m.Paperwork) and is
+            // REPLACED inside RestoreOwnershipFromManifest, beside the merger roster it belongs to —
+            // always from THIS manifest, so an older slot can never keep newer paperwork.
+            MPServer.RestoreOwnershipFromManifest(m);              // cross-machine ownership + cash seed + paperwork
             MPServer.SendLoadDataToEachClient(session, m, lineage); // each client gets its own .hsg FROM the source, tagged with the lineage
 
             float hostCash = BestCashFor(m, MPConfig.StableId);
@@ -3506,6 +3514,12 @@ namespace BigAmbitionsMP
                 m.Merger = BuildMergerManifest();
                 m.MergerWalletBalance     = MPServer.SnapshotWalletBalances();      // slice 4
                 m.MergerWalletContributed = MPServer.SnapshotWalletContributed();
+                // Merger phase 3-A: publish this machine's own paperwork first (main thread — every
+                // caller of this method is inside the enqueued save body), then copy the host store
+                // into the MODEL beside the merger roster. WriteManifest's temp + File.Replace
+                // carries it atomically; there is no second write to tear or lose.
+                try { PaperworkSync.FlushNow("pre-save"); } catch { }
+                m.Paperwork = MPServer.SnapshotPaperwork();
                 m.Loans = MPHub.SnapshotLoans();   // sweep 2026-08-18: loans are part of the save moment
                 // Round-53: the running session's tuning dials persist with the save (mid-session
                 // changes included), so the next load's lobby mirrors what this world actually ran.
@@ -3569,6 +3583,7 @@ namespace BigAmbitionsMP
                     m.Merger = BuildMergerManifest();   // merger membership rides the same persist-on-change
                     m.MergerWalletBalance     = MPServer.SnapshotWalletBalances();      // slice 4: pooling/payout
                     m.MergerWalletContributed = MPServer.SnapshotWalletContributed();   // states persist immediately
+                    m.Paperwork = MPServer.SnapshotPaperwork();   // phase 3-A: the store rides the model, so a grants-only write cannot drop it (no flush here — this path is not guaranteed main-thread)
                     m.Loans = MPHub.SnapshotLoans();   // sweep 2026-08-18: loans ride the manifest like grants
                     // Round-274/H1: do NOT touch SavedAtUnix here — it means "when was this
                     // WORLD saved", and a grants-only persist is not a world save.  Re-stamping
@@ -3642,6 +3657,13 @@ namespace BigAmbitionsMP
                 int idx = m.Slots.FindIndex(s => s.StableId == slot.StableId);
                 if (idx >= 0) m.Slots[idx] = slot; else m.Slots.Add(slot);
                 RefreshSlotCash(m);
+                // Merger phase 3-A, SESSION IDENTITY (review r1 MAJOR-2): a member names the session
+                // its upload belongs to, so the live store may only be stamped into the manifest of
+                // the world this host is RUNNING (its lineage base and that base's auto siblings).
+                // Any other session keeps whatever paperwork its own manifest already carries — no
+                // carry-over across slots or timelines.
+                if (StripAutoSuffix(sessionName) == StripAutoSuffix(_activeSessionName))
+                    m.Paperwork = MPServer.SnapshotPaperwork();
                 MPSaveManager.WriteManifest(sessionName, m);
             }
         }

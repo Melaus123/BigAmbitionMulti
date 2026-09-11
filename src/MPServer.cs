@@ -417,6 +417,11 @@ namespace BigAmbitionsMP
                         mn++;
                     }
                 }
+                // Merger phase 3-A: the paperwork store belongs to THIS manifest's moment - replaced
+                // from the slot being restored, beside the merger roster, clear-then-apply. An older
+                // slot can never keep the newer world's bundles (user rule 2026-09-11).
+                RestorePaperworkFromManifest(m);
+                try { PaperworkSync.Reset(); } catch { }   // and this machine's publisher forgets the previous world's day/edge
                 PruneOffers("session state restored");   // r4: the restored store decides which offers still stand
                 RestoreWalletFromManifest(m);   // slice 4: ledger BEFORE the broadcast below (members snap to it)
                 MPHub.RestoreLoans(m.Loans);    // sweep 2026-08-18: the loaded slot's loans are the timeline truth
@@ -424,6 +429,119 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Server] Restored {gn} access grant(s) + {mn} merger member(s) from manifest ({(m.Grants?.Count ?? 0)} grants in file).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RestoreOwnershipFromManifest: {ex.Message}"); }
+        }
+
+        // ══ MERGER PHASE 3-A - PAPERWORK STORE (2026-09-11, plan §9, D13) ═══════════════════════
+        // The host keeps the LATEST paperwork bundle per member (latest wins, with the sender's game
+        // day beside it) and copies the store into the manifest MODEL (MpManifest.Paperwork) at every
+        // manifest write for the session it is RUNNING - never into a .hsg, and never into any native
+        // save field. The store follows the save timeline exactly: replaced from the loaded slot's
+        // manifest on every load, never carried over in memory (user rule 2026-09-11). P3-B reads
+        // PaperworkStore to hand an absent member's businesses to a simulator. This build only stores.
+
+        /// <summary>One member's stored bundle. Json is the serialised BusinessPaperworkPayload -
+        /// kept as text so the manifest section is a straight passthrough and a future payload shape
+        /// round-trips through an older host untouched.</summary>
+        public class PaperworkEntry
+        {
+            public string StableId    { get; set; } = "";
+            public int    Day         { get; set; }       // the sender's game day at publish time
+            public int    ReceivedDay { get; set; }       // the HOST's game day when it landed
+            public string Json        { get; set; } = "";
+        }
+
+        private static readonly Dictionary<string, PaperworkEntry> _paperwork = new();
+
+        /// <summary>StableId to that member's latest paperwork bundle (P3-B's read surface).</summary>
+        public static IReadOnlyDictionary<string, PaperworkEntry> PaperworkStore => _paperwork;
+
+        public static void ResetPaperwork() { lock (_paperwork) _paperwork.Clear(); }
+
+        /// <summary>Host: take one member's bundle. Called from the receive case (a validated sender)
+        /// and directly by PaperworkSync when the HOST itself is the member.</summary>
+        public static void StorePaperwork(BusinessPaperworkPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null) return;
+                string json;
+                try { json = Newtonsoft.Json.JsonConvert.SerializeObject(p); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] store serialise for '{senderPid}': {ex.Message}"); return; }
+                int bytes = System.Text.Encoding.UTF8.GetByteCount(json);
+                if (bytes > PaperworkSync.MaxBundleBytes)
+                {
+                    Plugin.Logger.LogWarning($"[Paperwork] REFUSED bundle from '{senderPid}': {bytes} bytes > {PaperworkSync.MaxBundleBytes} cap - the previous bundle stands.");
+                    return;
+                }
+                // The durable key is the StableId (survives renames and offline members, like grants
+                // and the merger roster). A sender that somehow has none falls back to its pid.
+                string key = string.IsNullOrEmpty(p.StableId) ? (senderPid ?? "") : p.StableId;
+                if (string.IsNullOrEmpty(key)) return;
+                int hostDay = 0; try { hostDay = GameStateReader.GetGameTime().day; } catch { }
+                lock (_paperwork)
+                    _paperwork[key] = new PaperworkEntry { StableId = key, Day = p.Day, ReceivedDay = hostDay, Json = json };
+                Plugin.Logger.LogInfo($"[Paperwork] stored for '{senderPid}' (day {p.Day}, {bytes} bytes).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] store: {ex.Message}"); }
+        }
+
+        /// <summary>A one-line census for the TestDrive verb: "stable=<id>:day/bytes,...". The store is
+        /// keyed by StableId, so the census says so in the format (review r1 MINOR).</summary>
+        public static string PaperworkCensus(string filterStableId)
+        {
+            var sb = new System.Text.StringBuilder();
+            lock (_paperwork)
+                foreach (var kv in _paperwork)
+                {
+                    if (!string.IsNullOrEmpty(filterStableId) && kv.Key != filterStableId) continue;
+                    if (sb.Length > 0) sb.Append(',');
+                    sb.Append("stable=").Append(kv.Key).Append(':').Append(kv.Value.Day).Append('/')
+                      .Append(System.Text.Encoding.UTF8.GetByteCount(kv.Value.Json ?? ""));
+                }
+            return sb.ToString();
+        }
+
+        /// <summary>Host: the store as manifest MODEL entries, copied into MpManifest.Paperwork at
+        /// every manifest write for the session this host is RUNNING. The bundles ride the model like
+        /// the merger roster and the loan ledger, so they inherit WriteManifest's atomic temp +
+        /// File.Replace and there is no second write to tear, lose, or re-apply.</summary>
+        public static List<MpPaperworkEntry> SnapshotPaperwork()
+        {
+            var list = new List<MpPaperworkEntry>();
+            lock (_paperwork)
+                foreach (var kv in _paperwork)
+                    list.Add(new MpPaperworkEntry { StableId = kv.Value.StableId, Day = kv.Value.Day, Json = kv.Value.Json });
+            return list;
+        }
+
+        /// <summary>Host: REPLACE the store from the manifest being restored — clear-then-apply like
+        /// the grant and merger restores it sits beside. The loaded slot's paperwork is the only
+        /// paperwork there is: nothing survives in memory across a load, so an older save can never
+        /// pull newer paperwork (user rule 2026-09-11). A manifest written before the field existed
+        /// restores an empty store.</summary>
+        public static void RestorePaperworkFromManifest(MpManifest m)
+        {
+            ResetPaperwork();
+            try
+            {
+                int n = 0;
+                if (m?.Paperwork != null)
+                    lock (_paperwork)
+                        foreach (var e in m.Paperwork)
+                        {
+                            if (string.IsNullOrEmpty(e?.StableId)) continue;
+                            _paperwork[e.StableId] = new PaperworkEntry
+                            {
+                                StableId    = e.StableId,
+                                Day         = e.Day,
+                                ReceivedDay = 0,
+                                Json        = e.Json ?? "",
+                            };
+                            n++;
+                        }
+                Plugin.Logger.LogInfo($"[Paperwork] restored {n} member bundle(s) from the manifest.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] manifest restore: {ex.Message}"); }
         }
 
         /// <summary>Host: send each connected client its own stored .hsg for the
@@ -795,6 +913,8 @@ namespace BigAmbitionsMP
             GrantSync.ResetStore();   // fresh world — no grants; flush any store left by a previously loaded
                                       // session (the scene reset no longer wipes the store, 2026-06-30)
             MergerSync.ResetStore();  // fresh world — no merger (same session-boundary lifecycle)
+            ResetPaperwork();         // phase 3-A (review r1 MAJOR-2): the paperwork store dies with the session too — a new world never inherits the old world's bundles
+            try { PaperworkSync.Reset(); } catch { }   // and this machine's publisher forgets the previous world's day/edge
             _mergerPendingByTarget.Clear();   // and no proposals carried in from the previous world (audit 2026-08-26)
             ResetWallet();            // fresh world — no shared wallet (slice 4)
             MPSaveCoordinator.ConsumeDevHostLoadAs("new game");   // round-285: a fresh world has no member slots to impersonate
@@ -1388,6 +1508,17 @@ namespace BigAmbitionsMP
                     var nr = env.GetPayload<NotificationRelayPayload>();
                     if (nr != null && SenderIs(nr.PlayerId, senderPid, MessageType.NotificationRelay))
                         GameStatePatcher.EnqueueOnMainThread(() => HostRelayNotification(nr, senderPid));
+                    break;
+                }
+
+                case MessageType.BusinessPaperwork:
+                {
+                    // Merger phase 3-A: one member's paperwork bundle. Client -> host ONLY; the host
+                    // never sends this type. Stored per member (latest wins) and written into the
+                    // session manifest at the next coordinated save - no gameplay effect in P3-A.
+                    var pw = env.GetPayload<BusinessPaperworkPayload>();
+                    if (pw != null && SenderIs(pw.PlayerId, senderPid, MessageType.BusinessPaperwork))
+                        GameStatePatcher.EnqueueOnMainThread(() => StorePaperwork(pw, senderPid));
                     break;
                 }
 
@@ -5087,6 +5218,25 @@ namespace BigAmbitionsMP
             if (p == null || !SenderIs(p.OwnerId, senderPid, MessageType.PermissionGrantSet)) return;   // only the real owner may grant
             GameStatePatcher.EnqueueOnMainThread(() =>
             {
+                // Merger guard (2026-09-11): refuse a grant change between two members of the SAME company --
+                // a stale or crafted client cannot flip a grant under a merger. No store write; the stored
+                // grant is untouched and resumes when the merger ends.
+                if (!string.IsNullOrEmpty(p.GranteeId) && MergerSync.MergedRuntime(senderPid, p.GranteeId))
+                {
+                    Plugin.Logger.LogWarning($"[Merger] grant edit from '{senderPid}' for co-member '{p.GranteeId}' refused (merger overrides the three permissions)");
+                    return;
+                }
+                // D16 r2 (re-check MINOR-1): the offline-by-handle row must not bypass the same rule for a
+                // co-member who merely left this session (MemberPids keep them; the merger still stands).
+                if (!string.IsNullOrEmpty(p.GranteeStable))
+                {
+                    string offPid = PidOfStable(p.GranteeStable);
+                    if (offPid.Length > 0 && MergerSync.MergedRuntime(senderPid, offPid))
+                    {
+                        Plugin.Logger.LogWarning($"[Merger] offline grant edit from '{senderPid}' for co-member '{offPid}' refused (merger overrides the three permissions)");
+                        return;
+                    }
+                }
                 if (!StableIdByPlayer.TryGetValue(senderPid, out var ownerStable) || string.IsNullOrEmpty(ownerStable)) return;
                 string granteeStable;
                 if (!string.IsNullOrEmpty(p.GranteeStable)) granteeStable = p.GranteeStable;                  // offline revoke by handle
@@ -5106,6 +5256,15 @@ namespace BigAmbitionsMP
         public static void HostSetGrant(GrantKind kind, string granteePid, bool granted)
         {
             if (!_running || string.IsNullOrEmpty(granteePid)) return;
+            // Merger guard (user ruling 2026-09-11): the merger is a superset of the three permissions and
+            // overrides them, so a grant between two members of the SAME company is refused here -- defence in
+            // depth behind the hub's disabled toggles. The stored grant is left exactly as it is (it resumes
+            // when the merger ends); only the change is refused.
+            if (MergerSync.MergedRuntime(MPConfig.PlayerId, granteePid))
+            {
+                Plugin.Logger.LogWarning($"[Merger] grant change for co-member '{granteePid}' refused (merger overrides the three permissions)");
+                return;
+            }
             if (!StableIdByPlayer.TryGetValue(granteePid, out var gs) || string.IsNullOrEmpty(gs)) return;
             GrantSync.NoteName(gs, granteePid);
             GrantSync.StoreSet(kind, MPConfig.StableId, gs, granted);
@@ -5117,6 +5276,13 @@ namespace BigAmbitionsMP
         public static void HostSetGrantOffline(GrantKind kind, string granteeStable, bool granted)
         {
             if (!_running || string.IsNullOrEmpty(granteeStable)) return;
+            // D16 r2: same rule as the online row - a co-member who left this session is still merged with me.
+            string offPid = PidOfStable(granteeStable);
+            if (offPid.Length > 0 && MergerSync.MergedRuntime(MPConfig.PlayerId, offPid))
+            {
+                Plugin.Logger.LogWarning($"[Merger] offline grant edit for co-member '{offPid}' refused (merger overrides the three permissions)");
+                return;
+            }
             GrantSync.StoreSet(kind, MPConfig.StableId, granteeStable, granted);
             RefreshGrantsAndBroadcast();
             // (Durable: written to the session manifest at the next coordinated save.)
@@ -5557,10 +5723,12 @@ namespace BigAmbitionsMP
         // ═══════════════════════════════════════════════════════════════════════════════════════════════
         // SHARED-SHOP MANAGEMENT (the Business PERMISSION feature; src/SharedShopSchedule.cs) — NOT THE MERGER.
         // The merger's routes (HostRouteEmployeeEdit above, BusinessEditRequest) are untouched by this block.
-        // Access here = a DIRECT Business grant from the shop's owner (GrantSync.IsGrantedDirect) - and, for the
-        // SCHEDULE routes only (edit + session open/close), merger membership too (phase 0, 2026-09-10; the other
-        // routes stay permission-only); a per-sender rate cap (plan §2.9 P4) and a payload shape check guard the
-        // relay; snapshots go to exactly one machine (P1).
+        // Access here = a DIRECT Business grant from the shop's owner (GrantSync.IsGrantedDirect) - and, on the
+        // routes merger phase 2 has reached, merger membership too, through the UNION check GrantSync.IsGranted:
+        // the SCHEDULE routes (edit + session open/close, phase 0, 2026-09-10), the PRICE edit route (wave 1,
+        // 2026-09-11) and the two READ relays, sales history and work info (wave 2, 2026-09-11). The staff and
+        // work EDIT routes stay permission-only until waves 3-4. A per-sender rate cap (plan §2.9 P4) and a
+        // payload shape check guard the relay; snapshots go to exactly one machine (P1).
         // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
         private static readonly Dictionary<string, (float windowStart, int count)> _sharedRate = new();
@@ -5801,8 +5969,8 @@ namespace BigAmbitionsMP
                 if (p.Action == "request")
                 {
                     if (ownerPid == senderPid) return;
-                    if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid))
-                    { Plugin.Logger.LogWarning($"[SharedShop] sales-history request by '{senderPid}' on '{p.AddressKey}' — no Business permission, dropped."); return; }
+                    if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))   // wave 2: UNION — direct grant or merger membership
+                    { Plugin.Logger.LogWarning($"[SharedShop] sales-history request by '{senderPid}' on '{p.AddressKey}' — no Business permission and not a company member, dropped."); return; }
                     if (ownerPid == MPConfig.PlayerId) SharedShopPrices.HandleSalesHistory(p);
                     else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedSalesHistory, "host", p));
                 }
@@ -5810,7 +5978,7 @@ namespace BigAmbitionsMP
                 {
                     if (senderPid != ownerPid) { Plugin.Logger.LogWarning($"[SharedShop] sales snapshot for '{p.AddressKey}' from non-owner '{senderPid}' — dropped."); return; }
                     if (string.IsNullOrEmpty(p.ToPid)) return;
-                    if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, p.ToPid)) return;
+                    if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, p.ToPid)) return;   // wave 2: UNION
                     if (p.ToPid == MPConfig.PlayerId) SharedShopPrices.HandleSalesHistory(p);
                     else SendToPid(p.ToPid, MessageEnvelope.Create(MessageType.SharedSalesHistory, "host", p));
                 }
@@ -5863,8 +6031,8 @@ namespace BigAmbitionsMP
                 if (p.Action == "request")
                 {
                     if (ownerPid == senderPid) return;
-                    if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid))
-                    { Plugin.Logger.LogWarning($"[SharedShop] work-info request by '{senderPid}' on '{p.AddressKey}' — no Business permission, dropped."); return; }
+                    if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))   // wave 2: UNION — direct grant or merger membership
+                    { Plugin.Logger.LogWarning($"[SharedShop] work-info request by '{senderPid}' on '{p.AddressKey}' — no Business permission and not a company member, dropped."); return; }
                     if (!SharedWorkAddressAllowed(p.AddressKey))
                     { Plugin.Logger.LogWarning($"[SharedShop] work-info request by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
                     if (ownerPid == MPConfig.PlayerId) SharedShopWorkTabs.HandleWorkInfo(p);
@@ -5874,7 +6042,7 @@ namespace BigAmbitionsMP
                 {
                     if (senderPid != ownerPid) { Plugin.Logger.LogWarning($"[SharedShop] work snapshot for '{p.AddressKey}' from non-owner '{senderPid}' — dropped."); return; }
                     if (string.IsNullOrEmpty(p.ToPid)) return;
-                    if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, p.ToPid)) return;
+                    if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, p.ToPid)) return;   // wave 2: UNION
                     if (p.ToPid == MPConfig.PlayerId) SharedShopWorkTabs.HandleWorkInfo(p);
                     else SendToPid(p.ToPid, MessageEnvelope.Create(MessageType.SharedWorkInfo, "host", p));
                 }

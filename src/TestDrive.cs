@@ -634,6 +634,27 @@ namespace BigAmbitionsMP
                     return gsb.ToString();
                 }
 
+                case "paperwork":
+                {
+                    // Merger phase 3-A. No argument on the HOST = the store census; "push" on ANY
+                    // member forces one publish now. A thin wrapper over the same calls the tick
+                    // makes - the verb adds no write path of its own.
+                    string pwArg = arg.Trim();
+                    if (string.Equals(pwArg, "push", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!MergerSync.IAmMember) return "ERR not a merger member";
+                        var pushed = PaperworkSync.FlushNow("testdrive");
+                        if (pushed == null) return "ERR paperwork push produced nothing (no session, or the bundle was refused)";
+                        int pwBytes = 0;
+                        try { pwBytes = System.Text.Encoding.UTF8.GetByteCount(Newtonsoft.Json.JsonConvert.SerializeObject(pushed)); } catch { }
+                        return $"OK paperwork pushed day={pushed.Day} businesses={pushed.Businesses.Count}"
+                             + $" lists={PaperworkSync.CountListItems(pushed.Lists)} employees={pushed.Employees.Count} bytes={pwBytes}";
+                    }
+                    if (pwArg.Length > 0 && !MPServer.IsRunning) return "ERR 'paperwork <stableid>' is a host verb";
+                    if (!MPServer.IsRunning) return "ERR paperwork: not the host (use 'paperwork push' on a member)";
+                    return $"OK paperwork stored=[{MPServer.PaperworkCensus(pwArg)}]";
+                }
+
                 // -- merger phase 1 test levers (2026-09-11) -------------------
                 case "rivals":
                 {

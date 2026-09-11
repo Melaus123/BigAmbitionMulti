@@ -288,6 +288,7 @@ namespace BigAmbitionsMP
 
         private static void OnDisconnected(string reason, byte[] extra)
         {
+            try { PaperworkSync.Reset(); } catch { }   // P3-A r3 (re-review r2 MINOR-1): per-world publisher state dies with the connection
             PlayerColours.ResetSession();   // colours r2 (MINOR-5): an involuntary drop ends the session too - Disconnect() only covers the voluntary path
             bool wasConnected = _connected;
             double secs = _connectClock.IsRunning ? _connectClock.Elapsed.TotalSeconds : -1;
@@ -552,6 +553,13 @@ namespace BigAmbitionsMP
                     if (ee != null) GameStatePatcher.EnqueueOnMainThread(() => MergerEmployeeSync.ApplyOnOwner(ee));
                     break;
                 }
+
+                case MessageType.BusinessPaperwork:
+                    // Merger phase 3-A is client -> HOST only: nothing here sends paperwork the other
+                    // way, so an arriving bundle means a future build (or a confused peer). Log and
+                    // drop - never write game state off an unexpected direction.
+                    Plugin.Logger.LogWarning("[Paperwork] a BusinessPaperwork arrived from the host - P3-A publishes client -> host only; ignored.");
+                    break;
 
                 case MessageType.NotificationRelay:
                 {
@@ -1992,6 +2000,11 @@ namespace BigAmbitionsMP
 
         public static void TickWorldReadyGate()
         {
+            // Merger phase 3-A: the paperwork publisher rides this per-frame canvas call (it is the
+            // only existing tick reachable from the files this slice owns). It self-throttles to 1 Hz
+            // and is one bool read for a non-member, and it must run BEFORE the world-ready early
+            // return below, which is client-only state.
+            PaperworkSync.Tick();
             try
             {
                 if (!IsConnected || _worldReadySent || !WorldSyncApplied) return;

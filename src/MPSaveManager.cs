@@ -83,6 +83,11 @@ namespace BigAmbitionsMP
         /// <summary>Per group: stable ids whose merge-time wallet pooling was already accepted, so a
         /// restore/join replay can never pool the same member's cash twice (slice 4).</summary>
         public Dictionary<string, List<string>> MergerWalletContributed { get; set; } = new();
+        /// <summary>Merger phase 3-A: each member's LATEST business-paperwork bundle as of this save
+        /// moment (host store). Rides the model like Merger/Loans, so it follows the save timeline
+        /// exactly - written with the slot, replaced from the loaded slot on every load, never carried
+        /// over in memory. Empty/absent on manifests written before the field existed.</summary>
+        public List<MpPaperworkEntry> Paperwork { get; set; } = new();
 
         /// <summary>Round-53 — per-SAVE needs/morale authority (user design 2026-07-22): the load
         /// lobby mirrors these, the Customize panel edits them, and the edited values become the
@@ -120,6 +125,17 @@ namespace BigAmbitionsMP
         public string Group    { get; set; } = "";   // merged-company id (several disjoint groups per session; "" on old manifests → folded into one legacy group)
         public int    Order    { get; set; } = -1;   // phase 1-A: this member's index in the group's JOIN ORDER (-1 on old manifests → stored file order stands)
         public long   GroupSeq { get; set; }         // phase 1-A: the group's mint sequence, smaller = older (0 on old manifests → re-minted at load)
+    }
+
+    /// <summary>Merger phase 3-A — one member's stored paperwork bundle, StableId-keyed like the
+    /// merger roster so it survives renames and absent members. Json is the serialised
+    /// BusinessPaperworkPayload kept as TEXT, so a future payload shape round-trips through an
+    /// older host untouched (and Newtonsoft ignores the whole field on an older reader).</summary>
+    public class MpPaperworkEntry
+    {
+        public string StableId { get; set; } = "";
+        public int    Day      { get; set; }   // the sender's game day at publish time
+        public string Json     { get; set; } = "";
     }
 
     public static class MPSaveManager

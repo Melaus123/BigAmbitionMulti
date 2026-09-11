@@ -60,6 +60,9 @@ namespace BigAmbitionsMP
                 case (int)MessageType.RadioState:
                 // Review M6 — the megabyte class that was missed: a rejoiner's disconnect-save upload
                 // and gzipped log replies must not head-of-line-block their own gameplay lane.
+                // Merger phase 3-A: a paperwork bundle is snapshot-class (books + lists + full staff
+                // records, up to the 2 MB refusal cap) - it must not head-of-line-block gameplay.
+                case (int)MessageType.BusinessPaperwork:
                 case (int)MessageType.ClientDisconnectUpload:
                 case (int)MessageType.PeerLogReply:
                 case (int)MessageType.AuditDrillReply:
