@@ -587,8 +587,9 @@ namespace BigAmbitionsMP
         public float  Balance { get; set; }
     }
 
-    /// <summary>One merged company. MemberPids is ONLINE members in PlayerId space (all enforcement is
-    /// PlayerId — clients never learn StableIds); MemberNames is the FULL roster (offline included).</summary>
+    /// <summary>One merged company. MemberPids = every member whose PlayerId is KNOWN this session (a member
+    /// who connected and left is still listed - runtime membership must survive an absence; all enforcement is
+    /// PlayerId — clients never learn StableIds); MemberNames is the FULL roster (never-connected included).</summary>
     public class MergerGroupInfo
     {
         public string       GroupId     { get; set; } = "";

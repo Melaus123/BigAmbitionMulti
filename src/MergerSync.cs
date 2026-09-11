@@ -209,7 +209,7 @@ namespace BigAmbitionsMP
             => _groupByPid.TryGetValue(MPConfig.PlayerId, out var g) && _groupInfo.TryGetValue(g, out var gi) ? gi : null;
 
         /// <summary>r2/R3 - the group MODEL as one string: for every group in id order,
-        /// GroupId|DisplayName|MemberNamesOrdered|MemberPidsOrdered. Two states with the same
+        /// GroupId|DisplayName|MemberNamesOrdered|MemberPidsOrdered|BuildingKeys. Two states with the same
         /// signature are indistinguishable to the rivals list, so a heartbeat that carries no change
         /// must not re-Load an open leaderboard (MergerFlip rebroadcasts every 10 s, and the native
         /// Load destroys the rows and re-selects row 0). Also keys the ForeignGroups cache.</summary>
