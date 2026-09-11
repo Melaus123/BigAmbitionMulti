@@ -91,6 +91,12 @@ namespace BigAmbitionsMP
                 string addr; try { addr = GameStateReader.AddressKey(e.assignedAddress); } catch { continue; }
                 if (!MergerFlip.IsFlipped(addr)) continue;
 
+                // H-ADOPT-1 (harness run T-P0-4, 2026-09-10): the mod's own register stand-ins (BAMP_DUTY_*, the
+                // synthetic cashiers a visitor injects for a partner's staffed tills) sit at flipped addresses and are
+                // neither injected staff nor candidates - this scan adopted 55 of them OUT to the owner, who ADOPTED 48
+                // phantom 'On-Duty Staff' at $0/h into its live roster (the save strip kept the .hsg clean). Never a real hire.
+                if (MPRegisterSync.IsSyntheticDuty(e.id)) continue;
+
                 if (MPRegisterSync.IsInjectedStaff(e.id))
                 {
                     // Partner staff moved between shops via the dropdown — not supported yet (cross-save
@@ -183,8 +189,24 @@ namespace BigAmbitionsMP
                 else if (p.Action == "adopt")
                 {
                     // A member staffed MY shop with THEIR employee — the record migrates into MY save.
+                    if (MPRegisterSync.IsSyntheticDuty(p.EmployeeId ?? ""))   // H-ADOPT-1: a stand-in is never anyone's staff (belt and braces to the scan's skip)
+                    {
+                        if (_refusedSynthetic.Add(p.EmployeeId ?? ""))   // once per id (review 2026-09-10 #4: a pre-fix member retries every 30 s)
+                            Plugin.Logger.LogWarning($"[MergerStaff] routed adopt of a synthetic stand-in '{p.EmployeeId}' @ '{p.AddressKey}' from '{p.PlayerId}' — refused (further refusals of this id are silent).");
+                        return;
+                    }
                     bool exists = false;
                     try { exists = Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(p.EmployeeId ?? ""); } catch { }
+                    if (exists && MPRegisterSync.IsInjectedStaff(p.EmployeeId ?? ""))
+                    {
+                        // H-ADOPT-2 (harness run T-P0-5, 2026-09-10): the record already here is the member's INJECTED COPY from
+                        // their roster publish (injected records keep the real id) - not a completed adoption. The old
+                        // 'idempotent' return below mistook it for one and the transfer silently never happened. Forget the
+                        // copy and reconstruct the real record below (which also becomes payroll-real: it leaves the registry).
+                        MPRegisterSync.ForgetInjectedForAdopt(p.EmployeeId ?? "");
+                        Plugin.Logger.LogInfo($"[MergerStaff] adopt of '{p.EmployeeId}' @ '{p.AddressKey}' replaces this machine's injected copy (H-ADOPT-2).");
+                        exists = false;
+                    }
                     if (exists) { MPRegisterSync.ForceRosterRepublish(p.AddressKey); return; }   // idempotent (retry after a lost confirm)
                     var gi = SaveGameManager.Current;
                     if (gi?.BuildingRegistrations == null || gi.EmployeeInstances == null) return;
@@ -244,9 +266,12 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MergerStaff] ApplyOnOwner: {ex.Message}"); }
         }
 
+        private static readonly HashSet<string> _refusedSynthetic = new();   // H-ADOPT-1 refusal log, once per id
+
         public static void Reset()
         {
             _pendingAdopt.Clear();
+            _refusedSynthetic.Clear();
         }
     }
 }

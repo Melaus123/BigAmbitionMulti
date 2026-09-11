@@ -1761,7 +1761,7 @@ namespace BigAmbitionsMP
         /// unconditionally (no merged-partner exemption; S7 field report: ten "On-Duty Staff"
         /// rows in a business-less client's MyEmployees, one per staffed host shop).</summary>
         public static bool IsSyntheticDuty(string employeeId)
-            => !string.IsNullOrEmpty(employeeId) && employeeId.StartsWith(SyntheticDutyEmployeeIdPrefix);
+            => !string.IsNullOrEmpty(employeeId) && employeeId.StartsWith(SyntheticDutyEmployeeIdPrefix, StringComparison.Ordinal);   // Ordinal (review 2026-09-10): a per-employee 2 s-tick compare
 
         /// <summary>World-health consumer (2026-07-09): how many partner-staff records are injected.</summary>
         public static int InjectedCount => _injectedStaff.Count;
@@ -2260,6 +2260,17 @@ namespace BigAmbitionsMP
                 }
             }
             catch { }
+        }
+
+        /// <summary>H-ADOPT-2 (2026-09-10): the merger's adopt found a record with the member's employee id already here - the
+        /// INJECTED COPY the member's roster publish created (injected records keep the real id). That copy is not a completed
+        /// adoption: forget it (registry, owner memory, bench grace, game list) so the adopt can reconstruct the real record.
+        /// Returns false when the id is not an injected copy.</summary>
+        internal static bool ForgetInjectedForAdopt(string id)
+        {
+            if (string.IsNullOrEmpty(id) || !_injectedStaff.ContainsKey(id)) return false;
+            RemoveInjectedStaff(id);
+            return true;
         }
 
         private static void RemoveInjectedStaff(string id)
