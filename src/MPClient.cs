@@ -438,6 +438,7 @@ namespace BigAmbitionsMP
                         switch (env.Type)
                         {
                             case MessageType.BusinessChange:
+                            case MessageType.BusinessChangeBatch:
                             case MessageType.RivalsSnapshot:
                             case MessageType.RivalsStatsSnapshot:
                             case MessageType.RegisterCashier:
@@ -721,6 +722,10 @@ namespace BigAmbitionsMP
 
                 case MessageType.BusinessChange:
                     HandleBusinessChange(env);
+                    break;
+
+                case MessageType.BusinessChangeBatch:
+                    HandleBusinessChangeBatch(env);
                     break;
 
                 case MessageType.BuildingsForSale:
@@ -1511,7 +1516,25 @@ namespace BigAmbitionsMP
         {
             var payload = env.GetPayload<BusinessChangePayload>();
             if (payload?.Info == null) return;
-            GameStatePatcher.ApplyBusinessChange(payload.Info);
+            ApplyBusinessChangeRecord(payload.Info);
+        }
+
+        /// <summary>Burst fix 2026-09-10: many changed businesses in ONE envelope (the host sweep
+        /// and the join/daily delta).  Every record goes through exactly the same apply path as a
+        /// single BusinessChange — shared body, never a copy.</summary>
+        private static void HandleBusinessChangeBatch(MessageEnvelope env)
+        {
+            var payload = env.GetPayload<BusinessChangeBatchPayload>();
+            if (payload?.Infos == null) return;
+            foreach (var info in payload.Infos)
+                if (info != null) ApplyBusinessChangeRecord(info);
+        }
+
+        /// <summary>The ONE place a received business-change record is applied, shared by the
+        /// single and batched forms so their handling cannot drift apart.</summary>
+        private static void ApplyBusinessChangeRecord(BusinessInfo info)
+        {
+            GameStatePatcher.ApplyBusinessChange(info);
         }
 
         private static void HandleInteriorSnapshot(MessageEnvelope env)

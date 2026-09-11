@@ -165,6 +165,10 @@ namespace BigAmbitionsMP
             {
                 if (reg == null || entries == null) return;
                 if (reg.RentedByPlayer) return;   // I own it → my table is authoritative
+                // An AI shop PASSES this guard; what keeps the UpdateCustomerCapacity call below off AI replicas is the
+                // capture side (InteriorSync captures entries only for TrulyMine shops). If entries are ever captured for
+                // a non-owned shop, that call rebuilds cachedAvailableProducts from the replica's (empty) shelves and
+                // wipes the host-supplied H-AICAT-1 product list (review 2026-09-10 #3).
                 var table = Table();
                 if (table == null) return;
 

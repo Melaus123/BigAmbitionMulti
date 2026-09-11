@@ -4092,6 +4092,8 @@ namespace BigAmbitionsMP
         // the same gate + retry contract every other join-time action already follows.
         private static BusinessSnapshotPayload? _heldBizSnapshot;
         private static readonly List<BusinessInfo> _heldBizDeltas = new();   // review S1: deltas held with it, replayed AFTER
+        private static int _snapshotApplyDepth;      // H-AICAT-1 (review 2026-09-10 #5): >0 while a snapshot applies - product-list writes are counted, not logged one by one
+        private static int _aiProductsInSnapshot;    // count of product lists written by the current snapshot apply
 
         internal static void TickHeldBusinessSnapshot()
         {
@@ -4154,11 +4156,16 @@ namespace BigAmbitionsMP
                 VerifyCleanBaseline(payload);
 
                 int applied = 0;
-                foreach (var info in payload.Businesses)
+                _aiProductsInSnapshot = 0; _snapshotApplyDepth++;   // H-AICAT-1: per-record product-list lines are summarised for a snapshot
+                try
                 {
-                    if (ApplyBusinessInfoLocal(info)) applied++;
+                    foreach (var info in payload.Businesses)
+                    {
+                        if (ApplyBusinessInfoLocal(info)) applied++;
+                    }
                 }
-                Plugin.Logger.LogInfo($"[Patcher] Business snapshot applied: {applied}/{payload.Businesses.Count} buildings.");
+                finally { _snapshotApplyDepth--; }
+                Plugin.Logger.LogInfo($"[Patcher] Business snapshot applied: {applied}/{payload.Businesses.Count} buildings; AI product lists written: {_aiProductsInSnapshot} (H-AICAT-1).");
 
                 // ── Buy marketplace (gi.buildingsForSale) ───────────────────
                 // Wipe the client's local list and rebuild from host's payload.
@@ -4913,6 +4920,31 @@ namespace BigAmbitionsMP
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] AI prices apply '{info.AddressKey}': {ex.Message}"); }
+
+                // H-AICAT-1 (2026-09-10): the AI shop's PRODUCT LIST, host-authoritative - a client cannot derive it
+                // (the layout catalog never loads there), so without this every AI shop on a client sells nothing:
+                // no shoppers spawn in it, BizMan shows rivals selling nothing, and the "who else sells this"
+                // counts behind the client's own pricing collapse. Same guards as the prices above: never a
+                // player's business, never the receiver's own building. An EMPTY list on the wire is "no opinion"
+                // (an AI list is written once at creation; a transient empty must not blank a shop). Written only
+                // when it differs, so the join snapshot's ~300 writes happen once and the sweeps stay silent.
+                try
+                {
+                    if (info.Products != null && info.Products.Count > 0 && !reg.RentedByPlayer && !receiverOwnsThis
+                        && !IsAnyPlayerBusiness(reg))
+                    {
+                        var cur = reg.cachedAvailableProducts;
+                        bool same = cur != null && cur.Count == info.Products.Count;
+                        if (same) for (int i = 0; i < cur!.Count; i++) if (cur[i] != info.Products[i]) { same = false; break; }
+                        if (!same)
+                        {
+                            reg.cachedAvailableProducts = new List<string>(info.Products);
+                            if (_snapshotApplyDepth > 0) _aiProductsInSnapshot++;   // one summary line per snapshot (~300 shops at a join)
+                            else Plugin.Logger.LogInfo($"[Patcher] AI products applied for '{info.AddressKey}': {info.Products.Count} item(s) (H-AICAT-1).");
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] AI products apply '{info.AddressKey}': {ex.Message}"); }
 
                 // Tier B — description + sign + logo (owner-authored).  Skip for the receiver's OWN shop.
                 if (!receiverOwnsThis)

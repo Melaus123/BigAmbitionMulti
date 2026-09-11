@@ -52,6 +52,7 @@ namespace BigAmbitionsMP
                 // writes must SHARE the snapshot's lane, or an older snapshot can overtake-revert a
                 // newer delta (BusinessChange had no version guard and no re-assert path).
                 case (int)MessageType.BusinessChange:
+                case (int)MessageType.BusinessChangeBatch:   // burst fix 2026-09-10: same writes, so the same lane (M5 ordering invariant)
                 case (int)MessageType.BuildingsForSale:   // v9 review M5: writes gi.buildingsForSale, which BusinessSnapshot also writes
                 case (int)MessageType.InteriorCargoSync:
                 case (int)MessageType.InteriorDirtSync:   // v10 M5: writes dirt state InteriorSnapshot also writes

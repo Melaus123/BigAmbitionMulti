@@ -11,8 +11,9 @@ namespace BigAmbitionsMP
     ///
     /// Approach: every PollIntervalSeconds the host walks every BuildingRegistration,
     /// reads the fields we care about into a BusinessInfo, and compares them
-    /// against the last broadcast version.  Buildings whose info changed get
-    /// a BusinessChange message; all clients receive it.
+    /// against the last broadcast version.  Buildings whose info changed are
+    /// buffered and shipped as ONE BusinessChangeBatch per sweep cycle (64 per
+    /// envelope, so it deflates) to every client past its join snapshot (2026-09-10).
     ///
     /// Change detection is polling-based rather than Harmony-patched setters
     /// because: (a) we'd need to find every setter for every relevant field,
@@ -416,6 +417,15 @@ namespace BigAmbitionsMP
         private static float _cycleStartedAt;
         private static int   _cycleChanges;
 
+        // Burst fix 2026-09-10: the sweep's changes travel as ONE BusinessChangeBatch envelope per
+        // BizBatchMax records instead of N single BusinessChange messages, each of which was 1.3-2.4
+        // KB and so under the 4 KB deflate floor (field 2026-09-06: 664 records, uncompressed, to a
+        // client that was still loading).  A partial batch survives the per-frame budget exit — a
+        // cycle spans frames and the batch flushes at BizBatchMax or when the cycle completes.
+        private const int BizBatchMax = 64;
+        private static readonly List<BusinessInfo> _cycleBatch = new();
+        private static int   _cycleBatchSends;
+
         /// <summary>
         /// Called once per Update on the host.  Runs the change detector as a
         /// time-boxed incremental sweep (resumes every frame until complete).
@@ -474,6 +484,7 @@ namespace BigAmbitionsMP
                 _scanInProgress = true;
                 _scanCursor     = 0;
                 _cycleChanges   = 0;
+                _cycleBatchSends = 0;
             }
 
             try
@@ -499,7 +510,8 @@ namespace BigAmbitionsMP
                             _lastSent[info.AddressKey] = info;                 // H-BIZFLAP-1: remember the UNSTRIPPED record - comparing against a stripped one made every attach/strip transition look like a change (3 sends per real change; 142 in 4.5 min under signature churn, bundle 20260905-170233)
                             var wire = info.ShallowCopy();
                             StripUnchangedLogos(wire);                          // attach-once applies to the wire copy only
-                            MPServer.BroadcastBusinessChange(wire);
+                            _cycleBatch.Add(wire);                              // burst fix 2026-09-10: batched, not one message per record
+                            if (_cycleBatch.Count >= BizBatchMax) FlushCycleBatch();
                             _cycleChanges++;
                             // Log only non-trivial changes (something that has a name or
                             // isn't BusinessTypeName.Empty) so we don't spam at startup.
@@ -517,8 +529,9 @@ namespace BigAmbitionsMP
 
                 // Cycle complete.
                 _scanInProgress = false;
+                FlushCycleBatch();
                 if (_cycleChanges > 0)
-                    Plugin.Logger.LogInfo($"[BusinessSync] Broadcast {_cycleChanges} business change(s) this sweep.");
+                    Plugin.Logger.LogInfo($"[BusinessSync] Broadcast {_cycleChanges} business change(s) this sweep in {_cycleBatchSends} batch(es).");
 
                 // Buy marketplace (gi.buildingsForSale) — host's daily real-
                 // estate update modifies this list once per game day.  Hash-
@@ -588,6 +601,17 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] TickClient: {ex.Message}"); }
         }
 
+        /// <summary>Burst fix 2026-09-10: ship whatever the sweep has accumulated as ONE
+        /// BusinessChangeBatch envelope.  Called at BizBatchMax records and at cycle completion;
+        /// the copy is deliberate — the buffer is reused across batches.</summary>
+        private static void FlushCycleBatch()
+        {
+            if (_cycleBatch.Count == 0) return;
+            MPServer.BroadcastBusinessChangeBatch(new List<BusinessInfo>(_cycleBatch));
+            _cycleBatchSends++;
+            _cycleBatch.Clear();
+        }
+
         /// <summary>Reset state on host shutdown / new game start.</summary>
         public static void Reset()
         {
@@ -602,6 +626,8 @@ namespace BigAmbitionsMP
             _scanInProgress = false;
             _scanCursor     = 0;
             _cycleStartedAt = 0f;
+            _cycleBatch.Clear();
+            _cycleBatchSends = 0;
             _lastMarketEventsHash = 0;   // re-emit market events to a fresh session / re-host (don't suppress via a stale hash)
             _nextMarketEventsAt   = 0f;
             _lastMarketEventsSentAt = -1000f;   // round-101: first pass of a new session always sends
@@ -627,6 +653,7 @@ namespace BigAmbitionsMP
                 if (MPServer.IsRunning)
                 {
                     _lastSent[info.AddressKey] = info;
+                    _cycleChanges -= _cycleBatch.RemoveAll(x => x.AddressKey == info.AddressKey);   // burst-fix r2 (the sweep's count stays honest, r2 re-review #2) (review 2026-09-10 #3): an OLDER sweep copy buffered for this address must not ship after this push and revert it (the push seeds _lastSent, so the sweep would never re-send)
                     MPServer.BroadcastBusinessChange(info);
                 }
                 else
@@ -730,6 +757,20 @@ namespace BigAmbitionsMP
                             info.Prices.Add(new RetailPriceInfo { ItemName = rp.itemName ?? "", Price = rp.price });
                         }
                     }
+                }
+                catch { }
+
+                // H-AICAT-1 (2026-09-10): what the AI shop SELLS (cachedAvailableProducts) - same authority rule as
+                // its prices. A client cannot derive this list (the layout catalog never loads there), so without
+                // it every AI shop on a client sells nothing. Never part of EqualInfo; rides with any send - safe
+                // because the host's list changes only inside CompetitionHelper.RecalculateRetailPrices (:867), which
+                // also rewrites the prices that EqualInfo DOES compare (review 2026-09-10 #6).
+                try
+                {
+                    if (!reg.RentedByPlayer && !GameStatePatcher.IsAnyPlayerBusiness(reg)
+                        && reg.cachedAvailableProducts != null && reg.cachedAvailableProducts.Count > 0)
+                        foreach (var p in reg.cachedAvailableProducts)
+                            if (!string.IsNullOrEmpty(p)) info.Products.Add(p);
                 }
                 catch { }
 

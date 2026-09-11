@@ -3361,12 +3361,15 @@ namespace BigAmbitionsMP
         // startup overlay waited forever.  The transport now retries refused
         // sends, and THIS heals any residual cause: while the hold is up, a
         // player in-game but not world-ready gets the business snapshot
-        // re-sent after 15s, max 3 attempts, 15s apart.
+        // re-sent after 15s, max 3 attempts, 15s apart.  A peer whose queue is
+        // still draining is skipped without spending an attempt — field
+        // 2026-09-06: the heal re-sent 918 KB to a slow client whose first copy
+        // was still in flight.
         private static readonly Dictionary<string, (int attempts, long lastMs)> _gateHeal = new();
 
         private static void TickGateHeal()
         {
-            List<string>? needs = null;
+            List<string>? candidates = null;
             lock (_startupLock)
             {
                 if (_startupReleased) return;
@@ -3378,9 +3381,31 @@ namespace BigAmbitionsMP
                     _gateHeal.TryGetValue(pid, out var st);
                     if (st.lastMs == 0) { _gateHeal[pid] = (0, now); continue; } // arm on first sight
                     if (st.attempts >= 3 || now - st.lastMs < 15000) continue;
-                    _gateHeal[pid] = (st.attempts + 1, now);
-                    (needs ??= new List<string>()).Add(pid);
+                    (candidates ??= new List<string>()).Add(pid);
                 }
+            }
+            if (candidates == null) return;
+            List<string>? needs = null;
+            foreach (var pid in candidates)
+            {
+                // Burst fix 2026-09-10 (r2, review #1): the backlog read takes the transport's own
+                // locks and a native Steam status call, so it runs OUTSIDE _startupLock. Bytes still
+                // owed to this peer mean the first copy is in flight, not lost — re-arm the 15 s
+                // window WITHOUT spending an attempt. The figure is the peer's WHOLE backlog (paced
+                // store-mirror lane included), so a busy peer can defer the heal for as long as it
+                // stays busy; the startup-timeout release still broadcasts the table to everyone
+                // (review #2, accepted).
+                long queued = PendingSendBytesTo(pid);
+                long stamp = TickMs64;
+                lock (_startupLock)
+                {
+                    if (_startupReleased || _worldReadyPlayers.Contains(pid) || _fenceExcused.Contains(pid)) continue;   // became ready between the two locks — nothing to heal
+                    _gateHeal.TryGetValue(pid, out var st);
+                    if (queued > 0) _gateHeal[pid] = (st.attempts, stamp);
+                    else { _gateHeal[pid] = (st.attempts + 1, stamp); (needs ??= new List<string>()).Add(pid); }
+                }
+                if (queued > 0)
+                    Plugin.Logger.LogInfo($"[Server] gate-heal deferred for '{pid}': {queued / 1024} KB still queued to them — nothing to heal yet.");
             }
             if (needs == null) return;
             foreach (var pid in needs)
@@ -5654,12 +5679,32 @@ namespace BigAmbitionsMP
         /// <summary>Broadcasts the host's parked-vehicle snapshot to all clients.</summary>
         // ── Business sync (Phase 1: exterior business state) ─────────────────
 
-        /// <summary>Broadcast a single business-changed delta to all clients.</summary>
+        /// <summary>Broadcast a single business-changed delta to every client that is APPLYING
+        /// live traffic.  v9 latch: a loading peer DROPS these (MPClient early-return until settled)
+        /// and is covered by the WorldReady delta re-send + join snapshot — field 2026-09-06: 664
+        /// records were sent to a loading client and 8 applied.  Mirrors Broadcast per peer:
+        /// serialize once, then peer.Send(bytes, reliable: true).</summary>
         public static void BroadcastBusinessChange(BusinessInfo info)
         {
-            if (!_running) return;
+            if (!_running || _transport == null) return;
             var payload = new BusinessChangePayload { Info = info };
-            Broadcast(MessageEnvelope.Create(MessageType.BusinessChange, "host", payload));
+            var bytes = MessageEnvelope.Create(MessageType.BusinessChange, "host", payload).Serialize();
+            foreach (var cp in ConnectedClientPeers())
+                if (IsPlayerApplying(cp.playerId)) cp.peer.Send(bytes, reliable: true);
+        }
+
+        /// <summary>Burst fix 2026-09-10: several changed business records in ONE envelope so the
+        /// 4 KB deflate floor (Protocol.CompressOver) can apply — single BusinessChange records are
+        /// 1.3-2.4 KB and never compress.  Same applying-peer rule as BroadcastBusinessChange; an
+        /// empty list is a no-op.</summary>
+        public static void BroadcastBusinessChangeBatch(List<BusinessInfo> infos)
+        {
+            if (!_running || _transport == null) return;
+            if (infos == null || infos.Count == 0) return;
+            var payload = new BusinessChangeBatchPayload { Infos = infos };
+            var bytes = MessageEnvelope.Create(MessageType.BusinessChangeBatch, "host", payload).Serialize();
+            foreach (var cp in ConnectedClientPeers())
+                if (IsPlayerApplying(cp.playerId)) cp.peer.Send(bytes, reliable: true);
         }
 
         // Wave-2 (audit join item — MEASURED: the ~850 KB table travelled TWICE per join): the
@@ -5696,12 +5741,14 @@ namespace BigAmbitionsMP
             return map;
         }
 
-        /// <summary>Review MIN-4: each BusinessChange (~1.3 KB) ships uncompressed (below the
-        /// 4 KB deflate floor) while the full table deflates to ~825 KB — the delta stays the
+        /// <summary>Review MIN-4: the delta USED to ship each BusinessChange (~1.3 KB) uncompressed
+        /// (below the 4 KB deflate floor) while the full table deflates to ~825 KB — the delta stays the
         /// cheaper form until several hundred entries. Field 2026-08-24 (P-JOINDELTA): a fresh
         /// host load's join window really does churn ~109 businesses, so the original cap of 80
         /// forced the full-book fallback on exactly the case the delta was built for; 200 keeps
-        /// a wide margin over measured churn while still bounding a pathological burst.</summary>
+        /// a wide margin over measured churn while still bounding a pathological burst.  Burst fix
+        /// 2026-09-10: the delta now travels as ONE BusinessChangeBatch envelope, so it deflates
+        /// like the table does instead of shipping N uncompressed records.</summary>
         private const int BizDeltaCap = 200;
 
         /// <summary>v9: send this peer only the businesses whose per-business sig differs from
@@ -5728,12 +5775,12 @@ namespace BigAmbitionsMP
             }
             if (haveBase && !removedSince && changed.Count <= BizDeltaCap)
             {
-                foreach (var b in changed)
-                    peer.Send(MessageEnvelope.Create(MessageType.BusinessChange, "host",
-                              new BusinessChangePayload { Info = b }));
+                if (changed.Count > 0)
+                    peer.Send(MessageEnvelope.Create(MessageType.BusinessChangeBatch, "host",
+                              new BusinessChangeBatchPayload { Infos = changed }).Serialize(), reliable: true);
                 _joinBizSigs[peer.Id] = freshSigs;
                 return changed.Count == 0 ? "business table UNCHANGED — skipped"
-                                          : changed.Count + " changed business delta(s) (v9 — was a full table)";
+                                          : changed.Count + " changed business delta(s) in ONE batch (v9 — was a full table)";
             }
             var benv  = MessageEnvelope.Create(MessageType.BusinessSnapshot, "host", bsnap);
             var bdata = benv.Serialize();

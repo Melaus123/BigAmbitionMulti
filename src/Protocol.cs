@@ -58,7 +58,7 @@ namespace BigAmbitionsMP
 
         // Businesses (exterior business sync — Phase 1)
         BusinessSnapshot = 50, // Host → All: full table of business state (sent on connect).
-        BusinessChange   = 51, // Host → All: single building business state changed.
+        BusinessChange   = 51, // Host → applying clients (one immediate push) and Client → Host (its own shops): one building's business state changed. The host sweep and the join delta ship BusinessChangeBatch (206) instead (2026-09-10).
 
         // Interiors (Phase 2: building interior sync on entry + while inside)
         InteriorRequest       = 60, // Client → Host: "I entered building X, subscribe me + send snapshot."
@@ -204,6 +204,7 @@ namespace BigAmbitionsMP
         ServiceCarStop        = 203,     // Rider → Host → service-car OWNER (2026-09-02): "stop your private driver / handed-off car so I can catch up and ride it" (host relays; the owner's machine owns that car's Gley AI). Auto-resumes after 60 s on the owner's side.
         ServiceCarResume      = 204,     // Rider → Host → OWNER: the rider boarded (native DriveAway on our GhostTaxi) or cancelled the map — resume the car's previous driving state.
         ShopValuation         = 205,     // H-BIZ-1 (2026-09-03, user option A): "request": viewer → Host → the shop's OWNER when the BizMan page of another PLAYER's shop opens; "answer": owner → Host → exactly ONE viewer (ToPid) carrying the game's own closure figure for that shop (interior items' selling prices + vehicles at the address + deposit — BizManPresentation.OnTerminateContractConfirm's formula). No grant gate: the native page shows an estimate to anyone. Small, on demand, never broadcast.
+        BusinessChangeBatch   = 206,     // 2026-09-10 (burst fix): several changed business records in ONE envelope so the 4 KB deflate floor applies — the host sweep and the join/daily delta use it; a single immediate push still uses BusinessChange.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -1397,7 +1398,10 @@ namespace BigAmbitionsMP
         //      sessions refuse at Hello per the freeze rule.
         // v21 (2026-09-03): new message ShopValuation=205 (H-BIZ-1). A v20 peer drops it as "Unknown message type"
         //      and would show $0 on a friend's shop page; mixed sessions refuse at Hello per the freeze rule.
-        public const int Version = 21;
+        // v22 (2026-09-10): new message BusinessChangeBatch=206 (burst fix). A v21 peer drops it as
+        //      "Unknown message type" and would miss every swept business change and the join delta;
+        //      mixed sessions refuse at Hello per the freeze rule.
+        public const int Version = 22;
     }
 
     /// <summary>Sent by client on connect.</summary>
@@ -2188,6 +2192,15 @@ namespace BigAmbitionsMP
         /// MPPriceSync channel owns those.</summary>
         public List<RetailPriceInfo> Prices { get; set; } = new();
 
+        /// <summary>H-AICAT-1 (2026-09-10): what an AI-run shop SELLS (the game's cachedAvailableProducts),
+        /// host-authoritative. The game fills that list only when it CREATES the business, from the business-
+        /// layout catalog that never loads on a client, so a client's AI shops carried an empty list forever
+        /// (296 of 304 in a client's day-199 save, bundle 20260906-155451): rival shops looked like they sold
+        /// nothing, spawned no shoppers, and the client's "who else sells this" counts were wrong. Never
+        /// compared by EqualInfo (it causes no send on its own); rides with any record that is sent. Empty for
+        /// player shops and for an AI shop whose list is empty on the host (= "no opinion" on the receiver).</summary>
+        public List<string> Products { get; set; } = new();
+
         /// <summary>H-BIZFLAP-1: the record the sweeps REMEMBER stays intact; the copy that goes on the wire is the one that gets its logo bytes stripped (attach-once). Shallow: the lists are shared, so callers must REPLACE LogoFiles on the copy, never mutate it.</summary>
         internal BusinessInfo ShallowCopy() => (BusinessInfo)MemberwiseClone();
     }
@@ -2258,6 +2271,14 @@ namespace BigAmbitionsMP
     public class BusinessChangePayload
     {
         public BusinessInfo Info { get; set; } = new();
+    }
+
+    /// <summary>Burst fix 2026-09-10: several changed buildings in ONE envelope.  A single
+    /// BusinessChange is 1.3-2.4 KB — under the 4 KB deflate floor — so a sweep of hundreds
+    /// travelled entirely uncompressed; batched, the envelope compresses.</summary>
+    public class BusinessChangeBatchPayload
+    {
+        public List<BusinessInfo> Infos { get; set; } = new();
     }
 
     // ── Interior sync (Phase 2: building interior state) ─────────────────────
