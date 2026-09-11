@@ -62,6 +62,11 @@ DEFAULT_WITHIN_S = 10.0
 BOOT_FREEZE_S = 60.0
 BOOT_FREEZE_LINES = 40
 ROLE_NAME = {"h": "host", "c": "client", "d": "client2"}
+# ONE role's own launcher, for a mid-scenario relaunch (launch-mp-test.bat starts the whole rig):
+INTERNAL_LAUNCHER = {r: os.path.join(ROOT, "local", "_launch_%s_internal.bat" % n) for r, n in ROLE_NAME.items()}
+DROP_GONE_S = 60.0          # a dropped instance has this long to exit after WM_CLOSE
+DROP_KILL_AFTER_S = 30.0    # ... after this, taskkill BY PID (never by image name)
+RELAUNCH_PROBE = 4096       # log-head bytes compared after a relaunch: did the log truncate or append?
 
 
 # ---------------------------------------------------------------- small helpers
@@ -307,9 +312,9 @@ def apply_captures(capture, result_text, vars_):
     return got, None
 
 
-def load_scenario(path):
-    with open(path, "r", encoding="utf-8") as f:
-        sc = json.load(f)
+def validate_scenario(sc):
+    """Shape rules for a scenario dict. load_scenario applies them to a parsed file; --selftest calls
+    this directly on in-memory dicts. drop/relaunch are cmd-less step kinds, exactly like sleep_s."""
     steps = sc.get("steps") or []
     inst = sc.get("instances", 2)
     if inst not in (2, 3):
@@ -322,9 +327,33 @@ def load_scenario(path):
         if s.get("role") in ROLES and s["role"] not in active:
             raise ValueError("step %d: role '%s' needs instances=%d"
                              % (i, s["role"], ROLES.index(s["role"]) + 1))
-        if not s.get("cmd") and not s.get("sleep_s"):
-            raise ValueError("step %d: needs cmd or sleep_s" % i)
+        if s.get("drop") and s.get("relaunch"):
+            raise ValueError("step %d: drop and relaunch are separate steps" % i)
+        if (s.get("drop") or s.get("relaunch")) and (s.get("cmd") or s.get("sleep_s")):
+            raise ValueError("step %d: a drop/relaunch step is cmd-less (like sleep_s)" % i)
+        if (s.get("drop") or s.get("relaunch")) and s.get("role") not in active:
+            raise ValueError("step %d: drop/relaunch needs ONE concrete role (%s), not '%s'"
+                             % (i, "|".join(active), s.get("role")))
+        if not s.get("cmd") and not s.get("sleep_s") and not s.get("drop") and not s.get("relaunch"):
+            raise ValueError("step %d: needs cmd, sleep_s, drop or relaunch" % i)
     return sc
+
+
+def load_scenario(path):
+    with open(path, "r", encoding="utf-8") as f:
+        sc = json.load(f)
+    return validate_scenario(sc)
+
+
+def step_label(s):
+    """The 'cmd' column for any step, including the cmd-less kinds (sleep_s / drop / relaunch)."""
+    if s.get("cmd"):
+        return s["cmd"]
+    if s.get("drop"):
+        return "(drop %s)" % ROLE_NAME.get(s.get("role"), s.get("role"))
+    if s.get("relaunch"):
+        return "(relaunch %s)" % ROLE_NAME.get(s.get("role"), s.get("role"))
+    return "(wait %ss)" % s.get("sleep_s")
 
 
 # ---------------------------------------------------------------- the runner
@@ -344,6 +373,10 @@ class Run:
         self.mark_off = {r: 0 for r in ROLES}
         self.run_start_off = {r: 0 for r in ROLES}
         self.flicked = {r: False for r in ROLES}
+        self.down = set()                            # roles DROPPED right now (D3: all/both skip them)
+        self.drops = 0                               # drop counter -> <role>-drop-<k>.log
+        self.drop_off = {r: 0 for r in ROLES}        # each role's log size at its drop
+        self.drop_head = {r: b"" for r in ROLES}     # log head at drop: truncated-or-appended test
         self.launch_t = None
         self.id = sc.get("id", "run")
         self.rundir = os.path.join(RUNS, "%s-%s" % (self.id, datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
@@ -450,22 +483,37 @@ class Run:
                           str(self.instances)], creationflags=0x00000008)
         self.notes.append("launch at %s via local\\launch-mp-test.bat %d" % (stamp(self.launch_t), self.instances))
 
-    def wait_armed(self, role, timeout_s=300.0):
-        """Freshness: mtime newer than launch. Identity: exactly one ARMED line for this role."""
+    def relaunch_offset(self, role):
+        """Byte offset where a RELAUNCHED instance's log starts: 0 when the log was recreated (the usual
+        case - Player-instance*.log truncates with no -prev sibling), else the size captured at the drop,
+        so the 'exactly one ARMED line' rule counts only the new instance's lines. A log that truncated
+        and already grew past the old size is caught by comparing its head with the head kept at drop."""
+        off = self.drop_off.get(role, 0)
+        if off <= 0 or log_size(LOGS[role]) < off:
+            return 0
+        return off if read_bytes_shared(LOGS[role], 0)[:RELAUNCH_PROBE] == self.drop_head.get(role) else 0
+
+    def wait_armed(self, role, timeout_s=300.0, since_t=None, relaunch=False):
+        """Freshness: mtime newer than the launch this wait belongs to (the rig launch, or a relaunch's
+        own start time). Identity: exactly one ARMED line for this role, counted from relaunch_offset."""
         path = LOGS[role]
+        launch_t = self.launch_t if since_t is None else since_t
         deadline, last_size, last_growth = now() + timeout_s, -1, now()
         while now() < deadline:
-            if log_mtime(path) > self.launch_t:
-                text = read_text_from(path, 0)
+            off = self.relaunch_offset(role) if relaunch else 0
+            if log_mtime(path) > launch_t:
+                text = read_text_from(path, off)
                 hits = ARMED_RE[role].findall(text)
                 if len(hits) == 1:
-                    self.run_start_off[role] = 0
-                    self.mark_off[role] = 0
-                    say("%s ARMED (fresh log, exactly one ARMED line)" % ROLE_NAME[role])
+                    self.run_start_off[role] = off
+                    self.mark_off[role] = off
+                    say("%s ARMED (fresh log, exactly one ARMED line%s)"
+                        % (ROLE_NAME[role], (" after byte %d" % off) if off else ""))
                     return None
                 if len(hits) > 1:
-                    return ("%s log carries %d 'channel ARMED' lines - that is a stale/shared log, not this "
-                            "run's (08-testdrive.md stale-log trap)" % (ROLE_NAME[role], len(hits)))
+                    return ("%s log carries %d 'channel ARMED' lines (from byte %d) - that is a stale/shared "
+                            "log, not this run's (08-testdrive.md stale-log trap)"
+                            % (ROLE_NAME[role], len(hits), off))
                 size, lines = log_size(path), text.count("\n")
                 if size != last_size:
                     last_size, last_growth = size, now()
@@ -475,18 +523,104 @@ class Run:
                     last_growth = now()
             time.sleep(1.0)
         return "%s never logged its ARMED line within %.0fs of launch (log mtime fresh=%s)" % (
-            ROLE_NAME[role], timeout_s, log_mtime(path) > self.launch_t)
+            ROLE_NAME[role], timeout_s, log_mtime(path) > launch_t)
+
+    # ---- drop / relaunch of ONE instance mid-scenario
+    def cmdless_row(self, seq, role, label, expected, verdict, evidence):
+        self.rows.append((seq, role, label, "-", expected, verdict, evidence[:200]))
+        say(("" if verdict == "PASS" else "FAIL ") + "step %d (%s): %s" % (seq, ROLE_NAME[role], evidence))
+        return verdict == "PASS"
+
+    def drop_role(self, step):
+        """D1: WM_CLOSE exactly ONE role, wait for its process to be GONE (never a fixed sleep), then
+        snapshot that role's log because the relaunch truncates it. Never kills by image name."""
+        seq, role, label = step["seq"], step["role"], step_label(step)
+        exp, note = "process gone", step.get("note", "")
+        if role in self.down:
+            return self.cmdless_row(seq, role, label, exp, "FAIL", "role %s is already dropped" % role)
+        mine = [p for p in game_processes() if p[2] == role]
+        if not mine:
+            return self.cmdless_row(seq, role, label, exp, "FAIL",
+                                    "no %s process is running to drop" % ROLE_NAME[role])
+        pid, t0, killed = mine[0][0], now(), False
+        say("drop %s: WM_CLOSE pid=%d%s" % (ROLE_NAME[role], pid, (" - " + note) if note else ""))
+        for hwnd in windows_of_pid(pid):
+            _u32.PostMessageW(hwnd, 0x0010, 0, 0)      # WM_CLOSE == CloseMainWindow, the real quit path
+        while now() - t0 < DROP_GONE_S:
+            if not [p for p in game_processes() if p[0] == pid]:
+                break
+            if not killed and (now() - t0) > DROP_KILL_AFTER_S:
+                killed = True
+                say("drop %s: pid=%d survived WM_CLOSE %.0fs - taskkill by PID (never by image name)"
+                    % (ROLE_NAME[role], pid, DROP_KILL_AFTER_S))
+                run(["taskkill", "/PID", str(pid), "/F"])
+                self.notes.append("drop step %d: %s pid=%d needed taskkill /PID after %.0fs"
+                                  % (seq, ROLE_NAME[role], pid, DROP_KILL_AFTER_S))
+            time.sleep(POLL_S)
+        took = now() - t0
+        if [p for p in game_processes() if p[0] == pid]:
+            return self.cmdless_row(seq, role, label, exp, "FAIL",
+                                    "%s pid=%d still alive %.0fs after WM_CLOSE (+taskkill)"
+                                    % (ROLE_NAME[role], pid, took))
+        self.drops += 1
+        self.drop_off[role] = log_size(LOGS[role])
+        data = read_bytes_shared(LOGS[role], 0)
+        self.drop_head[role] = data[:RELAUNCH_PROBE]
+        snap = os.path.join(self.rundir, "%s-drop-%d.log" % (role, self.drops))
+        try:
+            os.makedirs(self.rundir, exist_ok=True)
+            with open(snap, "wb") as f:
+                f.write(data)
+        except OSError as e:
+            self.notes.append("drop step %d: could not snapshot the %s log: %s" % (seq, ROLE_NAME[role], e))
+        self.down.add(role)
+        self.notes.append("DROP step %d: %s pid=%d WM_CLOSE at %s, gone after %.1fs, snapshot %s (%d bytes)"
+                          % (seq, ROLE_NAME[role], pid, stamp(t0), took, os.path.basename(snap),
+                             self.drop_off[role]))
+        return self.cmdless_row(seq, role, label, exp, "PASS", "dropped pid=%d after %.1fs" % (pid, took))
+
+    def relaunch_role(self, step):
+        """D2: start ONLY this role's internal launcher, then wait for a FRESH ARMED line from the new
+        process and rebase its marks. join/acceptjoin afterwards are scenario business, not the driver's."""
+        seq, role, label = step["seq"], step["role"], step_label(step)
+        exp = "fresh ARMED line"
+        if role not in self.down:
+            return self.cmdless_row(seq, role, label, exp, "FAIL",
+                                    "role %s is not dropped - nothing to relaunch" % role)
+        bat = INTERNAL_LAUNCHER[role]
+        if not os.path.exists(bat):
+            return self.cmdless_row(seq, role, label, exp, "FAIL", "internal launcher missing: %s" % bat)
+        t0 = now()
+        say("relaunch %s via %s" % (ROLE_NAME[role], os.path.basename(bat)))
+        subprocess.Popen(["cmd", "/c", "start", "", "/D", os.path.dirname(bat), bat], creationflags=0x00000008)
+        err = self.wait_armed(role, since_t=t0, relaunch=True)
+        if err:
+            return self.cmdless_row(seq, role, label, exp, "FAIL", err)
+        took, off = now() - t0, self.mark_off[role]
+        self.down.discard(role)
+        self.drop_off[role], self.drop_head[role] = 0, b""
+        self.notes.append("RELAUNCH step %d: %s started at %s via %s, ARMED at %s (%.1fs); marks rebased to byte %d"
+                          % (seq, ROLE_NAME[role], stamp(t0), os.path.basename(bat), stamp(), took, off))
+        return self.cmdless_row(seq, role, label, exp, "PASS",
+                                "relaunched pid fresh, ARMED after %.1fs (log offset %d)" % (took, off))
 
     # ---- steps
     def roles_of(self, step):
-        if step["role"] == "both":
-            return ["h", "c"]              # unchanged: host + first client
-        if step["role"] == "all":
-            return list(self.active)       # every ACTIVE role of this scenario
+        if step["role"] in ("both", "all"):
+            want = ["h", "c"] if step["role"] == "both" else list(self.active)
+            live = [r for r in want if r not in self.down]
+            if len(live) != len(want):
+                self.notes.append("step %s ('%s'): skipped dropped role(s) %s"
+                                  % (step.get("seq"), step["role"], ",".join(r for r in want if r in self.down)))
+            return live
         return [step["role"]]
 
     def do_step(self, step):
         seq, verdicts = step["seq"], []
+        if step.get("drop"):
+            return self.drop_role(step)
+        if step.get("relaunch"):
+            return self.relaunch_role(step)
         if not step.get("cmd"):
             say("step %d: declared wait of %ss (%s)" % (seq, step["sleep_s"], step.get("note", "")))
             time.sleep(float(step["sleep_s"]))
@@ -494,6 +628,11 @@ class Run:
             return True
         ok_all = True
         for role in self.roles_of(step):
+            if role in self.down:                       # explicitly addressed, so it cannot be skipped
+                self.rows.append((seq, role, step["cmd"], "-", step.get("expect_result", ""), "FAIL",
+                                  "role %s is dropped" % role))
+                say("FAIL step %d: role %s is dropped" % (seq, role))
+                return False
             try:
                 cmd = subst(step["cmd"], self.vars)
                 exp = subst(step.get("expect_result"), self.vars, escape=True)
@@ -608,7 +747,7 @@ def dry_run(sc, args):
             extra = (extra + " | " if extra else "") + "capture " + ",".join(s["capture"])
         if s.get("note"):
             extra = (extra + " | " if extra else "") + s["note"]
-        cmd = s.get("cmd") or "(wait %ss)" % s.get("sleep_s")
+        cmd = step_label(s)
         exp = s.get("expect_result") or (("NOT " + s["refute_result"]) if s.get("refute_result") else "-")
         print("%-4s %-5s %-44s %-34s %s" % (s["seq"], s["role"], cmd[:44], exp[:34], extra))
     names = sorted({m.group(1) for s in sc["steps"]
@@ -668,6 +807,22 @@ LOGTESTS = [
 ]
 
 
+SHAPETESTS = [
+    # (label, scenario dict, must load_scenario accept it?) - the cmd-less step kinds
+    ("cmd step", {"steps": [{"role": "h", "cmd": "mergestatus"}]}, True),
+    ("sleep step", {"steps": [{"role": "h", "sleep_s": 5}]}, True),
+    ("drop step", {"instances": 3, "steps": [{"role": "d", "drop": True, "note": "sim window"}]}, True),
+    ("relaunch step", {"steps": [{"role": "c", "relaunch": True}]}, True),
+    ("drop+relaunch pair", {"steps": [{"role": "c", "drop": True}, {"role": "c", "relaunch": True},
+                                      {"role": "c", "cmd": "join ${session}"}]}, True),
+    ("empty step", {"steps": [{"role": "h"}]}, False),
+    ("drop needs one role", {"steps": [{"role": "all", "drop": True}]}, False),
+    ("drop d needs instances=3", {"steps": [{"role": "d", "drop": True}]}, False),
+    ("drop is cmd-less", {"steps": [{"role": "c", "drop": True, "cmd": "mergestatus"}]}, False),
+    ("drop is not relaunch", {"steps": [{"role": "c", "drop": True, "relaunch": True}]}, False),
+]
+
+
 def selftest():
     fails = []
     for label, sample, exp, refute, cap, want in SELFTESTS:
@@ -712,8 +867,20 @@ def selftest():
         print("  %-28s FAIL (a missing variable must raise)" % "subst missing")
     except Unresolved:
         print("  %-28s PASS (missing variable raises, step fails loudly)" % "subst missing")
+    print("  -- scenario step shapes (drop/relaunch are cmd-less, like sleep_s) --")
+    for label, sc, want in SHAPETESTS:
+        try:
+            validate_scenario(json.loads(json.dumps(sc)))
+            got, why = True, ""
+        except ValueError as e:
+            got, why = False, str(e)
+        if got != want:
+            fails.append(label)
+        print("  %-28s %s (accepted=%s want=%s)%s" % (label, "PASS" if got == want else "FAIL", got, want,
+                                                      ("  <- " + why) if why else ""))
     print("SELFTEST: %s (%d check groups, %d failed)" % ("PASS" if not fails else "FAIL - " + ", ".join(fails),
-                                                         len(SELFTESTS) + len(LOGTESTS) + 2, len(fails)))
+                                                         len(SELFTESTS) + len(LOGTESTS) + len(SHAPETESTS) + 2,
+                                                         len(fails)))
     return 0 if not fails else 1
 
 
