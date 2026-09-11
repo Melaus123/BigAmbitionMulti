@@ -208,6 +208,8 @@ namespace BigAmbitionsMP
         NotificationRelay     = 207,     // Merger slice 6 (2026-09-10, user requirement: the top-right pop-ups must MATCH on every member of a merged company): ONE business-scoped game toast — the GAME'S OWN headerKey + notificationData — from the member whose shop raised it, via the Host, to every OTHER ONLINE member of THAT sender's group. No new on-screen text: the receiver calls the game's own Notifications.Show with the same key, untracked (nothing persisted) and click-inert. Never leaves the group; non-members and other groups never receive it. Rides Gameplay (small, timely, and it writes no state a Bulk snapshot also writes).
         BusinessPaperwork     = 208,     // MERGER PHASE 3-A (2026-09-11, D13): one member's per-business PAPERWORK bundle - client -> HOST only, never the other way in this build. The books the interior/business syncs never carried (orderHistory, today's till, factory exports, marketing campaigns), the owner-level agreements FILTERED to the sender's own addresses (delivery contracts, import partnerships + this week's importer orders, the four manager plans, installation/moving contracts, licensing-fee state), and the FULL employee records behind the 7-field roster publish. The host keeps the LATEST bundle per member in the mod's session manifest (manifest.bamp.json - never a .hsg field) so an absent member's businesses can be handed to a simulator (P3-B) and survive a host restart. Publish-and-store only: nothing here changes gameplay. Rides Bulk (rule 9: it is a snapshot-class bundle).
         MergerHandover        = 209,     // MERGER PHASE 3-B (2026-09-11, plan §9, D1/D13/D15): Host -> the DESIGNATED SIMULATOR - "run these addresses of this absent member as an owner would". Carries the absent owner's building keys, the paperwork bundle the host stored in P3-A (as TEXT - a straight passthrough of what P3-A serialised), and the whole absence table so every receiver knows who simulates what. The INTERIORS follow separately as ordinary direct InteriorSnapshots, one per host tick (paced). The simulator sends the SAME type back carrying only Ack, so the host logs delivery; Drop=true retires a mark (dissolve, re-designation, nobody online) and the receiver undoes its apply. NEVER sent to the absent owner's own machine as a hand-over. MERGER PHASE 3-C (2026-09-11, D2/D13): the SAME type with Return=true IS the RETURN LEG - host -> the RETURNED OWNER, carrying the paperwork the host holds for exactly the addresses that were simulated in their absence plus the name of the machine that ran them; the interiors follow as paced direct InteriorSnapshots exactly as the hand-over's do. A return stamps SimulatorPid with the sentinel 'return-leg' (never a player id), so a pre-P3-C build ignores it instead of installing the owner's own businesses as an absent member's.
+        CompanyBooks          = 210,     // MERGER PHASE 4a (2026-09-11, D14/D18/D19): one member's OWN daily books - the last 30 day records as per-day totals (every float FinancialSummary holds), the BusinessIncomeStatement rows of the addresses this machine owns or simulates, and the real-estate rows, plus that member's net-worth components (investments, loans remaining, assets) and its outstanding TAX bill (B9-ii). Client -> HOST, and the host fans one owner's books out to that owner's ONLINE co-members and replays them to a joiner. Receivers OVERLAY the rows onto their own gi.financialSummaries, which is the single list every money surface in the game reads - so D14 lands with no per-surface patch. NEVER written to a .hsg: the overlay is stripped around every save.
+        MergerTax             = 212,     // MERGER PHASE 4a / B9 (2026-09-11, user decision): the TAX PAY-ALL. Action=payall: the member who just paid its own bill natively asks the host to have every partner settle theirs. Action=payown: host -> one ONLINE partner - run your own native pay action now (the money leaves the SHARED wallet through ChangeMoney, which the MergerWallet mirror follows). Action=report: that partner's result back to the payer's log (no on-screen text either way). A pay-all for an OFFLINE partner is HELD by the host and delivered at that partner's next connect.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -3668,5 +3670,95 @@ namespace BigAmbitionsMP
         /// the one piece of on-screen text this leg is approved to show (the return toast, user
         /// approval 2026-09-11). Empty = nobody known, and the owner shows no toast at all.</summary>
         public string RanByName { get; set; } = "";
+    }
+
+    // ══ MERGER PHASE 4a - COMPANY BOOKS (2026-09-11, D14/D18/D19) ═══════════════════════════════
+    /// <summary>One entry of a BusinessIncomeStatement's Sales / Resources breakdown.</summary>
+    public class CbTxGroup
+    {
+        public string ItemName { get; set; } = "";
+        public float  Amount   { get; set; }
+    }
+
+    /// <summary>ONE day's BusinessIncomeStatement for ONE address - every field the game's own record
+    /// holds (Entities/FinancialSummary.cs:11-41), keyed by the mod's address key so the receiver can
+    /// rebuild the row against its own Address value.</summary>
+    public class CbStatement
+    {
+        public int    Day        { get; set; }
+        public string AddressKey { get; set; } = "";
+        public List<CbTxGroup> Sales     { get; set; } = new();
+        public List<CbTxGroup> Resources { get; set; } = new();
+        public float SalaryExpenses    { get; set; }
+        public float RentExpenses      { get; set; }
+        public float MarketingExpenses { get; set; }
+        public float Theft             { get; set; }
+        public float LicensingFees     { get; set; }
+        public float TotalSales        { get; set; }
+        public float TotalResources    { get; set; }
+        public float TotalOngoing      { get; set; }
+        public float TotalProfit       { get; set; }
+    }
+
+    /// <summary>ONE day's real-estate row for ONE address (D19-1: the per-property rows are injected
+    /// too, and carry the owning member's colour).</summary>
+    public class CbRealEstate
+    {
+        public int    Day        { get; set; }
+        public string AddressKey { get; set; } = "";
+        public float  Amount     { get; set; }
+    }
+
+    /// <summary>ONE day record's TOTALS - EVERY float Entities/FinancialSummary.cs:61-89 holds, in
+    /// declaration order. D19-1: everything paid from the shared wallet counts, so all of them are
+    /// folded into the receiver's record and all of them are recorded in the removal ledger.</summary>
+    public class CbDayTotals
+    {
+        public int   Day                 { get; set; }
+        public float BusinessProfit      { get; set; }   // totalBusinessProfit
+        public float LoanExpenses        { get; set; }   // totalLoanExpenses
+        public float HealthInsurance     { get; set; }   // totalHealthInsuranceExpenses
+        public float HeadhunterFees      { get; set; }   // totalHeadhunterReplacementFees
+        public float RealEstate          { get; set; }   // totalRealEstate
+        public float NegativeInterest    { get; set; }   // negativeInterestRates
+        public float ParkingFees         { get; set; }   // parkingFees
+        public float SalaryIncome        { get; set; }   // salaryIncome
+        public float ResidentialExpenses { get; set; }   // totalResidentialExpenses
+        public float UnassignedWages     { get; set; }   // totalUnassignedStaffWages
+        public float TotalProfit         { get; set; }   // totalProfit
+    }
+
+    /// <summary>MERGER PHASE 4a: one member's whole publish - books, net-worth components (D19-4)
+    /// and tax bill (B9-ii).</summary>
+    public class CompanyBooksPayload
+    {
+        public string OwnerPid { get; set; } = "";   // sender (validated SenderIs at the host)
+        public string StableId { get; set; } = "";
+        public int    Day      { get; set; }         // the sender's game day at publish time
+        public List<CbStatement>  Statements { get; set; } = new();
+        public List<CbRealEstate> RealEstate { get; set; } = new();
+        public List<CbDayTotals>  Totals     { get; set; } = new();
+        // D19-4 - the three components the persona page sums across members (cash is already one
+        // number: the MergerWallet mirror).
+        public float Investments    { get; set; }
+        public float LoansRemaining { get; set; }
+        public float AssetsWorth    { get; set; }
+        // B9-ii - the bill as the GAME holds it (current + back taxes), its deadline, and the tax
+        // period the current bill belongs to (Taxes.day), so a pay-all can be refused twice over.
+        public float TaxDue         { get; set; }
+        public int   TaxDeadlineDay { get; set; }
+        public int   TaxPeriod      { get; set; }
+    }
+
+    /// <summary>MERGER PHASE 4a / B9 - the tax pay-all, its relay and the partner's report back.</summary>
+    public class MergerTaxPayload
+    {
+        public string PlayerId { get; set; } = "";   // sender (validated SenderIs at the host)
+        public string Action   { get; set; } = "";   // "payall" | "payown" | "report"
+        public string PayerPid { get; set; } = "";   // who asked the company to settle
+        public int    Period   { get; set; }
+        public bool   Ok       { get; set; }
+        public float  Amount   { get; set; }
+        public string Reason   { get; set; } = "";
     }
 }

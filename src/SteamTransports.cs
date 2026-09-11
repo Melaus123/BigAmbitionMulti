@@ -64,6 +64,11 @@ namespace BigAmbitionsMP
                 // records, up to the 2 MB refusal cap) - it must not head-of-line-block gameplay.
                 case (int)MessageType.BusinessPaperwork:
                 case (int)MessageType.MergerHandover:      // P3-B: the hand-over CARRIES that bundle (plus the marks) - same class, same lane
+                // Merger phase 4a (G2): a company-books bundle is the same snapshot class - 30 day records,
+                // every business statement and its transaction groups, up to the same 2 MB refusal cap. A
+                // near-cap bundle must not head-of-line-block gameplay.
+                case (int)MessageType.CompanyBooks:
+                case (int)MessageType.MergerTax:           // the pay-all is keyed to the books it reads (TaxDue/TaxPeriod) - same lane keeps that order
                 case (int)MessageType.ClientDisconnectUpload:
                 case (int)MessageType.PeerLogReply:
                 case (int)MessageType.AuditDrillReply:

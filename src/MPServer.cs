@@ -421,6 +421,11 @@ namespace BigAmbitionsMP
                 // from the slot being restored, beside the merger roster, clear-then-apply. An older
                 // slot can never keep the newer world's bundles (user rule 2026-09-11).
                 RestorePaperworkFromManifest(m);
+                // Phase 4a (G1): the books store follows the paperwork store exactly - same moment, same
+                // clear-then-apply, same timeline rule. AFTER the paperwork restore, whose ResetPaperwork
+                // already cleared the books store once (this re-clear is idempotent and keeps the contract
+                // local to the call that applies).
+                RestoreCompanyBooksFromManifest(m);
                 // P3-B: the absence marks follow the same timeline - clear-then-apply from THIS
                 // manifest, BEFORE HostReconcileAbsence can run, so a restored mark keeps its SinceDay
                 // and the reconcile only re-designates the simulator. This machine's own simulation
@@ -464,6 +469,7 @@ namespace BigAmbitionsMP
 
         public static void ResetPaperwork()
         {
+            try { CompanyBooks.HostReset(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] host store reset: {ex.Message}"); }   // phase 4a rides the same world boundary
             lock (_paperwork) _paperwork.Clear();
             lock (_capWarnedDay) _capWarnedDay.Clear();
             lock (_resendServedAt) { _resendServedAt.Clear(); _resendThrottleLogged.Clear(); }   // r7: the throttle dies with the session too
@@ -982,6 +988,76 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Paperwork] restored {n} member bundle(s) from the manifest.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] manifest restore: {ex.Message}"); }
+        }
+
+        /// <summary>Merger phase 4a (G1): the host's COMPANY BOOKS store for the manifest MODEL, beside
+        /// the paperwork store and the absence marks it rides with. Keyed by STABLE id like both of them
+        /// (a player id is live and dies with the session); the bundle goes in as TEXT, a straight
+        /// passthrough of what the sender serialised. A member with no known stable id is skipped - it
+        /// republishes at its next day change or membership edge.</summary>
+        public static List<MpCompanyBooksEntry> SnapshotCompanyBooks()
+        {
+            var list = new List<MpCompanyBooksEntry>();
+            try
+            {
+                int hostDay = SaveGameManager.Current?.Day ?? 0;
+                foreach (var kv in CompanyBooks.HostStoreSnapshot())
+                {
+                    var p = kv.Value;
+                    if (p == null) continue;
+                    string stable = !string.IsNullOrEmpty(p.StableId) ? p.StableId
+                                  : (StableIdByPlayer.TryGetValue(kv.Key, out var s) ? (s ?? "") : "");
+                    if (string.IsNullOrEmpty(stable)) { Plugin.Logger.LogInfo($"[Books] manifest snapshot skipped '{kv.Key}': no stable id known for that member yet."); continue; }
+                    list.Add(new MpCompanyBooksEntry
+                    {
+                        StableId    = stable,
+                        Day         = p.Day,
+                        ReceivedDay = hostDay,
+                        Json        = Newtonsoft.Json.JsonConvert.SerializeObject(p),
+                    });
+                }
+                list.Sort((x, y) => string.CompareOrdinal(x.StableId, y.StableId));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] manifest snapshot: {ex.Message}"); }
+            return list;
+        }
+
+        /// <summary>Host: REPLACE the books store from the manifest being restored - clear-then-apply
+        /// beside the paperwork restore, on the same timeline rule: the loaded slot's books are the only
+        /// books there is, and an older slot can never pull the newer world's (user rule 2026-09-11). The
+        /// owner's PID is re-keyed to whoever holds that stable id in THIS session; a member who is not
+        /// here keeps the pid the bundle was stored with and is simply re-keyed at its next publish. A
+        /// manifest written before the field existed restores an empty store.</summary>
+        public static void RestoreCompanyBooksFromManifest(MpManifest m)
+        {
+            try
+            {
+                CompanyBooks.HostReset();
+                int n = 0;
+                if (m?.CompanyBooks != null)
+                    foreach (var e in m.CompanyBooks)
+                    {
+                        if (string.IsNullOrEmpty(e?.StableId) || string.IsNullOrEmpty(e.Json)) continue;
+                        CompanyBooksPayload? p = null;
+                        try { p = Newtonsoft.Json.JsonConvert.DeserializeObject<CompanyBooksPayload>(e.Json); }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] manifest entry for '{e.StableId}' unreadable: {ex.Message} - that member republishes at its next day change."); }
+                        if (p == null) continue;
+                        p.StableId = e.StableId;
+                        if (e.Day > 0) p.Day = e.Day;
+                        // m-c (review r3): the serialised bundle still carries LAST session's player
+                        // id.  Blank it first, or the entry lands under a dead id - inert, yet it
+                        // rides every later manifest and two entries could share one stable id.
+                        p.OwnerPid = "";
+                        foreach (var kv in StableIdByPlayer)
+                            if (kv.Value == e.StableId) { p.OwnerPid = kv.Key; break; }
+                        if (string.IsNullOrEmpty(p.OwnerPid))
+                            Plugin.Logger.LogInfo($"[Books] manifest entry for '{e.StableId}' kept under its stable id: that member is not online yet - it is adopted when it connects.");
+                        CompanyBooks.HostRestore(p);
+                        n++;
+                    }
+                Plugin.Logger.LogInfo($"[Books] restored {n} member bundle(s) from the manifest.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] manifest restore: {ex.Message}"); }
         }
 
         /// <summary>Merger phase 3-B: the host's absence marks for the manifest MODEL, beside the
@@ -2035,6 +2111,31 @@ namespace BigAmbitionsMP
                     }
                     else if (!string.IsNullOrEmpty(hv.Ack))
                         Plugin.Logger.LogInfo($"[Absence] '{senderPid}' acked the hand-over of '{hv.OwnerPid}': {hv.Ack}.");
+                    break;
+                }
+
+                case MessageType.CompanyBooks:
+                {
+                    // MERGER PHASE 4a (D14): one member's own daily books. Client -> host; the host
+                    // stores them per owner, re-keys anything the sender only SIMULATES to the real
+                    // owner, and fans the result out to that owner's online co-members.
+                    var cb = env.GetPayload<CompanyBooksPayload>();
+                    if (cb != null && SenderIs(cb.OwnerPid, senderPid, MessageType.CompanyBooks))
+                        GameStatePatcher.EnqueueOnMainThread(() => CompanyBooks.HostStore(cb, senderPid));
+                    break;
+                }
+
+                case MessageType.MergerTax:
+                {
+                    // MERGER PHASE 4a / B9: the tax pay-all ("payall") or one partner's result
+                    // ("report"). The host never receives "payown" - that direction is host -> member.
+                    var mt = env.GetPayload<MergerTaxPayload>();
+                    if (mt == null) break;
+                    if (!SenderIs(mt.PlayerId, senderPid, MessageType.MergerTax)) break;
+                    string tPid = senderPid;
+                    if (mt.Action == "payall")      GameStatePatcher.EnqueueOnMainThread(() => CompanyBooks.HostPayAll(mt, tPid));
+                    else if (mt.Action == "report") GameStatePatcher.EnqueueOnMainThread(() => CompanyBooks.HostReport(mt, tPid));
+                    else Plugin.Logger.LogWarning($"[Tax] refused a MergerTax from '{tPid}': action '{mt.Action}' is not one this direction carries.");
                     break;
                 }
 
@@ -3297,6 +3398,13 @@ namespace BigAmbitionsMP
             RefreshGrantsAndBroadcast();
             if (_peerNames.TryGetValue(peer.Id, out var grantJoinerPid) && StableIdByPlayer.TryGetValue(grantJoinerPid, out var grantJoinerStable))
                 SendOwnGrantsTo(peer, grantJoinerStable);
+            // Merger phase 4a (review r2 M1): the joiner's COMPANY BOOKS ride the join replay that
+            // actually runs. They used to sit in SendPermissionSnapshotTo, which had no call site at all -
+            // so a mid-day joiner saw blank partner rows until the next day change, and a pay-all held
+            // while it was offline was never delivered. THIS method is the one both the fresh join
+            // (SendWorldStateTo) and the reconnect resync run, and it already knows the joiner's pid.
+            if (!string.IsNullOrEmpty(grantJoinerPid)) SendCompanyBooksTo(peer, grantJoinerPid);
+            else Plugin.Logger.LogInfo($"[Books] join replay refused for peer {peer.Id}: that peer has no player id yet (its books arrive with the next publish).");
             SendMarketEventsTo(peer);        // active market events (change-broadcast only)
             SendPlayerShopPricesTo(peer);    // player-run shop prices (change-broadcast only)
             SendAppearanceSyncTo(peer);      // every player's appearance (else a joiner sees default avatars — broadcast-on-change only)
@@ -6988,20 +7096,80 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendPassengerSnapshotTo: {ex.Message}"); }
         }
 
-        /// <summary>Send the full access-grant table to a single peer (join replay). The merger state
-        /// rides along — a joiner must learn the merged company immediately (ANTIPATTERNS Class 4).</summary>
-        public static void SendPermissionSnapshotTo(MPLink peer)
+        // Review r2 M1: SendPermissionSnapshotTo was DELETED here - it had no call site anywhere in the
+        // mod, so everything inside it (including phase 4a's books replay) was dead code. Its other three
+        // sends are all covered by paths that do run: RefreshGrantsAndBroadcast (called from inside
+        // SendJoinReplayTo) broadcasts MergerState and the PermissionSnapshot, and the per-group wallet
+        // state rides RebroadcastMergerState -> BroadcastAllWalletGroups on the host's 10 s cadence.
+
+        // MERGER PHASE 4a - COMPANY BOOKS (2026-09-11, D14/D18/D19)
+
+        /// <summary>HOST: fan ONE owner's books out to every ONLINE co-member of that owner's company
+        /// (never back to the owner - its own books must not be overlaid twice). Returns how many
+        /// machines actually got them; the host itself counts when it is a co-member.</summary>
+        public static int SendCompanyBooksToGroup(CompanyBooksPayload p)
         {
-            if (peer == null) return;
+            int fanout = 0;
             try
             {
-                Send(peer, MessageEnvelope.Create(MessageType.PermissionSnapshot, "host", GrantSync.BuildSnapshot()));
-                Send(peer, MessageEnvelope.Create(MessageType.MergerState, "host", BuildMergerState()));
-                foreach (var kv in SnapshotWalletBalances())   // slice 4: joining member snaps to the shared balance
-                    Send(peer, MessageEnvelope.Create(MessageType.MergerWalletState, "host",
-                         new MergerWalletStatePayload { GroupId = kv.Key, Balance = kv.Value }));
+                if (!_running || p == null || string.IsNullOrEmpty(p.OwnerPid)) return 0;
+                if (!MergerSync.InAnyGroup(p.OwnerPid)) { Plugin.Logger.LogInfo($"[Books] fan-out refused: '{p.OwnerPid}' is not in a company."); return 0; }
+                byte[]? bytes = null;
+                foreach (var cp in ConnectedClientPeers())
+                {
+                    if (cp.playerId == p.OwnerPid) continue;
+                    if (!MergerSync.MergedRuntime(p.OwnerPid, cp.playerId)) continue;
+                    bytes ??= MessageEnvelope.Create(MessageType.CompanyBooks, "host", p).Serialize();
+                    cp.peer.Send(bytes, reliable: true);
+                    fanout++;
+                }
+                if (MPConfig.PlayerId != p.OwnerPid && MergerSync.MergedRuntime(p.OwnerPid, MPConfig.PlayerId))
+                { CompanyBooks.Receive(p); fanout++; }        // the host is a member too
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendPermissionSnapshotTo: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] fan-out: {ex.Message}"); }
+            return fanout;
+        }
+
+        /// <summary>HOST: one MergerTax envelope to one named member. FALSE = that member is not
+        /// online here (the caller holds the pay-all for them).</summary>
+        public static bool SendMergerTaxTo(string pid, MergerTaxPayload p)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(pid)) return false;
+                if (pid == MPConfig.PlayerId)
+                {
+                    if (p.Action == "payown") { GameStatePatcher.EnqueueOnMainThread(() => CompanyBooks.PayOwnForCompany(p.PayerPid)); return true; }
+                    if (p.Action == "report") { CompanyBooks.LogReport(p, p.PlayerId); return true; }
+                    return false;
+                }
+                if (!_running) return false;
+                foreach (var cp in ConnectedClientPeers())
+                {
+                    if (cp.playerId != pid) continue;
+                    cp.peer.Send(MessageEnvelope.Create(MessageType.MergerTax, "host", p).Serialize(), reliable: true);
+                    return true;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Tax] send to '{pid}': {ex.Message}"); }
+            return false;
+        }
+
+        /// <summary>HOST: replay every co-member's stored books to a JOINER, and deliver any tax
+        /// pay-all that was held while they were offline (B9-iv).</summary>
+        public static void SendCompanyBooksTo(MPLink peer, string joinerPid)
+        {
+            if (peer == null || string.IsNullOrEmpty(joinerPid)) return;
+            try
+            {
+                int n = 0;
+                foreach (var p in CompanyBooks.HostReplayFor(joinerPid))
+                { Send(peer, MessageEnvelope.Create(MessageType.CompanyBooks, "host", p)); n++; }
+                if (n > 0) Plugin.Logger.LogInfo($"[Books] replayed {n} member bundle(s) to '{joinerPid}' (join replay).");
+                else Plugin.Logger.LogInfo($"[Books] join replay for '{joinerPid}': the host holds no co-member books yet.");
+                CompanyBooks.HostFlushHeld(joinerPid);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] join replay: {ex.Message}"); }
         }
 
         public static void SendInteriorSnapshotTo(MPLink peer, InteriorSnapshotPayload snap)

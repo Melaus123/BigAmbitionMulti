@@ -531,7 +531,15 @@ namespace BigAmbitionsMP
                     return;
                 }
                 // The game's own threshold (TaxHelper.PlayerShouldDoTaxes): total sales over the last daysPerYear summaries, by list index.
+                // ORDER HAZARD (merger phase 4a, review r2): this reads the SAME list the company-books
+                // overlay writes into, and a joiner can already be a merged member here - with partner rows
+                // live, every member would clear the $150,000 threshold on the COMPANY's sales. The overlay
+                // is physically lifted around both the sum and the assessment the sum decides, exactly as a
+                // veiled Step lifts it; the pop re-applies. Inert with no merger (one bool read).
                 float sales = 0f;
+                CompanyBooks.SuspendPush();
+                try
+                {
                 var sums = gi.financialSummaries;
                 if (sums != null)
                 {
@@ -552,6 +560,8 @@ namespace BigAmbitionsMP
                 if (m == null) { Plugin.Logger.LogWarning("[TimeSync] JOIN SNAP: TaxHelper.ExecutePlayerTaxesEvent not found — the skipped annual assessment could not be run (H-SNAP-1)."); return; }
                 m.Invoke(null, null);
                 Plugin.Logger.LogInfo($"[TimeSync] JOIN SNAP: tax anniversary day {anniversary} fell inside the skipped days — the game's annual assessment ran now: bill dated day {toDay}, 20 days to pay (H-SNAP-1).");
+                }
+                finally { CompanyBooks.SuspendPop(); }
             }
             catch (System.Exception ex)
             {

@@ -1,0 +1,198 @@
+{
+  "id": "T-P4-BOOKS",
+  "title": "phase 4a company books, two players: on formation each member receives the partner's income history and overlays it (books days>0 on both), a partner shop reads as a partner statement, and dissolving clears the overlay (days=0); ends dissolved",
+  "preconditions": "Fixture save1 (host melaus/Prabaha, client Client1/REX). Build with phase 4a deployed. Scenario ends dissolved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Books\\] .* NOT FOUND",
+    "SetMoneyChangeValue not found",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED"
+  ],
+  "oracles_report": [
+    "\\[Books\\]",
+    "\\[Tax\\]",
+    "\\[Merger\\]"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST P4-BOOKS START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "books",
+      "expect_result": "^OK books days=0 ",
+      "note": "no company yet: nothing overlaid"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Books\\] overlaid",
+          "within_s": 60
+        },
+        {
+          "role": "c",
+          "regex": "\\[Books\\] overlaid",
+          "within_s": 60
+        }
+      ],
+      "note": "membership edge: both publish, the host fans out, each member overlays the partner's books"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "capture": {
+        "clientShop": "keys=\\['([^']+)'"
+      }
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "capture": {
+        "hostShop": "keys=\\['([^']+)'"
+      }
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "books",
+      "expect_result": "^OK books days=[1-9]\\d* addrs=[1-9]",
+      "note": "the host holds the client's statements"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "books",
+      "expect_result": "^OK books days=[1-9]\\d* addrs=[1-9]",
+      "note": "the client holds the host's statements"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "books ${clientShop}",
+      "expect_result": "^OK books addr=${clientShop} (day=\\d+ .* source=partner|no statement)",
+      "note": "a partner shop's statement is attributed to the partner (or the fixture has no statement for that address)"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "books ${hostShop}",
+      "expect_result": "^OK books addr=${hostShop} (day=\\d+ .* source=partner|no statement)"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Books\\] cleared",
+          "within_s": 20
+        },
+        {
+          "role": "c",
+          "regex": "\\[Books\\] cleared",
+          "within_s": 20
+        }
+      ],
+      "note": "FIXTURE HYGIENE: end dissolved; the overlay is removed on both"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "books",
+      "expect_result": "^OK books days=0 "
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "cmd": "books",
+      "expect_result": "^OK books days=0 "
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 23,
+      "role": "both",
+      "cmd": "mark TEST P4-BOOKS END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

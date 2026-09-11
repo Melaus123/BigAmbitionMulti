@@ -77,6 +77,7 @@ namespace BigAmbitionsMP
             if (UnityEngine.Time.unscaledTime < _nextTick) return;
             _nextTick = UnityEngine.Time.unscaledTime + 1f;
             try { MergerAbsence.Tick(); } catch { }   // P3-B: the host's PACED hand-over snapshots, one per tick
+            try { CompanyBooks.Tick(); } catch { }    // P4a M0: the MEMBERSHIP EDGE - publish/apply on join, clear on the way out (nothing else fires on formation)
             if (_veilDepth > 0)
             {
                 // DIAG [FlipProbe] (2026-07-07, host stuck-flip: no 'flip OFF' after dissolve): a
@@ -214,10 +215,20 @@ namespace BigAmbitionsMP
 
         private static bool _saveStrip;   // true while the OUTERMOST push is the save strip
 
+        /// <summary>MERGER PHASE 4a: the company-books overlay reads this to stay INERT while a
+        /// veiled pass runs (D19-2 - GenerateTaxes and CreateFinancialSummary must see own books
+        /// only). The field itself stays private; this is the read-only accessor.</summary>
+        public static int VeilDepth => _veilDepth;
+
         private static void Push(bool saveStrip)
         {
             if (_veilDepth++ > 0) return;
             _saveStrip = saveStrip;
+            // PHASE 4a: the overlay is not just "not re-applied" while veiled - it is physically
+            // LIFTED (rows removed, folded totals subtracted) for the whole veiled pass and for the
+            // whole save, then put back by the Pop below. Without this the veiled tax Step would bill
+            // every member for the whole company's sales (design read Q3-b).
+            try { CompanyBooks.SuspendPush(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] veil lift refused: {ex.Message} - the overlay may be live during a veiled pass."); }
             if (_flipped.Count == 0) return;
             // DIAG [FlipProbe]: outermost push with live flips — the save-leak tracer (a save with
             // flips but NO such line before it means a save path bypassed the strip).
@@ -235,6 +246,9 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[FlipProbe] veil OFF — {_flipped.Count} flip(s) restored.");
                 ApplyAll(flip: true, honourSimulated: !wasSaveStrip);
             }
+            // PHASE 4a: put the company-books overlay back (AFTER the re-flip, so the re-apply sees
+            // the flipped world it was built against).
+            try { CompanyBooks.SuspendPop(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] veil restore refused: {ex.Message} - the overlay stays lifted until the next re-apply."); }
         }
 
         private static void ApplyAll(bool flip, bool honourSimulated)
@@ -263,6 +277,13 @@ namespace BigAmbitionsMP
 
         /// <summary>Scene boundary: the regs died with the scene — clear tracking WITHOUT touching
         /// objects (the fresh scene's regs arrive unflipped; the tick re-applies from state).</summary>
-        public static void Reset() { _flipped.Clear(); _veilDepth = 0; _saveStrip = false; }
+        public static void Reset()
+        {
+            _flipped.Clear(); _veilDepth = 0; _saveStrip = false;
+            // PHASE 4a: the books overlay clears its TRACKING on the same contract - no RemoveAll, because
+            // by the time this runs a DIFFERENT save's records are already loaded (review r2 M2). The
+            // active clear on dissolve/unmerge/disconnect is CompanyBooks.Tick's membership edge.
+            try { CompanyBooks.Reset(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] tracking clear refused: {ex.Message}"); }
+        }
     }
 }

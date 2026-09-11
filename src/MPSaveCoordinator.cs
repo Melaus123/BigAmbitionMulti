@@ -2374,6 +2374,12 @@ namespace BigAmbitionsMP
             // VeilPush reverts every flipped reg to native truth for the whole serialization;
             // the finally below re-flips (VeilPop) even if the save throws.
             MergerFlip.SaveStripPush();
+            // MERGER PHASE 4a (B3), same choke point: the company-books OVERLAY is written into
+            // persisted fields (financialSummaries' rows and totals), so a member's .hsg must
+            // carry none of it. SaveStripPush already lifts it through MergerFlip.Push, and this
+            // explicit pair is the belt to that braces - depth-counted, so the two nest cleanly
+            // and any future save path that reaches here keeps the guarantee.
+            try { CompanyBooks.SuspendPush(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] save strip push: {ex.Message}"); }
             // P3-B, same choke point: the owner lists this machine INSTALLED to simulate an absent
             // member's businesses are that member's paperwork, not this save's - they come out for the
             // serialization and go straight back in the finally (exactly as the flip is un-done).
@@ -2505,6 +2511,7 @@ namespace BigAmbitionsMP
                 // can't leave the live session with un-staffed registers.  JoinSaveGameThreads (inside the try)
                 // has returned in every normal/caught path by here, so serialization is done and gi is safe.
                 try { restoreSynthetics(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore synthetics: {ex.Message}"); }
+                try { CompanyBooks.SuspendPop(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] save strip pop: {ex.Message}"); }   // phase 4a: re-overlay after the write
                 try { MergerFlip.SaveStripPop(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore merger flip: {ex.Message}"); }
                 try { restoreAbsenceLists(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore absence lists: {ex.Message}"); }
                 // Round-68: put the live borrowed-ghost state back (serialization is done by here).
@@ -3532,6 +3539,7 @@ namespace BigAmbitionsMP
                 try { PaperworkSync.FlushNow("pre-save"); } catch { }
                 m.Paperwork = MPServer.SnapshotPaperwork();
                 m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
+                m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): the books store rides the same save moment
                 m.Loans = MPHub.SnapshotLoans();   // sweep 2026-08-18: loans are part of the save moment
                 // Round-53: the running session's tuning dials persist with the save (mid-session
                 // changes included), so the next load's lobby mirrors what this world actually ran.
@@ -3597,6 +3605,7 @@ namespace BigAmbitionsMP
                     m.MergerWalletContributed = MPServer.SnapshotWalletContributed();   // states persist immediately
                     m.Paperwork = MPServer.SnapshotPaperwork();   // phase 3-A: the store rides the model, so a grants-only write cannot drop it (no flush here — this path is not guaranteed main-thread)
                     m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
+                    m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): same reason - a grants-only write must not drop the books store
                     m.Loans = MPHub.SnapshotLoans();   // sweep 2026-08-18: loans ride the manifest like grants
                     // Round-274/H1: do NOT touch SavedAtUnix here — it means "when was this
                     // WORLD saved", and a grants-only persist is not a world save.  Re-stamping
@@ -3679,6 +3688,7 @@ namespace BigAmbitionsMP
                 {   // P3-B review MAJOR-5: BOTH stamps sit under the lineage gate (a bare second statement escaped it)
                     m.Paperwork = MPServer.SnapshotPaperwork();
                     m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
+                    m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): the books stamp sits under the SAME lineage gate
                 }
                 MPSaveManager.WriteManifest(sessionName, m);
             }

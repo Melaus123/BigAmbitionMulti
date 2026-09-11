@@ -634,6 +634,14 @@ namespace BigAmbitionsMP
                     return gsb.ToString();
                 }
 
+                case "books":
+                {
+                    // MERGER PHASE 4a (B6). Read-only. With no argument: how much of the company
+                    // books this machine currently has overlaid on its own day records. With an
+                    // address key: that address's newest statement and whose books it came from.
+                    return CompanyBooks.TestDriveLine(arg);
+                }
+
                 case "absence":
                 {
                     // Merger phase 3-B (B6). On the HOST the marks come from the live table; on any

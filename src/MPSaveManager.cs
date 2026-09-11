@@ -95,6 +95,13 @@ namespace BigAmbitionsMP
         /// company online would forget "simulated since day D", which the return leg needs.
         /// Empty/absent on manifests written before the field existed.</summary>
         public List<MpAbsenceMark> Absence { get; set; } = new();
+        /// <summary>Merger phase 4a (G1): each member's LATEST company-books bundle as of this save
+        /// moment (the host store). Rides the model like Paperwork/Absence and follows exactly the same
+        /// timeline - written with the slot, REPLACED from the loaded slot on every load, reset on a new
+        /// world, never carried over in memory, so an older save can never pull newer books. Without it
+        /// a host restart leaves every member's partner rows blank until the next day change.
+        /// Empty/absent on manifests written before the field existed.</summary>
+        public List<MpCompanyBooksEntry> CompanyBooks { get; set; } = new();
 
         /// <summary>Round-53 — per-SAVE needs/morale authority (user design 2026-07-22): the load
         /// lobby mirrors these, the Customize panel edits them, and the edited values become the
@@ -143,6 +150,18 @@ namespace BigAmbitionsMP
         public string StableId { get; set; } = "";
         public int    Day      { get; set; }   // the sender's game day at publish time
         public string Json     { get; set; } = "";
+    }
+
+    /// <summary>Merger phase 4a (G1) - one member's stored COMPANY BOOKS, mirroring MpPaperworkEntry:
+    /// StableId-keyed (a player id is live and dies with the session), the bundle kept as TEXT so the
+    /// manifest section is a straight passthrough and a future payload shape round-trips through an
+    /// older host untouched.</summary>
+    public class MpCompanyBooksEntry
+    {
+        public string StableId    { get; set; } = "";
+        public int    Day         { get; set; }   // the owner's game day at publish time
+        public int    ReceivedDay { get; set; }   // the HOST's game day when the snapshot was taken
+        public string Json        { get; set; } = "";
     }
 
     /// <summary>Merger phase 3-B - one ABSENCE MARK, StableId-keyed like the merger roster and the

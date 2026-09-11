@@ -19,6 +19,7 @@ namespace BigAmbitionsMP
             public Action? RestoreAbsence;
             public string GhostActiveId = "";
             public bool Veiled;
+            public bool BooksLifted;   // phase 4a: the company-books overlay was lifted for this write
         }
 
         static void Prefix(out object? __state)
@@ -37,6 +38,9 @@ namespace BigAmbitionsMP
                 // both tables on disconnect nowadays, so this is belt and braces - and it is the only thing standing
                 // between a fork save and an absent owner's paperwork if any path ever reaches here still simulating.
                 try { MergerFlip.SaveStripPush(); st.Veiled = true; } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] save-strip push: {ex.Message}"); }
+                // PHASE 4a (B3): the fork save is a .hsg like any other - the company-books overlay
+                // comes out for the write and goes back in the finalizer, exactly as the flip does.
+                try { CompanyBooks.SuspendPush(); st.BooksLifted = true; } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] books strip push: {ex.Message}"); }
                 try { st.RestoreAbsence = MergerAbsence.StripInstalledForSave(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] absence strip: {ex.Message}"); }
                 try
                 {
@@ -62,6 +66,7 @@ namespace BigAmbitionsMP
                 if (__state is State st)
                 {
                     try { st.RestoreSynthetics?.Invoke(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] synthetics restore: {ex.Message}"); }
+                    try { if (st.BooksLifted) CompanyBooks.SuspendPop(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] books strip pop: {ex.Message}"); }
                     try { if (st.Veiled) MergerFlip.SaveStripPop(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] save-strip pop: {ex.Message}"); }
                     try { st.RestoreAbsence?.Invoke(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] absence restore: {ex.Message}"); }
                     try { if (st.GhostActiveId.Length > 0 && SaveGameManager.Current != null) SaveGameManager.Current.ActiveVehicleId = st.GhostActiveId; } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] ActiveVehicleId restore: {ex.Message}"); }

@@ -3,6 +3,7 @@ using HarmonyLib;
 using Buildings;
 using Helpers;
 using GleyTrafficSystem;
+using Extensions;   // phase 4a: the game's own ToShortCurrencyFormat for the company figures
 
 namespace BigAmbitionsMP
 {
@@ -8014,5 +8015,284 @@ namespace BigAmbitionsMP
                 return null;
             }
         }
+
+        // ═══════════════════════════════════════════════════════════════════════════════════════
+        // MERGER PHASE 4a — COMPANY BOOKS (2026-09-11, D14/D18/D19 + B9)
+        // ═══════════════════════════════════════════════════════════════════════════════════════
+        // The overlay itself lives in src/CompanyBooks.cs. These are its hooks: the day-change
+        // re-apply, the two DISPLAY-TIME surfaces that read at an event rather than on open, the
+        // own-only loan cap, the tax inertness + pay-all, the row tint and the company net worth.
+        // Every one of them is inert without a merger.
+
+        /// <summary>B4/C2: the top-bar arrow + money tooltip are EVENT-driven (Topbar.cs:117-126), so
+        /// late books never reach them. SetMoneyChangeValue is private, side-effect-free and
+        /// re-entrant — the postfix below parks the live instance so a books receipt can re-invoke it.
+        /// </summary>
+        private static object? _topbarInstance;
+        private static System.Reflection.MethodInfo? _topbarSetMoneyChange;
+
+        public static void RefreshTopbarMoneyChange()
+        {
+            try
+            {
+                if (_topbarInstance == null) return;                         // the bar has not drawn yet
+                _topbarSetMoneyChange ??= AccessTools.Method(typeof(UI.Topbar.Topbar), "SetMoneyChangeValue");
+                if (_topbarSetMoneyChange == null) { Plugin.Logger.LogWarning("[Books] top-bar refresh refused: SetMoneyChangeValue not found."); return; }
+                _topbarSetMoneyChange.Invoke(_topbarInstance, null);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] top-bar refresh: {ex.Message}"); }
+        }
+
+        [HarmonyPatch(typeof(UI.Topbar.Topbar), "SetMoneyChangeValue")]
+        public static class Patch_Topbar_MoneyChange_Books
+        {
+            static void Postfix(UI.Topbar.Topbar __instance) { _topbarInstance = __instance; }
+        }
+
+        /// <summary>B2: RunDaily's POSTFIX — after the whole body, therefore AFTER the persisted
+        /// playerWeeklyIncomeHistory write (BusinessHelper.cs:139-140), so that history stays
+        /// personal, and after CreateFinancialSummary REPLACED the day record (:100-101), which is
+        /// what voids the previous overlay. RunDaily is itself a veil Step, so this runs with the veil
+        /// still up (VeilPop is the Finalizer): the apply defers and the veil's pop re-applies.</summary>
+        [HarmonyPatch(typeof(Helpers.BusinessHelper), nameof(Helpers.BusinessHelper.RunDaily))]
+        public static class Patch_BusinessHelper_RunDaily_Books
+        {
+            static void Postfix()
+            {
+                try { CompanyBooks.OnDayChanged(); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] day-change hook: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>B4/C1: the end-of-day popup reads the stored Day-1 record inside its coroutine at
+        /// DISPLAY time (DailySummary.cs:70). A prefix on the public Run() applies anything pending
+        /// before the coroutine starts.</summary>
+        [HarmonyPatch]
+        public static class Patch_DailySummary_Run_Books
+        {
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var m = AccessTools.Method("UI.DailySummary.DailySummary:Run");
+                if (m == null) Plugin.Logger.LogError("[Books] UI.DailySummary.DailySummary:Run NOT FOUND — the daily popup will not wait for late books.");
+                return m;
+            }
+            static void Prefix()
+            {
+                try { CompanyBooks.ApplyPending("daily popup"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] daily popup hook: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>B4/C5: the own 7-day income chart. Points 1-6 come from the PERSISTED
+        /// playerWeeklyIncomeHistory (written unveiled-personal at BusinessHelper.cs:139-140) and only
+        /// point 7 is re-summed live, so late books never reach the earlier points. When merged, every
+        /// point is recomputed from the OVERLAID summaries so the whole line is a company line.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.Rivals.SelectedRivalUI), "GetPlayerWeeklyIncomeHistory")]
+        public static class Patch_SelectedRivalUI_WeeklyHistory_Books
+        {
+            static void Postfix(List<Tuple<int, float>> __result)
+            {
+                try
+                {
+                    if (__result == null || !MergerSync.IAmMember) return;
+                    CompanyBooks.ApplyPending("weekly income chart");
+                    if (CompanyBooks.Inert) { Plugin.Logger.LogInfo("[Books] weekly chart left personal: the overlay is lifted right now."); return; }
+                    var sums = SaveGameManager.Current?.financialSummaries;
+                    if (sums == null) return;
+                    for (int i = 0; i < __result.Count; i++)
+                    {
+                        int day = __result[i].Item1;
+                        float v = 0f;
+                        foreach (var s in sums) if (s != null && s.dayNumber <= day && s.dayNumber > day - 7) v += s.totalProfit;
+                        __result[i] = new Tuple<int, float>(day, v);
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] weekly chart: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>D19-3: the BANK LOAN CAP reads own income only. BankDialog.cs:325 calls
+        /// PlayerHelper.CalculateDailyIncome, which sums the last seven records' totalProfit — the very
+        /// field the overlay folds partner money into. Answering from the LEDGER (the exact figure the
+        /// overlay added to each of those days, subtracted back out) keeps the cap personal without
+        /// mutating the list for anyone else, so no push/pop window exists for a reader to fall into.
+        /// </summary>
+        [HarmonyPatch(typeof(Helpers.PlayerHelper), nameof(Helpers.PlayerHelper.CalculateDailyIncome))]
+        public static class Patch_PlayerHelper_DailyIncome_OwnOnly
+        {
+            static bool Prefix(ref float __result)
+            {
+                try
+                {
+                    if (!MergerSync.IAmMember || CompanyBooks.OverlaidDays == 0) return true;   // vanilla
+                    __result = CompanyBooks.OwnOnlyDailyIncome();
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] loan-cap income: {ex.Message} — vanilla figure used."); return true; }
+            }
+        }
+
+        /// <summary>D19-2: TaxHelper.RunDaily is NOT one of the authority-veil Steps, yet the liability
+        /// trigger it calls (PlayerShouldDoTaxes, TaxHelper.cs:152-170) sums BusinessIncomeStatement
+        /// TotalSales over a whole tax year — with an overlay live every member would cross the
+        /// $150,000 threshold on the company's sales. The overlay is lifted for the whole pass, exactly
+        /// as a veiled Step lifts it.  Review r2: BusinessHelper.RunDaily IS a veil Step, and the veil
+        /// already lifts the overlay for that whole pass, so on the day-change path this patch is
+        /// redundant - it is KEPT as belt and braces because TaxHelper.RunDaily is a separate entry point
+        /// with its own callers, and a lift that nests correctly costs nothing when it is already up.</summary>
+        [HarmonyPatch(typeof(Helpers.TaxHelper), nameof(Helpers.TaxHelper.RunDaily))]
+        public static class Patch_TaxHelper_RunDaily_BooksInert
+        {
+            static void Prefix() { try { CompanyBooks.SuspendPush(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] tax-pass lift refused: {ex.Message}"); } }
+            static Exception? Finalizer(Exception? __exception)
+            {
+                try { CompanyBooks.SuspendPop(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] tax-pass restore refused: {ex.Message}"); }
+                return __exception;
+            }
+        }
+
+        /// <summary>B9-iii: the taxes tab shows the COMPANY bill. The page has ONE amount label per
+        /// row (EconoViewTaxes.cs:34 taxesOwedAmountLabel) and no per-member row container, so the
+        /// company figure goes into the page's own label with the page's own currency formatting —
+        /// no new wording, no new rows.</summary>
+        [HarmonyPatch(typeof(EconoViewTaxes), nameof(EconoViewTaxes.Init))]
+        public static class Patch_EconoViewTaxes_CompanyTotal
+        {
+            static void Postfix(TMPro.TMP_Text ___taxesOwedAmountLabel)
+            {
+                try
+                {
+                    if (!MergerSync.IAmMember || ___taxesOwedAmountLabel == null) return;
+                    // MINOR (b, review r2): this label natively shows the CURRENT bill only - back taxes
+                    // have their own label (EconoViewTaxes.cs:93) - so the OWN half is current-only too.
+                    // The partners' half is still their whole outstanding figure: CompanyBooksPayload
+                    // carries one TaxDue (current + back) and no split, and the payload lives in
+                    // src/Protocol.cs, which this brief does not name.
+                    float own = 0f;
+                    try { own = Helpers.TaxHelper.GetCurrentTaxesToPay(); } catch { }
+                    float partners = CompanyBooks.PartnerTaxDue();
+                    if (partners <= 0f) return;                          // nothing to add: leave the page alone
+                    ___taxesOwedAmountLabel.text = (own + partners).ToShortCurrencyFormat();
+                    // m-e (review r3): with no own bill the page had just written its own "no taxes
+                    // due" / "taxes paid" wording in darkGreen (EconoViewTaxes.cs:112/113 and
+                    // 122/123).  Overwriting the wording with a figure while leaving the green read as
+                    // SETTLED when the company still owes.  Give it the colour that same page uses for
+                    // a bill that IS due (EconoViewTaxes.cs:103) - the page's own colour, no new text.
+                    if (own <= 0f)
+                        try
+                        {
+                            var gr = InstanceBehavior<GlobalReferences>.Instance;
+                            if (gr?.colors != null) ___taxesOwedAmountLabel.color = gr.colors.red;
+                        }
+                        catch { }
+                    Plugin.Logger.LogInfo($"[Tax] company total shown: own {own:F2} + partners {partners:F2}.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Tax] company total: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>B9-iv: the game's OWN pay action fired. The member's own bill was paid natively;
+        /// ask every partner to settle theirs so the whole company is clear. PayingForCompany guards
+        /// the relayed payment from firing a second pay-all.</summary>
+        [HarmonyPatch(typeof(Helpers.TaxHelper), nameof(Helpers.TaxHelper.PayCurrentTaxes), new Type[] { typeof(float) })]
+        public static class Patch_TaxHelper_PayCurrent_PayAll
+        {
+            static void Prefix(out int __state)
+            {
+                __state = 0;
+                try { __state = SaveGameManager.Current?.currentUnpaidTaxes?.day ?? 0; } catch { }
+            }
+            static void Postfix(bool __result, int __state)
+            {
+                try
+                {
+                    if (!__result || !MergerSync.IAmMember) return;
+                    if (CompanyBooks.PayingForCompany) return;           // this IS the relayed payment
+                    // M5 (review r2): this method returns TRUE for a PARTIAL payment too - the game's own
+                    // UI pays whatever the player typed through it (IRSEmployee.cs:51 passes
+                    // purchaseUI.CurrentTaxPaymentAmount; TaxHelper.cs:376-419 pays min(amount, due) and
+                    // returns true). Only a payment that SETTLES the bill clears the record
+                    // (TaxHelper.cs:400-407: remaining <= 0 -> currentUnpaidTaxes = null), so that is the
+                    // test. A partial payment is a personal one and must not make the whole company pay.
+                    if (SaveGameManager.Current?.currentUnpaidTaxes != null)
+                    { Plugin.Logger.LogInfo("[Tax] partial own payment - company pay-all not triggered."); return; }
+                    CompanyBooks.SendPayAll(__state);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Tax] pay-all hook: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>B5/D18: an EconoView income-statement row whose business belongs to a PARTNER gets
+        /// that member's colour on the row LABEL only (the value columns keep the game's own
+        /// green/red). The cell view binds by rowName (EconoViewIncomeStatementCellView.cs:91), so the
+        /// overlay keeps a label→owner map alongside its address→owner one. D19-6: the residential
+        /// line and the loans/insurance/salary group line are company sums with no colour, and they
+        /// never appear in that map.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.EconoView.EconoViewIncomeStatementCellView),
+                      nameof(UI.Smartphone.Apps.EconoView.EconoViewIncomeStatementCellView.SetData))]
+        public static class Patch_EconoViewRow_PartnerTint
+        {
+            /// <summary>MINOR (a, review r2): EnhancedScroller RECYCLES these cells, and nothing ever put
+            /// the label's colour back - a cell that once carried a partner's colour kept it when it was
+            /// re-bound to an own or residential row. The label's ORIGINAL colour is cached the first time
+            /// each label is seen and restored for every row that is not a partner's.</summary>
+            private static readonly Dictionary<int, UnityEngine.Color> _labelHomeColour = new();
+
+            static void Postfix(UI.Smartphone.Apps.EconoView.EconoViewIncomeStatementModel data, TMPro.TMP_Text ___nameLabel)
+            {
+                try
+                {
+                    if (data == null || ___nameLabel == null) return;
+                    int id = ___nameLabel.GetInstanceID();
+                    if (!_labelHomeColour.TryGetValue(id, out var home)) { home = ___nameLabel.color; _labelHomeColour[id] = home; }
+
+                    if (!MergerSync.IAmMember
+                        || !CompanyBooks.TryOwnerOfRowLabel(data.rowName, out var pid)
+                        || !PlayerColours.TryColourFor(pid, out var c))
+                    { ___nameLabel.color = home; return; }   // own / residential / group row: the label's own colour
+                    ___nameLabel.color = c;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] row tint: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>D19-4: NET WORTH on the persona page becomes the COMPANY figure — shared cash
+        /// (already one number: the MergerWallet mirror) + every member's investments − every member's
+        /// remaining loans + every member's assets. The page lists ONE label per component, not one per
+        /// member, so the components are SUMS and there is nothing per-member to colour here. LABEL:
+        /// the company display name is appended to the page's existing net-worth label in parentheses —
+        /// an existing on-screen string, no new wording.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.Persona.CharacterInfo), "OnEnable")]
+        public static class Patch_CharacterInfo_CompanyWealth
+        {
+            static void Postfix(TMPro.TMP_Text ___investmentsLabel, TMPro.TMP_Text ___loansLabel,
+                                TMPro.TMP_Text ___assetsLabel, TMPro.TMP_Text ___personalWealthLabel)
+            {
+                try
+                {
+                    if (!MergerSync.IAmMember) return;
+                    CompanyBooks.ApplyPending("persona page");
+                    CompanyBooks.CompanyWealth(out float inv, out float loans, out float assets);
+                    if (inv == 0f && loans == 0f && assets == 0f)
+                    { Plugin.Logger.LogInfo("[Books] persona page left personal: no partner has published its wealth components yet."); return; }
+
+                    var w = Helpers.PlayerHelper.GetPersonalWealth();
+                    float tInv = w.totalInvestments + inv, tLoans = w.totalLoans + loans, tAssets = w.totalAssets + assets;
+                    float net = w.cash + tInv - tLoans + tAssets;
+
+                    if (___investmentsLabel != null) ___investmentsLabel.SetText(tInv.ToShortCurrencyFormat(abbreviated: true));
+                    if (___loansLabel != null) ___loansLabel.SetText((tLoans > 0f) ? ("-" + tLoans.ToShortCurrencyFormat(abbreviated: true)) : tLoans.ToShortCurrencyFormat(abbreviated: true));
+                    if (___assetsLabel != null) ___assetsLabel.SetText(tAssets.ToShortCurrencyFormat(abbreviated: true));
+                    if (___personalWealthLabel != null)
+                    {
+                        string company = MergerSync.MyGroupDisplayName ?? "";
+                        ___personalWealthLabel.SetText(net.ToShortCurrencyFormat(abbreviated: true)
+                                                     + (string.IsNullOrEmpty(company) ? "" : $" ({company})"));
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] persona net worth: {ex.Message}"); }
+            }
+        }
+
     }
 }

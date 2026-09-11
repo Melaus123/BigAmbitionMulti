@@ -568,6 +568,28 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.CompanyBooks:
+                {
+                    // MERGER PHASE 4a (D14): a co-member's daily books. Main thread - the overlay
+                    // mutates the live gi.financialSummaries objects every money surface reads.
+                    var cb = env.GetPayload<CompanyBooksPayload>();
+                    if (cb != null) GameStatePatcher.EnqueueOnMainThread(() => CompanyBooks.Receive(cb));
+                    break;
+                }
+
+                case MessageType.MergerTax:
+                {
+                    // MERGER PHASE 4a / B9: "payown" = a partner paid for the company and this machine
+                    // must settle its own bill natively; "report" = a partner's result, for the payer's
+                    // log only (no on-screen text either way).
+                    var mt = env.GetPayload<MergerTaxPayload>();
+                    if (mt == null) break;
+                    if (mt.Action == "payown")      GameStatePatcher.EnqueueOnMainThread(() => CompanyBooks.PayOwnForCompany(mt.PayerPid));
+                    else if (mt.Action == "report") CompanyBooks.LogReport(mt, mt.PlayerId);
+                    else Plugin.Logger.LogWarning($"[Tax] refused a MergerTax from the host: action '{mt.Action}' is not one this direction carries.");
+                    break;
+                }
+
                 case MessageType.BusinessPaperwork:
                     // Merger phase 3-A is client -> HOST only: nothing here sends paperwork the other
                     // way, so an arriving bundle means a future build (or a confused peer). Log and
