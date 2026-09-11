@@ -5767,8 +5767,10 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedStaffEdit: {ex.Message}"); }
         }
 
-        /// <summary>Shared-shop slice 4: one item's price at a shared shop → the shop's OWNER. Same gate as every
-        /// routed op: a DIRECT Business grant from that address's owner, plus the per-sender rate cap.</summary>
+        /// <summary>Shared-shop slice 4: one item's price at a shared shop → the shop's OWNER, plus the per-sender
+        /// rate cap. Merger phase 2 wave 1 (2026-09-11): the gate is the UNION check (GrantSync.IsGranted folds
+        /// MergerSync.MergedRuntime in, as HostRouteEmployeeEdit already does), so a company member pricing a
+        /// merger-flipped partner shop reaches the owner instead of editing their own replica.</summary>
         public static void HostRouteSharedPriceEdit(SharedPriceEditPayload p, string senderPid)
         {
             try
@@ -5778,8 +5780,8 @@ namespace BigAmbitionsMP
                 string ownerPid = SharedShopOwnerPid(p.AddressKey);
                 if (ownerPid.Length == 0) { Plugin.Logger.LogWarning($"[SharedShop] price edit for unowned '{p.AddressKey}' from '{senderPid}' — dropped."); return; }
                 if (ownerPid == senderPid) return;
-                if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid))
-                { Plugin.Logger.LogWarning($"[SharedShop] price edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission, dropped."); return; }
+                if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))
+                { Plugin.Logger.LogWarning($"[SharedShop] price edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission and not a company member, dropped."); return; }
                 if (ownerPid == MPConfig.PlayerId) SharedShopPrices.ApplyOnOwner(p);
                 else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedPriceEdit, "host", p));
             }

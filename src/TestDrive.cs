@@ -897,8 +897,53 @@ namespace BigAmbitionsMP
                     return $"OK money={mgi.Money.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} merged={mmem} wallet={(mmem ? $"{mgi.Money.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} (mirror)" : "n/a")}";   // review 2026-09-10 #4: invariant culture (the readout regex expects a dot)
                 }
 
+                case "prices":
+                {
+                    // retailPrices is keyed by RetailPrice.itemName — the product/item NAME string the pricing
+                    // tab's cell model carries (InventoryProductModel.RetailPriceReference) — printed verbatim.
+                    if (arg.Length == 0) return "ERR address key required";
+                    var preg = GameStatePatcher.FindRegistration(arg);
+                    if (preg == null) return $"ERR no registration at '{arg}'";
+                    string pkey = arg; try { pkey = GameStateReader.AddressKey(preg); } catch { }
+                    var pmap = new System.Collections.Generic.SortedDictionary<string, float>(StringComparer.Ordinal);
+                    if (preg.retailPrices != null)
+                        foreach (var prp in preg.retailPrices)
+                            if (prp != null && !string.IsNullOrEmpty(prp.itemName)) pmap[prp.itemName] = prp.price;
+                    var psb = new StringBuilder($"OK prices addr='{pkey}' n={pmap.Count}");
+                    foreach (var pkv in pmap)
+                        psb.Append(" | ").Append(pkv.Key).Append('=')
+                           .Append(pkv.Value.ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
+                    return psb.ToString();
+                }
+
+                case "setprice":
+                {
+                    // The pricing tab has NO named setter: its write is the anonymous onValueChanged listener wired
+                    // in InventoryProductCellView.Start (:114-115), which assigns RetailPriceReference.price and
+                    // StoredRetailPriceReference.price. SharedShopPrices.CommitPriceEdit performs exactly that pair
+                    // of writes and then takes the routing decision, so this lever exercises the real seam.
+                    var vtk = arg.Split(' ');
+                    if (vtk.Length < 4) return "ERR usage: setprice <num> <ba:street_x> <productKey> <value>";
+                    string vaddr = vtk[0] + " " + vtk[1];
+                    string vprod = vtk[2];
+                    if (!float.TryParse(vtk[3], System.Globalization.NumberStyles.Float,
+                                        System.Globalization.CultureInfo.InvariantCulture, out var vval))
+                        return "ERR value must be a number";
+                    var vreg = GameStatePatcher.FindRegistration(vaddr);
+                    if (vreg == null) return $"ERR no registration at '{vaddr}'";
+                    string vkey = vaddr; try { vkey = GameStateReader.AddressKey(vreg); } catch { }
+                    bool vfound = false;
+                    if (vreg.retailPrices != null)
+                        foreach (var vrp in vreg.retailPrices)
+                            if (vrp != null && vrp.itemName == vprod) { vfound = true; break; }
+                    if (!vfound) return $"ERR unknown product '{vprod}'";
+                    bool vrouted = SharedShopPrices.CommitPriceEdit(vreg, vkey, vprod, vval);
+                    string vshown = vval.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+                    return $"OK setprice addr='{vkey}' product='{vprod}' value={vshown} routed={vrouted}";
+                }
+
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice)";
             }
         }
 
