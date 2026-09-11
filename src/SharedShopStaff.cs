@@ -269,7 +269,10 @@ namespace BigAmbitionsMP
             try { TickAssignScan(); } catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} assignment scan: {ex.Message}"); }
             // Phase 4b (people): the company candidate pool rides the same main-thread tick this
             // file already owns, rather than adding a second entry point in the UI update.
-            try { CompanyCandidates.Tick(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] tick: {ex.Message}"); }
+            try { CompanyCandidates.Tick(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] tick: {ex.GetType().Name}: {ex.Message}"); }
+            // Phase 4b (people) P4: the phone relay rides the same tick - it publishes nothing on a timer,
+            // it only drops the copies when this player stops being a company member.
+            try { CompanyMessages.Tick(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Messages] tick: {ex.GetType().Name}: {ex.Message}"); }
             // Phase 4b (people) P2 r2 (T1): the host's in-transit transfers are swept on the same
             // main-thread tick - a recurring check with a confirmed exit, not a one-shot timer.
             try { if (MPServer.IsRunning) MPServer.HostTransfersTick(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Transfer] tick: {ex.Message}"); }
@@ -1219,6 +1222,7 @@ namespace BigAmbitionsMP
             _massAssignOwner = ""; _menuGroupKnown = false; _menuGroup = null;
             _inMassTrain = false; _massTrainArming = false;
             try { CompanyCandidates.Reset(); } catch { }
+            try { CompanyMessages.Reset(); } catch { }
         }
     }
 }

@@ -1017,6 +1017,10 @@ namespace BigAmbitionsMP
         private static int RemovePromoted(List<string> ids)
         {
             if (ids == null || ids.Count == 0) return 0;
+            // MERGER PHASE 4b (PEOPLE) P4 r2 (MINOR-6): THIS is the one point where promoted records leave
+            // this machine, so it is where the phone relay stops calling their messages MINE. Without it a
+            // press arriving after the hand-back still runs a stored closure over records that left the save.
+            try { CompanyMessages.ForgetMine(ids, "the stand-in handed those people back"); } catch { }
             int n = 0;
             var wanted = new HashSet<string>(ids, StringComparer.Ordinal);
             try

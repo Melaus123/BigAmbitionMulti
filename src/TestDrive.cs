@@ -1211,6 +1211,109 @@ namespace BigAmbitionsMP
                     return $"OK claim addr-less candidate='{cid}' origin='{(cowner.Length > 0 ? cowner : "mine")}' mode='{(cmode.Length > 0 ? cmode : "ask")}' sent={csent} heldBy='{CompanyCandidates.ClaimantOf(cid)}'";
                 }
 
+                case "messages":
+                {
+                    // Phase 4b (people) P4: the relayed phone AS THIS MACHINE SEES IT - the copies of a
+                    // partner's messages and the ones this machine raised and relayed, each with its id,
+                    // its contact, how many buttons it still offers and whether it has been handled.
+                    // An argument caps how many lines come back (default 15).
+                    int mmax = 15;
+                    if (arg.Length > 0 && !int.TryParse(arg, out mmax)) return "ERR usage: messages [n]";
+                    if (mmax < 1) mmax = 1;
+                    var mlines = CompanyMessages.Readout(mmax);
+                    var msb = new StringBuilder();
+                    foreach (var mline in mlines)
+                    {
+                        Plugin.Logger.LogWarning($"[TestDrive] message: {mline}");
+                        if (msb.Length > 0) msb.Append(" ; ");
+                        msb.Append(mline);
+                    }
+                    return $"OK {mlines.Count} relayed message(s) shown (copies here {CompanyMessages.CopyCount}): {msb}";
+                }
+
+                case "press":
+                {
+                    // The same message a relayed copy's button sends when it is clicked: the host hands it
+                    // to the OWNER, whose machine runs the original closure once and tells the company.
+                    var ptk = arg.Split(' ');
+                    if (ptk.Length < 2) return "ERR usage: press <messageId> <buttonIndex>";
+                    if (!int.TryParse(ptk[1], out var pidx)) return "ERR usage: press <messageId> <buttonIndex>";
+                    string pwhy = CompanyMessages.CommitPress(ptk[0], pidx, out var psent, out var preason);
+                    if (pwhy.Length > 0) return $"ERR press message='{ptk[0]}' button={pidx}: {pwhy}";
+                    return $"OK press message='{ptk[0]}' button={pidx} sent={psent}"
+                         + (preason.Length > 0 ? $" reason='{preason}'" : " (the owner runs it, once)");
+                }
+
+                case "relaymsg":
+                {
+                    // L7: re-send one of MY OWN messages as a fresh relay - the same DTO through the same
+                    // ownership gate as the Contact.SendMessage postfix, so the rig can drive a receiver
+                    // without waiting for the game to raise a second message. A message that is not mine, or
+                    // whose contact has gone, is an ERR rather than a quiet no-op.
+                    string rarg = arg.Trim();
+                    if (rarg.Length == 0) return "ERR usage: relaymsg <messageId> | relaymsg native [<contactId>]";
+                    if (rarg == "native" || rarg.StartsWith("native ", StringComparison.Ordinal))
+                    {
+                        // N1: the id form only reaches messages relayed SINCE this connection, so a fixture
+                        // whose phone filled before the connect could not be driven at all. This picks the
+                        // NEWEST NATIVE message on one of my own contacts (buttons preferred) and relays it.
+                        string rfilter = rarg.Length > 6 ? rarg.Substring(7).Trim() : "";
+                        string nwhy = CompanyMessages.CommitRelayNative(rfilter, out var nid, out var ncontact,
+                                                                       out var nkey, out var nbuttons, out var nsent);
+                        return nwhy.Length == 0
+                            ? $"OK relaymsg id='{nid}' contact='{ncontact}' key='{nkey}' buttons={nbuttons} sent={nsent}"
+                            : $"ERR relaymsg native: {nwhy}";
+                    }
+                    string rwhy = CompanyMessages.CommitRelay(rarg, out var rid, out var rcontact, out var rbuttons, out var rsent);
+                    return rwhy.Length == 0
+                        ? $"OK relaymsg id='{rid}' contact='{rcontact}' buttons={rbuttons} sent={rsent}"
+                        : $"ERR relaymsg message='{rarg}': {rwhy}";
+                }
+
+                case "poachmsg":
+                {
+                    // r4 P1: the game builds NATIVE message buttons in exactly TWO places, and both are rival
+                    // poach raise requests (decompile Entities/EmployeeInstance.cs:1051-1075 PoachByRival,
+                    // :1145-1165 StopPoachingRivalSurrender). This drives the first one on one of MY OWN
+                    // people, so the rig can raise a genuine two-button NATIVE message instead of a
+                    // relay-built one; it then travels by itself through the Contact.SendMessage postfix.
+                    // This handler already runs on the main thread (the 0.5s .cmd poll), like 'transfer'.
+                    var gtk = arg.Split(' ');
+                    string gempId = gtk[0].Trim();
+                    if (gempId.Length == 0) return "ERR usage: poachmsg <employeeId> [percent] [days]";
+                    int gpct = 5, gdays = 30;      // a LONG deadline, so an aborted run never loses the person to the poach
+                    if (gtk.Length > 1 && gtk[1].Length > 0 && !int.TryParse(gtk[1], out gpct)) return "ERR usage: poachmsg <employeeId> [percent] [days]";
+                    if (gtk.Length > 2 && gtk[2].Length > 0 && !int.TryParse(gtk[2], out gdays)) return "ERR usage: poachmsg <employeeId> [percent] [days]";
+                    var gemp = FindEmployee(gempId);
+                    if (gemp == null) return $"ERR no employee '{gempId}' on this machine";
+                    bool ginj = false; try { ginj = MPRegisterSync.IsInjectedStaff(gempId); } catch { }
+                    if (ginj) return $"ERR employee '{gempId}' is an injected partner copy - run poachmsg on the machine that OWNS them";
+                    string grival = "";
+                    try
+                    {
+                        var ggi = SaveGameManager.Current;
+                        if (ggi == null) return "ERR no save is loaded on this machine";
+                        if (ggi.rivalStates != null)
+                            foreach (var grs in ggi.rivalStates)
+                                if (grs != null && !string.IsNullOrEmpty(grs.rivalId)) { grival = grs.rivalId; break; }
+                        if (grival.Length == 0 && ggi.wholesaleRivalIds != null)
+                            foreach (var gw in ggi.wholesaleRivalIds)
+                                if (!string.IsNullOrEmpty(gw)) { grival = gw; break; }
+                        if (grival.Length == 0 && ggi.importRivalIds != null)
+                            foreach (var gim in ggi.importRivalIds)
+                                if (!string.IsNullOrEmpty(gim)) { grival = gim; break; }
+                    }
+                    catch (Exception gx) { return $"ERR reading this save's rivals: {gx.GetType().Name}: {gx.Message}"; }
+                    if (grival.Length == 0) return "ERR this save holds no rival, so there is no rival id to poach with";
+                    float gold = gemp.hourlyWage;
+                    float gnew = gold * (1f + (float)gpct / 100f);          // EmployeeInstance.cs:1053, the game's own sum
+                    try { gemp.PoachByRival(grival, gdays, gpct); }
+                    catch (Exception px) { return $"ERR poachmsg employee='{gempId}': {px.GetType().Name}: {px.Message}"; }
+                    var gci = System.Globalization.CultureInfo.InvariantCulture;
+                    return $"OK poachmsg employee='{gempId}' rival='{grival}' percent={gpct} days={gdays}"
+                         + $" wage={gold.ToString("F2", gci)}->{gnew.ToString("F2", gci)}";
+                }
+
                 case "transfers":
                 {
                     // T6: the HOST's in-transit table - the records no save holds right now. A member has
@@ -1269,7 +1372,7 @@ namespace BigAmbitionsMP
                 }
 
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|candidates|claim|transfer|transfers|train)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg)";
             }
         }
 

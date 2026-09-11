@@ -1767,6 +1767,7 @@ namespace BigAmbitionsMP
                 var lp = leftPlayer;
                 GameStatePatcher.EnqueueOnMainThread(() => { MPRegisterSync.RemovePlayer(lp); MPRestSync.RemovePlayer(lp); });   // duty + time-skip vote both die with the player
                 GameStatePatcher.EnqueueOnMainThread(() => PruneOffers("'" + lp + "' left"));   // phase 1-A r4: the ONE validator; the RefreshGrantsAndBroadcast enqueued below carries the pruned table (r6: no second broadcast)
+                GameStatePatcher.EnqueueOnMainThread(() => HostForgetPressesOf(lp));   // phase 4b (people) P4 r2 (MAJOR-3): a press waiting on a departed owner is refused, never left in flight
             }
 
             // A departed player drops out of every runtime grant relationship (their durable grants in
@@ -2207,6 +2208,16 @@ namespace BigAmbitionsMP
                     var cc = env.GetPayload<CompanyCandidatesPayload>();
                     if (cc != null && SenderIs(cc.PlayerId, senderPid, MessageType.CompanyCandidates))
                         GameStatePatcher.EnqueueOnMainThread(() => HostRouteCompanyCandidates(cc, senderPid));
+                    break;
+                }
+                case MessageType.CompanyMessages:
+                {
+                    // Merger phase 4b (people) P4: one member's business/staff MESSAGE for its co-members,
+                    // a co-member's button PRESS for the owner, or the owner's HANDLED mark. Main thread -
+                    // the host is a member too, so every leg may write this save's own contacts.
+                    var cm = env.GetPayload<CompanyMessagePayload>();
+                    if (cm != null && SenderIs(cm.PlayerId, senderPid, MessageType.CompanyMessages))
+                        GameStatePatcher.EnqueueOnMainThread(() => HostRouteCompanyMessages(cm, senderPid));
                     break;
                 }
                 case MessageType.SharedPriceEdit:
@@ -6358,7 +6369,8 @@ namespace BigAmbitionsMP
                 // in HostRouteTransfer, not by the per-address grant gate below, and they are read BEFORE
                 // the address check: a move out of the asker's OWN save carries no from-address at all.
                 if (p.Action == "transfer-request" || p.Action == "released" || p.Action == "adopted"
-                 || p.Action == "transfer-refused" || p.Action == "returned" || p.Action == "dropped")
+                 || p.Action == "transfer-refused" || p.Action == "returned" || p.Action == "dropped"
+                 || p.Action == "release-refused")
                 { HostRouteTransfer(p, senderPid); return; }
                 if (string.IsNullOrEmpty(p.AddressKey)) return;
                 if (!BuildingOwners.TryGetValue(p.AddressKey, out var owner) || string.IsNullOrEmpty(owner))
@@ -6812,7 +6824,7 @@ namespace BigAmbitionsMP
 
                 Plugin.Logger.LogWarning($"[Candidates] unknown action '{p.Action}' from '{senderPid}' - dropped.");
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] HostRouteCompanyCandidates: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] HostRouteCompanyCandidates: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         /// <summary>Re-stamp every row of a stored pool with the claim that stands RIGHT NOW (MINOR-7).</summary>
@@ -6868,7 +6880,7 @@ namespace BigAmbitionsMP
                 if ((includeOwner || !hostIsOwner) && (hostIsOwner || MergerSync.MergedRuntime(ownerPid, MPConfig.PlayerId)))
                 { CompanyCandidates.Receive(pay); fanout++; }       // the host is a member too (already on the main thread)
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] fan-out: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] fan-out: {ex.GetType().Name}: {ex.Message}"); }
             return fanout;
         }
 
@@ -6904,7 +6916,197 @@ namespace BigAmbitionsMP
                 if (n > 0) Plugin.Logger.LogInfo($"[Candidates] join replay to '{joinerPid}': {n} co-member pool(s).");
                 HostFlushHeldCandidates(peer, joinerPid);   // T3: a hire notice held while they were away
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] join replay: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] join replay: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        // === MERGER PHASE 4b (PEOPLE) P4 (D20-5): THE PHONE RELAY ===
+        // Four legs, none of them persisted: a message is a moment, so there is no join replay and no
+        // held notice - a member who was away simply never had that message. The host's whole job is the
+        // group gate (a message never leaves the sender's company) and pointing a PRESS at the one machine
+        // that still holds the button's live closure.
+
+        /// <summary>HOST (main thread): one leg of the phone relay.</summary>
+        public static void HostRouteCompanyMessages(CompanyMessagePayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(senderPid)) return;
+                if (!CompanyMessages.PayloadSane(p, "host relay")) return;
+                // r2 MAJOR-3: a PRESS the rate gate drops is ANSWERED, not silently swallowed. The presser's
+                // own click already wiped that copy's buttons, and nothing else would ever clear its pending
+                // entry - a silent drop meant that action could never be run again.
+                // r4 MINOR-1: the OWNER'S ANSWER legs are EXEMPT from that bucket. A 'handled' or a
+                // 'refused' is caused by a press that already passed the bucket itself, so neither can be an
+                // abuse channel - and HostRefusePress answers only a 'press', so a dropped 'handled' was
+                // SILENT: every partner copy then kept a dead button until somebody pressed it. A 'msg' the
+                // bucket refuses is LOGGED instead (once per sender): a relay is a moment, nothing to retry.
+                string mact = p.Action ?? "";
+                if (mact != "handled" && mact != "refused" && !SharedRateOk(senderPid, "phone relay"))
+                {
+                    if (mact == "press") { HostRefusePress(p, senderPid, "busy"); return; }
+                    if (_loggedMessageRateDrop.Add(senderPid))
+                        Plugin.Logger.LogWarning($"[Messages] '{mact}' from '{senderPid}' dropped - that machine's phone traffic is over the cap ({SharedEditRatePerSecond}/s).");
+                    return;
+                }
+                if (!MergerSync.InAnyGroup(senderPid))
+                { Plugin.Logger.LogInfo($"[Messages] '{p.Action}' from '{senderPid}' - not in a company, dropped."); HostRefusePress(p, senderPid, "unknown"); return; }
+
+                if (p.Action == "msg")
+                {
+                    p.PlayerId = senderPid; p.OwnerPid = senderPid;     // never take the sender's word for whose message this is
+                    int fan = FanOutMessages(p, senderPid, includeOwner: false);
+                    if (fan == 0 && _loggedNoMessagePeer.Add(senderPid))
+                        Plugin.Logger.LogInfo($"[Messages] '{senderPid}' relayed a message but no co-member of theirs is online - nothing sent.");
+                    return;
+                }
+
+                string owner = p.OwnerPid ?? "";
+                if (owner.Length == 0)
+                { Plugin.Logger.LogWarning($"[Messages] '{p.Action}' from '{senderPid}' names no owner - dropped."); HostRefusePress(p, senderPid, "unknown"); return; }
+                if (owner != senderPid && !MergerSync.MergedRuntime(owner, senderPid))
+                { Plugin.Logger.LogWarning($"[Messages] '{p.Action}' by '{senderPid}' for a message of '{owner}' - not in that company, dropped."); HostRefusePress(p, senderPid, "unknown"); return; }
+
+                if (p.Action == "press")
+                {
+                    p.PlayerId = senderPid;                              // the presser, as the owner's log will name them
+                    if (owner == MPConfig.PlayerId) { CompanyMessages.Receive(p); return; }
+                    if (!IsOnlinePid(owner))
+                    {
+                        // r2 MAJOR-2: not just a log - the presser's copy has already cleared its own buttons,
+                        // so it is told and puts them back; otherwise that action could never be run at all.
+                        Plugin.Logger.LogWarning($"[Messages] press of '{p.MessageId}' by '{senderPid}' - '{owner}' is not online, so nobody can run that button; dropped.");
+                        HostRefusePress(p, senderPid, "offline");
+                        return;
+                    }
+                    SendToPid(owner, MessageEnvelope.Create(MessageType.CompanyMessages, "host", p));
+                    _pressPending[(p.MessageId ?? "") + "|" + senderPid] = (owner, senderPid);   // r2 MAJOR-3
+                    Plugin.Logger.LogInfo($"[Messages] press of '{p.MessageId}' by '{senderPid}' handed to the owner '{owner}'.");
+                    return;
+                }
+
+                if (p.Action == "handled")
+                {
+                    if (owner != senderPid)
+                    { Plugin.Logger.LogWarning($"[Messages] 'handled' for '{p.MessageId}' came from '{senderPid}', not the owner '{owner}' - dropped."); return; }
+                    ClearPressPending(p.MessageId);                  // r2 MAJOR-3: that press is answered
+                    FanOutMessages(p, owner, includeOwner: false);
+                    return;
+                }
+
+                if (p.Action == "refused")
+                {
+                    // r2 MAJOR-2: the OWNER could not run a press (it no longer holds the message, the button
+                    // is not there, or it had already been handled). This goes to the ONE presser, never to
+                    // the company - nobody else's copy is waiting on an answer.
+                    if (owner != senderPid)
+                    { Plugin.Logger.LogWarning($"[Messages] 'refused' for '{p.MessageId}' came from '{senderPid}', not the owner '{owner}' - dropped."); return; }
+                    string to = p.TargetPid ?? "";
+                    if (to.Length == 0 || (to != MPConfig.PlayerId && !MergerSync.MergedRuntime(owner, to)))
+                    { Plugin.Logger.LogWarning($"[Messages] 'refused' for '{p.MessageId}' names '{to}', who is not in that company - dropped."); return; }
+                    ClearPressPending(p.MessageId);                  // r2 MAJOR-3: that press is answered
+                    Plugin.Logger.LogInfo($"[Messages] the owner '{owner}' refused the press of '{p.MessageId}' ({p.Reason}) - telling '{to}'.");
+                    if (to == MPConfig.PlayerId) { CompanyMessages.Receive(p); return; }
+                    if (!IsOnlinePid(to)) { Plugin.Logger.LogInfo($"[Messages] '{to}' has gone, so the refusal of '{p.MessageId}' goes nowhere."); return; }
+                    SendToPid(to, MessageEnvelope.Create(MessageType.CompanyMessages, "host", p));
+                    return;
+                }
+
+                Plugin.Logger.LogWarning($"[Messages] unknown action '{p.Action}' from '{senderPid}' - dropped.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Messages] HostRouteCompanyMessages: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        private static readonly HashSet<string> _loggedNoMessagePeer = new();
+        private static readonly HashSet<string> _loggedMessageRateDrop = new();   // r4 MINOR-1: one line per sender whose relay traffic the bucket refused
+
+        /// <summary>HOST (r2 MAJOR-3): the presses handed to an owner and not yet answered, keyed
+        /// "&lt;messageId&gt;|&lt;presser&gt;" so two members waiting on the same message are two entries. Main-thread
+        /// only (every leg of the relay is enqueued there). Nothing is persisted - a press is a moment.</summary>
+        private static readonly Dictionary<string, (string Owner, string Presser)> _pressPending = new();
+
+        /// <summary>Every presser waiting on this message has been answered.</summary>
+        private static void ClearPressPending(string messageId)
+        {
+            if (string.IsNullOrEmpty(messageId) || _pressPending.Count == 0) return;
+            string prefix = messageId + "|";
+            List<string> drop = null;
+            foreach (var kv in _pressPending)
+                if (kv.Key.StartsWith(prefix, StringComparison.Ordinal)) (drop ??= new List<string>()).Add(kv.Key);
+            if (drop != null) foreach (var k in drop) _pressPending.Remove(k);
+        }
+
+        /// <summary>HOST (r2 MAJOR-3): a player has gone. Every press still waiting on a message THEY own is
+        /// refused 'offline', so the presser's copy offers the button again instead of sitting "in flight" for
+        /// the rest of the session; a press by the player who left simply drops out of the table.</summary>
+        public static void HostForgetPressesOf(string pid)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(pid) || _pressPending.Count == 0) return;
+                var drop = new List<string>();
+                foreach (var kv in _pressPending)
+                    if (kv.Value.Owner == pid || kv.Value.Presser == pid) drop.Add(kv.Key);
+                int told = 0;
+                foreach (var k in drop)
+                {
+                    var e = _pressPending[k];
+                    _pressPending.Remove(k);
+                    if (e.Presser == pid || e.Owner != pid) continue;        // the presser is the one who left
+                    string mid = k.Substring(0, k.Length - e.Presser.Length - 1);
+                    HostRefusePress(new CompanyMessagePayload { Action = "press", MessageId = mid, OwnerPid = e.Owner }, e.Presser, "offline");
+                    told++;
+                }
+                if (drop.Count > 0)
+                    Plugin.Logger.LogInfo($"[Messages] '{pid}' left with {drop.Count} press(es) in flight - {told} presser(s) still waiting were told.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Messages] forgetting the presses of '{pid}': {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>HOST (r2 MAJOR-2): a PRESS this host cannot deliver is answered, not just logged. Only a
+        /// press is answered this way - a 'msg' that reaches nobody is simply a message nobody was there to
+        /// see, and the sender's own screen already has it.</summary>
+        private static void HostRefusePress(CompanyMessagePayload p, string toPid, string reason)
+        {
+            try
+            {
+                if (p == null || p.Action != "press" || string.IsNullOrEmpty(toPid)) return;
+                var back = new CompanyMessagePayload
+                {
+                    PlayerId  = MPConfig.PlayerId, Action = "refused", MessageId = p.MessageId ?? "",
+                    OwnerPid  = p.OwnerPid ?? "",  TargetPid = toPid,  Reason = reason, ButtonIndex = p.ButtonIndex,
+                };
+                if (toPid == MPConfig.PlayerId) { CompanyMessages.Receive(back); return; }   // the host is the presser
+                if (!IsOnlinePid(toPid)) return;
+                SendToPid(toPid, MessageEnvelope.Create(MessageType.CompanyMessages, "host", back));
+                Plugin.Logger.LogInfo($"[Messages] press of '{back.MessageId}' by '{toPid}' refused by the host ({reason}) - they put the buttons back.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Messages] refusing a press: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>Ship one relay leg to the ONLINE members of ownerPid's company (the owner's own machine
+        /// raised it, so it is skipped).</summary>
+        private static int FanOutMessages(CompanyMessagePayload pay, string ownerPid, bool includeOwner)
+        {
+            int fanout = 0;
+            try
+            {
+                if (!_running || pay == null || string.IsNullOrEmpty(ownerPid)) return 0;
+                byte[]? bytes = null;
+                foreach (var cp in ConnectedClientPeers())
+                {
+                    bool isOwner = cp.playerId == ownerPid;
+                    if (isOwner && !includeOwner) continue;
+                    if (!isOwner && !MergerSync.MergedRuntime(ownerPid, cp.playerId)) continue;
+                    bytes ??= MessageEnvelope.Create(MessageType.CompanyMessages, "host", pay).Serialize();
+                    cp.peer.Send(bytes, reliable: true);
+                    fanout++;
+                }
+                bool hostIsOwner = MPConfig.PlayerId == ownerPid;
+                if ((includeOwner || !hostIsOwner) && (hostIsOwner || MergerSync.MergedRuntime(ownerPid, MPConfig.PlayerId)))
+                { CompanyMessages.Receive(pay); fanout++; }        // the host is a member too (already on the main thread)
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Messages] fan-out: {ex.GetType().Name}: {ex.Message}"); }
+            return fanout;
         }
 
 
@@ -6921,6 +7123,7 @@ namespace BigAmbitionsMP
         {
             public string TransferId = "", EmployeeId = "", FromAddr = "", ToAddr = "";
             public string SourcePid = "", DestPid = "", Stage = "requested", RelayedTo = "";
+            public string InitiatorPid = "";   // r4 MINOR-3: who asked, so a source-side refusal can reach them at once
             public int Day, Hour, LastLogDay = -1, LastLogHour = -1;
             public EmployeeEditPayload? Record;
         }
@@ -7003,7 +7206,8 @@ namespace BigAmbitionsMP
                     if (src == dst)
                     { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: one machine runs both ends - that move is an ordinary routed assign."); return; }
                     var t = new HostTransfer { TransferId = tid, EmployeeId = p.EmployeeId ?? "", FromAddr = from, ToAddr = to,
-                                               SourcePid = src, DestPid = dst, Stage = "requested", Day = GameDayNow(), Hour = GameHourNow() };
+                                               SourcePid = src, DestPid = dst, Stage = "requested", InitiatorPid = senderPid,
+                                               Day = GameDayNow(), Hour = GameHourNow() };
                     _transfers[tid] = t;
                     Plugin.Logger.LogInfo($"[Transfer] {tid}: requested ('{t.EmployeeId}' {from} -> {to}); asking '{src}' to release.");
                     SendEmployeeEditToPid(src, TransferLeg(t, "release", from, to));
@@ -7083,6 +7287,23 @@ namespace BigAmbitionsMP
                     { Plugin.Logger.LogWarning($"[Transfer] {tid}: 'adopted' from '{senderPid}' while the host is {e.Stage} - nothing was ever relayed to them, ignored."); return; }
                     _transfers.Remove(tid);
                     Plugin.Logger.LogInfo($"[Transfer] {tid}: ADOPTED by '{senderPid}' at '{e.ToAddr}' - one save holds the record again.");
+                    return;
+                }
+
+                if (p.Action == "release-refused")
+                {
+                    // r4 MINOR-3 (rig run, build A): a source-side release refusal used to be a LOCAL log
+                    // only, so the host sat on a "requested" entry for a whole game hour and the initiator's
+                    // copy sat at the destination until its own 30 s give-back. The source answers now, the
+                    // entry closes at once, and the initiator is told so their copy goes home immediately.
+                    if (senderPid != e.SourcePid)
+                    { Plugin.Logger.LogWarning($"[Transfer] {tid}: 'release-refused' came from '{senderPid}', not the source '{e.SourcePid}' - ignored."); return; }
+                    if (e.Stage != "requested" && e.Stage != "cancelled")
+                    { Plugin.Logger.LogWarning($"[Transfer] {tid}: 'release-refused' arrived while the host is {e.Stage} - the record is already in the air; ignored."); return; }
+                    _transfers.Remove(tid);
+                    Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: the source '{senderPid}' would not release '{e.EmployeeId}' - the move is off (nothing was ever released).");
+                    if (e.InitiatorPid.Length > 0 && e.InitiatorPid != senderPid)
+                        SendEmployeeEditToPid(e.InitiatorPid, TransferLeg(e, "transfer-refused", e.FromAddr, e.ToAddr));
                     return;
                 }
 
@@ -7357,7 +7578,7 @@ namespace BigAmbitionsMP
                 foreach (var cp in ConnectedClientPeers()) Add(cp.playerId);
                 Add(MPConfig.PlayerId);
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] company roster of '{anyPid}': {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] company roster of '{anyPid}': {ex.GetType().Name}: {ex.Message}"); }
             return outp;
         }
 
@@ -7383,7 +7604,7 @@ namespace BigAmbitionsMP
                 if (held > 0)
                     Plugin.Logger.LogInfo($"[Candidates] the hired mark for '{mark.CandidateId}' is held for {held} offline member(s).");
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] hired-mark fan-out: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] hired-mark fan-out: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         /// <summary>HOST: a notice the ORIGIN must see even if they are not here (review r1 MAJOR-4 - the
@@ -7412,7 +7633,7 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Candidates] replayed {list.Count} notice(s) to '{pid}'.");
                 _candidateHeld.Remove(pid);
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] held replay: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] held replay: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         /// <summary>HOST: a member left the company (or the world) - their rows leave every other member's
@@ -7435,7 +7656,7 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Candidates] '{pid}' left - their rows are dropped from every pool and {drop.Count} claim(s) released.");
                 }
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] forget '{pid}': {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] forget '{pid}': {ex.GetType().Name}: {ex.Message}"); }
         }
 
         /// <summary>Host: a new world, a load, or a dissolve - the session tables go (review r1 MINOR-9).</summary>

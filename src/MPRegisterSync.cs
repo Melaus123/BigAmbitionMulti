@@ -1695,6 +1695,11 @@ namespace BigAmbitionsMP
             // and go back in the restore below, exactly as the injected employee records do.
             var removedCandidates = CompanyCandidates.StripInjected("the save");
 
+            // MERGER PHASE 4b (PEOPLE) P4, the same choke point: a partner's relayed MESSAGES are display
+            // copies too - they live in gi.Contacts, which nothing above walks - so they come out here and
+            // go back in the restore below. A .hsg never carries another member's phone.
+            var restoreMessages = CompanyMessages.StripForSave("the save");
+
             // Restore delegate — re-add the EXACT objects after serialization completes (dup-guarded; the main
             // thread is blocked through the save, so no tick can re-inject during the window, but be defensive).
             return () =>
@@ -1721,6 +1726,7 @@ namespace BigAmbitionsMP
                         if (!present) day.AddWorkShift(shift);
                     }
                     CompanyCandidates.RestoreInjected(removedCandidates, "the save");
+                    restoreMessages();
                     if (removedEmployees.Count > 0)
                         Plugin.Logger.LogInfo($"[SynthStaff] restored {removedEmployees.Count} synthetic(s) after save ({when}).");
                 }

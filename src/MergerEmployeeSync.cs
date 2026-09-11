@@ -255,6 +255,45 @@ namespace BigAmbitionsMP
             });
         }
 
+        /// <summary>r4 MINOR-3: THE SOURCE REFUSED. Until now every one of the four refusals above was a
+        /// LOCAL log, so the host held a "requested" entry for a whole game hour and the initiator's copy
+        /// stood at the destination until its own 30 s give-back. The host is answered at once instead; it
+        /// closes the entry and tells the initiator. The local cancel below covers the case where THIS
+        /// machine is both source and initiator (no round trip can help there).</summary>
+        private static void RefuseRelease(EmployeeEditPayload p)
+        {
+            try
+            {
+                Send(new EmployeeEditPayload
+                {
+                    PlayerId = MPConfig.PlayerId, Action = "release-refused",
+                    EmployeeId = p.EmployeeId ?? "", TransferId = p.TransferId ?? "",
+                    AddressKey = p.AddressKey ?? "", OtherAddressKey = p.OtherAddressKey ?? "",
+                });
+                CancelPendingTransfer(p.EmployeeId, "the source would not release them");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Transfer] release refusal: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>r4 MINOR-3: the initiator's copy goes home NOW rather than at its 30 s give-back. A
+        /// no-op when this machine has nothing in flight for that employee.</summary>
+        public static void CancelPendingTransfer(string employeeId, string why)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(employeeId)) return;
+                if (!_pendingTransfer.Remove(employeeId)) return;
+                var gi = SaveGameManager.Current;
+                EmployeeInstance? e = null;
+                try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(employeeId, out e); } catch { }
+                string home = ""; try { home = MPRegisterSync.InjectedAddrOf(employeeId); } catch { }
+                if (e != null && gi != null && home.Length > 0)
+                    try { e.assignedAddress = AddressOfKey(gi, home); } catch { }
+                Plugin.Logger.LogWarning($"[Transfer] '{employeeId}': {why} - the copy goes back to '{(home.Length == 0 ? "the bench" : home)}' now (nothing moved).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Transfer] cancel pending: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
         /// <summary>MINOR-10 r2: the caller is the MERGER SCAN above (ScanAssignments), which sees the
         /// partner's copy sitting where this machine asked for it once the owner's roster has caught up -
         /// not the MPRegisterSync roster apply the old comment named. The move has landed, so the pending
@@ -524,7 +563,8 @@ namespace BigAmbitionsMP
                 // to it, and U1's give-back to the BENCH legitimately carries no address at all.
                 bool transferLeg = !string.IsNullOrEmpty(p.TransferId)
                                 && (p.Action == "release" || p.Action == "adopt-in" || p.Action == "return"
-                                 || p.Action == "drop"    || p.Action == "adopt");
+                                 || p.Action == "drop"    || p.Action == "adopt"
+                                 || p.Action == "transfer-refused");   // r4 MINOR-3: the host's word to the initiator carries no address
                 if (string.IsNullOrEmpty(p.AddressKey) && !transferLeg) return;
                 if (p.Action == "fire")
                 {
@@ -552,8 +592,8 @@ namespace BigAmbitionsMP
                     { Plugin.Logger.LogInfo($"[Transfer] {p.TransferId}: release of '{p.EmployeeId}' - already released from here; the host holds the record."); return; }
                     EmployeeInstance rel = null;
                     try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(p.EmployeeId ?? "", out rel); } catch { }
-                    if (rel == null) { Plugin.Logger.LogWarning($"[Transfer] {p.TransferId}: release of '{p.EmployeeId}' - not my employee (already gone?), nothing sent."); return; }
-                    if (MPRegisterSync.IsInjectedStaff(rel.id)) { Plugin.Logger.LogWarning($"[Transfer] {p.TransferId}: release of '{p.EmployeeId}' - that is a copy here, not my record; refused."); return; }
+                    if (rel == null) { Plugin.Logger.LogWarning($"[Transfer] {p.TransferId}: release of '{p.EmployeeId}' - not my employee (already gone?), nothing sent."); RefuseRelease(p); return; }
+                    if (MPRegisterSync.IsInjectedStaff(rel.id)) { Plugin.Logger.LogWarning($"[Transfer] {p.TransferId}: release of '{p.EmployeeId}' - that is a copy here, not my record; refused."); RefuseRelease(p); return; }
                     string relAt = ""; try { relAt = rel.assignedAddress != null ? GameStateReader.AddressKey(rel.assignedAddress) : ""; } catch { }
                     // An EMPTY from-address is the host saying "you hold the record, wherever they stand":
                     // my own employee moved to a partner's shop, or one off the bench. A NAMED one is the
@@ -564,9 +604,9 @@ namespace BigAmbitionsMP
                     bool atFromEnd = string.IsNullOrEmpty(p.AddressKey) || string.Equals(relAt, p.AddressKey, StringComparison.OrdinalIgnoreCase);
                     bool atToEnd   = !string.IsNullOrEmpty(p.OtherAddressKey) && string.Equals(relAt, p.OtherAddressKey, StringComparison.OrdinalIgnoreCase);
                     if (!atFromEnd && !atToEnd)
-                    { Plugin.Logger.LogWarning($"[Transfer] {p.TransferId}: release of '{p.EmployeeId}' - they are at '{relAt}', not '{p.AddressKey}'; refused (owner wins)."); MPRegisterSync.ForceRosterRepublish(relAt); return; }
+                    { Plugin.Logger.LogWarning($"[Transfer] {p.TransferId}: release of '{p.EmployeeId}' - they are at '{relAt}', not '{p.AddressKey}'; refused (owner wins)."); MPRegisterSync.ForceRosterRepublish(relAt); RefuseRelease(p); return; }
                     if (string.IsNullOrEmpty(p.OtherAddressKey))
-                    { Plugin.Logger.LogWarning($"[Transfer] {p.TransferId}: release of '{p.EmployeeId}' with no destination - refused."); return; }
+                    { Plugin.Logger.LogWarning($"[Transfer] {p.TransferId}: release of '{p.EmployeeId}' with no destination - refused."); RefuseRelease(p); return; }
 
                     var handover = RecordOf(rel, p.OtherAddressKey, "released");
                     handover.TransferId = p.TransferId;
@@ -633,6 +673,13 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Transfer] {p.TransferId}: {(back ? "TOOK BACK" : "ADOPTED")} '{p.Name}' ({p.EmployeeId}) at '{p.AddressKey}' - one save holds the record again.");
                     MPRegisterSync.ForceRosterRepublish(p.AddressKey);
                     AckTransfer(p, back ? "returned" : "adopted");
+                }
+                else if (p.Action == "transfer-refused")
+                {
+                    // r4 MINOR-3, relayed BY THE HOST to the INITIATOR: the source would not let go, so the
+                    // move is off before anything was released. The only thing to undo is this machine's own
+                    // optimistic dropdown write - which used to sit until the 30 s give-back noticed.
+                    CancelPendingTransfer(p.EmployeeId, $"the host refused the move ({p.TransferId})");
                 }
                 else if (p.Action == "drop")
                 {

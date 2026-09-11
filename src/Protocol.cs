@@ -213,6 +213,7 @@ namespace BigAmbitionsMP
         MergerTax             = 212,     // MERGER PHASE 4a / B9 (2026-09-11, user decision): the TAX PAY-ALL. Action=payall: the member who just paid its own bill natively asks the host to have every partner settle theirs. Action=payown: host -> one ONLINE partner - run your own native pay action now (the money leaves the SHARED wallet through ChangeMoney, which the MergerWallet mirror follows). Action=report: that partner's result back to the payer's log (no on-screen text either way). A pay-all for an OFFLINE partner is HELD by the host and delivered at that partner's next connect.
         CompanyLists          = 213,     // MERGER PHASE 2 WAVE 4 (2026-09-11, D18), WIDENED BY 4c PART 1 (D20-6): ONE owner's FIVE headquarters/agreement list families - delivery contracts and logistics manager plans as INSTALLED DISPLAY COPIES, plus the four SCREEN-LAYER families 4c part 1 added (pricing manager plans, import partnerships, HR manager plans, headhunter plans), which are never installed into a game list at all - Host -> that owner's ONLINE co-members (and the same type replays them to a joiner). The books payload could not carry these: 4a's bundle is per-DAY financial records and is rebuilt from gi.financialSummaries, while these are the owner's live agreement objects the host already holds per owner in PaperworkStore. Receivers INSTALL them into their own gi lists through the absence installer, TAGGED - the two BizMan screens that show them read the GAME lists directly (BizManDeliveries.cs:53 `SaveGameManager.Current.DeliveryContracts.FindAll(...)`, LogisticsManagersPlanList.cs:108 -> LogisticsManagerHelper.cs:62 `SaveGameManager.Current.logisticsManagerPlans.FindAll(...)`), so 4b's screen-layer overlay has nothing to hook. The tag keeps them out of every .hsg (the absence strip) AND out of the two execution passes. Member -> host needs no type: the owner's own publish already carries the lists.
         CompanyCandidates     = 214,     // MERGER PHASE 4b (PEOPLE) part 1 (2026-09-11, D20-1): THE SHARED CANDIDATE POOL and its CLAIM. Four legs on one type, told apart by Action. "pool": a member's own candidate rows (client -> HOST, and the host fans them to that member's ONLINE co-members and replays them to a joiner) - a candidate pool is per SAVE (Helpers/RecruitmentHelper.cs:80) and job-board generation for a merged shop is already owner-only, so without this leg a member cannot even SEE what the company's boards produced. "claim": a member asks to open a salary negotiation on a company candidate; the host grants it to the FIRST asker and refuses the rest (the RivalStaffSync poach-claim shape), so two members can never hire the same person. "verdict": host -> the WHOLE company (the origin included, because the origin's own record must know it is taken) - who holds the candidate now, "" when released. "hired": the member who completed the hire -> host -> the ORIGIN, whose own candidate record is then discarded through the game's own DiscardCandidate. Receivers hold the rows as TAGGED display copies in their own CandidateEmployeeInstances: stripped at the save choke point and lifted out of the hourly pass that ages and deletes candidates, so expiry is the ORIGIN's clock and copies never vanish at different times on different machines.
+        CompanyMessages       = 215,     // MERGER PHASE 4b (PEOPLE) part 2 / P4 (2026-09-11, D20-5): THE PHONE RELAY. Four legs on one type, told apart by Action. "msg": a member's OWN business or staff message - the contact identity (id, category, description, address), the game's own messageKey + messageData + flags, and the BUTTON DESCRIPTORS (label key + the game's own background colour) - member -> HOST -> that member's ONLINE co-members, who re-raise it through the game's own Contact.GetContact + Contact.SendMessage so the contact auto-creates and the badge, the toast and the wording are all the game's. The button CLOSURES cannot travel (live UnityActions over the sender's objects, decompile TextMessage.cs:116-131), hence: "press": a co-member pressed a relayed copy's button - host -> the OWNER, whose machine runs the ORIGINAL closure exactly once; "handled": the owner -> the whole company, so every other copy clears its buttons and is marked read, which is what the game itself does to a message it pressed (ContextButton.SetUp); "refused" (review r2 MAJOR-2): the host, or the owner, -> the ONE presser, because a local click clears that copy's buttons BEFORE any answer (ContextButton.cs:77) - so a press nobody could run (owner offline, owner no longer holds the message, unknown to the host) is not silently lost: the presser puts the stored descriptors back, the copy is unread again and a real click can retry. The two ContextAction kinds are NOT pressed remotely: a salary negotiation opens LOCALLY on the presser through build A's candidate claim, and a health-insurance offer is informational (the HR plan and the offer exist only in the owner's save). A receiver's copy carries NO contextAction, so deleting it can never discard the owner's candidate or offer (decompile ContactsApp.cs:452-465), and every copy is lifted at both save choke points - a relayed message never reaches a .hsg. A relayed COMPLAINT never runs StartComplaint here, so it is outside the receiver's 2-per-week cap (ComplaintHelper.cs:32-39). No join replay: a message is a moment, not a state.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -385,6 +386,48 @@ namespace BigAmbitionsMP
         public string ClaimedBy   { get; set; } = "";   // verdict: who holds it now ("" = free again)
         public bool   Ok          { get; set; }         // verdict: granted to ClaimedBy
         public List<CandidateRow> Candidates { get; set; } = new();
+    }
+
+    // -- Merger phase 4b (people) P4: the phone relay (MessageType.CompanyMessages) --
+
+    /// <summary>One message button as the wire carries it: the game's own localisation key and the game's
+    /// own background colour (ContextButton.BackgroundColor). The onClick is deliberately absent - it is a
+    /// live UnityAction over the sender's objects, which is why a press travels back to the owner.</summary>
+    public class RelayButton
+    {
+        public string Key    { get; set; } = "";
+        public int    Colour { get; set; }
+    }
+
+    /// <summary>The four legs of the phone relay - see the MessageType comment. Action is the
+    /// discriminator: "msg" (the whole message + its contact), "press" (MessageId + ButtonIndex, sender =
+    /// the presser), "handled" (MessageId + HandledBy), "refused" (MessageId + TargetPid + Reason).</summary>
+    public class CompanyMessagePayload
+    {
+        public string PlayerId           { get; set; } = "";   // sender (validated SenderIs at the host)
+        public string Action             { get; set; } = "";
+        public string MessageId          { get; set; } = "";   // "bamp-msg-" + FNV, minted by the owner
+        public string OwnerPid           { get; set; } = "";   // the machine that raised the message
+        public string AddressKey         { get; set; } = "";   // the business it belongs to ("" = a person's contact)
+        public string ContactId          { get; set; } = "";   // the contact's display NAME, which is its id
+        public int    ContactCategory    { get; set; }         // ContactCategoryName
+        public string ContactDescription { get; set; } = "";
+        public string StreetName         { get; set; } = "";
+        public int    StreetNumber       { get; set; }
+        public string MessageKey         { get; set; } = "";
+        public Dictionary<string, string> Data { get; set; } = new();
+        public bool   IsSpecial          { get; set; }
+        public bool   IsNewInteraction   { get; set; }
+        public bool   Notify             { get; set; } = true;
+        public long   StampMinute        { get; set; }
+        public List<RelayButton> Buttons { get; set; } = new();
+        public int    CtxType            { get; set; }         // TextMessage.ContextAction.ContextActionType
+        public string CtxEmployeeId      { get; set; } = "";   // the candidate a salary negotiation is about
+        public string CtxOfferId         { get; set; } = "";   // the health-insurance offer id (informational)
+        public int    ButtonIndex        { get; set; } = -1;   // press
+        public string HandledBy          { get; set; } = "";   // handled: who pressed it
+        public string TargetPid          { get; set; } = "";   // refused: the ONE presser the answer is for
+        public string Reason             { get; set; } = "";   // refused: a short code (offline|gone|handled|nobutton|busy|unknown) - the words are built locally, nothing new on screen
     }
 
     /// <summary>Shared-shop slice 4: ONE item's retail price at a shared shop, set by a permitted player. The native

@@ -65,6 +65,7 @@ namespace BigAmbitionsMP
         private static bool _publishedOnce;                                                                    // RIG-3: my own pool has been offered to the host at least once this connection
         private static bool _poolSeen;                                                                         // U3(c): a co-member's pool has ARRIVED at least once this connection
         private static readonly HashSet<string> _everCopied = new();                                           // r3 MINOR-4: candidate ids this session ever held as a COMPANY COPY - the only ids the orphan sweep may close
+        private static readonly HashSet<string> _reassertOnly = new();                                         // r4 MINOR-1: claims asked by the RE-ASSERT, which must never open a dialog
 
         // -- identity --
 
@@ -108,7 +109,7 @@ namespace BigAmbitionsMP
                 SweepPending();
                 SweepOrphanNegotiations();
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} tick: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} tick: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         /// <summary>Republish on the next tick (after a hire, a discard, or a claim change).</summary>
@@ -200,7 +201,7 @@ namespace BigAmbitionsMP
                         return;
                 }
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} Receive: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} Receive: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         private static void ApplyPool(string ownerPid, List<CandidateRow> rows)
@@ -324,7 +325,14 @@ namespace BigAmbitionsMP
             if (_pending.ContainsKey(id))
             {
                 _pending.Remove(id);
-                if (p.Ok && mine) BeginNegotiationNow(id);
+                // r4 MINOR-1 (rig run, build A): a claim RE-ASSERTED at connect is for a negotiation that is
+                // ALREADY OPEN here - opening a second one threw "begin negotiation: Object reference not set
+                // to an instance of an object" on the host. Only a claim the player just asked for through
+                // MyEmployees.NegotiateWithCandidate (or the harness lever) continues into the dialog.
+                bool reassert = _reassertOnly.Remove(id);
+                if (p.Ok && mine && reassert)
+                    Plugin.Logger.LogInfo($"{Tag} claim of '{id}' re-asserted and GRANTED - the negotiation already open here keeps it; nothing new opened.");
+                else if (p.Ok && mine) BeginNegotiationNow(id);
                 else Plugin.Logger.LogWarning($"{Tag} claim of '{id}' REFUSED by the host - '{p.ClaimedBy}' is already talking to them; nothing opened here.");
             }
             if (mine) _keepalive[id] = Time.unscaledTime;
@@ -384,12 +392,13 @@ namespace BigAmbitionsMP
                     if (!IsInjectedCandidate(id) && !IsMyPublishedCandidate(id)) continue;
                     if (ClaimantOf(id).Length > 0 || _pending.ContainsKey(id)) continue;
                     _pending[id] = Time.unscaledTime;
+                    _reassertOnly.Add(id);                      // r4 MINOR-1: this grant must NOT open a second dialog
                     Send(new CompanyCandidatesPayload { PlayerId = MPConfig.PlayerId, Action = "claim", CandidateId = id, OwnerPid = OwnerOfCandidate(id) });
                     if (_logged.Add("reassert|" + id))
                         Plugin.Logger.LogInfo($"{Tag} re-asserting the claim on '{id}' - a negotiation is still open here.");
                 }
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} re-assert: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} re-assert: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         private static void SweepPending()
@@ -402,6 +411,7 @@ namespace BigAmbitionsMP
             foreach (var id in dead)
             {
                 _pending.Remove(id);
+                _reassertOnly.Remove(id);
                 Plugin.Logger.LogWarning($"{Tag} the host never answered the claim on '{id}' - nothing opened here (it can be tried again).");
             }
         }
@@ -431,7 +441,7 @@ namespace BigAmbitionsMP
                 Send(new CompanyCandidatesPayload { PlayerId = MPConfig.PlayerId, Action = "release", CandidateId = id, OwnerPid = owner });
                 Plugin.Logger.LogInfo($"{Tag} released the claim on '{id}' (harness drop).");
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} DropClaim: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} DropClaim: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         private static bool HasLiveNegotiation(string id)
@@ -469,7 +479,7 @@ namespace BigAmbitionsMP
                 try { _committing = true; page.NegotiateWithCandidate(inst); }
                 finally { _committing = false; }
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} begin negotiation: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} begin negotiation: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         /// <summary>The negotiation seam (MyEmployees.NegotiateWithCandidate, decompile :600-613 - the ONE
@@ -500,7 +510,7 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"{Tag} claiming '{id}' from the host before opening a negotiation.");
                 return true;
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} defer negotiation: {ex.Message}"); return false; }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} defer negotiation: {ex.GetType().Name}: {ex.Message}"); return false; }
         }
 
         // -- T2: the hire itself (review r1 MAJOR-3) --
@@ -546,7 +556,7 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"{Tag} accept of '{id}' deferred - asking the host whether this company candidate is still free.");
                 return true;
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} defer accept: {ex.Message}"); return false; }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} defer accept: {ex.GetType().Name}: {ex.Message}"); return false; }
         }
 
         /// <summary>The host's answer to an accept. GRANTED re-runs the game's own AcceptOffer end to end
@@ -562,7 +572,7 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogInfo($"{Tag} hire of '{id}' GRANTED by the host - completing the game's own accept.");
                 try { _hiring = true; pend.neg.AcceptOffer(pend.wage, pend.bonus); }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} accept after grant: {ex.Message}"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} accept after grant: {ex.GetType().Name}: {ex.Message}"); }
                 finally { _hiring = false; }
                 return;
             }
@@ -615,13 +625,13 @@ namespace BigAmbitionsMP
                 {
                     string id = inst.id ?? "";
                     try { EmployeeHelper.DiscardCandidate(inst); }
-                    catch (Exception dx) { Plugin.Logger.LogWarning($"{Tag} closing the stale negotiation for '{id}': {dx.Message}"); continue; }
+                    catch (Exception dx) { Plugin.Logger.LogWarning($"{Tag} closing the stale negotiation for '{id}': {dx.GetType().Name}: {dx.Message}"); continue; }
                     SetClaim(id, "");
                     Plugin.Logger.LogWarning($"{Tag} closed a stale negotiation for '{id}' - that candidate is neither in my list nor in the company pool any more, so nobody can be hired twice.");
                 }
                 RefreshIfOpen();
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} stale-negotiation sweep: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} stale-negotiation sweep: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         private static bool IsMyPublishedCandidate(string id)
@@ -659,7 +669,7 @@ namespace BigAmbitionsMP
                 SetClaim(id, "");
                 PublishNow();
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} OnHired: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} OnHired: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         /// <summary>THE ORIGIN: a co-member hired somebody from my pool - run the game's own discard on my
@@ -677,12 +687,12 @@ namespace BigAmbitionsMP
                 SetClaim(id, "");
                 if (mine == null) { Plugin.Logger.LogInfo($"{Tag} '{byPid}' hired '{id}' - not in my pool any more, nothing to drop."); return; }
                 try { EmployeeHelper.DiscardCandidate(mine); }
-                catch (Exception dx) { Plugin.Logger.LogWarning($"{Tag} discard of '{id}' after '{byPid}' hired them: {dx.Message}"); }
+                catch (Exception dx) { Plugin.Logger.LogWarning($"{Tag} discard of '{id}' after '{byPid}' hired them: {dx.GetType().Name}: {dx.Message}"); }
                 Plugin.Logger.LogInfo($"{Tag} '{byPid}' hired '{id}' out of my pool - my own candidate record discarded.");
                 PublishNow();
                 RefreshIfOpen();
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} OnPartnerHiredMine: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} OnPartnerHiredMine: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         /// <summary>A discard aimed at a PARTNER's copy: the candidate is not ours to destroy. The game's
@@ -715,7 +725,7 @@ namespace BigAmbitionsMP
                 RefreshIfOpen();
                 return true;
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} RefuseDiscard: {ex.Message}"); return false; }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} RefuseDiscard: {ex.GetType().Name}: {ex.Message}"); return false; }
         }
 
         /// <summary>U4 (re-check r3 MAJOR-4): TRUE only while ContactsApp.RemoveMessage runs. The removal
@@ -758,7 +768,7 @@ namespace BigAmbitionsMP
                     RefreshIfOpen();
                 }
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} message-purge repair: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} message-purge repair: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         // -- lifecycle / strips --
@@ -789,12 +799,12 @@ namespace BigAmbitionsMP
             {
                 var ids = new List<string>(_injected.Keys);
                 foreach (var id in ids) RemoveInjected(id, destroy: true);
-                _poolByOwner.Clear(); _claims.Clear(); _pending.Clear(); _keepalive.Clear(); _everCopied.Clear();
+                _poolByOwner.Clear(); _claims.Clear(); _pending.Clear(); _keepalive.Clear(); _everCopied.Clear(); _reassertOnly.Clear();
                 _publishedOnce = false; _poolSeen = false;   // RIG-3 / U3(c): both gates re-arm on the next connection
                 _sigSent = null;   // r4 re-check: a reconnect must re-publish the pool even when its signature is unchanged (the host's store may be stale)
                 if (ids.Count > 0) { Plugin.Logger.LogInfo($"{Tag} dropped {ids.Count} company candidate copy(ies) ({why})."); RefreshIfOpen(); }
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} ClearAll: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} ClearAll: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         /// <summary>Lift every injected copy out of the candidate list for the duration of a native pass
@@ -819,7 +829,7 @@ namespace BigAmbitionsMP
                 if (stripped.Count > 0 && _logged.Add("strip|" + context))
                     Plugin.Logger.LogInfo($"{Tag} {stripped.Count} company candidate copy(ies) sit out {context} (their expiry clock is the origin's).");
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} strip ({context}): {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} strip ({context}): {ex.GetType().Name}: {ex.Message}"); }
             return stripped;
         }
 
@@ -852,7 +862,7 @@ namespace BigAmbitionsMP
                     try { EmployeeHelper.EmployeeInstancesDictionary[c.id] = c; } catch { }
                 }
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} restore ({context}): {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} restore ({context}): {ex.GetType().Name}: {ex.Message}"); }
         }
 
         private static void RefreshIfOpen()
@@ -869,6 +879,7 @@ namespace BigAmbitionsMP
         public static void Reset()
         {
             _injected.Clear(); _poolByOwner.Clear(); _claims.Clear(); _pending.Clear(); _keepalive.Clear(); _everCopied.Clear();
+            _reassertOnly.Clear();
             _logged.Clear(); _sigSent = null; _committing = false; _nextTick = 0f;
             _pendingAccept.Clear(); _verbHeld.Clear(); _hiring = false;
             _publishedOnce = false; _poolSeen = false; MessagePurgeArmed = false;
@@ -905,10 +916,11 @@ namespace BigAmbitionsMP
                 if (string.IsNullOrEmpty(candidateId)) return false;
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return false;
                 _pending[candidateId] = Time.unscaledTime;
+                _reassertOnly.Remove(candidateId);              // the harness lever stands in for a real click: it DOES open
                 Send(new CompanyCandidatesPayload { PlayerId = MPConfig.PlayerId, Action = "claim", CandidateId = candidateId, OwnerPid = OwnerOfCandidate(candidateId) });
                 return true;
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} CommitClaim: {ex.Message}"); return false; }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} CommitClaim: {ex.GetType().Name}: {ex.Message}"); return false; }
         }
     }
 

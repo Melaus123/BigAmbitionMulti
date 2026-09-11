@@ -308,6 +308,7 @@ namespace BigAmbitionsMP
             try { GameStatePatcher.EnqueueOnMainThread(() => CompanyFeed.ClearAll("the connection dropped")); } catch { }
             try { GameStatePatcher.EnqueueOnMainThread(() => CompanyLists.ClearAll("the connection dropped")); } catch { }   // wave 4: no partner display copies without a session
             try { GameStatePatcher.EnqueueOnMainThread(() => CompanyCandidates.ClearAll("the connection dropped")); } catch { }   // phase 4b (people): same rule for the shared candidate copies
+            try { GameStatePatcher.EnqueueOnMainThread(() => CompanyMessages.ClearAll("the connection dropped")); } catch { }     // phase 4b (people) P4: and for the relayed message copies
             PlayerColours.ResetSession();   // colours r2 (MINOR-5): an involuntary drop ends the session too - Disconnect() only covers the voluntary path
             bool wasConnected = _connected;
             double secs = _connectClock.IsRunning ? _connectClock.Elapsed.TotalSeconds : -1;
@@ -683,6 +684,15 @@ namespace BigAmbitionsMP
                     // "somebody hired out of your pool". Main thread - it writes this save's candidate list.
                     var cc = env.GetPayload<CompanyCandidatesPayload>();
                     if (cc != null) GameStatePatcher.EnqueueOnMainThread(() => CompanyCandidates.Receive(cc));
+                    break;
+                }
+                case MessageType.CompanyMessages:
+                {
+                    // Merger phase 4b (people) P4: a co-member's relayed MESSAGE, a PRESS the host has
+                    // handed to this machine because it raised that message, or the owner's HANDLED mark.
+                    // Main thread - it writes this save's contacts.
+                    var cm = env.GetPayload<CompanyMessagePayload>();
+                    if (cm != null) GameStatePatcher.EnqueueOnMainThread(() => CompanyMessages.Receive(cm));
                     break;
                 }
                 case MessageType.SharedPriceEdit:

@@ -484,7 +484,7 @@ class Run:
     def launch(self):
         self.launch_t = now()
         say("launching %d instance(s) [%s] via %s" % (self.instances, ",".join(self.active), LAUNCHER))
-        subprocess.Popen(["cmd", "/c", "start", "", "/D", os.path.dirname(LAUNCHER), LAUNCHER,
+        subprocess.Popen(["cmd", "/c", "start", "", "/D", os.path.dirname(LAUNCHER), "cmd", "/c", LAUNCHER,   # cmd /c: the launcher window closes when the batch ends (2026-09-11: `start x.bat` runs it under /K and left one console per run)
                           str(self.instances)], creationflags=0x00000008)
         self.notes.append("launch at %s via local\\launch-mp-test.bat %d" % (stamp(self.launch_t), self.instances))
 
@@ -602,7 +602,7 @@ class Run:
             return self.cmdless_row(seq, role, label, exp, "FAIL", "internal launcher missing: %s" % bat)
         t0 = now()
         say("relaunch %s via %s" % (ROLE_NAME[role], os.path.basename(bat)))
-        subprocess.Popen(["cmd", "/c", "start", "", "/D", os.path.dirname(bat), bat], creationflags=0x00000008)
+        subprocess.Popen(["cmd", "/c", "start", "", "/D", os.path.dirname(bat), "cmd", "/c", bat], creationflags=0x00000008)   # cmd /c: no console left behind
         err = self.wait_armed(role, since_t=t0, relaunch=True)
         if err:
             return self.cmdless_row(seq, role, label, exp, "FAIL", err)
