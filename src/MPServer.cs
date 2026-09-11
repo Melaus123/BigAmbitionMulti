@@ -5158,6 +5158,22 @@ namespace BigAmbitionsMP
                     _mergerPendingByTarget.Remove(actorPid);
                     string a = StableOfPid(fromPid), b = StableOfPid(actorPid);
                     if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return;   // someone left mid-consent
+                    // Phase 0 (2026-09-10, map §21.6): the propose-time 'not already in a company' check is re-run at ACCEPT -
+                    // a target who joined another company while this offer was pending would otherwise be added to a
+                    // second group (one player in two groups; the half-merged state the user forbade). Group UNION is phase 1.
+                    if (MergerSync.GroupOfStable(b) != "" || MergerSync.InAnyGroup(actorPid))   // r2 (review #5): the STORE is what StoreAdd writes to
+                    {
+                        Plugin.Logger.LogWarning($"[Merger] accept by '{actorPid}' of '{fromPid}' REFUSED - they are already in a company (joined while the offer was pending).");
+                        var stale = new MergerRequestPayload { Action = "withdrawn", FromPid = fromPid };
+                        if (actorPid == MPConfig.PlayerId) MergerSync.IncomingFromPid = "";
+                        else SendToPid(actorPid, MessageEnvelope.Create(MessageType.MergerRequest, "host", stale));
+                        _mergerCooldown[fromPid + "|" + actorPid] = now + MergerReproposeCooldownMs;   // r3 (re-review #4): same anti-spam as a decline
+                        // r2 (review #6): the proposer learns the offer died - same relay and toast as a decline (their Cancel chip clears).
+                        var dead = new MergerRequestPayload { Action = "declined", FromPid = actorPid };
+                        if (fromPid == MPConfig.PlayerId) { MergerSync.OutgoingToPid = ""; PassengerHud.Toast("Merger proposal declined."); }
+                        else SendToPid(fromPid, MessageEnvelope.Create(MessageType.MergerRequest, "host", dead));
+                        return;
+                    }
                     GrantSync.NoteName(a, fromPid); GrantSync.NoteName(b, actorPid);
                     // Join the proposer's existing company, else mint a fresh group for the pair.
                     string group = MergerSync.GroupOfStable(a);
@@ -5267,8 +5283,9 @@ namespace BigAmbitionsMP
         // ═══════════════════════════════════════════════════════════════════════════════════════════════
         // SHARED-SHOP MANAGEMENT (the Business PERMISSION feature; src/SharedShopSchedule.cs) — NOT THE MERGER.
         // The merger's routes (HostRouteEmployeeEdit above, BusinessEditRequest) are untouched by this block.
-        // Access here = a DIRECT Business grant from the shop's owner (GrantSync.IsGrantedDirect — merger
-        // membership does not count); a per-sender rate cap (plan §2.9 P4) and a payload shape check guard the
+        // Access here = a DIRECT Business grant from the shop's owner (GrantSync.IsGrantedDirect) - and, for the
+        // SCHEDULE routes only (edit + session open/close), merger membership too (phase 0, 2026-09-10; the other
+        // routes stay permission-only); a per-sender rate cap (plan §2.9 P4) and a payload shape check guard the
         // relay; snapshots go to exactly one machine (P1).
         // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -5317,7 +5334,8 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
-        /// <summary>HOST (main thread): a permitted player's schedule edit → the owner (applied here if the host owns it).</summary>
+        /// <summary>HOST (main thread): a permitted player's schedule edit — direct Business grant or merger membership
+        /// (phase 0, 2026-09-10) — → the owner (applied here if the host owns it).</summary>
         public static void HostRouteSharedScheduleEdit(SharedScheduleEditPayload p, string senderPid)
         {
             try
@@ -5329,8 +5347,8 @@ namespace BigAmbitionsMP
                 string ownerPid = SharedShopOwnerPid(p.AddressKey);
                 if (ownerPid.Length == 0) { Plugin.Logger.LogWarning($"[SharedShop] schedule edit for unowned '{p.AddressKey}' from '{senderPid}' — dropped."); return; }
                 if (ownerPid == senderPid) return;   // an owner's own edits never route
-                if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid))
-                { Plugin.Logger.LogWarning($"[SharedShop] schedule edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission, dropped."); return; }
+                if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid) && !MergerSync.MergedRuntime(ownerPid, senderPid))
+                { Plugin.Logger.LogWarning($"[SharedShop] schedule edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission or merger membership, dropped."); return; }
                 if (ownerPid == MPConfig.PlayerId) SharedShopSchedule.ApplyOnOwner(p);
                 else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedScheduleEdit, "host", p));
             }
@@ -5338,7 +5356,7 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>HOST (main thread): editing-session traffic. open/close: the sender must hold a direct Business
-        /// grant from the owner → to the owner. snapshot: the sender must BE the owner → to exactly ONE machine (ToPid).</summary>
+        /// grant from the owner, or be merged with them (phase 0, 2026-09-10) → to the owner. snapshot: the sender must BE the owner → to exactly ONE machine (ToPid).</summary>
         public static void HostRouteScheduleSession(ScheduleSessionPayload p, string senderPid)
         {
             try
@@ -5355,8 +5373,8 @@ namespace BigAmbitionsMP
                     case "open":
                     case "close":
                         if (ownerPid == senderPid) return;   // the owner has no session with themself
-                        if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid))
-                        { Plugin.Logger.LogWarning($"[SharedShop] session '{p.Action}' by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission, dropped."); return; }
+                        if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid) && !MergerSync.MergedRuntime(ownerPid, senderPid))
+                        { Plugin.Logger.LogWarning($"[SharedShop] session '{p.Action}' by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission or merger membership, dropped."); return; }
                         target = ownerPid;
                         break;
                     case "snapshot":

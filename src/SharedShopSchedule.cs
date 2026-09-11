@@ -16,9 +16,10 @@ namespace BigAmbitionsMP
     /// Plan: .modding/03-systems/shared-shop-management-plan.md §2.5/§2.6/§2.8/§2.9.
     ///
     /// THIS IS NOT THE MERGER. The company merger (MergerSync / MergerFlip / MergerEmployeeSync) is a separate
-    /// feature with its own messages and its own rules; nothing here reads or writes merger state except to EXCLUDE
-    /// merger-flipped shops from this path (ruling 12: this effort touches only other players' businesses reached
-    /// through a Business grant — own shops, single-player, the merger and everything else stay exactly native).
+    /// feature with its own messages and its own rules. Since 2026-09-10 (merger phase 0) the SCHEDULE path also serves
+    /// merger-flipped shops through IsScheduleManaged/IsMergedShop (the merger's own write-back was retired); every
+    /// other shared-shop surface still keys on IsSharedShop, which EXCLUDES flipped shops (ruling 12: the permission
+    /// effort touches only other players' businesses reached through a Business grant).
     ///
     /// A SHARED SHOP on this machine = a registration the host lists in the local player's shared-manage set
     /// (GrantSync.IsSharedManage — a DIRECT Business grant from its operator, owner online; merger membership never
@@ -72,7 +73,8 @@ namespace BigAmbitionsMP
         private static readonly string[] DayNamesFallback = { "", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday" };
 
         /// <summary>A registration this machine may MANAGE through a DIRECT Business grant (host-pushed SharedManageKeys —
-        /// merger membership never counts) and does not own. Merger-flipped shops are explicitly NOT shared shops.</summary>
+        /// merger membership never counts) and does not own. Merger-flipped shops are explicitly NOT shared shops
+        /// (they are schedule-managed through IsScheduleManaged since 2026-09-10).</summary>
         public static bool IsSharedShop(BuildingRegistration reg, string addr)
         {
             if (reg == null || string.IsNullOrEmpty(addr)) return false;
@@ -92,13 +94,34 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
+        /// <summary>A merger-flipped shop this machine helps run (phase 0, 2026-09-10). NOT a shared shop: only the
+        /// schedule pipeline and auto-fill read merged shops this way — visibility, prices and work tabs stay
+        /// permission-only. HEADQUARTERS ARE IN for merged shops (unlike shared shops, ruling 27): the retired merger
+        /// write-back covered partner HQ schedules and the merger will manage HQ fully (plan phase 4c); the validated
+        /// pipeline carries HQ scheduling unchanged (merger map §22.x). Review 2026-09-10 #4.</summary>
+        public static bool IsMergedShop(BuildingRegistration reg, string addr)
+        {
+            if (reg == null || string.IsNullOrEmpty(addr)) return false;
+            try
+            {
+                if (!MergerFlip.IsFlipped(addr)) return false;
+                if (!MergerSync.IAmMember) return false;
+                return true;   // HQ included (see the summary above)
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Phase 0, 2026-09-10: the schedule pipeline serves DIRECT-grant shops and MERGED shops; every other
+        /// shared-shop surface keeps IsSharedShop.</summary>
+        public static bool IsScheduleManaged(BuildingRegistration reg, string addr) => IsSharedShop(reg, addr) || IsMergedShop(reg, addr);
+
         /// <summary>MAIN THREAD (MPCanvasUI.Update, 2 s). Inert unless this player helps somewhere, hosts an editing
-        /// session, or has deferred work.</summary>
+        /// session, is in a merger, or has deferred work.</summary>
         public static void Tick()
         {
             if (Time.unscaledTime < _nextScan) return;
             _nextScan = Time.unscaledTime + ScanSeconds;
-            bool helper = GrantSync.SharedManageCount > 0;
+            bool helper = GrantSync.SharedManageCount > 0 || MergerFlip.FlippedCount > 0;   // merged shops are schedule-managed too (phase 0, 2026-09-10)
             if (!helper && _sessions.Count == 0 && _pendingTruth.Count == 0 && _pendingRedraw.Count == 0
                 && _openSessionAddr.Length == 0 && _baseline.Count == 0) return;
             try
@@ -136,7 +159,7 @@ namespace BigAmbitionsMP
                 {
                     if (reg == null || reg.scheduleDays == null) continue;
                     string addr; try { addr = GameStateReader.AddressKey(reg); } catch { continue; }
-                    if (!IsSharedShop(reg, addr)) continue;   // membership decided by IsSharedShop alone — the prune below must agree with TryApplyOwnerTruth's gate
+                    if (!IsScheduleManaged(reg, addr)) continue;   // membership decided by IsScheduleManaged alone — the prune below must agree with TryApplyOwnerTruth's gate
                     (seen ??= new()).Add(addr);
                     if (IsAutoFilling(reg)) continue;         // the fill is still writing — send its days as one change-set when it is done
                     var sigs = DaySigs(reg);
@@ -211,7 +234,7 @@ namespace BigAmbitionsMP
                     if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                     var reg = ScheduleHelper.Business != null ? ScheduleHelper.Business.buildingRegistration : null;
                     string addr = ""; try { if (reg != null) addr = GameStateReader.AddressKey(reg); } catch { }
-                    if (reg != null && IsSharedShop(reg, addr)) OpenEditorSession(addr, reg);
+                    if (reg != null && IsScheduleManaged(reg, addr)) OpenEditorSession(addr, reg);
                     else if (_openSessionAddr.Length > 0) CloseEditorSession("another shop's schedule was opened");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} LoadScheduler hook: {ex.Message}"); }
@@ -283,7 +306,7 @@ namespace BigAmbitionsMP
             var reg = FindReg(_openSessionAddr, gi);
             if (reg == null) { CloseEditorSession("shop no longer exists here"); return; }
             if (!IsScheduleTabOpenFor(reg)) { CloseEditorSession("schedule tab no longer open"); return; }
-            if (!IsSharedShop(reg, _openSessionAddr)) { CloseEditorSession("no longer shared with this player"); return; }
+            if (!IsScheduleManaged(reg, _openSessionAddr)) { CloseEditorSession("no longer schedule-managed for this player"); return; }
             if (Time.unscaledTime - _lastKeepalive >= KeepaliveSeconds)
             {
                 _lastKeepalive = Time.unscaledTime;
@@ -549,13 +572,13 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"{Tag} snapshot for '{p.AddressKey}' arrived after it stopped being shared — ignored.");
         }
 
-        /// <summary>Owner truth for a SHARED shop — from a targeted snapshot or the business heartbeat (GameStatePatcher
-        /// calls this first; false = not a shared shop, run the native replace). Reconciled PER DAY against the baseline
+        /// <summary>Owner truth for a SCHEDULE-MANAGED shop — shared (direct grant) or merged — from a targeted snapshot
+        /// or the business heartbeat (GameStatePatcher calls this first; false = not schedule-managed, run the native replace). Reconciled PER DAY against the baseline
         /// (see the class summary); never under a drag; the open Schedule tab is redrawn.</summary>
         public static bool TryApplyOwnerTruth(BuildingRegistration reg, List<ScheduleDayInfo> days, string addr, string why, List<int> forceDays = null)
         {
             if (reg == null || reg.scheduleDays == null || string.IsNullOrEmpty(addr)) return false;
-            if (!IsSharedShop(reg, addr)) return false;   // live gate only — stale editing state must never keep a shop "shared"
+            if (!IsScheduleManaged(reg, addr)) return false;   // live gate only — stale editing state must never keep a shop managed
             if (days == null || days.Count == 0) return true;
             try
             {

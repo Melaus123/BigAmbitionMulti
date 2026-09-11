@@ -430,6 +430,7 @@ namespace BigAmbitionsMP
                         {
                             // Session players' shops are stamped with their id as the rival id.
                             var stamp = reg.businessOwnerRivalId?.ToString() ?? "";
+                            if (stamp.Length == 0) stamp = MergerFlip.ParkedRunner(GameStateReader.AddressKey(reg));   // merger phase 0 (review #2): a flipped partner shop parks its pid
                             ownerPid = stamp.Length > 0 ? stamp : "";
                         }
                     }

@@ -17,12 +17,10 @@ namespace BigAmbitionsMP
     ///    that would only strip the local replica (divergence) — instead the local record is dropped
     ///    optimistically and the op routes to the owner, who runs the native RemoveEmployee (shift
     ///    unassign, autofill abort, HR plans, security recalc) and force-republishes the roster.
-    ///  • SCHEDULE (hours + shifts): native BizMan edits the FLIPPED replica's scheduleDays locally.
-    ///    A 2s scan diffs each flipped shop's schedule against the last owner-applied signature; a
-    ///    local edit sends the whole schedule to the owner (last-writer-wins — co-op semantics), who
-    ///    applies it wholesale; the BusinessSync heartbeat republishes and every member converges.
-    ///    While an edit is in flight the owner heartbeat is HELD for that shop (15s cap) so the
-    ///    member's edit isn't clobbered by a pre-edit snapshot racing back.
+    ///  • SCHEDULE (hours + shifts): RETIRED here 2026-09-10. The wholesale write-back this file used to
+    ///    run (2s scan → whole-schedule send → unvalidated rebuild on the owner) is gone; merged shops now
+    ///    travel the VALIDATED per-day pipeline in SharedShopSchedule (IsScheduleManaged is true for them),
+    ///    and a routed "schedule" op from an old build is logged and ignored.
     ///
     /// Host validates every op: sender must BE the owner or be MERGED with the owner. INERT without
     /// a merger: no injected records → the fire patch passes through; no flipped shops → no scan.
@@ -53,17 +51,13 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── SCHEDULE write-back (hours + shifts) ──────────────────────────────
+        // ── flipped-shop scan (assignments only — the schedule write-back retired 2026-09-10) ──
 
-        private static readonly Dictionary<string, string> _ownerSig   = new();   // addr → sig last applied FROM the owner
-        private static readonly Dictionary<string, string> _sentSig    = new();   // addr → sig we sent (pending confirmation)
-        private static readonly Dictionary<string, float>  _sentAt     = new();
-        private const float PendingHoldSeconds = 15f;
         private static float _nextScan;
 
-        /// <summary>MAIN THREAD (MPCanvasUI.Update). Detect local edits to flipped shops' schedules,
-        /// own-employee assignments into flipped shops (→ record migration), and unsupported
-        /// reassignments of injected partner staff (→ revert + toast).</summary>
+        /// <summary>MAIN THREAD (MPCanvasUI.Update). Detect own-employee assignments into flipped shops
+        /// (→ record migration) and unsupported reassignments of injected partner staff (→ revert + toast).
+        /// Schedules are NOT scanned here — they travel the validated SharedShopSchedule path (2026-09-10).</summary>
         public static void Tick()
         {
             if (Time.unscaledTime < _nextScan) return;
@@ -73,23 +67,6 @@ namespace BigAmbitionsMP
             {
                 var gi = SaveGameManager.Current;
                 if (gi?.BuildingRegistrations == null) return;
-                foreach (var reg in gi.BuildingRegistrations)
-                {
-                    if (reg == null) continue;
-                    string addr; try { addr = GameStateReader.AddressKey(reg); } catch { continue; }
-                    if (!MergerFlip.IsFlipped(addr)) continue;
-                    string sig = ScheduleSig(reg);
-                    if (!_ownerSig.TryGetValue(addr, out var known)) { _ownerSig[addr] = sig; continue; }   // baseline on first sight
-                    if (sig == known) continue;                                        // matches the owner's truth
-                    _sentAt.TryGetValue(addr, out var at);
-                    if (_sentSig.TryGetValue(addr, out var sent) && sent == sig
-                        && Time.unscaledTime - at < PendingHoldSeconds) continue;      // already in flight
-                    _sentSig[addr] = sig; _sentAt[addr] = Time.unscaledTime;
-                    var p = new EmployeeEditPayload { PlayerId = MPConfig.PlayerId, Action = "schedule", AddressKey = addr };
-                    SerializeSchedule(reg, p.Schedule);
-                    Plugin.Logger.LogInfo($"[MergerStaff] schedule edit detected @ '{addr}' — routing {p.Schedule.Count} day(s) to the owner.");
-                    Send(p);
-                }
                 ScanAssignments(gi);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MergerStaff] scan: {ex.Message}"); }
@@ -174,31 +151,6 @@ namespace BigAmbitionsMP
             return null;
         }
 
-        /// <summary>GameStatePatcher calls this before applying an owner heartbeat's schedule to a reg:
-        /// while OUR edit is in flight, the (pre-edit) owner snapshot must not clobber it.</summary>
-        public static bool HoldScheduleApply(string addressKey)
-        {
-            if (!_sentSig.ContainsKey(addressKey)) return false;
-            _sentAt.TryGetValue(addressKey, out var at);
-            if (Time.unscaledTime - at >= PendingHoldSeconds)
-            { _sentSig.Remove(addressKey); _sentAt.Remove(addressKey); return false; }   // timed out — let truth through
-            return true;
-        }
-
-        /// <summary>GameStatePatcher calls this after applying an owner heartbeat's schedule: record the
-        /// owner's truth as the diff baseline; an arriving echo of our own edit clears the pending hold.</summary>
-        public static void NoteOwnerScheduleApplied(string addressKey, BuildingRegistration reg)
-        {
-            try
-            {
-                string sig = ScheduleSig(reg);
-                _ownerSig[addressKey] = sig;
-                if (_sentSig.TryGetValue(addressKey, out var sent) && sent == sig)
-                { _sentSig.Remove(addressKey); _sentAt.Remove(addressKey); }
-            }
-            catch { }
-        }
-
         // ── Wire ──────────────────────────────────────────────────────────────
 
         private static void Send(EmployeeEditPayload p)
@@ -225,16 +177,8 @@ namespace BigAmbitionsMP
                 }
                 else if (p.Action == "schedule")
                 {
-                    var gi = SaveGameManager.Current;
-                    if (gi?.BuildingRegistrations == null) return;
-                    foreach (var reg in gi.BuildingRegistrations)
-                    {
-                        if (reg == null || GameStateReader.AddressKey(reg) != p.AddressKey) continue;
-                        if (!MergerFlip.TrulyMine(reg)) { Plugin.Logger.LogWarning($"[MergerStaff] routed schedule for '{p.AddressKey}' — not truly mine, dropped."); return; }
-                        ApplyScheduleDtos(reg, p.Schedule);
-                        Plugin.Logger.LogInfo($"[MergerStaff] applied routed SCHEDULE @ '{p.AddressKey}' ({p.Schedule?.Count ?? 0} day(s), by '{p.PlayerId}').");
-                        return;
-                    }
+                    Plugin.Logger.LogWarning($"[MergerStaff] routed SCHEDULE from '{p.PlayerId}' ignored — retired 2026-09-10 (merged schedules travel the validated SharedShopSchedule path).");
+                    return;
                 }
                 else if (p.Action == "adopt")
                 {
@@ -300,80 +244,9 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MergerStaff] ApplyOnOwner: {ex.Message}"); }
         }
 
-        // ── Schedule (de)serialization — the BusinessSync/GameStatePatcher shapes, kept in step ────
-
-        public static void SerializeSchedule(BuildingRegistration reg, List<ScheduleDayInfo> into)
-        {
-            try
-            {
-                if (reg.scheduleDays == null) return;
-                foreach (var sd in reg.scheduleDays)
-                {
-                    if (sd == null) continue;
-                    var dto = new ScheduleDayInfo { Day = (int)sd.day, IsOpen = sd.isOpen };
-                    if (sd.openingHourSlots != null)
-                        foreach (var s in sd.openingHourSlots)
-                            if (s != null) dto.OpeningHourSlots.Add(new OpeningHourSlotInfo { StartingHour = s.startingHour, EndingHour = s.endingHour });
-                    if (sd.workShifts != null)
-                        foreach (var w in sd.workShifts)
-                            if (w != null) dto.WorkShifts.Add(new WorkShiftInfo
-                            {
-                                EmployeeId = w.employeeId ?? "", ItemInstanceId = w.itemInstanceId ?? "",
-                                StartingHour = w.startingHour, EndingHour = w.endingHour, Type = (int)w.type,
-                            });
-                    into.Add(dto);
-                }
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[MergerStaff] serialize: {ex.Message}"); }
-        }
-
-        public static void ApplyScheduleDtos(BuildingRegistration reg, List<ScheduleDayInfo> days)
-        {
-            if (reg.scheduleDays == null || days == null || days.Count == 0) return;
-            reg.scheduleDays.Clear();
-            foreach (var d in days)
-            {
-                var sd = new ScheduleDay { day = (BigAmbitions.DayNightCycle.DayOfWeekOrdered)d.Day, isOpen = d.IsOpen };
-                if (d.OpeningHourSlots != null)
-                    foreach (var slot in d.OpeningHourSlots)
-                        sd.openingHourSlots.Add(new OpeningHourSlot(slot.StartingHour, slot.EndingHour));
-                if (d.WorkShifts != null)
-                    foreach (var shift in d.WorkShifts)
-                        if (shift != null) sd.AddWorkShift(new WorkShift
-                        {
-                            employeeId = shift.EmployeeId ?? "", itemInstanceId = shift.ItemInstanceId ?? "",
-                            startingHour = shift.StartingHour, endingHour = shift.EndingHour,
-                            type = (WorkShiftType)shift.Type,
-                        });
-                reg.scheduleDays.Add(sd);
-            }
-        }
-
-        public static string ScheduleSig(BuildingRegistration reg)
-        {
-            var sb = new System.Text.StringBuilder();
-            try
-            {
-                if (reg.scheduleDays != null)
-                    foreach (var sd in reg.scheduleDays)
-                    {
-                        if (sd == null) continue;
-                        sb.Append((int)sd.day).Append(sd.isOpen ? 'o' : 'c');
-                        if (sd.openingHourSlots != null)
-                            foreach (var s in sd.openingHourSlots) if (s != null) sb.Append(s.startingHour).Append('-').Append(s.endingHour).Append(',');
-                        sb.Append('#');
-                        if (sd.workShifts != null)
-                            foreach (var w in sd.workShifts) if (w != null) sb.Append(w.employeeId).Append('@').Append(w.itemInstanceId).Append(':').Append(w.startingHour).Append('-').Append(w.endingHour).Append('/').Append((int)w.type).Append(';');
-                        sb.Append('|');
-                    }
-            }
-            catch { }
-            return sb.ToString();
-        }
-
         public static void Reset()
         {
-            _ownerSig.Clear(); _sentSig.Clear(); _sentAt.Clear(); _pendingAdopt.Clear();
+            _pendingAdopt.Clear();
         }
     }
 }

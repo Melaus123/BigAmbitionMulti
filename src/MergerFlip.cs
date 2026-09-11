@@ -37,8 +37,23 @@ namespace BigAmbitionsMP
 
         public static int FlippedCount => _flipped.Count;
         public static bool IsFlipped(string addressKey) => !string.IsNullOrEmpty(addressKey) && _flipped.ContainsKey(addressKey);
-        /// <summary>Slice 5: the currently flipped partner shops (the schedule write-back scans these).</summary>
-        public static IEnumerable<string> FlippedKeys => _flipped.Keys;
+        /// <summary>The TRUE owner (parked runner pid) of a flipped shop — "" when it is not flipped.</summary>
+        public static string ParkedRunner(string addressKey)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return "";
+            return _flipped.TryGetValue(addressKey, out var runner) ? (runner ?? "") : "";
+        }
+        /// <summary>Phase 0 (2026-09-10, fixes merger map §21.1): the owner's heartbeat keeps attributing a partner's shop to the
+        /// partner, and the ownership apply used to re-stamp businessOwnerRivalId on a FLIPPED reg - which made
+        /// IsForeignPlayerBusiness true again and re-engaged every helper guard (assign dropdowns, the class-6 sweep).
+        /// The apply now calls this instead: the stamp is PARKED (so a later flip OFF restores the current truth) and the
+        /// live field stays empty. Returns true when the key is flipped (caller must then leave the field empty).</summary>
+        public static bool ParkRunnerIfFlipped(string addressKey, string runner)
+        {
+            if (string.IsNullOrEmpty(addressKey) || !_flipped.ContainsKey(addressKey)) return false;
+            _flipped[addressKey] = runner ?? "";
+            return true;
+        }
 
         /// <summary>TRUE ownership for the MOD's sync layer: RentedByPlayer minus the flip. Every
         /// publisher scan, authority gate, and receiver guard in OUR code must use this instead of

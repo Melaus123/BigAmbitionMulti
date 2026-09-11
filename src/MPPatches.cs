@@ -3156,6 +3156,14 @@ namespace BigAmbitionsMP
                 ("Helpers.TaxHelper",               "GenerateTaxes"),
                 ("Helpers.FinancialSummaryHelper",  "CreateFinancialSummary"),  // (:24) drives NetWorth accumulation
                 ("BusinessSimulatorHelper",         "RunHourly"),               // away-from-shop revenue engine
+                // Merger phase 0 (2026-09-10, F-2026-09-10-B): two more RentedByPlayer-gated passes. FillProvidersDictionary
+                // counts a player shop as a provider unconditionally (an empty-shelf flipped partner shop would inflate the
+                // counts behind UpdateMarketDemands); RefreshRivals clears businessOwnerRivalId on RentedByPlayer regs and
+                // rebuilds the rival tables (a flipped shop would drop out of rival bookkeeping). The CompetitionHelper cluster
+                // and CustomerEntriesHelper.UpdateCachedProductsForAiBusiness are deliberately NOT here: the flip is what
+                // shields a partner's shop from the AI shutting it down, re-tenanting it or rewriting its prices/products.
+                ("Helpers.ProductMarketHelper",     "FillProvidersDictionary"),
+                ("BigAmbitions.Rivals.RivalsHelper", "RefreshRivals"),
                 // NEW IN GAME 1.0 (2026-08-29): BuildingManager.RunCurrentBuildingHourly ->
                 // BusinessHelper.RestockCurrentBusinessIfNeeded restocks the shop the local player is
                 // STANDING IN — the one building BusinessSimulatorHelper.RunHourly deliberately skips

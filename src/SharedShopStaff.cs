@@ -153,13 +153,24 @@ namespace BigAmbitionsMP
             catch { }
         }
 
-        /// <summary>Auto-fill on a shared shop may use the OWNER's copied staff (theirs, at their shop) — nobody else's.</summary>
+        /// <summary>Auto-fill on a shared shop may use the OWNER's copied staff (theirs, at their shop) — nobody else's.
+        /// On a MERGED shop (phase 0, 2026-09-10) the same rule runs off merger membership instead: the injected
+        /// record's owner must be the shop's TRUE owner (the runner parked by the flip) and merged with this player
+        /// at runtime. That branch is tested BEFORE IsFromGrantOwner, which only ever passes on a direct grant.</summary>
         public static bool AllowedInAutoFill(string employeeId, BuildingRegistration reg)
         {
             try
             {
-                if (reg == null || !IsFromGrantOwner(employeeId)) return false;
+                if (reg == null || string.IsNullOrEmpty(employeeId)) return false;
                 string addr = GameStateReader.AddressKey(reg);
+                if (SharedShopSchedule.IsMergedShop(reg, addr))
+                {
+                    if (!MPRegisterSync.IsInjectedStaff(employeeId)) return false;   // a live copy, never a memory of one
+                    string mergedOwner = MPRegisterSync.OwnerOfInjected(employeeId);
+                    if (mergedOwner.Length == 0 || mergedOwner == MPConfig.PlayerId) return false;
+                    return mergedOwner == MergerFlip.ParkedRunner(addr) && MergerSync.MergedRuntime(mergedOwner, MPConfig.PlayerId);
+                }
+                if (!IsFromGrantOwner(employeeId)) return false;
                 if (!SharedShopSchedule.IsSharedShop(reg, addr)) return false;
                 string stamp = reg.businessOwnerRivalId?.ToString() ?? "";
                 return stamp == MPRegisterSync.OwnerOfInjected(employeeId);

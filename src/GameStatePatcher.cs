@@ -2310,6 +2310,10 @@ namespace BigAmbitionsMP
         {
             if (reg == null) return false;
             if (IsSessionPlayerRivalId(reg.businessOwnerRivalId)) return true;
+            // Merger phase 0 (review 2026-09-10 #1): a FLIPPED partner shop carries an EMPTY live stamp (the pid is parked in
+            // the flip table), so the stamp arm above no longer sees it - it is a player's shop all the same (entrance fees,
+            // cleaning meter, shelf-fill correction all key on this).
+            try { if (MergerFlip.IsFlipped(GameStateReader.AddressKey(reg))) return true; } catch { }
             // Re-host durability (2026-06-24): the live roster forgets a player who is
             // disconnected, but the host's ownership LEDGER (restored from the manifest)
             // still reserves their building to them.  A building reserved to a player —
@@ -4974,17 +4978,15 @@ namespace BigAmbitionsMP
                 {
                     // The owner's OWN shop hours live in their save — never overwrite them from the host's
                     // (possibly stale/blank) replica.  AI + other players' shops take the host's relayed hours.
-                    // Slice 5: while OUR schedule edit to a flipped partner shop is in flight, hold the
-                    // owner heartbeat for that shop — a pre-edit snapshot must not clobber the member's edit.
-                    // Shared-shop management (Business PERMISSION feature, 2026-08-21): a shop this player may
-                    // manage through a grant is reconciled PER DAY by SharedShopSchedule (true = handled); every
-                    // other shop — own, AI, merger — takes the unchanged path below.
+                    // Shared-shop management (Business PERMISSION feature, 2026-08-21) and MERGED shops (phase 0,
+                    // 2026-09-10): a shop this player may manage through a grant — or helps run through a merger —
+                    // is reconciled PER DAY by SharedShopSchedule (true = handled); every other shop — own, AI —
+                    // takes the unchanged path below.
                     if (reg.scheduleDays != null && info.Schedule != null && info.Schedule.Count > 0 && !receiverOwnsThis
                         && SharedShopSchedule.TryApplyOwnerTruth(reg, info.Schedule, info.AddressKey, "heartbeat"))
                     { }
                     else if (reg.scheduleDays != null && info.Schedule != null && info.Schedule.Count > 0
-                        && !receiverOwnsThis
-                        && !MergerEmployeeSync.HoldScheduleApply(info.AddressKey))
+                        && !receiverOwnsThis)
                     {
                         reg.scheduleDays.Clear();
                         foreach (var d in info.Schedule)
@@ -5016,9 +5018,6 @@ namespace BigAmbitionsMP
                             }
                             reg.scheduleDays.Add(sd);
                         }
-                        // Slice 5: the owner's truth is the write-back diff baseline (and an echo of our
-                        // own edit clears the pending hold).
-                        MergerEmployeeSync.NoteOwnerScheduleApplied(info.AddressKey, reg);
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] schedule apply for {info.AddressKey}: {ex.Message}"); }
@@ -5116,9 +5115,17 @@ namespace BigAmbitionsMP
                     // contamination family produces), which would re-open the rebroadcast loop.
                     if (newBusinessOwner == MPConfig.PlayerId) newBusinessOwner = "";
 
+                    // Merger phase 0 (2026-09-10, map §21.1): on a FLIPPED partner shop the runner stamp is PARKED in the
+                    // flip table (restored exactly at flip OFF) and the live field stays empty - otherwise this heartbeat
+                    // re-stamp made IsForeignPlayerBusiness true and every helper guard re-engaged on a merged shop.
+                    // RentedByPlayer keeps the flip's true (newRented is priorRented for another player's building).
+                    // r2 (review #7): park only an ATTRIBUTED stamp - an un-attributed host record (round-247 shape) must not
+                    // poison the parked partner pid with an AI id; the live field stays empty on a flipped reg either way.
+                    bool flipped = false; try { flipped = MergerFlip.IsFlipped(info.AddressKey); } catch { }
+                    if (flipped && attributedToOther) { try { MergerFlip.ParkRunnerIfFlipped(info.AddressKey, newBusinessOwner); } catch { } }
                     reg.buildingOwnerRivalId = newBuildingOwner;
-                    reg.businessOwnerRivalId = newBusinessOwner;
-                    reg.RentedByPlayer       = newRented;
+                    reg.businessOwnerRivalId = flipped ? "" : newBusinessOwner;
+                    reg.RentedByPlayer       = flipped ? true : newRented;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ownership apply for {info.AddressKey}: {ex.Message}"); }
 
@@ -5917,6 +5924,8 @@ namespace BigAmbitionsMP
                             bool marketBad = false, tenantBad = false;
                             try { marketBad = reg.AvailableForRent; } catch { }
                             try { tenantBad = (reg.businessOwnerRivalId?.ToString() ?? "") != owner; } catch { }
+                            // (Merger note 2026-09-10: a FLIPPED partner shop never reaches this point - the loop bails on
+                            // RentedByPlayer above, and a flipped reg is always RentedByPlayer=true; re-review r2 #1.)
                             if (!marketBad && !tenantBad) continue;
                             try
                             {
@@ -6146,7 +6155,7 @@ namespace BigAmbitionsMP
                     if (legitimateDeed) continue;
                     try
                     {
-                        if (string.IsNullOrEmpty(reg.businessOwnerRivalId)) reg.businessOwnerRivalId = deed;
+                        if (string.IsNullOrEmpty(reg.businessOwnerRivalId) && !MergerFlip.IsFlipped(addr)) reg.businessOwnerRivalId = deed;   // merger phase 0 (review #4): a flipped reg's empty stamp is by design
                         reg.buildingOwnerRivalId = "";
                         repaired++;
                         Plugin.Logger.LogInfo($"[Patcher] rent-vs-deed repair: '{addr}' deed field held player '{deed}' with no purchase on the ledger → moved to tenant field.");
